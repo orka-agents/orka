@@ -1,0 +1,21 @@
+{
+  "apiVersion": "core.orka.ai/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "name": "enforced-hello"
+  },
+  "spec": {
+    "type": "ai",
+    "agentRef": {
+      "name": "enforced-hello"
+    },
+    "prompt": "What is 2+2? Answer with the single number.",
+    "timeout": "5m",
+    "enforcement": {
+      "format": "agentsuite.policy/v3",
+      "policy": "",
+      "requiredCapabilities": ["filesystem/deny-write/v1", "network/egress-allow/v1"],
+      "mode": "enforce"
+    }
+  }
+}

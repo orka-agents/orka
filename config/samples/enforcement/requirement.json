@@ -1,0 +1,6 @@
+{
+  "format": "agentsuite.policy/v3",
+  "policy": "",
+  "requiredCapabilities": ["filesystem/deny-write/v1", "network/egress-allow/v1"],
+  "mode": "enforce"
+}

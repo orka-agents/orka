@@ -1,0 +1,27 @@
+{
+  "apiVersion": "core.orka.ai/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "name": "enforced-review"
+  },
+  "spec": {
+    "type": "agent",
+    "agentRef": {
+      "name": "enforced-review"
+    },
+    "prompt": "Read workers/acp/images/opencode/Dockerfile and cmd/orka-acp-runtime/main.go. Use those exact workspace-relative strings as the read tool's filePath; relative paths are supported. Do not invent absolute paths. After the initial reads, use the grep tool in a separate verification pass to check your candidate startup, compilation and native-package download/extract/install excerpts against the workspace. Use the matched instructions, including relevant variable assignments and continued command lines, as evidence in your answer; do not stop after the initial reads. Give four short numbered answers, with file names and supporting code excerpts: (1) Identify an actual Go startup call or function. (2) Show the Dockerfile command that creates Orka's supervisor executable, its installed executable path, and the copy into the final image. (3) Show the final container ENTRYPOINT. (4) Identify upstream OpenCode's installed executable path and trace its native package through the URL assignment, download, extraction, installation and final-image copy. State whether this Dockerfile compiles that executable from source or obtains it prebuilt, supported by that artifact flow. Distinguish each binary's stages; downloading source and copying an existing binary do not themselves establish compilation. Keep each answer focused on its question, without an extra conclusion or unrelated claims. Code excerpts may span lines; quote what the files actually say. If you normalize a continued command, label it as an explanation rather than an exact quote. Do not invent evidence or guessed line numbers. If either file cannot be read, report that rather than guessing. Read only: do not modify files or publish anything.",
+    "workspace": {
+      "intent": "read",
+      "gitRepo": "https://github.com/orka-agents/orka.git",
+      "ref": "ef98c741ffe9a007ae4d22eef69778ee153d9df5",
+      "createPR": false
+    },
+    "timeout": "5m",
+    "enforcement": {
+      "format": "agentsuite.policy/v3",
+      "policy": "",
+      "requiredCapabilities": ["filesystem/deny-write/v1", "network/egress-allow/v1"],
+      "mode": "enforce"
+    }
+  }
+}

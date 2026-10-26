@@ -70,6 +70,16 @@ Implementations exist for Anthropic Claude and OpenAI. Provider selection is con
 
 ## LLM provider internals
 
+### OpenAI-compatible API selection
+
+The OpenAI provider prefers Responses and falls back to Chat Completions when
+the endpoint explicitly reports that surface unsupported. This includes HTTP
+400 declaring that tool use is unsupported in the Responses API, as returned by
+non-Harmony vLLM models. Ordinary invalid tool schemas, authentication failures
+and server failures are not this compatibility signal. Fallback preserves the
+original request's messages and tools. A streaming refusal may select Chat only
+before any chunk has been emitted; partial output is never replayed.
+
 ### Retry strategy
 
 LLM calls use exponential backoff with jitter:
@@ -262,4 +272,3 @@ Workers call this to check for unread messages.
 | `github.com/openai/openai-go/v3` | OpenAI API (official SDK) |
 | `github.com/github/copilot-sdk/go` | GitHub Copilot integration used by the built-in Copilot ACP RuntimePool profile |
 | `modernc.org/sqlite` | Embedded SQLite (pure Go, no CGO) |
-

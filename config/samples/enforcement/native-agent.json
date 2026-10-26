@@ -1,0 +1,15 @@
+{
+  "apiVersion": "core.orka.ai/v1alpha1",
+  "kind": "Agent",
+  "metadata": {
+    "name": "enforced-hello"
+  },
+  "spec": {
+    "providerRef": {
+      "name": "local"
+    },
+    "systemPrompt": {
+      "inline": "Answer briefly and in plain text. Say plainly when you do not know something."
+    }
+  }
+}

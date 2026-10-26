@@ -1,0 +1,21 @@
+{
+  "apiVersion": "core.orka.ai/v1alpha1",
+  "kind": "Agent",
+  "metadata": {
+    "name": "enforced-review"
+  },
+  "spec": {
+    "model": {
+      "name": "openai/your-configured-model",
+      "contextWindow": 32768,
+      "maxTokens": 4096
+    },
+    "runtime": {
+      "contractVersion": "orka.harness.v2",
+      "type": "opencode",
+      "defaultMaxTurns": 8,
+      "defaultAllowBash": false,
+      "defaultAllowedTools": ["read", "glob", "grep"]
+    }
+  }
+}

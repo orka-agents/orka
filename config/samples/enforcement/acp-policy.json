@@ -1,0 +1,19 @@
+{
+  "denyWritePaths": ["/home/worker"],
+  "network": {
+    "egressAllow": [
+      {"address": "CONTROLLER_SERVICE_IPV4", "port": 8080, "protocol": "TCP"},
+      {"address": "CONTROLLER_POD_IPV4", "port": "*", "protocol": "TCP"},
+      {"address": "NODE_HEALTH_SOURCE_IPV4", "port": "*", "protocol": "TCP"},
+      {"address": "127.0.0.1", "port": "*", "protocol": "TCP"},
+      {"address": "PROVIDER_PROXY_SERVICE_IPV4", "port": 8080, "protocol": "TCP"},
+      {"address": "PROVIDER_PROXY_POD_IPV4", "port": 8080, "protocol": "TCP"},
+      {"address": "DNS_SERVICE_IPV4", "port": 53, "protocol": "UDP"},
+      {"address": "DNS_SERVICE_IPV4", "port": 53, "protocol": "TCP"},
+      {"address": "DNS_POD_IPV4", "port": 53, "protocol": "UDP"},
+      {"address": "DNS_POD_IPV4", "port": 53, "protocol": "TCP"}
+    ]
+  },
+  "requiredCapabilities": ["filesystem/deny-write/v1", "network/egress-allow/v1"],
+  "version": "agentsuite.policy/v3"
+}
