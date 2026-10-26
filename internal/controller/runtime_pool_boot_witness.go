@@ -605,13 +605,17 @@ func runtimePoolPreparedContainerChanged(w runtimePoolBootWitness, pod *corev1.P
 
 // runtimePoolTaskWitnessMatches is shared by read-only historical cleanup and
 // eager Task receipts. It never compares old proof with the replacement pool.
+// A standalone reservation pins the physical instance before session creation;
+// cancellation may therefore leave its session acknowledgment fields empty.
 func runtimePoolTaskWitnessMatches(task *corev1alpha1.Task, taskUID types.UID, w runtimePoolBootWitness) error {
 	e := task.Status.Execution
 	binding := executionBinding(task)
 	if e == nil || binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
 		task.Namespace != w.PoolNamespace || e.RuntimePoolName != w.PoolName || e.RuntimePoolUID != string(w.PoolUID) ||
 		e.AgentRuntimeName != "" || e.AgentRuntimeUID != "" || e.RuntimeInstanceID != string(w.Fence.RuntimeInstanceID) ||
-		e.RuntimeSessionSupervisorBootID != string(w.Fence.SupervisorBootID) || e.Attempt < 1 || strings.TrimSpace(e.RuntimeSessionUID) == "" || e.RuntimeSessionGeneration < 1 ||
+		(e.RuntimeSessionSupervisorBootID != string(w.Fence.SupervisorBootID) &&
+			(e.RuntimeSessionSupervisorBootID != "" || task.Spec.SessionRef != nil)) ||
+		e.Attempt < 1 || strings.TrimSpace(e.RuntimeSessionUID) == "" || e.RuntimeSessionGeneration < 1 ||
 		binding.RuntimeProfileDigest != string(w.Fence.RuntimeProfileDigest) ||
 		(e.RuntimeSessionProfileDigest != string(w.Fence.RuntimeProfileDigest) && (task.Spec.SessionRef != nil || e.RuntimeSessionProfileDigest != "")) {
 		return fmt.Errorf("%w: Task does not match the exact retired RuntimePool boot", store.ErrConflict)

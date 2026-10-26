@@ -41,6 +41,53 @@ func TestRuntimePoolRetirementUnexpectedPodDeletionRetainsEvidence(t *testing.T)
 	}
 }
 
+func TestRuntimePoolRetirementStandaloneCancelledBeforeSessionAcknowledgment(t *testing.T) {
+	f := newNativePoolBootFixture(t, false)
+	f.serve(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	task := runtimePoolRetirementTask(t, &pool, "cancelled-before-session-ack")
+	task.Spec.SessionRef = nil
+	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateCancelled
+	task.Status.Execution.Outcome = corev1alpha1.TaskExecutionOutcomeCancelled
+	task.Status.Execution.RuntimeSessionSupervisorBootID = ""
+	task.Status.Execution.RuntimeSessionProfileDigest = ""
+	if err := f.r.Create(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, task, task.UID); err != nil || retired {
+		t.Fatalf("unacknowledged standalone reservation blocked live cleanup or invented retirement: %t %v", retired, err)
+	}
+	witness := f.witness(t)
+	for _, changed := range []string{"instance", "boot", "profile", "session"} {
+		t.Run(changed, func(t *testing.T) {
+			other := task.DeepCopy()
+			switch changed {
+			case "instance":
+				other.Status.Execution.RuntimeInstanceID = "foreign-instance"
+			case "boot":
+				other.Status.Execution.RuntimeSessionSupervisorBootID = "foreign-boot"
+			case "profile":
+				other.Status.AgentExecutionBinding.RuntimeProfileDigest = "foreign-profile"
+			case "session":
+				other.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "continued-session"}
+			}
+			if err := runtimePoolTaskWitnessMatches(other, task.UID, witness); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("different %s gained historical cleanup authority: %v", changed, err)
+			}
+		})
+	}
+	f.terminate(t, true)
+	runtimePoolReconcile(t, f.r, f.pool)
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(task) || task.Status.Phase != corev1alpha1.TaskPhaseCancelled ||
+		task.Status.Execution.RuntimeSessionSupervisorBootID != "" {
+		t.Fatalf("exact physical retirement lost cancellation or fabricated a session acknowledgment: %#v", task.Status)
+	}
+}
+
 // The fake API has no Deployment controller or kubelet. Only explicitly marked
 // native fixtures acquire real owner identities, running status and durable
 // epoch authority; deletion is NEVER synthesized into termination evidence.
