@@ -388,20 +388,20 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- if ne .Values.controller.mode "harness-v2" -}}
 {{- fail "controller.mode must be harness-v2; other harness protocols are unsupported" -}}
 {{- end -}}
-{{- if ne $watchNamespace .Release.Namespace -}}
-{{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}
+{{- if or (gt (len $watchNamespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $watchNamespace)) -}}
+{{- fail "controller.watchNamespace must be a valid namespace name" -}}
 {{- end -}}
 {{- if not .Values.controller.leaderElect -}}
 {{- fail "controller.leaderElect must be true for an isolated controller installation" -}}
 {{- end -}}
 {{- if .Release.IsUpgrade -}}
-{{- $existingNamespace := lookup "v1" "Namespace" "" .Release.Namespace -}}
+{{- $existingNamespace := lookup "v1" "Namespace" "" $watchNamespace -}}
 {{- $existingNamespaceMode := "" -}}
 {{- if $existingNamespace -}}
 {{- $existingNamespaceMode = dig "metadata" "labels" "orka.ai/controller-mode" "" $existingNamespace -}}
 {{- end -}}
 {{- if ne $existingNamespaceMode .Values.controller.mode -}}
-{{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" .Release.Namespace .Values.controller.mode) -}}
+{{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" $watchNamespace .Values.controller.mode) -}}
 {{- end -}}
 {{- $root := . -}}
 {{- $existingControllerList := lookup "apps/v1" "Deployment" .Release.Namespace "" -}}
@@ -420,6 +420,7 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- $existingController = index $existingControllers 0 -}}
 {{- end -}}
 {{- if $existingController -}}
+{{- include "orka.validateExistingEnforcement" (dict "root" $root "controller" $existingController) -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
 {{- if ne $existingWatchNamespace $watchNamespace -}}
 {{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" $watchNamespace) -}}
@@ -473,6 +474,9 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- end -}}
 {{- if eq .Values.controller.acpRuntime.namespace .Release.Namespace -}}
 {{- fail "controller.acpRuntime.namespace must differ from the release namespace" -}}
+{{- end -}}
+{{- if eq .Values.controller.acpRuntime.namespace $watchNamespace -}}
+{{- fail "controller.acpRuntime.namespace must differ from controller.watchNamespace" -}}
 {{- end -}}
 
 {{- end }}

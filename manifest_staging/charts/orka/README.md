@@ -41,6 +41,10 @@ Each installation also needs its own `controller.acpRuntime.namespace`.
 `service.port` sets the controller Service port; `controller.apiPort` sets its
 container listener and Service target port.
 
+The controller's cluster role includes read-only `get` on Nodes so container
+enforcement can verify the scheduled node's immutable UID. It grants no Node
+mutation or worker access.
+
 See the [Helm values reference](https://orka-agents.github.io/orka/docs/configuration#helm-chart)
 for all settings and Secret rotation, and [Security](https://orka-agents.github.io/orka/docs/security#scm-proxy-networkpolicy-limits)
 for NetworkPolicy limits.

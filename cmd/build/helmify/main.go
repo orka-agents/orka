@@ -28,6 +28,14 @@ var (
 		"cmd/build/helmify/static",
 		"directory containing static Helm chart inputs",
 	)
+	enforcementChart = flag.String(
+		"enforcement-chart", "",
+		"optional local Guardd chart archive to vendor; requires --enforcement-chart-sha256",
+	)
+	enforcementChartSHA256 = flag.String(
+		"enforcement-chart-sha256", "",
+		"independently verified lowercase SHA256 of the local Guardd chart archive",
+	)
 )
 
 var kindRegex = regexp.MustCompile(`(?m)^kind:[\s]+([^\s]+)[\s]*$`)
@@ -167,6 +175,9 @@ func main() {
 		log.Fatal(err)
 	}
 	if err := objects.write(); err != nil {
+		log.Fatal(err)
+	}
+	if err := bundleEnforcementChart(*outputDir, *enforcementChart, *enforcementChartSHA256); err != nil {
 		log.Fatal(err)
 	}
 }

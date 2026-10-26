@@ -1,5 +1,9 @@
 # Orka Helm Chart Values
 
+# Optional locally bundled Guardd installation; ordinary builds have no dependency.
+enforcement:
+  enabled: false
+
 # Controller configuration
 controller:
   # Fixed execution protocol identity. Only harness-v2 is supported.
@@ -31,6 +35,8 @@ controller:
   # Defaults to the Helm release namespace. On first start the controller
   # labels it orka.ai/controller-mode=<controller.mode>; a namespace already
   # labeled for another mode fails startup, and the label never changes.
+  # A separate precreated Task namespace is required by enabled/retained enforcement.
+  # Controller credentials and storage always remain in the release namespace.
   watchNamespace: ""
 
   # API server port
@@ -249,7 +255,7 @@ controller:
     jwksUrl: ""
     # Required comma-separated subject allowlist patterns when OIDC is enabled.
     allowedSubjects: ""
-    # Namespace assigned to authorized OIDC callers for namespace isolation. Empty uses controller default.
+    # Namespace assigned to authorized OIDC callers. Empty uses watchNamespace.
     namespace: ""
 
   # Transaction-token authentication, scoped authorization, and optional vendor-neutral TTS exchange.

@@ -36,7 +36,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
 
   - name: workspace-attachment-secret.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
@@ -62,7 +62,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
     objectSelector:
       matchExpressions:
         - key: workspace.orka.ai/attachment-for
@@ -91,7 +91,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   - name: tool-workspace-class.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -116,7 +116,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   - name: checkpoint-source-use.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -141,7 +141,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   {{- if include "orka.agentHostsEnabled" . }}
   # The controller serves this path only while agent hosts are enabled.
   - name: agenthost.{{ .Values.controller.mode }}.orka.ai
@@ -195,7 +195,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   - name: agentruntime-contract.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -220,7 +220,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   - name: task-execution-authority.{{ .Values.controller.mode }}.orka.ai
     admissionReviewVersions: [v1]
     sideEffects: None
@@ -245,4 +245,4 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
