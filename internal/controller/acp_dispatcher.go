@@ -5,10 +5,31 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/enforcement"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
+	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
+	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"maps"
 	"net"
 	"net/http"
 	"net/url"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"slices"
 	"sort"
 	"strconv"
@@ -17,29 +38,10 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	types "k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
-	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
-	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/acp"
-	"github.com/orka-agents/orka/internal/artifactcap"
-	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
-	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
-	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
-	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
-	"github.com/orka-agents/orka/internal/redact"
-	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/tools"
 )
+
+// substrateRouteHTTPClient lazily builds the router-pinned transport for
+// Substrate-backed RuntimePool instances.
 
 const (
 	terminalStateValue  = "terminal"
@@ -114,6 +116,7 @@ type ACPDispatcher struct {
 	ReservationTTL           time.Duration
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
+	Enforcement              enforcement.Coordinator
 	ACPRuntimeImages         ACPRuntimeImages
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
@@ -128,8 +131,125 @@ type ACPDispatcher struct {
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
 }
 
-// substrateRouteHTTPClient lazily builds the router-pinned transport for
-// Substrate-backed RuntimePool instances.
+type acpExecutionUpdatePersistenceError struct {
+	err        error
+	journalErr error
+	planErr    error
+}
+
+const acpExecutionEventPersistenceFailureReason = "ExecutionEventPersistenceFailed"
+
+type runtimeSessionPublicationFinalization struct {
+	WorkspaceDeltaID      harnessv2.WorkspaceDeltaID
+	PublicationID         string
+	PublicationGeneration uint64
+	PublicationVersion    uint64
+	TerminalState         harnessv2.PublicationTerminalState
+	TerminalReceiptDigest string
+}
+
+// errRuntimeSessionAdoptionInconclusive reports that the runtime did not
+// confirm, within the adoption window, whether the session an earlier send
+// created is admissible: status stayed unavailable or the session was still
+// creating when the window closed. Callers must not read it as absence.
+var errRuntimeSessionAdoptionInconclusive = errors.New("RuntimeSession adoption is inconclusive")
+
+type acpRuntimePoolReservationIdentity struct {
+	PoolKey           types.NamespacedName
+	PoolUID           types.UID
+	TaskUID           types.UID
+	Attempt           int32
+	ControllerEpoch   int64
+	RuntimeInstanceID string
+}
+
+type acpRuntimePoolReservationLease struct {
+	dispatcher *ACPDispatcher
+	identity   acpRuntimePoolReservationIdentity
+
+	mu     sync.Mutex
+	held   bool
+	cancel context.CancelFunc
+}
+
+type acpDispatchTarget struct {
+	pool        *corev1alpha1.RuntimePool
+	external    *corev1alpha1.AgentRuntime
+	reservation *acpRuntimePoolReservationIdentity
+}
+
+const runtimeSessionCreateRenewalMargin = 5 * time.Second
+
+type attemptRuntimeBinding struct {
+	RuntimeInstanceID string
+	SessionUID        string
+	SessionGeneration int64
+}
+
+const externalRuntimeFinalizePublicationOperation = "finalize_runtime_session_publication"
+
+// externalRuntimeCleanupAuthority retains the exact non-secret route and
+// credential identity that admitted a RuntimeSession. AgentRuntime spec changes
+// stop new admission, but cannot make an already-created resident session
+// impossible to cancel, settle, or delete while the same runtime instance still
+// proves ownership of it.
+type externalRuntimeCleanupAuthority struct {
+	runtimeKey            types.NamespacedName
+	runtimeUID            types.UID
+	frozenRuntime         *corev1alpha1.AgentRuntime
+	auth                  agentRuntimeAuthMaterial
+	serviceBackendPins    []string
+	runtimeInstanceID     harnessv2.RuntimeInstanceID
+	supervisorBootID      harnessv2.SupervisorBootID
+	runtimePoolUID        harnessv2.RuntimePoolUID
+	runtimePoolGeneration uint64
+	runtimeProfileDigest  harnessv2.ProfileDigest
+	protocolLimits        harnessv2.ProtocolLimits
+	reconformedAuth       bool
+	sessionCleanup        *sessionRuntimeCleanupFence
+	sessionCleanupAuth    *corev1.Secret
+}
+
+const (
+	externalRuntimeDeleteSessionOperation = "delete_runtime_session"
+	externalRuntimeDrainOperation         = "drain"
+)
+
+const (
+	// promptLeaseRenewalRetryDelay bounds how soon a transiently failed lease
+	// renewal is retried; promptLeaseRenewalRetryMargin is the remaining lease
+	// time below which a retry is no longer attempted.
+	promptLeaseRenewalRetryDelay  = 3 * time.Second
+	promptLeaseRenewalRetryMargin = 5 * time.Second
+)
+
+const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a terminal event"
+
+// acpInterruptedOutputFlushTimeout bounds the durable write of buffered
+// assistant/tool output after a prompt stream ends. The journal shares one
+// SQLite connection with every other controller write, so a short deadline
+// turns ordinary contention between concurrent ACP prompts into a failed
+// Task with ExecutionEventPersistenceFailed.
+const acpInterruptedOutputFlushTimeout = 60 * time.Second
+
+const (
+	acpCancelLogKeyNamespace = "namespace"
+	acpCancelLogKeyTask      = "task"
+	acpCancelLogKeyStatus    = "status"
+	acpCancelLogKeyKind      = "kind"
+)
+
+// acpPromptFailedReason classifies a prompt that the runtime settled as failed.
+const acpPromptFailedReason corev1alpha1.TaskExecutionReason = "PromptFailed"
+
+// Runtime diagnostics stay in the journal, whose redaction accounts for prior
+// prompt fields. Repeating them in status, Session outcomes, or TaskFailed
+// events would bypass that redaction and introduce additional public copies.
+const acpPromptFailedMessage = "prompt failed"
+
+// acpPromptFailureMessageLimit bounds runtime-derived status messages so a
+// supervisor-supplied detail can never bloat Task status.
+const acpPromptFailureMessageLimit = 512
 
 func (d *ACPDispatcher) NeedLeaderElection() bool { return true }
 
@@ -2441,14 +2561,6 @@ func reconcileACPPlanUpdateAfterJournal(
 	return nil
 }
 
-type acpExecutionUpdatePersistenceError struct {
-	err        error
-	journalErr error
-	planErr    error
-}
-
-const acpExecutionEventPersistenceFailureReason = "ExecutionEventPersistenceFailed"
-
 func (e *acpExecutionUpdatePersistenceError) Error() string {
 	if e == nil || e.err == nil {
 		return "ACP execution update persistence failed"
@@ -2546,15 +2658,6 @@ func createWorkspaceDeltaWithRetry(
 		return err
 	})
 	return response, err
-}
-
-type runtimeSessionPublicationFinalization struct {
-	WorkspaceDeltaID      harnessv2.WorkspaceDeltaID
-	PublicationID         string
-	PublicationGeneration uint64
-	PublicationVersion    uint64
-	TerminalState         harnessv2.PublicationTerminalState
-	TerminalReceiptDigest string
 }
 
 func publicationTerminalState(state store.PublicationState) (harnessv2.PublicationTerminalState, error) {
@@ -2802,12 +2905,6 @@ func waitForRuntimeSessionAdmission(
 ) (bool, error) {
 	return waitForRuntimeSessionAdmissionState(ctx, runtimeClient, sessionID, sessionUID, generation, timeout, false)
 }
-
-// errRuntimeSessionAdoptionInconclusive reports that the runtime did not
-// confirm, within the adoption window, whether the session an earlier send
-// created is admissible: status stayed unavailable or the session was still
-// creating when the window closed. Callers must not read it as absence.
-var errRuntimeSessionAdoptionInconclusive = errors.New("RuntimeSession adoption is inconclusive")
 
 // reconcileRuntimeSessionCreateDigestConflict resolves a digest_conflict answer
 // to create-session. The runtime already holds an operation record for this
@@ -3228,24 +3325,6 @@ func (d *ACPDispatcher) deleteRuntimeSessionReconciled(
 		case <-ticker.C:
 		}
 	}
-}
-
-type acpRuntimePoolReservationIdentity struct {
-	PoolKey           types.NamespacedName
-	PoolUID           types.UID
-	TaskUID           types.UID
-	Attempt           int32
-	ControllerEpoch   int64
-	RuntimeInstanceID string
-}
-
-type acpRuntimePoolReservationLease struct {
-	dispatcher *ACPDispatcher
-	identity   acpRuntimePoolReservationIdentity
-
-	mu     sync.Mutex
-	held   bool
-	cancel context.CancelFunc
 }
 
 func newACPRuntimePoolReservationLease(d *ACPDispatcher, identity *acpRuntimePoolReservationIdentity) *acpRuntimePoolReservationLease {
@@ -3692,12 +3771,6 @@ func updateRuntimePoolReservationStatusIfChanged(ctx context.Context, kubeClient
 	return kubeClient.Status().Update(ctx, pool)
 }
 
-type acpDispatchTarget struct {
-	pool        *corev1alpha1.RuntimePool
-	external    *corev1alpha1.AgentRuntime
-	reservation *acpRuntimePoolReservationIdentity
-}
-
 func runtimeSessionCreateTimeout(target acpDispatchTarget) time.Duration {
 	minimum := time.Duration(corev1alpha1.DefaultRuntimePoolColdStartTimeoutSeconds) * time.Second
 	if target.pool == nil {
@@ -3724,8 +3797,6 @@ func runtimeSessionCreateRenewalExpiresAt(issuedAt, createExpiresAt time.Time, h
 	}
 	return createExpiresAt
 }
-
-const runtimeSessionCreateRenewalMargin = 5 * time.Second
 
 func runtimeSessionCreateAuthorizationNeedsRenewal(expiresAt, now time.Time) bool {
 	return !expiresAt.After(now.UTC().Add(runtimeSessionCreateRenewalMargin))
@@ -4345,12 +4416,6 @@ func (d *ACPDispatcher) failTaskBeforeRuntimeAdmission(
 	return d.failTask(ctx, task, state, outcome, reason, message)
 }
 
-type attemptRuntimeBinding struct {
-	RuntimeInstanceID string
-	SessionUID        string
-	SessionGeneration int64
-}
-
 func (d *ACPDispatcher) transitionAttempt(ctx context.Context, id string, fence store.ControllerEpochFence, from, to store.PromptExecutionState, operation string, binding *attemptRuntimeBinding) error {
 	attempt, err := d.Store.GetPromptAttempt(ctx, id)
 	if err != nil {
@@ -4460,8 +4525,6 @@ func (d *ACPDispatcher) transitionDelivery(ctx context.Context, id string, fence
 	})
 	return err
 }
-
-const externalRuntimeFinalizePublicationOperation = "finalize_runtime_session_publication"
 
 func (d *ACPDispatcher) runtimeClient(
 	ctx context.Context,
@@ -4688,28 +4751,6 @@ func (d *ACPDispatcher) externalRuntimeClient(
 	return runtimeClient, fence, profile, limits.MaxTerminalResultBytes, nil
 }
 
-// externalRuntimeCleanupAuthority retains the exact non-secret route and
-// credential identity that admitted a RuntimeSession. AgentRuntime spec changes
-// stop new admission, but cannot make an already-created resident session
-// impossible to cancel, settle, or delete while the same runtime instance still
-// proves ownership of it.
-type externalRuntimeCleanupAuthority struct {
-	runtimeKey            types.NamespacedName
-	runtimeUID            types.UID
-	frozenRuntime         *corev1alpha1.AgentRuntime
-	auth                  agentRuntimeAuthMaterial
-	serviceBackendPins    []string
-	runtimeInstanceID     harnessv2.RuntimeInstanceID
-	supervisorBootID      harnessv2.SupervisorBootID
-	runtimePoolUID        harnessv2.RuntimePoolUID
-	runtimePoolGeneration uint64
-	runtimeProfileDigest  harnessv2.ProfileDigest
-	protocolLimits        harnessv2.ProtocolLimits
-	reconformedAuth       bool
-	sessionCleanup        *sessionRuntimeCleanupFence
-	sessionCleanupAuth    *corev1.Secret
-}
-
 func newExternalRuntimeCleanupAuthority(
 	current *corev1alpha1.AgentRuntime,
 	frozenRuntime *corev1alpha1.AgentRuntime,
@@ -4752,11 +4793,6 @@ func newExternalRuntimeCleanupAuthority(
 		protocolLimits:        protocolLimits,
 	}, nil
 }
-
-const (
-	externalRuntimeDeleteSessionOperation = "delete_runtime_session"
-	externalRuntimeDrainOperation         = "drain"
-)
 
 func externalRuntimeMutationUsesFrozenCleanupAuthority(operation string) bool {
 	switch operation {
@@ -5858,14 +5894,6 @@ func promptLeaseRenewalDelay(now, leaseExpiresAt, authorizationExpiresAt time.Ti
 	return min(leaseRemaining/2, authorizationRemaining/2)
 }
 
-const (
-	// promptLeaseRenewalRetryDelay bounds how soon a transiently failed lease
-	// renewal is retried; promptLeaseRenewalRetryMargin is the remaining lease
-	// time below which a retry is no longer attempted.
-	promptLeaseRenewalRetryDelay  = 3 * time.Second
-	promptLeaseRenewalRetryMargin = 5 * time.Second
-)
-
 // promptLeaseRenewalErrorClass renders a low-cardinality, credential-free
 // class for a failed lease renewal (client error kind, HTTP status, and v2
 // error code) suitable for structured logs.
@@ -6667,22 +6695,6 @@ func (d *ACPDispatcher) failPromptForExecutionEventPersistence(
 	)
 }
 
-const promptStreamMissingTerminalDiagnostic = "runtime stream ended without a terminal event"
-
-// acpInterruptedOutputFlushTimeout bounds the durable write of buffered
-// assistant/tool output after a prompt stream ends. The journal shares one
-// SQLite connection with every other controller write, so a short deadline
-// turns ordinary contention between concurrent ACP prompts into a failed
-// Task with ExecutionEventPersistenceFailed.
-const acpInterruptedOutputFlushTimeout = 60 * time.Second
-
-const (
-	acpCancelLogKeyNamespace = "namespace"
-	acpCancelLogKeyTask      = "task"
-	acpCancelLogKeyStatus    = "status"
-	acpCancelLogKeyKind      = "kind"
-)
-
 // logACPCancelSettlementUnknown records why an explicit prompt cancellation
 // could not prove settlement, so an OutcomeUnknown/RuntimeLost Task can be
 // diagnosed from controller logs. Fields stay low-cardinality: transport
@@ -6903,18 +6915,6 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpPromptFailedReason, message)
 	}
 }
-
-// acpPromptFailedReason classifies a prompt that the runtime settled as failed.
-const acpPromptFailedReason corev1alpha1.TaskExecutionReason = "PromptFailed"
-
-// Runtime diagnostics stay in the journal, whose redaction accounts for prior
-// prompt fields. Repeating them in status, Session outcomes, or TaskFailed
-// events would bypass that redaction and introduce additional public copies.
-const acpPromptFailedMessage = "prompt failed"
-
-// acpPromptFailureMessageLimit bounds runtime-derived status messages so a
-// supervisor-supplied detail can never bloat Task status.
-const acpPromptFailureMessageLimit = 512
 
 // boundACPStatusMessage truncates a runtime-derived status message to
 // acpPromptFailureMessageLimit bytes on a rune boundary so the persisted
