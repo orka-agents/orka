@@ -2,6 +2,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { StatusDot } from '@/components/ui/status-dot'
+import { useTaskChildren } from '@/hooks/use-tasks'
 import type { Task, TaskPhase, TaskType, ExecutionEvent } from '@/schemas/task'
 
 /** A node in the delegation graph. */
@@ -25,12 +26,15 @@ interface GraphNode {
  * so this can upgrade to a true multi-level DAG later without changing the
  * component API.
  */
-function buildGraph(task: Task, events: ExecutionEvent[] = []): GraphNode {
+function buildGraph(task: Task, events: ExecutionEvent[] = [], childTasks: Task[] = []): GraphNode {
+  const childMessages = new Map(childTasks.map((child) => [child.metadata.name, child.status?.message]))
   const children = (task.status?.childTasks ?? []).map((c) => ({
     name: c.name,
     agent: c.agent,
     phase: c.phase,
-    result: c.result,
+    // A child that failed before reporting a result keeps its failure reason
+    // in its own status message.
+    result: c.result || (c.phase === 'Failed' ? childMessages.get(c.name) : undefined),
     children: [] as GraphNode[],
   }))
   const latestModelEvent = [...events]
@@ -91,25 +95,35 @@ function TreeNode({
             aria-hidden="true"
           />
         )}
-        <span className="truncate font-mono text-xs font-medium">
+        {/* Each truncated label carries its full text as a tooltip. */}
+        <span className="truncate font-mono text-xs font-medium" title={node.name}>
           {node.name}
         </span>
         {node.agent && (
-          <span className="truncate text-xs text-muted-foreground">
+          <span className="truncate text-xs text-muted-foreground" title={node.agent}>
             {node.agent}
           </span>
         )}
         {node.telemetry && (
-          <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+          <span className="truncate rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground" title={node.telemetry}>
             {node.telemetry}
           </span>
         )}
         {node.result && (
+          // A failed child's recorded output is its failure reason; tone the
+          // chip by phase so it never reads as a success.
           <span
-            className="truncate rounded-full bg-status-succeeded-bg px-2 py-0.5 text-[10px] text-status-succeeded"
+            className={cn(
+              'truncate rounded-full px-2 py-0.5 text-[10px]',
+              node.phase === 'Failed'
+                ? 'bg-status-failed-bg text-status-failed'
+                : node.phase === 'Succeeded'
+                  ? 'bg-status-succeeded-bg text-status-succeeded'
+                  : 'bg-muted text-muted-foreground',
+            )}
             title={node.result}
           >
-            {node.result}
+            {node.phase === 'Failed' ? `Failed: ${node.result}` : node.result}
           </span>
         )}
         <span
@@ -163,7 +177,11 @@ export function ExecutionGraph({
   events = [],
 }: ExecutionGraphProps) {
   const navigate = useNavigate()
-  const root = buildGraph(task, events)
+  // status.childTasks has no result for a child that failed early, so read
+  // the children list for their messages, and only when such a child exists.
+  const needsChildReasons = (task.status?.childTasks ?? []).some((c) => c.phase === 'Failed' && !c.result)
+  const { data: childList } = useTaskChildren(task.metadata.name, needsChildReasons, task.metadata.uid)
+  const root = buildGraph(task, events, needsChildReasons ? childList?.items : undefined)
 
   const handleNavigate = (name: string) => {
     if (onSelect) onSelect(name)

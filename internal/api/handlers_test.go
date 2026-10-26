@@ -440,6 +440,42 @@ func TestHandlers_Readyz_UsesUncachedNamedNamespaceRead(t *testing.T) {
 	}
 }
 
+func TestHandlers_CreateTaskRejectsNonPositiveTimeout(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/tasks", handlers.CreateTask)
+
+	for _, timeout := range []string{"0", "0s", "-5m"} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default", Type: corev1alpha1.TaskTypeContainer,
+			Image: "busybox", Command: []string{"true"}, Timeout: timeout,
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, timeout)
+	}
+	// The Kubernetes-style body carries the timeout in spec.timeout.
+	for _, timeout := range []time.Duration{0, -5 * time.Minute} {
+		body := CreateTaskRequest{
+			Name: "zero-timeout", Namespace: "default",
+			Spec: &corev1alpha1.TaskSpec{
+				Type: corev1alpha1.TaskTypeContainer, Image: "busybox", Command: []string{"true"},
+				Timeout: &metav1.Duration{Duration: timeout},
+			},
+		}
+		bodyBytes, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPost, "/tasks", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "spec.timeout %s", timeout)
+	}
+	err := handlers.client.Get(context.Background(), types.NamespacedName{Name: "zero-timeout", Namespace: "default"}, &corev1alpha1.Task{})
+	require.True(t, apierrors.IsNotFound(err), "no Task may be created with a non-positive timeout")
+}
+
 func TestHandlers_CreateTask_Valid(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Post("/tasks", handlers.CreateTask)
@@ -2357,6 +2393,49 @@ func TestHandlers_ListTasks(t *testing.T) {
 	}
 }
 
+func TestHandlers_TaskResponsesOmitManagedFields(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "managed-task",
+			Namespace: "default",
+			Labels:    map[string]string{"team": "core"},
+			ManagedFields: []metav1.ManagedFieldsEntry{{
+				Manager:    "orka-controller",
+				Operation:  metav1.ManagedFieldsOperationUpdate,
+				APIVersion: corev1alpha1.GroupVersion.String(),
+				FieldsType: "FieldsV1",
+				FieldsV1:   metav1.NewFieldsV1(`{"f:status":{"f:phase":{}}}`),
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+	}
+	scheme := runtime.NewScheme()
+	_ = corev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithReturnManagedFields().WithRuntimeObjects(task).Build()
+	stored := &corev1alpha1.Task{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "managed-task", Namespace: "default"}, stored))
+	require.NotEmpty(t, stored.ManagedFields, "the fixture must carry managedFields for the assertion to mean anything")
+
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient})
+	app := fiber.New()
+	app.Get("/tasks", handlers.ListTasks)
+	app.Get("/tasks/:id", handlers.GetTask)
+
+	for _, path := range []string{"/tasks", "/tasks/managed-task"} {
+		t.Run(path, func(t *testing.T) {
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NotContains(t, string(body), "managedFields")
+			// The rest of the metadata is still served.
+			require.Contains(t, string(body), `"team":"core"`)
+		})
+	}
+}
+
 func TestHandlers_ListTasks_WithPagination(t *testing.T) {
 	handlers, app := setupTestHandlers()
 	app.Get("/tasks", handlers.ListTasks)
@@ -2496,30 +2575,47 @@ func TestHandlers_DeleteTask_NotFound(t *testing.T) {
 }
 
 func TestHandlers_GetTaskLogs_NoJob(t *testing.T) {
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-task",
-			Namespace: "default",
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeContainer,
-		},
-		Status: corev1alpha1.TaskStatus{
-			JobName: "", // No job
-		},
-	}
+	for _, tt := range []struct {
+		name     string
+		schedule string
+		phase    corev1alpha1.TaskPhase
+		want     string
+	}{
+		{name: "pending task", phase: corev1alpha1.TaskPhasePending, want: "task is pending, no logs available yet"},
+		{name: "scheduled parent", schedule: "0 * * * *", phase: corev1alpha1.TaskPhaseScheduled, want: "each scheduled run is a child task with its own logs"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-task",
+					Namespace: "default",
+				},
+				Spec: corev1alpha1.TaskSpec{
+					Type:     corev1alpha1.TaskTypeContainer,
+					Schedule: tt.schedule,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase:   tt.phase,
+					JobName: "", // No job
+				},
+			}
 
-	handlers, app := setupTestHandlersWithObjects(task)
-	app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
+			handlers, app := setupTestHandlersWithObjects(task)
+			app.Get("/tasks/:id/logs", handlers.GetTaskLogs)
 
-	req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("Test request failed: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodGet, "/tasks/test-task/logs", nil)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatalf("Test request failed: %v", err)
+			}
 
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Errorf("StatusCode = %d, want %d", resp.StatusCode, http.StatusNotFound)
+			}
+			if body := readRespBody(t, resp); !strings.Contains(body, tt.want) {
+				t.Errorf("body = %q, want it to contain %q", body, tt.want)
+			}
+		})
 	}
 }
 
@@ -2822,9 +2918,9 @@ func (s *sessionAccessRecordingStore) ListSessions(ctx context.Context, namespac
 	return s.SessionStore.ListSessions(ctx, namespace)
 }
 
-func (s *sessionAccessRecordingStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+func (s *sessionAccessRecordingStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	s.listCalls++
-	return s.SessionStore.ListSessionsPage(ctx, namespace, afterName, limit, excludeType)
+	return s.SessionStore.ListSessionsPage(ctx, namespace, after, limit, excludeType)
 }
 
 func (s *metadataOnlySessionStore) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
@@ -2936,9 +3032,12 @@ func TestHandlers_ListSessions_HidesGatewaySessions(t *testing.T) {
 func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	for _, name := range []string{"session-a", "session-b", "session-c"} {
+	// Created oldest first, so the list returns them in reverse.
+	created := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	for i, name := range []string{"session-c", "session-b", "session-a"} {
+		at := created.Add(time.Duration(i) * time.Minute)
 		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
-			Namespace: "default", Name: name, SessionType: "task",
+			Namespace: "default", Name: name, SessionType: "task", CreatedAt: at, UpdatedAt: at,
 		}))
 	}
 
@@ -2952,7 +3051,9 @@ func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 	items, ok := page1.Items.([]any)
 	require.True(t, ok)
 	require.Len(t, items, 2)
-	require.Equal(t, "session-b", page1.Metadata.Continue)
+	require.Equal(t, "session-a", items[0].(map[string]any)["name"])
+	require.Equal(t, "session-b", items[1].(map[string]any)["name"])
+	require.NotEmpty(t, page1.Metadata.Continue)
 
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=2&continue="+page1.Metadata.Continue, nil))
 	require.NoError(t, err)
@@ -2970,13 +3071,18 @@ func TestHandlers_ListSessions_HonorsLimitAndContinue(t *testing.T) {
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=bogus", nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&continue=session-b", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
 	handlers, app, ss := setupTestHandlersWithSessionManager()
 	ctx := context.Background()
-	// Sorted by name: "continue-not-supported" < "session-z". A page that
-	// ends on the sentinel-named session must still resume after it.
+	// Equal creation times sort by name: "continue-not-supported" <
+	// "session-z". A page that ends on the sentinel-named session must still
+	// resume after it.
 	for _, name := range []string{"continue-not-supported", "session-z"} {
 		require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 			Namespace: "default", Name: name, SessionType: "task",
@@ -2989,14 +3095,18 @@ func TestHandlers_ListSessions_CursorEqualToCacheSentinelResumes(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var page1 ListResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page1))
-	require.Equal(t, "continue-not-supported", page1.Metadata.Continue)
+	items, ok := page1.Items.([]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	require.Equal(t, "continue-not-supported", items[0].(map[string]any)["name"])
+	require.NotEmpty(t, page1.Metadata.Continue)
 
 	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/sessions?namespace=default&limit=1&continue="+page1.Metadata.Continue, nil))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var page2 ListResponse
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page2))
-	items, ok := page2.Items.([]any)
+	items, ok = page2.Items.([]any)
 	require.True(t, ok)
 	require.Len(t, items, 1)
 	item, ok := items[0].(map[string]any)
@@ -4028,6 +4138,33 @@ func TestHandlers_CreateAgent_Success(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 }
 
+func TestHandlers_AgentWritesRejectNegativeTTL(t *testing.T) {
+	handlers, app := setupTestHandlers()
+	app.Post("/agents", handlers.CreateAgent)
+	app.Put("/agents/:name", handlers.UpdateAgent)
+	spec := corev1alpha1.AgentSpec{
+		Model:            &corev1alpha1.ModelConfig{Provider: "anthropic", Name: "claude-3-5-sonnet"},
+		TTLAfterLastTask: &metav1.Duration{Duration: -time.Hour},
+	}
+
+	for _, request := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/agents", CreateAgentRequest{Name: "ttl-agent", Namespace: "default", Spec: spec}},
+		{http.MethodPut, "/agents/ttl-agent?namespace=default", UpdateAgentRequest{Spec: spec}},
+	} {
+		bodyBytes, _ := json.Marshal(request.body)
+		req := httptest.NewRequest(request.method, request.path, bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, request.method)
+		data, _ := io.ReadAll(resp.Body)
+		require.Contains(t, string(data), "spec.ttlAfterLastTask must not be negative")
+	}
+}
+
 func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -4037,21 +4174,15 @@ func TestHandlers_CreateAgent_DefaultsBuiltInContractFromExecutionMode(t *testin
 		wantStatus int
 	}{
 		{
-			name:       "harness v1",
-			mode:       executionmode.HarnessV1,
-			want:       corev1alpha1.AgentRuntimeContractHarnessV1,
-			wantStatus: http.StatusCreated,
-		},
-		{
 			name:       "harness v2",
 			mode:       executionmode.HarnessV2,
 			want:       corev1alpha1.AgentRuntimeContractHarnessV2,
 			wantStatus: http.StatusCreated,
 		},
 		{
-			name:       "opposite explicit contract",
-			mode:       executionmode.HarnessV1,
-			explicit:   corev1alpha1.AgentRuntimeContractHarnessV2,
+			name:       "reject explicit v1 contract",
+			mode:       executionmode.HarnessV2,
+			explicit:   corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 			wantStatus: http.StatusBadRequest,
 		},
 	}
@@ -5098,6 +5229,95 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
+func TestParseTaskLogTailLines(t *testing.T) {
+	tests := []struct {
+		raw     string
+		want    int64
+		wantErr bool
+	}{
+		{raw: "", want: defaultTaskLogTailLines},
+		{raw: " 200 ", want: 200},
+		{raw: "1", want: 1},
+		{raw: "10000", want: maxTaskLogTailLines},
+		{raw: "10001", want: maxTaskLogTailLines},
+		{raw: "99999999999999999999", want: maxTaskLogTailLines},
+		{raw: "0", wantErr: true},
+		{raw: "-5", wantErr: true},
+		{raw: "-99999999999999999999", wantErr: true},
+		{raw: "all", wantErr: true},
+		{raw: "1.5", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			got, err := parseTaskLogTailLines(tt.raw)
+			if tt.wantErr {
+				var fiberErr *fiber.Error
+				require.ErrorAs(t, err, &fiberErr)
+				require.Equal(t, fiber.StatusBadRequest, fiberErr.Code)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHandlers_GetTaskLogs_TailLines(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantStatus int
+		wantTail   int64
+	}{
+		{name: "default", query: "", wantStatus: http.StatusOK, wantTail: defaultTaskLogTailLines},
+		{name: "requested", query: "?tailLines=200", wantStatus: http.StatusOK, wantTail: 200},
+		{name: "clamped", query: "?tailLines=50000", wantStatus: http.StatusOK, wantTail: maxTaskLogTailLines},
+		{name: "invalid", query: "?tailLines=0", wantStatus: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "log-task", Namespace: "default"},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Status:     corev1alpha1.TaskStatus{JobName: "log-job"},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "log-job-abcde", Namespace: "default", Labels: map[string]string{"job-name": "log-job"},
+			}}
+			scheme := runtime.NewScheme()
+			_ = corev1alpha1.AddToScheme(scheme)
+			_ = corev1.AddToScheme(scheme)
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
+			fakeCS := kubefake.NewSimpleClientset(pod) //nolint:staticcheck
+			h := NewHandlers(HandlersConfig{Client: fakeClient, KubeClient: fakeCS})
+
+			app := fiber.New()
+			app.Get("/tasks/:id/logs", h.GetTaskLogs)
+			resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/tasks/log-task/logs"+tt.query, nil))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+
+			var gotOpts []*corev1.PodLogOptions
+			for _, action := range fakeCS.Actions() {
+				if action.GetSubresource() != "log" {
+					continue
+				}
+				opts, ok := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+				require.True(t, ok, "log action carries %T", action)
+				gotOpts = append(gotOpts, opts)
+			}
+			if tt.wantStatus != http.StatusOK {
+				require.Empty(t, gotOpts, "an invalid tailLines must not reach the pod log API")
+				return
+			}
+			require.Len(t, gotOpts, 1)
+			require.NotNil(t, gotOpts[0].TailLines)
+			require.Equal(t, tt.wantTail, *gotOpts[0].TailLines)
+			require.Equal(t, "worker", gotOpts[0].Container)
+		})
+	}
+}
+
 // --- Tests: DeleteTask with watch namespace ---
 
 func TestHandlers_DeleteTask_WatchNamespaceScoped(t *testing.T) {
@@ -5177,8 +5397,7 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 			}))
 
 			token := issueTestContextToken(t, provider, nil, map[string]any{"scope": tt.scope})
-			body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 			req.Header.Set(TransactionTokenHeaderName, token)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := app.Test(req)
@@ -5195,6 +5414,10 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	proposal := &store.MemoryProposal{
@@ -5212,8 +5435,7 @@ func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 		Reviewer:  "reviewer",
 	}))
 
-	body, _ := json.Marshal(map[string]any{"appliedBy": "api-user"})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+proposal.ID+"/apply?namespace=default", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -5239,6 +5461,10 @@ func TestHandlers_ApplyMemoryProposalConflict(t *testing.T) {
 	h := NewHandlers(HandlersConfig{MemoryProposalStore: conflictApplyMemoryProposalStore{}})
 
 	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+		return c.Next()
+	})
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/mprop-conflict/apply?namespace=default", nil)
@@ -5283,6 +5509,10 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 			h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 			app := fiber.New()
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{Username: "api-user"})
+				return c.Next()
+			})
 			app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 
 			ctx := context.Background()

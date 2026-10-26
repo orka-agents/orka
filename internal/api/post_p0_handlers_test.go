@@ -56,7 +56,7 @@ func (f *postP0FakeSessionStore) GetSession(ctx context.Context, namespace, name
 func (f *postP0FakeSessionStore) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	return nil, nil
 }
-func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace, afterName string, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
+func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
 func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
@@ -740,7 +740,6 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if tt.withBuiltInRuntimeFields {
 				maxTurns := int32(10)
 				allowBash := true
-				source.Spec.AgentRuntime.Workspace = &corev1alpha1.LegacyAgentWorkspaceConfig{GitRepo: "https://example.test/repo.git"}
 				source.Spec.AgentRuntime.MaxTurns = &maxTurns
 				source.Spec.AgentRuntime.DisallowedTools = []string{"stale_denied_tool"}
 				source.Spec.AgentRuntime.AllowBash = &allowBash
@@ -784,7 +783,7 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if created.Spec.AgentRuntime.AllowedTools == nil {
 				t.Fatal("allowedTools = nil, want explicit current policy")
 			}
-			if created.Spec.AgentRuntime.Workspace != nil || created.Spec.AgentRuntime.MaxTurns != nil ||
+			if created.Spec.AgentRuntime.MaxTurns != nil ||
 				created.Spec.AgentRuntime.DisallowedTools != nil || created.Spec.AgentRuntime.AllowBash != nil {
 				t.Fatalf("agentRuntime = %#v, want inherited runtime overrides cleared", created.Spec.AgentRuntime)
 			}

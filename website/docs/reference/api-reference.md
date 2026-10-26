@@ -1,12 +1,15 @@
 ---
 slug: /api-reference
-description: "Every Orka CRD field and HTTP endpoint, with types and defaults."
+description: "Every Orka HTTP endpoint: tasks, sessions, memory, agents, tools, connectors, security scans, monitors, chat, and the compatibility APIs."
 ---
 
 # API reference
 
-The controller exposes a REST API for programmatic access. Almost every `/api/v1/*`
-endpoint requires authentication. Kubernetes ServiceAccount tokens are the default;
+The controller exposes a REST API for programmatic access. The request bodies for resource
+endpoints use the custom resource shapes in the [Resource reference](resources.md), and the
+permissions each route needs are in [API authorization](api-authorization.md).
+
+Almost every `/api/v1/*` endpoint requires authentication. Kubernetes ServiceAccount tokens are the default;
 operators can also enable OIDC or context-token authentication. The header requirements
 for each mode are listed below.
 
@@ -48,7 +51,7 @@ GitHub webhooks use HMAC verification instead of bearer-token authentication.
 |----------|--------|-------------|
 | `/webhooks/github` | POST | Accept GitHub `issues` / `pull_request` label triggers and pull request events for exact-head repository monitor runs |
 
-The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. The `orka:implement` issue label queues the managed repository workflow; configured pause-label changes queue fresh reconciliation. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [GitHub Label Triggers](../guides/github-label-triggers.md) for configuration and webhook behavior.
+The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Signature-256` header. The `orka:implement` issue label queues the managed repository workflow; configured pause-label changes queue fresh reconciliation. Pull request events can also queue exact-head `RepositoryMonitor` runs when a matching monitor has `spec.review.exactEventEnabled: true`. See [Issue-to-PR automation](../guides/issue-to-pr-automation.md#start-from-a-github-label) for configuration and webhook behavior.
 
 ## Tasks
 
@@ -65,52 +68,15 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
-### Agent Task workspace and delivery schema
+`POST /api/v1/tasks` takes `name`, `namespace`, and a `spec` with the full set of
+[Task](resources.md#task) fields. As a shorthand, common fields — `type`, `agentRef`,
+`prompt`, `image`, `command`, `args`, `env`, `timeout`, `priority`, `retryPolicy`,
+`workspace`, `agentRuntime`, `sessionRef`, `schedule`, and a few more — can also go at the
+top level, as in the [example](#example-usage) below. Fields outside that set, such as
+`resources` or the schedule history limits, take effect only under `spec`.
 
-`POST /api/v1/tasks` accepts the Task CRD shape. Agent repository configuration belongs at top-level `spec.workspace`; `spec.agentRuntime` contains only per-Task runtime overrides.
-
-| Path | Type | Values/default | Notes |
-| --- | --- | --- | --- |
-| `spec.workspace.intent` | string | `read` for agent Tasks; `read` or `write` | Immutable effective intent for the attempt. |
-| `spec.workspace.gitRepo` | string | empty | Credential-free source repository URL. Embedded credentials, query strings, and fragments are rejected. |
-| `spec.workspace.sourceRepository` | object | empty | Optional canonical provider/ID source identity. |
-| `spec.workspace.branch` / `ref` | string | empty | Source branch or exact ref/commit/tag. When both are empty, the Publisher resolves and freezes the repository's advertised default branch before execution. |
-| `spec.workspace.readCredentialRef.name` | string | empty | Secret used only by the clean-room source clone/read operation. |
-| `spec.workspace.publicationGitRepo` | string | empty | Credential-free publication repository URL. |
-| `spec.workspace.publicationRepository` | object | empty | Optional canonical provider/ID publication identity. |
-| `spec.workspace.publicationReadCredentialRef.name` | string | empty | Target-read Secret used only for publication preflight and independent verification. |
-| `spec.workspace.publicationCredentialRef.name` | string | empty | Target-write Secret used only for the exact branch compare-and-swap push. |
-| `spec.workspace.forgeCredentialRef.name` | string | empty | Forge API Secret used only for pull-request reconciliation; required when `createPR` is true. |
-| `spec.workspace.subPath` | string | empty | Repository subdirectory exposed as workspace root. |
-| `spec.workspace.pushBranch` | string | generated for write Tasks when omitted | Publication branch; Orka-generated names use full Task or Session identity entropy. |
-| `spec.workspace.prBaseBranch` | string | empty | Pull-request base branch. |
-| `spec.workspace.prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
-| `spec.workspace.prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
-| `spec.workspace.createPR` | boolean | `false` | Reconcile a pull request only after branch publication when true; requires `intent: write`. |
-| `spec.agentRuntime.maxTurns` | integer | Agent default | Per-Task prompt-loop limit. |
-| `spec.agentRuntime.allowedTools` / `disallowedTools` | list | Agent defaults | Per-Task tool policy override. |
-| `spec.agentRuntime.allowBash` | boolean | Agent default | Per-Task bash policy override. |
-| `spec.timeout` | duration | `30m` for Orka harness v2 agent Tasks | Maximum wall-clock duration measured from Task creation, including queue, runtime admission, and prompt execution time. An explicit positive value overrides the default. |
-
-`prTitle` and `prBody` apply only when `createPR: true`. Supplying presentation text alone does not request a pull request; it can remain configured on branch-only Tasks.
-
-Orka rejects secret-like pull-request titles and bodies at runtime before publication, including prompt-derived titles. Explicit overrides wait for a publisher with pull-request presentation support before prompt admission.
-
-Source read, target read, target write, and forge references are distinct
-credential roles. The selected Secret UID/resourceVersion is frozen for the
-attempt, and the credential broker releases a value only to the
-Workspace/Publisher for the exact active operation. Secret contents are never
-copied to Task status or delivered to the ACP process tree.
-
-The durable ACP attempt is exposed in `status.execution`. Workspace validation and publication use `status.delivery`, including publication ID, repository identities, branch, starting/remote/tree/commit SHAs, artifact digest, and optional PR receipt. A Task is not delivered merely because the model reports success; require a terminal verified delivery outcome.
-
-`Task.spec.execution.workspace` runs the agent inside an external sandbox provider instead of a
-plain runtime Pod. It is off unless the operator turns it on: `--acp-workspace-dispatch-enabled`
-plus the flag for the provider you want (`--agent-sandbox-enabled` or `--substrate-enabled`).
-Without them the field is rejected rather than ignored. See
-[Agent Sandbox](../concepts/agent-sandbox.md) or [Agent Substrate](../concepts/substrate.md) for
-the two supported providers, and [Configuration](configuration.md#workspace-providers)
-for the flags and the class-based lifecycle.
+Task and Session event history, live streams, traces, forks, and approvals have their own
+endpoints, described in [Execution events](execution-events.md).
 
 ### Get Task plan
 
@@ -175,7 +141,7 @@ Common list query parameters: `namespace`, `query`/`q`, `sessionName`, `agentNam
 | `/api/v1/memory-proposals/:id/apply` | POST | Apply an accepted `memory` proposal into durable memory |
 | `/api/v1/memory-proposals/:id/archive` | POST | Archive a proposal without applying it |
 
-Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review and archive return `204 No Content`. Apply accepts optional `appliedBy` and returns the linked durable memory JSON; repeated apply requests return the same memory.
+Common list query parameters: `namespace`, `taskName`, `agentName`, `type`, `status`, `query`/`q`, and `limit`. Review returns the stored review record (`id`, `namespace`, `status`, `reviewer`, `reviewNote`, `reviewedAt`), and archive returns `204 No Content`. Apply returns the linked durable memory JSON; repeated apply requests return the same memory. The server records the request's signed-in identity as `reviewer` and `appliedBy`; a body with a non-empty `reviewer` (review) or `appliedBy` (apply) returns `400 Bad Request`, and a request without an identity returns `401 Unauthorized`.
 
 ## ACP runtime resources
 
@@ -198,6 +164,7 @@ RuntimePools are controller-owned for built-in Codex, OpenCode, Claude, and Copi
 | `/api/v1/agents` | POST | Create an agent |
 | `/api/v1/agents` | GET | List agents |
 | `/api/v1/agents/:name` | GET | Get agent details |
+| `/api/v1/agents/:name/system-prompt` | GET | Get the system prompt an agent reads from its `systemPrompt.configMapRef` |
 | `/api/v1/agents/:name` | PUT | Update an agent |
 | `/api/v1/agents/:name` | DELETE | Delete an agent |
 
@@ -213,9 +180,9 @@ RuntimePools are controller-owned for built-in Codex, OpenCode, Claude, and Copi
 | `/api/v1/skills/:name` | DELETE | Delete a skill |
 
 
-## Generic Gateways
+## Gateways
 
-See [Generic Gateway API](gateway-api.md) for the adapter contract, Kubernetes resources, durable ledger endpoints, filters, and retry workflow.
+See [Gateway API](gateway-api.md) for the adapter contract, Kubernetes resources, durable ledger endpoints, filters, and retry workflow.
 
 ## Tools
 
@@ -224,203 +191,13 @@ See [Generic Gateway API](gateway-api.md) for the adapter contract, Kubernetes r
 | `/api/v1/tools` | GET | List tools (built-in + CRDs) |
 | `/api/v1/tools/:name` | GET | Get tool details |
 
-### Tool CRD schema
-
-`GET /api/v1/tools/:name` returns built-in tool metadata or the full `Tool` CRD. Custom Tool CRDs can call plain HTTP endpoints or MCP servers hosted in durable Substrate actors.
-
-Plain HTTP tools set `spec.http.url` and may inject authentication from a Kubernetes Secret into either the `Authorization: Bearer` header or the JSON request body:
-
-This example uses a placeholder catalog API. Replace its URL and Secret reference with your service's values.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Tool
-metadata:
-  name: catalog-search
-spec:
-  description: "Search a product catalog"
-  parameters:
-    type: object
-    properties:
-      query:
-        type: string
-    required:
-      - query
-  http:
-    url: "https://catalog.example.com/search"
-    method: POST
-    authSecretRef:
-      name: catalog-api-key
-      key: api-key
-    authInject: body
-    authBodyKey: api_key
-```
-
-MCP actor-backed tools set `spec.mcp.substrateActor` and may omit `spec.http` entirely. Orka creates or reuses the Substrate actor, waits for the MCP endpoint, stores the resolved endpoint in `status.endpoint`, and workers call the MCP tool through JSON-RPC `tools/call` using the Tool name as the MCP tool name.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: Tool
-metadata:
-  name: repo-inspector
-spec:
-  description: "Inspect repository metadata through an MCP server"
-  parameters:
-    type: object
-    properties:
-      message:
-        type: string
-    required:
-      - message
-  mcp:
-    path: /mcp
-    substrateActor:
-      templateRef:
-        name: orka-mcp
-        namespace: ate-demo
-      poolRef:
-        name: mcp-substrate-pool
-      boot: true
-```
-
-| Path | Type | Values/default | Notes |
-|------|------|----------------|-------|
-| `spec.description` | string | required | Description shown to the LLM. |
-| `spec.parameters` | JSON Schema | empty | Tool argument schema in function-calling format. |
-| `spec.http.url` | string | required for plain HTTP tools | Endpoint called by workers. MCP actor-backed tools may omit it because Orka uses `status.endpoint`. |
-| `spec.http.method` | string | default `POST`; allowed `GET`, `POST`, `PUT`, `PATCH`, `DELETE` | HTTP method for plain HTTP tools. MCP actor-backed tools use `POST`. |
-| `spec.http.headers` | map | empty | Static headers sent with the request. Reserved token propagation headers cannot be overridden when outbound TxToken propagation is enabled. |
-| `spec.http.timeout` | duration | default `30s` | Per-call request timeout. |
-| `spec.http.authSecretRef` | Secret key selector | empty | Secret value used as the auth token. Cannot coexist with a direct OutboundAccessPolicy. |
-| `spec.http.outboundAccessPolicyRef.name` | string | empty | Same-namespace `OutboundAccessPolicy` required to be Accepted with ResolvedRefs. |
-| `spec.http.authInject` | string | default `header`; allowed `header`, `body` | `header` sends `Authorization: Bearer <token>`. `body` injects the token into the JSON request body and is invalid for MCP actor-backed tools. |
-| `spec.http.authBodyKey` | string | empty | JSON key used when `authInject: body`. |
-| `spec.mcp.path` | string | `/mcp` | HTTP path exposed by the MCP server inside the actor. |
-| `spec.mcp.substrateActor.templateRef.name` | string | required | Substrate `ActorTemplate` hosting the MCP server. |
-| `spec.mcp.substrateActor.templateRef.namespace` | string | Tool namespace or configured default | Namespace containing the actor template. |
-| `spec.mcp.substrateActor.poolRef.name` | string | empty | Optional `SubstrateActorPool` for actor placement and reuse. The pool template must match the MCP actor template. |
-| `spec.mcp.substrateActor.poolRef.namespace` | string | Tool namespace | Namespace containing the referenced actor pool. |
-| `spec.mcp.substrateActor.boot` | boolean | `false` | Boots the actor from scratch on first resume; later reconciles reuse an already booted actor. |
-| `status.available` | boolean | false | Whether the controller can reach the resolved endpoint. |
-| `status.endpoint` | string | empty | Resolved non-secret endpoint used by workers. For MCP actor-backed tools this is the Substrate router endpoint. |
-| `status.actor` | object | empty | Safe actor metadata, including provider, actor ID, route host, resolved template, and pool reference. |
-
-MCP actor-backed tools require Substrate support to be enabled on the controller. If transport auth is needed for an MCP endpoint, set `spec.http.authSecretRef`, keep `authInject` as `header` or omit it, and omit `spec.http.url`.
-
-## OutboundAccessPolicy
-
-`OutboundAccessPolicy` is namespaced and selects exactly one adapter. Direct mode performs RFC 8693/RFC 7523 exchange and injects a validated Bearer resource credential. Gateway mode dials a trusted Kubernetes Service while preserving the original Tool authority, path, query, method, body, and protocol headers. Connection mode injects the requesting person's linked-account credential for a `ConnectorProvider`.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: OutboundAccessPolicy
-metadata:
-  name: resource-api
-  namespace: default
-spec:
-  direct:
-    grant: TokenExchange
-    tokenEndpoint:
-      url: https://identity.example.test/oauth/token
-    subject:
-      source: TransactionToken
-    scopes: [api.read]
-    requestedTokenType: urn:ietf:params:oauth:token-type:access_token
-    expectedIssuedTokenType: urn:ietf:params:oauth:token-type:access_token
-```
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: OutboundAccessPolicy
-metadata:
-  name: github-as-me
-  namespace: default
-spec:
-  connection:
-    providerRef:
-      name: github
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `spec.connection.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. `ResolvedRefs` is True only while the provider is Accepted. |
-| `spec.connection.output` | object | `Authorization: Bearer` | Header and prefix for the injected credential. `Txn-Token` is forbidden. |
-
-Connection mode resolves at call time, in the controller only. A `readOnly` Connection hides the provider's write-class tools from the agent, and connector write tools are always approval-required. For native `type: ai` Tasks the worker Pod never runs such a tool itself: it calls `POST /internal/v1/tasks/:namespace/:taskName/connector-tools/:tool` with its ServiceAccount token, and the controller verifies the caller is the Task's current worker, that the arguments satisfy the Tool's declared JSON Schema, that the tool is connector-backed and enabled for the Task, and that the policy frozen into the Job at dispatch is honored: the Job carries the tool list, the approval-required set, the spec digest of every dispatched connector tool, and the Connection bindings (`ORKA_CONNECTOR_TOOL_DIGESTS`, `ORKA_CONNECTION_BINDINGS`). A tool whose definition changed since dispatch, a write-class tool the frozen policy does not cover, or a Task whose `status.connectionBindings` no longer match the Job's is refused, and a tool the policy covers executes only with an approved approval (`approvalId`) that binds this tool's configuration, the connection-mode policy's injection configuration, and the Connection frozen for its policy (so a Job re-created after the decision against a re-linked account or a changed policy needs a fresh approval), these exact arguments, and is claimed atomically for a single execution. Every failure before a provider request hands the claim back; a claimed call is recorded in the durable external-effect ledger under its claim with the frozen Connection digest, using the Tool's own request timeout as its lease, and a worker that lost the response receives the committed result again (`replayed: true`) without a second request. Results larger than 256 KiB are retained as a digest-and-size receipt and cannot be replayed. The effect record is reserved before the claim is recorded, and a spent claim is reconciled from it: a record still Pending is moved to Failed (which fences out any request that has not started its call) and the claim is handed back; an in-flight record whose lease lapsed settles as outcome unknown (`502`) and the approval stays spent; a live in-flight record is `409 still executing`. It then executes the call against the Connection frozen into `status.connectionBindings` at Job creation, which a recovered Job always reads back from its own environment. The Task's verified `spec.requestedBy` selects the person, the Connection identity frozen into the Task's execution snapshot at dispatch must still match the live Connection (UID, generation, and grant sequence, so a re-link of the same Connection object needs a re-dispatch), the policy object checked against the dispatched configuration must be the one that resolves, the Connection must be Ready for its current generation, and the Tool URL must be HTTPS without `authSecretRef`. A token that expires within 60 seconds is refreshed once per Connection at a time and the rotated material written back to custody. A provider that rejects the refresh marks the Connection `Revoked` and shreds its custody; an expired token with no refresh token marks it `Expired`. Any other condition fails the call with no fallback to Task Secrets, environment credentials, or other people's Connections. Worker Pods have no credential source and refuse connection-mode policies.
-
-Policy status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. Secret references are key-specific and same-namespace. Cross-namespace Service refs require exact controller allowlist entries. See [Outbound Access Policies](../concepts/outbound-access.md).
-
-## ConnectorProvider
-
-`ConnectorProvider` is the operator-owned catalog entry for one third-party service people may link through OAuth. It is namespaced, reconciled only when the controller runs with `--connectors-enabled`, and carries public OAuth client settings plus the tools the service offers. Only the client secret lives in a Secret.
-
-```yaml
-apiVersion: core.orka.ai/v1alpha1
-kind: ConnectorProvider
-metadata:
-  name: github
-  namespace: default
-spec:
-  displayName: GitHub
-  oauth:
-    authorizeURL: https://github.com/login/oauth/authorize
-    tokenURL: https://github.com/login/oauth/access_token
-    clientID: Iv1.example-client-id
-    clientSecretRef:
-      name: github-connector-oauth
-      key: clientSecret
-    scopes:
-      read: [read:user]
-      write: [repo]
-  tools:
-    - name: list_pull_requests
-      class: read
-      source: Builtin
-    - name: create_pull_request
-      class: write
-      source: Builtin
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `spec.displayName` | string | object name | Shown to people in the dashboard and CLI. |
-| `spec.oauth.authorizeURL` | string | required | Absolute HTTPS authorization endpoint. Private, loopback, link-local, and cluster-internal hosts are rejected, and so are single-label names (which Pod DNS search domains complete to cluster Services) and non-canonical numeric hosts. Hosts must be ASCII: write an internationalized name in its punycode (`xn--`) form. The same host rules, and a 2048-byte length bound, apply to every endpoint and HTTP tool URL. |
-| `spec.oauth.tokenURL` | string | required | Absolute HTTPS token endpoint used for the code exchange and refresh. |
-| `spec.oauth.revocationURL` | string | empty | Optional RFC 7009 endpoint called best-effort on disconnect for the committed credential. It must be on the token endpoint's host and port, so tokens are only sent back to their issuer; GitHub has no such endpoint, so a GitHub provider leaves it empty. Orka never revokes material it did not commit: a token from a consent nobody completed is deleted and left to expire, because it may belong to a different person's grant. |
-| `spec.oauth.clientID` | string | required | Public OAuth client identifier, printable ASCII, at most 256 bytes. |
-| `spec.oauth.clientSecretRef` | Secret key selector | required | Same-namespace Secret holding the client secret. |
-| `spec.oauth.clientAuthentication` | `ClientSecretBasic` \| `ClientSecretPost` | `ClientSecretBasic` | How the client secret is presented to the token endpoint. |
-| `spec.oauth.pkce` | bool | `true` | Enable RFC 7636 code verification. |
-| `spec.oauth.scopes.read` / `.write` | []string | empty | Scopes requested for `readOnly` Connections, and additionally for `readWrite`. Entries must be RFC 6749 scope tokens (printable ASCII without spaces, quotes, or backslashes) of at most 256 bytes; the read and write sets together must encode to at most 2048 bytes. |
-| `spec.oauth.additionalAuthorizeParameters` | map | empty | Static authorize query parameters, each value at most 512 bytes and 2048 bytes encoded in total. Reserved OAuth fields and credential-like names (`token`, `secret`, `api_key`, `assertion`, and similar) are rejected; the spec is public configuration. Endpoint URLs may carry a query of at most 1024 bytes, but not credential-like parameters or reserved OAuth fields (including `code_verifier`). An HTTP tool URL may use any query name that is not credential-like, such as `state=open`. |
-| `spec.tools[].name` | string | required | Tool name exposed to agents. Unique within the provider. |
-| `spec.tools[].class` | `read` \| `write` | required | Write tools are hidden from `readOnly` Connections and require approval. |
-| `spec.tools[].source` | `Builtin` \| `HTTP` | required | `Builtin` names an existing Orka tool. `HTTP` carries a curated definition in `http`. |
-| `spec.tools[].description`, `.parameters`, `.http` | | | HTTP tools only. `parameters` must be a JSON Schema whose root declares `type: object` and that resolves in full, including nested property schemas. `http.url` must be HTTPS and is the exact destination, without template placeholders; static headers are limited to 128-byte names, 1024-byte values, and 4096 bytes in total; `Authorization`, `Cookie`, `Host`, `Txn-Token`, and hop-by-hop headers (`Connection`, `Keep-Alive`, `Te`, `Trailer`, `Upgrade`, and similar) are reserved, and credential-like header names (`X-Api-Key`, `X-Auth-Token`, and similar) are rejected: the linked account is the only credential. |
-
-Status contains only `observedGeneration`, `Accepted`, and `ResolvedRefs`. `Builtin` declarations are checked against the controller's built-in tool registry and the connector built-in catalog (the GitHub tools listed in the [Connectors guide](../guides/connectors.md#built-in-github-tools)): a misspelled name, a built-in that would ignore the linked credential, or a class other than the one the catalog fixes for the tool is rejected.
-
-## Connection
-
-`Connection` is one person's linked account with one `ConnectorProvider`. The API server creates it from the caller's verified OIDC or context-token identity; `spec.subject` and `spec.providerRef` are immutable. Deleting the Connection is the disconnect. Status never carries token material.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `spec.subject.issuer` | string | required | Identity issuer that verified the subject. Immutable. |
-| `spec.subject.subject` | string | required | Issuer-scoped stable subject. Immutable. |
-| `spec.providerRef.name` | string | required | Same-namespace `ConnectorProvider`. Immutable. |
-| `spec.mode` | `readOnly` \| `readWrite` | `readOnly` | `readOnly` hides the provider's write tools and requests only read scopes. |
-| `status.state` | string | | `Pending`, `Ready`, `Expired`, `Revoked`, or `Error`. |
-| `status.grantedScopes` | []string | | Scopes the provider reported at consent time. |
-| `status.linkedAt`, `.expiresAt`, `.lastRefreshTime` | time | | Link, access-token expiry, and refresh timestamps. |
-| `status.grantSequence` | integer | | The grant custody assigned to the linked material; it rises with every committed consent and never repeats. Authority frozen or approved under one grant does not survive a re-link. |
-| `status.consent.providerUID`, `.authorityDigest` | string | | The `ConnectorProvider` UID and a non-secret digest of everything the last consent authorized a token to reach: the provider's OAuth client identity (client ID, secret reference, authentication method, endpoints, static authorize parameters) and the curated HTTP tool destinations (name, class, URL, method, static headers). Built-in declarations (name, class, and their fixed `https://api.github.com` audience) are part of it too. Changing any of these asks for consent again. |
-
-Conditions are `ProviderResolved` and `ScopesGranted` (set by the controller; the latter compares `status.grantedScopes` with the scopes the current mode and provider require, so widening the mode or a provider requiring more scopes projects `Pending` with reason `ConsentRequired` without erasing the consent, and narrowing restores readiness; it also requires `status.consent` to match the current provider, so a replaced provider or a changed OAuth client asks for consent again instead of refreshing or revoking the held token against a different authority) and `Ready` (set by the consent and refresh paths). A Connection is usable only when `Ready` is True and both controller conditions are True for the current generation. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md) for the design.
+`GET /api/v1/tools/:name` returns built-in tool metadata or the full [Tool](resources.md#tool)
+resource. Coordination tools are not listed; see [Built-in tools](built-in-tools.md).
 
 ## Connector endpoints
 
-Available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route except the OAuth callback requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. The callback is the provider's redirect target and carries no user token: the signed single-use consent `state` authenticates it against the pending consent instead, and the server-side PKCE verifier binds the code exchange to that consent. Under context-token authorization, reads need `orka:connectors:read` and every mutation needs `orka:connectors:manage`, so a delegated token narrowed to other work cannot inspect or revoke a person's accounts. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
+These routes manage [Connections](resources.md#connection) to a
+[ConnectorProvider](resources.md#connectorprovider). They are available when the controller runs with `--connectors-enabled` and `--connector-callback-base-url`. Every route except the OAuth callback requires a verified OIDC or context-token identity carrying an issuer and subject; ServiceAccount bearer tokens are refused with 403. The callback is the provider's redirect target and carries no user token: the signed single-use consent `state` authenticates it against the pending consent instead, and the server-side PKCE verifier binds the code exchange to that consent. Under context-token authorization, reads need `orka:connectors:read` and every mutation needs `orka:connectors:manage`, so a delegated token narrowed to other work cannot inspect or revoke a person's accounts. A person sees and changes only Connections whose `spec.subject` matches their identity; a foreign Connection reads as 404. Responses never carry token material.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -493,7 +270,7 @@ permission. Stages the scan has not reached yet are present with zero counts.
 ```json
 {
   "name": "example-repo",
-  "namespace": "default",
+  "namespace": "orka-system",
   "spec": {
     "provider": "github",
     "repoURL": "https://github.com/example/app",
@@ -521,7 +298,7 @@ The request accepts the same `RepositoryScan` spec fields as the CRD, including 
 
 A typical remediation workflow is:
 
-1. List findings with `GET /api/v1/security/repositories/:name/findings?namespace=default&recommended=true`.
+1. List findings with `GET /api/v1/security/repositories/:name/findings?namespace=orka-system&recommended=true`.
 2. Inspect evidence with `GET /api/v1/security/findings/:id`.
 3. Optionally validate with `POST /api/v1/security/findings/:id/validate`.
 4. Generate a patch with `POST /api/v1/security/findings/:id/patch`.
@@ -530,9 +307,9 @@ A typical remediation workflow is:
 
 Review slice and dropped-output inspection:
 
-1. List slices with `GET /api/v1/security/repositories/:name/slices?namespace=default`.
-2. Inspect one slice with `GET /api/v1/security/repositories/:name/slices/:sliceID?namespace=default`.
-3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=default&scanRunID=scan_...&layer=filter&reason=contains=rate-limit`.
+1. List slices with `GET /api/v1/security/repositories/:name/slices?namespace=orka-system`.
+2. Inspect one slice with `GET /api/v1/security/repositories/:name/slices/:sliceID?namespace=orka-system`.
+3. List rejected v2 model output with `GET /api/v1/security/repositories/:name/dropped-findings?namespace=orka-system&scanRunID=scan_...&layer=filter&reason=contains=rate-limit`.
 
 ## Repository monitors
 
@@ -587,7 +364,7 @@ Context-token authorization scopes are `orka:monitors:read` for list/get endpoin
 ```json
 {
   "name": "example-app",
-  "namespace": "default",
+  "namespace": "orka-system",
   "spec": {
     "provider": "github",
     "repoURL": "https://github.com/example/app",
@@ -728,92 +505,11 @@ See [OpenAI Compatibility](openai-compat.md) for details.
 
 The `/anthropic/v1/messages` endpoint injects built-in tools and runs server-side tool execution by default. Set `X-Orka-Tools: disabled` header to use as a transparent proxy instead. See [Anthropic Compatibility](anthropic-compat.md) for details.
 
-## Internal API (worker communication)
+## Internal API
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/internal/v1/results/:namespace/:taskName` | POST | Submit task result |
-| `/internal/v1/artifacts/:namespace/:taskName/:filename` | POST | Upload task artifact |
-| `/internal/v1/sessions/:namespace/:name/transcript` | GET | Get session transcript |
-| `/internal/v1/plans/:namespace/:taskName` | POST | Save plan state |
-| `/internal/v1/plans/:namespace/:taskName` | GET | Get plan state |
-| `/internal/v1/messages/:namespace` | POST | Send inter-agent message |
-| `/internal/v1/messages/:namespace/:taskName` | GET | Get messages for a task |
-
-### Save plan state
-
-Workers call this to persist autonomous plan state.
-
-**Endpoint:** `POST /internal/v1/plans/{namespace}/{taskName}`
-
-**Request Body:**
-```json
-{
-  "summary": "Completed phase 1",
-  "progress_pct": 25,
-  "goal_complete": false,
-  "plan_document": "# Plan\n..."
-}
-```
-
-**Response:** `204 No Content`
-
-### Get plan state
-
-Workers call this to load the current plan state at startup.
-
-**Endpoint:** `GET /internal/v1/plans/{namespace}/{taskName}`
-
-**Response (200):** Same as public plan endpoint.
-
-**Errors:**
-- `404` — No plan found
-
-### Send message
-
-Workers call this to send messages to sibling tasks (same parent coordinator).
-
-**Endpoint:** `POST /internal/v1/messages/{namespace}`
-
-**Request Body:**
-```json
-{
-  "fromTask": "worker-a",
-  "toTask": "worker-b",
-  "parentTask": "coordinator",
-  "content": "Found a bug in the auth module"
-}
-```
-
-Use `"toTask": "*"` to broadcast to all siblings.
-
-**Response:** `204 No Content`
-
-### Get messages
-
-Workers call this to check for unread messages.
-
-**Endpoint:** `GET /internal/v1/messages/{namespace}/{taskName}?parentTask={parentTask}&markRead={true|false}`
-
-**Query Parameters:**
-- `parentTask` (required) — Parent coordinator task name (scopes messages to siblings)
-- `markRead` (optional, default: `true`) — Whether to mark returned messages as read
-
-**Response (200):**
-```json
-[
-  {
-    "id": 1,
-    "namespace": "default",
-    "fromTask": "worker-b",
-    "toTask": "worker-a",
-    "parentTask": "coordinator",
-    "content": "Found a bug in the auth module",
-    "read": false,
-    "createdAt": "2026-01-15T10:30:00Z"
-  }
-]
-```
+Workers call `/internal/v1` routes to submit results and artifacts, read transcripts, save
+plans, and exchange messages. They are not for clients; see
+[Controller internals](../development/internals.md#internal-worker-api).
 
 ## Health
 
@@ -827,7 +523,7 @@ Workers call this to check for unread messages.
 ```bash
 # Create a task
 curl -X POST http://localhost:8080/api/v1/tasks \
-  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -H "Authorization: Bearer $(kubectl -n orka-system create token orka-client)" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "my-task",
@@ -838,20 +534,20 @@ curl -X POST http://localhost:8080/api/v1/tasks \
 
 # Get task result
 curl http://localhost:8080/api/v1/tasks/my-task/result \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer $(kubectl -n orka-system create token orka-client)"
 
 # List task artifacts
 curl http://localhost:8080/api/v1/tasks/my-task/artifacts \
-  -H "Authorization: Bearer $(kubectl create token orka-client)"
+  -H "Authorization: Bearer $(kubectl -n orka-system create token orka-client)"
 
 # Download an artifact
 curl -L http://localhost:8080/api/v1/tasks/my-task/artifacts/output.json \
-  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -H "Authorization: Bearer $(kubectl -n orka-system create token orka-client)" \
   -o output.json
 
 # Chat with SSE streaming
 curl -N http://localhost:8080/api/v1/chat \
-  -H "Authorization: Bearer $(kubectl create token orka-client)" \
+  -H "Authorization: Bearer $(kubectl -n orka-system create token orka-client)" \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Create an AI task that summarizes Kubernetes best practices",
@@ -859,60 +555,7 @@ curl -N http://localhost:8080/api/v1/chat \
   }'
 ```
 
-## Built-in Tools
+## Built-in tools
 
-These tools are available to AI worker agents:
-
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `web_search` | Search the web using a configured search API or DuckDuckGo | `query` (required), `limit` (default 5) |
-| `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (max 60s) |
-| `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
-| `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
-| `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
-
-### Coordination Tools
-
-These tools are injected into AI worker agents when the Agent has `coordination.enabled: true`. They are not returned by `GET /api/v1/tools`.
-
-The following tools are **auto-injected** when coordination is enabled:
-
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `namespace`, `priority`, `auto_retry`, `max_retries` |
-| `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
-| `create_container_task` | Create a child container task | `image`, `command`/`args`; `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule` |
-| `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
-| `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
-| `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
-| `recall_memory` | Recall durable namespace-scoped memories | `query`, `tags`, `task_name`, `agent_name`, `source`, `limit`, `include_disabled` |
-| `remember` | Submit a durable memory proposal for review | `content` (required); `title`, `description`, `tags`, `agent_name` |
-| `propose_memory` | Submit a memory-adjacent governance proposal | `title` (required); `type`, `skill_name`, `description`, `content`, `patch`, `agent_name` |
-| `search_transcript` | Search prior session transcripts | `query` (required); `session_name`, `exclude_session_name`, `roles`, `limit`, `max_snippet_length` |
-| `create_pull_request` | Create a GitHub pull request | `task_name`, `head_branch`, `base_branch`, `title` (required); `body` |
-| `check_pull_request_ci` | Check GitHub CI status without merging | `pr_number` (required); `task_name`, `repo_url`, `wait_timeout`, `poll_interval` |
-| `list_pull_requests` | List open pull requests in a repository | `task_name`, `repo_url`; `per_page`, `page` |
-| `check_pr_review_marker` | Check for an existing Orka PR review marker on a PR head | `pr_number` (required); `task_name`, `repo_url`, `head_sha` |
-| `merge_pull_request` | Merge a GitHub pull request | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message` |
-| `auto_merge_pull_request` | Poll CI checks and merge a PR when all pass | `task_name`, `pr_number` (required); `merge_method`, `commit_title`, `commit_message`, `timeout` |
-| `review_pull_request` | Fetch PR diff for review | `pr_number` (required); `task_name`, `repo_url` |
-| `post_review_comment` | Post a review on a PR | `pr_number`, `body`, `event` (required); `task_name`, `repo_url`, `comments` |
-| `create_agent` | Create an Agent CRD at runtime | `name`, `provider`, `model` (required); `systemPrompt` (required except OpenCode; omit for OpenCode), `tools`, `coordination` |
-| `delete_agent` | Delete an Agent CRD | `name` (required), `namespace` |
-| `update_plan` | Update the autonomous execution plan | `summary`, `plan_document` (required); `progress_pct`, `goal_complete` |
-
-The following tools require explicit `spec.tools[]` entries on the Agent CRD:
-
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `list_issues` | List open GitHub issues in a repository | `task_name`, `repo_url`; `unassigned_only` (default true), `per_page`, `page` |
-| `get_issue` | Fetch full details of a GitHub issue | `issue_number` (required); `task_name`, `repo_url` |
-| `comment_on_issue` | Post a comment on a GitHub issue | `issue_number`, `body` (required); `task_name`, `repo_url` |
-
-For GitHub tools that accept `repo_url`, explicit repository URLs are scope-checked when task context is available. The requested repository must match the current task's workspace repository or signed transaction repository context; otherwise the tool fails closed before resolving credentials or calling GitHub.
-
-`create_pr_monitor` is exposed through the chat/management tool set rather than auto-injected into every coordinator worker. Parameters are `name`, `repo_url`, `schedule`, and `agent_ref` (required), plus optional `namespace`, `provider_ref`, `gitSecretRef`, `per_page`, `review_event`, and `prompt`. `repo_url` must be a credential-free GitHub repository root URL such as `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`; pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, and embedded-credential URLs are rejected.
-
-`create_pr_monitor` is the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task, sets `spec.workspace.gitRepo` to `repo_url`, injects only the PR review loop tools, and instructs the task to pass the same `repo_url` to `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment`. The Agent referenced by `agent_ref` must be an AI Agent with coordination enabled and autonomous coordination disabled. The `create_pr_monitor` tool accepts its compatibility `gitSecretRef` parameter (or a supported default Secret name) and maps the selected Secret into the created Task's top-level `spec.workspace.readCredentialRef`. When the parameter is omitted, the supported default Secret names are `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, and `git-token`. The selected Secret must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
-
-`check_pr_review_marker` returns a hidden marker that the monitor should include unchanged in the subsequent review body. The marker includes `repo`, `pr`, `head_sha`, and `sig` fields, and matching is scoped to that repository, pull request, and exact head. Marker signatures are stable across GitHub token rotation. Operators can set `ORKA_PR_REVIEW_MARKER_SECRET` in the worker Task environment for dedicated marker signing and `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` for comma-separated previous keys during rotation. Legacy markers are accepted only from a trusted review author, configured with `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` or resolved from the Task's authenticated GitHub user.
+The tools Orka gives agents, and their parameters, are documented in
+[Built-in tools](built-in-tools.md).

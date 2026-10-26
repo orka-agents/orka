@@ -10,11 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 )
 
 // UpdateAgentTool updates an existing Agent CRD.
@@ -27,10 +27,10 @@ func (t *UpdateAgentTool) Description() string {
 }
 
 func (t *UpdateAgentTool) Parameters() json.RawMessage {
-	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "System prompt for the agent. OpenCode runtime Agents do not support Agent system prompts; use Task prompts instead."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+	return marshalAgentSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Role instructions for the agent. Built-in runtimes deliver these through their native instruction mechanism. Built-in harness v2 Copilot instructions cannot contain @ characters."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
 		providerField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai). For OpenCode this is normalized into model.name."},
 		nameField:     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name. OpenCode accepts a provider/model ID or a bare model name when the existing provider is retained."},
-		"temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2,
+		temperatureField: map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2,
 			jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
 		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
 		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
@@ -84,6 +84,13 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
+	if value, supplied := a["soul"]; supplied {
+		source, err := soulArgument(value)
+		if err != nil {
+			return ChatToolErrorResult("invalid_arguments", err.Error(), "Provide inline Markdown or a ConfigMap reference with an expected digest.")
+		}
+		agent.Spec.Soul = source
+	}
 	if requestedSystemPrompt != "" {
 		agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
 			Inline: requestedSystemPrompt,
@@ -97,26 +104,28 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 
-	if isOpenCodeAgent(agent) {
-		if agent.Spec.SystemPrompt != nil &&
-			(strings.TrimSpace(agent.Spec.SystemPrompt.Inline) != "" || agent.Spec.SystemPrompt.ConfigMapRef != nil) {
-			return ChatToolErrorResult(
-				"invalid_arguments",
-				"opencode runtime does not support systemPrompt",
-				"Remove spec.systemPrompt and use Task prompts for OpenCode instructions.",
-			)
+	// An Agent stored without a built-in contract runs under the namespace's
+	// mode, so validate the soul against that effective contract, as creation
+	// does. Only an omitted contract is filled; a stored one is left as is.
+	if runtime := agent.Spec.Runtime; runtime != nil && runtime.Type != "" && runtime.RuntimeRef == nil && runtime.ContractVersion == nil {
+		if contract := tc.ExecutionMode.ContractVersion(); contract != "" {
+			runtime.ContractVersion = &contract
 		}
+	}
+	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef Agents do not support souls.")
+	}
+	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Inline referenced text; built-in harness v2 Copilot role and soul instructions cannot contain @ characters.")
+	}
+
+	if isOpenCodeAgent(agent) {
 		if result, ok := normalizeChatOpenCodeModel(agent); !ok {
 			return result, nil
 		}
 	}
 
-	// Re-fetch before update to avoid conflicts
-	latest := &corev1alpha1.Agent{}
-	if err := tc.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, latest); err != nil {
-		return classifyChatK8sErr(err)
-	}
-	agent.ResourceVersion = latest.ResourceVersion
+	// Keep the version whose fields were edited; concurrent publication must conflict.
 	if result, ok := authorizeAgentUpdate(ctx, tc, agent); !ok {
 		return result, nil
 	}
@@ -140,7 +149,7 @@ func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
 	if !ok {
 		return values, nil
 	}
-	if _, numeric := model["temperature"].(float64); !numeric {
+	if _, numeric := model[temperatureField].(float64); !numeric {
 		return values, nil
 	}
 	var raw map[string]json.RawMessage
@@ -152,9 +161,9 @@ func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
 		return nil, err
 	}
 	var temperature json.Number
-	if err := json.Unmarshal(fields["temperature"], &temperature); err != nil {
+	if err := json.Unmarshal(fields[temperatureField], &temperature); err != nil {
 		return nil, err
 	}
-	model["temperature"] = temperature
+	model[temperatureField] = temperature
 	return values, nil
 }

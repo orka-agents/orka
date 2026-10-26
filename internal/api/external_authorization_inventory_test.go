@@ -108,6 +108,7 @@ DELETE /api/v1/agent-runtimes/:name | delete core.orka.ai:agentruntimes protecte
 POST /api/v1/agents | create core.orka.ai:agents
 GET /api/v1/agents | list core.orka.ai:agents
 GET /api/v1/agents/:name | get core.orka.ai:agents protected
+GET /api/v1/agents/:name/system-prompt | get core.orka.ai:agents protected
 PUT /api/v1/agents/:name | patch core.orka.ai:agents protected
 DELETE /api/v1/agents/:name | delete core.orka.ai:agents protected
 POST /api/v1/skills | create core.orka.ai:skills
@@ -173,6 +174,9 @@ PUT /api/v1/connections/:name | identity
 DELETE /api/v1/connections/:name | identity
 POST /api/v1/connections/:name/authorize | identity
 POST /api/v1/connections/:name/complete | identity
+GET /api/v1/agent-hosts/me | identity
+POST /api/v1/agent-hosts/me/wake | identity
+DELETE /api/v1/agent-hosts/me | identity
 GET /api/v1/secrets | list :secrets
 POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config

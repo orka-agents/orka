@@ -35,6 +35,7 @@ type ProviderProfile struct {
 }
 
 type ProviderSessionProjection struct {
+	Instructions   *acp.InstructionProjection
 	AdditionalArgs []string
 	Environment    map[string]string
 	NewSessionMeta acp.Meta
@@ -121,6 +122,15 @@ type Config struct {
 	// recording the operation. The one-shot record survives runtime and
 	// supervisor recreation so live conformance exposes an accidental retry.
 	E2EPromptWriteAmbiguityMarker string
+
+	// Toolboxes are the frozen profile toolboxes bound into this Pod, in
+	// declared order. Their PATH folders are appended after the default child
+	// PATH. The supervisor never opens or runs anything inside them.
+	Toolboxes []harnessv2.RuntimeToolbox
+	// ToolboxMountMethod is how the controller bound the toolboxes. With
+	// imageVolume the files were never sanitized, so startup runs the
+	// unprivileged architecture check.
+	ToolboxMountMethod string
 }
 
 func (c Config) Validate() error {

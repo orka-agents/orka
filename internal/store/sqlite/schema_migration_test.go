@@ -3,11 +3,13 @@ package sqlite
 import (
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	sqliteDriver "modernc.org/sqlite"
 )
@@ -20,6 +22,8 @@ func TestOpenLockedStoreMigrationLifecycle(t *testing.T) {
 		{"149", "0e567418", "", 1},
 		{"150", "1f18614c", "", 1},
 		{"162", "57583975", "", 1},
+		{"166", "abd2c040", "", 1},
+		{"158", "fdb64ecd", "", 1},
 		{"rollback and retry", "0e567418", "failure", 2},
 		{"crash and retry", "0e567418", "crash", 2},
 	} {
@@ -110,6 +114,51 @@ func TestOpenLockedStoreRefusesUnsupportedIntermediateAndUnknownSchemas(t *testi
 	}
 }
 
+func TestOpenLockedStoreRefusesHarnessV1Records(t *testing.T) {
+	for table, insert := range map[string]string{
+		"harness_v1_attempts": `INSERT INTO harness_v1_attempts(id,namespace,task_uid,attempt,binding_digest,snapshot_digest,
+			request_digest,turn_id,state,retry_class,version,created_at,updated_at)
+			VALUES('a','ns','uid',1,'b','s','r','t','Prepared','none',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+		"runtime_sessions": `INSERT INTO runtime_sessions(id,namespace,session_name,provider,state,cleanup_policy)
+			VALUES('rs','ns','session','kubernetes-service','Ready','Delete')`,
+		"session_lineages": `INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+			lineage_generation,runtime_identity,version,created_at,updated_at)
+			VALUES('ns','session','ns-uid','session-uid','orka.harness.v1',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+	} {
+		t.Run(table, func(t *testing.T) {
+			path, db := historicalSchemaDB(t, "abd2c040")
+			_, err := db.Exec(insert)
+			require.NoError(t, err)
+			before := storedSchemaSQL(t, db)
+			require.NoError(t, db.Close())
+			opened, err := OpenLockedStore(path)
+			require.Nil(t, opened)
+			require.ErrorContains(t, err, "harness v1 "+table+" records")
+			raw := rawMigrationDB(t, path)
+			require.Equal(t, before, storedSchemaSQL(t, raw))
+			var rows int
+			require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&rows))
+			require.Equal(t, 1, rows)
+			require.NoError(t, raw.Close())
+		})
+	}
+}
+
+func TestOpenLockedStoreKeepsHarnessV2LineagesAcrossV1TableRemoval(t *testing.T) {
+	path, db := historicalSchemaDB(t, "abd2c040")
+	_, err := db.Exec(`INSERT INTO session_lineages(namespace,session_name,namespace_uid,session_uid,contract_version,
+		lineage_generation,runtime_identity,version,created_at,updated_at)
+		VALUES('ns','session','ns-uid','session-uid','orka.harness.v2',1,'runtime',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	var rows int
+	require.NoError(t, s.db.QueryRow(`SELECT COUNT(*) FROM session_lineages WHERE contract_version = 'orka.harness.v2'`).Scan(&rows))
+	require.Equal(t, 1, rows)
+	require.NoError(t, s.close())
+}
+
 func TestOpenLockedStoreCurrentDoesNotBackUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	for range 2 {
@@ -123,12 +172,12 @@ func TestOpenLockedStoreCurrentDoesNotBackUp(t *testing.T) {
 // The newest prior layout uses only frozen historical DDL, never current
 // definitions. Changing current DDL without extending the chain fails here.
 func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
-	_, db := historicalSchemaDB(t, "57583975")
+	_, db := historicalSchemaDB(t, "abd2c040")
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
 	steps := schemaMigrations()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema162, steps[len(steps)-1:]))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, steps[len(steps)-2:]))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -250,6 +299,10 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 	switch revision {
 	case "57583975":
 		ddl += migration150To162
+	case "abd2c040":
+		ddl += migration150To162 + migration162To166
+	case "fdb64ecd":
+		ddl += migration150To162 + migration162To166 + migration166To167
 	case "b5265055":
 		ddl += read("b5265055")
 	}
@@ -267,9 +320,168 @@ func historicalSchemaDB(t *testing.T, revision string) (string, *sql.DB) {
 		"1f18614c": "66de67c84e6cf135ea10f5aa98ebb0a65eb920f2742be8c0bd27c5d651167df8",
 		"b5265055": "c82fb870c7ed92488fbe33daf9f0693ffdee5aebff9f48db6fa115fdf99ce83b",
 		"57583975": "b8ddc48210dbf5cce95a315cff79b2bad966a97e299e396f5574040e0732f6d7",
+		"abd2c040": "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36",
+		"fdb64ecd": "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c",
 	}
 	require.Equal(t, want[revision], schemaFingerprint(schema))
 	return path, db
+}
+
+// version1StoreStates lists every schema version 1 dataset state that
+// production can leave on disk, with whether DatasetInfo lets it mint a
+// snapshot key. An incomplete store is one whose key loading or authentication
+// failed after OpenLockedStore committed its identity row. A later upgrade of
+// these stores must preserve canBootstrap.
+var version1StoreStates = []struct {
+	name         string
+	origin       string
+	complete     bool
+	canBootstrap bool
+}{
+	{"new incomplete", datasetOriginNew, false, true},
+	{"new complete", datasetOriginNew, true, false},
+	{"adopted incomplete", datasetOriginAdopted, false, false},
+	{"adopted complete", datasetOriginAdopted, true, false},
+}
+
+// schemaVersion1StoreDB returns a schema version 1 store built only from frozen
+// inputs: the 166-object layout, the immutable 166-to-167.sql and 167-to-168.sql
+// steps, one store_dataset identity row and user_version = 1. An incomplete new store is
+// empty, because production writes no records before key bootstrap completes;
+// the others hold seeded migration records. It never uses the current schema
+// constructor, so it keeps producing version-1 stores after the layout moves
+// on. Upgrade tests for the next layout must start from this, not from
+// historicalSchemaDB plus 167-to-168.sql alone (see upgradeSchema).
+func schemaVersion1StoreDB(t *testing.T, origin string, complete bool) (string, *sql.DB) {
+	t.Helper()
+	require.Contains(t, []string{datasetOriginNew, datasetOriginAdopted}, origin)
+	path, db := historicalSchemaDB(t, "abd2c040")
+	if origin == datasetOriginAdopted || complete {
+		seedMigrationRecords(t, db, path)
+	}
+	_, err := db.Exec(migration166To167 + migration167To168)
+	require.NoError(t, err)
+	bootstrapComplete := 0
+	if complete {
+		bootstrapComplete = 1
+	}
+	_, err = db.Exec(`INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(1, ?, ?, ?)`,
+		uuid.NewString(), origin, bootstrapComplete)
+	require.NoError(t, err)
+	_, err = db.Exec(`PRAGMA user_version = 1`)
+	require.NoError(t, err)
+
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	// A literal digest, independent of schema168, as in historicalSchemaDB.
+	require.Equal(t, "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133", schemaFingerprint(schema))
+	record, err := readDataset(db)
+	require.NoError(t, err)
+	require.Equal(t, origin, record.origin)
+	require.Equal(t, complete, record.complete)
+	return path, db
+}
+
+type version1StoreState struct {
+	fingerprint  string
+	version      int
+	origin       string
+	complete     bool
+	canBootstrap bool
+}
+
+func readVersion1StoreState(t *testing.T, db *sql.DB, path string) version1StoreState {
+	t.Helper()
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	record, err := readDataset(db)
+	require.NoError(t, err)
+	info, err := NewStore(db, path).DatasetInfo()
+	require.NoError(t, err)
+	return version1StoreState{
+		fingerprint:  schemaFingerprint(schema),
+		version:      version,
+		origin:       record.origin,
+		complete:     record.complete,
+		canBootstrap: info.CanBootstrapSnapshotKey,
+	}
+}
+
+// Pins schemaVersion1StoreDB to what this release's production open path
+// writes, including whether the store may still mint a key. Once SchemaVersion
+// moves past 1 this release is historical: keep schemaVersion1StoreDB
+// unchanged and retire this comparison.
+func TestSchemaVersion1StoreMatchesProductionStore(t *testing.T) {
+	for _, state := range version1StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "store.db")
+			if state.origin == datasetOriginAdopted {
+				var old *sql.DB
+				path, old = historicalSchemaDB(t, "abd2c040")
+				require.NoError(t, old.Close())
+			}
+			s, err := OpenLockedStore(path)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, s.close()) }()
+			if state.complete {
+				require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			}
+			production := readVersion1StoreState(t, s.db, path)
+			require.Equal(t, state.canBootstrap, production.canBootstrap)
+
+			frozenPath, db := schemaVersion1StoreDB(t, state.origin, state.complete)
+			require.Equal(t, production, readVersion1StoreState(t, db, frozenPath))
+		})
+	}
+}
+
+// A 159-object fixture rebuilt from historical DDL plus 167-to-168.sql has the
+// current layout, but it is not a store this release writes. It passes the
+// version-0 migration gate and is adopted, while every real version-1 store is
+// refused there, so a future migration tested only on that fixture would pass
+// in tests and fail closed on real installations.
+func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
+	_, fixture := historicalSchemaDB(t, "abd2c040")
+	_, err := fixture.Exec(migration166To167 + migration167To168)
+	require.NoError(t, err)
+	schema, err := readSchema(fixture)
+	require.NoError(t, err)
+	require.Equal(t, schema168, schemaFingerprint(schema))
+	version, err := readSchemaVersion(fixture)
+	require.NoError(t, err)
+	require.Zero(t, version)
+	_, err = readDataset(fixture)
+	require.ErrorContains(t, err, "exactly one record")
+	conn, err := fixture.Conn(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, nil))
+	require.NoError(t, conn.Close())
+
+	for _, state := range version1StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path, db := schemaVersion1StoreDB(t, state.origin, state.complete)
+			before, err := readDataset(db)
+			require.NoError(t, err)
+			beforeRows := applicationRows(t, db)
+			backups := migrationBackups(t, path)
+
+			conn, err := db.Conn(t.Context())
+			require.NoError(t, err)
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, nil),
+				"unsupported SQLite schema version 1 before upgrade")
+			require.NoError(t, conn.Close())
+			validationErr := errors.New("validation failed")
+			require.ErrorIs(t, upgradeSchema(db, path, validationErr), validationErr)
+
+			require.Equal(t, backups, migrationBackups(t, path))
+			after, err := readDataset(db)
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+			require.Equal(t, beforeRows, applicationRows(t, db))
+		})
+	}
 }
 
 func rawMigrationDB(t *testing.T, path string) *sql.DB {

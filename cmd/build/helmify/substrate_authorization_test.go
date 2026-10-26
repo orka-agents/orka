@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -84,7 +85,7 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 	}
 }
 
-func TestStaticChartGrantsNativeSubstrateCheckpointRBAC(t *testing.T) {
+func TestStaticChartGrantsGenericWorkspaceCheckpointAndObservationRBAC(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
 	var role rbacv1.Role
 	roleDoc := requireRenderedDocument(t, rendered, "# Controller tenant Role.", "kind: Role\n")
@@ -92,7 +93,7 @@ func TestStaticChartGrantsNativeSubstrateCheckpointRBAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	if role.Namespace != staticChartTestNamespace {
-		t.Fatal("native Substrate permissions escaped the controller namespace")
+		t.Fatal("workspace checkpoint permissions escaped the controller namespace")
 	}
 	for _, test := range []struct {
 		group, resource string
@@ -113,13 +114,44 @@ func TestStaticChartGrantsNativeSubstrateCheckpointRBAC(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(clusterDoc), &clusterRole); err != nil {
 		t.Fatal(err)
 	}
-	for _, verb := range []string{"get", "list", "watch"} {
-		if !testSubstrateRuleAllows(clusterRole.Rules, "ate.dev", "workerpools", verb) {
-			t.Errorf("controller cannot %s WorkerPools outside its tenant namespace", verb)
+	for _, verb := range []string{"get", "list"} {
+		if !testSubstrateRuleAllows(clusterRole.Rules, "", "persistentvolumes", verb) {
+			t.Errorf("Core cannot independently verify PV %s", verb)
 		}
 	}
+	for _, resource := range []string{"runtimepools"} {
+		if !testSubstrateRuleAllows(clusterRole.Rules, "core.orka.ai", resource, "list") {
+			t.Errorf("upgrade preflight cannot list %s", resource)
+		}
+	}
+
+	// Provider finalization scans checkpoint references outside the controller
+	// namespace. Both production installers must grant only the cluster list.
+	kustomize, err := os.ReadFile(filepath.Join(
+		"..", "..", "..", "config", "acp-workload", "v2_controller_cluster_role.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kustomizeRole rbacv1.ClusterRole
+	if err := yaml.Unmarshal([]byte(strings.SplitN(string(kustomize), "\n---", 2)[0]), &kustomizeRole); err != nil {
+		t.Fatal(err)
+	}
+	for name, rules := range map[string][]rbacv1.PolicyRule{"helm": clusterRole.Rules, "kustomize": kustomizeRole.Rules} {
+		if !testSubstrateRuleAllows(rules, "workspace.orka.ai", "executionworkspacecheckpoints", "list") {
+			t.Errorf("%s provider deletion protection cannot list checkpoints cluster-wide", name)
+		}
+		for _, verb := range []string{"create", "update", "patch", "delete", "deletecollection"} {
+			if testSubstrateRuleAllows(rules, "workspace.orka.ai", "executionworkspacecheckpoints", verb) {
+				t.Errorf("%s grants cluster-wide checkpoint %s", name, verb)
+			}
+		}
+	}
+	if !testSubstrateRuleAllows(clusterRole.Rules, "networking.k8s.io", "networkpolicies", "list") {
+		t.Error("generic retirement cannot discover core policies")
+	}
+
 	allRules := append(slices.Clone(role.Rules), clusterRole.Rules...)
-	for _, verb := range []string{"create", "update", "patch", "delete"} {
+	for _, verb := range []string{"get", "list", "watch", "create", "update", "patch", "delete"} {
 		if testSubstrateRuleAllows(allRules, "ate.dev", "workerpools", verb) {
 			t.Errorf("controller unexpectedly has %s on provider WorkerPools", verb)
 		}

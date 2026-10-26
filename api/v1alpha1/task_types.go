@@ -141,6 +141,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
+// +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 type TaskSpec struct {
 	// Type specifies the task type: "container" or "ai"
 	// +kubebuilder:validation:Required
@@ -441,8 +442,9 @@ type SkillReference struct {
 // TaskStatus defines the observed state of Task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome",message="executionOutcome is immutable once recorded"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding) && self.agentExecutionBinding == oldSelf.agentExecutionBinding)",message="agentExecutionBinding is write-once and immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v1' || ((!has(self.execution) || (has(oldSelf.execution) && self.execution == oldSelf.execution)) && (!has(self.delivery) || (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))",message="a v1-bound Task cannot acquire new v2 execution or delivery state"
-// +kubebuilder:validation:XValidation:rule="!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion != 'orka.harness.v2' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime) && self.harnessRuntime == oldSelf.harnessRuntime)",message="a v2-bound Task cannot acquire new v1 harness state"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding == oldSelf.soulBinding)",message="soulBinding is write-once and immutable"
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type TaskStatus struct {
 	// Phase is the current phase of the task
 	// +optional
@@ -487,17 +489,15 @@ type TaskStatus struct {
 	// +optional
 	Delivery *TaskDeliveryStatus `json:"delivery,omitempty"`
 
-	// HarnessRuntime records the controller-resolved harness v1 runtime target
-	// for an in-flight agent turn. It intentionally stores only non-secret
-	// routing metadata and Secret references, never bearer values. Compatibility
-	// surface for harness v1 bindings.
-	// +optional
-	HarnessRuntime *HarnessRuntimeStatus `json:"harnessRuntime,omitempty"`
-
 	// AgentExecutionBinding is the authoritative, write-once, immutable
 	// execution route for this agent Task.
 	// +optional
 	AgentExecutionBinding *AgentExecutionBinding `json:"agentExecutionBinding,omitempty"`
+
+	// SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+	// digests only, never prompt text. Retries reject configuration drift.
+	// +optional
+	SoulBinding *TaskSoulBinding `json:"soulBinding,omitempty"`
 
 	// ConnectionBindings freezes, for native type: ai Tasks, the identity of
 	// the requester's Connection behind each connection-mode
@@ -547,6 +547,36 @@ type TaskStatus struct {
 	// NextScheduleTime is the next time a child task will be created.
 	// +optional
 	NextScheduleTime *metav1.Time `json:"nextScheduleTime,omitempty"`
+}
+
+// TaskSoulBinding is the non-secret, write-once identity of AI prompt configuration.
+type TaskSoulBinding struct {
+	// TaskGeneration is the Task spec generation whose prompt was resolved.
+	// +kubebuilder:validation:Minimum=1
+	TaskGeneration int64 `json:"taskGeneration"`
+	// AgentUID and AgentGeneration identify the exact Agent revision.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	AgentUID string `json:"agentUID"`
+	// +kubebuilder:validation:Minimum=1
+	AgentGeneration int64 `json:"agentGeneration"`
+	// SoulDigest identifies the exact persona source bytes.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	SoulDigest string `json:"soulDigest"`
+	// PromptDigest identifies the composed role and persona prompt.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	PromptDigest string `json:"promptDigest"`
+	// InputsDigest identifies the Task execution inputs, the spec without its
+	// control fields, that the binding froze. After the first binding it,
+	// rather than TaskGeneration, proves the inputs are unchanged, so a
+	// control-field edit such as spec.suspend keeps the binding valid.
+	// Bindings recorded before this field existed keep the generation check.
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	// +kubebuilder:validation:MaxLength=71
+	// +optional
+	InputsDigest string `json:"inputsDigest,omitempty"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
@@ -750,7 +780,10 @@ type ConnectionBinding struct {
 // +kubebuilder:printcolumn:name="Priority",type=integer,JSONPath=`.spec.priority`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:selectablefield:JSONPath=.spec.sessionRef.name
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding) || self.spec == oldSelf.spec)",message="Task spec is immutable after execution authority is recorded"
+// The execution-authority rule freezes the whole spec for ACP-bound Tasks. For a
+// soul-only binding it compares every field except TaskControlFields; a test
+// regenerates that field list from TaskSpec.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type) || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image) && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) && has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command) || self.spec.command == oldSelf.spec.command) && has(self.spec.args) == has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args) && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env) || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout) && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout) && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority) || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy) == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL) && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL) && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef) || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef) == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources) && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources) && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution) || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule) == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone) && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone) && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy) && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy == oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds) == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds) || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds) && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit) && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit) == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit) || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit) && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) || self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef) && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef) && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt) || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime) == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) || self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace) == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef) && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef) && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy) || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction) == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction == oldSelf.spec.transaction))))",message="Task spec is immutable after execution authority is recorded"
 
 // Task is the Schema for the tasks API
 type Task struct {
@@ -787,15 +820,9 @@ const (
 
 // AgentRuntimeSpec defines task-level overrides for agent runtime configuration.
 // Runtime type and credentials come from the referenced Agent CRD.
-// +kubebuilder:validation:XValidation:rule="!has(self.workspace) || (oldSelf.hasValue() && has(oldSelf.value().workspace) && self.workspace == oldSelf.value().workspace)",optionalOldSelf=true,message="legacy agentRuntime.workspace is a preserved harness v1 compatibility surface; new Tasks must use spec.workspace"
+// Unknown fields reach admission so removed fields are rejected.
+// +kubebuilder:pruning:PreserveUnknownFields
 type AgentRuntimeSpec struct {
-	// Workspace is the legacy harness v1 agent workspace configuration at its
-	// historical JSON path. It is a preserved compatibility read surface for
-	// stored v1 Tasks only: it can never be introduced or changed, and it is
-	// not an authority surface for new work.
-	// +optional
-	Workspace *LegacyAgentWorkspaceConfig `json:"workspace,omitempty"`
-
 	// MaxTurns limits the number of agent loop iterations
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1000
@@ -819,11 +846,10 @@ type AgentRuntimeSpec struct {
 // and an explicitly empty deny-all override.
 func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 	type agentRuntimeSpecJSON struct {
-		Workspace       *LegacyAgentWorkspaceConfig `json:"workspace,omitempty"`
-		MaxTurns        *int32                      `json:"maxTurns,omitempty"`
-		AllowedTools    *[]string                   `json:"allowedTools,omitempty"`
-		DisallowedTools []string                    `json:"disallowedTools,omitempty"`
-		AllowBash       *bool                       `json:"allowBash,omitempty"`
+		MaxTurns        *int32    `json:"maxTurns,omitempty"`
+		AllowedTools    *[]string `json:"allowedTools,omitempty"`
+		DisallowedTools []string  `json:"disallowedTools,omitempty"`
+		AllowBash       *bool     `json:"allowBash,omitempty"`
 	}
 	var allowedTools *[]string
 	if in.AllowedTools != nil {
@@ -831,161 +857,11 @@ func (in AgentRuntimeSpec) MarshalJSON() ([]byte, error) {
 		allowedTools = &tools
 	}
 	return json.Marshal(agentRuntimeSpecJSON{
-		Workspace:       in.Workspace,
 		MaxTurns:        in.MaxTurns,
 		AllowedTools:    allowedTools,
 		DisallowedTools: in.DisallowedTools,
 		AllowBash:       in.AllowBash,
 	})
-}
-
-// LegacyAgentWorkspaceConfig is the harness v1 agent workspace shape preserved
-// at the historical spec.agentRuntime.workspace JSON path. Historically valid
-// stored values round-trip unchanged and are intentionally not subject to the
-// v2 WorkspaceConfig URL and credential CEL policy; the shared schema keeps
-// only protocol-neutral validation, and protocol-specific rules are enforced
-// at binding resolution. These fields never enter new bindings: new v1
-// workspaces are credential-free and public-read-only by policy.
-type LegacyAgentWorkspaceConfig struct {
-	// GitRepo is the repository URL to clone.
-	// +optional
-	GitRepo string `json:"gitRepo,omitempty"`
-
-	// Branch is the git branch to checkout.
-	// +optional
-	Branch string `json:"branch,omitempty"`
-
-	// Ref is a specific git ref (commit SHA, tag) to checkout.
-	// +optional
-	Ref string `json:"ref,omitempty"`
-
-	// GitSecretRef references a Secret containing git credentials. Adopted
-	// legacy bindings freeze the exact Secret identity; new bindings reject it.
-	// +optional
-	GitSecretRef *corev1.LocalObjectReference `json:"gitSecretRef,omitempty"`
-
-	// SubPath is a subdirectory within the repo to use as workspace root.
-	// +optional
-	SubPath string `json:"subPath,omitempty"`
-
-	// ForkRepo is the writable fork repository URL for pushing changes.
-	// +optional
-	ForkRepo string `json:"forkRepo,omitempty"`
-
-	// PRBaseBranch is the upstream branch to target for pull requests.
-	// +optional
-	PRBaseBranch string `json:"prBaseBranch,omitempty"`
-
-	// PushBranch is the remote branch name to push changes to after the agent
-	// completes.
-	// +optional
-	PushBranch string `json:"pushBranch,omitempty"`
-}
-
-// HarnessRuntimeStatus records the resolved harness v1 runtime and its durable
-// attempt projection. Harness v1 cannot write the v2-only execution/delivery
-// surfaces, so terminal ambiguity is represented here without weakening route
-// exclusivity.
-// +kubebuilder:validation:XValidation:rule="!has(self.state) || !(self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown']) || has(self.outcome)",message="terminal harness state requires an outcome"
-// +kubebuilder:validation:XValidation:rule="!has(self.outcome) || (has(self.state) && self.state in ['Succeeded', 'Failed', 'Cancelled', 'OutcomeUnknown'])",message="harness outcome requires a terminal state"
-// +kubebuilder:validation:XValidation:rule="!has(self.state) || self.state != 'OutcomeUnknown' || (has(self.outcome) && self.outcome == 'OutcomeUnknown')",message="OutcomeUnknown harness state requires OutcomeUnknown outcome"
-type HarnessRuntimeStatus struct {
-	// RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
-	// Empty means built-in CLI wrapper.
-	// +optional
-	RuntimeRefName string `json:"runtimeRefName,omitempty"`
-
-	// RuntimeName is the runtime name advertised by the harness capabilities
-	// and sent in turn metadata.
-	// +optional
-	RuntimeName string `json:"runtimeName,omitempty"`
-
-	// ContractVersion is the Orka harness contract version used for the turn.
-	// +optional
-	ContractVersion string `json:"contractVersion,omitempty"`
-
-	// Endpoint is the non-secret harness base URL selected when the turn started.
-	// +optional
-	Endpoint string `json:"endpoint,omitempty"`
-
-	// RuntimeGeneration is the AgentRuntime generation selected when the turn started.
-	// +optional
-	RuntimeGeneration int64 `json:"runtimeGeneration,omitempty"`
-
-	// AuthRefName is the Secret name selected when the turn started.
-	// +optional
-	AuthRefName string `json:"authRefName,omitempty"`
-
-	// AuthRefField is the Secret data field selected when the turn started.
-	// +optional
-	AuthRefField string `json:"authRefField,omitempty"`
-
-	// AuthRefResourceVersion is the auth Secret resourceVersion validated
-	// before starting the turn.
-	// +optional
-	AuthRefResourceVersion string `json:"authRefResourceVersion,omitempty"`
-
-	// Attempt is the durable harness v1 attempt number.
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	Attempt int32 `json:"attempt,omitempty"`
-
-	// TurnID is the deterministic, non-secret harness turn identity.
-	// +optional
-	TurnID string `json:"turnID,omitempty"`
-
-	// RuntimeSessionID is the deterministic, non-secret v1 runtime-session identity.
-	// +optional
-	RuntimeSessionID string `json:"runtimeSessionID,omitempty"`
-
-	// State is the durable harness v1 attempt state projected for operators.
-	// +optional
-	State TaskExecutionState `json:"state,omitempty"`
-
-	// Outcome is set only for a terminal harness v1 attempt.
-	// +optional
-	Outcome TaskExecutionOutcome `json:"outcome,omitempty"`
-
-	// Reason is a bounded machine-readable terminal reason code.
-	// +kubebuilder:validation:MaxLength=256
-	// +optional
-	Reason string `json:"reason,omitempty"`
-
-	// TerminalReceiptDigest identifies the authoritative terminal or unknown receipt.
-	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +optional
-	TerminalReceiptDigest string `json:"terminalReceiptDigest,omitempty"`
-
-	// RequestDigest binds the canonical StartTurn request admitted by the
-	// durable wrapper ledger.
-	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
-	// +optional
-	RequestDigest string `json:"requestDigest,omitempty"`
-
-	// ControllerEpoch records the fenced controller epoch driving the attempt.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	ControllerEpoch int64 `json:"controllerEpoch,omitempty"`
-
-	// LastEventSeq is the highest durably mapped harness frame sequence.
-	// +kubebuilder:validation:Minimum=0
-	// +optional
-	LastEventSeq int64 `json:"lastEventSeq,omitempty"`
-
-	// CancelRequestedAt records a durable cancellation request. Cancellation
-	// remains nonterminal until a terminal frame or ledger receipt is observed.
-	// +optional
-	CancelRequestedAt *metav1.Time `json:"cancelRequestedAt,omitempty"`
-
-	// Message is bounded, sanitized execution context.
-	// +kubebuilder:validation:MaxLength=1024
-	// +optional
-	Message string `json:"message,omitempty"`
-
-	// LastTransitionTime is the last durable v1 attempt transition projected to
-	// the Task.
-	// +optional
-	LastTransitionTime *metav1.Time `json:"lastTransitionTime,omitempty"`
 }
 
 // WorkspaceConfig defines repository workspace, validation, and publication intent.

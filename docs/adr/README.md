@@ -31,7 +31,7 @@ shipped.
 | --- | --- | --- |
 | [0016](0016-harness-migration-strategy.md) | Full active coexistence for the v1/v2 migration | Superseded by 0018 |
 | [0017](0017-harness-coexistence-architecture.md) | Coexistence architecture and ownership contracts | Superseded by 0018 |
-| [0018](0018-static-harness-modes-and-namespace-isolation.md) | Static harness modes and namespace-isolated control planes | Accepted |
+| [0018](0018-static-harness-modes-and-namespace-isolation.md) | Static harness modes and namespace-isolated control planes | Superseded by #568 |
 
 ### The execution workspace model
 
@@ -109,6 +109,17 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
+
+### Agent hosts and the Agent Host Protocol
+
+Long-lived, per-user agent hosts that clients such as the Copilot desktop app connect to,
+and serving the Agent Host Protocol from Orka itself.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+| [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
+| [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
 
 ## Writing a new one
 

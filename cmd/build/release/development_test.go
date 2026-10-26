@@ -316,8 +316,8 @@ func TestDevelopmentPinnedValuesRenderEveryBuiltImage(t *testing.T) {
 		Images map[string]string `json:"images"`
 	}
 	must(t, readJSON(filepath.Join(directory, "images.json"), &manifest))
-	for name, ref := range manifest.Images {
-		if name != harnessWrapperImage && !strings.Contains(string(output), ref) {
+	for _, ref := range manifest.Images {
+		if !strings.Contains(string(output), ref) {
 			t.Errorf("pinned chart does not select %s", ref)
 		}
 	}

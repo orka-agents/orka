@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,22 +36,28 @@ const (
 	taskCreatedMsg       = "Task created"
 	toolNamespaceArg     = "namespace"
 	chatCreateAITaskTool = "create_ai_task"
+	limitReachedCode     = "limit_reached"
 )
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
 // Kubernetes resources (Tasks, Agents, Tools, Sessions).
 type ToolExecutor struct {
-	client                    client.Client
-	policyReader              client.Reader
-	kubeClient                kubernetes.Interface
-	sessionManager            *controller.SessionManager
-	namespace                 string
-	provider                  string
-	providerNamespace         string
-	providerType              string
-	executionMode             executionmode.Mode
-	sessionID                 string
-	taskSeq                   atomic.Int32
+	client            client.Client
+	policyReader      client.Reader
+	kubeClient        kubernetes.Interface
+	sessionManager    *controller.SessionManager
+	namespace         string
+	provider          string
+	providerNamespace string
+	providerType      string
+	executionMode     executionmode.Mode
+	sessionID         string
+	taskSeq           atomic.Int32
+	// taskSeqMu guards seeding taskSeq from the Session's existing Tasks;
+	// taskSeqSeeded is set only after a successful lookup, so a failed one
+	// is retried by the next name instead of restarting numbering at 1.
+	taskSeqMu                 sync.Mutex
+	taskSeqSeeded             bool
 	tasksCreated              int
 	maxTasks                  int
 	toolTimeout               time.Duration
@@ -64,6 +72,8 @@ type ToolExecutor struct {
 	linkedAccounts tools.LinkedAccountCredentials
 	// authorizeConnectorRead gates list_connections for delegated tokens.
 	authorizeConnectorRead func() *tools.ChatToolError
+	// dashboardEnabled lets list_connections name the dashboard page.
+	dashboardEnabled bool
 	// createdTasks is shared by every tool call of this turn.
 	createdTasks            *tools.CreatedTasks
 	registry                *tools.Registry
@@ -230,7 +240,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		EnforceNamespaceIsolation: e.enforceNamespaceIsolation,
 		ResultStore:               e.resultStore,
 		SessionDeleter:            e.sessionManager,
-		GenerateTaskName:          e.generateTaskName,
+		GenerateTaskName:          func() string { return e.generateTaskName(toolCtx) },
 		TaskLabels:                e.taskLabels,
 		AuthorizeAgentReference: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeAgentReference, ctx, agent, "Use an authorized Agent reference")
@@ -242,6 +252,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		Requester:              e.requester,
 		LinkedAccounts:         e.linkedAccounts,
 		AuthorizeConnectorRead: e.authorizeConnectorRead,
+		DashboardEnabled:       e.dashboardEnabled,
 		CreatedTasks:           e.createdTasks,
 		AuthorizeTaskDelete: func(ctx context.Context, task *corev1alpha1.Task) *tools.ChatToolError {
 			return chatToolAuthorizationError(e.authorizeTaskDelete, ctx, task, "Use a task authorized by the context token")
@@ -268,7 +279,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{
-					Type:       "limit_reached",
+					Type:       limitReachedCode,
 					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
 					Suggestion: "Wait for existing tasks to complete before creating new ones",
 				}
@@ -311,15 +322,16 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 
 // ---- Task creation helpers ----
 
-func (e *ToolExecutor) generateTaskName() string {
-	seq := e.taskSeq.Add(1)
+// generateTaskName returns the next chat-<session>-<hash>-<seq> Task name. The
+// executor lives for one turn, so its first name continues after the Tasks that
+// earlier turns of this session created instead of restarting at 1.
+func (e *ToolExecutor) generateTaskName(ctx context.Context) string {
+	seqSuffix := e.nextTaskSeqSuffix(ctx)
 	prefix := sanitizeTaskNameComponent(e.sessionID)
 	if prefix == "" {
 		prefix = "session"
 	}
-	hash := sha256.Sum256([]byte(e.sessionID))
-	hashSuffix := hex.EncodeToString(hash[:])[:8]
-	seqSuffix := strconv.FormatInt(int64(seq), 10)
+	hashSuffix := e.taskNameHash()
 
 	// Kubernetes task names must fit DNS label rules (max 63 chars).
 	const taskNameOverhead = len("chat-") + len("-") + len("-")
@@ -332,6 +344,61 @@ func (e *ToolExecutor) generateTaskName() string {
 	}
 
 	return fmt.Sprintf("chat-%s-%s-%s", prefix, hashSuffix, seqSuffix)
+}
+
+// taskNameHash distinguishes sessions whose sanitized names collide.
+func (e *ToolExecutor) taskNameHash() string {
+	hash := sha256.Sum256([]byte(e.sessionID))
+	return hex.EncodeToString(hash[:])[:8]
+}
+
+// nextTaskSeqSuffix numbers this turn's Tasks after those earlier turns of
+// the Session created. When the Session's Tasks cannot be listed it returns a
+// random suffix, which cannot collide with a numbered name, and the next call
+// retries the lookup.
+func (e *ToolExecutor) nextTaskSeqSuffix(ctx context.Context) string {
+	e.taskSeqMu.Lock()
+	defer e.taskSeqMu.Unlock()
+	if !e.taskSeqSeeded {
+		latest, err := e.latestSessionTaskSeq(ctx)
+		if err != nil {
+			chatLog.Error(err, "Failed to list chat session tasks; using a random task name suffix", "session", e.sessionID)
+			return "r" + strings.ToLower(rand.Text()[:8])
+		}
+		e.taskSeq.Store(latest)
+		e.taskSeqSeeded = true
+	}
+	return strconv.FormatInt(int64(e.taskSeq.Add(1)), 10)
+}
+
+// latestSessionTaskSeq returns the highest sequence number among the Tasks
+// labeled with this chat session, or 0 when there are none.
+func (e *ToolExecutor) latestSessionTaskSeq(ctx context.Context) (int32, error) {
+	opts := []client.ListOption{client.MatchingLabels{labels.LabelChatSession: e.sessionID}}
+	// Chat tools can only create Tasks in these namespaces when restricted.
+	switch {
+	case e.watchNamespace != "":
+		opts = append(opts, client.InNamespace(e.watchNamespace))
+	case e.enforceNamespaceIsolation:
+		opts = append(opts, client.InNamespace(e.namespace))
+	}
+	var tasks corev1alpha1.TaskList
+	if err := uncachedReaderOr(e.policyReader, e.client).List(ctx, &tasks, opts...); err != nil {
+		return 0, err
+	}
+	hashMarker := "-" + e.taskNameHash()
+	var latest int32
+	for i := range tasks.Items {
+		name := tasks.Items[i].Name
+		dash := strings.LastIndexByte(name, '-')
+		if !strings.HasPrefix(name, "chat-") || dash < 0 || !strings.HasSuffix(name[:dash], hashMarker) {
+			continue
+		}
+		if seq, err := strconv.ParseInt(name[dash+1:], 10, 32); err == nil && int32(seq) > latest {
+			latest = int32(seq)
+		}
+	}
+	return latest, nil
 }
 
 func (e *ToolExecutor) taskLabels() map[string]string {

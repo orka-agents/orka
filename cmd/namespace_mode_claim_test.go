@@ -49,7 +49,7 @@ func TestClaimNamespaceModeRejectsTheOtherMode(t *testing.T) {
 	}})
 	err := claimNamespaceMode(context.Background(), client.CoreV1().Namespaces(), "orka-system",
 		executionmode.HarnessV2, true)
-	if err == nil || !strings.Contains(err.Error(), `claimed by execution mode "harness-v1"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported execution mode "harness-v1"`) {
 		t.Fatalf("error = %v, want the other mode's claim to be rejected", err)
 	}
 }
@@ -90,7 +90,7 @@ func TestClaimNamespaceModeLosesTheRaceToAnotherMode(t *testing.T) {
 	})
 	err := claimNamespaceMode(context.Background(), client.CoreV1().Namespaces(), "orka-system",
 		executionmode.HarnessV2, true)
-	if err == nil || !strings.Contains(err.Error(), `claimed by execution mode "harness-v1"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported execution mode "harness-v1"`) {
 		t.Fatalf("error = %v, want the winner's claim to be enforced", err)
 	}
 }

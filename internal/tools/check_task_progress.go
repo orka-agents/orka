@@ -55,8 +55,12 @@ func (t *CheckTaskProgressTool) Execute(ctx context.Context, args json.RawMessag
 	data := map[string]any{nameField: task.Name, namespaceField: task.Namespace, phaseField: string(task.Status.Phase), messageField: task.Status.Message}
 
 	if task.Status.StartTime != nil {
-		duration := time.Since(task.Status.StartTime.Time)
-		data["duration"] = duration.Round(time.Second).String()
+		// A finished Task's duration ends at completion, not at this call.
+		end := time.Now()
+		if task.Status.CompletionTime != nil {
+			end = task.Status.CompletionTime.Time
+		}
+		data["duration"] = end.Sub(task.Status.StartTime.Time).Round(time.Second).String()
 	}
 
 	if len(task.Status.Conditions) > 0 {

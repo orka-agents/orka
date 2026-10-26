@@ -93,7 +93,7 @@ func (h *Handlers) CreateAgentRuntime(c fiber.Ctx) error {
 	}
 	var runtime corev1alpha1.AgentRuntime
 	if err := c.Bind().JSON(&runtime); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid agent runtime manifest")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid agent runtime manifest: %v", err))
 	}
 	if strings.TrimSpace(runtime.Name) == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "metadata.name is required")
@@ -114,6 +114,9 @@ func (h *Handlers) CreateAgentRuntime(c fiber.Ctx) error {
 		if apierrors.IsAlreadyExists(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent runtime already exists")
 		}
+		if invalid := invalidObjectError("agent runtime", err); invalid != nil {
+			return invalid
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create agent runtime: %v", err))
 	}
 	return c.Status(fiber.StatusCreated).JSON(&runtime)
@@ -132,12 +135,15 @@ func (h *Handlers) UpdateAgentRuntime(c fiber.Ctx) error {
 	}
 	var desired corev1alpha1.AgentRuntime
 	if err := c.Bind().JSON(&desired); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid agent runtime manifest")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid agent runtime manifest: %v", err))
 	}
 	existing.Spec = desired.Spec
 	if err := h.client.Update(c.Context(), existing); err != nil {
 		if apierrors.IsConflict(err) {
 			return fiber.NewError(fiber.StatusConflict, "agent runtime was updated concurrently")
+		}
+		if invalid := invalidObjectError("agent runtime", err); invalid != nil {
+			return invalid
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to update agent runtime: %v", err))
 	}

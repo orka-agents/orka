@@ -175,7 +175,7 @@ func nativeRecoveryRuntimeStatus(t *testing.T, ctx context.Context, dispatcher *
 	t.Helper()
 	pool := &corev1alpha1.RuntimePool{}
 	require.NoError(t, dispatcher.APIReader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: task.Status.Execution.RuntimePoolName}, pool))
-	runtimeClient, _, _, _, err := dispatcher.runtimePoolClient(ctx, pool)
+	runtimeClient, _, _, _, err := dispatcher.runtimePoolClient(ctx, pool, false)
 	require.NoError(t, err)
 	status, err := runtimeClient.Status(ctx)
 	require.NoError(t, err)

@@ -18,8 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 )
 
 const (
@@ -153,8 +153,13 @@ func (v *WorkspaceClassUseValidator) decodeSelection(
 			return "", "", fmt.Errorf("decode Task workspace class selection: %w", err)
 		}
 		className := ""
-		if value.Spec.Execution != nil && value.Spec.Execution.Workspace != nil &&
-			value.Spec.Execution.Workspace.ClassRef != nil {
+		if value.Spec.Execution != nil && value.Spec.Execution.Workspace != nil {
+			if value.Spec.Execution.Workspace.ClassRef == nil || strings.TrimSpace(value.Spec.Execution.Workspace.ClassRef.Name) == "" {
+				return "", "", fmt.Errorf("execution workspace classRef.name is required")
+			}
+			if value.Spec.Type != corev1alpha1.TaskTypeAgent {
+				return "", "", fmt.Errorf("execution workspace is only supported for type: agent tasks")
+			}
 			className = value.Spec.Execution.Workspace.ClassRef.Name
 		}
 		return strings.TrimSpace(className), requestNamespace(req.Namespace, value.Namespace), nil

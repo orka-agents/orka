@@ -15,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	sandboxextv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -34,51 +33,30 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 		mutateTask                  func(*corev1alpha1.Task)
 		mutateAgent                 func(*corev1alpha1.Agent)
 		objects                     []client.Object
-		agentSandboxEnabled         bool
-		substrateEnabled            bool
-		acpRuntimeEnabled           bool
 		acpWorkspaceDispatchEnabled bool
-		harnessV1Enabled            bool
 		mode                        executionmode.Mode
 		wantPath                    agentExecutionPath
 		wantReason                  string
 		wantWorkspaceStatusErr      string
 	}{
 		{
-			name:              "built-in agent task uses ACP RuntimePool",
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathACP,
+			name:     "built-in agent task uses ACP RuntimePool",
+			wantPath: agentExecutionPathACP,
 		},
 		{
 			name: "built-in agent without contractVersion is classified by the controller mode",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.ContractVersion = nil
 			},
-			acpRuntimeEnabled: true,
-			mode:              executionmode.HarnessV2,
-			wantPath:          agentExecutionPathACP,
-		},
-		{
-			name: "built-in agent without contractVersion fails closed without a controller mode",
-			mutateAgent: func(agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.ContractVersion = nil
-			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "unclassified",
+			mode:     executionmode.HarnessV2,
+			wantPath: agentExecutionPathACP,
 		},
 		{
 			name: "built-in Copilot task uses ACP RuntimePool",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathACP,
-		},
-		{
-			name:       "disabled ACP runtime fails closed without legacy fallback",
-			wantPath:   agentExecutionPathRejected,
-			wantReason: "no fallback execution path",
+			wantPath: agentExecutionPathACP,
 		},
 		{
 			name: "conformant external runtimeRef uses ACP external dispatch",
@@ -87,9 +65,8 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
 				}
 			},
-			objects:           []client.Object{plannerExternalRuntime()},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathExternal,
+			objects:  []client.Object{plannerExternalRuntime()},
+			wantPath: agentExecutionPathExternal,
 		},
 		{
 			name: "transaction-scoped external runtimeRef uses ACP external dispatch",
@@ -101,9 +78,8 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
 				}
 			},
-			objects:           []client.Object{plannerExternalRuntime()},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathExternal,
+			objects:  []client.Object{plannerExternalRuntime()},
+			wantPath: agentExecutionPathExternal,
 		},
 		{
 			name: "external runtimeRef rejects task maxTurns",
@@ -116,208 +92,116 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external-v2"},
 				}
 			},
-			objects:           []client.Object{plannerExternalRuntime()},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "do not support maxTurns",
+			objects:    []client.Object{plannerExternalRuntime()},
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "do not support maxTurns",
 		},
 		{
 			name: "OpenCode uses ACP RuntimePool",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathACP,
+			wantPath: agentExecutionPathACP,
 		},
 		{
-			name: "built-in agent without contractVersion is rejected as unclassified",
+			name: "built-in agent without contractVersion fails closed without a controller mode",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.ContractVersion = nil
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "unclassified",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "explicit orka.harness.v2 is required",
 		},
 		{
 			name: "built-in agent classified orka.harness.v1 is rejected",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
-				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "orka.harness.v1",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "orka.harness.v1",
 		},
 		{
 			name: "priorTaskRef continuation is rejected",
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.PriorTaskRef = &corev1alpha1.PriorTaskReference{Name: "parent"}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "use sessionRef",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "use sessionRef",
 		},
 		{
 			name: "transaction token delegation is rejected before ACP admission",
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.Transaction = &corev1alpha1.TaskTransaction{ID: "txn-1"}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "transaction token delegation",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "transaction token delegation",
 		},
 		{
 			name: "task resources are rejected until a RuntimePool class is selected",
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "custom Kubernetes resources",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "custom Kubernetes resources",
 		},
 		{
 			name: "agent resources are rejected until a RuntimePool class is selected",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Resources.Limits = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "custom Kubernetes resources",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "custom Kubernetes resources",
 		},
 		{
 			name: "task execution placement is rejected before ACP admission",
 			mutateTask: func(task *corev1alpha1.Task) {
 				task.Spec.Execution = &corev1alpha1.ExecutionSpec{RuntimeClassName: "kata"}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "execution placement",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "execution placement",
 		},
 		{
 			name: "agent execution placement is rejected before ACP admission",
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Execution = &corev1alpha1.ExecutionSpec{NodeSelector: map[string]string{"disk": "ssd"}}
 			},
-			acpRuntimeEnabled: true,
-			wantPath:          agentExecutionPathRejected,
-			wantReason:        "execution placement",
+			wantPath:   agentExecutionPathRejected,
+			wantReason: "execution placement",
 		},
 		{
 			name:                        "workspace-backed agent task uses ACP RuntimePool when dispatch is enabled",
 			mutateTask:                  plannerWorkspaceTask(nil),
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathACP,
 		},
 		{
 			name:                   "workspace-backed dispatch disabled fails closed",
 			mutateTask:             plannerWorkspaceTask(nil),
-			agentSandboxEnabled:    true,
-			acpRuntimeEnabled:      true,
 			wantPath:               agentExecutionPathRejected,
 			wantReason:             "acp-workspace-dispatch-enabled",
 			wantWorkspaceStatusErr: "acp-workspace-dispatch-enabled",
-		},
-		{
-			name:                        "workspace-backed agent task fails closed when agent-sandbox is disabled",
-			mutateTask:                  plannerWorkspaceTask(nil),
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "agent-sandbox-enabled",
-			wantWorkspaceStatusErr:      "agent-sandbox-enabled",
-		},
-		{
-			name: "workspace templateRef is rejected for ACP RuntimeSessions",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: runtimePoolSandboxTemplateSuffix}
-			}),
-			objects: []client.Object{
-				&sandboxextv1beta1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
-				&sandboxextv1beta1.SandboxWarmPool{ObjectMeta: metav1.ObjectMeta{Name: runtimePoolSandboxTemplateSuffix, Namespace: defaultNS}},
-			},
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestTemplateRefForbiddenError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefForbiddenError,
-		},
-		{
-			name: "substrate execution workspace without templateRef fails closed before any demand",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-			}),
-			substrateEnabled:            true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestTemplateRefRequiredError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestTemplateRefRequiredError,
-		},
-		{
-			name: "substrate-backed agent task uses ACP RuntimePool when dispatch is enabled",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			substrateEnabled:            true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathACP,
-		},
-		{
-			name: "substrate-backed agent task fails closed when substrate is disabled",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.Provider = corev1alpha1.WorkspaceProviderSubstrate
-				workspace.TemplateRef = &corev1alpha1.WorkspaceTemplateReference{Name: substrateTestBaseTemplateName, Namespace: substrateTestTemplateNamespace}
-			}),
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "substrate-enabled",
-			wantWorkspaceStatusErr:      "substrate-enabled",
-		},
-		{
-			name: "workspace cleanupPolicy retain fails closed",
-			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
-				workspace.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicyRetain
-			}),
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
-			acpWorkspaceDispatchEnabled: true,
-			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  acpWorkspaceTestCleanupDeleteError,
-			wantWorkspaceStatusErr:      acpWorkspaceTestCleanupDeleteError,
 		},
 		{
 			name: "workspace session reuse without sessionRef fails closed",
 			mutateTask: plannerWorkspaceTask(func(workspace *corev1alpha1.ExecutionWorkspaceSpec) {
 				workspace.ReusePolicy = corev1alpha1.WorkspaceReusePolicySession
 			}),
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
 			wantPath:                    agentExecutionPathRejected,
 			wantReason:                  acpWorkspaceTestSessionReferenceRequiredError,
 			wantWorkspaceStatusErr:      acpWorkspaceTestSessionReferenceRequiredError,
 		},
 		{
-			name: "harness v1 agent with execution workspace is rejected with a v1-specific message",
+			name: "harness v1 contract with an execution workspace is rejected",
 			mutateTask: func(task *corev1alpha1.Task) {
 				plannerWorkspaceTask(nil)(task)
 			},
 			mutateAgent: func(agent *corev1alpha1.Agent) {
 				agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex
-				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
+				agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))
 			},
-			agentSandboxEnabled:         true,
-			acpRuntimeEnabled:           true,
 			acpWorkspaceDispatchEnabled: true,
-			harnessV1Enabled:            true,
 			wantPath:                    agentExecutionPathRejected,
-			wantReason:                  "harness v1 execution path",
-			wantWorkspaceStatusErr:      "harness v1 execution path",
+			wantReason:                  "orka.harness.v1",
 		},
 	}
 
@@ -333,11 +217,8 @@ func TestPlanAgentExecutionMatrix(t *testing.T) {
 			}
 
 			r := newUnitReconciler(scheme, tt.objects...)
-			r.AgentSandboxEnabled = tt.agentSandboxEnabled
-			r.SubstrateEnabled = tt.substrateEnabled
-			r.ACPRuntimeEnabled = tt.acpRuntimeEnabled
+			installTestACPWorkspaceClass(t, r)
 			r.ACPWorkspaceDispatchEnabled = tt.acpWorkspaceDispatchEnabled
-			r.HarnessV1Enabled = tt.harnessV1Enabled
 			r.Mode = tt.mode
 
 			plan := r.planAgentExecution(context.Background(), task, agent)
@@ -426,10 +307,7 @@ func plannerRuntimeRefAgent() *corev1alpha1.Agent {
 func plannerWorkspaceTask(mutate func(*corev1alpha1.ExecutionWorkspaceSpec)) func(*corev1alpha1.Task) {
 	return func(task *corev1alpha1.Task) {
 		task.UID = "task-uid-workspace"
-		workspace := &corev1alpha1.ExecutionWorkspaceSpec{
-			Enabled:  true,
-			Provider: corev1alpha1.WorkspaceProviderAgentSandbox,
-		}
+		workspace := &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}}
 		if mutate != nil {
 			mutate(workspace)
 		}

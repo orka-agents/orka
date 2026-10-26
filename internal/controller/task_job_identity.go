@@ -143,3 +143,24 @@ func (r *TaskReconciler) deleteRejectedTaskJob(ctx context.Context, job *batchv1
 	}
 	return nil
 }
+
+// retireAISoulTaskJob fences replay before retiring a Job that may have started
+// even though its Running status write was lost. Terminal projection must wait
+// for foreground deletion to finish, so the worker cannot outlive the Task.
+func (r *TaskReconciler) retireAISoulTaskJob(ctx context.Context, task *corev1alpha1.Task, message string) (bool, error) {
+	reader := uncachedReader(r.APIReader, r.Client)
+	job := &batchv1.Job{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: buildTaskJobName(task)}, job); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(job, task) {
+		return false, fmt.Errorf("%w: existing AI Job has a different controller owner", errTaskJobIdentity)
+	}
+	if err := r.recordTaskJobIdentityRejection(ctx, task, job, message); err != nil {
+		return false, err
+	}
+	if err := r.deleteRejectedTaskJob(ctx, job); err != nil {
+		return false, err
+	}
+	return true, nil
+}

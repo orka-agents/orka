@@ -60,7 +60,7 @@ func acpTaskUsesRestoredSourceIdentity(task *corev1alpha1.Task) bool {
 	default:
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Task.UID == "" || binding.Task.UID == task.UID ||
 		task.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpRestoreIdentityChangedReason) {
 		return false
@@ -84,7 +84,7 @@ func acpTaskHasUnvalidatedSourceIdentity(task *corev1alpha1.Task) bool {
 }
 
 func acpTaskHasRestoredSourceIdentityBinding(task *corev1alpha1.Task) bool {
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	return binding != nil && binding.Task.UID != "" && binding.Task.UID != task.UID
 }
 
@@ -209,7 +209,7 @@ func (d *ACPDispatcher) recoverRestoredTaskIncarnation(
 	if task == nil {
 		return false, nil
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil {
 		return false, nil
 	}
@@ -697,6 +697,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 	return latest, true, nil
 }
 
+//nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.
 func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
 	if task.Annotations[nativeInstallUnresolvedAnnotation] != "" {
 		return errNativeSessionInstallUnresolved
@@ -1239,6 +1240,7 @@ func taskScopedRuntimeSessionCleanupCompleteForUID(task *corev1alpha1.Task, task
 		return true
 	}
 	if task.DeletionTimestamp.IsZero() && task.Spec.SessionRef != nil &&
+		task.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
 		task.Annotations[nativeCaptureIntentAnnotation] == "" && !task.Status.Execution.RuntimeSessionRecreationPending {
 		// A live read Session retains its conversation process between Tasks.
@@ -1289,7 +1291,7 @@ func taskHasAgentRuntimeDrainCleanupProofForUID(task *corev1alpha1.Task, taskUID
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	execution := task.Status.Execution
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || execution.AgentRuntimeName != binding.RuntimeRef.Name ||
@@ -1349,7 +1351,7 @@ func persistTaskScopedRuntimeSessionCleanupReceipt(
 			return fmt.Errorf("%w: Task execution identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 		}
 		if taskUID != latest.UID {
-			binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+			binding := executionBinding(latest)
 			if binding == nil || binding.Task.UID != taskUID {
 				return fmt.Errorf("%w: restored Task source identity changed during RuntimeSession cleanup receipt", store.ErrConflict)
 			}
@@ -1382,7 +1384,7 @@ func persistAgentRuntimeDrainCleanupProof(
 		if err := kubeClient.Get(ctx, key, latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
-		binding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(latest)
 		if latest.Status.Execution == nil || binding == nil || binding.BindingDigest != expectedBindingDigest ||
 			acpTaskControlUID(latest) != taskUID ||
 			binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint || binding.RuntimeRef == nil ||
@@ -1436,7 +1438,7 @@ func (d *ACPDispatcher) verifiedExternalRuntimeRecoveryTarget(
 	if d.Snapshots == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("immutable execution snapshot store is required for external RuntimeSession recovery")
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint ||
 		binding.RuntimeRef == nil || binding.Task.UID != taskUID || task.Status.Execution == nil {
 		return nil, harnessv2.RuntimeProfile{}, harnessv2.MCPPolicyConfiguration{}, errors.New("external RuntimeSession recovery binding is incomplete")
@@ -1687,7 +1689,8 @@ func (d *ACPDispatcher) reconcileRecoveredTaskScopedRuntimeSession(
 	if task != nil && task.Spec.SessionRef != nil &&
 		(task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite) &&
 		task.Annotations[nativeCaptureIntentAnnotation] == "" &&
-		(task.Status.Execution == nil || !task.Status.Execution.RuntimeSessionRecreationPending) {
+		(task.Status.Execution == nil || (task.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown &&
+			!task.Status.Execution.RuntimeSessionRecreationPending)) {
 		return true, nil
 	}
 	return d.reconcileRecoveredRuntimeSession(ctx, task, taskUID, deleteAfterSettlement, nil)
@@ -1707,6 +1710,9 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return true, nil
 	}
 	retired, retirementErr := verifiedKubernetesRuntimeRetirement(ctx, d.Store, task, taskUID)
+	if retirementErr == nil && !retired {
+		retired, retirementErr = verifiedNativeRuntimePoolRetirement(ctx, d.Store, task, taskUID)
+	}
 	if retirementErr != nil {
 		return false, retirementErr
 	}
@@ -1769,8 +1775,20 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 			}
 			return true, nil
 		}
-		if active.ControllerEpoch != currentFence.Epoch {
+		// Unknown terminal recovery on a native pool uses exact cleanup authority
+		// for every mutation (including deletion after validation), even before
+		// an epoch changes. Retained boots never get admission authority. That
+		// authority is native-only: a workspace pool keeps its current-epoch,
+		// backend-aware client and waits for a new epoch's owner otherwise.
+		retainedCleanup := pool.Spec.ExecutionWorkspace == nil && (sessionDeletion || abandonedValidationRecoveryTask(task))
+		if active.ControllerEpoch != currentFence.Epoch && !retainedCleanup {
 			return false, nil
+		}
+		if retainedCleanup && (active.ControllerEpoch != currentFence.Epoch || abandonedValidationRecoveryTask(task)) {
+			runtimeClient, runtimeFence, err = d.runtimePoolRetainedCleanupClient(ctx, task, taskUID, pool, currentFence, sessionDeletion)
+			if err != nil {
+				return false, err
+			}
 		}
 		if sessionDeletion && (string(pool.UID) != execution.RuntimePoolUID ||
 			active.BootID != execution.RuntimeSessionSupervisorBootID ||
@@ -1916,13 +1934,32 @@ func (d *ACPDispatcher) reconcileRecoveredRuntimeSession(
 		return false, errNativeSessionInstallUnresolved
 	}
 	switch observed.State {
+	case harnessv2.RuntimeSessionStateValidating:
+		// Session deletion itself is deliberately delete-only. Normal Task
+		// recovery must first finish its abandoned local validation barrier.
+		// That recovery uses native-only retained cleanup authority, so other
+		// backends keep waiting as they did before it existed.
+		if sessionDeletion || target.pool == nil || target.pool.Spec.ExecutionWorkspace != nil {
+			return false, nil
+		}
+		if err := d.recoverAbandonedWorkspaceValidation(ctx, task, taskUID, target.pool); err != nil {
+			return false, err
+		}
+		// Re-observe the exact runtime after validation/finalization. Never
+		// treat a validation response as a runtime retirement receipt.
+		return false, nil
 	case harnessv2.RuntimeSessionStatePublicationPrepared:
 		if task.Spec.Workspace == nil || task.Spec.Workspace.Intent != corev1alpha1.WorkspaceIntentWrite {
 			return false, fmt.Errorf("recover RuntimeSession publication finalization: prepared session is not bound to a write workspace")
 		}
 		deltaID := harnessv2.WorkspaceDeltaID("delta-" + execution.PromptID)
 		finalization, finalizationErr := d.runtimeSessionPublicationFinalization(ctx, publicationIDForTaskUID(task, taskUID), deltaID)
-		if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
+		if errors.Is(finalizationErr, store.ErrNotFound) && abandonedValidationRecoveryTask(task) {
+			// A validation response can be lost after a delta was prepared.
+			// Resume the same canonical no-publication receipt, not a different
+			// abandonment identity derived from the Task's empty delivery.
+			finalization, finalizationErr = abandonedValidationFinalization(task, taskUID, deltaID)
+		} else if errors.Is(finalizationErr, store.ErrNotFound) && task.Status.Delivery != nil &&
 			task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNoChange {
 			finalization, finalizationErr = runtimeSessionDeltaAbandonmentFinalizationForTaskUID(task, taskUID, deltaID, *task.Status.Delivery)
 		}

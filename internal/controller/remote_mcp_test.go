@@ -17,7 +17,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -200,7 +199,7 @@ func TestRemoteMCPBackendTransitionClearsAccepted(t *testing.T) {
 				if err := r.Update(t.Context(), tool); err != nil {
 					t.Fatal(err)
 				}
-				r.WorkspaceProviderAPIEnabled, r.SubstrateEnabled = true, true
+				r.WorkspaceProviderAPIEnabled, r.SubstrateMCPToolsEnabled = true, true
 				r.SubstrateConfig = SubstrateConfig{RouterURL: server.URL, ActorDNSSuffix: "actors.example.com"}
 				r.SubstrateTemplateValidator = func(context.Context, *ExecutionWorkspaceRequest) error { return nil }
 				r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
@@ -314,23 +313,5 @@ func TestRemoteMCPExcludedFromACP(t *testing.T) {
 	}
 	if _, err := customACPMCPToolDescriptor(&tool); err == nil {
 		t.Fatal("remote tool exposed to ACP")
-	}
-	tool.Namespace, tool.UID, tool.Generation = "default", "remote-uid", 1
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&tool).Build()
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{tool.Name}}},
-	}
-	agent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{}}}
-	target := resolvedHarnessV1Target{
-		runtimeRef: &corev1alpha1.AgentRuntime{}, backend: corev1alpha1.AgentExecutionBackendExternalEndpoint,
-		supportsContinuation: true, brokeredToolClasses: []corev1alpha1.AgentRuntimeBrokeredToolClass{corev1alpha1.AgentRuntimeBrokeredToolClassRead},
-	}
-	if _, err := resolveHarnessV1BrokeredTools(t.Context(), reader, task, agent, target); err == nil {
-		t.Fatal("remote tool exposed through legacy harness v1 broker")
 	}
 }

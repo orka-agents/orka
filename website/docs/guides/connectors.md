@@ -44,7 +44,8 @@ Task can do.
   server provably stamped it.
 - `--connectors-enabled` and `--connector-callback-base-url`, the public
   https origin the OAuth provider redirects back to. See
-  [Configuration](../reference/configuration.md).
+  [Configuration](../reference/configuration.md). The dashboard is optional:
+  without `--dashboard-enabled`, people link with the CLI.
 - The persistent controller store. Sealed credentials live there.
 
 ## 1. Register a GitHub OAuth App
@@ -171,7 +172,8 @@ not.
 Each person links once, signed in as themselves (an OIDC or context-token
 identity; a ServiceAccount token has no accounts to link). Three ways:
 
-**Dashboard.** Open **Settings › Connectors** (`/settings/connectors`). Every
+**Dashboard** (when the controller runs with `--dashboard-enabled`). Open
+**Settings › Connectors** (`/settings/connectors`). Every
 provider shows its read and write tools and whether you are linked. *Connect
 (read only)* or *Connect with writes* sends you to the provider's consent
 page; the callback brings you back and the page finishes the link. From the
@@ -195,12 +197,14 @@ bearer, which carries a context token only when the server opts in). It
 explains a `403`, whether from a ServiceAccount token or from a context
 token that lacks the connector scope. `--no-open` prints the consent URL instead of opening
 a browser, `--no-wait` returns as soon as consent has started. The provider
-sends the browser back to the dashboard, which finishes the link when it is
-signed in as you; when it is not, copy the value after `#completion=` from
-the address bar and run `orka connection complete <name> --namespace
-<namespace> --completion <value>` (the namespace the consent was started
-in; `orka connect` prints the exact command) so the CLI finishes it with
-your token instead.
+sends the browser back to `/settings/connectors` on the callback origin. With
+the dashboard enabled, that page finishes the link when it is signed in as
+you. When it is not, or when the controller serves no dashboard (it then
+answers with a plain page that shows the command and runs no script), copy
+the value after `#completion=` from the address bar and run `orka connection
+complete <name> --namespace <namespace> --completion <value>` (the namespace
+the consent was started in; `orka connect` prints the exact command) so the
+CLI finishes it with your token instead.
 
 **API.**
 
@@ -262,12 +266,14 @@ link changes whose credential is used, not where.
 
 Agents and chat have a read-only `list_connections` tool. It returns the
 signed-in person's (or the Task's verified requester's) linked accounts with
-their mode and readiness, the providers they could still link, and the
-settings path, never any token. A link whose provider was removed is still
+their mode and readiness, the providers they could still link, the
+namespace the links live in, and, when the controller serves the
+dashboard, the settings path; never any token. A link whose provider was removed is still
 listed, marked `providerMissing` and never ready, until the person
 disconnects it. An agent that needs an account the person
-has not linked should say so and point them at **Settings › Connectors**
-rather than try another credential. The tool is available to chat, to the
+has not linked should say so and point them at **Settings › Connectors**,
+or at `orka connect <provider> --namespace <namespace>` when there is no dashboard, rather than try
+another credential. The tool is available to chat, to the
 compatibility proxies' coordinator mode, and to ACP runtimes through the
 broker; a Task without a verified requester gets an explicit "no identity"
 result. The tool exists only while `--connectors-enabled` is set: without
@@ -326,18 +332,14 @@ additive.
   only name repositories its parent chain holds; a child delegated to another
   repository is refused rather than given the person's account there.
 - Curated `HTTP` connector tools are not available on external v2
-  `AgentRuntime` registrations, and harness v1 Tasks receive no connector
-  tools at all.
+  `AgentRuntime` registrations.
 
-## Proving it in CI
+## Testing your setup
 
-`scripts/live-connectors-e2e.sh` (the `Live Connectors E2E` workflow) runs the
-whole lifecycle against an in-cluster fixture with no real provider: sign-in
-through an OIDC stub, consent with a fake OAuth provider, a Task that reads as
-the person, a write that waits for approval, a refresh forced by a short token
-lifetime, and a disconnect that revokes. It is the reference for what a
-working installation looks like; see
-[Development](../development/development.md#ci-validation).
+The `Live Connectors E2E` workflow exercises the whole lifecycle — sign-in, consent, a read
+as the person, a write that waits for approval, a token refresh, and disconnect — against
+in-cluster fixtures. Its script, `scripts/live-connectors-e2e.sh`, is a working reference
+installation; see [CI validation](../development/development.md#ci-validation).
 
 ## Troubleshooting
 

@@ -521,6 +521,19 @@ func EffectiveWorkspaceBranch(scan *corev1alpha1.RepositoryScan) string {
 	return EffectiveBranch(scan)
 }
 
+// ValidateRepositoryScanSource rejects a repository URL the scan's provider
+// cannot clone, so an unusable RepositoryScan never admits scan Tasks.
+// GitHub is the only supported provider; an empty provider defaults to it.
+func ValidateRepositoryScanSource(spec corev1alpha1.RepositoryScanSpec) error {
+	if provider := strings.TrimSpace(spec.Provider); provider != "" && provider != "github" {
+		return fmt.Errorf("spec.provider %q is not supported; use github", spec.Provider)
+	}
+	if _, _, err := ParseGitHubRepositoryURL(spec.RepoURL); err != nil {
+		return fmt.Errorf("spec.repoURL %s", strings.TrimPrefix(err.Error(), "repository URL "))
+	}
+	return nil
+}
+
 // IsSuspended returns whether scheduled scans are paused.
 func IsSuspended(scan *corev1alpha1.RepositoryScan) bool {
 	return scan.Spec.Suspend != nil && *scan.Spec.Suspend

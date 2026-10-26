@@ -5,6 +5,19 @@ description: "Credential and network boundaries for ACP runtimes, native workers
 
 # Security
 
+Orka's security model rests on one idea: each credential lives only with the component that
+needs it, for only as long as it needs it. For coding-agent Tasks, model keys stay behind a
+proxy, Git credentials go to a separate publisher one operation at a time, and the agent —
+the part most exposed to prompt injection — holds neither. Native `type: ai` Tasks are
+different: Orka's own AI worker receives its Provider's API key from a Secret and calls the
+model directly, so that worker is part of the trusted platform (see
+[Native worker Pods](#native-worker-pods)). On top of that, every API call is authenticated and authorized, Tasks carry verified
+provenance, and work is scoped to a namespace.
+
+This page describes each boundary. For the permissions behind every API route, see
+[API authorization](../reference/api-authorization.md); for the trust boundary around
+external runtimes, see [AgentRuntime security operations](../operations/agent-runtime-security.md).
+
 ## The boundaries at a glance
 
 On the ACP runtime and Workspace/Publisher path, the agent has no Git credentials and the
@@ -100,8 +113,8 @@ A shared pool is a same-administrative-trust-domain density boundary, not a hard
 ACP Tasks reject per-Task container settings and custom resource requests. Runtime isolation
 and resources come from the reviewed RuntimePool profile. For built-in runtimes,
 `spec.execution.workspace` can bind a dedicated RuntimePool through a sandbox provider when
-the operator enables `--acp-workspace-dispatch-enabled` plus `--agent-sandbox-enabled` or
-`--substrate-enabled`. External `runtimeRef` dispatch rejects execution workspaces. Other
+the operator enables the workspace provider API and `--acp-workspace-dispatch-enabled`,
+with required admission webhooks and an admitted external provider and class. External `runtimeRef` dispatch rejects execution workspaces. Other
 per-Task execution placement fields fail closed.
 
 ### Workspace/Publisher
@@ -169,22 +182,34 @@ The controller runs with:
 
 ## Authentication
 
-- All API endpoints require authentication with a Kubernetes ServiceAccount bearer token or, when configured, an OIDC JWT or generic context token
-- ServiceAccount token validation uses the Kubernetes TokenReview API
-- OIDC token validation checks issuer, audience, time claims, and RS256 signatures using either the configured JWKS URL or issuer metadata discovery
-- Context-token validation supports the built-in `transaction-token` profile. transaction tokens are RS256-signed JWTs with `typ: txntoken+jwt`, matching issuer and audience, valid time claims, a non-empty subject, and required `iat`, `txn`, `scope`, and `req_wl` claims
-- transaction tokens are read from the raw `Txn-Token` header by default. `Authorization: Bearer` support is opt-in with `--context-token-headers=Txn-Token,Authorization:Bearer` (or `ORKA_CONTEXT_TOKEN_HEADERS`); when enabled, only bearer JWTs with `typ: txntoken+jwt` are handled as context tokens so normal OIDC and ServiceAccount bearer tokens can coexist
-- Optional context-token authorization can run in `off`, `audit`, or `enforce` mode with `--context-token-authz-mode` (or `ORKA_CONTEXT_TOKEN_AUTHZ_MODE`). In enforce mode, each operation class (task create/read/list/delete, tool read/use, provider use, agent, memory, session, security-scan, repository-monitor, and skill read/write) requires its configured scope, and Orka additionally honors signed `tctx` constraints — for example namespace, task type, agent, workspace repo/branch/ref, and allowed tools on Task creation, and namespace, provider/allowedProviders, model/allowedModels, and allowedTools on chat/OpenAI/Anthropic model-provider calls. See the [default-scope table](transaction-tokens.md#default-scopes) for the full operation-to-scope mapping and the configurable `--context-token-*-scopes` flags
-- Optional transaction-token TTS exchange configuration is available with `--context-token-tts-endpoint` / `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT` plus token-source and TTL settings. Orka keeps this disabled unless an endpoint is configured and does not store exchanged raw TxTokens in Task resources
+Every client request to the REST API and the compatibility endpoints authenticates with one
+of three credentials. Health probes, gateway ingress, and signed GitHub webhooks authenticate
+differently; the [API reference](../reference/api-reference.md) lists them.
+
+- **Kubernetes ServiceAccount tokens**, the default, validated with the TokenReview API.
+  Validated tokens are cached for 60 seconds by SHA-256 hash, so a revoked token can keep
+  working for up to a minute. The cache is in memory only.
+- **OIDC JWTs**, when an issuer and audience are configured. Orka checks the issuer, audience,
+  time claims, and RS256 signature, using the configured JWKS URL or issuer discovery. See
+  [External OIDC callers](#external-oidc-callers).
+- **Transaction tokens**, when the `transaction-token` profile is configured. They are read
+  from the `Txn-Token` header by default, and can carry operation scopes and signed `tctx`
+  constraints that Orka enforces. See [Transaction tokens](transaction-tokens.md).
+
+`orka dashboard` creates a 24-hour ServiceAccount token with your kubeconfig and opens the
+dashboard signed in with it.
+
+### Provenance
+
+- OIDC- and context-token-authenticated Task creation stamps the verified identity into immutable `spec.requestedBy`; context-token-authenticated Task creation also stamps immutable `spec.transaction` metadata for audit correlation. Client-supplied `requestedBy` and `transaction` fields are rejected
+- Task provenance admission rejects untrusted direct Kubernetes Task creates/updates that set or modify Orka-managed provenance fields, including `spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations. Helm enables it automatically. The opt-in Kustomize webhook bundle already uses `failurePolicy: Fail`; apply it only after completing the readiness, TLS, CA injection, and trusted-identity checks in [Task provenance admission hardening](../reference/configuration.md#task-provenance-admission-hardening)
+
+### Tokens in delegated and workspace Tasks
+
 - Delegation tools can exchange a mounted subject token for a child-scope TxToken when `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT`, `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE`, and `ORKA_CONTEXT_TOKEN_CHILD_SCOPE` are configured; the requested child scope must be a subset of the parent transaction scopes, and the child token is stored in an ephemeral Secret that is referenced by Task annotation, adopted by the child Task after creation, and mounted into the child worker as a token file
 - Worker HTTP Tool CRD calls can propagate a TxToken from a mounted file using `ORKA_TRANSACTION_TOKEN_FILE`; when `ORKA_CONTEXT_TOKEN_TTS_ENDPOINT` and `ORKA_CONTEXT_TOKEN_SUBJECT_TOKEN_FILE` are configured, workers exchange the subject token for an operation-scoped outbound TxToken before calling the tool. Token values are read at request time and are not stored in Task spec/status; downstream services must still verify incoming TxTokens and enforce their own policy
 - Workspace-backed agent Tasks run through controller-owned `acp-ws-*` RuntimePools; the controller never forwards mounted transaction/context-subject token files into the workspace, and raw TxTokens are still not written to Task spec/status/logs.
-- See [Transaction Token integration](transaction-tokens.md) for deployment examples, scope vocabulary, transaction metadata, TTS exchange, admission hardening, metrics, and rollout guidance
-- Provider-backed `Task.spec.execution.workspace` dispatch is fail-closed behind `--acp-workspace-dispatch-enabled` plus the selected provider flag. Agent Sandbox uses only controller-rendered templates; Substrate accepts only an operator-owned infrastructure `templateRef` and derives the credential-free runtime template. Both providers bind one dedicated RuntimeSession workspace, bootstrap the exact attested instance with one-time credentials, keep provider-native identifiers out of Task status, and delete the physical workspace only after authenticated drain. Raw transaction tokens are never staged into retained workspaces or provider child environments.
-- OIDC- and context-token-authenticated Task creation stamps the verified identity into immutable `spec.requestedBy`; context-token-authenticated Task creation also stamps immutable `spec.transaction` metadata for audit correlation. Client-supplied `requestedBy` and `transaction` fields are rejected
-- Task provenance admission rejects untrusted direct Kubernetes Task creates/updates that set or modify Orka-managed provenance fields, including `spec.requestedBy`, `spec.transaction`, and transaction metadata labels/annotations. Helm enables it automatically. The opt-in Kustomize webhook bundle already uses `failurePolicy: Fail`; apply it only after completing the readiness, TLS, CA injection, and trusted-identity checks in [Task provenance admission hardening](../reference/configuration.md#task-provenance-admission-hardening)
-- The `orka` CLI extracts tokens from kubeconfig for browser-based login
-- **Token caching**: Validated ServiceAccount tokens are cached for 60 seconds using SHA256 hashes to avoid repeated TokenReview API calls. Token revocation has up to 60s propagation delay. The cache is in-memory only — not persistent across pod restarts
+- Workspace-backed Tasks select only `execution.workspace.classRef`. A separate provider receives a frozen public runtime request and reports infrastructure evidence through `workspace.orka.ai`. Core independently checks the exact Pod or native worker, completes sealed bootstrap, verifies the authenticated boot, and authorizes retirement after drain. Provider readiness cannot authorize prompts or replace core admission. Shared ownership policies separate provider status from core conditions and private attachment credentials. Raw transaction tokens never enter retained workspaces or provider child environments.
 
 ## API authorization
 
@@ -215,16 +240,16 @@ for every route's permissions, namespace precedence, and grant examples.
 
 ## Namespace scoping
 
-- Every controller requires one non-empty `--watch-namespace` and one static
-  `--controller-mode` (`harness-v1` or `harness-v2`)
+- Every controller requires one non-empty `--watch-namespace` and the fixed
+  `harness-v2` installation identity
 - The watched namespace carries the matching `orka.ai/controller-mode`
   label. The controller claims an unlabeled namespace on first start; a
   mismatched claim fails startup, and a per-release ValidatingAdmissionPolicy
   keeps the claim immutable and lets only that controller add it
-- Same-cluster v1/v2 installations use distinct namespaces, ServiceAccounts,
+- Separate installations use distinct namespaces, ServiceAccounts,
   RBAC, Leases, stores, Services, Secrets, and execution data planes
 - Chat endpoint blocks operations in `kube-system` and `kube-public` namespaces
-- The embedded UI is served over the same port as the API (no separate attack surface)
+- The web dashboard is off by default. When enabled with `--dashboard-enabled`, it is served on the API port, with no separate listener
 
 ## Multi-tenancy
 

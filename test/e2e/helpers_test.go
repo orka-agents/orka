@@ -1791,15 +1791,14 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 	if strings.TrimSpace(review.Namespace) == "" {
 		review.Namespace = namespace
 	}
+	// The server records the caller's identity as the reviewer.
 	payload, err := json.Marshal(struct {
 		Namespace  string `json:"namespace"`
 		Status     string `json:"status"`
-		Reviewer   string `json:"reviewer,omitempty"`
 		ReviewNote string `json:"reviewNote,omitempty"`
 	}{
 		Namespace:  review.Namespace,
 		Status:     review.Status,
-		Reviewer:   review.Reviewer,
 		ReviewNote: review.ReviewNote,
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -1812,7 +1811,7 @@ func reviewMemoryProposalViaAPI(apiBaseURL, token, id string, review store.Memor
 		"",
 	)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(statusCode).To(Equal(http.StatusNoContent), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
+	Expect(statusCode).To(Equal(http.StatusOK), "unexpected memory proposal review response: %s", strings.TrimSpace(body))
 	return getMemoryProposalViaAPI(apiBaseURL, token, id)
 }
 

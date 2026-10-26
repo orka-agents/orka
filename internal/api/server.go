@@ -10,9 +10,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,7 +33,6 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/uiembed"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -101,6 +100,10 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
+	// port serve the embedded web dashboard and answer unrouted non-API
+	// paths with its index page.
+	DashboardEnabled bool
 }
 
 // Server is the REST API server
@@ -128,12 +131,14 @@ type Server struct {
 // NewServer creates a new API server
 func NewServer(c client.Client, sessionManager *controller.SessionManager, config ServerConfig) *Server {
 	config.Chat.ExecutionMode = config.ExecutionMode
+	config.Chat.DashboardEnabled = config.DashboardEnabled
 	app := fiber.New(fiber.Config{
 		AppName:           "Orka API",
 		BodyLimit:         defaultAPIRequestBodyLimit,
 		StreamRequestBody: true,
 		ErrorHandler:      customErrorHandler,
 	})
+	redactRequestParseErrors(app)
 
 	server := &Server{
 		app:                 app,
@@ -254,6 +259,9 @@ func isGatewayIngressPath(path string) bool {
 
 // setupMiddleware configures middleware for the server
 func (s *Server) setupMiddleware() {
+	// Outermost, so it runs after every handler and middleware has returned.
+	s.app.Use(drainUnreadRequestBody)
+
 	// Recovery middleware
 	s.app.Use(recover.New())
 
@@ -423,6 +431,7 @@ func (s *Server) setupRoutes() {
 	api.Post("/agents", s.handlers.CreateAgent)
 	api.Get("/agents", s.handlers.ListAgents)
 	api.Get("/agents/:name", s.handlers.GetAgent)
+	api.Get("/agents/:name/system-prompt", s.handlers.GetAgentSystemPrompt)
 	api.Put("/agents/:name", s.handlers.UpdateAgent)
 	api.Delete("/agents/:name", s.handlers.DeleteAgent)
 
@@ -501,6 +510,9 @@ func (s *Server) setupRoutes() {
 	api.Delete("/connections/:name", s.handlers.DeleteConnection)
 	api.Post("/connections/:name/authorize", s.handlers.AuthorizeConnection)
 	api.Post("/connections/:name/complete", s.handlers.CompleteConnection)
+	api.Get("/agent-hosts/me", s.handlers.GetOwnAgentHost)
+	api.Post("/agent-hosts/me/wake", s.handlers.WakeOwnAgentHost)
+	api.Delete("/agent-hosts/me", s.handlers.DeleteOwnAgentHost)
 
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
@@ -524,8 +536,7 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
-	// Internal API for worker communication. Harness v1 retirement is served
-	// only by the dedicated audience-bound TLS listener configured below.
+	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
 			s.ResultStore,
@@ -639,31 +650,21 @@ func routeLookupPath(path string) string {
 	return folded
 }
 
+// staticAssetRoot holds the hashed build output. A missing file under it is a
+// stale or mistyped chunk reference: answering with index.html would hand the
+// browser HTML where it expects JavaScript or CSS, so it stays a 404.
+const staticAssetRoot = "/assets"
+
 // spaFallbackEligible reports whether a 404 for path is served as the SPA
 // index page instead of a JSON error. Telemetry middleware uses the same
 // predicate so the recorded status matches what the client receives.
 func spaFallbackEligible(path string) bool {
 	folded := routeLookupPath(path)
-	for _, root := range apiPathRoots {
-		if folded == root || strings.HasPrefix(folded, root+"/") {
-			return false
-		}
+	underRoot := func(root string) bool { return folded == root || strings.HasPrefix(folded, root+"/") }
+	if slices.ContainsFunc(apiPathRoots, underRoot) || underRoot(staticAssetRoot) {
+		return false
 	}
 	return folded != "/healthz" && folded != "/readyz"
-}
-
-// spaIndexHTML returns the embedded SPA index page, or false when the UI
-// assets are unavailable.
-func spaIndexHTML() ([]byte, bool) {
-	distFS, err := uiembed.FS()
-	if err != nil {
-		return nil, false
-	}
-	data, err := fs.ReadFile(distFS, "index.html")
-	if err != nil {
-		return nil, false
-	}
-	return data, true
 }
 
 // customErrorHandler handles errors returned by handlers and produces a
@@ -693,12 +694,13 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 		code = e.Code
 		message = e.Message
 	}
+	// Every error body is JSON or the SPA page; neither may be sniffed.
+	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 
 	// For 404s on non-API paths, serve the SPA index.html
-	if code == fiber.StatusNotFound && spaFallbackEligible(c.Path()) {
-		if data, ok := spaIndexHTML(); ok {
-			c.Set("Content-Type", "text/html; charset=utf-8")
-			return c.Status(fiber.StatusOK).Send(data)
+	if code == fiber.StatusNotFound && dashboardServed(c) && spaFallbackEligible(c.Path()) {
+		if page, ok := embeddedSPAIndexPage(); ok {
+			return page.send(c)
 		}
 	}
 

@@ -188,7 +188,8 @@ func acpTaskTerminalBeforeDurableAttempt(task *corev1alpha1.Task) bool {
 	delivery := task.Status.Delivery
 	terminalBeforeAttempt := execution.State == corev1alpha1.TaskExecutionStateFailed &&
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeFailed &&
-		(execution.Reason == corev1alpha1.TaskExecutionReason("InvalidWorkspace") || execution.Reason == corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile"))
+		(execution.Reason == corev1alpha1.TaskExecutionReason("InvalidWorkspace") || execution.Reason == corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") ||
+			execution.Reason == corev1alpha1.TaskExecutionReason("WorkspaceFailed"))
 	if !terminalBeforeAttempt {
 		return false
 	}

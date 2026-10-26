@@ -57,9 +57,10 @@ func newRootCmd() *cobra.Command {
 
 	// Register subcommands
 	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newLoginCmd())
+	cmd.AddCommand(newDashboardCmd())
 	cmd.AddCommand(newConnectCmd())
 	cmd.AddCommand(newConnectionCmd())
+	cmd.AddCommand(newHostCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
 	cmd.AddCommand(newAgentCmd())
@@ -86,9 +87,9 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
-// serviceAccountLoginFunc is used by login to request ServiceAccount login credentials.
+// serviceAccountTokenFunc creates the ServiceAccount token orka dashboard signs the browser in with.
 // Tests can replace this to avoid calling kubectl.
-var serviceAccountLoginFunc = createServiceAccountToken
+var serviceAccountTokenFunc = createServiceAccountToken
 
 // createServiceAccountToken generates a token for the given ServiceAccount using kubectl.
 func createServiceAccountToken(serviceAccount, namespace string) (string, error) {

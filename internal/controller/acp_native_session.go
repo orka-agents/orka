@@ -439,7 +439,8 @@ func (d *ACPDispatcher) recoverTaskNativeCapture(ctx context.Context, task *core
 		}
 		return nil
 	}
-	runtimeClient, runtimeFence, _, _, err := d.runtimePoolClient(ctx, pool)
+	// Recovery settles an existing session even when admission for new work is closed.
+	runtimeClient, runtimeFence, _, _, err := d.runtimePoolClient(ctx, pool, false)
 	if err != nil {
 		return err
 	}

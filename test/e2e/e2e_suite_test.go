@@ -57,6 +57,7 @@ var (
 	acpOpencodeRuntimeRef        string
 	workspacePublisherRef        string
 	e2eRegistryContainerName     string
+	e2eRegistryAddress           string
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -110,6 +111,7 @@ var _ = BeforeSuite(func() {
 	registry, registryContainer, err := prepareKindLocalRegistry()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to prepare Kind-local registry")
 	e2eRegistryContainerName = registryContainer
+	e2eRegistryAddress = registry
 	managerRef, err = pushImageToLocalRegistry(registry, managerImage, "orka/controller:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish controller image")
 	aiWorkerRef, err = pushImageToLocalRegistry(registry, aiWorkerImage, "orka/ai-worker:e2e")
@@ -305,7 +307,13 @@ var _ = BeforeSuite(func() {
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[`+
 			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"`+e2eACPIdlePoolTTL.String()+`"},`+
-			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"}]}]}}}}`,
+			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"},`+
+			`{"name":"ORKA_ENABLE_WORKSPACE_PROVIDER_API","value":"true"},`+
+			`{"name":"ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED","value":"true"},`+
+			`{"name":"ORKA_ACP_WORKSPACE_DISPATCH_ENABLED","value":"true"}],`+
+			`"volumeMounts":[{"name":"e2e-workspace-webhook-tls",`+
+			`"mountPath":"/tmp/k8s-webhook-server/serving-certs","readOnly":true}]}],`+
+			`"volumes":[{"name":"e2e-workspace-webhook-tls","secret":{"secretName":"orka-admission-tls"}}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")

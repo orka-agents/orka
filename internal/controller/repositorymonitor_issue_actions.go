@@ -415,25 +415,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandIntentForID(ctx co
 	return fallback
 }
 
-func repositoryMonitorImplementationActionAlreadyStarted(action *store.WorkAction) bool {
-	if action == nil {
-		return false
-	}
-	switch strings.TrimSpace(action.Phase) {
-	case repositoryMonitorIssuePhaseImplementationQueued,
-		repositoryMonitorIssuePhaseImplementing,
-		repositoryMonitorIssuePhasePatchReady,
-		repositoryMonitorIssuePhaseMutationQueued,
-		repositoryMonitorIssuePhaseMutatingToPR,
-		repositoryMonitorIssuePhasePROpened,
-		repositoryMonitorIssuePhaseComplete,
-		repositoryMonitorIssuePhaseBlocked:
-		return true
-	default:
-		return false
-	}
-}
-
 func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTaskName bool) {
 	if action == nil {
 		return
@@ -1144,16 +1125,6 @@ func repositoryMonitorWorkspaceValidationGuidance(task *corev1alpha1.Task) strin
 	default:
 		return "the workspace changes did not pass content policy; see the Task status in the Orka namespace for details"
 	}
-}
-
-func anySliceField(body map[string]any, key string) []any {
-	if body == nil {
-		return nil
-	}
-	if values, ok := body[key].([]any); ok {
-		return values
-	}
-	return nil
 }
 
 func repositoryMonitorIssueActionRecordID(task *corev1alpha1.Task) string {

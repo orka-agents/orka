@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,8 +35,8 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// The binding stage implements the coexistence plan's write-once execution
-// binding: every executable agent Task freezes its protocol, backend, and an
+// The binding stage creates a write-once execution binding: every executable
+// agent Task freezes its protocol, backend, and an
 // immutable content-addressed execution snapshot before any executor-specific
 // side effect. The snapshot store and revisioned backend control are mandatory:
 // a controller that cannot prove either one never queues executor demand.
@@ -91,7 +93,6 @@ type agentExecutionSnapshotBody struct {
 	Workspace        *corev1alpha1.WorkspaceConfig          `json:"workspace,omitempty"`
 	RuntimeOverride  *corev1alpha1.AgentRuntimeSpec         `json:"runtimeOverride,omitempty"`
 	DefaultTools     *agentExecutionSnapshotToolPolicy      `json:"defaultTools,omitempty"`
-	HarnessV1        *agentExecutionSnapshotHarnessV1       `json:"harnessV1,omitempty"`
 	ExternalRuntime  *agentExecutionSnapshotExternalRuntime `json:"externalRuntime,omitempty"`
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
@@ -165,24 +166,30 @@ type agentExecutionSnapshotWorkspaceBinding struct {
 // binding for class-selected execution workspaces. It carries only Orka-owned
 // identity and policy: no provider-native identifiers and no secrets.
 type agentExecutionSnapshotWorkspaceClass struct {
-	Name               string                               `json:"name"`
-	UID                string                               `json:"uid"`
-	Generation         int64                                `json:"generation"`
-	ProfileHash        string                               `json:"profileHash"`
-	ProviderName       string                               `json:"providerName"`
-	ProviderUID        string                               `json:"providerUID"`
-	ProviderGeneration int64                                `json:"providerGeneration"`
-	ProviderConfigUID  string                               `json:"providerConfigUID,omitempty"`
-	EffectiveOnDetach  string                               `json:"effectiveOnDetach"`
-	SuspendMode        string                               `json:"suspendMode,omitempty"`
-	SandboxVolume      *agentExecutionSnapshotSandboxVolume `json:"sandboxVolume,omitempty"`
-	MaxSuspended       *int32                               `json:"maxSuspended,omitempty"`
-	DefaultOnDetach    string                               `json:"defaultOnDetach"`
-	AllowedOnDetach    []string                             `json:"allowedOnDetach"`
-	DetachTimeout      string                               `json:"detachTimeout"`
-	IdleTimeout        string                               `json:"idleTimeout,omitempty"`
-	MaxLifetime        string                               `json:"maxLifetime,omitempty"`
-	DeletionPolicy     struct {
+	Name                     string                                    `json:"name"`
+	UID                      string                                    `json:"uid"`
+	Generation               int64                                     `json:"generation"`
+	ProfileHash              string                                    `json:"profileHash"`
+	ProviderName             string                                    `json:"providerName"`
+	ProviderUID              string                                    `json:"providerUID"`
+	ProviderGeneration       int64                                     `json:"providerGeneration"`
+	ProviderConfigUID        string                                    `json:"providerConfigUID,omitempty"`
+	ControllerName           string                                    `json:"controllerName,omitempty"`
+	LifecycleContractVersion string                                    `json:"lifecycleContractVersion,omitempty"`
+	ProviderConfigRef        *workspacev1alpha1.TypedObjectReference   `json:"providerConfigRef,omitempty"`
+	ProviderConfigBinding    *workspacev1alpha1.ImmutableObjectBinding `json:"providerConfigBinding,omitempty"`
+	ParametersRef            *workspacev1alpha1.TypedObjectReference   `json:"parametersRef,omitempty"`
+	ParametersBinding        *workspacev1alpha1.ImmutableObjectBinding `json:"parametersBinding,omitempty"`
+	EffectiveOnDetach        string                                    `json:"effectiveOnDetach"`
+	SuspendMode              string                                    `json:"suspendMode,omitempty"`
+	SandboxVolume            *agentExecutionSnapshotSandboxVolume      `json:"sandboxVolume,omitempty"`
+	MaxSuspended             *int32                                    `json:"maxSuspended,omitempty"`
+	DefaultOnDetach          string                                    `json:"defaultOnDetach"`
+	AllowedOnDetach          []string                                  `json:"allowedOnDetach"`
+	DetachTimeout            string                                    `json:"detachTimeout"`
+	IdleTimeout              string                                    `json:"idleTimeout,omitempty"`
+	MaxLifetime              string                                    `json:"maxLifetime,omitempty"`
+	DeletionPolicy           struct {
 		ProviderResources string `json:"providerResources"`
 		PersistentVolumes string `json:"persistentVolumes"`
 		Checkpoints       string `json:"checkpoints"`
@@ -221,46 +228,6 @@ type agentExecutionSnapshotToolPolicy struct {
 	AllowedToolsOmitted bool     `json:"allowedToolsOmitted"`
 	AllowedTools        []string `json:"allowedTools"`
 	AllowBash           *bool    `json:"allowBash,omitempty"`
-}
-
-// agentExecutionSnapshotHarnessV1 freezes the non-secret wrapper or external
-// endpoint identity used by the v1 dispatcher. Secret contents never enter the
-// snapshot; the exact Secret UID/resourceVersion is verified again before the
-// first executor side effect.
-type agentExecutionSnapshotHarnessV1 struct {
-	Endpoint                  string                                           `json:"endpoint"`
-	Backend                   string                                           `json:"backend"`
-	RuntimeName               string                                           `json:"runtimeName"`
-	TaskSpecDigest            string                                           `json:"taskSpecDigest,omitempty"`
-	ToolExecutionMode         string                                           `json:"toolExecutionMode,omitempty"`
-	BrokeredToolClasses       []corev1alpha1.AgentRuntimeBrokeredToolClass     `json:"brokeredToolClasses,omitempty"`
-	BrokeredTools             []agentExecutionSnapshotHarnessV1BrokeredTool    `json:"brokeredTools,omitempty"`
-	RuntimeAuthOnly           bool                                             `json:"runtimeAuthOnly,omitempty"`
-	AuthSecretNamespace       string                                           `json:"authSecretNamespace"`
-	AuthSecretName            string                                           `json:"authSecretName"`
-	AuthSecretKey             string                                           `json:"authSecretKey"`
-	AuthSecretUID             string                                           `json:"authSecretUID"`
-	AuthSecretResourceVersion string                                           `json:"authSecretResourceVersion"`
-	DuplicateSafe             bool                                             `json:"duplicateSafe"`
-	SessionName               string                                           `json:"sessionName"`
-	SessionBootstrap          *agentExecutionSnapshotHarnessV1SessionBootstrap `json:"sessionBootstrap,omitempty"`
-	CredentialRefs            []agentExecutionSnapshotSecretRef                `json:"credentialRefs,omitempty"`
-}
-
-// agentExecutionSnapshotHarnessV1SessionBootstrap freezes the canonical
-// transcript suffix used to give a fresh v1 CLI process conversation context.
-// The rendered JSONL is kept inside the encrypted, content-addressed snapshot
-// so dispatch and recovery never re-read mutable transcript state.
-type agentExecutionSnapshotHarnessV1SessionBootstrap struct {
-	SchemaVersion   int    `json:"schemaVersion"`
-	SessionUID      string `json:"sessionUID"`
-	ControlVersion  int64  `json:"controlVersion"`
-	LeaseGeneration int64  `json:"leaseGeneration"`
-	Artifact        string `json:"artifact"`
-	Digest          string `json:"digest"`
-	MessageCount    uint32 `json:"messageCount"`
-	TotalMessages   int    `json:"totalMessages"`
-	Truncated       bool   `json:"truncated,omitempty"`
 }
 
 type agentExecutionSnapshotSecretRef struct {
@@ -316,6 +283,8 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 		}
 		return r.resolveExternalAgentExecutionCandidate(ctx, task, agent)
 	}
+	agent = withEffectiveBuiltInContract(agent, r.Mode)
+
 	var err error
 	task, err = r.projectACPReplyPolicy(ctx, task, agent, false)
 	if err != nil {
@@ -333,7 +302,15 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
-	plan, err := PlanACPRuntimeWithConfiguration(task, withEffectiveBuiltInContract(agent, r.Mode), r.ACPRuntimeImages, configuration)
+	if len(agentToolboxes(agent)) > 0 && (strings.TrimSpace(workspaceSessionUID) != "" || taskRequestsExecutionWorkspace(task)) {
+		return nil, permanentACPAgentConfiguration(errors.New(
+			"runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces cannot mount toolboxes yet",
+		))
+	}
+	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
+		return nil, permanentACPAgentConfiguration(errors.New(reason))
+	}
+	plan, err := PlanACPRuntimeWithConfiguration(task, agent, r.ACPRuntimeImages, configuration)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -364,7 +341,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, classifyACPWorkspaceClassResolutionError(err)
 	}
-	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, resolvedClass)
+	workspaceBinding, err := validateACPWorkspaceBindingRequestWithClass(task, resolvedClass)
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
@@ -387,7 +364,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			}
 		}
 		workspaceBinding, err = resolveACPWorkspaceBindingWithClass(
-			task, r.ExecutionWorkspaceDefaultProvider, r.EnforceNamespaceIsolation, workspaceSessionUID, resolvedClass,
+			task, workspaceSessionUID, resolvedClass,
 		)
 		if err != nil {
 			return nil, permanentACPAgentConfiguration(err)
@@ -1017,7 +994,7 @@ func validateExternalAgentExecutionSnapshot(
 		return errors.New("external v2 execution snapshot is missing its frozen AgentRuntime authority")
 	}
 	if binding.RuntimeType != "" || body.RuntimeType != "" || body.RuntimeImage != "" || body.PoolName != "" ||
-		body.ExecutionWorkspace != nil || body.HarnessV1 != nil || body.Configuration != (agentExecutionSnapshotConfig{}) {
+		body.ExecutionWorkspace != nil || body.Configuration != (agentExecutionSnapshotConfig{}) {
 		return errors.New("external v2 execution snapshot carries RuntimePool or adapter-owned configuration")
 	}
 	if strings.TrimSpace(binding.RuntimeRef.Name) == "" || binding.RuntimeRef.UID == "" || binding.RuntimeRef.Generation < 1 {
@@ -1060,21 +1037,27 @@ func snapshotWorkspaceClassFromBinding(class *ACPWorkspaceClassBinding) *agentEx
 		return nil
 	}
 	frozen := &agentExecutionSnapshotWorkspaceClass{
-		Name:               class.Name,
-		UID:                class.UID,
-		Generation:         class.Generation,
-		ProfileHash:        class.ProfileHash,
-		ProviderName:       class.ProviderName,
-		ProviderUID:        class.ProviderUID,
-		ProviderGeneration: class.ProviderGeneration,
-		ProviderConfigUID:  class.ProviderConfigUID,
-		EffectiveOnDetach:  class.EffectiveOnDetach,
-		SuspendMode:        class.SuspendMode,
-		DefaultOnDetach:    class.DefaultOnDetach,
-		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
-		DetachTimeout:      class.DetachTimeout,
-		IdleTimeout:        class.IdleTimeout,
-		MaxLifetime:        class.MaxLifetime,
+		Name:                     class.Name,
+		UID:                      class.UID,
+		Generation:               class.Generation,
+		ProfileHash:              class.ProfileHash,
+		ProviderName:             class.ProviderName,
+		ProviderUID:              class.ProviderUID,
+		ProviderGeneration:       class.ProviderGeneration,
+		ProviderConfigUID:        class.ProviderConfigUID,
+		ControllerName:           class.ControllerName,
+		LifecycleContractVersion: class.LifecycleContractVersion,
+		ProviderConfigRef:        class.ProviderConfigRef.DeepCopy(),
+		ProviderConfigBinding:    class.ProviderConfigBinding.DeepCopy(),
+		ParametersRef:            class.ParametersRef.DeepCopy(),
+		ParametersBinding:        class.ParametersBinding.DeepCopy(),
+		EffectiveOnDetach:        class.EffectiveOnDetach,
+		SuspendMode:              class.SuspendMode,
+		DefaultOnDetach:          class.DefaultOnDetach,
+		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:            class.DetachTimeout,
+		IdleTimeout:              class.IdleTimeout,
+		MaxLifetime:              class.MaxLifetime,
 	}
 	if class.SandboxVolume != nil {
 		frozen.SandboxVolume = &agentExecutionSnapshotSandboxVolume{
@@ -1101,22 +1084,28 @@ func workspaceClassBindingFromSnapshot(class *agentExecutionSnapshotWorkspaceCla
 		return nil
 	}
 	return &ACPWorkspaceClassBinding{
-		Name:               class.Name,
-		UID:                class.UID,
-		Generation:         class.Generation,
-		ProfileHash:        class.ProfileHash,
-		ProviderName:       class.ProviderName,
-		ProviderUID:        class.ProviderUID,
-		ProviderGeneration: class.ProviderGeneration,
-		ProviderConfigUID:  class.ProviderConfigUID,
-		EffectiveOnDetach:  class.EffectiveOnDetach,
-		SuspendMode:        class.SuspendMode,
-		DefaultOnDetach:    class.DefaultOnDetach,
-		AllowedOnDetach:    append([]string(nil), class.AllowedOnDetach...),
-		DetachTimeout:      class.DetachTimeout,
-		IdleTimeout:        class.IdleTimeout,
-		MaxLifetime:        class.MaxLifetime,
-		SandboxVolume:      sandboxVolumeFromSnapshot(class.SandboxVolume),
+		Name:                     class.Name,
+		UID:                      class.UID,
+		Generation:               class.Generation,
+		ProfileHash:              class.ProfileHash,
+		ProviderName:             class.ProviderName,
+		ProviderUID:              class.ProviderUID,
+		ProviderGeneration:       class.ProviderGeneration,
+		ProviderConfigUID:        class.ProviderConfigUID,
+		ControllerName:           class.ControllerName,
+		LifecycleContractVersion: class.LifecycleContractVersion,
+		ProviderConfigRef:        class.ProviderConfigRef.DeepCopy(),
+		ProviderConfigBinding:    class.ProviderConfigBinding.DeepCopy(),
+		ParametersRef:            class.ParametersRef.DeepCopy(),
+		ParametersBinding:        class.ParametersBinding.DeepCopy(),
+		EffectiveOnDetach:        class.EffectiveOnDetach,
+		SuspendMode:              class.SuspendMode,
+		DefaultOnDetach:          class.DefaultOnDetach,
+		AllowedOnDetach:          append([]string(nil), class.AllowedOnDetach...),
+		DetachTimeout:            class.DetachTimeout,
+		IdleTimeout:              class.IdleTimeout,
+		MaxLifetime:              class.MaxLifetime,
+		SandboxVolume:            sandboxVolumeFromSnapshot(class.SandboxVolume),
 		MaxSuspendedWorkspaces: func() *int32 {
 			if class.MaxSuspended == nil {
 				return nil

@@ -90,13 +90,20 @@ func CreateOrGetGitHubPullRequest(ctx context.Context, token, owner, repo, head,
 	if resp.StatusCode == http.StatusUnprocessableEntity && isExistingPullRequestError(respBody) {
 		pr, lookupErr := findExistingGitHubPullRequest(ctx, token, owner, repo, head, base, baseURL)
 		if lookupErr != nil {
-			return GitHubPullRequest{}, fmt.Errorf("GitHub reported an existing pull request, but lookup failed: %w", lookupErr)
+			err := fmt.Errorf("GitHub reported an existing pull request, but lookup failed: %w", lookupErr)
+			if followedRedirect(resp) {
+				return GitHubPullRequest{}, err
+			}
+			// GitHub refused the create; only the confirming lookup failed.
+			return GitHubPullRequest{}, &NoEffectError{
+				Summary: "GitHub refused the request because the pull request already exists, and looking it up failed", Err: err,
+			}
 		}
 		pr.Status = GitHubPullRequestStatusExisting
 		return pr, nil
 	}
 
-	return GitHubPullRequest{}, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(respBody))
+	return GitHubPullRequest{}, githubStatusError(resp, respBody)
 }
 
 func findExistingGitHubPullRequest(ctx context.Context, token, owner, repo, head, base, baseURL string) (GitHubPullRequest, error) {

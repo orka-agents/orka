@@ -1094,24 +1094,13 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace. Worker-backed Task types use
-                      it directly. ACP agent Tasks may bind a workspace-provider-backed
-                      RuntimeSession through it (a provider/templateRef request, or a classRef
-                      with the workspace provider API enabled); these dispatch paths are
-                      flag-gated behind --acp-workspace-dispatch-enabled plus the matching
-                      provider flag and fail closed otherwise. Clean-room publication remains
-                      owned by RuntimeSession lifecycle.
+                      Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
+                      Omit workspace for ordinary execution. Workspace dispatch requires the
+                      workspace provider API, ACP workspace dispatch, and an installed provider.
                     properties:
-                      boot:
-                        description: |-
-                          Boot asks providers that support it to boot the workspace workload from scratch
-                          instead of resuming from the provider's default snapshot. Currently supported
-                          by the Substrate provider.
-                        type: boolean
                       classRef:
-                        description: |-
-                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-                          classRef implicitly enables the controller-first workspace path.
+                        description: ClassRef selects an immutable ExecutionWorkspaceClass
+                          in the Task namespace.
                         properties:
                           name:
                             description: Name is the class name.
@@ -1120,67 +1109,12 @@ spec:
                         required:
                         - name
                         type: object
-                      cleanupPolicy:
-                        description: |-
-                          CleanupPolicy controls whether the workspace is deleted or retained after use.
-                          Defaults to delete when omitted.
-                        enum:
-                        - delete
-                        - retain
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled requests use of a durable workspace for
-                          the task execution.
-                        type: boolean
-                      hibernation:
-                        description: |-
-                          Hibernation configures process lifetime inside the workspace. Resident
-                          mode is currently rejected until the worker protocol can report per-turn
-                          completion separately from resident process lifetime.
-                        properties:
-                          processMode:
-                            description: |-
-                              ProcessMode controls whether each turn starts fresh or reuses a resident
-                              process. Defaults to fresh.
-                            enum:
-                            - fresh
-                            - resident
-                            type: string
-                          residentKey:
-                            description: |-
-                              ResidentKey selects the process slot for resident mode. When omitted, the
-                              worker derives a stable key from namespace, template, and reuse key.
-                            type: string
-                        type: object
                       onDetach:
                         description: OnDetach requests an action allowed by the selected
                           class.
                         enum:
                         - Suspend
                         - Delete
-                        type: string
-                      poolRef:
-                        description: |-
-                          PoolRef references an operator-managed Substrate actor pool for placement,
-                          density tracking, and oversubscription policy.
-                        properties:
-                          name:
-                            description: Name is the pool name.
-                            type: string
-                          namespace:
-                            description: Namespace is the pool namespace. It defaults
-                              to the Task namespace.
-                            type: string
-                        type: object
-                      provider:
-                        description: |-
-                          Provider selects the workspace backend. When omitted, the controller
-                          resolves the configured default workspace provider; the built-in
-                          compatibility default is agent-sandbox.
-                        enum:
-                        - agent-sandbox
-                        - substrate
                         type: string
                       restoreFrom:
                         description: |-
@@ -1220,43 +1154,6 @@ spec:
                         - none
                         - session
                         type: string
-                      snapshot:
-                        description: |-
-                          Snapshot configures explicit provider snapshot restore/checkpoint behavior.
-                          Non-empty settings are currently rejected until provider checkpoint/restore
-                          support is available through Orka.
-                        properties:
-                          checkpointOnRelease:
-                            description: |-
-                              CheckpointOnRelease requests a checkpoint when cleanup releases or retains
-                              the workspace. CheckpointURI must be set when this is true.
-                            type: boolean
-                          checkpointURI:
-                            description: |-
-                              CheckpointURI is a provider-native snapshot URI prefix to write when the
-                              workspace is retained or released.
-                            type: string
-                          restoreURI:
-                            description: |-
-                              RestoreURI is a provider-native snapshot URI prefix to restore before the
-                              workspace command runs.
-                            type: string
-                        type: object
-                      templateRef:
-                        description: |-
-                          TemplateRef references the workspace template to instantiate or reuse.
-                          The template name is required when enabled is true unless the controller
-                          is configured with a provider-specific default template.
-                        properties:
-                          name:
-                            description: Name is the name of the workspace template.
-                            type: string
-                          namespace:
-                            description: |-
-                              Namespace is the namespace of the workspace template and claim.
-                              It defaults to the Task namespace, or the controller namespace when configured.
-                            type: string
-                        type: object
                       workspaceSlot:
                         default: default
                         description: WorkspaceSlot names one independently reusable
@@ -1265,16 +1162,9 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                    required:
+                    - classRef
                     type: object
-                    x-kubernetes-validations:
-                    - message: classRef cannot be combined with legacy enabled, provider,
-                        template, pool, cleanup, boot, snapshot, or hibernation settings
-                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
-                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
-                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
-                        && !has(self.snapshot) && !has(self.hibernation))'
-                    - message: restoreFrom requires classRef
-                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               model:
                 description: |-
@@ -1311,8 +1201,9 @@ spec:
                     description: |-
                       MaxTokens limits the response length. OpenCode validates positive reviewed
                       limits at its runtime-specific admission boundary; existing Agent objects
-                      may retain the legacy zero value.
+                      may retain the legacy zero value, which selects the worker default.
                     format: int32
+                    minimum: 0
                     type: integer
                   name:
                     description: |-
@@ -1416,13 +1307,10 @@ spec:
                   contractVersion:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
-                      types. It may be omitted: the namespace is bound to exactly one
-                      execution mode, so an omitted selector means that mode. An explicit
-                      value must match the namespace mode and, once written, never changes.
-                      runtime.type alone (including opencode, which exists in both protocols)
-                      is never protocol evidence.
+                      types. Only orka.harness.v2 is supported, so an omitted selector means
+                      orka.harness.v2. Once written, the value never changes. runtime.type
+                      alone is never protocol evidence.
                     enum:
-                    - orka.harness.v1
                     - orka.harness.v2
                     type: string
                   defaultAllowBash:
@@ -1467,6 +1355,53 @@ spec:
                     required:
                     - name
                     type: object
+                  toolboxes:
+                    description: |-
+                      Toolboxes lists extra command-line tool images for built-in runtimes.
+                      Each toolbox folder is bound read-only into the runtime Pod at the same
+                      path and its pathEntries are appended, in order, to the agent's PATH.
+                      Nothing from a toolbox runs with elevated permissions. The feature is
+                      off by default and the controller restricts images to allowed registries.
+                    items:
+                      description: |-
+                        AgentToolbox is a container image whose files are added, read-only, to the
+                        runtime Pod so the agent can run the tools inside it.
+                      properties:
+                        image:
+                          description: |-
+                            Image must be a fully qualified reference pinned by digest:
+                            <registry>/<repository>@sha256:<64 hex>.
+                          maxLength: 512
+                          minLength: 1
+                          pattern: ^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$
+                          type: string
+                        mountPath:
+                          description: |-
+                            MountPath is the absolute folder inside the toolbox image that holds the
+                            tools. Orka makes it appear at the same path in the runtime container.
+                            It must be exactly /home/linuxbrew/.linuxbrew or /opt/<name>, where
+                            <name> is not one the runtime images already use.
+                          maxLength: 256
+                          minLength: 5
+                          pattern: ^(/opt/[A-Za-z0-9][A-Za-z0-9._-]{0,127}|/home/linuxbrew/\.linuxbrew)$
+                          type: string
+                        pathEntries:
+                          description: |-
+                            PathEntries are folders relative to MountPath that are appended, in
+                            order, to the agent's PATH. Example: ["bin"].
+                          items:
+                            maxLength: 256
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9._-][A-Za-z0-9._/-]*$
+                            type: string
+                          maxItems: 8
+                          type: array
+                      required:
+                      - image
+                      - mountPath
+                      type: object
+                    maxItems: 4
+                    type: array
                   type:
                     description: Type specifies which built-in CLI runtime to use.
                       Use runtimeRef for admin-registered custom runtimes.
@@ -1477,6 +1412,7 @@ spec:
                     - opencode
                     type: string
                 type: object
+                x-kubernetes-preserve-unknown-fields: true
                 x-kubernetes-validations:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
@@ -1486,6 +1422,9 @@ spec:
                 - message: runtime.contractVersion applies only to built-in runtime
                     types; runtimeRef derives the protocol from the referenced AgentRuntime
                   rule: '!has(self.contractVersion) || has(self.type)'
+                - message: runtime.toolboxes are supported only on built-in runtime
+                    types; external runtimeRef runtimes cannot mount toolboxes
+                  rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)'
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:
@@ -1536,6 +1475,44 @@ spec:
                       type: string
                   type: object
                 type: array
+              soul:
+                description: |-
+                  Soul supplies persistent persona and communication defaults, separate from the role prompt.
+                  Supported by AI workers and built-in harness v2 runtimes, not runtimeRef runtimes.
+                properties:
+                  configMapRef:
+                    description: ConfigMapRef selects non-secret text in the Agent's
+                      namespace.
+                    properties:
+                      key:
+                        description: Key is the key within the ConfigMap
+                        type: string
+                      name:
+                        description: Name is the name of the ConfigMap
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  digest:
+                    description: |-
+                      Digest is the expected SHA-256 digest of the exact UTF-8 source bytes.
+                      Required for ConfigMap sources; optional for inline text.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  inline:
+                    description: Inline is UTF-8 Markdown, limited to 8192 bytes by
+                      the controller.
+                    maxLength: 8192
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: soul must use exactly one of inline or configMapRef
+                  rule: (has(self.inline) && self.inline.size() > 0) != has(self.configMapRef)
+                - message: ConfigMap-backed souls require an expected digest
+                  rule: '!has(self.configMapRef) || (has(self.digest) && self.digest.size()
+                    > 0)'
               systemPrompt:
                 description: SystemPrompt defines the system prompt configuration
                 properties:
@@ -1585,13 +1562,8 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
-            - message: execution.workspace.classRef is only supported on Task specs
-              rule: '!has(self.execution) || !has(self.execution.workspace) || !has(self.execution.workspace.classRef)'
-            - message: opencode orka.harness.v2 runtime does not support spec.systemPrompt
-              rule: '!(has(self.runtime) && has(self.runtime.type) && self.runtime.type
-                == ''opencode'' && has(self.runtime.contractVersion) && self.runtime.contractVersion
-                == ''orka.harness.v2'' && has(self.systemPrompt) && ((has(self.systemPrompt.inline)
-                && self.systemPrompt.inline.size() > 0) || has(self.systemPrompt.configMapRef)))'
+            - message: execution.workspace is only supported on Task specs
+              rule: '!has(self.execution) || !has(self.execution.workspace)'
           status:
             description: AgentStatus defines the observed state of Agent
             properties:

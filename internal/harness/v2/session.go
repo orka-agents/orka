@@ -54,6 +54,10 @@ type RuntimeProfile struct {
 	ProxyCredentialRole      string            `json:"proxyCredentialRole"`
 	ProxyCredentialScope     string            `json:"proxyCredentialScope"`
 	ResourceClass            string            `json:"resourceClass"`
+	// Toolboxes lists the read-only tool images bound into the runtime Pod,
+	// in declared order. An absent list serializes identically to profiles
+	// that predate toolboxes, so their digests are unchanged.
+	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
@@ -101,7 +105,10 @@ func (p RuntimeProfile) Validate() error {
 	if err := validateBoundedString("proxy credential scope", p.ProxyCredentialScope, true, 1024); err != nil {
 		return err
 	}
-	return validateBoundedString("resource class", p.ResourceClass, true, 128)
+	if err := validateBoundedString("resource class", p.ResourceClass, true, 128); err != nil {
+		return err
+	}
+	return ValidateRuntimeToolboxes(p.Toolboxes)
 }
 
 const (

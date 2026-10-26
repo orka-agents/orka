@@ -61,6 +61,7 @@ func TestCheckTaskProgressTool_Parameters(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // One table covers every task progress state.
 func TestCheckTaskProgressTool_Execute(t *testing.T) {
 	newToolCtx := func(fc client.Client) context.Context {
 		tc := &ToolContext{
@@ -115,6 +116,33 @@ func TestCheckTaskProgressTool_Execute(t *testing.T) {
 				}
 				if _, ok := data["duration"]; !ok {
 					t.Error("expected duration to be set for running task with start time")
+				}
+			},
+		},
+		{
+			name: "finished task reports its run time",
+			args: json.RawMessage(`{"name":"done-task"}`),
+			objects: []client.Object{
+				&corev1alpha1.Task{
+					ObjectMeta: metav1.ObjectMeta{Name: "done-task", Namespace: defaultNamespace},
+					Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+					Status: corev1alpha1.TaskStatus{
+						Phase:          corev1alpha1.TaskPhaseSucceeded,
+						StartTime:      &metav1.Time{Time: startTime.Add(-8 * time.Minute)},
+						CompletionTime: &metav1.Time{Time: startTime.Add(-8*time.Minute + 14*time.Second)},
+					},
+				},
+			},
+			checkResult: func(t *testing.T, result string) {
+				var r ChatToolResult
+				if err := json.Unmarshal([]byte(result), &r); err != nil {
+					t.Fatalf("failed to parse result: %v", err)
+				}
+				if !r.Success {
+					t.Fatalf("expected success, got error: %s", r.Error)
+				}
+				if got := r.Data.(map[string]any)["duration"]; got != "14s" {
+					t.Errorf("duration = %v, want 14s", got)
 				}
 			},
 		},

@@ -17,10 +17,6 @@ import (
 )
 
 const (
-	mergeMethodField = "mergeMethod"
-)
-
-const (
 	githubPermissionAdmin    = "admin"
 	githubPermissionMaintain = "maintain"
 	bearerAuthScheme         = "Bearer"

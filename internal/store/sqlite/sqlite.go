@@ -77,6 +77,10 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 		db.Close() //nolint:errcheck
 		return nil, fmt.Errorf("failed to initialize SQLite schema: %w", schemaErr)
 	}
+	if err := synchronizeDatasetMetadata(db); err != nil {
+		db.Close() //nolint:errcheck
+		return nil, err
+	}
 
 	return db, nil
 }
@@ -84,6 +88,7 @@ func newDB(path string, allowMigration bool) (*sql.DB, error) {
 // currentSchemaStatements defines the complete supported SQLite layout.
 func currentSchemaStatements() []string {
 	statements := []string{
+		datasetSchema,
 		`CREATE TABLE IF NOT EXISTS task_data_cleanup_generations (
 			namespace TEXT PRIMARY KEY,
 			generation INTEGER NOT NULL
@@ -192,30 +197,6 @@ func currentSchemaStatements() []string {
 			ON session_messages(namespace, message_id) WHERE message_id <> ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_session_messages_sort_order
 			ON session_messages(namespace, session_name, sort_order) WHERE sort_order > 0`,
-		`CREATE TABLE IF NOT EXISTS runtime_sessions (
-			id              TEXT NOT NULL,
-			namespace       TEXT NOT NULL,
-			session_name    TEXT NOT NULL,
-			active_task     TEXT NOT NULL DEFAULT '',
-			agent_name      TEXT NOT NULL DEFAULT '',
-			provider        TEXT NOT NULL,
-			state           TEXT NOT NULL,
-			cleanup_policy  TEXT NOT NULL,
-			idle_timeout_ns INTEGER NOT NULL DEFAULT 0,
-			max_lifetime_ns INTEGER NOT NULL DEFAULT 0,
-			created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (namespace, id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_namespace_updated
-			ON runtime_sessions(namespace, updated_at DESC, id ASC)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_owner
-			ON runtime_sessions(namespace, session_name, provider, state, updated_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_active_task
-			ON runtime_sessions(namespace, active_task, updated_at DESC)
-			WHERE active_task <> ''`,
-		`CREATE INDEX IF NOT EXISTS idx_runtime_sessions_cleanup
-			ON runtime_sessions(namespace, state, cleanup_policy, updated_at ASC)`,
 		`CREATE TABLE IF NOT EXISTS plan_states (
 			namespace     TEXT NOT NULL,
 			task_name     TEXT NOT NULL,
@@ -1078,6 +1059,9 @@ func (s *Store) close() error {
 	}
 	return lockErr
 }
+
+// Close releases the database and process lock, including a failed bootstrap.
+func (s *Store) Close() error { return s.close() }
 
 // updateDBSizeMetric reads the database file size and updates the gauge.
 func (s *Store) updateDBSizeMetric() {

@@ -84,28 +84,14 @@ export const workspaceConfigSchema = z.object({
   }
 })
 
-// Legacy harness v1 workspace preserved at spec.agentRuntime.workspace; a
-// read-only compatibility surface for stored v1 Tasks.
-const legacyAgentWorkspaceConfigSchema = z.object({
-  gitRepo: z.string().optional(),
-  branch: z.string().optional(),
-  ref: z.string().optional(),
-  gitSecretRef: z.object({ name: z.string().optional() }).optional(),
-  subPath: z.string().optional(),
-  forkRepo: z.string().optional(),
-  prBaseBranch: z.string().optional(),
-  pushBranch: z.string().optional(),
-})
-
 export const agentRuntimeSpecSchema = z.object({
-  workspace: legacyAgentWorkspaceConfigSchema.optional(),
   maxTurns: z.number().optional(),
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
   allowBash: z.boolean().optional(),
 }).strict()
 
-export const harnessContractVersionSchema = z.enum(['orka.harness.v1', 'orka.harness.v2'])
+export const harnessContractVersionSchema = z.literal('orka.harness.v2')
 
 const taskExecutionStateSchema = z.enum([
   'Queued',
@@ -268,22 +254,11 @@ export const taskSpecSchema = z.object({
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
   workspace: workspaceConfigSchema.optional(),
-})
-
-// Harness v1 compatibility status surface (non-secret routing metadata only).
-export const harnessRuntimeStatusSchema = z.object({
-  runtimeRefName: z.string().optional(),
-  runtimeName: z.string().optional(),
-  contractVersion: z.string().optional(),
-  endpoint: z.string().optional(),
-  runtimeGeneration: z.number().optional(),
-  authRefName: z.string().optional(),
-  authRefField: z.string().optional(),
-  authRefResourceVersion: z.string().optional(),
-  state: taskExecutionStateSchema.optional(),
-  outcome: taskExecutionOutcomeSchema.optional(),
-  reason: z.string().optional(),
-  message: z.string().optional(),
+  // Cron scheduling: a scheduled Task creates one child Task per tick.
+  schedule: z.string().optional(),
+  suspend: z.boolean().optional(),
+  timeZone: z.string().optional(),
+  concurrencyPolicy: z.string().optional(),
 })
 
 // The authoritative execution route. Snapshot metadata and abbreviated
@@ -291,7 +266,7 @@ export const harnessRuntimeStatusSchema = z.object({
 const agentExecutionBindingSchema = z.object({
   schemaVersion: z.number(),
   contractVersion: harnessContractVersionSchema,
-  backend: z.enum(['harness-wrapper', 'runtime-pool', 'external-endpoint']),
+  backend: z.enum(['runtime-pool', 'external-endpoint']),
   bindingDigest: z.string(),
   task: z.object({
     namespaceUID: z.string(),
@@ -320,7 +295,12 @@ const agentExecutionBindingSchema = z.object({
   boundAt: z.string(),
 })
 
-export const taskStatusSchema = z.object({
+export const taskStatusSchema = z.preprocess((status, context) => {
+  if (status && typeof status === 'object' && 'harnessRuntime' in status) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'status.harnessRuntime is no longer supported' })
+  }
+  return status
+}, z.object({
   phase: taskPhaseSchema.optional(),
   startTime: z.string().optional(),
   completionTime: z.string().optional(),
@@ -330,13 +310,22 @@ export const taskStatusSchema = z.object({
   resultRef: resultRefSchema.optional(),
   execution: taskExecutionStatusSchema.optional(),
   delivery: taskDeliveryStatusSchema.optional(),
-  harnessRuntime: harnessRuntimeStatusSchema.optional(),
   agentExecutionBinding: agentExecutionBindingSchema.optional(),
   webhookDelivered: z.boolean().optional(),
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
   conditions: z.array(conditionSchema).optional(),
   executionWorkspace: executionWorkspaceStatusSchema.optional(),
+  lastScheduleTime: z.string().optional(),
+  nextScheduleTime: z.string().optional(),
+}))
+
+export const ownerReferenceSchema = z.object({
+  apiVersion: z.string().optional(),
+  kind: z.string(),
+  name: z.string(),
+  uid: z.string().optional(),
+  controller: z.boolean().optional(),
 })
 
 export const k8sMetadataSchema = z.object({
@@ -344,8 +333,11 @@ export const k8sMetadataSchema = z.object({
   namespace: z.string().optional(),
   uid: z.string().optional(),
   creationTimestamp: z.string().optional(),
+  // Set once a delete is accepted; the object lingers until finalizers finish.
+  deletionTimestamp: z.string().optional(),
   labels: z.record(z.string()).optional(),
   annotations: z.record(z.string()).optional(),
+  ownerReferences: z.array(ownerReferenceSchema).optional(),
 })
 
 export const planStateSchema = z.object({

@@ -39,7 +39,7 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 		if runtimeSessionCleanupCompleteForUID(task, taskUID) {
 			continue
 		}
-		binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+		binding := executionBinding(task)
 		// Standalone Tasks freeze the profile in AgentExecutionBinding. The
 		// additional session profile digest is populated for Session reuse.
 		sessionProfileMatches := execution.RuntimeSessionProfileDigest == active.ProfileDigest ||

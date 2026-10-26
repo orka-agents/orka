@@ -92,64 +92,8 @@ spec:
                     maximum: 1000
                     minimum: 1
                     type: integer
-                  workspace:
-                    description: |-
-                      Workspace is the legacy harness v1 agent workspace configuration at its
-                      historical JSON path. It is a preserved compatibility read surface for
-                      stored v1 Tasks only: it can never be introduced or changed, and it is
-                      not an authority surface for new work.
-                    properties:
-                      branch:
-                        description: Branch is the git branch to checkout.
-                        type: string
-                      forkRepo:
-                        description: ForkRepo is the writable fork repository URL
-                          for pushing changes.
-                        type: string
-                      gitRepo:
-                        description: GitRepo is the repository URL to clone.
-                        type: string
-                      gitSecretRef:
-                        description: |-
-                          GitSecretRef references a Secret containing git credentials. Adopted
-                          legacy bindings freeze the exact Secret identity; new bindings reject it.
-                        properties:
-                          name:
-                            default: ""
-                            description: |-
-                              Name of the referent.
-                              This field is effectively required, but due to backwards compatibility is
-                              allowed to be empty. Instances of this type with an empty value here are
-                              almost certainly wrong.
-                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                            type: string
-                        type: object
-                        x-kubernetes-map-type: atomic
-                      prBaseBranch:
-                        description: PRBaseBranch is the upstream branch to target
-                          for pull requests.
-                        type: string
-                      pushBranch:
-                        description: |-
-                          PushBranch is the remote branch name to push changes to after the agent
-                          completes.
-                        type: string
-                      ref:
-                        description: Ref is a specific git ref (commit SHA, tag) to
-                          checkout.
-                        type: string
-                      subPath:
-                        description: SubPath is a subdirectory within the repo to
-                          use as workspace root.
-                        type: string
-                    type: object
                 type: object
-                x-kubernetes-validations:
-                - message: legacy agentRuntime.workspace is a preserved harness v1
-                    compatibility surface; new Tasks must use spec.workspace
-                  optionalOldSelf: true
-                  rule: '!has(self.workspace) || (oldSelf.hasValue() && has(oldSelf.value().workspace)
-                    && self.workspace == oldSelf.value().workspace)'
+                x-kubernetes-preserve-unknown-fields: true
               ai:
                 description: AI contains AI-specific configuration (when type is "ai")
                 properties:
@@ -1380,24 +1324,13 @@ spec:
                     type: array
                   workspace:
                     description: |-
-                      Workspace requests an execution workspace. Worker-backed Task types use
-                      it directly. ACP agent Tasks may bind a workspace-provider-backed
-                      RuntimeSession through it (a provider/templateRef request, or a classRef
-                      with the workspace provider API enabled); these dispatch paths are
-                      flag-gated behind --acp-workspace-dispatch-enabled plus the matching
-                      provider flag and fail closed otherwise. Clean-room publication remains
-                      owned by RuntimeSession lifecycle.
+                      Workspace selects an ExecutionWorkspaceClass for an ACP agent Task.
+                      Omit workspace for ordinary execution. Workspace dispatch requires the
+                      workspace provider API, ACP workspace dispatch, and an installed provider.
                     properties:
-                      boot:
-                        description: |-
-                          Boot asks providers that support it to boot the workspace workload from scratch
-                          instead of resuming from the provider's default snapshot. Currently supported
-                          by the Substrate provider.
-                        type: boolean
                       classRef:
-                        description: |-
-                          ClassRef selects an immutable ExecutionWorkspaceClass in the Task namespace. Setting
-                          classRef implicitly enables the controller-first workspace path.
+                        description: ClassRef selects an immutable ExecutionWorkspaceClass
+                          in the Task namespace.
                         properties:
                           name:
                             description: Name is the class name.
@@ -1406,67 +1339,12 @@ spec:
                         required:
                         - name
                         type: object
-                      cleanupPolicy:
-                        description: |-
-                          CleanupPolicy controls whether the workspace is deleted or retained after use.
-                          Defaults to delete when omitted.
-                        enum:
-                        - delete
-                        - retain
-                        type: string
-                      enabled:
-                        default: false
-                        description: Enabled requests use of a durable workspace for
-                          the task execution.
-                        type: boolean
-                      hibernation:
-                        description: |-
-                          Hibernation configures process lifetime inside the workspace. Resident
-                          mode is currently rejected until the worker protocol can report per-turn
-                          completion separately from resident process lifetime.
-                        properties:
-                          processMode:
-                            description: |-
-                              ProcessMode controls whether each turn starts fresh or reuses a resident
-                              process. Defaults to fresh.
-                            enum:
-                            - fresh
-                            - resident
-                            type: string
-                          residentKey:
-                            description: |-
-                              ResidentKey selects the process slot for resident mode. When omitted, the
-                              worker derives a stable key from namespace, template, and reuse key.
-                            type: string
-                        type: object
                       onDetach:
                         description: OnDetach requests an action allowed by the selected
                           class.
                         enum:
                         - Suspend
                         - Delete
-                        type: string
-                      poolRef:
-                        description: |-
-                          PoolRef references an operator-managed Substrate actor pool for placement,
-                          density tracking, and oversubscription policy.
-                        properties:
-                          name:
-                            description: Name is the pool name.
-                            type: string
-                          namespace:
-                            description: Namespace is the pool namespace. It defaults
-                              to the Task namespace.
-                            type: string
-                        type: object
-                      provider:
-                        description: |-
-                          Provider selects the workspace backend. When omitted, the controller
-                          resolves the configured default workspace provider; the built-in
-                          compatibility default is agent-sandbox.
-                        enum:
-                        - agent-sandbox
-                        - substrate
                         type: string
                       restoreFrom:
                         description: |-
@@ -1506,43 +1384,6 @@ spec:
                         - none
                         - session
                         type: string
-                      snapshot:
-                        description: |-
-                          Snapshot configures explicit provider snapshot restore/checkpoint behavior.
-                          Non-empty settings are currently rejected until provider checkpoint/restore
-                          support is available through Orka.
-                        properties:
-                          checkpointOnRelease:
-                            description: |-
-                              CheckpointOnRelease requests a checkpoint when cleanup releases or retains
-                              the workspace. CheckpointURI must be set when this is true.
-                            type: boolean
-                          checkpointURI:
-                            description: |-
-                              CheckpointURI is a provider-native snapshot URI prefix to write when the
-                              workspace is retained or released.
-                            type: string
-                          restoreURI:
-                            description: |-
-                              RestoreURI is a provider-native snapshot URI prefix to restore before the
-                              workspace command runs.
-                            type: string
-                        type: object
-                      templateRef:
-                        description: |-
-                          TemplateRef references the workspace template to instantiate or reuse.
-                          The template name is required when enabled is true unless the controller
-                          is configured with a provider-specific default template.
-                        properties:
-                          name:
-                            description: Name is the name of the workspace template.
-                            type: string
-                          namespace:
-                            description: |-
-                              Namespace is the namespace of the workspace template and claim.
-                              It defaults to the Task namespace, or the controller namespace when configured.
-                            type: string
-                        type: object
                       workspaceSlot:
                         default: default
                         description: WorkspaceSlot names one independently reusable
@@ -1551,16 +1392,9 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                    required:
+                    - classRef
                     type: object
-                    x-kubernetes-validations:
-                    - message: classRef cannot be combined with legacy enabled, provider,
-                        template, pool, cleanup, boot, snapshot, or hibernation settings
-                      rule: '!has(self.classRef) || (!has(self.provider) && !has(self.templateRef)
-                        && !has(self.poolRef) && (!has(self.enabled) || !self.enabled)
-                        && !has(self.cleanupPolicy) && (!has(self.boot) || !self.boot)
-                        && !has(self.snapshot) && !has(self.hibernation))'
-                    - message: restoreFrom requires classRef
-                      rule: '!has(self.restoreFrom) || has(self.classRef)'
                 type: object
               failedRunsHistoryLimit:
                 default: 1
@@ -2184,8 +2018,13 @@ spec:
               rule: self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch)
                 || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size()
                 == 0
+            - message: execution.workspace is only supported for agent Tasks
+              rule: '!has(self.execution) || !has(self.execution.workspace) || self.type
+                == ''agent'''
           status:
-            description: TaskStatus defines the observed state of Task
+            description: |-
+              TaskStatus defines the observed state of Task
+              Unknown fields reach admission so removed fields are rejected.
             properties:
               agentExecutionBinding:
                 description: |-
@@ -2222,7 +2061,6 @@ spec:
                     description: AgentExecutionBackend identifies the isolated execution
                       dispatcher backend.
                     enum:
-                    - harness-wrapper
                     - runtime-pool
                     - external-endpoint
                     type: string
@@ -2240,7 +2078,6 @@ spec:
                     description: ContractVersion is the frozen execution protocol
                       for the Task lifetime.
                     enum:
-                    - orka.harness.v1
                     - orka.harness.v2
                     type: string
                   runtimeProfileDigest:
@@ -2344,14 +2181,6 @@ spec:
                 - snapshot
                 - task
                 type: object
-                x-kubernetes-validations:
-                - message: the harness-wrapper backend requires an orka.harness.v1
-                    binding
-                  rule: self.backend != 'harness-wrapper' || self.contractVersion
-                    == 'orka.harness.v1'
-                - message: the runtime-pool backend requires an orka.harness.v2 binding
-                  rule: self.backend != 'runtime-pool' || self.contractVersion ==
-                    'orka.harness.v2'
               attempts:
                 description: Attempts is the number of attempts made
                 format: int32
@@ -3088,9 +2917,8 @@ spec:
                     type: object
                   provider:
                     description: Provider is the resolved legacy workspace backend.
-                    enum:
-                    - agent-sandbox
-                    - substrate
+                    maxLength: 253
+                    minLength: 1
                     type: string
                   reason:
                     description: Reason is the provider-neutral lifecycle reason.
@@ -3155,143 +2983,6 @@ spec:
                     - name
                     type: object
                 type: object
-              harnessRuntime:
-                description: |-
-                  HarnessRuntime records the controller-resolved harness v1 runtime target
-                  for an in-flight agent turn. It intentionally stores only non-secret
-                  routing metadata and Secret references, never bearer values. Compatibility
-                  surface for harness v1 bindings.
-                properties:
-                  attempt:
-                    description: Attempt is the durable harness v1 attempt number.
-                    format: int32
-                    minimum: 1
-                    type: integer
-                  authRefField:
-                    description: AuthRefField is the Secret data field selected when
-                      the turn started.
-                    type: string
-                  authRefName:
-                    description: AuthRefName is the Secret name selected when the
-                      turn started.
-                    type: string
-                  authRefResourceVersion:
-                    description: |-
-                      AuthRefResourceVersion is the auth Secret resourceVersion validated
-                      before starting the turn.
-                    type: string
-                  cancelRequestedAt:
-                    description: |-
-                      CancelRequestedAt records a durable cancellation request. Cancellation
-                      remains nonterminal until a terminal frame or ledger receipt is observed.
-                    format: date-time
-                    type: string
-                  contractVersion:
-                    description: ContractVersion is the Orka harness contract version
-                      used for the turn.
-                    type: string
-                  controllerEpoch:
-                    description: ControllerEpoch records the fenced controller epoch
-                      driving the attempt.
-                    format: int64
-                    minimum: 0
-                    type: integer
-                  endpoint:
-                    description: Endpoint is the non-secret harness base URL selected
-                      when the turn started.
-                    type: string
-                  lastEventSeq:
-                    description: LastEventSeq is the highest durably mapped harness
-                      frame sequence.
-                    format: int64
-                    minimum: 0
-                    type: integer
-                  lastTransitionTime:
-                    description: |-
-                      LastTransitionTime is the last durable v1 attempt transition projected to
-                      the Task.
-                    format: date-time
-                    type: string
-                  message:
-                    description: Message is bounded, sanitized execution context.
-                    maxLength: 1024
-                    type: string
-                  outcome:
-                    description: Outcome is set only for a terminal harness v1 attempt.
-                    enum:
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                  reason:
-                    description: Reason is a bounded machine-readable terminal reason
-                      code.
-                    maxLength: 256
-                    type: string
-                  requestDigest:
-                    description: |-
-                      RequestDigest binds the canonical StartTurn request admitted by the
-                      durable wrapper ledger.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  runtimeGeneration:
-                    description: RuntimeGeneration is the AgentRuntime generation
-                      selected when the turn started.
-                    format: int64
-                    type: integer
-                  runtimeName:
-                    description: |-
-                      RuntimeName is the runtime name advertised by the harness capabilities
-                      and sent in turn metadata.
-                    type: string
-                  runtimeRefName:
-                    description: |-
-                      RuntimeRefName is the AgentRuntime name for custom runtimeRef turns.
-                      Empty means built-in CLI wrapper.
-                    type: string
-                  runtimeSessionID:
-                    description: RuntimeSessionID is the deterministic, non-secret
-                      v1 runtime-session identity.
-                    type: string
-                  state:
-                    description: State is the durable harness v1 attempt state projected
-                      for operators.
-                    enum:
-                    - Queued
-                    - Reserved
-                    - SessionStarting
-                    - Planned
-                    - Submitting
-                    - SubmittedUnknown
-                    - Accepted
-                    - Running
-                    - Settling
-                    - Succeeded
-                    - Failed
-                    - Cancelled
-                    - OutcomeUnknown
-                    type: string
-                  terminalReceiptDigest:
-                    description: TerminalReceiptDigest identifies the authoritative
-                      terminal or unknown receipt.
-                    pattern: ^sha256:[a-f0-9]{64}$
-                    type: string
-                  turnID:
-                    description: TurnID is the deterministic, non-secret harness turn
-                      identity.
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: terminal harness state requires an outcome
-                  rule: '!has(self.state) || !(self.state in [''Succeeded'', ''Failed'',
-                    ''Cancelled'', ''OutcomeUnknown'']) || has(self.outcome)'
-                - message: harness outcome requires a terminal state
-                  rule: '!has(self.outcome) || (has(self.state) && self.state in [''Succeeded'',
-                    ''Failed'', ''Cancelled'', ''OutcomeUnknown''])'
-                - message: OutcomeUnknown harness state requires OutcomeUnknown outcome
-                  rule: '!has(self.state) || self.state != ''OutcomeUnknown'' || (has(self.outcome)
-                    && self.outcome == ''OutcomeUnknown'')'
               iteration:
                 description: |-
                   Iteration is the current autonomous loop iteration (0-based).
@@ -3345,6 +3036,55 @@ spec:
                 required:
                 - available
                 type: object
+              soulBinding:
+                description: |-
+                  SoulBinding pins an AI Task's resolved persona and role prompt. It contains
+                  digests only, never prompt text. Retries reject configuration drift.
+                properties:
+                  agentGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  agentUID:
+                    description: AgentUID and AgentGeneration identify the exact Agent
+                      revision.
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                  inputsDigest:
+                    description: |-
+                      InputsDigest identifies the Task execution inputs, the spec without its
+                      control fields, that the binding froze. After the first binding it,
+                      rather than TaskGeneration, proves the inputs are unchanged, so a
+                      control-field edit such as spec.suspend keeps the binding valid.
+                      Bindings recorded before this field existed keep the generation check.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  promptDigest:
+                    description: PromptDigest identifies the composed role and persona
+                      prompt.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  soulDigest:
+                    description: SoulDigest identifies the exact persona source bytes.
+                    maxLength: 71
+                    pattern: ^sha256:[0-9a-f]{64}$
+                    type: string
+                  taskGeneration:
+                    description: TaskGeneration is the Task spec generation whose
+                      prompt was resolved.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                required:
+                - agentGeneration
+                - agentUID
+                - promptDigest
+                - soulDigest
+                - taskGeneration
+                type: object
               startTime:
                 description: StartTime is when the task started running
                 format: date-time
@@ -3354,27 +3094,69 @@ spec:
                   called
                 type: boolean
             type: object
+            x-kubernetes-preserve-unknown-fields: true
             x-kubernetes-validations:
             - message: executionOutcome is immutable once recorded
               rule: '!has(oldSelf.executionOutcome) || self.executionOutcome == oldSelf.executionOutcome'
             - message: agentExecutionBinding is write-once and immutable
               rule: '!has(oldSelf.agentExecutionBinding) || (has(self.agentExecutionBinding)
                 && self.agentExecutionBinding == oldSelf.agentExecutionBinding)'
-            - message: a v1-bound Task cannot acquire new v2 execution or delivery
-                state
-              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
-                != ''orka.harness.v1'' || ((!has(self.execution) || (has(oldSelf.execution)
-                && self.execution == oldSelf.execution)) && (!has(self.delivery) ||
-                (has(oldSelf.delivery) && self.delivery == oldSelf.delivery)))'
-            - message: a v2-bound Task cannot acquire new v1 harness state
-              rule: '!has(self.agentExecutionBinding) || self.agentExecutionBinding.contractVersion
-                != ''orka.harness.v2'' || !has(self.harnessRuntime) || (has(oldSelf.harnessRuntime)
-                && self.harnessRuntime == oldSelf.harnessRuntime)'
+            - message: soulBinding is write-once and immutable
+              rule: '!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding
+                == oldSelf.soulBinding)'
         type: object
         x-kubernetes-validations:
         - message: Task spec is immutable after execution authority is recorded
-          rule: '!has(oldSelf.status) || (!has(oldSelf.status.agentExecutionBinding)
-            || self.spec == oldSelf.spec)'
+          rule: '!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding)
+            && !has(oldSelf.status.soulBinding)) || self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding)
+            && (has(self.spec.type) == has(oldSelf.spec.type) && (!has(self.spec.type)
+            || self.spec.type == oldSelf.spec.type) && has(self.spec.image) == has(oldSelf.spec.image)
+            && (!has(self.spec.image) || self.spec.image == oldSelf.spec.image) &&
+            has(self.spec.command) == has(oldSelf.spec.command) && (!has(self.spec.command)
+            || self.spec.command == oldSelf.spec.command) && has(self.spec.args) ==
+            has(oldSelf.spec.args) && (!has(self.spec.args) || self.spec.args == oldSelf.spec.args)
+            && has(self.spec.env) == has(oldSelf.spec.env) && (!has(self.spec.env)
+            || self.spec.env == oldSelf.spec.env) && has(self.spec.timeout) == has(oldSelf.spec.timeout)
+            && (!has(self.spec.timeout) || self.spec.timeout == oldSelf.spec.timeout)
+            && has(self.spec.priority) == has(oldSelf.spec.priority) && (!has(self.spec.priority)
+            || self.spec.priority == oldSelf.spec.priority) && has(self.spec.retryPolicy)
+            == has(oldSelf.spec.retryPolicy) && (!has(self.spec.retryPolicy) || self.spec.retryPolicy
+            == oldSelf.spec.retryPolicy) && has(self.spec.webhookURL) == has(oldSelf.spec.webhookURL)
+            && (!has(self.spec.webhookURL) || self.spec.webhookURL == oldSelf.spec.webhookURL)
+            && has(self.spec.secretRef) == has(oldSelf.spec.secretRef) && (!has(self.spec.secretRef)
+            || self.spec.secretRef == oldSelf.spec.secretRef) && has(self.spec.sessionRef)
+            == has(oldSelf.spec.sessionRef) && (!has(self.spec.sessionRef) || self.spec.sessionRef
+            == oldSelf.spec.sessionRef) && has(self.spec.resources) == has(oldSelf.spec.resources)
+            && (!has(self.spec.resources) || self.spec.resources == oldSelf.spec.resources)
+            && has(self.spec.execution) == has(oldSelf.spec.execution) && (!has(self.spec.execution)
+            || self.spec.execution == oldSelf.spec.execution) && has(self.spec.schedule)
+            == has(oldSelf.spec.schedule) && (!has(self.spec.schedule) || self.spec.schedule
+            == oldSelf.spec.schedule) && has(self.spec.timeZone) == has(oldSelf.spec.timeZone)
+            && (!has(self.spec.timeZone) || self.spec.timeZone == oldSelf.spec.timeZone)
+            && has(self.spec.concurrencyPolicy) == has(oldSelf.spec.concurrencyPolicy)
+            && (!has(self.spec.concurrencyPolicy) || self.spec.concurrencyPolicy ==
+            oldSelf.spec.concurrencyPolicy) && has(self.spec.startingDeadlineSeconds)
+            == has(oldSelf.spec.startingDeadlineSeconds) && (!has(self.spec.startingDeadlineSeconds)
+            || self.spec.startingDeadlineSeconds == oldSelf.spec.startingDeadlineSeconds)
+            && has(self.spec.successfulRunsHistoryLimit) == has(oldSelf.spec.successfulRunsHistoryLimit)
+            && (!has(self.spec.successfulRunsHistoryLimit) || self.spec.successfulRunsHistoryLimit
+            == oldSelf.spec.successfulRunsHistoryLimit) && has(self.spec.failedRunsHistoryLimit)
+            == has(oldSelf.spec.failedRunsHistoryLimit) && (!has(self.spec.failedRunsHistoryLimit)
+            || self.spec.failedRunsHistoryLimit == oldSelf.spec.failedRunsHistoryLimit)
+            && has(self.spec.ai) == has(oldSelf.spec.ai) && (!has(self.spec.ai) ||
+            self.spec.ai == oldSelf.spec.ai) && has(self.spec.agentRef) == has(oldSelf.spec.agentRef)
+            && (!has(self.spec.agentRef) || self.spec.agentRef == oldSelf.spec.agentRef)
+            && has(self.spec.prompt) == has(oldSelf.spec.prompt) && (!has(self.spec.prompt)
+            || self.spec.prompt == oldSelf.spec.prompt) && has(self.spec.agentRuntime)
+            == has(oldSelf.spec.agentRuntime) && (!has(self.spec.agentRuntime) ||
+            self.spec.agentRuntime == oldSelf.spec.agentRuntime) && has(self.spec.workspace)
+            == has(oldSelf.spec.workspace) && (!has(self.spec.workspace) || self.spec.workspace
+            == oldSelf.spec.workspace) && has(self.spec.priorTaskRef) == has(oldSelf.spec.priorTaskRef)
+            && (!has(self.spec.priorTaskRef) || self.spec.priorTaskRef == oldSelf.spec.priorTaskRef)
+            && has(self.spec.requestedBy) == has(oldSelf.spec.requestedBy) && (!has(self.spec.requestedBy)
+            || self.spec.requestedBy == oldSelf.spec.requestedBy) && has(self.spec.transaction)
+            == has(oldSelf.spec.transaction) && (!has(self.spec.transaction) || self.spec.transaction
+            == oldSelf.spec.transaction))))'
     selectableFields:
     - jsonPath: .spec.sessionRef.name
     served: true

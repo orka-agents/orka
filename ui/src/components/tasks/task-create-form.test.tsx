@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@/test/test-utils'
+import { render, screen, waitFor, fireEvent, within } from '@/test/test-utils'
 import { act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
@@ -442,20 +442,26 @@ describe('TaskCreateForm', () => {
       }),
     )
     const user = userEvent.setup()
-    render(<TaskCreateForm />)
+    const { unmount } = render(<TaskCreateForm />)
 
     // Configure the inline provider/model first, as if no Agent were going to be used.
-    fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI provider' }), { button: 0, pointerId: 1, pointerType: 'mouse' })
-    fireEvent.click(await screen.findByRole('option', { name: 'OpenAI' }))
-    await user.type(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'gpt-5')
+    const enterInlineProvider = async () => {
+      fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI provider' }), { button: 0, pointerId: 1, pointerType: 'mouse' })
+      fireEvent.click(await screen.findByRole('option', { name: 'OpenAI' }))
+      await user.type(screen.getByPlaceholderText('claude-sonnet-4-20250514'), 'gpt-5')
+    }
+    await enterInlineProvider()
 
-    const agentTrigger = await screen.findByRole('combobox', { name: 'AI agent' })
-    await waitFor(() => expect(agentTrigger).not.toBeDisabled())
-    fireEvent.pointerDown(agentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
-    fireEvent.click(await screen.findByRole('option', { name: /native-agent/ }))
-    await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
+    const pickAgent = async () => {
+      const agentTrigger = await screen.findByRole('combobox', { name: 'AI agent' })
+      await waitFor(() => expect(agentTrigger).not.toBeDisabled())
+      fireEvent.pointerDown(agentTrigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+      fireEvent.click(await screen.findByRole('option', { name: /native-agent/ }))
+      await waitFor(() => expect(screen.getByTestId('ai-agent-info-card')).toBeInTheDocument())
+    }
+    await pickAgent()
 
-    const disclosure = screen.getByRole('button', { name: /Provider \/ model overrides/ })
+    let disclosure = screen.getByRole('button', { name: /Provider \/ model overrides/ })
     expect(disclosure).toHaveAttribute('aria-expanded', 'false')
     expect(disclosure).toHaveAttribute('aria-controls', 'ai-model-overrides')
     expect(document.getElementById('ai-model-overrides')).toBeNull()
@@ -468,6 +474,17 @@ describe('TaskCreateForm', () => {
     expect(submitted[0]).toMatchObject({ agentRef: { name: 'native-agent' }, ai: { prompt: 'Summarize' } })
     expect(submitted[0].ai).not.toHaveProperty('provider')
     expect(submitted[0].ai).not.toHaveProperty('model')
+
+    // A created task ends the form (it navigates away), so the re-entered
+    // overrides are submitted from a fresh form.
+    unmount()
+    useStateTypeOverride = 'ai'
+    render(<TaskCreateForm />)
+    await enterInlineProvider()
+    await pickAgent()
+    await user.type(screen.getByPlaceholderText('my-task'), 'ai-task')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Summarize')
+    disclosure = screen.getByRole('button', { name: /Provider \/ model overrides/ })
 
     // Overrides re-entered after opening the disclosure are sent.
     await user.click(disclosure)
@@ -989,7 +1006,7 @@ describe('TaskCreateForm', () => {
     })
     expect(screen.getByText('anthropic')).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet')).toBeInTheDocument()
-    expect(screen.getByText('codex ACP')).toBeInTheDocument()
+    expect(screen.getByText('Codex ACP')).toBeInTheDocument()
     expect(screen.getByText('Coordination')).toBeInTheDocument()
     expect(screen.getByText('2 tools')).toBeInTheDocument()
   })
@@ -1091,7 +1108,7 @@ describe('TaskCreateForm', () => {
     expect(toast.success).not.toHaveBeenCalled()
   })
 
-  it('submits a harness-v1 runtimeRef Agent with an explicit empty allowlist', async () => {
+  it('rejects a harness-v1 runtimeRef Agent before creating a Task', async () => {
     useStateTypeOverride = 'agent'
     let submitted: any
     server.use(
@@ -1120,11 +1137,11 @@ describe('TaskCreateForm', () => {
     fireEvent.click(await screen.findByRole('option', { name: /external-agent/ }))
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
-    expect(submitted).toMatchObject({
-      agentRef: { name: 'external-agent' },
-      agentRuntime: { allowedTools: [] },
-    })
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      expect.stringContaining('orka.harness.v2'),
+    ))
+    expect(submitted).toBeUndefined()
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -1194,5 +1211,198 @@ describe('TaskCreateForm', () => {
     act(() => useUIStore.setState({ namespace: 'other' }))
     await waitFor(() => expect(screen.queryByTestId('agent-info-card')).not.toBeInTheDocument())
     expect(trigger).toHaveTextContent('Select an agent')
+  })
+
+  it('sends a single create request when the form is submitted twice in a row', async () => {
+    let posts = 0
+    server.use(
+      http.post('/api/v1/tasks', async () => {
+        posts += 1
+        await new Promise((r) => setTimeout(r, 20))
+        return HttpResponse.json({ metadata: { name: 'once', namespace: 'default' }, spec: { type: 'container' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'once')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+
+    // Two submits before React re-renders model a double click that beats
+    // the isPending-driven disabled state.
+    const form = screen.getByRole('button', { name: 'Create Task' }).closest('form')!
+    fireEvent.submit(form)
+    fireEvent.submit(form)
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(posts).toBe(1)
+    expect(toast.error).not.toHaveBeenCalled()
+  })
+
+  it('explains an invalid name inline instead of sending it', async () => {
+    let posted = false
+    server.use(
+      http.post('/api/v1/tasks', () => {
+        posted = true
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    const nameInput = screen.getByLabelText('Name')
+    await user.type(nameInput, 'My_Task')
+    // Not flagged mid-typing; flagged once the field is left.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    expect(screen.getByRole('alert')).toHaveTextContent('Use lowercase letters, numbers, "-", or "."')
+    expect(nameInput).toHaveAttribute('aria-invalid', 'true')
+
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(posted).toBe(false)
+    expect(toast.error).not.toHaveBeenCalled()
+
+    await user.clear(nameInput)
+    await user.type(nameInput, 'my-task')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('rejects a name longer than 253 characters', async () => {
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'a'.repeat(254) } })
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Name must be at most 253 characters.')
+  })
+
+  it('reveals collapsed Advanced Options when a hidden value is invalid', async () => {
+    let posted = false
+    server.use(
+      http.post('/api/v1/tasks', () => {
+        posted = true
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'prio-task')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.type(screen.getByLabelText('Priority'), '2000')
+    await user.type(screen.getByLabelText('Timeout'), '30')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    expect(screen.queryByLabelText('Priority')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(posted).toBe(false)
+    expect(screen.getByRole('button', { name: /Advanced Options/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByLabelText('Priority')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Priority must be a whole number from 0 to 1000.')).toBeInTheDocument()
+    expect(screen.getByText('Timeout must be a duration such as 90s, 30m, or 1h30m.')).toBeInTheDocument()
+  })
+
+  it.each(['0', '0s', '0h0m'])('rejects a zero timeout (%s) inline instead of creating a task that times out at once', async (zero) => {
+    let posted = false
+    server.use(
+      http.post('/api/v1/tasks', () => {
+        posted = true
+        return HttpResponse.json({}, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'zero-timeout')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.type(screen.getByLabelText('Timeout'), zero)
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(posted).toBe(false)
+    expect(screen.getByLabelText('Timeout')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByRole('alert')).toHaveTextContent('Timeout must be greater than zero, such as 90s, 30m, or 1h30m.')
+  })
+
+  it('submits valid advanced values as a number and a duration', async () => {
+    let submitted: Record<string, unknown> | undefined
+    server.use(
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ metadata: { name: 'prio-task', namespace: 'default' }, spec: { type: 'container' } }, { status: 201 })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'prio-task')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.type(screen.getByLabelText('Priority'), '750')
+    await user.type(screen.getByLabelText('Timeout'), '1h30m')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
+    expect(submitted?.priority).toBe(750)
+    expect(submitted?.timeout).toBe('1h30m')
+  })
+
+  it('does not repeat the server prefix in the create failure toast', async () => {
+    server.use(
+      http.post('/api/v1/tasks', () =>
+        HttpResponse.json({ error: { code: 500, message: 'failed to create task: admission webhook denied' } }, { status: 500 }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByPlaceholderText('my-task'), 'denied')
+    await user.type(screen.getByPlaceholderText('alpine:latest'), 'alpine')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to create task: admission webhook denied'))
+  })
+
+  it('labels every select control', async () => {
+    useStateTypeOverride = 'agent'
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    expect(screen.getByLabelText('Type')).toHaveAttribute('role', 'combobox')
+    expect(screen.getByLabelText('Agent Reference')).toHaveAttribute('role', 'combobox')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.click(screen.getByRole('button', { name: /Workspace policy/ }))
+    expect(screen.getByLabelText('Workspace intent')).toHaveAttribute('role', 'combobox')
+  })
+
+  it('labels the inline AI agent and provider selects', () => {
+    useStateTypeOverride = 'ai'
+    render(<TaskCreateForm />)
+    expect(screen.getByLabelText('Agent', { selector: 'button' })).toHaveAttribute('id', 'ai-agent')
+    expect(screen.getByLabelText('Provider', { selector: 'button' })).toHaveAttribute('id', 'ai-provider')
+  })
+
+  it('caps the agent selects at the field width and truncates a long label', async () => {
+    useStateTypeOverride = 'ai'
+    const { unmount } = render(<TaskCreateForm />)
+    const aiAgent = screen.getByRole('combobox', { name: 'AI agent' })
+    expect(aiAgent).toHaveClass('max-w-full')
+    const aiValue = within(aiAgent).getByText('No agent — configure provider inline')
+    expect(aiValue.closest('span.truncate')).toHaveClass('min-w-0')
+    unmount()
+
+    useStateTypeOverride = 'agent'
+    render(<TaskCreateForm />)
+    const agentRef = screen.getByLabelText('Agent Reference')
+    expect(agentRef).toHaveClass('max-w-full')
+    expect(within(agentRef).getByText('Select an agent').closest('span.truncate')).toHaveClass('min-w-0')
+  })
+
+  it('uses the singular for an agent with one tool', async () => {
+    useStateTypeOverride = 'agent'
+    server.use(
+      http.get('/api/v1/agents', () =>
+        HttpResponse.json({
+          items: [{ metadata: { name: 'solo-agent', namespace: 'default' }, spec: { runtime: { type: 'codex' }, tools: [{ name: 'tool1' }] } }],
+        }),
+      ),
+    )
+    render(<TaskCreateForm />)
+    const trigger = screen.getByLabelText('Agent Reference')
+    await waitFor(() => expect(trigger).not.toBeDisabled())
+    fireEvent.pointerDown(trigger, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /solo-agent/ }))
+    expect(await screen.findByText('1 tool')).toBeInTheDocument()
   })
 })

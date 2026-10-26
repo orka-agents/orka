@@ -9,6 +9,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	types "k8s.io/apimachinery/pkg/types"
@@ -270,49 +271,41 @@ func TestACPNoWorkspaceTerminalProjectionSettlesStatusAndFinalizer(t *testing.T)
 	}
 }
 
-func TestACPOutboxProjectorAppliesHarnessV1ResultReference(t *testing.T) {
+func TestACPOutboxProjectorClearsWaitingForApprovalOnTerminalPhase(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	bindingDigest := "sha256:" + strings.Repeat("a", 64)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: types.UID("task-uid")},
 		Status: corev1alpha1.TaskStatus{
-			Phase: corev1alpha1.TaskPhaseRunning,
-			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
-				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-				BindingDigest:   bindingDigest,
-			},
+			Phase:     corev1alpha1.TaskPhaseRunning,
+			Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1},
+			Conditions: []metav1.Condition{{
+				Type: ConditionTypeWaitingForApproval, Status: metav1.ConditionTrue, Reason: waitingForApprovalReasonPending,
+				Message: "waiting for approval a for deploy", LastTransitionTime: metav1.Now(),
+			}},
 		},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	payload, err := json.Marshal(taskTerminalProjection{
-		Namespace: "default", Task: "task", TaskUID: "task-uid", Attempt: 1,
-		Phase: corev1alpha1.TaskPhaseSucceeded, BindingDigest: bindingDigest,
-		HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
-			Attempt: 1, State: corev1alpha1.TaskExecutionStateSucceeded,
-			Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
-		},
-		ResultRef: &corev1alpha1.ResultReference{Available: true},
+		Namespace: "default", Task: "task", TaskUID: "task-uid", Attempt: 1, Phase: corev1alpha1.TaskPhaseSucceeded,
+		Execution: corev1alpha1.TaskExecutionStatus{Attempt: 1, State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	projection := store.OutboxProjection{
-		ID: "session-turn-projection", AggregateKind: "SessionTurn", AggregateID: "turn",
-		ProjectionKind: "TaskTerminalStatus", Payload: payload, PayloadDigest: canonicalACPPayloadDigest(payload),
-	}
 	projector := &ACPOutboxProjector{Client: kubeClient}
-	if _, err := projector.deliver(context.Background(), projection); err != nil {
+	if _, err := projector.deliver(context.Background(), store.OutboxProjection{ProjectionKind: taskTerminalProjectionKind, Payload: payload}); err != nil {
 		t.Fatal(err)
 	}
 	updated := &corev1alpha1.Task{}
 	if err := kubeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "task"}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
-		t.Fatalf("Session outbox result reference = %#v, want available", updated.Status.ResultRef)
+	waiting := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeWaitingForApproval)
+	if waiting == nil || waiting.Status != metav1.ConditionFalse || waiting.Reason != "TaskSucceeded" || waiting.Message != taskTerminalMessage {
+		t.Fatalf("WaitingForApproval = %+v, want False after the terminal projection", waiting)
 	}
 }
 

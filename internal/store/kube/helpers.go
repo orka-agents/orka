@@ -106,6 +106,7 @@ func controlLabels(logicalID string) map[string]string {
 	return map[string]string{corev1alpha1.ControlRecordIDHashLabel: dnsDigest(logicalID)}
 }
 
+//nolint:unparam // Callers name the label key they set.
 func labelIfValid(labels map[string]string, key, value string) {
 	if value == "" || len(utilvalidation.IsValidLabelValue(value)) != 0 {
 		return

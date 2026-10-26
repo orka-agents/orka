@@ -5,9 +5,24 @@ description: "Watching a repository and having agents triage, review, and repair
 
 # Repository monitors
 
-Repository monitors are durable, Kubernetes-native PR review automation for GitHub repositories. A `RepositoryMonitor` stores the repository scope, review agent, schedule, and safety policy in a CRD. The controller records runs, PR inventory, review results, and audit events in the SQLite store, then exposes that state through the REST API and embedded dashboard.
+A `RepositoryMonitor` puts a GitHub repository under agent care. It reviews pull requests as
+they arrive and posts the findings back, and it can also plan and implement issues, repair
+pull requests when review or CI asks, and publish a readiness check that GitHub's auto-merge
+can wait on. Every run, item, review, and GitHub write is recorded durably and shown in the
+API, the CLI, and the dashboard's **Monitors** page.
 
-This is the durable successor path for prompt-orchestrated PR monitor tasks created by the `create_pr_monitor` tool. The implementation supports GitHub pull request and issue inventory, durable `orka:*` command intake, issue triage/research/planning/implementation, controller-owned issue-to-PR mutation, exact-head PR review, bounded repair, readiness state, mutation auditing, and optional controller-owned GitHub `COMMENT` review publishing. GitHub native auto-merge owns merging; Orka publishes readiness and never enables auto-merge.
+Reviews run as read-only coding-agent Tasks bound to the exact pull request head. GitHub
+writes — review comments, branch pushes, pull requests, labels, and statuses — are made by
+Orka's controller and publisher and recorded in an audit log, never by an agent. GitHub's own auto-merge owns merging; Orka publishes
+readiness and never merges.
+
+:::tip[Runnable examples]
+[`repository-monitor-pr-review-repair`](https://github.com/orka-agents/orka/tree/main/examples/repository-monitor-pr-review-repair)
+reviews and repairs pull requests;
+[`repository-monitor-issue-plan-only`](https://github.com/orka-agents/orka/tree/main/examples/repository-monitor-issue-plan-only)
+triages and plans issues without writing code. To go from an issue label to a merge-ready
+pull request, see [Issue-to-PR automation](issue-to-pr-automation.md).
+:::
 
 ## What it does
 
@@ -25,28 +40,7 @@ A repository monitor can:
 - store monitor runs, issue/PR items, command events, workflow actions, action records, implementation jobs, mutation records, review records, and audit events durably
 - show monitor status, recent runs, workflow timeline, blocked reasons, implementation jobs, mutation audit, issues, and the PR queue in the dashboard under **Monitors**
 
-The review Task is bound to the exact PR head SHA. It runs as a `type: agent` Task with top-level `workspace.intent: read`; `RepositoryMonitor.spec.readCredentialRef` is mapped to `workspace.readCredentialRef`, with `spec.gitSecretRef` retained only as a backward-compatible read-only fallback. The ACP runtime receives no Git credential and must leave the verified tree unchanged. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review with `spec.forgeCredentialRef`.
-
-## Current limits
-
-The first implementation is intentionally narrow:
-
-- GitHub is the only supported provider.
-- Pull requests and issues are supported target types; commit monitoring is still rejected.
-- Pull request monitoring is enabled by default when no target is specified.
-- Issue-only monitors can set `spec.targets.pullRequests.enabled: false` and `spec.targets.issues.enabled: true`.
-- `spec.review.requireGreenCI` gates review selection until CI is green.
-- GitHub webhook-driven exact runs are opt-in with `spec.review.exactEventEnabled`.
-- Repair, maintainer command routing, issue action workflows, implementation budgets (`maxActive`, `maxAttemptsPerIssue`, `maxChangedFiles`, `allowedPaths`), and head-bound readiness statuses are active monitor-owned workflows. GitHub native auto-merge requires no Orka merge command.
-- Built-in reviewer Agents may use `runtime.type: claude`, `codex`, or `opencode`. Codex reviewers are confined by the RuntimeSession boundary: elevation requests are rejected by the controller, file writes are mediated by the supervisor, and the read-intent workspace delta classification fails any turn that modifies the workspace. Reviewer Agents must omit `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and never enter the Task spec.
-
-## CI coverage
-
-Repository monitor backend coverage has a focused GitHub Actions workflow at `.github/workflows/repository-monitor-smoke.yml`. It runs on pull requests and pushes that touch the workflow, Go API/controller/store code, CRD/config paths, worker code, or Go dependency files.
-
-The smoke workflow creates the UI embed stub and runs targeted Go tests for monitor store CRUD, API handlers, GitHub pull request event handling, targeted single-PR inventory runs, controller queue and review flow, blocked status counts, read-only review Task construction, stdout result forwarding, `create_pr_monitor` repository URL and credential validation, GitHub tool `repo_url` scope enforcement, and PR review marker signing/detection tooling. Worker-level PR review diff context generation is covered by the normal Go test workflow. UI monitor pages are covered by the normal frontend test workflow rather than this smoke workflow.
-
-The smoke workflow is secret-free. Exact pull request event queueing is exercised with synthetic signed webhook payloads and test clients, so repository monitor PRs do not need live GitHub credentials just to verify queueing, scope checks, or review result ingestion in CI.
+The review Task is bound to the exact PR head SHA. It runs as a `type: agent` Task with `workspace.intent: read`, receives no Git credential, and must leave the verified tree unchanged. If `spec.review.publish.enabled` is true, the controller later revalidates the PR state and may publish a deterministic neutral `COMMENT` review with `spec.forgeCredentialRef`.
 
 ## Prerequisites
 
@@ -57,7 +51,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Agent
 metadata:
   name: repo-reviewer
-  namespace: default
+  namespace: orka-system
 spec:
   runtime:
     type: claude
@@ -79,7 +73,7 @@ For private repositories or higher GitHub rate limits, create a source-read Secr
 
 ```bash
 kubectl create secret generic repo-monitor-source-read \
-  --namespace default \
+  --namespace orka-system \
   --from-literal=token='<read-only-github-token>'
 ```
 
@@ -96,22 +90,6 @@ Implementation and repair are write workflows and require four explicit, pairwis
 
 `gitSecretRef` never supplies a write, publication, or forge role. A write Task is not created when any explicit role is missing or when two roles reference the same Secret. Credential values are resolved only by the controller/Workspace Publisher brokers and never appear in ACP process environment, prompts, Task status, or delivery receipts.
 
-## Review workspace context
-
-The review Task is pinned to the exact PR head SHA with `workspace.intent: read`. Before creating it, the controller fetches the pull request identity, lists the pull request's changed files with their patches, and refetches the pull request to ensure the base, head, and head repository did not change during context assembly. The drift check runs even when the file listing failed, so a race fails closed instead of queueing a stale review; a GitHub read failure does not fail the run and instead marks the context `contextUnavailable`.
-
-The controller embeds a bounded `orka.prReview.context.v1` payload in the prompt: at most 700 KiB encoded context, patch excerpts (at most 64 KiB encoded each) for the first 100 changed files, and path-only identity entries (`patchOmitted: "capped"`) for up to 2,000 changed files, with bounded paths/short metadata fields. Identities take precedence over patches inside the byte budget: patches are dropped first, and `truncated.files` is set only when the complete change set could not be represented — a missing identity, a compare listing shorter than the pull request's `changed_files` total (GitHub caps the compare file array at 300 entries), or an omitted patch that hides content the checkout cannot show (a removed file, a renamed file's previous contents, or deleted lines in any changed file). Because the checkout carries no Git metadata, the prompt then requires a non-`passed` verdict (`needs_human` or stricter). Patches and paths pass through the shared credential redaction before they are persisted in the Task prompt. The prompt treats titles, labels, paths, patches, and repository content as untrusted data and tells the reviewer to inspect the verified checkout whenever GitHub context is incomplete.
-
-If a Task with the predictable review name already exists, the controller adopts it only when its spec is byte-identical to the freshly rendered review (including the diff context) or carries only the controller-shaped `contextUnavailable` envelope; any other pre-existing Task fails the run.
-
-The reviewer must not mutate the verified tree. Any unexpected workspace change fails read validation. GitHub review publishing, when enabled, happens later through the controller's deterministic publisher path; the ACP child has no GitHub mutation credential.
-
-If `spec.validation.image` is configured, the review Task also receives the brokered `run_validation` tool. The reviewer inspects the repository and supplies one shell command. Orka creates one container Task with the configured image, a 45-minute timeout, and the same exact-head read-only workspace. The checkout init container finishes first. Orka then installs a deny-all NetworkPolicy before releasing the validation command. The reviewer cannot change the image, checkout, credentials, publication settings, or network policy. It can wait only for its own child Task through `wait_for_tasks` before returning the review result.
-
-The image is repository-specific, not language-specific. It must contain `/bin/sh` plus every compiler, linter, package manager, dependency, or infrastructure CLI that validation may need. The command cannot download modules, packages, providers, or contact cloud APIs. A Go repository that uses `golangci-lint` should point at a Go-based image with dependencies and `golangci-lint` installed. Repositories that run offline Terraform or Azure CLI checks should include those tools and required local data. Maintainers can build and publish that image once, then reuse it in the repository's monitor configuration.
-
-Validation fails closed when configured. A reviewer that does not call the tool, a failed command, a non-terminal child Task, or a child Task whose image or checkout no longer matches the review cannot produce a `passed` or merge-ready result. Orka stores the image, command digest, status, and safe evidence in the durable review record. The validation binding retains the same SHA-256 command digest. Validation stdout and stderr are suppressed so repository or fixture secrets cannot enter Pod logs or result storage. A failure before workload execution is recorded as `unavailable`, and the same head remains eligible for a later review. No validation Task is required when `spec.validation.image` is empty; the review records validation as `not_run`.
-
 ## Create a monitor
 
 ```yaml
@@ -119,7 +97,7 @@ apiVersion: core.orka.ai/v1alpha1
 kind: RepositoryMonitor
 metadata:
   name: example-app
-  namespace: default
+  namespace: orka-system
 spec:
   provider: github
   repoURL: https://github.com/example/app
@@ -167,7 +145,7 @@ Scheduled runs are queued from `spec.schedule` when the monitor is not suspended
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/runs?namespace=default" \
+  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/runs?namespace=orka-system" \
   -d '{}'
 ```
 
@@ -197,24 +175,24 @@ Exact event runs are still read-only review runs. They are stored with trigger `
 Use `kubectl` for CRD-level status:
 
 ```bash
-kubectl get repositorymonitors -n default
-kubectl describe repositorymonitor example-app -n default
+kubectl get repositorymonitors -n orka-system
+kubectl describe repositorymonitor example-app -n orka-system
 ```
 
 Use the API or dashboard for durable run and item state:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://<orka-api-host>/api/v1/monitors/repositories?namespace=default"
+  "https://<orka-api-host>/api/v1/monitors/repositories?namespace=orka-system"
 
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/runs?namespace=default"
+  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/runs?namespace=orka-system"
 
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/items?namespace=default&kind=pull_request"
+  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/items?namespace=orka-system&kind=pull_request"
 
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://<orka-api-host>/api/v1/monitors/events?namespace=default&name=example-app"
+  "https://<orka-api-host>/api/v1/monitors/events?namespace=orka-system&name=example-app"
 ```
 
 The embedded dashboard shows the same state under **Monitors**:
@@ -222,6 +200,22 @@ The embedded dashboard shows the same state under **Monitors**:
 - monitor list with phase, schedule, repository, and summary counts
 - detail page with open PR count, pending reviews, blocked items, merge-ready count, recent runs, and PR queue
 - manual **Run** action for an immediate monitor run
+
+## Review workspace context
+
+The review Task is pinned to the exact PR head SHA with `workspace.intent: read`. Before creating it, the controller fetches the pull request identity, lists the pull request's changed files with their patches, and refetches the pull request to ensure the base, head, and head repository did not change during context assembly. The drift check runs even when the file listing failed, so a race fails closed instead of queueing a stale review; a GitHub read failure does not fail the run and instead marks the context `contextUnavailable`.
+
+The controller embeds a bounded `orka.prReview.context.v1` payload in the prompt: at most 700 KiB encoded context, patch excerpts (at most 64 KiB encoded each) for the first 100 changed files, and path-only identity entries (`patchOmitted: "capped"`) for up to 2,000 changed files, with bounded paths/short metadata fields. Identities take precedence over patches inside the byte budget: patches are dropped first, and `truncated.files` is set only when the complete change set could not be represented — a missing identity, a compare listing shorter than the pull request's `changed_files` total (GitHub caps the compare file array at 300 entries), or an omitted patch that hides content the checkout cannot show (a removed file, a renamed file's previous contents, or deleted lines in any changed file). Because the checkout carries no Git metadata, the prompt then requires a non-`passed` verdict (`needs_human` or stricter). Patches and paths pass through the shared credential redaction before they are persisted in the Task prompt. The prompt treats titles, labels, paths, patches, and repository content as untrusted data and tells the reviewer to inspect the verified checkout whenever GitHub context is incomplete.
+
+If a Task with the predictable review name already exists, the controller adopts it only when its spec is byte-identical to the freshly rendered review (including the diff context) or carries only the controller-shaped `contextUnavailable` envelope; any other pre-existing Task fails the run.
+
+The reviewer must not mutate the verified tree. Any unexpected workspace change fails read validation. GitHub review publishing, when enabled, happens later through the controller's deterministic publisher path; the ACP child has no GitHub mutation credential.
+
+If `spec.validation.image` is configured, the review Task also receives the brokered `run_validation` tool. The reviewer inspects the repository and supplies one shell command. Orka creates one container Task with the configured image, a 45-minute timeout, and the same exact-head read-only workspace. The checkout init container finishes first. Orka then installs a deny-all NetworkPolicy before releasing the validation command. The reviewer cannot change the image, checkout, credentials, publication settings, or network policy. It can wait only for its own child Task through `wait_for_tasks` before returning the review result.
+
+The image is repository-specific, not language-specific. It must contain `/bin/sh` plus every compiler, linter, package manager, dependency, or infrastructure CLI that validation may need. The command cannot download modules, packages, providers, or contact cloud APIs. A Go repository that uses `golangci-lint` should point at a Go-based image with dependencies and `golangci-lint` installed. Repositories that run offline Terraform or Azure CLI checks should include those tools and required local data. Maintainers can build and publish that image once, then reuse it in the repository's monitor configuration.
+
+Validation fails closed when configured. A reviewer that does not call the tool, a failed command, a non-terminal child Task, or a child Task whose image or checkout no longer matches the review cannot produce a `passed` or merge-ready result. Orka stores the image, command digest, status, and safe evidence in the durable review record. The validation binding retains the same SHA-256 command digest. Validation stdout and stderr are suppressed so repository or fixture secrets cannot enter Pod logs or result storage. A failure before workload execution is recorded as `unavailable`, and the same head remains eligible for a later review. No validation Task is required when `spec.validation.image` is empty; the review records validation as `not_run`.
 
 ## Review results
 
@@ -241,91 +235,30 @@ If a review task fails, is cancelled, returns malformed JSON, or returns a stale
 
 If GitHub returns HTTP 401 during publication, the controller records `github_authentication_failed` and retries after the existing five-minute publish cooldown. Each attempt reloads `spec.forgeCredentialRef`, so refreshing an expired GitHub App installation token lets the controller publish the completed review without running the reviewer again. Every retry repeats the PR safety and duplicate checks. Orka does not refresh the token itself; an invalid or revoked credential continues to fail until replaced. Non-rate-limited HTTP 403 and HTTP 404 responses remain terminal permission failures. Older attempts already recorded as `github_permission_denied` are not automatically reclassified.
 
-## API and authorization
-
-Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
-
-Context-token `tctx` constraints can also restrict monitor access by namespace, repository URL, branch, reviewer Agent, or allowed Agent set.
-
-See [API Reference](../reference/api-reference.md#repository-monitors) for endpoint details.
-
-## Prompt-orchestrated PR monitor tool
-
-`create_pr_monitor` remains the compatibility path for prompt-orchestrated scheduled PR monitors. It creates a scheduled `type: ai` Task with `spec.workspace.gitRepo` set to the requested GitHub repository, injects the PR review loop tools, and instructs the monitor to call `list_pull_requests`, `check_pr_review_marker`, `check_pull_request_ci`, `review_pull_request`, and `post_review_comment` with the same `repo_url`.
-
-`repo_url` must be a credential-free GitHub repository root URL, for example `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, or `git@github.com:owner/repo.git`. Do not pass a pull request, issue, branch/tree, blob/file, commit, query-string, fragment, non-GitHub, HTTP, or token-bearing URL. Orka rejects non-root repository URLs before it creates the monitor Task, which prevents prompts or copied browser URLs from widening the monitor's repository scope.
-
-The tool requires an AI Agent with coordination enabled and autonomous coordination disabled. The created Task uses a narrow explicit tool set instead of the full coordination tool set, and it requires a Git credential Secret either through `gitSecretRef` or one of the supported default Secret names in the target namespace: `git-credentials`, `github-credentials`, `copilot-token`, `github-token`, or `git-token`. Orka validates the selected Secret before creating the monitor Task; it must contain a non-empty `token`, `password`, or `GITHUB_TOKEN` key.
-
-The scheduled monitor prompt tells the worker to pass the same `repo_url` to every PR review loop tool. Those GitHub tools are scoped to the current Task: when task context is available, the requested repository must match the Task workspace repository or signed transaction repository context. If it does not match, Orka rejects the tool call before resolving credentials or calling GitHub. This means a monitor created for `owner/repo` cannot use its Task credential to list, review, or comment on another repository by changing tool arguments.
-
-### PR review markers
-
-`check_pr_review_marker` returns the exact hidden marker that the monitor should include in the GitHub review body:
-
-```html
-<!-- orka:pr-review repo=owner/repo pr=123 head_sha=abc123 sig=... -->
-```
-
-The marker binds the review to one repository, pull request number, and head SHA. Future monitor runs skip that PR head only when they find a matching marker in a GitHub pull request review.
-
-Markers are stable across GitHub token rotation. They are not signed with the live GitHub token by default. To make marker verification independent of the review author, provide a stable worker environment secret named `ORKA_PR_REVIEW_MARKER_SECRET` to the monitor Task. During rotation, keep the old value in comma-separated `ORKA_PR_REVIEW_MARKER_PREVIOUS_SECRETS` until reviews signed with it have aged out.
-
-For compatibility, Orka also recognizes legacy markers and markers signed before a dedicated marker secret was configured, but only from a trusted reviewer account. Set `ORKA_PR_REVIEW_MARKER_TRUSTED_AUTHOR` to that GitHub login, or omit it to let Orka resolve the authenticated GitHub user for the Task's Git credential. Do not store marker signing secrets in the repository; use Kubernetes Secrets or another secret injection path for Task environment.
-
-## Related workflows
-
-- [GitHub Label Triggers](github-label-triggers.md) start the managed issue workflow with `orka:implement`.
-- [Repository Security Scanning](repository-security-scanning.md) scans repository history for security findings and supports patch proposal workflows.
-- `create_pr_monitor` remains available for prompt-orchestrated scheduled PR monitor tasks, but it does not provide the durable per-PR run, item, review, publish, and event records described here.
-
-## Issue inventory and label commands
+## Issues
 
 Repository monitors can also inventory open GitHub issues when `spec.targets.issues.enabled: true`. Issue inventory excludes GitHub issues that represent pull requests, stores the item as `monitor_items.kind = issue`, and records an issue content digest over human-controlled inputs: issue number, title, body, and non-`orka:*` / non-`orka-state:*` labels. Orka-authored command labels and state labels therefore do not stale issue plans or future issue workflow artifacts.
 
 A monitor can be run against one exact issue without retiring unrelated inventory:
 
 ```bash
-orka monitor run orka-main --target-kind issue --target-number 123 --namespace default
-orka monitor issues list orka-main --namespace default
+orka monitor run orka-main --target-kind issue --target-number 123 --namespace orka-system
+orka monitor issues list orka-main --namespace orka-system
 ```
 
-Durable `orka:*` label command intake is enabled per monitor:
-
-```yaml
-spec:
-  targets:
-    pullRequests:
-      enabled: false
-    issues:
-      enabled: true
-      maxPerRun: 10
-      excludeLabels:
-      - blocked
-      - waiting-external
-  triggers:
-    github:
-      labels:
-        enabled: true
-        requireActorPermission: write
-        issues:
-          implement: orka:implement
-```
-
-When a matching label webhook arrives, Orka verifies the webhook signature, matches the repository monitor by repository and target kind, checks the sender's current GitHub repository permission using `spec.forgeCredentialRef`, records a durable command event, and queues a targeted monitor run for accepted commands. Replayed deliveries are idempotent. Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked commands and do not queue work.
+Label commands — `orka:implement` to start the workflow and `orka:pause` to hold an item —
+are covered in [Issue-to-PR automation](issue-to-pr-automation.md#start-from-a-github-label).
+Guard labels from `spec.policy.protectedLabels` and `spec.policy.pauseLabels` record blocked
+commands and do not queue work.
 
 Inspect command intake with:
 
 ```bash
-orka monitor commands list orka-main --namespace default
-orka monitor commands get '<command-id>' --namespace default
+orka monitor commands list orka-main --namespace orka-system
+orka monitor commands get '<command-id>' --namespace orka-system
 ```
 
-### Label controls
-
-Use `orka:implement` on an issue to start the managed workflow. `orka:pause` is a persistent guard; removing it queues fresh reconciliation. There are no labels for internal phases. Ad hoc plan, research, review, repair, and decomposition operations remain available through the API/CLI.
-
-## Issue triage, research, planning, and implementation
+### Triage, research, planning, and implementation
 
 `orka:implement` runs planning when a required ready plan is missing, then continues to implementation if policy permits it. Triage and research are ad hoc API/CLI operations:
 
@@ -343,8 +276,8 @@ The controller advances the workflow only from a `VerifiedExact` delivery whose 
 Inspect action records with:
 
 ```bash
-orka monitor actions list orka-main --namespace default --kind issue --number 123
-orka monitor actions get '<action-id>' --namespace default
+orka monitor actions list orka-main --namespace orka-system --kind issue --number 123
+orka monitor actions get '<action-id>' --namespace orka-system
 ```
 
 ## PR repair and readiness
@@ -358,7 +291,6 @@ The controller starts bounded repairs automatically when enabled. Ad hoc PR comm
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.
 
-
 ## GitHub merge readiness
 
 Managed workflows with `review.publish.enabled: true` publish the commit status `orka/<namespace>/<monitor-name>/ready` on the exact PR head. Require this status context together with your normal CI and approving-review rules. A GitHub App is not required.
@@ -370,3 +302,30 @@ Reserve this context for Orka. Orka excludes only status IDs persisted in its mu
 The status stays pending or failed while review, validation, or repair is incomplete. Statuses are commit-scoped: when multiple open PRs on the monitored base branch share a head SHA, all must be ready before that commit receives success. A paused or unreviewed peer blocks the shared status. A new head requires new evidence. Repair defaults to at most five attempts per PR and two per head; explicit lower limits are honored. Workflow polling observes CI and completed Tasks without requiring another command label.
 
 GitHub merges only when its per-PR auto-merge setting is enabled and all required conditions pass. When disabled, the PR remains open and merge-ready. Orka never calls the merge endpoint or changes the auto-merge setting. There is no sensitive label or additional merge-approval classifier.
+
+## API and authorization
+
+Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
+
+Context-token `tctx` constraints can also restrict monitor access by namespace, repository URL, branch, reviewer Agent, or allowed Agent set.
+
+See [API Reference](../reference/api-reference.md#repository-monitors) for endpoint details.
+
+## Limits
+
+- GitHub is the only supported provider.
+- Pull requests and issues are supported targets; commit monitoring is rejected.
+- Reviewer Agents must use a built-in `claude`, `codex`, or `opencode` runtime and omit
+  `spec.secretRef`; provider credentials come from the controller-managed runtime proxy and
+  never enter the Task spec. Codex reviewers are confined by the RuntimeSession boundary:
+  the controller rejects elevation requests, the supervisor mediates file writes, and any
+  turn that modifies the workspace fails read-intent validation.
+- Review publishing supports only neutral `COMMENT` reviews, with `sameHeadPolicy: skip`.
+
+## Prompt-orchestrated monitors
+
+Before RepositoryMonitor existed, the chat tool `create_pr_monitor` created a scheduled AI
+Task that reviewed pull requests. It still works, but it keeps none of the durable per-PR
+runs, items, review records, publish records, or audit events described on this page. Its
+parameters, repository scoping, and review markers are documented under
+[`create_pr_monitor`](../reference/built-in-tools.md#create_pr_monitor).

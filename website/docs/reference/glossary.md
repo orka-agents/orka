@@ -29,6 +29,19 @@ entry with structure.
 **Tool** — something a model can call: a built-in like `web_search`, or a `Tool` custom
 resource describing an HTTP endpoint or MCP server.
 
+**Built-in tool** — a tool Orka ships, such as `web_search`, `delegate_task`, or
+`create_pull_request`. Some are selected by name; others are added automatically, for
+example memory tools on every AI Task. See [Built-in tools](built-in-tools.md).
+
+**Coordinator** — an Agent with `coordination.enabled` that delegates work to other Agents
+as child Tasks. See [Multi-agent coordination](../guides/multi-agent-coordination.md).
+
+**Memory proposal** — a suggested memory an agent submits for review. It becomes durable
+memory only after a person accepts and applies it. See [Memory](../concepts/memory.md).
+
+**Chat orchestrator** — the model behind the chat endpoint that creates, runs, and checks on
+Tasks for you. See [Interactive chat](../guides/chat.md).
+
 ## Running coding agents
 
 **ACP** — the [Agent Client Protocol](https://agentclientprotocol.com), a JSON-RPC protocol
@@ -49,6 +62,10 @@ Pod for each Task.
 and its own operating-system user, so two sessions in one pool cannot read each other's
 files.
 
+**AgentRuntime** — a registration for an operator-run agent runtime outside the built-in
+four, selected from an Agent with `runtime.runtimeRef`. See
+[Bring your own agent runtime](../guides/bring-your-own-agent-runtime.md).
+
 **Supervisor** — the small Orka process inside a runtime Pod that starts agent CLIs, keeps
 sessions apart, and speaks to the controller. The agent CLI never talks to the cluster
 directly.
@@ -57,16 +74,16 @@ directly.
 it was delivered, so a controller restart never sends the same prompt twice.
 
 **Harness** — the contract between the controller and the thing executing agent work.
-`harness-v1` is the deprecated sidecar-wrapper design, to be removed in a future release; `harness-v2` is the current ACP pool
-design. An installation picks one at install time and cannot switch.
+Orka supports `orka.harness.v2` for built-in ACP runtimes and externally registered
+runtimes. Its controller identity is fixed to `harness-v2`.
 Orka harness v2 uses the `orka.harness.v2` controller-to-supervisor contract. The
 supervisor separately speaks ACP to agent CLIs over stdin/stdout. The harness
 version describes Orka's contract, independently of the ACP protocol version.
-See [Harness modes](../operations/harness-modes.md).
+See [installation ownership](../operations/harness-modes.md).
 
 **Producer** — anything that creates Tasks: a person with the CLI, CI, a webhook, another
-agent. The term matters during a v1-to-v2 migration, where you point producers at one
-installation's endpoint or the other.
+agent. When a cluster runs several installations, each producer points at one
+installation's endpoint.
 
 ## Safety and correctness
 
@@ -98,6 +115,11 @@ refusing new ones. Replacement and scale-down wait for a drain to complete.
 agent produces a patch; the publisher applies and pushes it. The agent process never holds
 a token that can write to your repository.
 
+**Delivery receipt** — the non-secret record in a Task's `status.delivery` of what happened to
+its workspace: validated unchanged, published and verified, or why not. A coding-agent Task
+that changes code is done only when this says so. See
+[Delivery status](../concepts/agent-runtimes.md#delivery-status).
+
 ## Credentials and network
 
 **Provider proxy** — the path for agent model traffic: the supervisor's per-session
@@ -128,6 +150,15 @@ subset of its parent's.
 publisher, after checking what the request is for. Keeps forge credentials out of agent
 Pods.
 
+**Outbound access policy** — an `OutboundAccessPolicy` resource that tells a Tool how to reach
+an external API — by token exchange, through a trusted gateway, or with a person's linked
+account — without giving the agent the credential. See
+[Outbound access](../concepts/outbound-access.md).
+
+**Connector** and **Connection** — a `ConnectorProvider` is an OAuth service, such as GitHub,
+that people may link; a `Connection` is one person's link to it, so agents they start can act
+as them. See [Connectors](../guides/connectors.md).
+
 ## Workspaces
 
 **Workspace** (`Task.spec.workspace`) — the git repository an agent Task works in: the
@@ -135,7 +166,8 @@ clone URL, branch, whether it may write, and which Secrets to read or publish wi
 
 **Execution workspace** (`Task.spec.execution.workspace`) — a different thing with a
 confusingly similar name: where the agent process *runs*, when you want stronger isolation
-than a normal Pod. Off by default and behind feature flags.
+than a normal Pod. Off by default and behind feature flags. See
+[Execution workspaces](../concepts/execution-workspaces.md).
 
 **agent-sandbox** — an execution workspace provider using
 [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
@@ -151,11 +183,16 @@ a restored process would also restore credentials that should have expired.
 ## Other
 
 **Gateway** — authenticated ingress and reliable outbound delivery for external systems
-(chat platforms, event buses). See [Gateways](../operations/gateways.md).
+such as Microsoft Teams, Telegram, or A2A clients, through an out-of-tree adapter. See
+[Gateways](../guides/gateways.md).
 
-**Repository monitor** — a durable queue that watches a GitHub repository and runs review
-or repair Tasks against pull requests. See
+**Repository monitor** — a durable queue that watches a GitHub repository and runs review,
+repair, and issue-implementation Tasks. See
 [Repository monitors](../guides/repository-monitors.md).
+
+**Repository scan** — a `RepositoryScan` that builds a threat model for a repository, finds
+and validates security issues, and proposes fixes. See
+[Security scanning](../guides/repository-security-scanning.md).
 
 **Artifact** — a file produced by a Task, stored by the controller and downloadable
 afterwards.

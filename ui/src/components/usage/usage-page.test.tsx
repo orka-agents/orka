@@ -46,6 +46,10 @@ describe('UsagePage', () => {
   beforeEach(() => {
     useUIStore.setState({ namespace: 'payments' })
     useAuthStore.setState({ token: 'fixture' })
+    // The fixtures' records belong to the live Task of the same name (UID ==
+    // name), so their Open Task links are kept.
+    server.use(http.get('/api/v1/tasks/:id', ({ params }) =>
+      HttpResponse.json({ metadata: { name: params.id, namespace: 'payments', uid: params.id }, spec: { type: 'agent' } })))
   })
 
   it('shows the Payments ratios and the linked request evidence', async () => {
@@ -77,6 +81,16 @@ describe('UsagePage', () => {
     await user.click(screen.getByText('task-0', { exact: false, selector: 'summary' }))
     const task = (await screen.findByRole('link', { name: 'Open Task task-0' })).closest('details') as HTMLElement
     expect(within(task).getByText('Input 500,000 · Output 100,000 · Cached reads 50,000 · Cached writes Unavailable')).toBeInTheDocument()
+  })
+
+  it('lets the keyboard reach and scroll the wide Team summary table', async () => {
+    server.use(http.get('/api/v1/usage', () => HttpResponse.json(reportFixture())))
+    render(<UsagePage />)
+    const region = await screen.findByRole('region', { name: 'Team summary' })
+    expect(region).toHaveAttribute('tabindex', '0')
+    expect(within(region).getByRole('columnheader', { name: 'Tokens / merged PR' })).toBeInTheDocument()
+    region.focus()
+    expect(region).toHaveFocus()
   })
 
   it('pins the report time when paging work summaries', async () => {
@@ -298,5 +312,64 @@ describe('UsagePage', () => {
     render(<UsagePage />)
     expect(await screen.findByRole('alert')).toHaveTextContent('not authorized')
     expect(screen.queryByText('No PRs merged yet')).not.toBeInTheDocument()
+  })
+
+  async function expandFirstTask(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByText('org/repo #1'))
+    await user.click(await screen.findByText('task-0', { exact: false, selector: 'summary' }))
+  }
+
+  function serveReport() {
+    const report = reportFixture()
+    server.use(
+      http.get('/api/v1/usage', () => HttpResponse.json(report)),
+      http.get('/api/v1/usage/work/:id', ({ params }) => HttpResponse.json({ work: report.works.find((work) => work.id === params.id) })),
+    )
+  }
+
+  it('marks a record of an earlier Task with a reused name as a previous run instead of linking to the newer Task', async () => {
+    serveReport()
+    server.use(http.get('/api/v1/tasks/:id', ({ params }) =>
+      HttpResponse.json({ metadata: { name: params.id, namespace: 'payments', uid: 'a-newer-uid' }, spec: { type: 'agent' } })))
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await expandFirstTask(user)
+    expect(await screen.findByText('Previous run of task-0; a newer Task now uses this name')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Task task-0' })).not.toBeInTheDocument()
+  })
+
+  it('says when the recorded Task no longer exists', async () => {
+    serveReport()
+    server.use(http.get('/api/v1/tasks/:id', () => HttpResponse.json({ error: { code: 404, message: 'task not found' } }, { status: 404 })))
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await expandFirstTask(user)
+    expect(await screen.findByText('Task task-0 no longer exists')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Task task-0' })).not.toBeInTheDocument()
+  })
+
+  it('rejects an empty or inverted date range before calling the API', async () => {
+    const requests: URL[] = []
+    server.use(http.get('/api/v1/usage', ({ request }) => { requests.push(new URL(request.url)); return HttpResponse.json(reportFixture()) }))
+    const user = userEvent.setup()
+    render(<UsagePage />)
+    await screen.findByText('Tokens per merged PR')
+    const from = screen.getByLabelText('Requests started from')
+    const until = screen.getByLabelText('Started before, exclusive')
+    await user.clear(from)
+    await user.type(from, '2026-10-10')
+    await user.clear(until)
+    await user.type(until, '2026-10-01')
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('The start date must be before the exclusive end date.')
+    expect(from).toHaveAttribute('aria-invalid', 'true')
+    expect(requests).toHaveLength(1)
+
+    await user.clear(until)
+    await user.type(until, '2026-10-20')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }))
+    await waitFor(() => expect(requests).toHaveLength(2))
+    expect(requests[1].searchParams.get('from')).toBe('2026-10-10')
   })
 })

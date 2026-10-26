@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { Shield, Plus, RefreshCcw } from 'lucide-react'
+import { toast } from 'sonner'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -8,8 +9,9 @@ import { ListAccessError } from '@/components/ui/list-access-error'
 import { PageHeader } from '@/components/layout/page-header'
 import { useRepositoryScans, useRunSecurityScan } from '@/hooks/use-security'
 import type { RepositoryScan } from '@/schemas/security'
-import { repositoryDisplayName } from '@/lib/repository-name'
 import { timeAgo } from '@/lib/time'
+import { statusProblem } from '@/components/common/status-problem'
+import { FindingCountBadges } from './finding-count-badges'
 
 export function RepositoryList() {
   const { data, isLoading, error } = useRepositoryScans()
@@ -40,7 +42,7 @@ export function RepositoryList() {
           ))}
         </div>
       ) : error ? (
-        <Card><CardContent className="pt-6"><ListAccessError error={error} resource="security repositories" /></CardContent></Card>
+        <Card><CardContent><ListAccessError error={error} resource="security repositories" /></CardContent></Card>
       ) : repositories.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
@@ -61,41 +63,42 @@ export function RepositoryList() {
 function RepositoryCard({ repo }: { repo: RepositoryScan }) {
   const runScan = useRunSecurityScan(repo.metadata.name)
   const lastScanAt = repo.status?.lastScanAt ?? repo.status?.lastSuccessfulScanAt
-  const displayName = repositoryDisplayName(repo.spec, repo.metadata.name)
+  const problem = statusProblem(repo.status)
+  const scanNow = () => runScan.mutate(undefined, {
+    onSuccess: () => toast.success(`Manual scan of ${repo.metadata.name} started`),
+    onError: (error) => toast.error(`Failed to start scan: ${error instanceof Error ? error.message : 'Unknown error'}`),
+  })
 
   return (
     <Card className="transition-colors hover:border-primary/50">
       <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0">
         <div className="space-y-1">
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Shield className="h-5 w-5 text-primary" />
+            <Shield className="h-5 w-5 shrink-0 text-primary" />
             <Link to="/security/$repoId" params={{ repoId: repo.metadata.name }} className="hover:underline">
-              {displayName.split('/').pop() || repo.metadata.name}
+              {repo.metadata.name}
             </Link>
           </CardTitle>
-          <p className="text-sm text-muted-foreground">{displayName} · {repo.spec.branch || 'main'}</p>
+          <p className="break-all text-sm text-muted-foreground">{repo.spec.repoURL} · {repo.spec.branch || 'main'}</p>
+          {problem && <p className="text-sm font-medium text-status-failed" title={problem.message}>{problem.reason}</p>}
         </div>
         <Badge variant={repo.status?.phase === 'Ready' ? 'default' : 'secondary'}>
           {repo.status?.phase || 'Pending'}
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="text-sm text-muted-foreground">{repo.spec.repoURL}</div>
         <div className="grid gap-2 text-sm md:grid-cols-2">
           <div>Open findings: <span className="font-medium text-foreground">{repo.status?.findingCounts?.total ?? 0}</span></div>
           <div>Last scan: <span className="font-medium text-foreground">{timeAgo(lastScanAt, { empty: 'Never' })}</span></div>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
-          <Badge variant="destructive">{repo.status?.findingCounts?.critical ?? 0} critical</Badge>
-          <Badge variant="destructive">{repo.status?.findingCounts?.high ?? 0} high</Badge>
-          <Badge variant="secondary">{repo.status?.findingCounts?.medium ?? 0} medium</Badge>
-          <Badge variant="outline">{repo.status?.findingCounts?.low ?? 0} low</Badge>
+          <FindingCountBadges counts={repo.status?.findingCounts} />
         </div>
         <div className="flex items-center justify-between">
           <Link to="/security/$repoId" params={{ repoId: repo.metadata.name }}>
             <Button variant="outline">Open</Button>
           </Link>
-          <Button variant="secondary" onClick={() => runScan.mutate()} disabled={runScan.isPending}>
+          <Button variant="secondary" onClick={scanNow} disabled={runScan.isPending}>
             <RefreshCcw className="mr-2 h-4 w-4" />
             Scan Now
           </Button>

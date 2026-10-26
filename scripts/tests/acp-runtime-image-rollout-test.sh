@@ -722,13 +722,13 @@ if jq -e 'if .kind == "List" then any(.items[]?; .kind == "ValidatingWebhookConf
     exit 61
   }
   [[ -e "${FAKE_KUBE_STATE}/admission-endpoints" ]] || { echo 'admission webhooks applied before ready endpoints' >&2; exit 38; }
-  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 8 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
+  [[ "$(grep -c '^smoke:' "${FAKE_KUBE_LOG}")" -ge 9 ]] || { echo 'admission webhooks applied before every handler smoke' >&2; exit 39; }
   jq -e '
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 8 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 8 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       (.failurePolicy == "Fail" and .sideEffects == "None" and
        .clientConfig.service.name == "orka-admission" and
@@ -986,7 +986,7 @@ assert_converged() {
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" -ge 1 ]]
   [[ "$(grep -c '^proxy-start$' "${state_dir}/apply.log")" == "$(grep -c '^proxy-stop$' "${state_dir}/apply.log")" ]]
   [[ "$(grep -c '^secret:agent-execution-snapshot-key$' "${state_dir}/apply.log")" == "1" ]]
-  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "8" ]]
+  [[ "$(grep '^smoke:' "${state_dir}/apply.log" | sort -u | wc -l | tr -d '[:space:]')" == "9" ]]
   grep -Fxq 'smoke:/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use' "${state_dir}/apply.log"
   [[ "$(grep -c '^webhooks:orka-admission$' "${state_dir}/apply.log")" -ge 1 ]]
   # Recovery scenarios run the apply script twice into one shared log, so

@@ -10,8 +10,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -139,7 +139,7 @@ func deletingSessionWorkspaceFixture(t *testing.T) (*TaskReconciler, *corev1alph
 	task = bindSuspendableSessionTaskForSettlement(t, r, task)
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	require.NoError(t, err)
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	require.NoError(t, err)
 	plan := ACPRuntimePlan{PoolName: suspendTestRuntimePoolName, Workspace: binding}
 	_, _, err = r.ensureACPClassWorkspace(ctx, task, plan)

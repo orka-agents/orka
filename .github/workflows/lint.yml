@@ -2,10 +2,6 @@ name: Lint
 
 on:
   workflow_call:
-    inputs:
-      full_check:
-        type: boolean
-        default: false
   workflow_dispatch:
   push:
     # PR branches are linted by the pull_request event. Keep push coverage on
@@ -32,6 +28,12 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  # Supersede earlier runs of the same pull request. Every other event,
+  # including release workflow_call, gets a unique group and never cancels.
+  group: ${{ github.event_name == 'pull_request' && format('lint-pr-{0}', github.event.pull_request.number) || format('lint-{0}-{1}', github.ref, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Go Lint
@@ -39,8 +41,6 @@ jobs:
     steps:
       - name: Clone the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -53,14 +53,11 @@ jobs:
 
       - name: Run linter
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        # Lint the whole tree on every event so findings a diff can't show,
+        # such as code another change left unused, fail before they merge.
         with:
           version: v2.14.0
           install-mode: goinstall
-          # GitHub refuses REST PR diffs over 20,000 lines. Compare revisions
-          # locally so large PRs still filter out pre-existing lint findings.
-          # PR checkout is a merge ref: its first parent is the actual base,
-          # which can be newer than the base SHA frozen in the event payload.
-          args: ${{ !inputs.full_check && format('--new-from-rev={0}', github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'HEAD~1') || '' }}
 
   ui-lint:
     name: UI Lint

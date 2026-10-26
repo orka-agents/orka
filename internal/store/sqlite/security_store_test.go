@@ -354,6 +354,42 @@ func TestSaveThreatModelReplacesCurrentModel(t *testing.T) {
 	}
 }
 
+func TestSaveThreatModelIfVersionRejectsStaleVersion(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	save := func(content string, expectedVersion int64) error {
+		return s.SaveThreatModelIfVersion(ctx, &store.ThreatModel{
+			Namespace: "ns1", RepositoryScan: "repo1", Content: content, Source: "edited",
+		}, expectedVersion)
+	}
+	requireLatest := func(content string, version int64) {
+		t.Helper()
+		got, err := s.GetLatestThreatModel(ctx, "ns1", "repo1")
+		if err != nil {
+			t.Fatalf("GetLatestThreatModel: %v", err)
+		}
+		if got.Content != content || got.Version != version {
+			t.Fatalf("latest = %q v%d, want %q v%d", got.Content, got.Version, content, version)
+		}
+	}
+
+	if err := save("missing model", 1); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("save over a missing model error = %v, want ErrConflict", err)
+	}
+	if err := save("first", 0); err != nil {
+		t.Fatalf("save first: %v", err)
+	}
+	requireLatest("first", 1)
+	if err := save("second", 1); err != nil {
+		t.Fatalf("save second: %v", err)
+	}
+	requireLatest("second", 2)
+	if err := save("stale", 1); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale save error = %v, want ErrConflict", err)
+	}
+	requireLatest("second", 2)
+}
+
 func TestSaveThreatModelRedactsContent(t *testing.T) {
 	for _, source := range []string{"generated", "edited"} {
 		t.Run(source, func(t *testing.T) {
