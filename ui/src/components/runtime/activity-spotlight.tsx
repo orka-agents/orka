@@ -6,6 +6,7 @@ import { SonarPing } from '@/components/ui/sonar-ping'
 import { StatusDot } from '@/components/ui/status-dot'
 import { useFreshness } from '@/hooks/use-freshness'
 import { cn } from '@/lib/utils'
+import { displayedTaskMessage } from '@/lib/task-enforcement'
 import { elapsedSeconds, formatElapsed, UNASSIGNED_AGENT } from '@/lib/runtime-activity'
 import { isTerminal } from '@/lib/runtime-validation'
 import { isWaitingForApproval, podWaitingMessage } from '@/components/tasks/task-state'
@@ -37,9 +38,10 @@ export function ActivitySpotlight({ task, latestEvent, following, eventError = f
   // with Job ...") would read as if it were still progressing.
   const waitingForApproval = task ? isWaitingForApproval(task) : false
   const podWaiting = task ? podWaitingMessage(task) : undefined
-  const headline = running && !waitingForApproval && !podWaiting
+  const rawHeadline = running && !waitingForApproval && !podWaiting
     ? latestEvent?.summary ?? task?.status?.message
     : task?.status?.message ?? latestEvent?.summary
+  const headline = task ? displayedTaskMessage(task, rawHeadline) : rawHeadline
   const justUpdated = useFreshness(headline)
 
   useEffect(() => {

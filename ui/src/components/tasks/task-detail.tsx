@@ -502,7 +502,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               {task.status?.message && (
                 <div className="md:col-span-2 break-words">
                   <span className="text-muted-foreground">Message:</span>{' '}
-                  {task.status.message}
+                  {displayedTaskMessage(task, task.status.message)}
                 </div>
               )}
             </CardContent>
@@ -650,3 +650,4 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     </div>
   )
 }
+import { displayedTaskMessage } from '@/lib/task-enforcement'

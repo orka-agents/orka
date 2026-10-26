@@ -22,6 +22,24 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe('RunTimeline', () => {
+  it('uses the bounded enforcement observation instead of provider condition prose', () => {
+    render(<RunTimeline task={makeTask({
+      metadata: { name: 'protected', generation: 1 },
+      spec: {
+        type: 'ai',
+        enforcement: { mode: 'enforce', format: 'opaque/v1', policy: 'e30=', requiredCapabilities: ['fs'] },
+      },
+      status: {
+        conditions: [{
+          type: 'EnforcementReady', status: 'False', reason: 'EnforcementRefused',
+          observedGeneration: 1, message: 'private-provider-prose',
+        }],
+      },
+    })} />)
+    expect(screen.getByText('Enforcement refused; admission not confirmed.')).toBeInTheDocument()
+    expect(screen.queryByText('private-provider-prose')).not.toBeInTheDocument()
+  })
+
   it('renders events in chronological order from conditions + iteration', () => {
     const task = makeTask({
       status: {

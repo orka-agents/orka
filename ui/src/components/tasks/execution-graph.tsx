@@ -1,5 +1,6 @@
 import { useNavigate } from '@tanstack/react-router'
 import { cn } from '@/lib/utils'
+import { displayedTaskMessage } from '@/lib/task-enforcement'
 import { phaseStyle, typeStyle } from '@/lib/task-status'
 import { StatusDot } from '@/components/ui/status-dot'
 import { useTaskChildren } from '@/hooks/use-tasks'
@@ -27,7 +28,7 @@ interface GraphNode {
  * component API.
  */
 function buildGraph(task: Task, events: ExecutionEvent[] = [], childTasks: Task[] = []): GraphNode {
-  const childMessages = new Map(childTasks.map((child) => [child.metadata.name, child.status?.message]))
+  const childMessages = new Map(childTasks.map((child) => [child.metadata.name, displayedTaskMessage(child, child.status?.message)]))
   const children = (task.status?.childTasks ?? []).map((c) => ({
     name: c.name,
     agent: c.agent,

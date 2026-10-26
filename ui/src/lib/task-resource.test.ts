@@ -42,6 +42,57 @@ const messageShown = (message: string) =>
 describe('displayedTaskResource', () => {
   const shown = displayedTaskResource(task)
 
+  it('hides legacy Task/execution failure prose and malformed optional diagnostics without hiding ordinary conditions', () => {
+    const source: Task = {
+      ...task, metadata: { ...task.metadata, generation: 1 },
+      status: {
+        phase: 'Failed', message: 'private-provider-task-detail',
+        execution: { state: 'Failed', message: 'private-provider-execution-detail' },
+        enforcementOutcome: { observedGeneration: 1, reason: 'private-provider-reason', needs: ['private-provider-need'] },
+        conditions: [
+          { type: 'EnforcementReady', status: 'False', reason: 'EnforcementRefused', observedGeneration: 1, message: 'private-provider-condition-detail' },
+          { type: 'Complete', status: 'False', reason: 'TaskFailed', message: 'private-provider-completion-detail' },
+          { type: 'Scheduled', status: 'True', message: 'ordinary scheduling detail' },
+        ],
+      },
+    }
+    const resource = displayedTaskResource(source)
+    expect(JSON.stringify(resource)).not.toContain('private-provider')
+    expect(JSON.stringify(resource)).toContain('ordinary scheduling detail')
+    expect(source.status?.execution?.message).toBe('private-provider-execution-detail')
+  })
+
+  it('always hides opaque policy bytes rather than relying on credential heuristics', () => {
+    const requirement = {
+      mode: 'enforce' as const, format: 'opaque/v1', policy: 'e30=', requiredCapabilities: ['fs'],
+    }
+    const resource = displayedTaskResource({
+      ...task, spec: { type: 'ai', enforcement: requirement },
+    })
+    expect(resource.spec).toMatchObject({
+      enforcement: { ...requirement, policy: HIDDEN_VALUE },
+    })
+    expect(JSON.stringify(resource)).not.toContain('e30=')
+    expect(requirement.policy).toBe('e30=')
+  })
+
+  it('hides arbitrary enforcement prose without mutating ordinary conditions or the source', () => {
+    const conditions = [
+      { type: 'EnforcementReady', status: 'False', message: 'private-provider-prose without credential markers' },
+      { type: 'Scheduled', status: 'True', message: 'ordinary scheduling detail' },
+    ]
+    const source: Task = { ...task, status: { conditions } }
+    const resource = displayedTaskResource(source)
+    expect(resource.status).toMatchObject({
+      conditions: [
+        { ...conditions[0], message: HIDDEN_VALUE },
+        conditions[1],
+      ],
+    })
+    expect(JSON.stringify(resource)).not.toContain('private-provider-prose')
+    expect(source.status?.conditions?.[0].message).toBe(conditions[0].message)
+  })
+
   it('names the resource and keeps its spec and status, but not the API-only plan', () => {
     expect(shown).toMatchObject({ apiVersion: 'core.orka.ai/v1alpha1', kind: 'Task', spec: { type: 'container', image: 'busybox' }, status: { phase: 'Running' } })
     expect(shown).not.toHaveProperty('plan')
