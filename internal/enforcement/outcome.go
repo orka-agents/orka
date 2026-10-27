@@ -7,6 +7,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
+const reasonEnforcementUncertain = "EnforcementUncertain"
+
 var needGuidance = map[string]string{
 	"complete-policy":               "Supply one complete supported policy; do not omit a required capability",
 	"supported-format":              "Use a policy format supported by every mandatory provider",
@@ -30,11 +32,11 @@ func Outcome(reason string, needs ...string) *corev1alpha1.EnforcementOutcome {
 		fallback = "prepared-container"
 	case "EnforcementRefused":
 		fallback = "operator-configuration"
-	case "EnforcementAdmissionPending", "EnforcementUncertain":
+	case "EnforcementAdmissionPending", reasonEnforcementUncertain:
 	case "EnforcementReleaseUnobserved":
-		reason, fallback = "EnforcementUncertain", "admission-recovery"
+		reason, fallback = reasonEnforcementUncertain, "admission-recovery"
 	default:
-		reason = "EnforcementUncertain"
+		reason = reasonEnforcementUncertain
 	}
 	result := &corev1alpha1.EnforcementOutcome{Reason: reason}
 	seen := make(map[string]bool)
@@ -78,8 +80,7 @@ func (e *RefusalError) Error() string {
 }
 
 func RefusalNeeds(err error) []string {
-	var refusal *RefusalError
-	if errors.As(err, &refusal) {
+	if refusal, ok := errors.AsType[*RefusalError](err); ok {
 		return refusal.Needs
 	}
 	return nil

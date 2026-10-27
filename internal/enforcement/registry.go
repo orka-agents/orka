@@ -16,6 +16,7 @@ import (
 
 	enforcementv1 "github.com/orka-agents/orka/api/enforcement/v1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Coordinator is supplied by the operator, never by a Task or Agent.
@@ -81,9 +82,8 @@ func readRegistry(path string) (RegistryConfig, [sha256.Size]byte, error) {
 	if err != nil {
 		return config, digest, fmt.Errorf("read operator enforcement registry: %w", err)
 	}
-	defer file.Close()
 	blob, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-	if err != nil {
+	if err := errors.Join(err, file.Close()); err != nil {
 		return config, digest, fmt.Errorf("read operator enforcement registry: %w", err)
 	}
 	if len(blob) > 1<<20 {
@@ -203,7 +203,9 @@ func (r *Registry) Close() {
 		r.closed = true
 		for _, entry := range r.nodes {
 			for _, client := range entry.clients {
-				client.Close()
+				if err := client.Close(); err != nil {
+					logf.Log.Error(err, "close enforcement provider client", "nodeName", entry.name)
+				}
 			}
 		}
 	}

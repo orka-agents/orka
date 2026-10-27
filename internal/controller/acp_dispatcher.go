@@ -6337,8 +6337,7 @@ func acpWorkspaceValidationFailureMessage(err error) string {
 }
 
 func boundedRuntimeSessionServerMessage(err error) string {
-	var admissionErr *enforcement.AdmissionError
-	if errors.As(err, &admissionErr) {
+	if admissionErr, ok := errors.AsType[*enforcement.AdmissionError](err); ok {
 		return admissionErr.Error()
 	}
 	var clientErr *harnessv2.ClientError
