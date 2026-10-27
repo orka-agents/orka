@@ -132,7 +132,7 @@ func TestACPEnforcementAdmissionLaunchesOnlyAfterCurrentVerification(t *testing.
 	binding, err := d.admitEnforcedRuntimeSession(t.Context(), c, task, target, create, true, fence)
 	require.NoError(t, err)
 	require.NotNil(t, binding)
-	require.Equal(t, string(target.pool.Status.ActiveInstance.PodUID), binding.PodUID)
+	require.Equal(t, target.pool.Status.ActiveInstance.PodUID, binding.PodUID)
 	status := TaskReconciler{Client: d.Client, APIReader: d.APIReader}
 	require.NoError(t, status.markEnforcementAdmission(t.Context(), task, binding, task.DeepCopy()))
 	observed := &corev1alpha1.Task{}

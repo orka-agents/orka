@@ -90,6 +90,15 @@ func (d *ACPDispatcher) verifyEnforcedACPTaskAuthority(
 	if deadline, ok := acpTaskDeadline(current, time.Now().UTC()); ok && !time.Now().Before(deadline) {
 		return errors.Join(errEnforcedACPTaskAuthority, context.DeadlineExceeded)
 	}
+	return d.verifyEnforcedACPAttemptAuthority(ctx, expected, current, runtimeFence, fence)
+}
+
+func (d *ACPDispatcher) verifyEnforcedACPAttemptAuthority(
+	ctx context.Context,
+	expected, current *corev1alpha1.Task,
+	runtimeFence harnessv2.Fence,
+	fence store.ControllerEpochFence,
+) error {
 	attemptID, err := promptAttemptIDFromTask(expected)
 	if err != nil {
 		return err

@@ -20,6 +20,12 @@ type preparedSession struct {
 	nativeRestoration     *harnessv2.NativeSessionRestoration
 }
 
+func (p *preparedSession) matchesLaunch(request harnessv2.LaunchRuntimeSessionRequest) bool {
+	return p != nil && request.PreparationOperationID == p.preparation.OperationID &&
+		request.Metadata.TaskUID == p.preparation.TaskUID &&
+		request.Metadata.TaskAttempt == p.preparation.TaskAttempt
+}
+
 // launchPreparedSession is the only adapter-start boundary for either create
 // mode. A non-nil runtime on failure retains an unproven child stop.
 func (s *Server) launchPreparedSession(ctx context.Context, prepared *preparedSession) (*acp.RuntimeSession, error) {
@@ -80,9 +86,7 @@ func (s *Server) handleLaunchSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prepared := state.prepared
-	if prepared == nil || request.PreparationOperationID != prepared.preparation.OperationID ||
-		request.Metadata.TaskUID != prepared.preparation.TaskUID ||
-		request.Metadata.TaskAttempt != prepared.preparation.TaskAttempt {
+	if !prepared.matchesLaunch(request) {
 		s.mu.Unlock()
 		writeError(w, http.StatusConflict, harnessv2.ErrorCodeInvalidRequest, "launch does not match the original session preparation", nil, false)
 		return

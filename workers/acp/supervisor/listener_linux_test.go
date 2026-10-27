@@ -44,7 +44,11 @@ func TestSupervisorListenersUsePlainTCP(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer listener.Close()
+				t.Cleanup(func() {
+					if err := listener.Close(); err != nil {
+						t.Error(err)
+					}
+				})
 				requirePlainTCP(t, listener)
 			})
 			t.Run("provider", func(t *testing.T) {
