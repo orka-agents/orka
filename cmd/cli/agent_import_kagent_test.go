@@ -353,6 +353,8 @@ type kagentImportAPI struct {
 	failOn  string
 	creates int
 	updates int
+	// runtimes are the AgentRuntimes a bundle activation reads.
+	runtimes map[string]map[string]any
 }
 
 func kagentImportAPIServer(t *testing.T, api *kagentImportAPI) *httptest.Server {
@@ -365,6 +367,13 @@ func kagentImportAPIServer(t *testing.T, api *kagentImportAPI) *httptest.Server 
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/agent-runtimes/"):
+			runtime, ok := api.runtimes[strings.TrimPrefix(r.URL.Path, "/api/v1/agent-runtimes/")]
+			if !ok {
+				http.Error(w, `{"error":"agent runtime not found"}`, http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(runtime) //nolint:errcheck
 		case r.Method == http.MethodGet && name != r.URL.Path:
 			agent, ok := api.agents[name]
 			if !ok {
