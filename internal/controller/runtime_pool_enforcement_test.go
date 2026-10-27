@@ -211,7 +211,7 @@ func TestRuntimePoolEnforcementStopAfterSweepCannotRestartRollout(t *testing.T) 
 				pod.DeepCopyInto(observed)
 				return nil
 			}
-			return r.Client.Get(ctx, key, object, opts...)
+			return r.Get(ctx, key, object, opts...)
 		},
 	})
 	cfg, err := r.runtimePoolConfig(pool)

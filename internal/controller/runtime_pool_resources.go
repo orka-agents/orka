@@ -25,7 +25,7 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 	}
 	environment := []corev1.EnvVar{
 		{Name: "ORKA_ACP_LISTEN_ADDRESS", Value: ":8080"},
-		{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
+		{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: podUIDFieldPath}}},
 		{Name: "ORKA_ACP_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 		{Name: "ORKA_ACP_POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"}}},
 		{Name: "ORKA_ACP_CONTROLLER_EPOCH", Value: strconv.FormatInt(cfg.controllerEpoch, 10)},

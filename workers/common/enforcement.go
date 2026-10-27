@@ -43,7 +43,9 @@ func WaitForEnforcementFromEnv(ctx context.Context, required bool) error {
 	return WaitForPodEnforcement(ctx, client, namespace, podName, podUID, digest)
 }
 
-func WaitForPodEnforcement(ctx context.Context, client kubernetes.Interface, namespace, name, uid, digest string) error {
+func WaitForPodEnforcement(
+	ctx context.Context, client kubernetes.Interface, namespace, name, uid, digest string,
+) error {
 	pods := client.CoreV1().Pods(namespace)
 	selector := fields.OneTermEqualSelector("metadata.name", name).String()
 	lw := &cache.ListWatch{
@@ -63,7 +65,8 @@ func WaitForPodEnforcement(ctx context.Context, client kubernetes.Interface, nam
 		}
 		return enforcement.PodApproved(pod, uid, "worker", digest)
 	}
-	_, err := watchtools.UntilWithSync(ctx, cache.ToListWatcherWithWatchListSemantics(lw, client), &corev1.Pod{}, func(store cache.Store) (bool, error) {
+	source := cache.ToListWatcherWithWatchListSemantics(lw, client)
+	_, err := watchtools.UntilWithSync(ctx, source, &corev1.Pod{}, func(store cache.Store) (bool, error) {
 		object, exists, err := store.GetByKey(namespace + "/" + name)
 		if err != nil {
 			return false, err

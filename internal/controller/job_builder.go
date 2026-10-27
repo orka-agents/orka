@@ -51,6 +51,7 @@ const (
 	workerBinaryPath              = "/worker"
 	workerHomePath                = "/home/worker"
 	workerTempPath                = "/tmp"
+	podUIDFieldPath               = "metadata.uid"
 	runtimePoolTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	sessionDataVolumeName         = "session-data"
@@ -939,7 +940,7 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"},
 			}},
 			corev1.EnvVar{Name: workerenv.WorkerPodUID, ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"},
+				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: podUIDFieldPath},
 			}},
 		)
 	}

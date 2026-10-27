@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	enforcementv1 "github.com/orka-agents/orka/api/enforcement/v1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/enforcement"
 	execevents "github.com/orka-agents/orka/internal/events"
@@ -58,7 +59,7 @@ func (r *TaskReconciler) markEnforcement(ctx context.Context, task *corev1alpha1
 	err := r.updateStatusWithRetry(ctx, task, func(current *corev1alpha1.Task) {
 		conflict = nil
 		if !sameEnforcementObservation(current, expected) {
-			conflict = errors.New("Task attempt or enforcement observation changed before outcome publication")
+			conflict = errors.New("task attempt or enforcement observation changed before outcome publication")
 			return
 		}
 		outcome := enforcement.Outcome(reason, needs...)
@@ -158,7 +159,7 @@ func (r *TaskReconciler) persistEnforcementBinding(ctx context.Context, task *co
 		return conflict
 	}
 	if !written {
-		return errors.New("Task attempt stopped before enforcement admission")
+		return errors.New("task attempt stopped before enforcement admission")
 	}
 	return nil
 }
@@ -181,35 +182,47 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 		return result, true, err
 	}
 	if job.Status.Succeeded > 0 || job.Status.Failed > 0 {
-		published := false
-		for _, binding := range slices.Clone(task.Status.EnforcementBindings) {
-			if binding.JobUID != string(job.UID) {
-				continue
-			}
-			observed, err := r.recoverNativeEnforcementPublication(ctx, task, &binding)
-			if err != nil {
-				return ctrl.Result{}, true, err
-			}
-			published = published || observed
-		}
-		if !published {
-			message := "worker ended without a verified enforcement release publication"
-			if job.Status.Failed > 0 {
-				if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
-					result, err := r.failTask(ctx, task, timedOutTaskMessage(task))
-					return result, true, err
-				}
-				if r.shouldRetry(task) {
-					result, err := r.retryTaskAfterFailure(ctx, task, r.diagnoseFailedJob(ctx, task))
-					return result, true, err
-				}
-				message = r.diagnoseFailedJob(ctx, task)
-			}
-			result, err := r.failTask(ctx, task, message)
-			return result, true, err
-		}
-		return ctrl.Result{}, false, nil
+		return r.reconcileCompletedNativeEnforcement(ctx, task, job)
 	}
+	return r.reconcileRunningNativeEnforcement(ctx, task, job)
+}
+
+func (r *TaskReconciler) reconcileCompletedNativeEnforcement(
+	ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job,
+) (ctrl.Result, bool, error) {
+	published := false
+	for _, binding := range slices.Clone(task.Status.EnforcementBindings) {
+		if binding.JobUID != string(job.UID) {
+			continue
+		}
+		observed, err := r.recoverNativeEnforcementPublication(ctx, task, &binding)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		published = published || observed
+	}
+	if !published {
+		message := "worker ended without a verified enforcement release publication"
+		if job.Status.Failed > 0 {
+			if task.Spec.Timeout != nil && jobFailedDueToActiveDeadline(job) {
+				result, err := r.failTask(ctx, task, timedOutTaskMessage(task))
+				return result, true, err
+			}
+			if r.shouldRetry(task) {
+				result, err := r.retryTaskAfterFailure(ctx, task, r.diagnoseFailedJob(ctx, task))
+				return result, true, err
+			}
+			message = r.diagnoseFailedJob(ctx, task)
+		}
+		result, err := r.failTask(ctx, task, message)
+		return result, true, err
+	}
+	return ctrl.Result{}, false, nil
+}
+
+func (r *TaskReconciler) reconcileRunningNativeEnforcement(
+	ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job,
+) (ctrl.Result, bool, error) {
 	reader := r.taskMetadataReader()
 	var pods corev1.PodList
 	if err := reader.List(ctx, &pods, client.InNamespace(task.Namespace),
@@ -232,31 +245,43 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 	running := false
 	if pod != nil {
 		for _, status := range pod.Status.ContainerStatuses {
-			running = running || (status.Name == "worker" && status.ContainerID != "" && status.State.Running != nil)
+			running = running || (status.Name == workerContainerName && status.ContainerID != "" && status.State.Running != nil)
 		}
 	}
 	if !running || pod.Spec.NodeName == "" {
-		// Pod termination can precede Job completion. Retain the exact completed
-		// container's historical admission without releasing or reactivating it.
-		for _, binding := range task.Status.EnforcementBindings {
-			if binding.JobUID != string(job.UID) || !binding.Admitted || !binding.Published {
+		return r.reconcileWaitingNativeEnforcement(ctx, task, job, pod, pods.Items)
+	}
+	return r.reconcilePreparedNativeEnforcement(ctx, task, job, pod, reader)
+}
+
+func (r *TaskReconciler) reconcileWaitingNativeEnforcement(
+	ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job, pod *corev1.Pod, pods []corev1.Pod,
+) (ctrl.Result, bool, error) {
+	// Pod termination can precede Job completion. Retain the exact completed
+	// container's historical admission without releasing or reactivating it.
+	for _, binding := range task.Status.EnforcementBindings {
+		if binding.JobUID != string(job.UID) || !binding.Admitted || !binding.Published {
+			continue
+		}
+		for _, candidate := range pods {
+			if string(candidate.UID) != binding.PodUID || candidate.Spec.NodeName != binding.NodeName ||
+				!metav1.IsControlledBy(&candidate, job) || (pod != nil && pod.UID != candidate.UID) {
 				continue
 			}
-			for _, candidate := range pods.Items {
-				if string(candidate.UID) != binding.PodUID || candidate.Spec.NodeName != binding.NodeName ||
-					!metav1.IsControlledBy(&candidate, job) || (pod != nil && pod.UID != candidate.UID) {
-					continue
-				}
-				for _, status := range candidate.Status.ContainerStatuses {
-					if status.Name == "worker" && status.ContainerID == binding.ContainerID && status.State.Terminated != nil {
-						return ctrl.Result{}, false, r.finishNativeEnforcementAdmission(ctx, task, &binding, task.DeepCopy())
-					}
+			for _, status := range candidate.Status.ContainerStatuses {
+				if status.Name == workerContainerName && status.ContainerID == binding.ContainerID && status.State.Terminated != nil {
+					return ctrl.Result{}, false, r.finishNativeEnforcementAdmission(ctx, task, &binding, task.DeepCopy())
 				}
 			}
 		}
-		return ctrl.Result{}, false,
-			r.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementPending", "waiting for the prepared worker container")
 	}
+	return ctrl.Result{}, false,
+		r.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementPending", "waiting for the prepared worker container")
+}
+
+func (r *TaskReconciler) reconcilePreparedNativeEnforcement(
+	ctx context.Context, task *corev1alpha1.Task, job *batchv1.Job, pod *corev1.Pod, reader client.Reader,
+) (ctrl.Result, bool, error) {
 	requirement, err := enforcement.TaskRequirement(task)
 	if err != nil {
 		return ctrl.Result{}, true, err
@@ -265,7 +290,7 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 	if err != nil {
 		return ctrl.Result{}, true, err
 	}
-	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != "worker" ||
+	if len(pod.Spec.Containers) != 1 || pod.Spec.Containers[0].Name != workerContainerName ||
 		!slices.Equal(pod.Spec.Containers[0].Command, []string{"/worker-enforced"}) ||
 		pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		result, err := r.failTask(ctx, task, "worker image/Pod does not provide qualified enforcement bootstrap")
@@ -294,11 +319,18 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 		result, failErr := r.failTask(ctx, task, message)
 		return result, true, failErr
 	}
-	binding, err := enforcement.BindContainer(pod, node, "worker", requirementDigest, providerSetDigest)
+	binding, err := enforcement.BindContainer(pod, node, workerContainerName, requirementDigest, providerSetDigest)
 	if err != nil {
 		return ctrl.Result{}, true, err
 	}
 	binding.JobUID = string(job.UID)
+	return r.admitNativeEnforcementWorker(ctx, task, pod, binding, requirement, reader)
+}
+
+func (r *TaskReconciler) admitNativeEnforcementWorker(
+	ctx context.Context, task *corev1alpha1.Task, pod *corev1.Pod,
+	binding *corev1alpha1.ContainerEnforcementBinding, requirement *enforcementv1.Requirement, reader client.Reader,
+) (ctrl.Result, bool, error) {
 	for _, prior := range slices.Clone(task.Status.EnforcementBindings) {
 		if prior.JobUID == binding.JobUID && prior.BindingID != binding.BindingID {
 			retired, err := r.retireNativeEnforcementBinding(ctx, task, prior)
@@ -311,7 +343,7 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 			}
 		}
 	}
-	approved, approvalErr := enforcement.PodApproved(pod, binding.PodUID, "worker", requirementDigest)
+	approved, approvalErr := enforcement.PodApproved(pod, binding.PodUID, workerContainerName, binding.RequirementDigest)
 	for _, prior := range task.Status.EnforcementBindings {
 		if prior.BindingID == binding.BindingID && prior.Admitted && approved && approvalErr == nil {
 			if !sameEnforcementAssociation(prior, *binding) {
@@ -365,11 +397,11 @@ func (r *TaskReconciler) reconcileNativeEnforcement(ctx context.Context, task *c
 		return ctrl.Result{}, true, err
 	}
 	if !activeEnforcementAttempt(latest, task.UID, binding.JobUID) {
-		return ctrl.Result{}, true, errors.New("Task attempt stopped before worker release")
+		return ctrl.Result{}, true, errors.New("task attempt stopped before worker release")
 	}
 	admission, err := json.Marshal(enforcement.PodAdmission{
 		Version: enforcement.PodAdmissionVersion, BindingID: binding.BindingID,
-		RequirementDigest: requirementDigest, PodUID: binding.PodUID, ContainerID: binding.ContainerID,
+		RequirementDigest: binding.RequirementDigest, PodUID: binding.PodUID, ContainerID: binding.ContainerID,
 	})
 	if err != nil {
 		return ctrl.Result{}, true, err
@@ -492,12 +524,12 @@ func (r *TaskReconciler) markEnforcementAdmission(ctx context.Context, task *cor
 		conflict = nil
 		requirement, err := enforcement.TaskRequirement(current)
 		if err != nil || requirement == nil || !sameEnforcementObservation(current, expected) {
-			conflict = errors.New("Task changed before enforcement admission observation")
+			conflict = errors.New("task changed before enforcement admission observation")
 			return
 		}
 		digest, err := enforcement.RequirementDigest(requirement)
 		if err != nil || digest != binding.RequirementDigest {
-			conflict = errors.New("Task requirement changed before enforcement admission observation")
+			conflict = errors.New("task requirement changed before enforcement admission observation")
 			return
 		}
 		admission := enforcementAdmission(generation, binding)

@@ -437,7 +437,8 @@ func externalNativeRuntimeIdentity(request *workspacev1alpha1.WorkloadRequest, l
 	// usable for exact retirement, while startup and Task dispatch deny it.
 	if identity.Value == "" && identity.ValueFrom != nil && identity.ValueFrom.FieldRef != nil && legacyInstanceID != "" {
 		field := identity.ValueFrom.FieldRef
-		if (field.APIVersion == "" || field.APIVersion == "v1") && field.FieldPath == "metadata.uid" && reflect.DeepEqual(identity.ValueFrom, &corev1.EnvVarSource{FieldRef: field}) {
+		if (field.APIVersion == "" || field.APIVersion == "v1") && field.FieldPath == podUIDFieldPath &&
+			reflect.DeepEqual(identity.ValueFrom, &corev1.EnvVarSource{FieldRef: field}) {
 			return types.UID(legacyInstanceID), false, nil
 		}
 	}
