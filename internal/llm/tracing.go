@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -192,11 +191,7 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 		}
 		errType := errorType(err)
 		if spanRecording {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			if errType != "" {
-				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-			}
+			tracing.RecordSpanErrorType(span, errType)
 		}
 		tp.recordOperationDuration(ctx, durationSeconds, providerName, requestModel(req), errType)
 		return nil, err
@@ -212,12 +207,7 @@ func (tp *TracingProvider) Complete(ctx context.Context, req *CompletionRequest)
 	modelName := responseModel(resp, req)
 	errType := completionResponseErrorType(resp)
 	if errType != "" && spanRecording {
-		statusDescription := errType
-		if resp != nil && strings.TrimSpace(resp.StopReason) != "" {
-			statusDescription = resp.StopReason
-		}
-		span.SetStatus(codes.Error, statusDescription)
-		span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+		tracing.RecordSpanErrorType(span, errType)
 	}
 	tp.recordOperationDuration(ctx, durationSeconds, providerName, modelName, errType)
 	tp.recordTokenUsage(ctx, resp, providerName, modelName)
@@ -247,11 +237,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 		}
 		errType := errorType(err)
 		if spanRecording {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			if errType != "" {
-				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-			}
+			tracing.RecordSpanErrorType(span, errType)
 		}
 		tp.recordOperationDuration(ctx, time.Since(start).Seconds(), providerName, requestModel(req), errType)
 		span.End()
@@ -312,7 +298,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			}
 			if chunk.StopReason != "" {
 				lastStopReason = chunk.StopReason
-				finishReasons = []string{chunk.StopReason}
+				finishReasons = []string{telemetryStopReason(chunk.StopReason)}
 			}
 			if chunk.ToolCall != nil {
 				toolCallSeen = true
@@ -322,11 +308,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 				terminalSignalSeen = true
 				errType = errorType(chunk.Error)
 				if spanRecording {
-					span.RecordError(chunk.Error)
-					span.SetStatus(codes.Error, chunk.Error.Error())
-					if errType != "" {
-						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
-					}
+					tracing.RecordSpanErrorType(span, errType)
 				}
 			}
 			if chunk.Done {
@@ -334,12 +316,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 				if !providerErrorSeen {
 					errType = streamCompletionErrorType(lastStopReason, toolCallSeen)
 					if errType != "" && spanRecording {
-						statusDescription := lastStopReason
-						if statusDescription == "" {
-							statusDescription = errType
-						}
-						span.SetStatus(codes.Error, statusDescription)
-						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+						tracing.RecordSpanErrorType(span, errType)
 					}
 				}
 			}
@@ -349,9 +326,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 				if ctx.Err() != nil {
 					errType = errorType(ctx.Err())
 					if spanRecording {
-						span.RecordError(ctx.Err())
-						span.SetStatus(codes.Error, ctx.Err().Error())
-						span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+						tracing.RecordSpanErrorType(span, errType)
 					}
 				}
 				return
@@ -361,16 +336,13 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				errType = errorType(ctxErr)
 				if spanRecording {
-					span.RecordError(ctxErr)
-					span.SetStatus(codes.Error, ctxErr.Error())
-					span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+					tracing.RecordSpanErrorType(span, errType)
 				}
 				return
 			}
 			errType = stopReasonErrorType("")
 			if spanRecording {
-				span.SetStatus(codes.Error, errType)
-				span.SetAttributes(attribute.String(genai.AttrErrorType, errType))
+				tracing.RecordSpanErrorType(span, errType)
 			}
 		}
 	}()
@@ -404,16 +376,33 @@ func completionResponseErrorType(resp *CompletionResponse) string {
 }
 
 func completionOutcomeErrorType(outcome CompletionOutcome, reason string) string {
-	trimmed := strings.TrimSpace(reason)
 	switch outcome {
 	case CompletionOutcomeIncomplete, CompletionOutcomeRefused, CompletionOutcomeFailed, CompletionOutcomeUnknown:
-		if trimmed == "" {
-			return unknownStopReasonErrorType
-		}
-		return trimmed
+		return telemetryStopReason(reason)
 	default:
 		return ""
 	}
+}
+
+// Provider SDK stop reasons and response statuses that the completion outcome
+// map does not classify. They are fixed enum values, so telemetry keeps them.
+var unclassifiedProviderStopReasons = map[string]struct{}{
+	"model_context_window_exceeded": {}, // Anthropic
+	"in_progress":                   {}, // OpenAI Responses status
+	"queued":                        {}, // OpenAI Responses status
+}
+
+// Other unknown stop reasons can contain arbitrary text from an
+// OpenAI-compatible endpoint, so they are reported as unknown_stop_reason.
+func telemetryStopReason(reason string) string {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	if completionOutcomeForStopReason(reason) != CompletionOutcomeUnknown {
+		return normalized
+	}
+	if _, ok := unclassifiedProviderStopReasons[normalized]; ok {
+		return normalized
+	}
+	return unknownStopReasonErrorType
 }
 
 func spanName(req *CompletionRequest) string {
@@ -493,7 +482,7 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 		attrs = append(attrs, attribute.String(genai.AttrResponseID, resp.ID))
 	}
 	if resp.StopReason != "" {
-		attrs = append(attrs, attribute.StringSlice(genai.AttrResponseFinishReasons, []string{resp.StopReason}))
+		attrs = append(attrs, attribute.StringSlice(genai.AttrResponseFinishReasons, []string{telemetryStopReason(resp.StopReason)}))
 	}
 	span.SetAttributes(attrs...)
 }
