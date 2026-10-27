@@ -613,7 +613,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		return err
 	}
 
-	createErr := h.client.Create(ctx, task)
+	var options []client.CreateOption
+	if task.Spec.Enforcement != nil {
+		options = append(options, client.FieldValidation(metav1.FieldValidationStrict))
+	}
+	createErr := h.client.Create(ctx, task, options...)
 	if createErr == nil {
 		sealRequesterStamp(ctx, h.client, task)
 	}

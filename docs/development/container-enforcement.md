@@ -18,6 +18,12 @@ worker container's evidence. This boundary does not claim those targets.
 Both Kubernetes manifests and HTTP Task creation accept `spec.enforcement`;
 flat HTTP requests accept `enforcement`. Its presence and complete contents
 are immutable for the Task lifetime. There is no Agent inheritance or merge.
+The capability list is ordered and unique: reordering changes requirement
+identity and is refused, just like changing policy bytes. A Task must retain
+its complete `spec`; deleting the parent cannot bypass requirement immutability.
+HTTP creates carrying enforcement request strict Kubernetes field validation
+before persistence, so an older schema cannot silently prune the requirement.
+These checks do not reconstruct requirements already erased from legacy objects.
 
 The following is a schema illustration, not a runnable provider policy:
 
