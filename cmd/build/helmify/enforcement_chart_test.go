@@ -133,7 +133,8 @@ func TestBundledEnforcementProjectionSurvivesDisabledEnrollment(t *testing.T) {
 	var installed appsv1.Deployment
 	for _, enabled := range []string{"false", "true"} {
 		t.Run(enabled, func(t *testing.T) {
-			arguments := []string{"template", "test", destination, "--namespace", "orka-test"}
+			arguments := make([]string, 0, 5+len(staticChartDefaultArgs())+8)
+			arguments = append(arguments, "template", "test", destination, "--namespace", "orka-test")
 			arguments = append(arguments, staticChartDefaultArgs()...)
 			arguments = append(arguments, "--set", "enforcement.enabled="+enabled,
 				"--set-string", "controller.watchNamespace=orka-tasks",
@@ -206,7 +207,9 @@ func TestBundledEnforcementProjectionSurvivesDisabledEnrollment(t *testing.T) {
 			"metadata": map[string]string{"name": "local-enforcement-installation", "namespace": "orka-test"},
 		},
 	})
-	for _, change := range []string{"", "enforcement.installationName=other-installation", "enforcement.controllerMountDirectory=/other-directory"} {
+	for _, change := range []string{
+		"", "enforcement.installationName=other-installation", "enforcement.controllerMountDirectory=/other-directory",
+	} {
 		t.Run("disabled-upgrade/"+change, func(t *testing.T) {
 			args := append([]string{"template", "test", destination, "--namespace", "orka-test",
 				"--is-upgrade", "--dry-run=server", "--kubeconfig", upgradeConfig}, staticChartDefaultArgs()...)
@@ -235,7 +238,7 @@ func assertManagementIsolation(t *testing.T, rendered, management, tasks string)
 	var clusterBindings []rbacv1.ClusterRoleBinding
 	var managementRole *rbacv1.Role
 	var webhookFound bool
-	for _, document := range strings.Split(rendered, "\n---") {
+	for document := range strings.SplitSeq(rendered, "\n---") {
 		var metadata struct {
 			metav1.TypeMeta `json:",inline"`
 			Metadata        metav1.ObjectMeta `json:"metadata"`
@@ -296,7 +299,8 @@ func assertManagementIsolation(t *testing.T, rendered, management, tasks string)
 	require.NotNil(t, managementRole)
 	for _, rule := range managementRole.Rules {
 		for _, resource := range rule.Resources {
-			require.NotContains(t, []string{"*", "pods", "jobs", "deployments", "serviceaccounts", "serviceaccounts/token"}, resource)
+			require.NotContains(t,
+				[]string{"*", "pods", "jobs", "deployments", "serviceaccounts", "serviceaccounts/token"}, resource)
 		}
 	}
 }

@@ -168,7 +168,7 @@ webhooks:
     namespaceSelector:
       matchLabels:
         orka.ai/controller-mode: {{ .Values.controller.mode | quote }}
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
   {{- end }}
 
   - name: agent-contract.{{ .Values.controller.mode }}.orka.ai

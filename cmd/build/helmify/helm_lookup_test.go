@@ -29,7 +29,8 @@ func helmLookupConfig(t *testing.T, objects map[string]any) string {
 				"preferredVersion": map[string]string{"groupVersion": "apps/v1", "version": "v1"},
 			},
 			map[string]any{
-				"name": "apiextensions.k8s.io", "versions": []any{map[string]string{"groupVersion": "apiextensions.k8s.io/v1", "version": "v1"}},
+				"name":             "apiextensions.k8s.io",
+				"versions":         []any{map[string]string{"groupVersion": "apiextensions.k8s.io/v1", "version": "v1"}},
 				"preferredVersion": map[string]string{"groupVersion": "apiextensions.k8s.io/v1", "version": "v1"},
 			},
 		}},

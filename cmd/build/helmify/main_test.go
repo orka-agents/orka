@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -217,47 +216,18 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template rejected controller RBAC: %v\n%s", err, output)
 	}
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatalf("rendered RBAC is missing the controller tenant Role:\n%s", output)
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
-	const want = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n    verbs: [\"get\", \"list\", \"delete\"]"
-	if !strings.Contains(controllerRole, want) {
-		t.Fatalf("controller tenant Role is missing the least-privilege Session rule %q:\n%s", want, controllerRole)
-	}
-	clientStart := strings.Index(output, "# Client Role")
-	if clientStart < 0 {
-		t.Fatalf("rendered RBAC is missing the client Role:\n%s", output)
-	}
-	clientRole := output[clientStart:]
-	if end := strings.Index(clientRole, "\n---"); end >= 0 {
-		clientRole = clientRole[:end]
-	}
-	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
-	if !strings.Contains(clientRole, wantClient) {
-		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
-	}
+	controllerRole := requireRenderedRole(t, output, "test-orka-controller")
+	requireResourceVerbs(t, controllerRole.Rules, "core.orka.ai", "sessions", []string{"get", "list", "delete"})
+	clientRole := requireRenderedRole(t, output, "test-orka-client")
+	requireResourceVerbs(t, clientRole.Rules, "core.orka.ai", "sessions",
+		[]string{"get", "list", "create", "update", "delete"})
 }
 
 func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 	args := []string{"--show-only", "templates/rbac.yaml"}
 
 	output := requireHelmRender(t, args...)
-	_, clientRole, found := strings.Cut(output, "# Client Role")
-	if !found {
-		t.Fatal("rendered RBAC is missing the client Role")
-	}
-	_, clientRole, _ = strings.Cut(clientRole, "\n")
-	clientRole, _, _ = strings.Cut(clientRole, "\n---")
-	var role rbacv1.Role
-	if err := yaml.Unmarshal([]byte(clientRole), &role); err != nil {
-		t.Fatalf("decode client Role: %v", err)
-	}
+	role := requireRenderedRole(t, output, "test-orka-client")
 	if role.Namespace != "orka-test" {
 		t.Fatalf("client Role namespace = %q, want orka-test", role.Namespace)
 	}
@@ -335,44 +305,33 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 
 func TestStaticChartGrantsConnectorProvidersLeastPrivilege(t *testing.T) {
 	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatal("rendered RBAC is missing the controller tenant Role")
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
+	role := requireRenderedRole(t, output, "test-orka-controller")
 	// The controller reads providers and manages their finalizer; it never
 	// creates or deletes one.
-	const want = "resources: [\"connectorproviders\"]\n    verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]"
-	if !strings.Contains(controllerRole, want) || strings.Count(controllerRole, `"connectorproviders"`) != 1 {
-		t.Fatalf("controller tenant Role must grant connectorproviders only %q:\n%s", want, controllerRole)
-	}
+	requireResourceVerbs(t, role.Rules, "core.orka.ai", "connectorproviders",
+		[]string{"get", "list", "watch", "update", "patch"})
 }
 
 func TestStaticChartOmitsUnusedControllerPermissions(t *testing.T) {
 	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatal("rendered RBAC is missing the controller tenant Role")
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
+	role := requireRenderedRole(t, output, "test-orka-controller")
 	for _, resource := range []string{
 		"cronjobs", "endpoints", "nodes", "replicationcontrollers", "pods/portforward",
 		"statefulsets", "daemonsets", "ingresses", "horizontalpodautoscalers", "metrics.k8s.io",
 	} {
-		if strings.Contains(controllerRole, strconv.Quote(resource)) {
-			t.Errorf("controller tenant Role still grants unused %q access", resource)
+		for _, rule := range role.Rules {
+			if slices.Contains(rule.Resources, resource) || slices.Contains(rule.Resources, "*") ||
+				slices.Contains(rule.APIGroups, resource) {
+				t.Errorf("controller tenant Role still grants unused %q access", resource)
+			}
 		}
 	}
 	for _, resource := range []string{
 		"jobs", "pods/status", "persistentvolumeclaims", "serviceaccounts/token", "endpointslices",
 	} {
-		if !strings.Contains(controllerRole, strconv.Quote(resource)) {
+		if !slices.ContainsFunc(role.Rules, func(rule rbacv1.PolicyRule) bool {
+			return slices.Contains(rule.Resources, resource)
+		}) {
 			t.Errorf("controller tenant Role is missing required %q access", resource)
 		}
 	}

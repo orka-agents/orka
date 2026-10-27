@@ -18,7 +18,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-const maxEnforcementChartBytes = 8 << 20
+const (
+	maxEnforcementChartBytes = 8 << 20
+	enforcementChartName     = "guardd"
+)
 
 func bundleEnforcementChart(destination, archivePath, expected string) error {
 	if archivePath == "" && expected == "" {
@@ -31,9 +34,8 @@ func bundleEnforcementChart(destination, archivePath, expected string) error {
 	if err != nil {
 		return fmt.Errorf("open local enforcement chart: %w", err)
 	}
-	defer file.Close()
 	blob, err := io.ReadAll(io.LimitReader(file, maxEnforcementChartBytes+1))
-	if err != nil {
+	if err := errors.Join(err, file.Close()); err != nil {
 		return fmt.Errorf("read local enforcement chart: %w", err)
 	}
 	if len(blob) > maxEnforcementChartBytes {
@@ -63,7 +65,7 @@ func bundleEnforcementChart(destination, archivePath, expected string) error {
 		return errors.New("enforcement composition requires a dependency-free Orka chart input")
 	}
 	chart["dependencies"] = []map[string]string{
-		{"name": "guardd", "alias": "enforcement", "version": version},
+		{"name": enforcementChartName, "alias": "enforcement", "version": version},
 	}
 	contents, err = yaml.Marshal(chart)
 	if err != nil {
@@ -87,9 +89,8 @@ func enforcementChartVersion(blob []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open enforcement chart gzip: %w", err)
 	}
-	defer compressed.Close()
 	expanded, err := io.ReadAll(io.LimitReader(compressed, (16<<20)+1))
-	if err != nil {
+	if err := errors.Join(err, compressed.Close()); err != nil {
 		return "", fmt.Errorf("expand enforcement chart: %w", err)
 	}
 	if len(expanded) > 16<<20 {
@@ -107,7 +108,7 @@ func enforcementChartVersion(blob []byte) (string, error) {
 			return "", fmt.Errorf("decode enforcement chart archive: %w", err)
 		}
 		name := strings.TrimSuffix(header.Name, "/")
-		if (name != "guardd" && !strings.HasPrefix(name, "guardd/")) ||
+		if (name != enforcementChartName && !strings.HasPrefix(name, "guardd/")) ||
 			path.Clean(name) != name || seen[name] ||
 			name == "guardd/charts" || strings.HasPrefix(name, "guardd/charts/") ||
 			(header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) {
@@ -134,7 +135,7 @@ func enforcementChartVersion(blob []byte) (string, error) {
 		if err := yaml.Unmarshal(body, &metadata); err != nil {
 			return "", fmt.Errorf("decode enforcement chart metadata: %w", err)
 		}
-		if metadata.APIVersion != "v2" || metadata.Name != "guardd" ||
+		if metadata.APIVersion != "v2" || metadata.Name != enforcementChartName ||
 			metadata.Type != "application" || len(metadata.Dependencies) != 0 ||
 			len(metadata.Version) > 128 ||
 			!regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$`).MatchString(metadata.Version) {

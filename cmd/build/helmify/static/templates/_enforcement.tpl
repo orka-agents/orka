@@ -3,7 +3,8 @@
 {{- end -}}
 
 {{- define "orka.validateEnforcement" -}}
-{{- if and .Values.enforcement.enabled (not (include "orka.enforcementBundled" .)) -}}
+{{- $enforcement := .Values.enforcement | default dict -}}
+{{- if and $enforcement.enabled (not (include "orka.enforcementBundled" .)) -}}
 {{- fail "enforcement.enabled requires a locally verified Guardd chart bundled by helmify" -}}
 {{- end -}}
 {{- if and (include "orka.enforcementBundled" .) (not (hasKey (.Values.podSecurityContext | default dict) "fsGroup")) -}}
@@ -12,7 +13,7 @@
 {{- if include "orka.enforcementBundled" . -}}
 {{- $installation := include "guardd.installationName" .Subcharts.enforcement -}}
 {{- $retained := lookup "v1" "ConfigMap" .Release.Namespace (printf "%s-installation" $installation) -}}
-{{- if and (or .Values.enforcement.enabled $retained) (eq (include "orka.watchNamespace" .) .Release.Namespace) -}}
+{{- if and (or $enforcement.enabled $retained) (eq (include "orka.watchNamespace" .) .Release.Namespace) -}}
 {{- fail "enabled or retained enforcement requires controller.watchNamespace to differ from the management release namespace" -}}
 {{- end -}}
 {{- end -}}
