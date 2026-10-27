@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/providerproxy"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
@@ -159,6 +160,9 @@ type providerProxySession struct {
 	lastFailureSeq                  uint64
 	lastUpstreamStatus              int
 	lastUpstreamDetail              string
+	// turnUsage totals the token usage a lifecycle broker reported for the
+	// active prompt's successful inference responses.
+	turnUsage *harnessv2.UsageUpdate
 	// admissionClosed rejects new requests for the active prompt once the
 	// ACP child has settled its turn, while in-flight relays keep their
 	// gate context and drain normally.
@@ -216,8 +220,8 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream URL is invalid")
 	}
-	if c.ProviderKind == providerKindFoundry && (parsed.Path != "/v1" || parsed.RawPath != "") {
-		return ProviderProxyConfig{}, nil, fmt.Errorf("external Foundry provider proxy must target the lifecycle broker /v1 endpoint")
+	if usesLifecycleBroker(c.ProviderKind) && (parsed.Path != "/v1" || parsed.RawPath != "") {
+		return ProviderProxyConfig{}, nil, fmt.Errorf("external %s provider proxy must target the lifecycle broker /v1 endpoint", lifecycleBrokerLabel(c.ProviderKind))
 	}
 	if c.MaxRequestBytes <= 0 {
 		c.MaxRequestBytes = defaultProviderProxyMaxRequestBytes
@@ -385,6 +389,7 @@ func (s *providerProxySession) activateWithMaxTurns(promptID string, maxTurns in
 	s.lastFailureSeq = 0
 	s.lastUpstreamStatus = 0
 	s.lastUpstreamDetail = ""
+	s.turnUsage = nil
 	s.leaseVersion++
 	version := s.leaseVersion
 	s.gateContext, s.gateCancel = context.WithCancelCause(context.Background())
@@ -683,6 +688,54 @@ func (s *providerProxySession) recordInferenceOutcome(promptID string, class pro
 		return
 	}
 	s.recordInferenceOutcomeLocked(seq, statusCode, detail)
+}
+
+// recordInferenceUsage adds a successful response's reported token usage to
+// the active prompt's totals.
+func (s *providerProxySession) recordInferenceUsage(promptID string, usage harnessv2.UsageUpdate) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(promptID) == "" || s.turnPromptID != strings.TrimSpace(promptID) {
+		return
+	}
+	first := s.turnUsage == nil
+	if first {
+		s.turnUsage = &harnessv2.UsageUpdate{Reported: true}
+	}
+	s.turnUsage.InputTokens += usage.InputTokens
+	s.turnUsage.OutputTokens += usage.OutputTokens
+	// One response without a cache breakdown leaves the prompt's cached
+	// total unknown, not partial.
+	if usage.CachedInputTokens == nil || (!first && s.turnUsage.CachedInputTokens == nil) {
+		s.turnUsage.CachedInputTokens = nil
+		return
+	}
+	cached := *usage.CachedInputTokens
+	if s.turnUsage.CachedInputTokens != nil {
+		cached += *s.turnUsage.CachedInputTokens
+	}
+	s.turnUsage.CachedInputTokens = &cached
+}
+
+// promptUsage returns the prompt's reported token usage, if any.
+func (s *providerProxySession) promptUsage(promptID string) *harnessv2.UsageUpdate {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnUsage == nil || s.turnPromptID != strings.TrimSpace(promptID) {
+		return nil
+	}
+	usage := *s.turnUsage
+	if usage.CachedInputTokens != nil {
+		cached := *usage.CachedInputTokens
+		usage.CachedInputTokens = &cached
+	}
+	return &usage
 }
 
 // recordRejectedInferenceRequest accounts an inference request the proxy
@@ -993,8 +1046,8 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		reject(http.StatusBadRequest, "provider request path is invalid")
 		return
 	}
-	if p.providerKind == providerKindFoundry && (r.URL.RawQuery != "" || session.foundry == nil) {
-		reject(http.StatusForbidden, "Foundry inference requires a bound session and exact broker route")
+	if usesLifecycleBroker(p.providerKind) && (r.URL.RawQuery != "" || session.foundry == nil) {
+		reject(http.StatusForbidden, lifecycleBrokerLabel(p.providerKind)+" inference requires a bound session and exact broker route")
 		return
 	}
 	if providerproxy.HasDisallowedContentEncoding(r.Header) {
@@ -1061,7 +1114,7 @@ func (p *providerProxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		trustedContext, contextErr := session.foundry.inferenceContext(authorization.promptID, inferenceSeq, body)
 		if contextErr != nil {
 			waitForPromptGateCancellation(r.Context(), authorization.gateContext)
-			reject(http.StatusForbidden, "Foundry inference ownership is no longer active")
+			reject(http.StatusForbidden, session.foundry.label+" inference ownership is no longer active")
 			return
 		}
 		// Always replace child input, including duplicates, with the context
@@ -1215,7 +1268,9 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	// stream for explicit error events so they are accounted as failures.
 	var streamScanner *sseTerminalErrorScanner
 	if !upstreamFailed && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
-		streamScanner = &sseTerminalErrorScanner{}
+		// A lifecycle broker reports the turn's token usage on its terminal
+		// Responses event; other providers keep their existing accounting.
+		streamScanner = &sseTerminalErrorScanner{captureUsage: usesLifecycleBroker(p.providerKind)}
 		// The scanner attaches on the WRITE side below, so it sees only
 		// bytes the child actually received. A marker read upstream but
 		// never delivered must not count as delivered.
@@ -1249,6 +1304,11 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 	recordIncompleteStream := func() {
 		session.recordInferenceOutcome(promptID, requestClass, seq, http.StatusBadGateway, "provider stream ended before a terminal success event")
 	}
+	recordStreamUsage := func() {
+		if streamScanner != nil && streamScanner.usage != nil && requestClass == providerRequestInference {
+			session.recordInferenceUsage(promptID, *streamScanner.usage)
+		}
+	}
 	if upstreamFailed {
 		session.attachInferenceFailureDetail(promptID, requestClass, seq, providerUpstreamErrorDetail(capture.buffer))
 	}
@@ -1265,7 +1325,10 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 					if !streamScanner.completed {
 						recordIncompleteStream()
 					} else {
+						// A child may close the stream as soon as it reads
+						// the terminal event, before the upstream body ends.
 						session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
+						recordStreamUsage()
 					}
 				}
 				// A partially delivered non-SSE body is left unaccounted:
@@ -1301,6 +1364,7 @@ func (p *providerProxy) relayUpstreamResponseWithCancellation(
 		// child; a streamed response must also carry a provider terminal
 		// success marker so a truncated 2xx cannot mask an earlier failure.
 		session.recordInferenceOutcome(promptID, requestClass, seq, response.StatusCode, "")
+		recordStreamUsage()
 	}
 }
 
@@ -1338,11 +1402,20 @@ type sseTerminalErrorScanner struct {
 	eventMarker       []byte
 	completed         bool
 	detail            string
+	// captureUsage parses Responses usage from a complete terminal
+	// response.completed data line into usage. That line carries the whole
+	// response object, so it is buffered separately from linePrefix.
+	captureUsage  bool
+	usageLine     []byte
+	usageOverflow bool
+	usage         *harnessv2.UsageUpdate
 }
 
 const (
 	sseScannerDetailPrefixBytes = 1024
 	sseScannerWindowBytes       = 64
+	// sseScannerUsageLineBytes bounds the buffered response.completed line.
+	sseScannerUsageLineBytes = 1 << 20
 )
 
 // Markers are matched against a whitespace-stripped copy of each line, so
@@ -1393,6 +1466,13 @@ func (c *sseTerminalErrorScanner) Write(p []byte) (int, error) {
 		if len(c.linePrefix) < sseScannerDetailPrefixBytes {
 			c.linePrefix = append(c.linePrefix, b)
 		}
+		if c.captureUsage && !c.usageOverflow {
+			if len(c.usageLine) < sseScannerUsageLineBytes {
+				c.usageLine = append(c.usageLine, b)
+			} else {
+				c.usageOverflow = true
+			}
+		}
 		if b == ' ' || b == '\t' || b == '\r' {
 			continue
 		}
@@ -1441,6 +1521,9 @@ func (c *sseTerminalErrorScanner) scanWindow() {
 }
 
 func (c *sseTerminalErrorScanner) finishLine() {
+	if c.captureUsage && c.pendingMarker == nil && !c.awaitingErrorData {
+		c.captureResponseUsage()
+	}
 	if c.pendingMarker != nil {
 		c.markFailure(c.pendingMarker)
 		return
@@ -1477,6 +1560,44 @@ func (c *sseTerminalErrorScanner) finishLine() {
 	}
 }
 
+// captureResponseUsage reads usage only from a whole data line whose
+// top-level event is response.completed or response.incomplete, the two
+// terminal successes. Model text reaches the stream only JSON-escaped inside
+// other events, so it cannot forge this line.
+func (c *sseTerminalErrorScanner) captureResponseUsage() {
+	if c.usageOverflow {
+		return
+	}
+	payload, ok := bytes.CutPrefix(bytes.TrimSpace(c.usageLine), sseDataFieldPrefix)
+	if !ok {
+		return
+	}
+	var event struct {
+		Type     string `json:"type"`
+		Response *struct {
+			Usage *struct {
+				InputTokens        uint64 `json:"input_tokens"`
+				OutputTokens       uint64 `json:"output_tokens"`
+				InputTokensDetails *struct {
+					CachedTokens *uint64 `json:"cached_tokens"`
+				} `json:"input_tokens_details"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(payload), &event) != nil || (event.Type != "response.completed" && event.Type != "response.incomplete") ||
+		event.Response == nil || event.Response.Usage == nil {
+		return
+	}
+	usage := harnessv2.UsageUpdate{InputTokens: event.Response.Usage.InputTokens, OutputTokens: event.Response.Usage.OutputTokens, Reported: true}
+	if details := event.Response.Usage.InputTokensDetails; details != nil && details.CachedTokens != nil {
+		cached := *details.CachedTokens
+		usage.CachedInputTokens = &cached
+	}
+	if usage.Validate() == nil {
+		c.usage = &usage
+	}
+}
+
 func (c *sseTerminalErrorScanner) markFailure(marker []byte) {
 	c.failed = true
 	c.pendingMarker = nil
@@ -1497,6 +1618,7 @@ func (c *sseTerminalErrorScanner) markFailure(marker []byte) {
 
 func (c *sseTerminalErrorScanner) resetLine() {
 	c.linePrefix = c.linePrefix[:0]
+	c.usageLine, c.usageOverflow = c.usageLine[:0], false
 	c.lineWindow = c.lineWindow[:0]
 	c.compactLen = 0
 }
@@ -1666,7 +1788,7 @@ func providerRequestRoute(providerKind, requestPath, method string) (allowed, re
 		case providerOpenAIChatCompletionsPath:
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
-	case providerKindFoundry:
+	case providerKindFoundry, providerKindKagent:
 		if requestPath == providerResponsesPath {
 			allowed, requiresModel, class = method == http.MethodPost, true, providerRequestInference
 		}
