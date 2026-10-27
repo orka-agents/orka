@@ -40,6 +40,7 @@ func setupMemoryProposalApp(t *testing.T, ui *UserInfo) (*fiber.App, *sqlite.Sto
 			return c.Next()
 		})
 	}
+	app.Post("/api/v1/memory-proposals", h.CreateMemoryProposal)
 	app.Post("/api/v1/memory-proposals/:id/review", h.ReviewMemoryProposal)
 	app.Post("/api/v1/memory-proposals/:id/apply", h.ApplyMemoryProposal)
 	return app, ss
@@ -68,6 +69,17 @@ func createTestMemoryProposal(t *testing.T, ss *sqlite.Store, status string) *st
 func postMemoryProposal(t *testing.T, app *fiber.App, id, action, body string) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals/"+id+"/"+action+"?namespace=default", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(raw)
+}
+
+func createMemoryProposalRequest(t *testing.T, app *fiber.App, body string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memory-proposals?namespace=default", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -194,5 +206,62 @@ func TestMemoryProposalRequiresIdentity(t *testing.T) {
 		stored, err = ss.GetMemoryProposal(context.Background(), "default", accepted.ID)
 		require.NoError(t, err)
 		require.Equal(t, "accepted", stored.Status)
+	}
+}
+
+func TestCreateMemoryProposalRejectsClientDecision(t *testing.T) {
+	tests := []struct {
+		name  string
+		body  string
+		field string
+	}{
+		{name: "accepted status", body: `"status":"accepted"`, field: "status"},
+		{name: "applied status", body: `"status":"applied","appliedMemoryId":"mem-1"`, field: "status"},
+		{name: "reviewer", body: `"reviewer":"someone-else"`, field: "reviewer"},
+		{name: "review note", body: `"reviewNote":"looks fine"`, field: "reviewNote"},
+		{name: "reviewed at", body: `"reviewedAt":"2026-10-17T00:00:00Z"`, field: "reviewedAt"},
+		{name: "applied memory", body: `"appliedMemoryId":"mem-1"`, field: "appliedMemoryId"},
+		{name: "whitespace applied memory", body: `"appliedMemoryId":" "`, field: "appliedMemoryId"},
+		{name: "applier", body: `"appliedBy":"someone-else"`, field: "appliedBy"},
+		{name: "applier case folded", body: `"APPLIEDBY":"someone-else"`, field: "appliedBy"},
+		{name: "applied at", body: `"appliedAt":"2026-10-17T00:00:00Z"`, field: "appliedAt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, ss := setupMemoryProposalApp(t, &UserInfo{Username: memoryProposalTestUser})
+			body := `{"namespace":"default","type":"memory","title":"Dock 4 returns",` + tt.body + `}`
+
+			status, raw := createMemoryProposalRequest(t, app, body)
+			require.Equal(t, http.StatusBadRequest, status, raw)
+			require.Contains(t, raw, tt.field+" cannot be set by clients")
+
+			proposals, err := ss.ListMemoryProposals(context.Background(), store.MemoryProposalFilter{Namespace: "default"})
+			require.NoError(t, err)
+			require.Empty(t, proposals)
+		})
+	}
+}
+
+func TestCreateMemoryProposalStartsPending(t *testing.T) {
+	// Older clients send every key, so empty decision fields and an explicit
+	// pending status still create an ordinary pending proposal.
+	for _, body := range []string{
+		`{"namespace":"default","type":"memory","title":"Dock 4 returns"}`,
+		`{"namespace":"default","type":"memory","title":"Dock 4 returns","status":"pending","reviewer":"","appliedBy":"","appliedMemoryId":""}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			app, ss := setupMemoryProposalApp(t, &UserInfo{Username: memoryProposalTestUser})
+
+			status, raw := createMemoryProposalRequest(t, app, body)
+			require.Equal(t, http.StatusCreated, status, raw)
+
+			var created store.MemoryProposal
+			require.NoError(t, json.Unmarshal([]byte(raw), &created))
+			stored, err := ss.GetMemoryProposal(context.Background(), "default", created.ID)
+			require.NoError(t, err)
+			require.Equal(t, "pending", stored.Status)
+			require.Empty(t, stored.Reviewer)
+			require.Empty(t, stored.AppliedBy)
+		})
 	}
 }
