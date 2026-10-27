@@ -126,6 +126,8 @@ curl -sS -X POST http://localhost:8080/api/v1/memories \
   }'
 ```
 
+`source` defaults to `manual`. A create request that sets `source: "memory_proposal"` or a `sourceProposalId` returns `400 Bad Request`; applying a proposal records those fields. An update that changes `source` to `memory_proposal` also returns `400 Bad Request`, as does an update that changes the `source` of a memory created by applying a proposal. An update never changes `sourceProposalId`. Omitting `source`, or sending back a memory's current `source` unchanged, is accepted.
+
 ## Memory proposal API
 
 | Endpoint | Method | Description |
@@ -187,7 +189,7 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/ap
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Apply links only the memory it creates: if another memory already names the proposal in `sourceProposalId`, apply returns `409 Conflict` and the proposal stays accepted. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
 
 ## Safety model
 
