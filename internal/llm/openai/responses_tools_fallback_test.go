@@ -7,10 +7,73 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/orka-agents/orka/internal/llm"
 )
+
+func TestResponsesStreamErrorsDoNotReplay(t *testing.T) {
+	for _, test := range []struct {
+		name, event, message string
+		status               int
+	}{
+		{"cached404", "", "response not found", http.StatusNotFound},
+		{"event404", "", "404 response not found", http.StatusOK},
+		{"metadata404", `{"type":"response.created","response":{"id":"resp-test","status":"in_progress"}}`,
+			"404 response not found", http.StatusOK},
+		{"output404", `{"type":"response.output_text.delta","delta":"partial"}`,
+			"404 response not found", http.StatusOK},
+		{"metadata tool error", `{"type":"response.created","response":{"id":"resp-test","status":"in_progress"}}`,
+			"Tool use is not supported in Responses API without Harmony", http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.URL.Path != "/responses" {
+					t.Errorf("stream error replayed on %s", r.URL.Path)
+				}
+				if test.status != http.StatusOK {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(test.status)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": test.message}})
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if test.event != "" {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", test.event)
+				}
+				event, err := json.Marshal(map[string]string{"type": "error", "message": test.message})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", event)
+			}))
+			defer server.Close()
+			provider, err := NewProvider(llm.ProviderConfig{APIKey: "test", BaseURL: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.mode.Store(int32(apiModeResponses))
+			chunks, err := provider.Stream(t.Context(), &llm.CompletionRequest{Model: "local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var streamErr error
+			for chunk := range chunks {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+			}
+			if streamErr == nil || calls.Load() != 1 || apiMode(provider.mode.Load()) != apiModeResponses {
+				t.Fatalf("stream error was replayed or hidden: calls=%d mode=%d err=%v",
+					calls.Load(), provider.mode.Load(), streamErr)
+			}
+		})
+	}
+}
 
 func TestResponsesToolsCompatibilityFallback(t *testing.T) {
 	for _, mode := range []apiMode{apiModeUnknown, apiModeResponses} {

@@ -583,6 +583,17 @@ type responseStream interface {
 	Err() error
 }
 
+type observedResponseStream struct {
+	responseStream
+	observed bool
+}
+
+func (s *observedResponseStream) Next() bool {
+	next := s.responseStream.Next()
+	s.observed = s.observed || next
+	return next
+}
+
 type responseFuncCallState struct {
 	itemID         string
 	outputIndex    int64
@@ -1073,13 +1084,16 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		send := newStreamSender(ctx, ch)
 		params := buildResponsesParams(req)
 		params.Model = p.requestModel(req.Model)
-		emitted, fallback := false, false
-		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), func(chunk llm.StreamChunk) bool {
-			if !emitted && chunk.Error != nil && isUnsupportedAPIError(chunk.Error) {
-				fallback = true
-				return false
+		stream := &observedResponseStream{responseStream: p.client.Responses.NewStreaming(ctx, params)}
+		fallback := false
+		streamResponsesEvents(stream, p.TelemetryProviderName(), func(chunk llm.StreamChunk) bool {
+			if !stream.observed && chunk.Error != nil && ctx.Err() == nil {
+				rejection, ok := errors.AsType[*openai.Error](stream.Err())
+				if ok && rejection.StatusCode == http.StatusBadRequest && isUnsupportedResponsesToolsMessage(rejection.Message) {
+					fallback = true
+					return false
+				}
 			}
-			emitted = true
 			return send(chunk)
 		}, req.ResponsesInput)
 		if fallback {
