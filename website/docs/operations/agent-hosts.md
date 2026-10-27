@@ -45,7 +45,8 @@ release namespace and `controller.acpRuntime.namespace`.
 Before you disable agent hosts, uninstall, or roll back to a release without them, delete
 every AgentHost and wait until it is gone. Without agent hosts the controller stops
 reconciling them, so their Pods keep running and their deletion never finishes; an upgrade
-that disables agent hosts is refused while AgentHosts remain. Helm keeps the host
+that disables agent hosts is refused while AgentHosts remain in the effective watched
+namespace (`controller.watchNamespace`, defaulting to the release namespace). Helm keeps the host
 namespace, with the hosts' volumes and the controller's Role in it, so a controller with
 agent hosts on can still finish cleaning up, including hosts left in an earlier namespace
 after `controller.agentHosts.namespace` changes. Delete the namespace yourself once no
