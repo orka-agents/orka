@@ -346,7 +346,10 @@ func (f *externalAuthorizationFixture) request(t *testing.T, method, path, body 
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer fixture-%s-%d", t.Name(), f.sequence))
-	response, err := f.server.app.Test(request, fiber.TestConfig{Timeout: 5 * time.Second})
+	// The oversized usage report scans 20,000 SQLite rows: about 0.4s normally
+	// but 11-12s under -race, past the former 5s budget. A hung handler still
+	// fails with a deadline error instead of an empty response.
+	response, err := f.server.app.Test(request, fiber.TestConfig{Timeout: 60 * time.Second, FailOnTimeout: true})
 	require.NoError(t, err)
 	defer response.Body.Close() //nolint:errcheck
 	data, err := io.ReadAll(response.Body)

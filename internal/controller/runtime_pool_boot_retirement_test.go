@@ -88,6 +88,72 @@ func TestRuntimePoolRetirementStandaloneCancelledBeforeSessionAcknowledgment(t *
 	}
 }
 
+func TestRuntimePoolRetirementReusableUnacknowledgedBootKeepsIdentityFences(t *testing.T) {
+	f := newNativePoolBootFixture(t, false)
+	f.serve(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	task := runtimePoolRetirementTask(t, &pool, "reusable-before-session-ack")
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateFailed
+	task.Status.Execution.Outcome = corev1alpha1.TaskExecutionOutcomeFailed
+	task.Status.Execution.RuntimeSessionSupervisorBootID = ""
+	if err := f.r.Create(t.Context(), task); err != nil {
+		t.Fatal(err)
+	}
+	witness := f.witness(t)
+	if err := runtimePoolTaskWitnessMatches(task, task.UID, witness); err != nil {
+		t.Fatalf("exact reserved reusable session with its frozen profile was rejected: %v", err)
+	}
+	if retired, err := verifiedNativeRuntimePoolRetirement(t.Context(), f.control, task, task.UID); err != nil || retired {
+		t.Fatalf("unacknowledged reusable reservation invented live retirement: %t %v", retired, err)
+	}
+	for _, changed := range []string{
+		"missing session profile", "foreign session profile", "foreign task binding",
+		"foreign binding digest", "foreign instance", "foreign recorded boot",
+		"foreign pod", "empty authoritative boot",
+	} {
+		t.Run(changed, func(t *testing.T) {
+			other, proof := task.DeepCopy(), witness
+			switch changed {
+			case "missing session profile":
+				other.Status.Execution.RuntimeSessionProfileDigest = ""
+			case "foreign session profile":
+				other.Status.Execution.RuntimeSessionProfileDigest = "foreign-profile"
+			case "foreign task binding":
+				other.Status.AgentExecutionBinding.Task.UID = "foreign-task"
+			case "foreign binding digest":
+				other.Status.AgentExecutionBinding.BindingDigest = "foreign-digest"
+			case "foreign instance":
+				other.Status.Execution.RuntimeInstanceID = "foreign-instance"
+			case "foreign recorded boot":
+				other.Status.Execution.RuntimeSessionSupervisorBootID = "foreign-boot"
+			case "foreign pod":
+				proof.PodUID = "foreign-pod"
+			case "empty authoritative boot":
+				proof.Fence.SupervisorBootID = ""
+			}
+			if err := runtimePoolTaskWitnessMatches(other, task.UID, proof); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("%s gained historical cleanup authority: %v", changed, err)
+			}
+		})
+	}
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeSessionCleanupCompleteForUID(task, task.UID) {
+		t.Fatal("live reusable reservation already has an exact cleanup receipt")
+	}
+	f.terminate(t, true)
+	runtimePoolReconcile(t, f.r, f.pool)
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(task), task); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeSessionCleanupCompleteForUID(task, task.UID) || task.Status.Phase != corev1alpha1.TaskPhaseFailed ||
+		task.Status.Execution.RuntimeSessionSupervisorBootID != "" {
+		t.Fatalf("exact retirement lost failure or fabricated acknowledgment: %#v", task.Status)
+	}
+}
+
 // The fake API has no Deployment controller or kubelet. Only explicitly marked
 // native fixtures acquire real owner identities, running status and durable
 // epoch authority; deletion is NEVER synthesized into termination evidence.
