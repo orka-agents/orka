@@ -50,7 +50,8 @@ type EnforcementRequirement struct {
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=256
-	// +listType=set
+	// +kubebuilder:validation:XValidation:rule="self.all(capability, self.filter(other, other == capability).size() == 1)",message="required capabilities must be unique"
+	// +listType=atomic
 	RequiredCapabilities []string `json:"requiredCapabilities"`
 
 	// Mode has no advisory fallback.

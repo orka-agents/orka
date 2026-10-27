@@ -222,7 +222,11 @@ spec:
                     maxItems: 32
                     minItems: 1
                     type: array
-                    x-kubernetes-list-type: set
+                    x-kubernetes-list-type: atomic
+                    x-kubernetes-validations:
+                    - message: required capabilities must be unique
+                      rule: self.all(capability, self.filter(other, other == capability).size()
+                        == 1)
                 required:
                 - format
                 - mode
@@ -3265,6 +3269,8 @@ spec:
             - message: soulBinding is write-once and immutable
               rule: '!has(oldSelf.soulBinding) || (has(self.soulBinding) && self.soulBinding
                 == oldSelf.soulBinding)'
+        required:
+        - spec
         type: object
         x-kubernetes-validations:
         - message: Task spec is immutable after execution authority is recorded

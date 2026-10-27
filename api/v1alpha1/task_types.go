@@ -813,6 +813,7 @@ type Task struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +required
 	Spec   TaskSpec   `json:"spec,omitempty"`
 	Status TaskStatus `json:"status,omitempty"`
 }
