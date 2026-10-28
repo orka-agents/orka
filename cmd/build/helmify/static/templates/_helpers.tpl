@@ -677,6 +677,9 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
 {{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
 {{- end -}}
+{{- if eq $namespace (include "orka.watchNamespace" .) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from controller.watchNamespace" $namespace) -}}
+{{- end -}}
 {{- $_ := include "orka.agentHostAgentImage" . -}}
 {{- end -}}
 {{- if include "orka.agentHostGitHubEnabled" . -}}
