@@ -111,6 +111,10 @@ func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	if err := common.WaitForEnforcementFromEnv(ctx, filepath.Base(os.Args[0]) == "worker-enforced"); err != nil {
+		return fmt.Errorf("enforcement admission: %w", err)
+	}
+
 	// Get configuration from environment
 	workerEnv := workerenv.ParseAIWorkerEnv(os.Getenv)
 	taskName := workerEnv.TaskName

@@ -13,6 +13,8 @@
 !internal/
 !internal/**/
 !internal/**/*.go
+# SQLite store migrations are compile-time embedded inputs.
+!internal/store/sqlite/migrations/*.sql
 !pkg/
 !pkg/**/
 !pkg/**/*.go

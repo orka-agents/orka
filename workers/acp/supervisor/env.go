@@ -32,48 +32,49 @@ const (
 )
 
 const (
-	providerKindCodex            = "codex"
-	providerKindClaude           = "claude"
-	providerKindCopilot          = "copilot"
-	providerKindOpencode         = "opencode"
-	providerToolBash             = "Bash"
-	providerToolEdit             = "Edit"
-	providerToolGlob             = "Glob"
-	providerToolGrep             = "Grep"
-	providerToolRead             = "Read"
-	providerToolWebFetch         = "WebFetch"
-	providerToolWebSearch        = "WebSearch"
-	providerToolWrite            = "Write"
-	architectureARM64            = "arm64"
-	acpCommandProtocol           = "acp"
-	EnvListenAddress             = "ORKA_ACP_LISTEN_ADDRESS"
-	EnvNativeSessionMaxBytes     = "ORKA_NATIVE_SESSION_MAX_BYTES"
-	EnvRuntimeInstanceID         = "ORKA_ACP_RUNTIME_INSTANCE_ID"
-	EnvSupervisorBootID          = "ORKA_ACP_SUPERVISOR_BOOT_ID"
-	EnvPodUID                    = "ORKA_ACP_POD_UID"
-	EnvControllerEpoch           = "ORKA_ACP_CONTROLLER_EPOCH"
-	EnvRuntimePoolUID            = "ORKA_ACP_RUNTIME_POOL_UID"
-	EnvRuntimePoolGeneration     = "ORKA_ACP_RUNTIME_POOL_GENERATION"
-	EnvProvider                  = "ORKA_ACP_PROVIDER"
-	EnvModel                     = "ORKA_ACP_MODEL"
-	EnvModelContextLimit         = "ORKA_ACP_MODEL_CONTEXT_LIMIT"
-	EnvModelOutputLimit          = "ORKA_ACP_MODEL_OUTPUT_LIMIT"
-	EnvWorkspaceIntent           = "ORKA_ACP_WORKSPACE_INTENT"
-	EnvAgentConfigurationDigest  = "ORKA_ACP_AGENT_CONFIGURATION_DIGEST"
-	EnvToolPolicyDigest          = "ORKA_ACP_TOOL_POLICY_DIGEST"
-	EnvApprovalPolicyDigest      = "ORKA_ACP_APPROVAL_POLICY_DIGEST"
-	EnvMCPConfigurationDigest    = "ORKA_ACP_MCP_CONFIGURATION_DIGEST"
-	EnvProxyCredentialRole       = "ORKA_ACP_PROXY_CREDENTIAL_ROLE"
-	EnvProxyCredentialScope      = "ORKA_ACP_PROXY_CREDENTIAL_SCOPE"
-	EnvResourceClass             = "ORKA_ACP_RESOURCE_CLASS"
-	EnvProviderProxyBaseURL      = "ORKA_ACP_PROVIDER_PROXY_BASE_URL"
-	EnvProviderTokenFile         = "ORKA_ACP_PROVIDER_TOKEN_FILE"
-	EnvArtifactAPIURL            = "ORKA_ACP_ARTIFACT_API_URL"
-	EnvWorkspaceArtifactMaxBytes = "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES"
-	EnvMCPBrokerURL              = "ORKA_ACP_MCP_BROKER_URL"
-	EnvTrustNamespace            = "ORKA_ACP_TRUST_NAMESPACE"
-	EnvControllerTokenFile       = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
-	EnvCapabilitySecretFile      = "ORKA_ACP_CAPABILITY_SECRET_FILE"
+	providerKindCodex               = "codex"
+	providerKindClaude              = "claude"
+	providerKindCopilot             = "copilot"
+	providerKindOpencode            = "opencode"
+	providerToolBash                = "Bash"
+	providerToolEdit                = "Edit"
+	providerToolGlob                = "Glob"
+	providerToolGrep                = "Grep"
+	providerToolRead                = "Read"
+	providerToolWebFetch            = "WebFetch"
+	providerToolWebSearch           = "WebSearch"
+	providerToolWrite               = "Write"
+	architectureARM64               = "arm64"
+	acpCommandProtocol              = "acp"
+	EnvListenAddress                = "ORKA_ACP_LISTEN_ADDRESS"
+	EnvNativeSessionMaxBytes        = "ORKA_NATIVE_SESSION_MAX_BYTES"
+	EnvRuntimeInstanceID            = "ORKA_ACP_RUNTIME_INSTANCE_ID"
+	EnvSupervisorBootID             = "ORKA_ACP_SUPERVISOR_BOOT_ID"
+	EnvPodUID                       = "ORKA_ACP_POD_UID"
+	EnvControllerEpoch              = "ORKA_ACP_CONTROLLER_EPOCH"
+	EnvRuntimePoolUID               = "ORKA_ACP_RUNTIME_POOL_UID"
+	EnvRuntimePoolGeneration        = "ORKA_ACP_RUNTIME_POOL_GENERATION"
+	EnvProvider                     = "ORKA_ACP_PROVIDER"
+	EnvModel                        = "ORKA_ACP_MODEL"
+	EnvModelContextLimit            = "ORKA_ACP_MODEL_CONTEXT_LIMIT"
+	EnvModelOutputLimit             = "ORKA_ACP_MODEL_OUTPUT_LIMIT"
+	EnvWorkspaceIntent              = "ORKA_ACP_WORKSPACE_INTENT"
+	EnvAgentConfigurationDigest     = "ORKA_ACP_AGENT_CONFIGURATION_DIGEST"
+	EnvToolPolicyDigest             = "ORKA_ACP_TOOL_POLICY_DIGEST"
+	EnvApprovalPolicyDigest         = "ORKA_ACP_APPROVAL_POLICY_DIGEST"
+	EnvMCPConfigurationDigest       = "ORKA_ACP_MCP_CONFIGURATION_DIGEST"
+	EnvProxyCredentialRole          = "ORKA_ACP_PROXY_CREDENTIAL_ROLE"
+	EnvProxyCredentialScope         = "ORKA_ACP_PROXY_CREDENTIAL_SCOPE"
+	EnvResourceClass                = "ORKA_ACP_RESOURCE_CLASS"
+	EnvEnforcementRequirementDigest = "ORKA_ACP_ENFORCEMENT_REQUIREMENT_DIGEST"
+	EnvProviderProxyBaseURL         = "ORKA_ACP_PROVIDER_PROXY_BASE_URL"
+	EnvProviderTokenFile            = "ORKA_ACP_PROVIDER_TOKEN_FILE"
+	EnvArtifactAPIURL               = "ORKA_ACP_ARTIFACT_API_URL"
+	EnvWorkspaceArtifactMaxBytes    = "ORKA_ACP_WORKSPACE_MAX_ARTIFACT_BYTES"
+	EnvMCPBrokerURL                 = "ORKA_ACP_MCP_BROKER_URL"
+	EnvTrustNamespace               = "ORKA_ACP_TRUST_NAMESPACE"
+	EnvControllerTokenFile          = "ORKA_ACP_CONTROLLER_TOKEN_FILE"
+	EnvCapabilitySecretFile         = "ORKA_ACP_CAPABILITY_SECRET_FILE"
 	// The *_BOOTSTRAP variables carry read-once secrets for provider-hosted
 	// supervisors (for example Substrate Actors) that have no Kubernetes
 	// Secret mounts. The corresponding *_FILE variable always wins when set.
@@ -156,19 +157,20 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	profile := harnessv2.RuntimeProfile{
-		ACPProfile:               harnessv2.ACPProfileV1,
-		ProviderKind:             providerKind,
-		Model:                    model,
-		ModelLimits:              modelLimits,
-		AgentConfigurationDigest: requiredEnv(EnvAgentConfigurationDigest),
-		ToolPolicyDigest:         requiredEnv(EnvToolPolicyDigest),
-		ApprovalPolicyDigest:     requiredEnv(EnvApprovalPolicyDigest),
-		MCPConfigurationDigest:   requiredEnv(EnvMCPConfigurationDigest),
-		WorkspaceIntent:          intent,
-		ProxyCredentialRole:      requiredEnv(EnvProxyCredentialRole),
-		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
-		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
-		Toolboxes:                toolboxes,
+		ACPProfile:                   harnessv2.ACPProfileV1,
+		ProviderKind:                 providerKind,
+		Model:                        model,
+		ModelLimits:                  modelLimits,
+		AgentConfigurationDigest:     requiredEnv(EnvAgentConfigurationDigest),
+		ToolPolicyDigest:             requiredEnv(EnvToolPolicyDigest),
+		ApprovalPolicyDigest:         requiredEnv(EnvApprovalPolicyDigest),
+		MCPConfigurationDigest:       requiredEnv(EnvMCPConfigurationDigest),
+		WorkspaceIntent:              intent,
+		ProxyCredentialRole:          requiredEnv(EnvProxyCredentialRole),
+		ProxyCredentialScope:         requiredEnv(EnvProxyCredentialScope),
+		ResourceClass:                envutil.String(EnvResourceClass, "standard"),
+		EnforcementRequirementDigest: os.Getenv(EnvEnforcementRequirementDigest),
+		Toolboxes:                    toolboxes,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)

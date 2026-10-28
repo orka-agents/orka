@@ -32,6 +32,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/enforcement"
 	executionevents "github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
@@ -4001,6 +4002,10 @@ type dispatcherRuntimeServerOptions struct {
 	nativeInstallUnresolved bool
 	onNativeCapture         func(harnessv2.CaptureNativeSessionRequest) error
 	onPrompt                func(harnessv2.StartPromptRequest)
+	onLaunch                func(harnessv2.LaunchRuntimeSessionRequest)
+	launchFailure           *harnessv2.ErrorResponse
+	launchFailureApplied    bool
+	rejectPrompt            func(harnessv2.StartPromptRequest) *harnessv2.ErrorResponse
 	workspaceDeltaState     harnessv2.WorkspaceDeltaState
 	workspaceDeltaFailure   *harnessv2.ErrorResponse
 }
@@ -4053,6 +4058,7 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
 			SupportsAgentSessionConfiguration: !options.disableAgentSessionConfiguration,
+			SupportsSessionPreparation:        profile.EnforcementRequirementDigest != "",
 		})
 	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", func(w http.ResponseWriter, r *http.Request) {
@@ -4079,6 +4085,11 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			created.ProviderSessionID = request.NativeRestore.Snapshot.ProviderSessionID
 			created.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: created.ProviderSessionID, Loaded: true}
 		}
+		if request.PrepareOnly {
+			created.State = harnessv2.RuntimeSessionStatePrepared
+			created.ProviderSessionID = ""
+			created.NativeRestoration = nil
+		}
 		if options.nativeInstallUnresolved {
 			created.State = harnessv2.RuntimeSessionStatePoisoned
 			created.NativeRestoration = nil
@@ -4102,6 +4113,33 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Session: created,
 		})
 	})
+	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/launch", func(w http.ResponseWriter, r *http.Request) {
+		var request harnessv2.LaunchRuntimeSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if options.onLaunch != nil {
+			options.onLaunch(request)
+		}
+		descriptorMu.Lock()
+		if options.launchFailure == nil || options.launchFailureApplied {
+			descriptor.State = harnessv2.RuntimeSessionStateIdle
+			descriptor.ProviderSessionID = "provider-session"
+			descriptor.LastTransitionAt = time.Now().UTC()
+		}
+		current := descriptor
+		descriptorMu.Unlock()
+		if options.launchFailure != nil {
+			writeDispatcherJSONStatus(w, http.StatusServiceUnavailable, *options.launchFailure)
+			return
+		}
+		writeDispatcherJSON(w, harnessv2.LaunchRuntimeSessionResponse{
+			Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: harnessv2.RequestClassificationFresh},
+			PreparationOperationID: request.PreparationOperationID, Session: current,
+		})
+	})
 	mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}", func(w http.ResponseWriter, r *http.Request) {
 		var request harnessv2.StartPromptRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -4111,6 +4149,12 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 		}
 		if options.onPrompt != nil {
 			options.onPrompt(request)
+		}
+		if options.rejectPrompt != nil {
+			if response := options.rejectPrompt(request); response != nil {
+				writeDispatcherJSONStatus(w, http.StatusTooManyRequests, *response)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", harnessv2.NDJSONMediaType)
 		encoder, err := harnessv2.NewEventEncoder(w, harnessv2.EventStreamLimits{
@@ -4725,77 +4769,105 @@ func TestACPDispatcherRuntimePoolReservationReclaimsExpiredAndReplacedInstance(t
 }
 
 func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := corev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	task := runtimePoolReservationTestTask("rate-limited", "rate-limited-uid", "pool-uid")
-	task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
-	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
-	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
-	epochs := NewControllerEpochManager(controlStore, "controller-test")
-	epochCtx, cancelEpoch := context.WithCancel(context.Background())
-	epochDone := make(chan error, 1)
-	go func() { epochDone <- epochs.Start(epochCtx) }()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	fence, err := epochs.CurrentFence(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
-	attemptID, err := key.CanonicalID()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
-		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
-		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
-	}), fence); err != nil {
-		t.Fatal(err)
-	}
-	dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
-	for _, transition := range []struct {
-		from, to store.PromptExecutionState
-	}{
-		{store.PromptExecutionQueued, store.PromptExecutionReserved},
-		{store.PromptExecutionReserved, store.PromptExecutionSessionStarting},
-		{store.PromptExecutionSessionStarting, store.PromptExecutionPlanned},
-	} {
-		if err := dispatcher.transitionAttempt(ctx, attemptID, fence, transition.from, transition.to, "test-"+string(transition.to), nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rateLimited := &harnessv2.ClientError{StatusCode: http.StatusTooManyRequests, Code: harnessv2.ErrorCodeRateLimited, Retryable: true}
-	retrying, err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, rateLimited)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !retrying {
-		t.Fatal("rate-limited RuntimeSession start was not classified as a retry")
-	}
-	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attempt.ExecutionState != store.PromptExecutionReserved {
-		t.Fatalf("rate-limited attempt state = %s, want Reserved", attempt.ExecutionState)
-	}
-	updated := &corev1alpha1.Task{}
-	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
-		t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
-	}
-	cancelEpoch()
-	if err := <-epochDone; err != nil {
-		t.Fatal(err)
+	for _, mode := range []string{"ordinary", "protected-retry", "protected-rejection"} {
+		t.Run(mode, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			task := runtimePoolReservationTestTask("rate-limited", "rate-limited-uid", "pool-uid")
+			task.Status.Execution.State = corev1alpha1.TaskExecutionStatePlanned
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+			db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close() //nolint:errcheck
+			controlStore := sqlite.NewStore(db, "test")
+			epochs := NewControllerEpochManager(controlStore, "controller-test")
+			epochCtx, cancelEpoch := context.WithCancel(context.Background())
+			epochDone := make(chan error, 1)
+			go func() { epochDone <- epochs.Start(epochCtx) }()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			fence, err := epochs.CurrentFence(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+			attemptID, err := key.CanonicalID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+				ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+				ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+			}), fence); err != nil {
+				t.Fatal(err)
+			}
+			dispatcher := &ACPDispatcher{Client: kubeClient, Store: controlStore, Epochs: epochs}
+			for _, transition := range []struct {
+				from, to store.PromptExecutionState
+			}{
+				{store.PromptExecutionQueued, store.PromptExecutionReserved},
+				{store.PromptExecutionReserved, store.PromptExecutionSessionStarting},
+				{store.PromptExecutionSessionStarting, store.PromptExecutionPlanned},
+			} {
+				if err := dispatcher.transitionAttempt(ctx, attemptID, fence, transition.from, transition.to, "test-"+string(transition.to), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clientError := &harnessv2.ClientError{
+				Kind:       harnessv2.ClientErrorHTTP,
+				StatusCode: http.StatusTooManyRequests, Code: harnessv2.ErrorCodeRateLimited,
+				Retryable: true, Message: "private-provider-details",
+			}
+			if mode == "protected-rejection" {
+				clientError.StatusCode, clientError.Code, clientError.Retryable = http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, false
+			}
+			var admissionError error = clientError
+			if mode != "ordinary" {
+				admissionError = &enforcement.AdmissionError{Cause: clientError}
+				if strings.Contains(boundedRuntimeSessionServerMessage(admissionError), clientError.Message) {
+					t.Fatal("downstream admission diagnostic exposed the unwrapped runtime message")
+				}
+			}
+			retrying, err := dispatcher.handlePrePromptClientError(ctx, task.DeepCopy(), attemptID, fence, admissionError)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retrying != (mode != "protected-rejection") {
+				t.Fatal("safe admission error changed the runtime lifecycle classification")
+			}
+			attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "protected-rejection" && attempt.ExecutionState != store.PromptExecutionReserved {
+				t.Fatalf("rate-limited attempt state = %s, want Reserved", attempt.ExecutionState)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "protected-rejection" {
+				if attempt.ExecutionState != store.PromptExecutionFailed || updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed {
+					t.Fatalf("runtime rejection did not retain terminal classification: %#v", updated.Status.Execution)
+				}
+			} else if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
+				t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
+			}
+			if mode != "ordinary" {
+				status, marshalErr := json.Marshal(updated.Status)
+				if marshalErr != nil || strings.Contains(string(status), clientError.Message) {
+					t.Fatal("downstream admission handler exposed unwrapped runtime prose in Task status")
+				}
+			}
+			cancelEpoch()
+			if err := <-epochDone; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

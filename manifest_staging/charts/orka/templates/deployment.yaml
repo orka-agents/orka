@@ -5,6 +5,14 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- include "orka.validateAgentHosts" . }}
+{{- include "orka.validateEnforcement" . }}
+{{- $enforcementBundled := include "orka.enforcementBundled" . -}}
+{{- $enforcementName := "" -}}
+{{- $enforcementDirectory := "" -}}
+{{- if $enforcementBundled -}}
+{{- $enforcementName = include "guardd.installationName" .Subcharts.enforcement -}}
+{{- $enforcementDirectory = .Subcharts.enforcement.Values.controllerMountDirectory -}}
+{{- end -}}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -83,6 +91,10 @@ spec:
             - --health-probe-bind-address=:{{ .Values.controller.healthPort }}
             - --metrics-secure=false
             - --watch-namespace={{ include "orka.watchNamespace" . }}
+            {{- if $enforcementBundled }}
+            - {{ printf "--enforcement-provider-registry=%s/registry.json" $enforcementDirectory | quote }}
+            - --enforcement-provider-registry-projected=true
+            {{- end }}
             - --leader-elect={{ .Values.controller.leaderElect }}
             - --controller-mode={{ .Values.controller.mode }}
             - {{ printf "--execution-mode-controller-usernames=%s" (include "orka.controllerUsername" .) | quote }}
@@ -204,9 +216,7 @@ spec:
             {{- if .allowedSubjects }}
             - {{ printf "--oidc-allowed-subjects=%s" .allowedSubjects | quote }}
             {{- end }}
-            {{- if .namespace }}
-            - {{ printf "--oidc-namespace=%s" .namespace | quote }}
-            {{- end }}
+            - {{ printf "--oidc-namespace=%s" (default (include "orka.watchNamespace" $) .namespace) | quote }}
             {{- end }}
             {{- with .Values.controller.contextToken }}
             {{- if .profile }}
@@ -495,6 +505,11 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
+            {{- if $enforcementBundled }}
+            - name: enforcement-providers
+              mountPath: {{ $enforcementDirectory | quote }}
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
             {{- if $substrateCredentials.existingSecret }}
@@ -526,6 +541,28 @@ spec:
               mountPath: /var/run/orka/webhook/tls
               readOnly: {{ if include "orka.webhookTLSGenerated" . }}false{{ else }}true{{ end }}
       volumes:
+        {{- if $enforcementBundled }}
+        - name: enforcement-providers
+          projected:
+            defaultMode: 0440
+            sources:
+              - configMap:
+                  name: {{ printf "%s-registry" $enforcementName | quote }}
+                  optional: true
+                  items:
+                    - key: registry.json
+                      path: registry.json
+              - secret:
+                  name: {{ printf "%s-controller-identity" $enforcementName | quote }}
+                  optional: true
+                  items:
+                    - key: ca.pem
+                      path: ca.pem
+                    - key: controller.pem
+                      path: controller.pem
+                    - key: controller-key.pem
+                      path: controller-key.pem
+        {{- end }}
         - name: tmp
           emptyDir: {}
         {{- if $substrateCredentials.existingSecret }}

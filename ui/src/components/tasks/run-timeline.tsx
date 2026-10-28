@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { displayedTaskConditionMessage, taskEnforcementObservation } from '@/lib/task-enforcement'
 import { CheckCircle2, Circle, XCircle, MinusCircle, Flag } from 'lucide-react'
 import type { Task, PlanState, TaskPhase } from '@/schemas/task'
 
@@ -71,7 +72,9 @@ function buildEvents(task: Task, plan?: PlanState): TimelineEvent[] {
     events.push({
       key: `cond-${c.type}`,
       label: c.type,
-      detail: c.message ?? c.reason,
+      detail: c.type === 'EnforcementReady'
+        ? taskEnforcementObservation(task)?.state ?? 'Enforcement admission not confirmed.'
+        : displayedTaskConditionMessage(task, c) ?? c.reason,
       at: c.lastTransitionTime,
       bucket: 0,
       status: c.status === 'True' ? 'done' : 'pending',

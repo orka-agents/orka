@@ -52,6 +52,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/enforcement"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	orkametrics "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
@@ -319,6 +320,9 @@ type RuntimePoolReconciler struct {
 	// ControlStore preserves native boot witnesses independently of Pod lifetime.
 	ControlStore store.DurableControlStore
 
+	// Enforcement retains operator-owned provider routes for physical cleanup.
+	Enforcement enforcement.Coordinator
+
 	// RuntimeNamespace is used when spec.runtimeNamespace is empty.
 	RuntimeNamespace string
 	// ControllerNamespace is the namespace allowed to reach the runtime control port.
@@ -406,6 +410,9 @@ func (r *RuntimePoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if err := r.reconcileNativeRuntimePoolRetirement(ctx, pool); err != nil {
 		return r.failRuntimePoolBootReconcile(ctx, pool, err)
+	}
+	if pending, err := r.reconcileRuntimePoolEnforcementRetirement(ctx, pool, false); err != nil || pending {
+		return ctrl.Result{RequeueAfter: time.Second}, err
 	}
 	if r.CleanupOnly {
 		return ctrl.Result{}, nil
@@ -936,9 +943,19 @@ func (r *RuntimePoolReconciler) runtimePoolNamespace(pool *corev1alpha1.RuntimeP
 	// behalf. A caller with only namespaced RuntimePool-create rights must not
 	// be able to steer those controller-owned resources into an arbitrary
 	// namespace, so an explicit spec.runtimeNamespace is accepted only when it
-	// matches the controller-configured runtime namespace or the pool's own
-	// namespace; anything else is rejected rather than reconciled.
+	// matches the configured runtime namespace or, for colocated installations,
+	// the pool's own namespace. Split installations keep runtime credentials
+	// outside both the Task and management namespaces.
 	allowed := map[string]struct{}{pool.Namespace: {}}
+	if controllerNamespace := strings.TrimSpace(r.ControllerNamespace); controllerNamespace != "" && controllerNamespace != pool.Namespace {
+		allowed = make(map[string]struct{})
+		if configured == "" {
+			return "", fmt.Errorf("a separate management namespace requires a configured runtime namespace")
+		}
+		if configured == pool.Namespace || configured == controllerNamespace {
+			return "", fmt.Errorf("runtime namespace must differ from Task and management namespaces")
+		}
+	}
 	if configured != "" {
 		allowed[configured] = struct{}{}
 	}
@@ -950,7 +967,7 @@ func (r *RuntimePoolReconciler) runtimePoolNamespace(pool *corev1alpha1.RuntimeP
 		namespace = pool.Namespace
 	}
 	if _, ok := allowed[namespace]; !ok {
-		return "", fmt.Errorf("spec.runtimeNamespace %q is not permitted; use the pool namespace or the controller-configured runtime namespace", requested)
+		return "", fmt.Errorf("spec.runtimeNamespace %q is not permitted for this controller installation", requested)
 	}
 	if errs := validation.IsDNS1123Label(namespace); len(errs) != 0 {
 		return "", fmt.Errorf("runtime namespace is invalid")
@@ -2421,6 +2438,23 @@ func (r *RuntimePoolReconciler) ensureRuntimePoolDeployment(
 		if !creating && !allowTemplateUpdate && runtimePoolDeploymentNeedsRollout(deployment, desiredTemplate) {
 			return fmt.Errorf("RuntimePool Deployment template requires an authenticated drain before replacement")
 		}
+		starting := replicas > 0 && (creating || ptr.Deref(deployment.Spec.Replicas, 0) == 0 ||
+			runtimePoolDeploymentNeedsRollout(deployment, desiredTemplate))
+		if starting && (pool.Status.EnforcementBinding != nil || pool.Spec.Runtime.Profile.EnforcementRequirementDigest != "") {
+			if r.APIReader == nil {
+				return errors.New("enforced runtime replacement requires a fresh API reader")
+			}
+			current := &corev1alpha1.RuntimePool{}
+			if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+				return err
+			}
+			if current.UID != pool.UID || current.Generation != pool.Generation || !current.DeletionTimestamp.IsZero() {
+				return fmt.Errorf("%w: RuntimePool changed before runtime replacement", store.ErrConflict)
+			}
+			if current.Status.EnforcementBinding != nil {
+				return errRuntimePoolEnforcementRetirementPending
+			}
+		}
 		deployment.Spec.Replicas = new(replicas)
 		deployment.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 		deployment.Spec.MinReadySeconds = 2
@@ -3010,20 +3044,21 @@ func runtimePoolValidationTargetFromTemplate(
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool toolboxes are invalid: %w", err)
 	}
 	profile := harnessv2.RuntimeProfile{
-		ACPProfile:               environment["ORKA_ACP_ACP_PROFILE"],
-		AdapterDigests:           adapterDigests,
-		ProviderKind:             environment["ORKA_ACP_PROVIDER"],
-		Model:                    environment["ORKA_ACP_MODEL"],
-		ModelLimits:              modelLimits,
-		AgentConfigurationDigest: environment["ORKA_ACP_AGENT_CONFIGURATION_DIGEST"],
-		ToolPolicyDigest:         environment["ORKA_ACP_TOOL_POLICY_DIGEST"],
-		ApprovalPolicyDigest:     environment["ORKA_ACP_APPROVAL_POLICY_DIGEST"],
-		MCPConfigurationDigest:   environment["ORKA_ACP_MCP_CONFIGURATION_DIGEST"],
-		WorkspaceIntent:          harnessv2.WorkspaceIntent(environment["ORKA_ACP_WORKSPACE_INTENT"]),
-		ProxyCredentialRole:      environment["ORKA_ACP_PROXY_CREDENTIAL_ROLE"],
-		ProxyCredentialScope:     environment["ORKA_ACP_PROXY_CREDENTIAL_SCOPE"],
-		ResourceClass:            environment["ORKA_ACP_RESOURCE_CLASS"],
-		Toolboxes:                toolboxes,
+		ACPProfile:                   environment["ORKA_ACP_ACP_PROFILE"],
+		AdapterDigests:               adapterDigests,
+		ProviderKind:                 environment["ORKA_ACP_PROVIDER"],
+		Model:                        environment["ORKA_ACP_MODEL"],
+		ModelLimits:                  modelLimits,
+		AgentConfigurationDigest:     environment["ORKA_ACP_AGENT_CONFIGURATION_DIGEST"],
+		ToolPolicyDigest:             environment["ORKA_ACP_TOOL_POLICY_DIGEST"],
+		ApprovalPolicyDigest:         environment["ORKA_ACP_APPROVAL_POLICY_DIGEST"],
+		MCPConfigurationDigest:       environment["ORKA_ACP_MCP_CONFIGURATION_DIGEST"],
+		WorkspaceIntent:              harnessv2.WorkspaceIntent(environment["ORKA_ACP_WORKSPACE_INTENT"]),
+		ProxyCredentialRole:          environment["ORKA_ACP_PROXY_CREDENTIAL_ROLE"],
+		ProxyCredentialScope:         environment["ORKA_ACP_PROXY_CREDENTIAL_SCOPE"],
+		ResourceClass:                environment["ORKA_ACP_RESOURCE_CLASS"],
+		EnforcementRequirementDigest: environment["ORKA_ACP_ENFORCEMENT_REQUIREMENT_DIGEST"],
+		Toolboxes:                    toolboxes,
 	}
 	if err := profile.Validate(); err != nil {
 		return nil, runtimePoolConfig{}, fmt.Errorf("deployed RuntimePool profile is invalid: %w", err)
@@ -3325,6 +3360,12 @@ func (r *RuntimePoolReconciler) finishRuntimePoolResourceFailure(
 	status.AdmissionState = corev1alpha1.RuntimePoolAdmissionClosed
 	status.ActiveInstance = nil
 	status.Message = sanitizeStatusMessage(err.Error())
+	if errors.Is(err, errRuntimePoolEnforcementRetirementPending) {
+		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleStopping
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionUnknown, "EnforcementRetirementPending", status.Message)
+		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
+		return r.finishRuntimePoolStatus(ctx, pool, status, time.Second)
+	}
 	reason := corev1alpha1.RuntimePoolReasonRolloutFailed
 	lower := strings.ToLower(status.Message)
 	switch {
@@ -3591,6 +3632,9 @@ func (r *RuntimePoolReconciler) finalizeRuntimePool(ctx context.Context, pool *c
 	if remaining {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+	if pending, err := r.reconcileRuntimePoolEnforcementRetirement(ctx, pool, true); err != nil || pending {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
 	if err := r.removeRuntimePoolFinalizer(ctx, pool); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -3853,20 +3897,21 @@ func runtimePoolHarnessProfile(spec corev1alpha1.RuntimePoolProfileSpec) (harnes
 		}
 	}
 	profile := harnessv2.RuntimeProfile{
-		ACPProfile:               strings.TrimSpace(spec.ACPProfile),
-		AdapterDigests:           cloneStringMap(spec.AdapterDigests),
-		ProviderKind:             strings.TrimSpace(spec.ProviderKind),
-		Model:                    strings.TrimSpace(spec.Model),
-		ModelLimits:              modelLimits,
-		AgentConfigurationDigest: strings.TrimSpace(spec.AgentConfigurationDigest),
-		ToolPolicyDigest:         strings.TrimSpace(spec.ToolPolicyDigest),
-		ApprovalPolicyDigest:     strings.TrimSpace(spec.ApprovalPolicyDigest),
-		MCPConfigurationDigest:   strings.TrimSpace(spec.MCPConfigurationDigest),
-		WorkspaceIntent:          harnessv2.WorkspaceIntent(spec.WorkspaceIntent),
-		ProxyCredentialRole:      strings.TrimSpace(spec.ProxyCredentialRole),
-		ProxyCredentialScope:     strings.TrimSpace(spec.ProxyCredentialScope),
-		ResourceClass:            strings.TrimSpace(spec.ResourceClass),
-		Toolboxes:                runtimeToolboxesFromPool(spec.Toolboxes),
+		ACPProfile:                   strings.TrimSpace(spec.ACPProfile),
+		AdapterDigests:               cloneStringMap(spec.AdapterDigests),
+		ProviderKind:                 strings.TrimSpace(spec.ProviderKind),
+		Model:                        strings.TrimSpace(spec.Model),
+		ModelLimits:                  modelLimits,
+		AgentConfigurationDigest:     strings.TrimSpace(spec.AgentConfigurationDigest),
+		ToolPolicyDigest:             strings.TrimSpace(spec.ToolPolicyDigest),
+		ApprovalPolicyDigest:         strings.TrimSpace(spec.ApprovalPolicyDigest),
+		MCPConfigurationDigest:       strings.TrimSpace(spec.MCPConfigurationDigest),
+		WorkspaceIntent:              harnessv2.WorkspaceIntent(spec.WorkspaceIntent),
+		ProxyCredentialRole:          strings.TrimSpace(spec.ProxyCredentialRole),
+		ProxyCredentialScope:         strings.TrimSpace(spec.ProxyCredentialScope),
+		ResourceClass:                strings.TrimSpace(spec.ResourceClass),
+		EnforcementRequirementDigest: spec.EnforcementRequirementDigest,
+		Toolboxes:                    runtimeToolboxesFromPool(spec.Toolboxes),
 	}
 	if err := profile.Validate(); err != nil {
 		return harnessv2.RuntimeProfile{}, fmt.Errorf("spec.runtime.profile is invalid: %w", err)

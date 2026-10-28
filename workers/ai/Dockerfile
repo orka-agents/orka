@@ -28,6 +28,7 @@ RUN useradd -u 65532 -m nonroot
 WORKDIR /
 
 COPY --from=builder /workspace/worker /worker
+RUN ln /worker /worker-enforced
 
 # Create work directory for code execution
 RUN mkdir -p /tmp/orka-exec && chown nonroot:nonroot /tmp/orka-exec

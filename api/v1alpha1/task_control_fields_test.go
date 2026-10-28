@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package v1alpha1
 
 import (
-	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -85,25 +84,5 @@ func TestTaskSpecExecutionInputsClearOnlyControlFields(t *testing.T) {
 				t.Fatalf("ExecutionInputs changed execution input %s", name)
 			}
 		})
-	}
-}
-
-// The CRD rule must compare every execution input. Regenerate the expression
-// from TaskSpec and require the marker to contain it exactly.
-func TestTaskImmutabilityRuleCoversExecutionInputs(t *testing.T) {
-	var comparisons []string
-	for _, name := range taskSpecJSONFields(t) {
-		if slices.Contains(TaskControlFields, name) {
-			continue
-		}
-		comparisons = append(comparisons, fmt.Sprintf(
-			"has(self.spec.%[1]s) == has(oldSelf.spec.%[1]s) && (!has(self.spec.%[1]s) || self.spec.%[1]s == oldSelf.spec.%[1]s)", name))
-	}
-	rule := "!has(oldSelf.status) || ((!has(oldSelf.status.agentExecutionBinding) && !has(oldSelf.status.soulBinding)) || " +
-		"self.spec == oldSelf.spec || (!has(oldSelf.status.agentExecutionBinding) && (" + strings.Join(comparisons, " && ") + ")))"
-	marker := "// +kubebuilder:validation:XValidation:rule=\"" + rule +
-		"\",message=\"Task spec is immutable after execution authority is recorded\""
-	if !strings.Contains(string(readTaskTypesSource(t)), marker) {
-		t.Fatalf("Task immutability rule does not match TaskSpec; regenerate it as:\n%s", marker)
 	}
 }

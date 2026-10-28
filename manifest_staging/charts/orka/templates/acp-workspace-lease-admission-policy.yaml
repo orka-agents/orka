@@ -16,7 +16,7 @@ spec:
   matchConstraints:
     namespaceSelector:
       matchLabels:
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
     resourceRules:
       - apiGroups: ["coordination.k8s.io"]
         apiVersions: ["v1"]

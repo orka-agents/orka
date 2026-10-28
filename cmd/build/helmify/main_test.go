@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -215,47 +216,18 @@ func TestStaticChartGrantsSessionAuthorizationRBAC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helm template rejected controller RBAC: %v\n%s", err, output)
 	}
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatalf("rendered RBAC is missing the controller tenant Role:\n%s", output)
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
-	const want = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n    verbs: [\"get\", \"list\", \"delete\"]"
-	if !strings.Contains(controllerRole, want) {
-		t.Fatalf("controller tenant Role is missing the least-privilege Session rule %q:\n%s", want, controllerRole)
-	}
-	clientStart := strings.Index(output, "# Client Role")
-	if clientStart < 0 {
-		t.Fatalf("rendered RBAC is missing the client Role:\n%s", output)
-	}
-	clientRole := output[clientStart:]
-	if end := strings.Index(clientRole, "\n---"); end >= 0 {
-		clientRole = clientRole[:end]
-	}
-	const wantClient = "apiGroups: [\"core.orka.ai\"]\n    resources: [\"sessions\"]\n" +
-		"    verbs: [\"get\", \"list\", \"create\", \"update\", \"delete\"]"
-	if !strings.Contains(clientRole, wantClient) {
-		t.Fatalf("client Role is missing the Session API rule %q:\n%s", wantClient, clientRole)
-	}
+	controllerRole := requireRenderedRole(t, output, "test-orka-controller")
+	requireResourceVerbs(t, controllerRole.Rules, "core.orka.ai", "sessions", []string{"get", "list", "delete"})
+	clientRole := requireRenderedRole(t, output, "test-orka-client")
+	requireResourceVerbs(t, clientRole.Rules, "core.orka.ai", "sessions",
+		[]string{"get", "list", "create", "update", "delete"})
 }
 
 func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 	args := []string{"--show-only", "templates/rbac.yaml"}
 
 	output := requireHelmRender(t, args...)
-	_, clientRole, found := strings.Cut(output, "# Client Role")
-	if !found {
-		t.Fatal("rendered RBAC is missing the client Role")
-	}
-	_, clientRole, _ = strings.Cut(clientRole, "\n")
-	clientRole, _, _ = strings.Cut(clientRole, "\n---")
-	var role rbacv1.Role
-	if err := yaml.Unmarshal([]byte(clientRole), &role); err != nil {
-		t.Fatalf("decode client Role: %v", err)
-	}
+	role := requireRenderedRole(t, output, "test-orka-client")
 	if role.Namespace != "orka-test" {
 		t.Fatalf("client Role namespace = %q, want orka-test", role.Namespace)
 	}
@@ -333,65 +305,35 @@ func TestStaticChartClientVirtualAPIPermissions(t *testing.T) {
 
 func TestStaticChartGrantsConnectorProvidersLeastPrivilege(t *testing.T) {
 	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatal("rendered RBAC is missing the controller tenant Role")
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
+	role := requireRenderedRole(t, output, "test-orka-controller")
 	// The controller reads providers and manages their finalizer; it never
 	// creates or deletes one.
-	const want = "resources: [\"connectorproviders\"]\n    verbs: [\"get\", \"list\", \"watch\", \"update\", \"patch\"]"
-	if !strings.Contains(controllerRole, want) || strings.Count(controllerRole, `"connectorproviders"`) != 1 {
-		t.Fatalf("controller tenant Role must grant connectorproviders only %q:\n%s", want, controllerRole)
-	}
+	requireResourceVerbs(t, role.Rules, "core.orka.ai", "connectorproviders",
+		[]string{"get", "list", "watch", "update", "patch"})
 }
 
 func TestStaticChartOmitsUnusedControllerPermissions(t *testing.T) {
 	output := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	start := strings.Index(output, "# Controller tenant Role.")
-	if start < 0 {
-		t.Fatal("rendered RBAC is missing the controller tenant Role")
-	}
-	controllerRole := output[start:]
-	if end := strings.Index(controllerRole, "\n---"); end >= 0 {
-		controllerRole = controllerRole[:end]
-	}
+	role := requireRenderedRole(t, output, "test-orka-controller")
 	for _, resource := range []string{
 		"cronjobs", "endpoints", "nodes", "replicationcontrollers", "pods/portforward",
 		"statefulsets", "daemonsets", "ingresses", "horizontalpodautoscalers", "metrics.k8s.io",
 	} {
-		if strings.Contains(controllerRole, strconv.Quote(resource)) {
-			t.Errorf("controller tenant Role still grants unused %q access", resource)
+		for _, rule := range role.Rules {
+			if slices.Contains(rule.Resources, resource) || slices.Contains(rule.Resources, "*") ||
+				slices.Contains(rule.APIGroups, resource) {
+				t.Errorf("controller tenant Role still grants unused %q access", resource)
+			}
 		}
 	}
 	for _, resource := range []string{
 		"jobs", "pods/status", "persistentvolumeclaims", "serviceaccounts/token", "endpointslices",
 	} {
-		if !strings.Contains(controllerRole, strconv.Quote(resource)) {
+		if !slices.ContainsFunc(role.Rules, func(rule rbacv1.PolicyRule) bool {
+			return slices.Contains(rule.Resources, resource)
+		}) {
 			t.Errorf("controller tenant Role is missing required %q access", resource)
 		}
-	}
-}
-
-func forceStaticChartNamespaceMode(t *testing.T, chartDir, mode string) {
-	t.Helper()
-	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
-	helpers, err := os.ReadFile(helpersPath)
-	if err != nil {
-		t.Fatalf("read static chart helpers: %v", err)
-	}
-	namespaceLookup := `{{- $existingNamespace := lookup "v1" "Namespace" "" .Release.Namespace -}}`
-	forcedNamespaceLookup := `{{- $existingNamespace := dict "metadata" (dict "labels" ` +
-		`(dict "orka.ai/controller-mode" ` + strconv.Quote(mode) + `)) -}}`
-	forced := strings.Replace(string(helpers), namespaceLookup, forcedNamespaceLookup, 1)
-	if forced == string(helpers) {
-		t.Fatalf("controller mode validation is not gated by the exact existing Namespace lookup")
-	}
-	if err := os.WriteFile(helpersPath, []byte(forced), 0o600); err != nil {
-		t.Fatalf("force existing namespace lookup in copied chart: %v", err)
 	}
 }
 
@@ -423,45 +365,37 @@ func helmTemplateStaticChartWithExistingControllerSnapshot(
 		t.Skip("helm is required for static chart render tests")
 	}
 
-	chartDir := filepath.Join(t.TempDir(), "static")
-	if err := os.CopyFS(chartDir, os.DirFS("static")); err != nil {
-		t.Fatalf("copy static chart: %v", err)
-	}
-	forceStaticChartNamespaceMode(t, chartDir, "harness-v2")
-	helpersPath := filepath.Join(chartDir, "templates", "_helpers.tpl")
-	helpers, err := os.ReadFile(helpersPath)
-	if err != nil {
-		t.Fatalf("read static chart helpers: %v", err)
-	}
-	lookup := `{{- $existingControllerList := lookup "apps/v1" "Deployment" .Release.Namespace "" -}}`
-	forcedLookup := `{{- $existingControllerList := dict "items" (list) -}}`
+	controllers := []any{}
 	if existingControllerArgs != nil {
-		quotedControllerArgs := make([]string, 0, len(existingControllerArgs))
-		for _, arg := range existingControllerArgs {
-			quotedControllerArgs = append(quotedControllerArgs, strconv.Quote(arg))
-		}
-		forcedLookup = `{{- $existingControllerList := dict "items" (list (dict ` +
-			`"metadata" (dict "name" "test-orka-controller" "labels" (dict ` +
-			`"app.kubernetes.io/instance" "test" "app.kubernetes.io/component" "controller" ` +
-			`"app.kubernetes.io/managed-by" "Helm")) ` +
-			`"spec" (dict "template" (dict "spec" (dict ` +
-			`"containers" (list (dict "name" "controller" "args" (list ` +
-			strings.Join(quotedControllerArgs, " ") + `))) ` +
-			`"volumes" (list (dict "name" "agent-execution-snapshot-key" "secret" (dict ` +
-			`"secretName" ` + strconv.Quote(existingSnapshotSecret) + ` "items" (list (dict ` +
-			`"key" ` + strconv.Quote(existingSnapshotKey) + ` "path" "key")))))))))) -}}`
+		controllers = append(controllers, appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-orka-controller", Labels: map[string]string{
+				"app.kubernetes.io/instance": "test", "app.kubernetes.io/component": "controller",
+				"app.kubernetes.io/managed-by": "Helm",
+			}},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "controller", Args: existingControllerArgs}},
+				Volumes: []corev1.Volume{{Name: "agent-execution-snapshot-key", VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: existingSnapshotSecret,
+						Items: []corev1.KeyToPath{{Key: existingSnapshotKey, Path: "key"}}},
+				}}},
+			}}},
+		})
 	}
-	withController := strings.Replace(string(helpers), lookup, forcedLookup, 1)
-	if withController == string(helpers) {
-		t.Fatalf("controller mode validation is not gated by the release-owned Deployment list lookup")
-	}
-	if err := os.WriteFile(helpersPath, []byte(withController), 0o600); err != nil {
-		t.Fatalf("force existing controller lookup in copied chart: %v", err)
-	}
+	config := helmLookupConfig(t, map[string]any{
+		"/api/v1/namespaces/orka-test": map[string]any{
+			"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{
+				"name": "orka-test", "labels": map[string]string{"orka.ai/controller-mode": "harness-v2"},
+			},
+		},
+		"/apis/apps/v1/namespaces/orka-test/deployments": map[string]any{
+			"apiVersion": "apps/v1", "kind": "DeploymentList", "items": controllers,
+		},
+	})
 
 	defaults := staticChartDefaultArgs()
 	commandArgs := make([]string, 0, 6+len(defaults)+len(args))
-	commandArgs = append(commandArgs, "template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade")
+	commandArgs = append(commandArgs, "template", "test", "static", "--namespace", "orka-test",
+		"--is-upgrade", "--dry-run=server", "--kubeconfig", config)
 	commandArgs = append(commandArgs, defaults...)
 	commandArgs = append(commandArgs, args...)
 	output, err := exec.Command(helm, commandArgs...).CombinedOutput()
@@ -1196,6 +1130,17 @@ func TestStaticChartRejectsControllerWatchScopeChangesOnUpgrade(t *testing.T) {
 		{
 			name:                   "static harness v2 namespace with a deleted controller",
 			existingControllerArgs: nil,
+		},
+		{
+			name: "retained enforcement cannot lose its bundled chart",
+			existingControllerArgs: []string{
+				"--controller-mode=harness-v2",
+				"--watch-namespace=orka-test",
+				"--controller-url=http://test-orka.orka-test.svc:8080",
+				"--acp-runtime-namespace=orka-runtimes",
+				"--enforcement-provider-registry-projected=true",
+			},
+			wantError: "requires a compatible bundled enforcement chart",
 		},
 	}
 

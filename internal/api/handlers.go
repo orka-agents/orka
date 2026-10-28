@@ -275,33 +275,34 @@ type UpdateAgentRequest struct {
 
 // CreateTaskRequest is the request body for creating a task
 type CreateTaskRequest struct {
-	Name              string                           `json:"name"`
-	Namespace         string                           `json:"namespace"`
-	Metadata          MetadataRequest                  `json:"metadata"`
-	Spec              *corev1alpha1.TaskSpec           `json:"spec,omitempty"`
-	Annotations       map[string]string                `json:"annotations,omitempty"`
-	Type              corev1alpha1.TaskType            `json:"type"`
-	Image             string                           `json:"image,omitempty"`
-	Command           []string                         `json:"command,omitempty"`
-	Args              []string                         `json:"args,omitempty"`
-	Env               []corev1.EnvVar                  `json:"env,omitempty"`
-	Timeout           string                           `json:"timeout,omitempty"`
-	Priority          *int32                           `json:"priority,omitempty"`
-	RetryPolicy       *corev1alpha1.RetryPolicy        `json:"retryPolicy,omitempty"`
-	WebhookURL        string                           `json:"webhookURL,omitempty"`
-	SecretRef         *corev1alpha1.SecretReference    `json:"secretRef,omitempty"`
-	SessionRef        *corev1alpha1.SessionReference   `json:"sessionRef,omitempty"`
-	AI                *corev1alpha1.AISpec             `json:"ai,omitempty"`
-	AgentRef          *corev1alpha1.AgentReference     `json:"agentRef,omitempty"`
-	Prompt            string                           `json:"prompt,omitempty"`
-	AgentRuntime      *corev1alpha1.AgentRuntimeSpec   `json:"agentRuntime,omitempty"`
-	Execution         *corev1alpha1.ExecutionSpec      `json:"execution,omitempty"`
-	Workspace         *corev1alpha1.WorkspaceConfig    `json:"workspace,omitempty"`
-	PriorTaskRef      *corev1alpha1.PriorTaskReference `json:"priorTaskRef,omitempty"`
-	Schedule          string                           `json:"schedule,omitempty"`
-	TimeZone          *string                          `json:"timeZone,omitempty"`
-	ConcurrencyPolicy string                           `json:"concurrencyPolicy,omitempty"`
-	Suspend           *bool                            `json:"suspend,omitempty"`
+	Name              string                               `json:"name"`
+	Namespace         string                               `json:"namespace"`
+	Metadata          MetadataRequest                      `json:"metadata"`
+	Spec              *corev1alpha1.TaskSpec               `json:"spec,omitempty"`
+	Annotations       map[string]string                    `json:"annotations,omitempty"`
+	Type              corev1alpha1.TaskType                `json:"type"`
+	Image             string                               `json:"image,omitempty"`
+	Command           []string                             `json:"command,omitempty"`
+	Args              []string                             `json:"args,omitempty"`
+	Env               []corev1.EnvVar                      `json:"env,omitempty"`
+	Timeout           string                               `json:"timeout,omitempty"`
+	Priority          *int32                               `json:"priority,omitempty"`
+	RetryPolicy       *corev1alpha1.RetryPolicy            `json:"retryPolicy,omitempty"`
+	WebhookURL        string                               `json:"webhookURL,omitempty"`
+	SecretRef         *corev1alpha1.SecretReference        `json:"secretRef,omitempty"`
+	SessionRef        *corev1alpha1.SessionReference       `json:"sessionRef,omitempty"`
+	AI                *corev1alpha1.AISpec                 `json:"ai,omitempty"`
+	AgentRef          *corev1alpha1.AgentReference         `json:"agentRef,omitempty"`
+	Prompt            string                               `json:"prompt,omitempty"`
+	AgentRuntime      *corev1alpha1.AgentRuntimeSpec       `json:"agentRuntime,omitempty"`
+	Execution         *corev1alpha1.ExecutionSpec          `json:"execution,omitempty"`
+	Enforcement       *corev1alpha1.EnforcementRequirement `json:"enforcement,omitempty"`
+	Workspace         *corev1alpha1.WorkspaceConfig        `json:"workspace,omitempty"`
+	PriorTaskRef      *corev1alpha1.PriorTaskReference     `json:"priorTaskRef,omitempty"`
+	Schedule          string                               `json:"schedule,omitempty"`
+	TimeZone          *string                              `json:"timeZone,omitempty"`
+	ConcurrencyPolicy string                               `json:"concurrencyPolicy,omitempty"`
+	Suspend           *bool                                `json:"suspend,omitempty"`
 }
 
 // UnmarshalJSON validates status in Kubernetes-style manifests even though
@@ -367,6 +368,9 @@ func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	}
 	if req.Execution != nil {
 		spec.Execution = req.Execution.DeepCopy()
+	}
+	if req.Enforcement != nil {
+		spec.Enforcement = req.Enforcement.DeepCopy()
 	}
 	if req.Workspace != nil {
 		spec.Workspace = req.Workspace
@@ -609,7 +613,11 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		return err
 	}
 
-	createErr := h.client.Create(ctx, task)
+	var options []client.CreateOption
+	if task.Spec.Enforcement != nil {
+		options = append(options, client.FieldValidation(metav1.FieldValidationStrict))
+	}
+	createErr := h.client.Create(ctx, task, options...)
 	if createErr == nil {
 		sealRequesterStamp(ctx, h.client, task)
 	}
@@ -947,6 +955,9 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
+	// Clients check this on an authenticated absent-Task probe before submitting
+	// a requirement. It advertises protocol support, not provider readiness.
+	c.Set("Orka-Task-Enforcement", "container-v1")
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {

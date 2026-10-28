@@ -32,6 +32,20 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 }
 
 describe('TaskExecutionPanel', () => {
+  it('shows actionable enforcement guidance instead of legacy Task and execution diagnostics', () => {
+    render(<TaskExecutionPanel task={makeTask({
+      metadata: { name: 'protected', generation: 2 },
+      spec: { type: 'ai', enforcement: { mode: 'enforce', format: 'opaque/v1', policy: 'e30=', requiredCapabilities: ['fs'] } },
+      status: {
+        phase: 'Failed', message: 'private-provider-task-detail',
+        execution: { state: 'Failed', message: 'private-provider-execution-detail' },
+        conditions: [{ type: 'EnforcementReady', status: 'False', reason: 'EnforcementRefused', observedGeneration: 2 }],
+        enforcementOutcome: { observedGeneration: 2, reason: 'EnforcementRefused', needs: ['supported-format'] },
+      },
+    })} />)
+    expect(screen.queryByText(/private-provider/)).not.toBeInTheDocument()
+    expect(screen.getAllByText(/format supported/).length).toBeGreaterThan(0)
+  })
   it('renders with Pending phase', () => {
     render(
       <TaskExecutionPanel

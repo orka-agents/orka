@@ -162,7 +162,7 @@ export function TaskExecutionRouteLedger({ task }: { task: Task }) {
               label: 'Reconciliation',
               title: 'Human reconciliation required',
               detail: status?.execution?.reason
-                || status?.execution?.message,
+                || displayedTaskMessage(task, status?.execution?.message),
               icon: ShieldAlert,
               tone: 'danger',
             }
@@ -239,3 +239,4 @@ export function SessionExecutionRouteLedger({ session }: { session: Session }) {
     />
   )
 }
+import { displayedTaskMessage } from '@/lib/task-enforcement'

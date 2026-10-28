@@ -42,6 +42,20 @@ describe('task state flags', () => {
     expect(isScheduleSuspended(task({ spec: { suspend: true } }))).toBe(false)
   })
 
+  it('keeps Pod waiting detection independent of blocked enforcement display guidance', () => {
+    const message = 'pod waiting: ImagePullBackOff - pull access denied'
+    const source = task({
+      metadata: { generation: 1 },
+      spec: { type: 'ai', enforcement: { mode: 'enforce', format: 'opaque/v1', policy: 'e30=', requiredCapabilities: ['fs'] } },
+      status: {
+        phase: 'Running', message,
+        enforcementOutcome: { observedGeneration: 1, reason: 'EnforcementPending', needs: ['prepared-container'] },
+        conditions: [{ type: 'EnforcementReady', status: 'False', reason: 'EnforcementPending', observedGeneration: 1 }],
+      },
+    })
+    expect(podWaitingMessage(source)).toBe(message)
+  })
+
   it('renders a badge per active flag and nothing otherwise', () => {
     const { container, rerender } = render(<TaskStateBadges task={task()} />)
     expect(container).toBeEmptyDOMElement()

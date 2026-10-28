@@ -4,6 +4,49 @@ export const taskTypeSchema = z.enum(['container', 'ai', 'agent'])
 export const taskPhaseSchema = z.enum(['Pending', 'Running', 'Finalizing', 'Succeeded', 'Failed', 'Scheduled', 'Cancelled'])
 export const workspaceIntentSchema = z.enum(['read', 'write'])
 
+const enforcementIdentifierSchema = z.string().min(1).max(256).refine(
+  (value) => value.trim() === value && !value.includes('\0') && new TextEncoder().encode(value).length <= 256,
+  'Use a bounded nonempty identifier without surrounding whitespace or NUL',
+)
+
+const enforcementPolicySchema = z.string().min(1).max(699052)
+  .refine((value) => {
+    if (value.length > 699052 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) return false
+    const decoded = atob(value)
+    return decoded.length <= 512 * 1024 && btoa(decoded) === value
+  }, 'Policy must be canonical base64 encoding at most 512 KiB')
+
+export const enforcementRequirementSchema = z.object({
+  format: enforcementIdentifierSchema,
+  policy: enforcementPolicySchema,
+  requiredCapabilities: z.array(enforcementIdentifierSchema).min(1).max(32)
+    .refine((values) => new Set(values).size === values.length, 'Capabilities must be distinct'),
+  mode: z.literal('enforce'),
+}).strict()
+
+export const enforcementAdmissionSchema = z.object({
+  bindingID: z.string().regex(/^container:[a-f0-9]{64}$/),
+  requirementDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  observedGeneration: z.number().int().positive(),
+})
+
+export const enforcementNeedSchema = z.enum([
+  'complete-policy', 'supported-format', 'configured-backend', 'supported-target',
+  'supported-runtime', 'mandatory-capability-coverage', 'provider-recovery',
+  'prepared-container', 'stopped-previous-container', 'operator-configuration',
+  'admission-recovery',
+])
+
+export const enforcementOutcomeSchema = z.object({
+  observedGeneration: z.number().int().positive(),
+  reason: z.enum(['EnforcementPending', 'EnforcementAdmissionPending', 'EnforcementRefused', 'EnforcementUncertain']),
+  needs: z.array(enforcementNeedSchema).max(32).optional(),
+}).strict()
+
+export type EnforcementAdmission = z.infer<typeof enforcementAdmissionSchema>
+export type EnforcementOutcome = z.infer<typeof enforcementOutcomeSchema>
+export type EnforcementNeed = z.infer<typeof enforcementNeedSchema>
+export type EnforcementRequirement = z.infer<typeof enforcementRequirementSchema>
 
 export const conditionSchema = z.object({
   type: z.string(),
@@ -11,6 +54,7 @@ export const conditionSchema = z.object({
   reason: z.string().optional(),
   message: z.string().optional(),
   lastTransitionTime: z.string().optional(),
+  observedGeneration: z.number().int().optional(),
 })
 
 export const retryPolicySchema = z.object({
@@ -254,6 +298,7 @@ export const taskSpecSchema = z.object({
   prompt: z.string().optional(),
   agentRuntime: agentRuntimeSpecSchema.optional(),
   workspace: workspaceConfigSchema.optional(),
+  enforcement: enforcementRequirementSchema.optional(),
   // Cron scheduling: a scheduled Task creates one child Task per tick.
   schedule: z.string().optional(),
   suspend: z.boolean().optional(),
@@ -311,6 +356,9 @@ export const taskStatusSchema = z.preprocess((status, context) => {
   execution: taskExecutionStatusSchema.optional(),
   delivery: taskDeliveryStatusSchema.optional(),
   agentExecutionBinding: agentExecutionBindingSchema.optional(),
+  enforcementAdmission: z.unknown().optional(),
+  // Decode optional diagnostics independently so malformed detail cannot hide a Task.
+  enforcementOutcome: z.unknown().optional(),
   webhookDelivered: z.boolean().optional(),
   message: z.string().optional(),
   childTasks: z.array(childTaskStatusSchema).optional(),
@@ -332,6 +380,7 @@ export const k8sMetadataSchema = z.object({
   name: z.string(),
   namespace: z.string().optional(),
   uid: z.string().optional(),
+  generation: z.number().int().optional(),
   creationTimestamp: z.string().optional(),
   // Set once a delete is accepted; the object lingers until finalizers finish.
   deletionTimestamp: z.string().optional(),

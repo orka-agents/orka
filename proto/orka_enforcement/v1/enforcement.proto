@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package orka.enforcement.v1;
+
+option go_package = "github.com/orka-agents/orka/api/enforcement/v1;enforcementv1";
+
+// Providers run outside the governed target and authenticate Orka using mTLS.
+// Ensure is idempotent for an immutable binding, complete requirement and target.
+// An RPC error is uncertainty, never permission to execute or remove controls.
+service EnforcementProvider {
+  rpc EnsureEnforced(EnsureRequest) returns (EnsureResponse);
+  // The runtime stops the exact target first. Providers independently verify
+  // that stop before removing controls and retain terminal binding tombstones.
+  rpc RetireEnforcement(RetireRequest) returns (RetireResponse);
+}
+
+message Requirement {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    MODE_ENFORCE = 1;
+  }
+  string format = 1;
+  bytes policy = 2;
+  repeated string required_capabilities = 3;
+  Mode mode = 4;
+}
+
+// Versioned provider-understood observations, not caller-selected kernel paths.
+// Providers independently resolve them to an exact physical incarnation.
+message TargetFacts {
+  string format = 1;
+  bytes value = 2;
+}
+
+message EnsureRequest {
+  string binding_id = 1;
+  Requirement requirement = 2;
+  TargetFacts target_facts = 3;
+}
+
+message Pending {
+  string reason = 1;
+}
+
+message Refused {
+  string reason = 1;
+  repeated string needs = 2;
+}
+
+message Enforced {
+  string binding_id = 1;
+  // SHA-256 of the domain-separated deterministic protobuf message.
+  string requirement_digest = 2;
+  string target_facts_digest = 3;
+  repeated string enforced_capabilities = 4;
+  // Provider-owned physical identity and current readback; not a policy rewrite.
+  TargetFacts resolved_target = 5;
+  bytes evidence = 6;
+}
+
+message EnsureResponse {
+  oneof result {
+    Pending pending = 1;
+    Enforced enforced = 2;
+    Refused refused = 3;
+  }
+}
+
+message RetireRequest {
+  string binding_id = 1;
+}
+
+message Retired {
+  string binding_id = 1;
+}
+
+message RetireResponse {
+  oneof result {
+    Pending pending = 1;
+    Retired retired = 2;
+    Refused refused = 3;
+  }
+}

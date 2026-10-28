@@ -388,20 +388,20 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- if ne .Values.controller.mode "harness-v2" -}}
 {{- fail "controller.mode must be harness-v2; other harness protocols are unsupported" -}}
 {{- end -}}
-{{- if ne $watchNamespace .Release.Namespace -}}
-{{- fail (printf "controller.watchNamespace must equal the Helm release namespace %q" .Release.Namespace) -}}
+{{- if or (gt (len $watchNamespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $watchNamespace)) -}}
+{{- fail "controller.watchNamespace must be a valid namespace name" -}}
 {{- end -}}
 {{- if not .Values.controller.leaderElect -}}
 {{- fail "controller.leaderElect must be true for an isolated controller installation" -}}
 {{- end -}}
 {{- if .Release.IsUpgrade -}}
-{{- $existingNamespace := lookup "v1" "Namespace" "" .Release.Namespace -}}
+{{- $existingNamespace := lookup "v1" "Namespace" "" $watchNamespace -}}
 {{- $existingNamespaceMode := "" -}}
 {{- if $existingNamespace -}}
 {{- $existingNamespaceMode = dig "metadata" "labels" "orka.ai/controller-mode" "" $existingNamespace -}}
 {{- end -}}
 {{- if ne $existingNamespaceMode .Values.controller.mode -}}
-{{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" .Release.Namespace .Values.controller.mode) -}}
+{{- fail (printf "controller mode identity is missing or incompatible; namespace %q must already claim orka.ai/controller-mode=%s before this release can be upgraded" $watchNamespace .Values.controller.mode) -}}
 {{- end -}}
 {{- $root := . -}}
 {{- $existingControllerList := lookup "apps/v1" "Deployment" .Release.Namespace "" -}}
@@ -420,6 +420,7 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- $existingController = index $existingControllers 0 -}}
 {{- end -}}
 {{- if $existingController -}}
+{{- include "orka.validateExistingEnforcement" (dict "root" $root "controller" $existingController) -}}
 {{- $existingWatchNamespace := include "orka.existingControllerWatchNamespace" $existingController | trim -}}
 {{- if ne $existingWatchNamespace $watchNamespace -}}
 {{- fail (printf "controller.watchNamespace is immutable; the existing controller must already watch namespace %q; install cluster-wide or differently scoped controllers as a new release and namespace" $watchNamespace) -}}
@@ -473,6 +474,9 @@ helm upgrade --reuse-values carries an older chart's defaults, including them.
 {{- end -}}
 {{- if eq .Values.controller.acpRuntime.namespace .Release.Namespace -}}
 {{- fail "controller.acpRuntime.namespace must differ from the release namespace" -}}
+{{- end -}}
+{{- if eq .Values.controller.acpRuntime.namespace $watchNamespace -}}
+{{- fail "controller.acpRuntime.namespace must differ from controller.watchNamespace" -}}
 {{- end -}}
 
 {{- end }}
@@ -673,6 +677,9 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
 {{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
 {{- end -}}
+{{- if eq $namespace (include "orka.watchNamespace" .) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from controller.watchNamespace" $namespace) -}}
+{{- end -}}
 {{- $_ := include "orka.agentHostAgentImage" . -}}
 {{- end -}}
 {{- if include "orka.agentHostGitHubEnabled" . -}}
@@ -705,9 +712,10 @@ Pods keep running and their deletion never finishes. The CRD is checked
 first, so an upgrade from a release without it does not fail on the kind. */ -}}
 {{- if and .Release.IsUpgrade (not (include "orka.agentHostsEnabled" .)) -}}
 {{- if lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "agenthosts.core.orka.ai" -}}
-{{- $hosts := dig "items" list (lookup "core.orka.ai/v1alpha1" "AgentHost" .Release.Namespace "") -}}
+{{- $watchNamespace := include "orka.watchNamespace" . -}}
+{{- $hosts := dig "items" list (lookup "core.orka.ai/v1alpha1" "AgentHost" $watchNamespace "") -}}
 {{- if $hosts -}}
-{{- fail (printf "controller.agentHosts.enabled=false would leave %d AgentHost(s) in %s that nothing stops or cleans up; delete them, wait until they are gone, then upgrade" (len $hosts) .Release.Namespace) -}}
+{{- fail (printf "controller.agentHosts.enabled=false would leave %d AgentHost(s) in %s that nothing stops or cleans up; delete them, wait until they are gone, then upgrade" (len $hosts) $watchNamespace) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

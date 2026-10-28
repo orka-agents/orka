@@ -126,11 +126,11 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     # The controller check below names this release's controller, so the
-    # policy covers only this release's namespace; another release's hosts
+    # policy covers only this release's watched namespace; another release's hosts
     # are its own policy's to admit.
     namespaceSelector:
       matchLabels:
-        kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        kubernetes.io/metadata.name: {{ include "orka.watchNamespace" . | quote }}
     resourceRules:
       - apiGroups: ["core.orka.ai"]
         apiVersions: ["v1alpha1"]

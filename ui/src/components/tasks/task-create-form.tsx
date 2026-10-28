@@ -27,6 +27,7 @@ import {
 } from '@/lib/workspace-source-ref'
 import { builtInAgentRuntimeLabel } from '@/lib/agent-runtime'
 import { splitShellWords } from '@/lib/shell-words'
+import { MAX_ENFORCEMENT_INPUT_BYTES, parseTaskEnforcement } from '@/lib/task-enforcement'
 import { actionErrorMessage } from './action-error'
 import { taskNameError } from './task-name'
 
@@ -96,6 +97,7 @@ export function TaskCreateForm() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [priority, setPriority] = useState('')
   const [timeout, setTimeout] = useState('')
+  const [enforcementJSON, setEnforcementJSON] = useState('')
   // Field errors appear once a field is left or a submit is attempted, so a
   // half-typed value ("my-", "30") is not flagged mid-keystroke.
   const [visitedFields, setVisitedFields] = useState<ReadonlySet<string>>(() => new Set())
@@ -189,6 +191,12 @@ export function TaskCreateForm() {
   const nameError = taskNameError(name)
   const priorityIssue = priorityError(priority)
   const timeoutIssue = timeoutError(timeout)
+  const enforcementInput = useMemo(() => parseTaskEnforcement(enforcementJSON), [enforcementJSON])
+  const enforcementIssue = enforcementInput.error ?? (
+    enforcementInput.requirement && type === 'container'
+      ? 'Enforcement requires an AI or Agent runtime Task. Clear the requirement or select a supported type.'
+      : undefined
+  )
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -206,12 +214,13 @@ export function TaskCreateForm() {
   const submitTask = async (): Promise<boolean> => {
     setSubmitAttempted(true)
     if (nameError) return false
-    if (priorityIssue || timeoutIssue) {
+    if (priorityIssue || timeoutIssue || enforcementIssue) {
       // Collapsed fields are still submitted, so reveal the invalid one.
       setShowAdvanced(true)
       return false
     }
     const body: Record<string, unknown> = { name, namespace, type }
+    if (enforcementInput.requirement) body.enforcement = enforcementInput.requirement
 
     if (type === 'container') {
       body.image = image
@@ -696,6 +705,28 @@ export function TaskCreateForm() {
 
             {showAdvanced && (
               <div id="task-advanced-options" className="space-y-4 border-l-2 border-border pl-4">
+                <div className="space-y-2">
+                  <label htmlFor="task-enforcement" className="text-sm font-medium">Enforcement requirement (JSON)</label>
+                  <textarea
+                    id="task-enforcement"
+                    className="flex min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+                    value={enforcementJSON}
+                    onChange={(event) => setEnforcementJSON(event.target.value)}
+                    onBlur={() => visitField('enforcement')}
+                    maxLength={MAX_ENFORCEMENT_INPUT_BYTES}
+                    disabled={type === 'container' && !enforcementJSON.trim()}
+                    spellCheck={false}
+                    aria-invalid={fieldError('enforcement', enforcementIssue) ? true : undefined}
+                    aria-describedby={`task-enforcement-help${fieldError('enforcement', enforcementIssue) ? ' task-enforcement-error' : ''}`}
+                  />
+                  <p id="task-enforcement-help" className="text-xs text-muted-foreground">
+                    Optional for AI and Agent runtime Tasks. Supply the complete requirement with mode, format, base64 policy and requiredCapabilities.
+                    {' '}Policy bytes and capability order are preserved. This does not install or enroll providers; admission requires every mandatory provider.
+                  </p>
+                  {fieldError('enforcement', enforcementIssue) && (
+                    <p id="task-enforcement-error" className="text-xs text-destructive" role="alert">{enforcementIssue}</p>
+                  )}
+                </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
                     <label htmlFor="task-priority" className="text-sm font-medium">Priority</label>

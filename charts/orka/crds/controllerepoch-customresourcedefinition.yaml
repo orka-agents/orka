@@ -1,0 +1,109 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: controllerepochs.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: ControllerEpoch
+    listKind: ControllerEpochList
+    plural: controllerepochs
+    shortNames:
+    - cepoch
+    singular: controllerepoch
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.epoch
+      name: Epoch
+      type: integer
+    - jsonPath: .status.holderId
+      name: Holder
+      type: string
+    - jsonPath: .status.version
+      name: Version
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ControllerEpoch is the human-visible Kubernetes control record paired with
+          an authoritative namespaced Lease.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ControllerEpochSpec is the immutable epoch-domain identity. The associated
+              coordination.k8s.io Lease is the CAS authority for holder and epoch changes.
+            properties:
+              name:
+                maxLength: 253
+                minLength: 1
+                type: string
+            required:
+            - name
+            type: object
+            x-kubernetes-validations:
+            - message: controller epoch spec is immutable
+              rule: self == oldSelf
+          status:
+            description: |-
+              ControllerEpochStatus mirrors the authoritative Lease state for inspection
+              and recovery. LeaseResourceVersion identifies the exact Lease revision.
+            properties:
+              acquiredAt:
+                format: date-time
+                type: string
+              epoch:
+                format: int64
+                minimum: 1
+                type: integer
+              holderId:
+                maxLength: 1024
+                type: string
+              leaseName:
+                maxLength: 253
+                type: string
+              leaseResourceVersion:
+                maxLength: 64
+                type: string
+              requestDigest:
+                pattern: ^sha256:[a-f0-9]{64}$
+                type: string
+              updatedAt:
+                format: date-time
+                type: string
+              version:
+                format: int64
+                minimum: 1
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

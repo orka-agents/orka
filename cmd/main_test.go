@@ -412,7 +412,6 @@ func TestManagerCacheOptions(t *testing.T) {
 		&appsv1.ReplicaSet{},
 		&corev1.Pod{},
 		&corev1.Service{},
-		&corev1.Secret{},
 		&networkingv1.NetworkPolicy{},
 		&policyv1.PodDisruptionBudget{},
 	}
@@ -424,6 +423,7 @@ func TestManagerCacheOptions(t *testing.T) {
 		wantDefault         []string
 		wantRuntimeChild    []string
 		wantConfigMaps      []string
+		wantSecrets         []string
 		wantChildOverrides  bool
 	}{
 		{
@@ -466,12 +466,14 @@ func TestManagerCacheOptions(t *testing.T) {
 			watchNamespace: "tenant-a", runtimeNamespace: "orka-runtimes", controllerNamespace: "orka-system",
 			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"orka-runtimes", "tenant-a"},
 			wantConfigMaps: []string{"orka-system", "tenant-a"}, wantChildOverrides: true,
+			wantSecrets: []string{"orka-runtimes", "orka-system", "tenant-a"},
 		},
 		{
 			name:           "checkpoint collection does not depend on a separate runtime namespace",
 			watchNamespace: "tenant-a", controllerNamespace: "orka-system",
 			wantDefault: []string{"tenant-a"}, wantRuntimeChild: []string{"tenant-a"},
 			wantConfigMaps: []string{"orka-system", "tenant-a"},
+			wantSecrets:    []string{"orka-system", "tenant-a"},
 		},
 		{
 			name:           "controller namespace equal to tenant needs no override",
@@ -495,19 +497,16 @@ func TestManagerCacheOptions(t *testing.T) {
 				assertCacheNamespaces(t, effectiveCacheNamespaces(options, object), tt.wantDefault)
 			}
 
-			wantOverrides := 0
 			wantConfigMaps := tt.wantDefault
 			if tt.wantConfigMaps != nil {
-				wantOverrides++
 				wantConfigMaps = tt.wantConfigMaps
 			}
 			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1.ConfigMap{}), wantConfigMaps)
-			if tt.wantChildOverrides {
-				wantOverrides += len(childTypes)
+			wantSecrets := tt.wantSecrets
+			if wantSecrets == nil {
+				wantSecrets = tt.wantRuntimeChild
 			}
-			if got := len(options.ByObject); got != wantOverrides {
-				t.Fatalf("ByObject override count = %d, want %d", got, wantOverrides)
-			}
+			assertCacheNamespaces(t, effectiveCacheNamespaces(options, &corev1.Secret{}), wantSecrets)
 			for _, object := range childTypes {
 				_, overridden := cacheByObjectForType(options, object)
 				if overridden != tt.wantChildOverrides {

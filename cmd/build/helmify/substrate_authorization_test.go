@@ -87,11 +87,7 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 
 func TestStaticChartGrantsGenericWorkspaceCheckpointAndObservationRBAC(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
-	var role rbacv1.Role
-	roleDoc := requireRenderedDocument(t, rendered, "# Controller tenant Role.", "kind: Role\n")
-	if err := yaml.Unmarshal([]byte(roleDoc), &role); err != nil {
-		t.Fatal(err)
-	}
+	role := requireRenderedRole(t, rendered, "test-orka-controller")
 	if role.Namespace != staticChartTestNamespace {
 		t.Fatal("workspace checkpoint permissions escaped the controller namespace")
 	}
@@ -110,7 +106,7 @@ func TestStaticChartGrantsGenericWorkspaceCheckpointAndObservationRBAC(t *testin
 		}
 	}
 	var clusterRole rbacv1.ClusterRole
-	clusterDoc := requireRenderedDocument(t, rendered, "kind: ClusterRole\n", `resources: ["tokenreviews"]`)
+	clusterDoc := requireRenderedObject(t, rendered, "ClusterRole", "test-orka-controller-cluster", "")
 	if err := yaml.Unmarshal([]byte(clusterDoc), &clusterRole); err != nil {
 		t.Fatal(err)
 	}

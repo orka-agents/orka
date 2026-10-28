@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -217,6 +218,28 @@ func TestRuntimePoolNamespaceRejectsArbitraryOverride(t *testing.T) {
 	pool.Spec.RuntimeNamespace = acpTestRuntimeNamespace
 	if _, err := unconfigured.runtimePoolNamespace(pool); err == nil {
 		t.Fatal("unconfigured controller accepted a non-pool runtime namespace")
+	}
+}
+
+func TestRuntimePoolNamespaceSeparatesManagementAndWorkloadCredentials(t *testing.T) {
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Namespace: "tasks", Name: "pool"}}
+	reconciler := &RuntimePoolReconciler{RuntimeNamespace: "runtimes", ControllerNamespace: "management"}
+	for _, requested := range []string{"", "runtimes"} {
+		pool.Spec.RuntimeNamespace = requested
+		namespace, err := reconciler.runtimePoolNamespace(pool)
+		require.NoError(t, err)
+		require.Equal(t, "runtimes", namespace)
+	}
+	for _, requested := range []string{"tasks", "management", "other"} {
+		pool.Spec.RuntimeNamespace = requested
+		_, err := reconciler.runtimePoolNamespace(pool)
+		require.Error(t, err)
+	}
+	pool.Spec.RuntimeNamespace = ""
+	for _, configured := range []string{"", "tasks", "management"} {
+		reconciler.RuntimeNamespace = configured
+		_, err := reconciler.runtimePoolNamespace(pool)
+		require.Error(t, err)
 	}
 }
 

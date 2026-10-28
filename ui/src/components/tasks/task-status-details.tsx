@@ -2,6 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN } from '@/lib/secret-like'
 import { cn } from '@/lib/utils'
+import { displayedTaskConditionMessage, taskEnforcementObservation } from '@/lib/task-enforcement'
 import type { Task } from '@/schemas/task'
 
 interface TaskStatusDetailsProps {
@@ -55,7 +56,8 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
   const wsPlacement = ws?.placement
   const wsDensity = ws?.density
   const hasLabels = labels.length > 0 || annotations.length > 0
-  if (!conditions.length && !ws && !sessionName && !resultRef && !hasLabels) return null
+  const enforcement = taskEnforcementObservation(task)
+  if (!conditions.length && !ws && !sessionName && !resultRef && !hasLabels && !enforcement) return null
 
   return (
     <Card>
@@ -63,6 +65,22 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
         <CardTitle>Status details</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
+        {enforcement && (
+          <Section title="Enforcement">
+            <p>{enforcement.state}</p>
+            {enforcement.guidance.map((guidance) => <p key={guidance}>{guidance}</p>)}
+            {enforcement.admission && (
+              <>
+                <Field label="Recorded generation" value={enforcement.admission.observedGeneration} />
+                <Field label="Binding" value={`${enforcement.admission.bindingID.slice(0, 22)}...`} />
+                <Field label="Requirement digest" value={`${enforcement.admission.requirementDigest.slice(0, 19)}...`} />
+              </>
+            )}
+            <p className="mt-1 text-muted-foreground">
+              A controller admission record is historical, not a live kernel check or permission to remove container controls.
+            </p>
+          </Section>
+        )}
         {conditions.length > 0 && (
           <Section title="Conditions">
             <ul className="space-y-1.5">
@@ -75,7 +93,7 @@ export function TaskStatusDetails({ task }: TaskStatusDetailsProps) {
                     <span className="min-w-0 wrap-anywhere font-mono">{c.type}</span>
                     <Badge className="shrink-0" variant={c.status === 'True' ? 'secondary' : 'outline'}>{c.status}</Badge>
                   </div>
-                  {c.message && <p className="wrap-anywhere text-muted-foreground">{c.message}</p>}
+                  {c.type !== 'EnforcementReady' && c.message && <p className="wrap-anywhere text-muted-foreground">{displayedTaskConditionMessage(task, c)}</p>}
                 </li>
               ))}
             </ul>

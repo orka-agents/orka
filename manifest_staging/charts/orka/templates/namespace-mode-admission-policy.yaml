@@ -1,6 +1,6 @@
 {{- /*
-The release namespace's execution-mode claim is enforced by CEL rather than a
-controller-served webhook so the controller can claim its own namespace on first
+The watched namespace's execution-mode claim is enforced by CEL rather than a
+controller-served webhook so the controller can claim its tenant namespace on first
 start and so namespace edits never depend on the controller being up. The claim
 is immutable once present; only this release's controller may add it to an
 existing namespace; anyone may create the namespace with it already set.
@@ -21,7 +21,7 @@ spec:
         resources: ["namespaces"]
   matchConditions:
     - name: release-namespace
-      expression: "object.metadata.name == '{{ .Release.Namespace }}'"
+      expression: "object.metadata.name == '{{ include "orka.watchNamespace" . }}'"
   variables:
     - name: label
       expression: "'orka.ai/controller-mode'"

@@ -226,6 +226,11 @@ type RuntimePoolProfileSpec struct {
 	// +kubebuilder:validation:MaxItems=4
 	// +optional
 	Toolboxes []RuntimePoolToolbox `json:"toolboxes,omitempty"`
+	// EnforcementRequirementDigest pins the complete requirement, not current
+	// enforcement proof. Absence preserves ordinary pool identity.
+	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
+	// +optional
+	EnforcementRequirementDigest string `json:"enforcementRequirementDigest,omitempty"`
 }
 
 // RuntimePoolToolbox is the frozen projection of one Agent toolbox.
@@ -615,6 +620,11 @@ type RuntimePoolStatus struct {
 	// unless one instance has been authoritatively selected.
 	// +optional
 	ActiveInstance *RuntimePoolActiveInstanceStatus `json:"activeInstance,omitempty"`
+
+	// EnforcementBinding retains physical cleanup intent independently of
+	// consuming Tasks and sessions. Replacement waits for its retirement.
+	// +optional
+	EnforcementBinding *ContainerEnforcementBinding `json:"enforcementBinding,omitempty"`
 
 	// Capacity reports effective limits, use, and queued demand.
 	// +optional

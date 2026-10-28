@@ -32,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/enforcement"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
@@ -114,6 +115,7 @@ type ACPDispatcher struct {
 	ReservationTTL           time.Duration
 	RateLimitRetryInterval   time.Duration
 	AdmissionGate            *ACPAdmissionGate
+	Enforcement              enforcement.Coordinator
 	ACPRuntimeImages         ACPRuntimeImages
 	runtimeContextFactory    func(context.Context, *corev1alpha1.Task) (context.Context, context.CancelFunc)
 
@@ -1028,6 +1030,16 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		return err
 	}
+	if _, err := d.runtimePoolEnforcementRequirement(task, target); err != nil {
+		if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "enforcement-target-refused"); transitionErr != nil {
+			return transitionErr
+		}
+		enforcementStatus := TaskReconciler{Client: d.Client, APIReader: d.APIReader}
+		if statusErr := enforcementStatus.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementRefused", err.Error()); statusErr != nil {
+			return statusErr
+		}
+		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "EnforcementRefused", sanitizeStatusMessage(err.Error()))
+	}
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
 	}
@@ -1398,6 +1410,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		RuntimeSessionID: harnessv2.RuntimeSessionID(runtimeSessionID(runtimeFence)),
 		Profile:          profile, AgentConfiguration: agentConfigurationRef, MCPConfiguration: mcpConfiguration,
 		Workspace: workspace, WorkspaceArtifactAuthorization: workspaceAuthorization,
+		PrepareOnly: profile.EnforcementRequirementDigest != "",
 	}
 	nativeRestore, nativeRestoreErr := nativeRestoreForTask(sessionExecution, createRequest, nativeSessionsSupported)
 	if nativeRestoreErr != nil {
@@ -1410,9 +1423,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err := d.recordKubernetesRuntimeExposure(ctx, task, target.external, runtimeFence, fence); err != nil {
 		return fmt.Errorf("persist pre-admission Kubernetes runtime witness: %w", err)
 	}
-	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported
+	enforcedPreparationPending := createRequest.PrepareOnly &&
+		(runtimeSessionCreationRequired || sessionExecution != nil && sessionExecution.Binding.RecreationRequired)
+	runtimeSessionRetirementRequired := sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported || enforcedPreparationPending
 	runtimeSessionCleanupPending := taskScopedRuntimeSessionReused ||
-		sessionExecution != nil && (workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported)
+		sessionExecution != nil && (workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported ||
+			enforcedPreparationPending && sessionExecution.Reused)
 	runtimeSessionSettlementRequired := false
 	runtimePublicationFinalizationRequired := false
 	runtimePublicationFinalized := false
@@ -1522,7 +1538,20 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return deadlineErr
 			}
 			digestConflict := runtimeSessionCreateDigestConflict(err)
-			if sessionExecution == nil && digestConflict {
+			if createRequest.PrepareOnly && runtimeSessionCreationMayHaveApplied(err) {
+				// A prepared receipt is not launch authority. Recovery retires
+				// preparations whose original operation cannot be replayed exactly.
+				if sessionExecution != nil {
+					if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+						ctx, task, attemptID, fence, err, &sessionExecution.Binding,
+					); requeueErr != nil {
+						return requeueErr
+					}
+					sessionExecution.requeued = true
+					return nil
+				}
+				return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+			} else if sessionExecution == nil && digestConflict {
 				// The runtime already processed a create for this exact attempt
 				// identity: this reconcile rebuilt the request (fresh expiry and
 				// workspace capability) after an earlier send. Adopt the session
@@ -1658,22 +1687,82 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		if runtimeSessionRetirementRequired {
 			runtimeSessionCleanupPending = true
 		}
-		if sessionExecution != nil {
-			sessionExecution.Binding.RecreationRequired = false
-			d.setRuntimeSessionBinding(sessionExecution.Binding)
-			if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
-				applyRuntimeSessionBindingToExecution(status, &sessionExecution.Binding)
-				status.LastTransitionTime = nowMeta()
-			}); err != nil {
-				if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
-					ctx, task, attemptID, fence, err, &sessionExecution.Binding,
-				); requeueErr != nil {
-					return errors.Join(err, requeueErr)
-				}
-				sessionExecution.requeued = true
-				return nil
+	}
+	admissionObservation := task.DeepCopy()
+	admissionBinding, err := d.admitEnforcedRuntimeSession(
+		runtimeCtx, runtimeClient, task, target, createRequest, runtimeSessionCreationRequired, fence,
+	)
+	if err != nil {
+		authorityCancelled := errors.Is(err, errEnforcedACPTaskAuthority) &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+		if authorityCancelled || runtimeContextError(runtimeCtx) != nil {
+			reason, message := corev1alpha1.TaskExecutionReason("Cancelled"), "task cancelled before runtime launch"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
+				reason, message = acpTaskTimeoutReason, "task deadline exceeded before runtime launch"
 			}
+			return d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, "cancelled-before-launch", reason, message)
 		}
+		enforcementStatus := TaskReconciler{Client: d.Client, APIReader: d.APIReader}
+		if errors.Is(err, store.ErrValidation) {
+			needs := enforcement.RefusalNeeds(err)
+			message := enforcement.OutcomeMessage(enforcement.Outcome("EnforcementRefused", needs...))
+			if statusErr := enforcementStatus.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementRefused", message, needs...); statusErr != nil {
+				return statusErr
+			}
+			if transitionErr := d.transitionAttemptToTerminal(ctx, attemptID, fence, store.PromptExecutionFailed, "enforcement-refused"); transitionErr != nil {
+				return transitionErr
+			}
+			return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "EnforcementRefused", message)
+		}
+		err = &enforcement.AdmissionError{Cause: err}
+		if statusErr := enforcementStatus.markEnforcement(ctx, task, metav1.ConditionUnknown, "EnforcementAdmissionPending", err.Error()); statusErr != nil {
+			return statusErr
+		}
+		if clientErr, ok := errors.AsType[*harnessv2.ClientError](err); ok &&
+			clientErr.Kind == harnessv2.ClientErrorHTTP && clientErr.StatusCode >= http.StatusBadRequest &&
+			clientErr.StatusCode < http.StatusInternalServerError && !clientErr.Retryable && !runtimeSessionCreateDigestConflict(err) {
+			_, handleErr := d.handlePrePromptClientError(ctx, task, attemptID, fence, err)
+			return handleErr
+		}
+		if sessionExecution != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, err, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return requeueErr
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+		return d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
+	}
+	if task.Spec.Enforcement != nil {
+		if admissionBinding == nil {
+			return errors.New("mandatory enforcement returned no runtime admission binding")
+		}
+		enforcementStatus := TaskReconciler{Client: d.Client, APIReader: d.APIReader}
+		if err := enforcementStatus.markEnforcementAdmission(ctx, task, admissionBinding, admissionObservation); err != nil {
+			return err
+		}
+	}
+	if (runtimeSessionCreationRequired || enforcedPreparationPending) && sessionExecution != nil {
+		sessionExecution.Binding.RecreationRequired = false
+		d.setRuntimeSessionBinding(sessionExecution.Binding)
+		if err := d.patchExecution(ctx, task, func(status *corev1alpha1.TaskExecutionStatus) {
+			applyRuntimeSessionBindingToExecution(status, &sessionExecution.Binding)
+			status.LastTransitionTime = nowMeta()
+		}); err != nil {
+			if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+				ctx, task, attemptID, fence, err, &sessionExecution.Binding,
+			); requeueErr != nil {
+				return errors.Join(err, requeueErr)
+			}
+			sessionExecution.requeued = true
+			return nil
+		}
+	}
+	if enforcedPreparationPending {
+		runtimeSessionRetirementRequired = sessionExecution == nil || workspace.Intent == harnessv2.WorkspaceIntentWrite || nativeSessionsSupported
+		runtimeSessionCleanupPending = runtimeSessionRetirementRequired
 	}
 	if sessionExecution != nil && sessionExecution.NativeSession != nil {
 		_, observed, observeErr := runtimeSessionStatusForUID(sessionCtx, runtimeClient, runtimeFence.RuntimeSessionUID)
@@ -1990,7 +2079,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			break
 		}
 		if !accepted && !summary.Accepted && isACPRateLimitedClientError(streamErr) {
-			if target.external != nil {
+			if target.external != nil || task.Spec.Enforcement != nil {
 				var runtimeBinding *ACPRuntimeSessionBinding
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
@@ -2974,7 +3063,9 @@ func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 		if observed.State.CanAdmitPrompt() {
 			if !session.Reused {
 				session.Reused = true
-				session.Binding.RecreationRequired = false
+				if task.Spec.Enforcement == nil {
+					session.Binding.RecreationRequired = false
+				}
 				d.setRuntimeSessionBinding(session.Binding)
 				if err := d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
 					applyRuntimeSessionBindingToExecution(execution, &session.Binding)
@@ -4535,6 +4626,9 @@ func (d *ACPDispatcher) runtimePoolClient(ctx context.Context, pool *corev1alpha
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool does not provide strict workspace governance")
 	}
 	profile := runtimeProfileFromPool(pool.Spec.Runtime.Profile)
+	if profile.EnforcementRequirementDigest != "" && !capabilities.SupportsSessionPreparation {
+		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, errors.New("enforced RuntimePool does not support prepare-before-launch")
+	}
 	if profile.WorkspaceIntent == harnessv2.WorkspaceIntentWrite && !capabilities.SupportsPublicationFinalization {
 		return nil, harnessv2.Fence{}, harnessv2.RuntimeProfile{}, 0, fmt.Errorf("RuntimePool does not support controller-owned RuntimeSession publication finalization required for write workspaces")
 	}
@@ -5455,7 +5549,8 @@ func runtimeProfileFromPool(profile corev1alpha1.RuntimePoolProfileSpec) harness
 		ApprovalPolicyDigest: profile.ApprovalPolicyDigest, MCPConfigurationDigest: profile.MCPConfigurationDigest,
 		WorkspaceIntent: harnessv2.WorkspaceIntent(profile.WorkspaceIntent), ProxyCredentialRole: profile.ProxyCredentialRole,
 		ProxyCredentialScope: profile.ProxyCredentialScope, ResourceClass: profile.ResourceClass,
-		Toolboxes: runtimeToolboxesFromPool(profile.Toolboxes),
+		Toolboxes:                    runtimeToolboxesFromPool(profile.Toolboxes),
+		EnforcementRequirementDigest: profile.EnforcementRequirementDigest,
 	}
 }
 
@@ -6250,6 +6345,9 @@ func acpWorkspaceValidationFailureMessage(err error) string {
 }
 
 func boundedRuntimeSessionServerMessage(err error) string {
+	if admissionErr, ok := errors.AsType[*enforcement.AdmissionError](err); ok {
+		return admissionErr.Error()
+	}
 	var clientErr *harnessv2.ClientError
 	if !errors.As(err, &clientErr) {
 		return "non-client runtime session error"

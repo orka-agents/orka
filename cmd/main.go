@@ -66,6 +66,7 @@ import (
 	"github.com/orka-agents/orka/internal/connectors/credential"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/enforcement"
 	"github.com/orka-agents/orka/internal/envutil"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -253,6 +254,8 @@ func main() {
 	var vendorWorkerClusterRoleName string
 	var containerWorkerClusterRoleName string
 	var workerRoleBindingNamePrefix string
+	var enforcementRegistryFile string
+	var enforcementRegistryProjected bool
 	var chatEnabled bool
 	var chatProvider string
 	var chatModel string
@@ -779,7 +782,17 @@ func main() {
 	flag.StringVar(&agentHostControllerPodLabels, "agent-host-controller-pod-labels",
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
+	flag.StringVar(&enforcementRegistryFile, "enforcement-provider-registry",
+		os.Getenv("ORKA_ENFORCEMENT_PROVIDER_REGISTRY"),
+		"Operator-owned JSON registry of mandatory mTLS enforcement providers keyed by exact Node UID.")
+	flag.BoolVar(&enforcementRegistryProjected, "enforcement-provider-registry-projected", false,
+		"Defer optional projected registry initialization; protected requests refuse until its files are valid.")
 	flag.Parse()
+	if enforcementRegistryProjected && enforcementRegistryFile == "" {
+		setupLog.Error(errors.New("--enforcement-provider-registry is required"),
+			"projected enforcement registry has no configured path")
+		os.Exit(1)
+	}
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
 		setupLog.Error(nativeSessionMaxBytesErr, "invalid native session size configuration")
@@ -1619,6 +1632,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	var enforcementRegistry *enforcement.Registry
+	if enforcementRegistryFile != "" {
+		if enforcementRegistryProjected {
+			enforcementRegistry, err = enforcement.NewProjectedRegistry(enforcementRegistryFile)
+		} else {
+			enforcementRegistry, err = enforcement.LoadRegistry(enforcementRegistryFile)
+		}
+		if err != nil {
+			setupLog.Error(err, "unable to configure required enforcement providers")
+			os.Exit(1)
+		}
+		defer enforcementRegistry.Close()
+	}
+
 	// Setup Task controller with helper components.
 	taskReconciler := &controller.TaskReconciler{
 		Client:                       mgr.GetClient(),
@@ -1673,6 +1700,10 @@ func main() {
 		),
 		OutboundAccessTrust: outboundAccessTrust,
 	}
+	if enforcementRegistry != nil {
+		taskReconciler.Enforcement = enforcementRegistry
+		runtimePoolReconciler.Enforcement = enforcementRegistry
+	}
 	if err := taskReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -1705,6 +1736,9 @@ func main() {
 		// existing Tasks and RuntimeSessions still need authenticated recovery,
 		// cancellation, finalization, drain, and cleanup against their actors.
 
+	}
+	if enforcementRegistry != nil {
+		acpDispatcher.Enforcement = enforcementRegistry
 	}
 	if err := mgr.Add(acpDispatcher); err != nil {
 		setupLog.Error(err, "unable to add ACP dispatcher")
@@ -2473,10 +2507,13 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespac
 		DefaultNamespaces: map[string]cache.Config{watchNamespace: {}},
 		ByObject:          make(map[crclient.Object]cache.ByObject),
 	}
+	secretNamespaces := map[string]cache.Config{watchNamespace: {}}
 	if namespace := strings.TrimSpace(controllerNamespace); namespace != "" && namespace != watchNamespace {
 		options.ByObject[&corev1.ConfigMap{}] = cache.ByObject{Namespaces: map[string]cache.Config{
 			watchNamespace: {}, namespace: {},
 		}}
+		secretNamespaces[namespace] = cache.Config{}
+		options.ByObject[&corev1.Secret{}] = cache.ByObject{Namespaces: secretNamespaces}
 	}
 	runtimeNamespace := strings.TrimSpace(acpRuntimeNamespace)
 	if runtimeNamespace == "" {
@@ -2491,7 +2528,8 @@ func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespac
 	options.ByObject[&appsv1.ReplicaSet{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&corev1.Pod{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&corev1.Service{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
-	options.ByObject[&corev1.Secret{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
+	secretNamespaces[runtimeNamespace] = cache.Config{}
+	options.ByObject[&corev1.Secret{}] = cache.ByObject{Namespaces: secretNamespaces}
 	options.ByObject[&networkingv1.NetworkPolicy{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	options.ByObject[&policyv1.PodDisruptionBudget{}] = cache.ByObject{Namespaces: runtimeChildNamespaces}
 	return options

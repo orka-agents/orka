@@ -1,10 +1,10 @@
 {{- if .Values.rbac.create -}}
-# Controller tenant Role. The release namespace is also the immutable watch namespace.
+# Controller tenant Role in the immutable watched namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "orka.controllerName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
@@ -114,7 +114,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "orka.controllerName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
@@ -125,6 +125,48 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if ne (include "orka.watchNamespace" .) .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "orka.controllerName" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["controllerepochs"]
+    verbs: ["get", "create", "update", "patch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["controllerepochs/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "orka.controllerName" . }}-management
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "orka.controllerName" . }}-management
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "orka.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- if .Values.controller.executionWorkspace.dispatchEnabled }}
 ---
 # Providers opt namespaced profile reads into this release's watch namespace.
@@ -144,7 +186,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "orka.controllerClusterRoleName" . }}-workspace-parameter-reader
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
@@ -277,11 +319,15 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
-  # The controller reads its own namespace's execution-mode claim and writes
+  # Enforcement resolves the scheduled node's immutable UID before admission.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  # The controller reads its tenant namespace's execution-mode claim and writes
   # it on first start; the namespace-mode admission policy keeps it immutable.
   - apiGroups: [""]
     resources: ["namespaces"]
-    resourceNames: [{{ .Release.Namespace | quote }}]
+    resourceNames: [{{ include "orka.watchNamespace" . | quote }}]
     verbs: ["get", "update"]
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -609,7 +655,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "orka.aiWorkerRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
@@ -619,7 +665,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "orka.aiWorkerServiceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "orka.watchNamespace" . }}
 ---
 # Vendor Worker Role (restricted worker for external agent providers)
 apiVersion: rbac.authorization.k8s.io/v1
@@ -688,7 +734,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "orka.vendorWorkerRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
@@ -698,7 +744,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "orka.vendorWorkerServiceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "orka.watchNamespace" . }}
 ---
 # Container Worker Role (minimal worker for container tasks)
 apiVersion: rbac.authorization.k8s.io/v1
@@ -720,7 +766,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "orka.containerWorkerRoleBindingName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "orka.watchNamespace" . }}
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 roleRef:
@@ -730,5 +776,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "orka.containerWorkerServiceAccountName" . }}
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "orka.watchNamespace" . }}
 {{- end }}

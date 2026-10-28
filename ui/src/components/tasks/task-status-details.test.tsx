@@ -35,6 +35,33 @@ const minimalTask: Task = {
 }
 
 describe('TaskStatusDetails', () => {
+  it('presents only bounded historical admission, never policy or provider prose', () => {
+    render(<TaskStatusDetails task={{
+      metadata: { name: 'protected', generation: 1 },
+      spec: {
+        type: 'ai',
+        enforcement: { mode: 'enforce', format: 'opaque/v1', policy: 'cHJpdmF0ZQ==', requiredCapabilities: ['fs'] },
+      },
+      status: {
+        enforcementAdmission: {
+          bindingID: `container:${'a'.repeat(64)}`,
+          requirementDigest: `sha256:${'b'.repeat(64)}`,
+          observedGeneration: 1,
+        },
+        conditions: [{
+          type: 'EnforcementReady', status: 'True', reason: 'EnforcementVerified',
+          observedGeneration: 1, message: 'private-provider-prose',
+        }],
+      },
+    }} />)
+    expect(screen.getByText('Controller admission recorded.')).toBeInTheDocument()
+    expect(screen.getByText(`container:${'a'.repeat(12)}...`)).toBeInTheDocument()
+    expect(screen.getByText(/historical, not a live kernel check/)).toBeInTheDocument()
+    expect(screen.queryByText('private-provider-prose')).not.toBeInTheDocument()
+    expect(screen.queryByText('cHJpdmF0ZQ==')).not.toBeInTheDocument()
+    expect(screen.queryByText(`container:${'a'.repeat(64)}`)).not.toBeInTheDocument()
+  })
+
   it('renders execution workspace pool and visible metadata, hides secret-looking keys', () => {
     render(<TaskStatusDetails task={fullTask} />)
     expect(screen.getByText('pool-blue')).toBeInTheDocument()

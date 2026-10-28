@@ -163,6 +163,89 @@ describe('TaskCreateForm', () => {
     }
   })
 
+  it.each(['ai', 'agent'])('submits the complete %s requirement without changing policy bytes or capability order', async (type) => {
+    useStateTypeOverride = type
+    let submitted: Record<string, unknown> | undefined
+    const requirement = {
+      mode: 'enforce', format: 'opaque/v1', policy: 'AP8=',
+      requiredCapabilities: ['network/egress-allow/v1', 'filesystem/deny-write/v1'],
+    }
+    server.use(
+      http.get('/api/v1/agents', () => HttpResponse.json({
+        items: [{
+          metadata: { name: 'selected-agent', namespace: 'default' },
+          spec: type === 'ai' ? { providerRef: { name: 'test-provider' } } : { runtime: { type: 'opencode' } },
+        }],
+      })),
+      http.post('/api/v1/tasks', async ({ request }) => {
+        submitted = await request.json() as Record<string, unknown>
+        return HttpResponse.json({ metadata: { name: 'protected' }, spec: { type } })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    const select = await screen.findByRole('combobox', { name: type === 'ai' ? 'AI agent' : 'Agent Reference' })
+    await waitFor(() => expect(select).not.toBeDisabled())
+    fireEvent.pointerDown(select, { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: /selected-agent/ }))
+    await user.type(screen.getByLabelText('Name'), 'protected')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Answer briefly')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    fireEvent.change(screen.getByLabelText('Enforcement requirement (JSON)'), { target: { value: JSON.stringify(requirement) } })
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(submitted).toBeDefined())
+    expect(submitted).toMatchObject({ type, agentRef: { name: 'selected-agent' }, enforcement: requirement })
+  })
+
+  it('reveals malformed enforcement in collapsed advanced options before any API effect', async () => {
+    useStateTypeOverride = 'ai'
+    let requests = 0
+    server.use(http.post('/api/v1/tasks', () => {
+      requests++
+      return HttpResponse.json({})
+    }))
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByLabelText('Name'), 'invalid-requirement')
+    await user.type(screen.getByPlaceholderText('Enter your prompt...'), 'Answer')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    fireEvent.change(screen.getByLabelText('Enforcement requirement (JSON)'), {
+      target: { value: '{"policy": "private-broken-source",' },
+    })
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Enforcement requirement must be valid JSON.')
+    expect(screen.getByLabelText('Enforcement requirement (JSON)')).toBeVisible()
+    expect(requests).toBe(0)
+  })
+
+  it('never silently drops a requirement when switching to an unsupported container Task', async () => {
+    useStateTypeOverride = 'ai'
+    let submitted: Record<string, unknown> | undefined
+    server.use(http.post('/api/v1/tasks', async ({ request }) => {
+      submitted = await request.json() as Record<string, unknown>
+      return HttpResponse.json({ metadata: { name: 'unprotected' }, spec: { type: 'container' } })
+    }))
+    const user = userEvent.setup()
+    render(<TaskCreateForm />)
+    await user.type(screen.getByLabelText('Name'), 'unprotected')
+    await user.click(screen.getByRole('button', { name: /Advanced Options/ }))
+    const input = screen.getByLabelText('Enforcement requirement (JSON)')
+    fireEvent.change(input, { target: { value: JSON.stringify({
+      mode: 'enforce', format: 'opaque/v1', policy: 'e30=', requiredCapabilities: ['fs'],
+    }) } })
+    fireEvent.pointerDown(screen.getByRole('combobox', { name: 'Type' }), { button: 0, pointerId: 1, pointerType: 'mouse' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Container' }))
+    await user.type(screen.getByLabelText('Image'), 'alpine:latest')
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Clear the requirement or select a supported type.')
+    expect(submitted).toBeUndefined()
+    fireEvent.change(input, { target: { value: '' } })
+    await user.click(screen.getByRole('button', { name: 'Create Task' }))
+    await waitFor(() => expect(submitted).toBeDefined())
+    expect(submitted).not.toHaveProperty('enforcement')
+  })
+
   it('renders form with name and type fields', () => {
     render(<TaskCreateForm />)
     expect(screen.getByText('Name')).toBeInTheDocument()

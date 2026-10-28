@@ -57,10 +57,16 @@ type RuntimeProfile struct {
 	// Toolboxes lists the read-only tool images bound into the runtime Pod,
 	// in declared order. An absent list serializes identically to profiles
 	// that predate toolboxes, so their digests are unchanged.
-	Toolboxes []RuntimeToolbox `json:"toolboxes,omitempty"`
+	Toolboxes                    []RuntimeToolbox `json:"toolboxes,omitempty"`
+	EnforcementRequirementDigest string           `json:"enforcementRequirementDigest,omitempty"`
 }
 
 func (p RuntimeProfile) Validate() error {
+	if p.EnforcementRequirementDigest != "" {
+		if err := validateSHA256Digest(p.EnforcementRequirementDigest); err != nil {
+			return fmt.Errorf("enforcement requirement digest: %w", err)
+		}
+	}
 	if p.ACPProfile != ACPProfileV1 {
 		return fmt.Errorf("ACP profile %q is unsupported; want %q", p.ACPProfile, ACPProfileV1)
 	}
@@ -374,6 +380,7 @@ func (b SessionBootstrap) Validate() error {
 
 type CreateRuntimeSessionRequest struct {
 	Protocol                       string                     `json:"protocol"`
+	PrepareOnly                    bool                       `json:"prepareOnly,omitempty"`
 	Metadata                       MutationMetadata           `json:"metadata"`
 	RuntimeSessionID               RuntimeSessionID           `json:"runtimeSessionID"`
 	Profile                        RuntimeProfile             `json:"profile"`
@@ -398,6 +405,9 @@ func (r CreateRuntimeSessionRequest) ValidateAt(now time.Time) error {
 	}
 	if err := r.Profile.Validate(); err != nil {
 		return fmt.Errorf("runtime profile: %w", err)
+	}
+	if r.PrepareOnly != (r.Profile.EnforcementRequirementDigest != "") {
+		return fmt.Errorf("prepare-only creation is required exactly for enforcement-bound profiles")
 	}
 	profileDigest, err := CanonicalProfileDigest(r.Profile)
 	if err != nil {
@@ -490,8 +500,11 @@ func (d RuntimeSessionDescriptor) Validate() error {
 	if !IsKnownRuntimeSessionState(d.State) {
 		return fmt.Errorf("unsupported runtime session state %q", d.State)
 	}
-	if err := validateBoundedString("provider session ID", d.ProviderSessionID, true, 1024); err != nil {
+	if err := validateBoundedString("provider session ID", d.ProviderSessionID, d.State != RuntimeSessionStatePrepared, 1024); err != nil {
 		return err
+	}
+	if d.State == RuntimeSessionStatePrepared && (d.ProviderSessionID != "" || d.NativeRestoration != nil) {
+		return fmt.Errorf("prepared session must not claim a provider session or native restoration")
 	}
 	if d.NativeRestoration != nil {
 		if err := d.NativeRestoration.Validate(); err != nil {
@@ -537,8 +550,12 @@ func (r CreateRuntimeSessionResponse) ValidateFor(request CreateRuntimeSessionRe
 	if err := r.Session.Validate(); err != nil {
 		return fmt.Errorf("session descriptor: %w", err)
 	}
-	if r.Session.State != RuntimeSessionStateIdle {
-		return fmt.Errorf("session create must return initialized idle session, got %q", r.Session.State)
+	expectedState := RuntimeSessionStateIdle
+	if request.PrepareOnly {
+		expectedState = RuntimeSessionStatePrepared
+	}
+	if r.Session.State != expectedState {
+		return fmt.Errorf("session create must return %q session, got %q", expectedState, r.Session.State)
 	}
 	if r.Session.RuntimeSessionID != request.RuntimeSessionID ||
 		r.Session.RuntimeSessionUID != request.Metadata.Fence.RuntimeSessionUID ||
@@ -546,7 +563,7 @@ func (r CreateRuntimeSessionResponse) ValidateFor(request CreateRuntimeSessionRe
 		r.Session.RuntimeProfileDigest != request.Metadata.Fence.RuntimeProfileDigest {
 		return fmt.Errorf("session create response identity does not match request")
 	}
-	if request.NativeRestore != nil {
+	if request.NativeRestore != nil && !request.PrepareOnly {
 		if r.Session.NativeRestoration == nil || !r.Session.NativeRestoration.Loaded ||
 			r.Session.NativeRestoration.DataDigest != request.NativeRestore.Snapshot.DataDigest ||
 			r.Session.ProviderSessionID != request.NativeRestore.Snapshot.ProviderSessionID {

@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { TaskStatusBadge } from './task-status-badge'
 import type { Task, ExecutionEvent } from '@/schemas/task'
 import { latestModelContextEvent, latestModelUsageEvents } from '@/lib/execution-events'
+import { displayedTaskMessage } from '@/lib/task-enforcement'
 
 const steps = ['Pending', 'Running', 'Completed'] as const
 
@@ -127,7 +128,7 @@ function DurableExecution({ task }: { task: Task }) {
         <div><span className="text-muted-foreground">Controller epoch</span><div>{execution.controllerEpoch ?? '—'}</div></div>
       </div>
       {(execution.reason || execution.message) && (
-        <p className="text-sm text-muted-foreground">{[execution.reason, execution.message].filter(Boolean).join(' · ')}</p>
+        <p className="text-sm text-muted-foreground">{[execution.reason, displayedTaskMessage(task, execution.message)].filter(Boolean).join(' · ')}</p>
       )}
     </section>
   )
@@ -212,7 +213,7 @@ export function TaskExecutionPanel({ task, events = [] }: { task: Task; events?:
           <div className="flex items-center gap-2"><span className="text-muted-foreground">Phase:</span><TaskStatusBadge phase={phase} /></div>
           <div className="flex items-center gap-2"><span className="text-muted-foreground">Elapsed:</span><ElapsedTime startTime={task.status?.startTime} completionTime={task.status?.completionTime} /></div>
           <div><span className="text-muted-foreground">Attempts:</span> {task.status?.attempts ?? 0}</div>
-          {task.status?.message && <div className="md:col-span-2"><span className="text-muted-foreground">Message:</span> {task.status.message}</div>}
+          {task.status?.message && <div className="md:col-span-2"><span className="text-muted-foreground">Message:</span> {displayedTaskMessage(task, task.status.message)}</div>}
         </div>
 
         <DurableExecution task={task} />

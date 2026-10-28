@@ -1,4 +1,5 @@
 import type { Task } from '@/schemas/task'
+import { displayedTaskConditionMessage, displayedTaskMessage, taskEnforcementObservation } from './task-enforcement'
 import { containsCredential, looksSecret, UNSAFE_KEY_PATTERN, WEBHOOK_URL } from './secret-like'
 
 export const HIDDEN_VALUE = '(hidden)'
@@ -102,7 +103,34 @@ export function displayedTaskResource(task: Task): Record<string, unknown> {
       ...(scrubbed(spec) as Task['spec']),
       ...(spec.env && { env: spec.env.map((entry) => (entry.value === undefined ? entry : { ...entry, value: HIDDEN_VALUE })) }),
       ...(spec.webhookURL && { webhookURL: shownWebhookURL(spec.webhookURL) }),
+      ...(spec.enforcement && {
+        enforcement: { ...(scrubbed(spec.enforcement) as Record<string, unknown>), policy: HIDDEN_VALUE },
+      }),
     },
-    ...(status && { status: scrubbed(status) }),
+    ...(status && {
+      status: {
+        ...(scrubbed(status) as Record<string, unknown>),
+        ...(status.message !== undefined && { message: scrubbed(displayedTaskMessage(task, status.message)) }),
+        ...(status.execution && {
+          execution: {
+            ...(scrubbed(status.execution) as Record<string, unknown>),
+            ...(status.execution.message !== undefined && { message: scrubbed(displayedTaskMessage(task, status.execution.message)) }),
+          },
+        }),
+        ...(status.enforcementOutcome !== undefined && {
+          enforcementOutcome: taskEnforcementObservation(task)?.outcome ?? HIDDEN_VALUE,
+        }),
+        ...(status.enforcementAdmission !== undefined && {
+          enforcementAdmission: taskEnforcementObservation(task)?.admission ?? HIDDEN_VALUE,
+        }),
+        ...(status.conditions && {
+          conditions: status.conditions.map((condition) => ({
+            ...(scrubbed(condition) as Record<string, unknown>),
+            ...(condition.message !== undefined && { message: scrubbed(displayedTaskConditionMessage(task, condition)) }),
+            ...(condition.type === 'EnforcementReady' && condition.message !== undefined && { message: HIDDEN_VALUE }),
+          })),
+        }),
+      },
+    }),
   }
 }

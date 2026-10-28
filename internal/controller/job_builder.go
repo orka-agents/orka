@@ -38,6 +38,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/contexttoken"
+	"github.com/orka-agents/orka/internal/enforcement"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
@@ -50,6 +51,7 @@ const (
 	workerBinaryPath              = "/worker"
 	workerHomePath                = "/home/worker"
 	workerTempPath                = "/tmp"
+	podUIDFieldPath               = "metadata.uid"
 	runtimePoolTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	sessionDataVolumeName         = "session-data"
@@ -674,6 +676,12 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 		container.ImagePullPolicy = platformImagePullPolicy(container.Image)
 		container.Command = []string{workerBinaryPath}
 		container.Args = []string{"--mode=ai"}
+		if task.Spec.Enforcement != nil {
+			if taskRequestsReadOnlyAgent(task) {
+				return corev1.Container{}, errors.New("enforcement requires authenticated Pod admission; read-only validation workers are not qualified")
+			}
+			container.Command = []string{"/worker-enforced"}
+		}
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
 			container.Image = task.Spec.Image
@@ -922,6 +930,33 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		frozenBindings = string(encoded)
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
+	enforcementRequirement, err := enforcement.TaskRequirement(task)
+	if err != nil {
+		return nil, err
+	}
+	requirementDigest := ""
+	if enforcementRequirement != nil {
+		if task.Spec.Type != corev1alpha1.TaskTypeAI {
+			return nil, errors.New("enforcement Job admission supports managed AI workers only")
+		}
+		requirementDigest, err = enforcement.RequirementDigest(enforcementRequirement)
+		if err != nil {
+			return nil, err
+		}
+	}
+	envVars = setControllerEnv(envVars, workerenv.EnforcementRequirementDigest, requirementDigest)
+	envVars = removeControllerEnv(envVars, workerenv.WorkerPodName)
+	envVars = removeControllerEnv(envVars, workerenv.WorkerPodUID)
+	if enforcementRequirement != nil {
+		envVars = append(envVars,
+			corev1.EnvVar{Name: workerenv.WorkerPodName, ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"},
+			}},
+			corev1.EnvVar{Name: workerenv.WorkerPodUID, ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: podUIDFieldPath},
+			}},
+		)
+	}
 	if taskRequestsReadOnlyAgent(task) {
 		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)

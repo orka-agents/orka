@@ -107,7 +107,10 @@ func main() {
 		"ACP supervisor listening", "address", cfg.ListenAddress, "provider", cfg.Provider.Kind,
 		"runtimeInstanceID", cfg.Fence.RuntimeInstanceID,
 	)
-	serveErr := httpServer.ListenAndServe()
+	listener, serveErr := supervisor.ListenTCP("tcp", cfg.ListenAddress)
+	if serveErr == nil {
+		serveErr = httpServer.Serve(listener)
+	}
 	if errors.Is(serveErr, http.ErrServerClosed) {
 		serveErr = nil
 	}

@@ -384,6 +384,9 @@ func (r *RuntimePoolReconciler) releaseRuntimePoolBootPod(ctx context.Context, w
 // Guard only new enrolled native owners; provider and legacy finalization keep
 // their existing path. The optimistic owner PATCH fences delayed enrollment.
 func (r *RuntimePoolReconciler) removeRuntimePoolFinalizer(ctx context.Context, pool *corev1alpha1.RuntimePool) error {
+	if pool.Status.EnforcementBinding != nil {
+		return fmt.Errorf("%w: physical enforcement binding still owns cleanup", store.ErrNotReady)
+	}
 	remove := func(writeCtx context.Context) error {
 		base := pool.DeepCopy()
 		controllerutil.RemoveFinalizer(pool, runtimePoolFinalizer)

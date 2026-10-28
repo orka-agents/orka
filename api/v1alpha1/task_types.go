@@ -129,6 +129,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="has(self.requestedBy) == has(oldSelf.requestedBy) && (!has(self.requestedBy) || self.requestedBy == oldSelf.requestedBy)",message="requestedBy is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.transaction) == has(oldSelf.transaction) && (!has(self.transaction) || self.transaction == oldSelf.transaction)",message="transaction is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type == oldSelf.type",message="type is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.enforcement) == has(oldSelf.enforcement) && (!has(self.enforcement) || self.enforcement == oldSelf.enforcement)",message="enforcement is immutable"
 // +kubebuilder:validation:XValidation:rule="(has(self.workspace) && has(self.workspace.intent) ? self.workspace.intent : (self.type == 'agent' ? 'read' : self.type)) == (has(oldSelf.workspace) && has(oldSelf.workspace.intent) ? oldSelf.workspace.intent : (oldSelf.type == 'agent' ? 'read' : oldSelf.type))",message="effective workspace intent is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.prompt) == has(oldSelf.prompt) && (!has(self.prompt) || self.prompt == oldSelf.prompt))",message="agent prompt is immutable"
 // +kubebuilder:validation:XValidation:rule="self.type != 'agent' || (has(self.agentRef) == has(oldSelf.agentRef) && (!has(self.agentRef) || self.agentRef == oldSelf.agentRef))",message="agentRef is immutable for agent Tasks"
@@ -198,6 +199,11 @@ type TaskSpec struct {
 	// Execution defines worker pod runtime and placement settings.
 	// +optional
 	Execution *ExecutionSpec `json:"execution,omitempty"`
+
+	// Enforcement is the complete immutable requirement for this Task's runtime
+	// container. It is never inherited from an Agent or rewritten by Orka.
+	// +optional
+	Enforcement *EnforcementRequirement `json:"enforcement,omitempty"`
 
 	// Schedule is a cron expression for recurring tasks (e.g., "0 */6 * * *").
 	// When set, the controller creates child Task CRs on each cron tick.
@@ -475,6 +481,23 @@ type TaskStatus struct {
 	// current Job. A Job with the same name and a different UID has no worker authority.
 	// +optional
 	JobUID string `json:"jobUID,omitempty"`
+
+	// EnforcementBindings retain physical cleanup obligations across retries,
+	// cancellation and deletion until the runtime stops each target and every
+	// mandatory provider confirms retirement.
+	// +optional
+	// +listType=map
+	// +listMapKey=bindingID
+	EnforcementBindings []ContainerEnforcementBinding `json:"enforcementBindings,omitempty"`
+
+	// EnforcementAdmission retains the last verified policy/container admission
+	// after physical cleanup. Conditions report its outcome; this is not live proof.
+	// +optional
+	EnforcementAdmission *EnforcementAdmission `json:"enforcementAdmission,omitempty"`
+
+	// EnforcementOutcome contains only safe explanatory metadata for blocked admission.
+	// +optional
+	EnforcementOutcome *EnforcementOutcome `json:"enforcementOutcome,omitempty"`
 
 	// ResultRef indicates whether a result is available
 	// +optional
@@ -790,6 +813,7 @@ type Task struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
+	// +required
 	Spec   TaskSpec   `json:"spec,omitempty"`
 	Status TaskStatus `json:"status,omitempty"`
 }

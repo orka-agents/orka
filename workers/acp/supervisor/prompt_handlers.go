@@ -1382,7 +1382,6 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
-	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
 	var providerCleanupErr error
@@ -1393,7 +1392,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		providerProxy.close()
 		providerCleanupErr = providerProxy.wait(r.Context())
 	}
-	cleanup, deleteErr := runtimeSession.Delete(r.Context())
+	cleanup, deleteErr := deleteSessionRuntime(r.Context(), state)
 	if providerCleanupErr != nil || deleteErr != nil || !cleanup.Proven {
 		s.poisonPool("descendant_cleanup_unproven")
 		s.mu.Lock()
@@ -1490,7 +1489,7 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 		}
 	}
 	promptSettled := state.prompt == nil || state.prompt.settlement != nil
-	if state.creating || state.runtime == nil || !promptSettled || nextState != harnessv2.RuntimeSessionStateDeleting {
+	if state.creating || (state.runtime == nil && state.prepared == nil) || !promptSettled || nextState != harnessv2.RuntimeSessionStateDeleting {
 		if !state.creating && nextState == harnessv2.RuntimeSessionStateCancelling && state.descriptor.State != nextState {
 			state.descriptor.State = nextState
 			state.descriptor.LastTransitionAt = now

@@ -100,7 +100,13 @@ func TestControllerStartupProbeReusedValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			chartDir := filepath.Join(t.TempDir(), "chart")
 			require.NoError(t, os.CopyFS(chartDir, os.DirFS("static")))
-			forceStaticChartNamespaceMode(t, chartDir, "harness-v2")
+			config := helmLookupConfig(t, map[string]any{
+				"/api/v1/namespaces/orka-test": map[string]any{
+					"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{
+						"name": "orka-test", "labels": map[string]string{"orka.ai/controller-mode": "harness-v2"},
+					},
+				},
+			})
 			var values map[string]any
 			require.NoError(t, yaml.Unmarshal(defaults, &values))
 			controller, ok := values["controller"].(map[string]any)
@@ -118,6 +124,7 @@ func TestControllerStartupProbeReusedValues(t *testing.T) {
 				"template", "test", chartDir, "--namespace", "orka-test", "--is-upgrade",
 			}, staticChartDefaultArgs()...)
 			args = append(args, "--show-only", "templates/deployment.yaml")
+			args = append(args, "--dry-run=server", "--kubeconfig", config)
 			rendered, err := exec.Command(helm, args...).CombinedOutput()
 			require.NoError(t, err, "%s", rendered)
 			var deployment appsv1.Deployment

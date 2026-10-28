@@ -244,6 +244,9 @@ type sessionState struct {
 	nativeInstallJournal    string
 	id                      harnessv2.RuntimeSessionID
 	runtime                 *acp.RuntimeSession
+	prepared                *preparedSession
+	preparedDescriptor      *harnessv2.RuntimeSessionDescriptor
+	launchDescriptor        *harnessv2.RuntimeSessionDescriptor
 	promptMutations         promptMutationExecutor
 	descriptor              harnessv2.RuntimeSessionDescriptor
 	operations              map[harnessv2.OperationID]harnessv2.OperationRecord
@@ -389,6 +392,7 @@ func New(cfg Config) (*Server, error) {
 }
 
 func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) (io.Closer, error)) (*Server, error) {
+	cfg.Capabilities.SupportsSessionPreparation = true
 	nativeSessionMaxBytes, err := harnessv2.NormalizeNativeSessionMaxBytes(cfg.Capabilities.Limits.MaxNativeSessionBytes)
 	if err != nil {
 		return nil, err
@@ -479,6 +483,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT "+harnessv2.DrainPath, s.handleDrain)
 	s.mux.HandleFunc("PUT "+harnessv2.FoundryBootRetirementPath, s.handleRetireFoundryBoot)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}", s.handleCreateSession)
+	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/launch", s.handleLaunchSession)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/publication-finalization", s.handleFinalizeSessionPublication)
 	s.mux.HandleFunc("DELETE /v2/runtime-sessions/{sessionID}", s.handleDeleteSession)
 	s.mux.HandleFunc("POST /v2/runtime-sessions/{sessionID}/native-session", s.handleCaptureNativeSession)
@@ -512,7 +517,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	if r.Header.Get(harnessv2.SessionPreparationHeader) != "1" {
+		capabilities.SupportsSessionPreparation = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+harnessv2.SessionPreparationHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
@@ -802,6 +810,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if classification.Class == harnessv2.RequestClassificationDuplicate && !existing.creating {
+			if request.PrepareOnly && existing.preparedDescriptor != nil {
+				response := harnessv2.CreateRuntimeSessionResponse{Protocol: harnessv2.ProtocolVersion, Classification: classification, Session: *existing.preparedDescriptor}
+				s.mu.Unlock()
+				writeJSON(w, http.StatusOK, response)
+				return
+			}
 			replay := existing.nativeInstallUnresolved
 			if replay == nil {
 				replay = existing.createCleanupUnproven
@@ -880,7 +894,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid)
+	runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, diagnosticFilter, createErr := s.createSession(r.Context(), request, now, uid, gid, state)
 	if createErr != nil {
 		if isNativeInstallUnknown(createErr) && paths.Root != "" {
 			s.retainUnresolvedCreate(state, request, paths, nil, nativeInstallUnknownMessage, now)
@@ -920,8 +934,16 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	state.runtime = runtimeSession
-	state.promptMutations = runtimeSession
+	if runtimeSession != nil {
+		state.promptMutations = runtimeSession
+	}
 	state.descriptor = descriptor
+	if request.PrepareOnly {
+		state.preparedDescriptor = &descriptor
+		if request.NativeRestore != nil {
+			state.nativeInstallJournal = filepath.Join(s.cfg.SessionBaseDir, ".native-install", sessionPathID(descriptor.RuntimeSessionUID, descriptor.Generation))
+		}
+	}
 	state.paths = paths
 	state.baseline = baseline
 	state.workspaceIntent = request.Workspace.Intent
@@ -937,7 +959,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	state.agentDiagnosticFilter = diagnosticFilter
 	state.creating = false
 	recordSessionOperationLocked(state, request.Metadata, harnessv2.OperationPhaseApplied, "", now)
-	drainCleanup := s.drain.Requested && !state.drainCleanupScheduled && isDrainCleanupState(state)
+	drainCleanup := (s.drain.Requested || s.lifecycle != harnessv2.SupervisorLifecycleReady) && !state.drainCleanupScheduled && isDrainCleanupState(state)
 	if drainCleanup {
 		state.drainCleanupScheduled = true
 	}
@@ -959,11 +981,15 @@ func (s *Server) createSession(
 	now time.Time,
 	uid int,
 	gid int,
+	state *sessionState,
 ) (
 	resultRuntime *acp.RuntimeSession, resultDescriptor harnessv2.RuntimeSessionDescriptor, resultPaths acp.SessionPaths,
 	resultBaseline *workspacedelta.Snapshot, resultProviderProxy *providerProxySession, resultMCPProxy *mcpProxySession,
 	resultDiagnosticFilter *AgentDiagnosticFilter, resultErr error,
 ) {
+	if request.PrepareOnly && state == nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("session preparation", errors.New("prepared session requires an owning supervisor session"))
+	}
 	if err := s.validateNativeRestoreSize(request); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("native session size", err)
 	}
@@ -1278,22 +1304,7 @@ func (s *Server) createSession(
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}
-	if resumedFromCheckpoint {
-		// Invalidate the committed marker only NOW, immediately before the
-		// provider child (the only writer of the durable tree) can spawn: a
-		// failure in any earlier stage - baseline reconstruction, provider
-		// home preparation, proxy setup - leaves the committed marker intact
-		// so the untouched checkpoint is reused on retry instead of being
-		// wiped as a partial session. A failure after this point wipes, as
-		// it must: the child may have modified the repository. The
-		// successful commit below restores the marker.
-		if err := acp.MarkDurableSessionWorkspaceResumePending(
-			s.cfg.DurableWorkspaceDir, sessionComponent,
-		); err != nil {
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
-		}
-	}
-	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
+	runtimeConfig := acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
 		Generation:    int64(request.Metadata.Fence.RuntimeSessionGeneration),
 		ProfileDigest: string(request.Metadata.Fence.RuntimeProfileDigest),
@@ -1316,45 +1327,32 @@ func (s *Server) createSession(
 		CancelGrace:           defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace),
 		MaxBufferedEvents:     s.cfg.Capabilities.Limits.MaxBufferedEvents,
 		MaxBufferedEventBytes: supervisorMaxBufferedPromptEventBytes,
-	})
-	if err != nil {
-		if initialization, failed := errors.AsType[*acp.InitializationError](err); failed && !initialization.Cleanup.Proven {
-			cleanup = false
-			return initialization.RuntimeSession(), harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", &createCleanupUnprovenError{Err: err})
-		}
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider adapter initialization", err)
 	}
-	if s.cfg.DurableWorkspaceDir != "" {
-		// The marker commits only after the session is fully initialized: a
-		// creation that fails part-way leaves its binding pending, so the next
-		// creation wipes the uncommitted durable tree and
-		// materializes clean instead of reusing state a failed create — or a
-		// partially started provider — may have modified. A resume recommits
-		// here, retiring its pending record.
-		if commitErr := acp.CommitDurableSessionWorkspace(
-			s.cfg.DurableWorkspaceDir,
-			sessionComponent,
-			acp.DurableWorkspaceBinding{
-				RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
-				Revision:           request.Workspace.Baseline.Revision,
-				SessionIdentityHighWater: s.cfg.UIDAllocator.Capacity() -
-					s.cfg.UIDAllocator.Remaining(),
-				SessionGeneration: request.Metadata.Fence.RuntimeSessionGeneration,
-			},
-		); commitErr != nil {
-			// The credential-bearing child is already running; its removal
-			// must be PROVEN before this creation is abandoned, or the
-			// surviving descendant would be untracked by any session and
-			// later pool lifecycle decisions would proceed over it.
-			cleanupResult, deleteErr := runtimeSession.Delete(ctx)
-			if deleteErr != nil || !cleanupResult.Proven {
-				if request.NativeRestore != nil {
-					cleanup = false
-					return runtimeSession, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", &createCleanupUnprovenError{Err: errors.Join(commitErr, deleteErr)})
-				}
-				s.poisonPool("durable_commit_session_cleanup_unproven")
+	prepared := &preparedSession{
+		config: runtimeConfig, preparation: request.Metadata,
+		resumedFromCheckpoint: resumedFromCheckpoint, durableComponent: sessionComponent,
+		durableBinding: acp.DurableWorkspaceBinding{
+			RepositoryIdentity: request.Workspace.Baseline.RepositoryIdentity,
+			Revision:           request.Workspace.Baseline.Revision,
+			SessionGeneration:  request.Metadata.Fence.RuntimeSessionGeneration,
+		},
+	}
+	if request.NativeRestore != nil {
+		prepared.nativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: resumeSessionID, Loaded: true}
+	}
+	var runtimeSession *acp.RuntimeSession
+	if request.PrepareOnly {
+		s.mu.Lock()
+		state.prepared = prepared
+		s.mu.Unlock()
+	} else {
+		runtimeSession, err = s.launchPreparedSession(ctx, prepared)
+		if err != nil {
+			if runtimeSession != nil {
+				cleanup = false
+				return runtimeSession, harnessv2.RuntimeSessionDescriptor{}, paths, nil, nil, nil, nil, err
 			}
-			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace commit", commitErr)
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, err
 		}
 	}
 	cleanup = false
@@ -1368,13 +1366,15 @@ func (s *Server) createSession(
 		SupervisorBootID:     s.cfg.Fence.SupervisorBootID,
 		RuntimeProfileDigest: s.cfg.Fence.RuntimeProfileDigest,
 		State:                harnessv2.RuntimeSessionStateIdle,
-		ProviderSessionID:    runtimeSession.ProviderSessionID(),
 		WorkspaceBaseline:    request.Workspace.Baseline,
 		CreatedAt:            now,
 		LastTransitionAt:     now,
 	}
-	if request.NativeRestore != nil {
-		descriptor.NativeRestoration = &harnessv2.NativeSessionRestoration{DataDigest: request.NativeRestore.Snapshot.DataDigest, ProviderSessionID: resumeSessionID, Loaded: true}
+	if request.PrepareOnly {
+		descriptor.State = harnessv2.RuntimeSessionStatePrepared
+	} else {
+		descriptor.ProviderSessionID = runtimeSession.ProviderSessionID()
+		descriptor.NativeRestoration = prepared.nativeRestoration
 	}
 	return runtimeSession, descriptor, paths, baseline, providerProxy, mcpProxy, projection.AgentDiagnosticFilter, nil
 }
@@ -1625,7 +1625,7 @@ func isDrainCleanupState(state *sessionState) bool {
 		return false
 	}
 	switch state.descriptor.State {
-	case harnessv2.RuntimeSessionStateIdle, harnessv2.RuntimeSessionStatePoisoned, harnessv2.RuntimeSessionStatePublicationPrepared:
+	case harnessv2.RuntimeSessionStatePrepared, harnessv2.RuntimeSessionStateIdle, harnessv2.RuntimeSessionStatePoisoned, harnessv2.RuntimeSessionStatePublicationPrepared:
 		return true
 	case harnessv2.RuntimeSessionStateFinalizing:
 		return state.publicationFinalization != nil
@@ -1643,7 +1643,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		return
 	}
 	settled := state.prompt == nil || state.prompt.settlement != nil
-	if state.creating || state.runtime == nil || !settled || !isDrainCleanupState(state) {
+	if state.creating || (state.runtime == nil && state.prepared == nil) || !settled || !isDrainCleanupState(state) {
 		state.drainCleanupScheduled = false
 		s.mu.Unlock()
 		return
@@ -1659,7 +1659,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		state.providerProxy.close()
 		proxyErr = state.providerProxy.wait(ctx)
 	}
-	cleanup, deleteErr := state.runtime.Delete(ctx)
+	cleanup, deleteErr := deleteSessionRuntime(ctx, state)
 	if proxyErr != nil || deleteErr != nil || !cleanup.Proven {
 		s.failDrainCleanup(sessionID, state, "drain_session_cleanup_unproven")
 		return
@@ -1738,7 +1738,7 @@ func (s *Server) Close(ctx context.Context) error {
 	s.drain.AcceptingNewSessions = false
 	sessions := make([]*sessionState, 0, len(s.sessions))
 	for _, state := range s.sessions {
-		if state.runtime != nil || state.providerProxy != nil || state.mcpProxy != nil {
+		if state.creating || state.prepared != nil || state.runtime != nil || state.providerProxy != nil || state.mcpProxy != nil {
 			sessions = append(sessions, state)
 		}
 	}
@@ -1748,6 +1748,11 @@ func (s *Server) Close(ctx context.Context) error {
 		s.mu.Lock()
 		capture := state.nativeCapture
 		retainEvidence := retainsNativeCaptureEvidence(state)
+		if state.creating {
+			s.mu.Unlock()
+			errs = append(errs, errors.New("runtime session preparation or launch still in progress"))
+			continue
+		}
 		s.mu.Unlock()
 		if capture != nil {
 			select {
@@ -1766,8 +1771,8 @@ func (s *Server) Close(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("provider proxy session cleanup: %w", err))
 			}
 		}
-		if state.runtime != nil {
-			cleanup, err := state.runtime.Delete(ctx)
+		if state.runtime != nil || state.prepared != nil {
+			cleanup, err := deleteSessionRuntime(ctx, state)
 			if err != nil || !cleanup.Proven {
 				errs = append(errs, fmt.Errorf("runtime session cleanup unproven: %w", err))
 			} else if err := reclaimStoppedSessionOwnership(state.paths); err != nil {

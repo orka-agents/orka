@@ -50,6 +50,7 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/enforcement"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -116,6 +117,7 @@ type TaskReconciler struct {
 	APIReader                    client.Reader
 	Scheme                       *runtime.Scheme
 	JobBuilder                   *JobBuilder
+	Enforcement                  enforcement.Coordinator
 	GatewayService               *gatewayruntime.Service
 	SessionManager               *SessionManager
 	WebhookNotifier              *WebhookNotifier
@@ -185,7 +187,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=pods/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
@@ -193,6 +195,7 @@ type TaskReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch
@@ -407,6 +410,20 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	if message, ok := requestedTaskCancellation(task); ok {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+	}
+
+	if len(task.Status.EnforcementBindings) > 0 {
+		keepJobUID := ""
+		if task.Status.Phase == corev1alpha1.TaskPhaseRunning {
+			keepJobUID = task.Status.JobUID
+		}
+		cleaned, err := r.cleanupNativeEnforcement(ctx, task, keepJobUID)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !cleaned {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
 	}
 
 	// Handle based on current phase
@@ -678,21 +695,20 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 		}
 
-		// Clean up execution timeline events before allowing a future task with the
-		// same namespace/name to expose stale history.
-		if r.ExecutionEventStore != nil {
-			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
-				log.Error(err, "failed to delete execution events", "task", task.Name)
-				return ctrl.Result{}, err
-			}
-		}
-
 		waitingForJob, err := r.cleanupDeletedTaskJob(ctx, task)
 		if err != nil {
 			log.Error(err, "failed to delete Job")
 			return ctrl.Result{}, err
 		}
 		if waitingForJob {
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+
+		cleaned, err := r.cleanupNativeEnforcement(ctx, task, "")
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !cleaned {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
 
@@ -710,6 +726,15 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 			}
 			if err := authority.DeleteTaskJobRevocations(ctx, task.Namespace, task.Name, string(task.UID)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete task Job revocations: %w", err)
+			}
+		}
+
+		// Enforcement cleanup can repair admission events. Erase the stream only
+		// after that repair, before a future Task may reuse the same name.
+		if r.ExecutionEventStore != nil {
+			if err := r.ExecutionEventStore.DeleteExecutionEvents(ctx, task.Namespace, store.ExecutionEventStreamTypeTask, task.Name); err != nil {
+				log.Error(err, "failed to delete execution events", "task", task.Name)
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -737,6 +762,13 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 //nolint:gocyclo // Pending routing keeps every mutually exclusive execution path in one auditable state machine.
 func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if err := r.validateTaskEnforcement(task); err != nil {
+		if statusErr := r.markEnforcement(ctx, task, metav1.ConditionFalse, "EnforcementRefused", err.Error(), enforcement.RefusalNeeds(err)...); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return r.failTask(ctx, task, err.Error())
+	}
 
 	if outcome := task.Status.ExecutionOutcome; outcome != nil {
 		log.Info("refusing to replay task with immutable execution outcome", "outcome", outcome.Phase)
@@ -1761,6 +1793,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			Reason:             "JobCreated",
 			Message:            fmt.Sprintf("Job %s created", job.Name),
 		})
+		if t.Spec.Enforcement != nil {
+			t.Status.EnforcementOutcome = enforcement.Outcome("EnforcementPending")
+			t.Status.EnforcementOutcome.ObservedGeneration = t.Generation
+			meta.SetStatusCondition(&t.Status.Conditions, metav1.Condition{
+				Type: ConditionTypeEnforcementReady, Status: metav1.ConditionFalse,
+				LastTransitionTime: now, ObservedGeneration: t.Generation,
+				Reason: "EnforcementPending", Message: "waiting for the prepared worker container",
+			})
+		}
 		transitionedToRunning = true
 	}); err != nil {
 		log.Error(err, "failed to update status")
@@ -1774,13 +1815,15 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 			execevents.ExecutionEventSeverityInfo,
 			fmt.Sprintf("Job %s created", jobName),
 		)
-		_ = r.recordTaskLifecycleEvent(
-			ctx,
-			task,
-			execevents.ExecutionEventTypeTaskStarted,
-			execevents.ExecutionEventSeverityInfo,
-			fmt.Sprintf("Task started with Job %s", jobName),
-		)
+		if task.Spec.Enforcement == nil {
+			_ = r.recordTaskLifecycleEvent(
+				ctx,
+				task,
+				execevents.ExecutionEventTypeTaskStarted,
+				execevents.ExecutionEventSeverityInfo,
+				fmt.Sprintf("Task started with Job %s", jobName),
+			)
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -1936,6 +1979,10 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			return r.failTask(ctx, task, err.Error())
 		}
 		return ctrl.Result{}, err
+	}
+
+	if result, handled, err := r.reconcileNativeEnforcement(ctx, task, job); handled || err != nil {
+		return result, err
 	}
 
 	// Check Job status

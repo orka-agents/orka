@@ -6,6 +6,7 @@ type RuntimeSessionState string
 
 const (
 	RuntimeSessionStateCreating             RuntimeSessionState = "creating"
+	RuntimeSessionStatePrepared             RuntimeSessionState = "prepared"
 	RuntimeSessionStateIdle                 RuntimeSessionState = "idle"
 	RuntimeSessionStatePromptRunning        RuntimeSessionState = "prompt_running"
 	RuntimeSessionStateValidating           RuntimeSessionState = "validating"
@@ -22,9 +23,15 @@ const (
 
 var runtimeSessionTransitions = map[RuntimeSessionState]map[RuntimeSessionState]struct{}{
 	RuntimeSessionStateCreating: {
+		RuntimeSessionStatePrepared:   {},
 		RuntimeSessionStateIdle:       {},
 		RuntimeSessionStateCancelling: {},
 		RuntimeSessionStatePoisoned:   {},
+	},
+	RuntimeSessionStatePrepared: {
+		RuntimeSessionStateIdle:     {},
+		RuntimeSessionStatePoisoned: {},
+		RuntimeSessionStateDeleting: {},
 	},
 	RuntimeSessionStateIdle: {
 		RuntimeSessionStatePromptRunning: {},
@@ -110,7 +117,7 @@ func (s RuntimeSessionState) CanAdmitPrompt() bool {
 }
 
 func (s RuntimeSessionState) CanEvict() bool {
-	return s == RuntimeSessionStateIdle
+	return s == RuntimeSessionStateIdle || s == RuntimeSessionStatePrepared
 }
 
 func (s RuntimeSessionState) AllowsPromptScopedMCP() bool {
@@ -138,7 +145,7 @@ func DeletionTransition(state RuntimeSessionState) (RuntimeSessionState, error) 
 		return "", fmt.Errorf("unsupported runtime session state %q", state)
 	}
 	switch state {
-	case RuntimeSessionStateIdle, RuntimeSessionStateFinalizing, RuntimeSessionStatePoisoned:
+	case RuntimeSessionStatePrepared, RuntimeSessionStateIdle, RuntimeSessionStateFinalizing, RuntimeSessionStatePoisoned:
 		return RuntimeSessionStateDeleting, nil
 	case RuntimeSessionStateCreating, RuntimeSessionStatePromptRunning:
 		return RuntimeSessionStateCancelling, nil

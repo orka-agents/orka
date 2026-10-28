@@ -156,7 +156,7 @@ func TestNativeRestoreConfiguredLimitBeforeMutation(t *testing.T) {
 	if err := server.validateNativeRestoreSize(request); err == nil {
 		t.Fatal("configured restore limit was ignored")
 	}
-	_, _, _, _, _, _, _, err := server.createSession(t.Context(), request, time.Now(), os.Getuid(), os.Getgid())
+	_, _, _, _, _, _, _, err := server.createSession(t.Context(), request, time.Now(), os.Getuid(), os.Getgid(), nil)
 	if err == nil {
 		t.Fatal("oversize restore reached runtime creation")
 	}

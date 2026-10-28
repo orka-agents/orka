@@ -2,6 +2,7 @@ import type { Task, TaskPhase } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
 import type { ArtifactMetadata } from '@/schemas/artifact'
 import { podWaitingMessage } from '@/components/tasks/task-state'
+import { displayedTaskMessage } from './task-enforcement'
 
 /**
  * Derived runtime health checks — NOT a formal evaluation. These summarize
@@ -66,7 +67,7 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
       id: 'outcome',
       label: 'Task succeeded',
       status: phase === 'Succeeded' ? 'pass' : phase === 'Failed' ? 'fail' : 'warn',
-      reason: phase === 'Succeeded' ? 'Succeeded' : task.status?.message || `Phase ${phase}`,
+      reason: phase === 'Succeeded' ? 'Succeeded' : displayedTaskMessage(task, task.status?.message) || `Phase ${phase}`,
     })
   }
 
