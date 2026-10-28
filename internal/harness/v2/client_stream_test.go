@@ -295,3 +295,20 @@ func TestClientPromptNotAcceptedPreservesRequestWriteEvidence(t *testing.T) {
 		})
 	}
 }
+
+// A response can be read before net/http reports WroteRequest. Until that
+// report arrives, the evidence must stay ambiguous and never resend-safe.
+func TestRequestTraceResponseBeforeWriteReportStaysAmbiguous(t *testing.T) {
+	tracker := newRequestTrace(true)
+	trace := tracker.clientTrace()
+	trace.WroteHeaders()
+	tracker.bodyBytesRead.Add(64)
+	trace.GotFirstResponseByte()
+	if evidence := tracker.evidence(); evidence.State != RequestWriteAmbiguous || evidence.SafeToResendSameIdentity() {
+		t.Fatalf("response before the write report = %#v, want ambiguous and not resendable", evidence)
+	}
+	trace.WroteRequest(httptrace.WroteRequestInfo{})
+	if evidence := tracker.evidence(); evidence.State != RequestWriteComplete || evidence.SafeToResendSameIdentity() {
+		t.Fatalf("reported write = %#v, want complete and not resendable", evidence)
+	}
+}

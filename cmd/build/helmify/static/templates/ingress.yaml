@@ -1,0 +1,41 @@
+{{- /* Older releases' values have no ingress map; --reuse-values keeps them. */ -}}
+{{- $ingress := .Values.ingress | default dict }}
+{{- if $ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "orka.fullname" . }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  {{- with $ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $ingress.className }}
+  ingressClassName: {{ . | toString | quote }}
+  {{- end }}
+  {{- with $ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if $ingress.host }}
+  rules:
+    - host: {{ $ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "orka.fullname" . }}
+                port:
+                  name: api
+  {{- else }}
+  defaultBackend:
+    service:
+      name: {{ include "orka.fullname" . }}
+      port:
+        name: api
+  {{- end }}
+{{- end }}

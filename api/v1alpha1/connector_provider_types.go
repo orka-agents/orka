@@ -34,6 +34,7 @@ const (
 
 // ConnectorProviderSpec is the operator-owned catalog entry for one third-party
 // service that people may link through OAuth.
+// +kubebuilder:validation:XValidation:rule="has(self.agentHost) || (has(self.tools) && size(self.tools) > 0)",message="a provider declares tools unless it serves agent hosts"
 type ConnectorProviderSpec struct {
 	// DisplayName is shown to people in the dashboard and CLI. Defaults to the
 	// object name.
@@ -48,11 +49,25 @@ type ConnectorProviderSpec struct {
 	// Tools declares the tools this provider offers to agents acting for a
 	// linked person. Built-in tools name an Orka built-in; HTTP tools carry a
 	// curated definition executed by the controller with the person's token.
-	// +kubebuilder:validation:MinItems=1
+	// A provider that serves agent hosts may declare none.
 	// +kubebuilder:validation:MaxItems=64
 	// +listType=map
 	// +listMapKey=name
-	Tools []ConnectorTool `json:"tools"`
+	// +optional
+	Tools []ConnectorTool `json:"tools,omitempty"`
+
+	// AgentHost makes this provider the source of agent hosts: each person who
+	// links it gets an AgentHost from the template, fed short-lived access
+	// tokens from their link. Linking discloses that code on the host can read
+	// those tokens. At most one provider in a namespace may set it.
+	// +optional
+	AgentHost *ConnectorAgentHost `json:"agentHost,omitempty"`
+}
+
+// ConnectorAgentHost selects the template a provider's agent hosts run.
+type ConnectorAgentHost struct {
+	// TemplateRef names an AgentHostTemplate in the provider's namespace.
+	TemplateRef LocalObjectReference `json:"templateRef"`
 }
 
 // ConnectorOAuthConfig holds the OAuth 2.0 client settings for a provider.

@@ -1394,41 +1394,52 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
 	now := time.Now().UTC()
-	result, err := s.securityDB().ExecContext(ctx,
-		`UPDATE security_patch_proposals
-		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
-		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
-		proposal.PRURL, now, proposal.Namespace, proposal.ID,
-	)
-	if err != nil {
+	// The update and the read that classifies a refused update share one
+	// transaction, so they see the same proposal.
+	var current *store.PatchProposal
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx,
+			`UPDATE security_patch_proposals
+			 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
+			 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
+			proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
+			proposal.PRURL, now, proposal.Namespace, proposal.ID,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 1 {
+			return nil
+		}
+		existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, tx.securityDB(), proposal.Namespace, proposal.ID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(evidenceJSON) == "" {
+			return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
+		}
+		if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
+			existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
+			existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
+			existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
+			current = &existing
+			return nil
+		}
+		return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}); err != nil {
 		return err
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if updated == 1 {
-		proposal.UpdatedAt = now
+	if current != nil {
+		proposal.CreatedAt = current.CreatedAt
+		proposal.UpdatedAt = current.UpdatedAt
 		return nil
 	}
-
-	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(evidenceJSON) == "" {
-		return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
-	}
-	if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
-		existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
-		existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
-		existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
-		proposal.CreatedAt = existing.CreatedAt
-		proposal.UpdatedAt = existing.UpdatedAt
-		return nil
-	}
-	return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	proposal.UpdatedAt = now
+	return nil
 }
 
 // ListPatchProposals lists patch proposals for a finding, newest first.

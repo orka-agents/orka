@@ -101,6 +101,7 @@ const sidebars = {
       items: [
         'operations/provider-proxy',
         'operations/gateways',
+        'operations/agent-hosts',
         'operations/agent-runtime-security',
         'operations/upgrading',
         'operations/troubleshooting',
