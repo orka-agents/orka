@@ -428,8 +428,8 @@ render_admission_webhooks() {
     ([.items[] | select(.kind == "ValidatingAdmissionPolicy")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingAdmissionPolicyBinding")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration")] | length) == 1 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 8 and
-    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 8 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]] | length) == 9 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[].name] | unique | length) == 9 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "namespaceexecutionmode.core.orka.ai")] | length) == 0 and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
@@ -441,6 +441,10 @@ render_admission_webhooks() {
        (.clientConfig.service.path | type == "string" and length > 0))] | all)
     and
     ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
+      select(.name == "agenthost.core.orka.ai" and
+             .clientConfig.service.path == "/validate-core-orka-ai-v1alpha1-agenthost" and
+             .rules == [{"operations":["CREATE","UPDATE"],"apiGroups":["core.orka.ai"],"apiVersions":["v1alpha1"],"resources":["agenthosts"],"scope":"Namespaced"}])] | length) == 1 and
+    ([.items[] | select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] |
       select(.name == "checkpointsourceuse.workspace.orka.ai" and
              .clientConfig.service.path == "/validate-workspace-orka-ai-v1alpha1-checkpoint-source-use" and
              .rules == [{"operations":["CREATE"],"apiGroups":["workspace.orka.ai"],"apiVersions":["v1alpha1"],"resources":["executionworkspacecheckpoints"],"scope":"Namespaced"}])] | length) == 1 and
@@ -450,7 +454,7 @@ render_admission_webhooks() {
              .rules == [{"operations":["CREATE","UPDATE","DELETE"],"apiGroups":[""],"apiVersions":["v1"],"resources":["secrets"],"scope":"Namespaced"}] and
              .objectSelector.matchExpressions == [{"key":"workspace.orka.ai/attachment-for","operator":"Exists"}])] | length) == 1
   ' "${admission_webhooks_manifest}" >/dev/null || {
-    echo "admission wave must contain exactly eight unique, fail-closed, CA-pinned orka-admission webhooks, including checkpoint source authorization and attachment Secret protection, with namespace-mode claims and ACP workspace coordination Leases enforced by admission policies in the workload wave and no legacy coexistence policies" >&2
+    echo "admission wave must contain exactly nine unique, fail-closed, CA-pinned orka-admission webhooks, including AgentHost selection, checkpoint source authorization and attachment Secret protection, with namespace-mode claims and ACP workspace coordination Leases enforced by admission policies in the workload wave and no legacy coexistence policies" >&2
     return 1
   }
 }
@@ -592,6 +596,7 @@ smoke_admission_handlers() {
 /validate-core-orka-ai-v1alpha1-task-provenance|core.orka.ai|v1alpha1|Task|tasks
 /validate-core-orka-ai-v1alpha1-task-workspace-class-use|core.orka.ai|v1alpha1|Task|tasks-workspace-class-use
 /validate-core-orka-ai-v1alpha1-tool-workspace-class-use|core.orka.ai|v1alpha1|Tool|tools
+/validate-core-orka-ai-v1alpha1-agenthost|core.orka.ai|v1alpha1|AgentHost|agenthosts
 /validate-workspace-orka-ai-v1alpha1-checkpoint-source-use|workspace.orka.ai|v1alpha1|ExecutionWorkspaceCheckpoint|executionworkspacecheckpoints
 /validate-core-orka-ai-v1alpha1-agent-contract|core.orka.ai|v1alpha1|Agent|agents
 /validate-core-orka-ai-v1alpha1-agentruntime-contract|core.orka.ai|v1alpha1|AgentRuntime|agentruntimes
