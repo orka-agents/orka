@@ -77,6 +77,7 @@ import (
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
@@ -87,6 +88,7 @@ import (
 	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -94,6 +96,9 @@ const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
+	// storageConfigResolveTimeout bounds the startup Secret reads for storage
+	// adapters.
+	storageConfigResolveTimeout = 30 * time.Second
 )
 
 var (
@@ -281,8 +286,7 @@ func main() {
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
-	var storeBackend string
-	var storePath string
+	var storageFlags storageconfig.Flags
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
@@ -507,8 +511,7 @@ func main() {
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
-	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
-	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
+	storageFlags.AddFlags(flag.CommandLine)
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
@@ -875,6 +878,13 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
+	// Read the storage configuration before anything opens storage. It reads
+	// only local flags and the configuration file.
+	storageConfig, err := storageFlags.Load()
+	if err != nil {
+		setupLog.Error(err, "invalid storage configuration")
+		os.Exit(1)
+	}
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
 	substrateConfig = substrateConfig.WithDefaults()
@@ -1297,11 +1307,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create SQLite store
-	if storeBackend != "sqlite" {
-		setupLog.Error(fmt.Errorf("unsupported store backend: %s", storeBackend), "unknown store backend")
+	// Resolve the Secrets that storage adapters reference with the direct
+	// reader, before any application storage opens and without waiting for
+	// the manager cache. A configuration bound only to SQLite reads nothing.
+	storageLog := setupLog.WithValues("source", storageConfig.Source, "digest", storageConfig.Digest,
+		"state", storageConfig.Bindings[storagev1.StateContract].Backend,
+		"artifacts", storageConfig.Bindings[storagev1.ArtifactsContract].Backend)
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), storageConfigResolveTimeout)
+	_, err = storageConfig.Resolve(resolveCtx, mgr.GetAPIReader(), currentPodNamespace())
+	cancelResolve()
+	if err != nil {
+		storageLog.Error(err, "unable to resolve the storage configuration")
 		os.Exit(1)
 	}
+	// Only embedded SQLite can serve a contract until the storage adapter
+	// transport exists; an adapter binding is refused, never replaced.
+	storePath, err := storageConfig.RequireEmbeddedSQLite()
+	if err != nil {
+		storageLog.Error(err, "unsupported storage configuration")
+		os.Exit(1)
+	}
+	storageLog.Info("storage configuration loaded")
 
 	// Acquire SQLite exclusivity and validate durable dataset history before
 	// deciding whether an absent snapshot key may be created.

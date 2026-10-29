@@ -335,6 +335,61 @@ the next section. They are not part of the provider contract or the client. A
 client test fails if any other SQLite method is missing from the client, so a
 consumer's type assertion cannot silently lose a capability.
 
+## Storage configuration
+
+`internal/storageconfig` loads which backend serves each contract before
+application storage opens. Both sources produce the same `Config`:
+
+- **Default.** Without `--storage-config`, both contracts bind to embedded
+  SQLite at `--store-path`. `--store-backend` accepts only `sqlite`.
+- **File.** `--storage-config=<path>` names a YAML file with `bindings`
+  (`state` and `artifacts`, each `sqlite` or an adapter name) and `adapters`.
+  The Helm chart renders it from `storage.bindings` and `storage.adapters`
+  into the `<release>-storage` ConfigMap when a contract names an adapter.
+  `--store-backend` cannot be combined with a file, and `--store-path` is the
+  database for contracts bound to `sqlite`.
+
+```yaml
+bindings:
+  state: postgres
+  artifacts: sqlite
+adapters:
+  postgres:
+    serviceRef: {name: orka-storage-postgres, port: 8443}   # or url: https://...
+    tls:
+      serverName: orka-storage-postgres.orka-system.svc     # optional
+      caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional
+    clientAuth:
+      bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+```
+
+Loading rejects unknown and duplicate fields, a binding that names no adapter,
+an adapter bound to no contract, an adapter named `sqlite`, an adapter with
+both or neither of `serviceRef` and `url`, a URL that is not `https://` or has
+credentials, a query or a fragment, and an adapter without
+`clientAuth.bearerTokenSecretRef`. The file has no namespace fields: Services
+and Secrets resolve in the installation namespace.
+
+The configuration digest is `sha256:` followed by the hex SHA-256 of
+`orka.storage.configuration.v1`, a NUL byte and the compact JSON of the
+bindings in contract order. It covers each binding's backend, SQLite path,
+endpoint, TLS settings and Secret references, never Secret values, and does not
+depend on the source: the default flags and a file binding both contracts to
+the same SQLite path have the same digest. Startup logs the source, digest and
+backends.
+
+`Config.Resolve` reads the referenced Secrets with the manager's direct API
+reader, so it does not wait for the cache. A configuration that uses only
+SQLite reads nothing. A bearer token must have at least 32 bytes of visible
+ASCII, and a CA bundle at least one PEM certificate.
+
+Until the adapter transport exists, the controller serves both contracts only
+from embedded SQLite. After the Secrets resolve, a contract bound to an
+adapter stops startup with `AdapterTransportUnavailable`; nothing falls back to
+SQLite. Every failure carries a stable reason for later status reporting:
+`InvalidConfiguration`, `SecretNotFound`, `SecretKeyMissing`, `InvalidSecret`,
+`SecretUnavailable` or `AdapterTransportUnavailable`.
+
 ## Kubernetes control authority and retained SQL compatibility
 
 `store/kube.NewComposite` receives precisely `SessionTurnPersistenceStore`,

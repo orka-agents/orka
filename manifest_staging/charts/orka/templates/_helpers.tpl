@@ -372,6 +372,97 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 {{- end }}
 
 {{/*
+Storage bindings. Each contract is served by embedded SQLite ("sqlite") or by
+an adapter named under storage.adapters. A missing storage block, as left by
+helm upgrade --reuse-values from an older chart, binds both contracts to
+SQLite. orka.storageBindings returns the resolved bindings as JSON.
+*/}}
+{{- define "orka.storageBindings" -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- $bindings := $storage.bindings | default dict -}}
+{{- $resolved := dict -}}
+{{- range $contract := list "state" "artifacts" -}}
+{{- $backend := "sqlite" -}}
+{{- if hasKey $bindings $contract -}}
+{{- $backend = get $bindings $contract -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $backend)) (empty $backend) -}}
+{{- fail (printf "storage.bindings.%s must be \"sqlite\" or the name of an adapter in storage.adapters" $contract) -}}
+{{- end -}}
+{{- $_ := set $resolved $contract $backend -}}
+{{- end -}}
+{{- $resolved | toJson -}}
+{{- end }}
+
+{{/*
+Non-empty when the controller needs a storage configuration file: a contract
+is bound to an adapter, or adapters are configured. With both contracts on
+SQLite and no adapters, the controller keeps its default flags.
+*/}}
+{{- define "orka.storageConfigEnabled" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- if or (ne $bindings.state "sqlite") (ne $bindings.artifacts "sqlite") (not (empty $storage.adapters)) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Non-empty when a contract is bound to embedded SQLite.
+*/}}
+{{- define "orka.storageUsesSQLite" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- if or (eq $bindings.state "sqlite") (eq $bindings.artifacts "sqlite") -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Chart-side checks that give early feedback; the controller validates every
+field again when it loads the file.
+*/}}
+{{- define "orka.validateStorage" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- $adapters := $storage.adapters | default dict -}}
+{{- if not (kindIs "map" $adapters) -}}
+{{- fail "storage.adapters must be a map of adapter names to adapter settings" -}}
+{{- end -}}
+{{- range $contract := list "state" "artifacts" -}}
+{{- $backend := get $bindings $contract -}}
+{{- if and (ne $backend "sqlite") (not (hasKey $adapters $backend)) -}}
+{{- fail (printf "storage.bindings.%s names %q, which is not in storage.adapters" $contract $backend) -}}
+{{- end -}}
+{{- end -}}
+{{- range $name := keys $adapters | sortAlpha -}}
+{{- if eq $name "sqlite" -}}
+{{- fail "storage.adapters.sqlite is reserved for embedded SQLite; choose another adapter name" -}}
+{{- end -}}
+{{- if and (ne $bindings.state $name) (ne $bindings.artifacts $name) -}}
+{{- fail (printf "storage.adapters.%s is not bound to any contract in storage.bindings" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The storage configuration file the controller reads with --storage-config.
+It holds bindings and Secret references, never Secret values.
+*/}}
+{{- define "orka.storageConfig" -}}
+{{- $bindings := include "orka.storageBindings" . | fromJson -}}
+{{- $storage := .Values.storage | default dict -}}
+{{- $config := dict "bindings" $bindings -}}
+{{- with $storage.adapters -}}
+{{- $_ := set $config "adapters" . -}}
+{{- end -}}
+{{- toYaml $config -}}
+{{- end }}
+
+{{- define "orka.storageConfigName" -}}
+{{- printf "%s-storage" (include "orka.fullname" . | trunc 55 | trimSuffix "-") | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Default the tenant namespace to the Helm release namespace.
 */}}
 {{- define "orka.watchNamespace" -}}
