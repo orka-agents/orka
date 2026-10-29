@@ -186,6 +186,10 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		lockDuringDelete(t, newProvider(t))
 	})
 
+	t.Run("a usage observation replayed during retention is recorded", func(t *testing.T) {
+		usageReplayDuringRetention(t, newProvider(t))
+	})
+
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
 		provider := newProvider(t)
 		expires := time.Now().UTC().Add(time.Hour)
@@ -484,4 +488,36 @@ func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 			t.Fatalf("Session locked-%d was deleted although a lock on it was granted", i)
 		}
 	}
+}
+
+// usageReplayDuringRetention replays usage observations while retention
+// removes them. The writer records an observation that is already past the
+// retention cutoff and then prunes; readers replay the newest one unchanged.
+// Before or after the prune, an identical replay is recorded, so any error
+// matches no serial order.
+func usageReplayDuringRetention(t *testing.T, provider storagev1.StateProvider) {
+	input := int64(5)
+	observation := func(round int64) storagev1.UsageObservation {
+		return storagev1.UsageObservation{ID: fmt.Sprintf("expired-%d", round), Namespace: "tenant",
+			CounterID: fmt.Sprintf("counter-%d", round), Scope: "call", Source: "agent", Model: "model",
+			InputTokens: &input, Status: "running", ObservedAt: controlBaseTime}
+	}
+	// current holds one more than the newest round whose observation was recorded.
+	var current atomic.Int64
+	readDuringWrites(t, 50, func(i int) error {
+		if err := provider.RecordUsage(t.Context(), observation(int64(i))); err != nil {
+			return err
+		}
+		current.Store(int64(i) + 1)
+		return provider.PruneUsage(t.Context(), controlBaseTime.Add(time.Hour))
+	}, func() error {
+		round := current.Load()
+		if round == 0 {
+			return nil
+		}
+		if err := provider.RecordUsage(t.Context(), observation(round-1)); err != nil {
+			return fmt.Errorf("replaying usage observation expired-%d during retention: %w", round-1, err)
+		}
+		return nil
+	})
 }
