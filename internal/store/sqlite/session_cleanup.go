@@ -163,50 +163,59 @@ func (s *Store) BindSessionCleanupIdentity(ctx context.Context, namespace, sessi
 	if err := store.ValidateControlIdentifier("session UID", sessionUID); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE sessions SET control_session_uid = ?
-		 WHERE namespace = ? AND name = ?
-		   AND (control_session_uid = '' OR control_session_uid = ?)
-		   AND NOT EXISTS (
-		     SELECT 1 FROM session_cleanup_intents
-		     WHERE namespace = ? AND session_name = ?
-		   )
-		   AND NOT EXISTS (
-		     SELECT 1 FROM session_cleanup_completions
-		     WHERE namespace = ? AND session_name = ?
-		   )`,
-		sessionUID, namespace, sessionName, sessionUID,
-		namespace, sessionName, namespace, sessionName,
-	)
-	if err != nil {
-		return err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 1 {
-		return nil
-	}
-	var count int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
-	).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		return store.ErrNotFound
-	}
-	return store.ConflictErrorf("session %s/%s has a different cleanup identity or deletion fence", namespace, sessionName)
+	// The update and the check that tells a missing Session from a conflict
+	// share one transaction, so a Session created after the update is not
+	// reported as a conflict.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		result, err := q.ExecContext(ctx,
+			`UPDATE sessions SET control_session_uid = ?
+			 WHERE namespace = ? AND name = ?
+			   AND (control_session_uid = '' OR control_session_uid = ?)
+			   AND NOT EXISTS (
+			     SELECT 1 FROM session_cleanup_intents
+			     WHERE namespace = ? AND session_name = ?
+			   )
+			   AND NOT EXISTS (
+			     SELECT 1 FROM session_cleanup_completions
+			     WHERE namespace = ? AND session_name = ?
+			   )`,
+			sessionUID, namespace, sessionName, sessionUID,
+			namespace, sessionName, namespace, sessionName,
+		)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows == 1 {
+			return nil
+		}
+		var count int
+		if err := q.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`, namespace, sessionName,
+		).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return store.ErrNotFound
+		}
+		return store.ConflictErrorf("session %s/%s has a different cleanup identity or deletion fence", namespace, sessionName)
+	})
 }
 
 // HasSessionCleanupIntent reports whether new work must be refused for a
 // Session whose deletion has crossed the durable intent boundary.
 func (s *Store) HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error) {
+	return sessionCleanupIntentExists(ctx, s.db, strings.TrimSpace(namespace), strings.TrimSpace(sessionName))
+}
+
+func sessionCleanupIntentExists(ctx context.Context, q controlQueryRower, namespace, sessionName string) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM session_cleanup_intents WHERE namespace = ? AND session_name = ?`,
-		strings.TrimSpace(namespace), strings.TrimSpace(sessionName),
+		namespace, sessionName,
 	).Scan(&count); err != nil {
 		return false, err
 	}
