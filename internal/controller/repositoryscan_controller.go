@@ -4670,18 +4670,21 @@ func validationJSONForFinding(raw, findingID string) string {
 	return string(data)
 }
 
+// findingValidationStatusRank orders results when a duplicate's validation
+// merges into its canonical finding. An error ends a pending validation
+// without a verdict, so it outranks pending but never a verdict.
 func findingValidationStatusRank(status string) int {
 	switch strings.TrimSpace(status) {
 	case findingValidationStatusValidated:
-		return 5
+		return 6
 	case findingValidationStatusFailed:
-		return 4
+		return 5
 	case findingValidationStatusSkipped:
+		return 4
+	case findingValidationStatusError:
 		return 3
 	case findingValidationStatusPending:
 		return 2
-	case findingValidationStatusError:
-		return 1
 	case "unvalidated":
 		return 1
 	default:

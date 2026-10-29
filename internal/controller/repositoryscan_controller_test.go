@@ -7754,3 +7754,17 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 		t.Fatalf("unlisted after the grace period = %d, want it forgotten", n)
 	}
 }
+
+func TestMergeFindingValidationStateEndsPendingWithError(t *testing.T) {
+	canonical := &storepkg.Finding{ID: "fnd_canonical", ScanRunID: "run", ValidationStatus: findingValidationStatusPending}
+	errored := &storepkg.Finding{ID: "fnd_duplicate", ScanRunID: "run", ValidationStatus: findingValidationStatusError, ValidationJSON: `{"status":"error"}`}
+	mergeFindingValidationState(canonical, errored)
+	if canonical.ValidationStatus != findingValidationStatusError {
+		t.Fatalf("canonical = %q, want the pending validation ended with error", canonical.ValidationStatus)
+	}
+	refuted := &storepkg.Finding{ID: "fnd_canonical", ScanRunID: "run", ValidationStatus: findingValidationStatusFailed}
+	mergeFindingValidationState(refuted, errored)
+	if refuted.ValidationStatus != findingValidationStatusFailed {
+		t.Fatalf("refuted canonical = %q, want its verdict kept", refuted.ValidationStatus)
+	}
+}
