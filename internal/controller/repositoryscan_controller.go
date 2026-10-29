@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -131,6 +132,9 @@ type RepositoryScanReconciler struct {
 	// capacity, which bounds each run's review Task window together with
 	// its RuntimePool's prompt capacity. Zero uses the default.
 	ACPDispatchMaxConcurrentTasks int
+	// createdReviewTasks remembers review Tasks this reconciler created
+	// until the informer cache lists them; see reviewTaskBudget.
+	createdReviewTasks *createdTasks
 	// APIReader reads uncached Secrets and verifies RepositoryScan identity
 	// before run admission or cleanup; nil falls back to Client.
 	APIReader client.Reader
@@ -1130,6 +1134,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err := r.createOrValidateScanStageTask(ctx, scan, run, task); err != nil {
 			return err
 		}
+		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), time.Now())
 	}
 	return nil
 }
@@ -1430,16 +1435,63 @@ func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTask
 		return 0, err
 	}
 	shared := 0
+	listed := make(map[types.NamespacedName]struct{}, len(all.Items))
 	for i := range all.Items {
+		listed[client.ObjectKeyFromObject(&all.Items[i])] = struct{}{}
 		if phase := all.Items[i].Status.Phase; phase == "" || isActiveTaskPhase(phase) {
 			shared++
 		}
 	}
+	// The cache can lag reviews created moments ago, for this or another scan.
+	shared += r.reviewTaskLedger().unlisted(listed, time.Now())
 	dispatch := r.ACPDispatchMaxConcurrentTasks
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
 	}
 	return min(available, max(maxOutstandingReviewTasks/DefaultACPDispatchWorkers*dispatch-shared, 0)), nil
+}
+
+func (r *RepositoryScanReconciler) reviewTaskLedger() *createdTasks {
+	if r.createdReviewTasks == nil {
+		r.createdReviewTasks = &createdTasks{}
+	}
+	return r.createdReviewTasks
+}
+
+// createdTaskCacheGrace is how long a created Task is counted while the
+// informer cache does not list it yet.
+const createdTaskCacheGrace = time.Minute
+
+// createdTasks remembers Tasks a reconciler created until the informer cache
+// lists them, so counts taken from the cache include them meanwhile.
+type createdTasks struct {
+	mu      sync.Mutex
+	created map[types.NamespacedName]time.Time
+}
+
+func (c *createdTasks) record(key types.NamespacedName, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.created == nil {
+		c.created = map[types.NamespacedName]time.Time{}
+	}
+	c.created[key] = now
+}
+
+// unlisted counts recorded Tasks the cache does not list yet, and forgets
+// those it lists or that are older than createdTaskCacheGrace.
+func (c *createdTasks) unlisted(listed map[types.NamespacedName]struct{}, now time.Time) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for key, created := range c.created {
+		if _, ok := listed[key]; ok || now.Sub(created) > createdTaskCacheGrace {
+			delete(c.created, key)
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func outstandingReviewTasks(tasks []corev1alpha1.Task, runID string) int {
@@ -5093,6 +5145,8 @@ func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, sc
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryScanReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Created before reconciles copy the reconciler, so the copies share it.
+	r.reviewTaskLedger()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryScan{}).
 		Owns(&corev1alpha1.Task{}).

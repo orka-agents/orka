@@ -7743,4 +7743,14 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 	if got != 2 {
 		t.Fatalf("reviewTaskBudget() = %d, want the 2 shared places left", got)
 	}
+
+	// Reviews created moments ago count while the cache does not list them.
+	now := time.Now()
+	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "just-created"}, now)
+	if got, err = reconciler.reviewTaskBudget(context.Background(), nil, "scan_this"); err != nil || got != 1 {
+		t.Fatalf("reviewTaskBudget(unlisted creation) = %d, %v; want 1", got, err)
+	}
+	if n := reconciler.reviewTaskLedger().unlisted(nil, now.Add(2*createdTaskCacheGrace)); n != 0 {
+		t.Fatalf("unlisted after the grace period = %d, want it forgotten", n)
+	}
 }
