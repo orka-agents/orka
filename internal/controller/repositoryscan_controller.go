@@ -1120,6 +1120,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 	if err != nil {
 		return err
 	}
+	var pool types.NamespacedName
 	if r.Client != nil {
 		// Count past the informer cache, which can miss a retry created
 		// earlier in this reconcile.
@@ -1132,6 +1133,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 			return err
 		}
 		reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
+		pool, _ = r.reviewRuntimePool(ctx, existing.Items, run.ID)
 	}
 	for _, reviewSlice := range reviewSlices {
 		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
@@ -1141,7 +1143,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err := r.createOrValidateScanStageTask(ctx, scan, run, task); err != nil {
 			return err
 		}
-		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), time.Now())
+		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
 	}
 	return nil
 }
@@ -1446,21 +1448,30 @@ func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTask
 	}
 	pool, poolPrompts := r.reviewRuntimePool(ctx, runTasks, runID)
 	shared, onPool := 0, 0
-	listed := make(map[types.NamespacedName]struct{}, len(all.Items))
+	// settled records listed Tasks that already name their pool or have
+	// finished; the ledger needs to count neither.
+	settled := make(map[types.NamespacedName]bool, len(all.Items))
 	for i := range all.Items {
 		task := &all.Items[i]
-		listed[client.ObjectKeyFromObject(task)] = struct{}{}
-		if phase := task.Status.Phase; phase != "" && !isActiveTaskPhase(phase) {
+		named := task.Status.Execution != nil && strings.TrimSpace(task.Status.Execution.RuntimePoolName) != ""
+		active := task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)
+		settled[client.ObjectKeyFromObject(task)] = named || !active
+		if !active {
 			continue
 		}
 		shared++
-		if poolPrompts > 0 && task.Namespace == pool.Namespace && task.Status.Execution != nil &&
+		if poolPrompts > 0 && named && task.Namespace == pool.Namespace &&
 			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
 			onPool++
 		}
 	}
-	// The cache can lag reviews created moments ago, for this or another scan.
-	shared += r.reviewTaskLedger().unlisted(listed, time.Now())
+	// The cache can lag reviews created moments ago, for this or another
+	// scan, and a review names its pool only once it is queued.
+	unlisted, unqueuedOnPool := r.reviewTaskLedger().pending(settled, pool, time.Now())
+	shared += unlisted
+	if poolPrompts > 0 {
+		onPool += unqueuedOnPool
+	}
 	dispatch := r.ACPDispatchMaxConcurrentTasks
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
@@ -1482,39 +1493,53 @@ func (r *RepositoryScanReconciler) reviewTaskLedger() *createdTasks {
 }
 
 // createdTaskCacheGrace is how long a created Task is counted while the
-// informer cache does not list it yet.
+// informer cache does not show it queued to its RuntimePool yet.
 const createdTaskCacheGrace = time.Minute
 
-// createdTasks remembers Tasks a reconciler created until the informer cache
-// lists them, so counts taken from the cache include them meanwhile.
+// createdTasks remembers Tasks a reconciler created, with the RuntimePool
+// their run uses, until the informer cache lists them queued to it, so
+// counts taken from the cache include them meanwhile.
 type createdTasks struct {
 	mu      sync.Mutex
-	created map[types.NamespacedName]time.Time
+	created map[types.NamespacedName]createdTask
 }
 
-func (c *createdTasks) record(key types.NamespacedName, now time.Time) {
+type createdTask struct {
+	at   time.Time
+	pool types.NamespacedName
+}
+
+func (c *createdTasks) record(key, pool types.NamespacedName, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.created == nil {
-		c.created = map[types.NamespacedName]time.Time{}
+		c.created = map[types.NamespacedName]createdTask{}
 	}
-	c.created[key] = now
+	c.created[key] = createdTask{at: now, pool: pool}
 }
 
-// unlisted counts recorded Tasks the cache does not list yet, and forgets
-// those it lists or that are older than createdTaskCacheGrace.
-func (c *createdTasks) unlisted(listed map[types.NamespacedName]struct{}, now time.Time) int {
+// pending counts recorded Tasks the cache does not list yet, and those
+// recorded for pool that are not yet queued to it. settled maps each listed
+// Task to whether it already names its pool or has finished. Settled
+// entries, and those older than createdTaskCacheGrace, are forgotten.
+func (c *createdTasks) pending(settled map[types.NamespacedName]bool, pool types.NamespacedName, now time.Time) (int, int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	count := 0
-	for key, created := range c.created {
-		if _, ok := listed[key]; ok || now.Sub(created) > createdTaskCacheGrace {
+	unlisted, onPool := 0, 0
+	for key, task := range c.created {
+		done, listed := settled[key]
+		if done || now.Sub(task.at) > createdTaskCacheGrace {
 			delete(c.created, key)
 			continue
 		}
-		count++
+		if !listed {
+			unlisted++
+		}
+		if pool.Name != "" && task.pool == pool {
+			onPool++
+		}
 	}
-	return count
+	return unlisted, onPool
 }
 
 func outstandingReviewTasks(tasks []corev1alpha1.Task, runID string) int {
@@ -3988,7 +4013,11 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	}
 	// A retry replaces its failed first attempt rather than waiting for the
 	// shared review budget, but it is counted there like any new review.
-	r.reviewTaskLedger().record(client.ObjectKeyFromObject(desired), time.Now())
+	var retryPool types.NamespacedName
+	if sourceTask.Status.Execution != nil {
+		retryPool = types.NamespacedName{Namespace: sourceTask.Namespace, Name: strings.TrimSpace(sourceTask.Status.Execution.RuntimePoolName)}
+	}
+	r.reviewTaskLedger().record(client.ObjectKeyFromObject(desired), retryPool, time.Now())
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return false, err

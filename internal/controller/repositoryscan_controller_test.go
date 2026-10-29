@@ -7746,11 +7746,11 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 
 	// Reviews created moments ago count while the cache does not list them.
 	now := time.Now()
-	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "just-created"}, now)
+	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "just-created"}, types.NamespacedName{}, now)
 	if got, err = reconciler.reviewTaskBudget(context.Background(), nil, "scan_this"); err != nil || got != 1 {
 		t.Fatalf("reviewTaskBudget(unlisted creation) = %d, %v; want 1", got, err)
 	}
-	if n := reconciler.reviewTaskLedger().unlisted(nil, now.Add(2*createdTaskCacheGrace)); n != 0 {
+	if n, _ := reconciler.reviewTaskLedger().pending(nil, types.NamespacedName{}, now.Add(2*createdTaskCacheGrace)); n != 0 {
 		t.Fatalf("unlisted after the grace period = %d, want it forgotten", n)
 	}
 }
@@ -7798,6 +7798,14 @@ func TestReviewTaskBudgetIsSharedPerRuntimePool(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("reviewTaskBudget() = %d, want the 1 place left on the shared pool", got)
+	}
+
+	// Another scan's review created moments ago, not yet listed or queued,
+	// still holds a place on the pool it will run on.
+	poolKey := types.NamespacedName{Namespace: defaultNS, Name: pool.Name}
+	reconciler.reviewTaskLedger().record(types.NamespacedName{Namespace: defaultNS, Name: "other-02"}, poolKey, time.Now())
+	if got, err = reconciler.reviewTaskBudget(context.Background(), []corev1alpha1.Task{*own}, "scan_this"); err != nil || got != 0 {
+		t.Fatalf("reviewTaskBudget(unqueued review on the pool) = %d, %v; want 0", got, err)
 	}
 }
 
