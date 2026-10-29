@@ -121,8 +121,8 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 			}
 		}
 		if spec == pkg.name && pkg.main != "" {
-			if _, ok := known[pkg.main]; ok {
-				return pkg.main
+			if found := resolveNodeBase(pkg.main, known); found != "" {
+				return found
 			}
 		}
 		return resolveNodeBase(path.Join(pkg.dir, strings.TrimPrefix(spec, pkg.name)), known)

@@ -359,3 +359,17 @@ func TestReferenceFilesHonorExportConditionOrder(t *testing.T) {
 		t.Fatalf("references = %s, want only the first matching condition", got)
 	}
 }
+
+func TestReferenceFilesResolveExtensionlessPackageMain(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "lib/package.json", `{"name":"@app/lib","main":"./lib/entry"}`)
+	writeFile(t, root, "lib/lib/entry.ts", "export const entry = 1\n")
+	writeFile(t, root, "app/main.ts", "import { entry } from '@app/lib'\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/main.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	if got := referenceSummary(refs["app"]); !strings.Contains(got, "lib/lib/entry.ts=imports") {
+		t.Fatalf("references = %s, want the extensionless main resolved", got)
+	}
+}
