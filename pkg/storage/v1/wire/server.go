@@ -112,9 +112,11 @@ type Server struct {
 	// artifactLimit is the artifacts provider's MaxArtifactBytes from its
 	// latest description.
 	artifactLimit atomic.Int64
-	// describeMu keeps concurrent first calls from each describing the
-	// providers.
-	describeMu sync.Mutex
+	// describeLock keeps concurrent first calls from each describing the
+	// providers. It is a one-slot channel rather than a mutex so that a call
+	// waiting for another call's description stops waiting when its own
+	// context ends.
+	describeLock chan struct{}
 	// describeSeq numbers descriptions as they start. publishMu and
 	// published let only a description newer than the last one published
 	// change the serving dataset, so a slow description cannot restore a
@@ -143,7 +145,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	s := &Server{
 		state: config.State, artifacts: config.Artifacts, info: info, authenticator: config.Authenticator,
 		logger: logger, observer: config.Observer, maxDuration: map[Class]time.Duration{},
-		admission: map[Class]chan struct{}{}, maxBlobBytes: maxBlob,
+		admission: map[Class]chan struct{}{}, maxBlobBytes: maxBlob, describeLock: make(chan struct{}, 1),
 	}
 	s.dataset = datasetProvider{server: s}
 	for class, limit := range config.Limits.MaxConcurrent {
@@ -291,13 +293,19 @@ func (s *Server) publish(ctx context.Context, seq uint64, dataset string, artifa
 }
 
 // servingDataset returns the serving dataset, describing the providers if
-// no description has succeeded yet.
+// no description has succeeded yet. A call that waits for another call's
+// description returns unavailable when its own context ends, without
+// cancelling that description.
 func (s *Server) servingDataset(ctx context.Context) (string, error) {
 	if dataset := s.DatasetID(); dataset != "" {
 		return dataset, nil
 	}
-	s.describeMu.Lock()
-	defer s.describeMu.Unlock()
+	select {
+	case s.describeLock <- struct{}{}:
+	case <-ctx.Done():
+		return "", fmt.Errorf("%w: waiting for the storage provider's description: %w", storagev1.ErrUnavailable, ctx.Err())
+	}
+	defer func() { <-s.describeLock }()
 	if dataset := s.DatasetID(); dataset != "" {
 		return dataset, nil
 	}
