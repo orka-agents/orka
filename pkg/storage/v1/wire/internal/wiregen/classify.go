@@ -22,14 +22,15 @@ const (
 	convRecord
 	convRecordPointer
 	convList
-	convStringMap
+	convScalarMap
 )
 
 // conversion is one checked pair from the type mapping table.
 type conversion struct {
 	kind   convKind
 	goType types.Type
-	// wireType is the generated Go type of a scalar wire value.
+	// wireType is the generated Go type of a scalar wire value, or of a scalar
+	// map's values.
 	wireType string
 	// cast is set when the Go type is not identical to wireType.
 	cast   bool
@@ -64,9 +65,8 @@ var scalarKinds = map[types.BasicKind]struct {
 func (b *builder) classify(goType types.Type, field protoreflect.FieldDescriptor) (*conversion, error) {
 	switch {
 	case field.IsMap():
-		if isStringMap(goType) && field.MapKey().Kind() == protoreflect.StringKind &&
-			field.MapValue().Kind() == protoreflect.StringKind {
-			return &conversion{kind: convStringMap, goType: goType}, nil
+		if conv := classifyScalarMap(goType, field); conv != nil {
+			return conv, nil
 		}
 		return nil, mismatch(goType, field)
 	case field.IsList():
@@ -195,7 +195,17 @@ func (b *builder) contractRecord(t types.Type) *types.Named {
 	return named
 }
 
+// isNamed reports whether t is the type path.name, declared as a defined
+// type or as an alias. encoding/json.RawMessage is an alias in some Go
+// releases.
 func isNamed(t types.Type, path, name string) bool {
+	if alias, ok := t.(*types.Alias); ok {
+		object := alias.Obj()
+		if object.Pkg() != nil && object.Pkg().Path() == path && object.Name() == name {
+			return true
+		}
+		t = types.Unalias(t)
+	}
 	named, ok := t.(*types.Named)
 	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == path && named.Obj().Name() == name
 }
@@ -222,14 +232,24 @@ func isAnyMap(t types.Type) bool {
 	return ok && key.Kind() == types.String && isEmptyInterface(types.Unalias(m.Elem()))
 }
 
-func isStringMap(t types.Type) bool {
-	m, ok := t.Underlying().(*types.Map)
-	if !ok {
-		return false
+// classifyScalarMap pairs a Go map from string to a predeclared scalar type
+// with a wire map from string to the scalar protoc-gen-go generates as that
+// same Go type, such as map[string]int64 with map<string, int64>.
+func classifyScalarMap(goType types.Type, field protoreflect.FieldDescriptor) *conversion {
+	m, ok := goType.Underlying().(*types.Map)
+	if !ok || field.MapKey().Kind() != protoreflect.StringKind || field.MapValue().Message() != nil {
+		return nil
 	}
 	key, keyOK := m.Key().(*types.Basic)
 	value, valueOK := m.Elem().(*types.Basic)
-	return keyOK && valueOK && key.Kind() == types.String && value.Kind() == types.String
+	if !keyOK || !valueOK || key.Kind() != types.String {
+		return nil
+	}
+	scalar, ok := scalarKinds[value.Kind()]
+	if !ok || scalar.wire != field.MapValue().Kind() || !isPredeclared(value, scalar.wireType) {
+		return nil
+	}
+	return &conversion{kind: convScalarMap, goType: goType, wireType: scalar.wireType}
 }
 
 func isBytes(t types.Type) bool {

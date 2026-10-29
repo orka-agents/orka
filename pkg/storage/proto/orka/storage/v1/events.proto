@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+import "orka/storage/v1/results.proto";
+import "orka/storage/v1/usage.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Events serves execution events, their deduplicated appends and the plan
+// projection an event carries. Event lists are bounded by their filter's
+// limit.
+service Events {
+  option (go_interface) = "ExecutionEventStore";
+  option (go_interface) = "DeduplicatingExecutionEventStore";
+  option (go_interface) = "AtomicExecutionEventPlanStore";
+
+  rpc AppendExecutionEvent(AppendExecutionEventRequest) returns (AppendExecutionEventResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ListExecutionEvents(ListExecutionEventsRequest) returns (ListExecutionEventsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc ListSessionExecutionEvents(ListSessionExecutionEventsRequest) returns (ListSessionExecutionEventsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc GetLatestExecutionEventSeq(GetLatestExecutionEventSeqRequest) returns (GetLatestExecutionEventSeqResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc GetLatestExecutionEventSeqs(GetLatestExecutionEventSeqsRequest) returns (GetLatestExecutionEventSeqsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteExecutionEvents(DeleteExecutionEventsRequest) returns (DeleteExecutionEventsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AppendExecutionEventIfAbsent(AppendExecutionEventIfAbsentRequest) returns (AppendExecutionEventIfAbsentResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AppendExecutionEventWithPlanIfAbsent(AppendExecutionEventWithPlanIfAbsentRequest) returns (AppendExecutionEventWithPlanIfAbsentResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+}
+
+message ExecutionEventTruncation {
+  bool summary_truncated = 1;
+  int64 summary_original_chars = 2;
+  bool content_text_truncated = 3;
+  int64 content_text_original_chars = 4;
+  bool content_json_truncated = 5;
+  int64 content_json_original_bytes = 6;
+}
+
+message ExecutionEventUsage {
+  UsageObservation observation = 1;
+  bool keep_first_observed_at = 2;
+}
+
+message ExecutionEvent {
+  string id = 1;
+  string namespace = 2;
+  string stream_type = 3;
+  string stream_id = 4;
+  int64 seq = 5;
+  string type = 6;
+  string severity = 7;
+  string task_name = 8;
+  string session_name = 9;
+  string agent_name = 10;
+  string tool_name = 11;
+  string tool_call_id = 12;
+  string summary = 13;
+  JSONValue content = 14;
+  string content_text = 15;
+  ExecutionEventTruncation truncation = 16;
+  google.protobuf.Timestamp created_at = 17;
+  ExecutionEventUsage usage = 18;
+}
+
+message ExecutionEventFilter {
+  string namespace = 1;
+  string stream_type = 2;
+  string stream_id = 3;
+  string task_name = 4;
+  string session_name = 5;
+  repeated string event_types = 6;
+  int64 after_seq = 7;
+  int64 limit = 8;
+}
+
+message SessionExecutionEventFilter {
+  string namespace = 1;
+  string session_name = 2;
+  repeated string event_types = 3;
+  int64 after_seq = 4;
+  int64 limit = 5;
+}
+
+// SessionExecutionEvent carries the Go record's embedded ExecutionEvent in
+// its execution_event field.
+message SessionExecutionEvent {
+  ExecutionEvent execution_event = 1;
+  int64 session_seq = 2;
+  int64 task_seq = 3;
+}
+
+message AppendExecutionEventRequest {
+  ExecutionEvent event = 1;
+}
+
+message AppendExecutionEventResponse {
+  ExecutionEvent event = 1;
+}
+
+message ListExecutionEventsRequest {
+  ExecutionEventFilter filter = 1;
+}
+
+message ListExecutionEventsResponse {
+  repeated ExecutionEvent events = 1;
+}
+
+message ListSessionExecutionEventsRequest {
+  SessionExecutionEventFilter filter = 1;
+}
+
+message ListSessionExecutionEventsResponse {
+  repeated SessionExecutionEvent events = 1;
+  int64 latest_seq = 2;
+}
+
+message GetLatestExecutionEventSeqRequest {
+  string namespace = 1;
+  string stream_type = 2;
+  string stream_id = 3;
+}
+
+message GetLatestExecutionEventSeqResponse {
+  int64 seq = 1;
+}
+
+message GetLatestExecutionEventSeqsRequest {
+  string namespace = 1;
+  string stream_type = 2;
+  repeated string stream_ids = 3 [(go_name) = "streamIDs"];
+}
+
+message GetLatestExecutionEventSeqsResponse {
+  map<string, int64> seqs = 1;
+}
+
+message DeleteExecutionEventsRequest {
+  string namespace = 1;
+  string stream_type = 2;
+  string stream_id = 3;
+}
+
+message DeleteExecutionEventsResponse {}
+
+message AppendExecutionEventIfAbsentRequest {
+  ExecutionEvent event = 1;
+  string dedupe_key = 2;
+}
+
+message AppendExecutionEventIfAbsentResponse {
+  ExecutionEvent persisted = 1;
+  bool appended = 2;
+}
+
+message AppendExecutionEventWithPlanIfAbsentRequest {
+  ExecutionEvent event = 1;
+  string dedupe_key = 2;
+  PlanState plan = 3;
+}
+
+message AppendExecutionEventWithPlanIfAbsentResponse {
+  ExecutionEvent persisted = 1;
+  bool appended = 2;
+}

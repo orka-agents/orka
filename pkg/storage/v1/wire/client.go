@@ -53,14 +53,18 @@ type ClientConfig struct {
 	// server's revision is at least the one that introduced it. Zero means
 	// this library's ProtocolRevision.
 	ServerRevision int
-	// Bulk, when set, carries the streaming RPCs that move blobs, so a large
-	// transfer has its own HTTP/2 flow-control window and cannot hold up
-	// ordinary calls or health checks. Nil sends them over the main
-	// connection.
+	// Bulk, when set, carries the streaming RPCs that move blobs and batched
+	// reads, so a large transfer has its own HTTP/2 flow-control window and
+	// cannot hold up ordinary calls or health checks. Nil sends them over the
+	// main connection.
 	Bulk grpc.ClientConnInterface
 	// MaxBlobBytes caps the blob the client sends or accepts in one call.
 	// Zero means DefaultMaxBlobBytes.
 	MaxBlobBytes int64
+	// MaxSnapshotBytes caps the list the client accepts from one batched
+	// read, such as a Session's transcript. Zero means
+	// DefaultMaxSnapshotBytes.
+	MaxSnapshotBytes int64
 	// Limits are the provider's limits from its Describe. The client refuses
 	// an artifact larger than Limits.MaxArtifactBytes without sending it.
 	// Zero leaves that check to the server.
@@ -76,12 +80,13 @@ type Client struct {
 	// conn and bulkConn are the connections when the client calls a
 	// *grpc.ClientConn directly; send evidence is trusted only on such a
 	// connection from Dial.
-	conn           *grpc.ClientConn
-	bulkConn       *grpc.ClientConn
-	dataset        string
-	serverRevision int
-	maxBlobBytes   int64
-	limits         storagev1.ProviderLimits
+	conn             *grpc.ClientConn
+	bulkConn         *grpc.ClientConn
+	dataset          string
+	serverRevision   int
+	maxBlobBytes     int64
+	maxSnapshotBytes int64
+	limits           storagev1.ProviderLimits
 }
 
 // DialConfig configures Dial. It takes no other gRPC options, so no caller
@@ -138,6 +143,10 @@ func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	if maxBlob <= 0 {
 		maxBlob = DefaultMaxBlobBytes
 	}
+	maxSnapshot := config.MaxSnapshotBytes
+	if maxSnapshot <= 0 {
+		maxSnapshot = DefaultMaxSnapshotBytes
+	}
 	bulk := config.Bulk
 	if bulk == nil {
 		bulk = conn
@@ -146,7 +155,8 @@ func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	bulkDirect, _ := bulk.(*grpc.ClientConn)
 	return &Client{
 		stubs: newClientStubs(conn), bulk: newClientStubs(bulk), conn: direct, bulkConn: bulkDirect,
-		dataset: config.Dataset, serverRevision: revision, maxBlobBytes: maxBlob, limits: config.Limits,
+		dataset: config.Dataset, serverRevision: revision, maxBlobBytes: maxBlob, maxSnapshotBytes: maxSnapshot,
+		limits: config.Limits,
 	}
 }
 

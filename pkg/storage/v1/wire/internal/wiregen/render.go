@@ -193,8 +193,8 @@ func toWire(f *goFile, target, source string, c *conversion, label, onErr string
 		f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, c.wireType, source, target, value)
 	case convBytes:
 		f.printf("%s = []byte(%s)\n", target, source)
-	case convStringMap:
-		f.printf("%s = map[string]string(%s)\n", target, source)
+	case convScalarMap:
+		f.printf("%s = map[string]%s(%s)\n", target, c.wireType, source)
 	case convTime:
 		f.printf("if %s, err = timeToWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
 	case convNullableTime:
@@ -249,7 +249,7 @@ func fromWire(f *goFile, target, source string, c *conversion, label, onErr stri
 		// nil, so a present record keeps an empty value a provider may
 		// require, as it would receive in process.
 		f.printf("%s = %s(%s)\nif %s == nil {\n%s = %s{}\n}\n", target, goType(), source, target, target, goType())
-	case convStringMap:
+	case convScalarMap:
 		f.printf("%s = %s(%s)\n", target, goType(), source)
 	case convTime:
 		f.printf("if %s, err = timeFromWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)
@@ -318,9 +318,21 @@ func streamName(stream streamShape) string {
 		return "streamUpload"
 	case streamDownload:
 		return "streamDownload"
+	case streamSnapshot:
+		return "streamSnapshot"
 	default:
 		return "streamNone"
 	}
+}
+
+// batchedName renders a snapshot RPC's batched path as the dotted wire field
+// names.
+func batchedName(method *rpcMethod) string {
+	names := make([]string, 0, len(method.batched))
+	for _, field := range method.batched {
+		names = append(names, string(field.Name()))
+	}
+	return strings.Join(names, ".")
 }
 
 func contractName(contract string) string {
@@ -359,9 +371,13 @@ func renderService(f *goFile, m *model) {
 	f.printf("var (\n")
 	for _, svc := range m.services {
 		for _, method := range svc.methods {
-			f.printf("method%s = method{name: %q, fullName: %q, kind: %s, since: %d, stream: %s, contract: %s}\n",
+			batched := ""
+			if method.stream == streamSnapshot {
+				batched = fmt.Sprintf(", batched: %q", batchedName(method))
+			}
+			f.printf("method%s = method{name: %q, fullName: %q, kind: %s, since: %d, stream: %s, contract: %s, callClass: %s%s}\n",
 				method.name, method.name, "/"+string(svc.desc.FullName())+"/"+method.name, kindName(method.kind),
-				method.since, streamName(method.stream), contractName(svc.contract))
+				method.since, streamName(method.stream), contractName(svc.contract), method.class, batched)
 		}
 	}
 	f.printf(")\n\nvar methodsByFullName = map[string]*method{\n")
@@ -400,7 +416,7 @@ func renderService(f *goFile, m *model) {
 	for _, contract := range []string{contractBoth, contractState, contractArtifacts} {
 		var registered []*service
 		for _, svc := range m.services {
-			if svc.contract == contract {
+			if svc.contract == contract && !svc.optional {
 				registered = append(registered, svc)
 			}
 		}
@@ -418,10 +434,41 @@ func renderService(f *goFile, m *model) {
 			f.printf("}\n")
 		}
 	}
+	for _, svc := range m.services {
+		if svc.optional {
+			f.printf("if provider := s.%sProvider(); provider != nil {\n", lowerFirst(svc.name))
+			f.printf("storagepb.Register%sServer(registrar, &%sService{server: s, provider: provider})\n}\n",
+				svc.name, lowerFirst(svc.name))
+		}
+	}
 	f.printf("}\n\n")
 	for _, svc := range m.services {
+		if svc.optional {
+			renderOptionalProvider(f, svc)
+		}
 		renderServer(f, svc)
 	}
+}
+
+// serviceProvider renders the interface a service's provider implements.
+func serviceProvider(f *goFile, svc *service) string {
+	embedded := make([]string, 0, len(svc.interfaces))
+	for _, iface := range svc.interfaces {
+		embedded = append(embedded, f.typeString(iface.Type()))
+	}
+	return "interface {\n" + strings.Join(embedded, "\n") + "\n}"
+}
+
+// renderOptionalProvider writes the lookup of the provider that serves an
+// optional service: the state provider when it implements every interface,
+// else the artifacts provider when it does, else none.
+func renderOptionalProvider(f *goFile, svc *service) {
+	provider := serviceProvider(f, svc)
+	f.printf("// %sProvider returns the provider that serves %s: the state provider when it\n", lowerFirst(svc.name), svc.desc.FullName())
+	f.printf("// implements the service's interfaces, else the artifacts provider when it\n// does, else nil.\n")
+	f.printf("func (s *Server) %sProvider() %s {\n", lowerFirst(svc.name), provider)
+	f.printf("if provider, ok := s.state.(%s); ok {\nreturn provider\n}\n", provider)
+	f.printf("if provider, ok := s.artifacts.(%s); ok {\nreturn provider\n}\nreturn nil\n}\n\n", provider)
 }
 
 func signature(f *goFile, method *rpcMethod) (params, args, results string) {
@@ -479,10 +526,13 @@ func renderClientMethod(f *goFile, method *rpcMethod) {
 		f.printf("_ = err\n")
 	}
 	switch method.stream {
-	case streamUpload, streamDownload:
+	case streamUpload, streamDownload, streamSnapshot:
 		helper, open := "upload", fmt.Sprintf("client.bulk.%s.%s(ctx, opts...)", stub, method.name)
-		if method.stream == streamDownload {
+		switch method.stream {
+		case streamDownload:
 			helper, open = "download", fmt.Sprintf("client.bulk.%s.%s(ctx, wireRequest, opts...)", stub, method.name)
+		case streamSnapshot:
+			helper, open = "snapshot", fmt.Sprintf("client.bulk.%s.%s(ctx, wireRequest, opts...)", stub, method.name)
 		}
 		f.printf("wireResponse := &%s{}\n", wireMessage(f, method.desc.Output()))
 		f.printf("if err := client.%s(ctx, &method%s, wireRequest, wireResponse, "+
@@ -513,13 +563,9 @@ func renderClientMethod(f *goFile, method *rpcMethod) {
 }
 
 func renderServer(f *goFile, svc *service) {
-	embedded := make([]string, 0, len(svc.interfaces))
-	for _, iface := range svc.interfaces {
-		embedded = append(embedded, f.typeString(iface.Type()))
-	}
 	f.printf("// %sService serves %s from a provider.\n", lowerFirst(svc.name), svc.desc.FullName())
-	f.printf("type %sService struct {\nstoragepb.Unimplemented%sServer\nserver *Server\nprovider interface {\n%s\n}\n}\n\n",
-		lowerFirst(svc.name), svc.name, strings.Join(embedded, "\n"))
+	f.printf("type %sService struct {\nstoragepb.Unimplemented%sServer\nserver *Server\nprovider %s\n}\n\n",
+		lowerFirst(svc.name), svc.name, serviceProvider(f, svc))
 	for _, method := range svc.methods {
 		request := wireMessage(f, method.desc.Input())
 		response := wireMessage(f, method.desc.Output())
@@ -533,7 +579,7 @@ func renderServer(f *goFile, svc *service) {
 				lowerFirst(svc.name), method.name, request, response)
 			f.printf("ctx := stream.Context()\nwireRequest := &%s{}\n", request)
 			f.printf("if err := service.server.receiveUpload(stream, &method%s, wireRequest); err != nil {\nreturn err\n}\n", method.name)
-		case streamDownload:
+		case streamDownload, streamSnapshot:
 			fail = "return %s"
 			f.printf("func (service *%sService) %s(wireRequest *%s, stream grpc.ServerStreamingServer[%s]) error {\n",
 				lowerFirst(svc.name), method.name, request, response)
@@ -576,6 +622,8 @@ func renderServer(f *goFile, svc *service) {
 			f.printf("return stream.SendAndClose(wireResponse)\n}\n\n")
 		case streamDownload:
 			f.printf("return service.server.sendDownload(stream, &method%s, wireResponse)\n}\n\n", method.name)
+		case streamSnapshot:
+			f.printf("return service.server.sendSnapshot(stream, &method%s, wireResponse)\n}\n\n", method.name)
 		default:
 			f.printf("return wireResponse, nil\n}\n\n")
 		}
@@ -584,7 +632,8 @@ func renderServer(f *goFile, svc *service) {
 
 // renderOverlay writes the wiretest overlay: a state provider that sends
 // every state.v1 method with a wire RPC through the client and serves the
-// rest in process.
+// rest in process. An optional service is not part of state.v1, so the
+// overlay leaves it out; its RPCs are tested through the client directly.
 func renderOverlay(f *goFile, m *model) {
 	storagev1 := f.use(contractPath, "storagev1")
 	wire := f.use(wirePath, "wire")
@@ -592,7 +641,7 @@ func renderOverlay(f *goFile, m *model) {
 	f.printf("// client, and every other family from the in-process provider.\n")
 	f.printf("type stateOverlay struct {\n%s.StateProvider\nclient *%s.Client\n}\n\n", storagev1, wire)
 	for _, svc := range m.services {
-		if svc.contract == contractArtifacts {
+		if svc.contract == contractArtifacts || svc.optional {
 			continue
 		}
 		for _, method := range svc.methods {

@@ -26,6 +26,12 @@ const (
 	// as response headers.
 	HeaderBlobSize   = "orka-storage-blob-size"
 	HeaderBlobSHA256 = "orka-storage-blob-sha256"
+	// HeaderSnapshotRecords and HeaderSnapshotBytes describe the whole list a
+	// batched read returns: its number of records, and the sum of their
+	// encoded sizes in bytes, both in decimal. The server sends them as
+	// response headers.
+	HeaderSnapshotRecords = "orka-storage-snapshot-records"
+	HeaderSnapshotBytes   = "orka-storage-snapshot-bytes"
 )
 
 // unknownName names a kind, class or version this library cannot name.
@@ -43,6 +49,10 @@ const MaxChunkBytes = 1 << 20
 // DefaultMaxBlobBytes is the largest blob a client or server accepts unless
 // it is configured otherwise. It covers the contract's largest values.
 const DefaultMaxBlobBytes = 64 << 20
+
+// DefaultMaxSnapshotBytes is the largest list a client accepts from one
+// batched read unless it is configured otherwise.
+const DefaultMaxSnapshotBytes = 256 << 20
 
 // Kind states whether a method may change stored state.
 type Kind int
@@ -77,8 +87,9 @@ const (
 	ClassHealth Class = iota + 1
 	// ClassControl is every other unary call.
 	ClassControl
-	// ClassBulk is every streaming call, which carries a blob. A client sends
-	// bulk calls over their own connection when it has one.
+	// ClassBulk is every streaming call: one that carries a blob, and a
+	// batched read. A client sends bulk calls over their own connection when
+	// it has one.
 	ClassBulk
 )
 
@@ -106,6 +117,9 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
+	// streamSnapshot is a server-streaming read whose response list crosses in
+	// batches.
+	streamSnapshot
 )
 
 // method describes one RPC. The generated method table holds one per
@@ -117,8 +131,14 @@ type method struct {
 	since    int
 	stream   streamShape
 	// contract is the contract part the RPC belongs to, or empty for the
-	// Dataset RPCs every provider serves.
+	// Dataset RPCs every provider serves and for the RPCs of an optional
+	// service either part's provider may serve.
 	contract string
+	// callClass is the RPC's call class.
+	callClass Class
+	// batched is, for a batched read, the path of field names from the
+	// response message to the list that crosses in batches.
+	batched string
 }
 
 // takesEnvelope reports whether m carries a write envelope. Only the methods
@@ -137,14 +157,7 @@ func methodByFullName(fullName string) *method {
 
 // class returns the call class of m.
 func (m *method) class() Class {
-	switch {
-	case m.contract == "":
-		return ClassHealth
-	case m.stream != streamNone:
-		return ClassBulk
-	default:
-		return ClassControl
-	}
+	return m.callClass
 }
 
 // ServerInfo describes the server library that serves a provider. Describe

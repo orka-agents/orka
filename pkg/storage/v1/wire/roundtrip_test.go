@@ -170,6 +170,15 @@ func TestJSONValuesCarryTheirEncodingJSONBytes(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, raw, back, "raw JSON bytes are carried unchanged")
 
+	for _, blank := range []json.RawMessage{nil, {}, json.RawMessage(" \n\t\r ")} {
+		encoded, err = rawJSONToWire(blank, "J")
+		require.NoError(t, err, "content that is only whitespace is no content, not invalid JSON")
+		require.Nil(t, encoded, "empty or whitespace-only raw JSON is an absent field")
+	}
+	back, err = rawJSONFromWire(&storagepb.JSONValue{Json: []byte(" \n")}, "J")
+	require.NoError(t, err)
+	require.Nil(t, back)
+
 	_, err = rawJSONToWire(json.RawMessage(`{`), "J")
 	require.ErrorIs(t, err, storagev1.ErrValidation)
 	_, err = jsonToWire(func() {}, "J")

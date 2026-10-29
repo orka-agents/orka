@@ -78,6 +78,18 @@ message ControllerEpochFence {
   string holder_id = 3;
 }
 
+// ControllerEpoch is the durable compare-and-swap record of controller
+// ownership.
+message ControllerEpoch {
+  string name = 1;
+  int64 epoch = 2;
+  string holder_id = 3;
+  string request_digest = 4;
+  int64 version = 5;
+  google.protobuf.Timestamp acquired_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
 // WriteEnvelope carries the cross-cutting identity of one controller write.
 // It travels as the binary request header orka-storage-envelope-bin, never in
 // a request message.

@@ -18,7 +18,7 @@ type TaskJobIdentity struct {
 // changes. Revocations survive ordinary data cleanup and are reclaimed only by
 // the Task finalizer, together with a fresh cleanup generation.
 type TaskJobAuthorityStore interface {
-	RevokeTaskJob(context.Context, TaskJobIdentity) error
-	CheckTaskJobAuthority(context.Context, TaskJobIdentity) error
-	DeleteTaskJobRevocations(context.Context, string, string, string) error
+	RevokeTaskJob(ctx context.Context, identity TaskJobIdentity) error
+	CheckTaskJobAuthority(ctx context.Context, identity TaskJobIdentity) error
+	DeleteTaskJobRevocations(ctx context.Context, namespace, taskName, taskUID string) error
 }

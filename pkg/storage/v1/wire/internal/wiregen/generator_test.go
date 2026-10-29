@@ -402,3 +402,87 @@ func TestGenerationMapsAnInlineRecordToTheRequest(t *testing.T) {
 		"SaveArtifact(ctx context.Context, request SaveArtifactRequest, overwrite bool) error")
 	expectProblem(t, contract, wireFiles(), "parameter request of SaveArtifact has no field in SaveArtifactRequest")
 }
+
+// A batched read streams only its response, is a read, and names a repeated
+// message field reached through singular message fields.
+func TestGenerationFailsOnInconsistentBatchedReads(t *testing.T) {
+	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
+		// A unary RPC that declares a batched list.
+		proto.SetExtension(methodProto(t, protos, "sessions.proto", "SearchTranscript").GetOptions(), storagepb.E_Batched, "results")
+		// A batched path that ends at a singular field.
+		proto.SetExtension(methodProto(t, protos, "sessions.proto", "GetSession").GetOptions(), storagepb.E_Batched, "session")
+		// A batched path through a field the response does not have.
+		proto.SetExtension(methodProto(t, protos, "sessions.proto", "ListSessions").GetOptions(), storagepb.E_Batched, "items")
+		// A batched read declared as a write.
+		proto.SetExtension(methodProto(t, protos, "sessions.proto", "LoadTranscript").GetOptions(), storagepb.E_Kind,
+			storagepb.MethodKind_METHOD_KIND_WRITE)
+	})
+	expectProblem(t, testContractDir, files,
+		"orka.storage.v1.Sessions.SearchTranscript declares batched but does not stream only its response",
+		`orka.storage.v1.Sessions.GetSession batches "session", which must reach a repeated message field`,
+		`orka.storage.v1.Sessions.ListSessions batches "items", but ListSessionsResponse has no field "items"`,
+		"orka.storage.v1.Sessions.LoadTranscript streams its response, so it must be a read")
+}
+
+// An optional service names only interfaces neither contract part requires,
+// and a service of such interfaces must say it is optional.
+func TestGenerationFailsOnMisdeclaredOptionalServices(t *testing.T) {
+	files := editedWire(t, func(protos map[string]*descriptorpb.FileDescriptorProto) {
+		proto.SetExtension(protos["orka/storage/v1/messages.proto"].GetService()[0].GetOptions(), storagepb.E_Optional, true)
+		proto.SetExtension(protos["orka/storage/v1/ownership.proto"].GetService()[0].GetOptions(), storagepb.E_Optional, false)
+	})
+	expectProblem(t, testContractDir, files,
+		"optional service Messages names an interface a contract part requires",
+		"service Ownership mixes state.v1 and artifacts.v1 interfaces, or names interfaces neither part requires")
+}
+
+// An embedded field crosses the wire only when it is a contract record.
+func TestGenerationFailsOnAnEmbeddedFieldThatIsNotARecord(t *testing.T) {
+	contract := editedContract(t, "\tGoalComplete bool ", "\tDatasetOrigin\n\tGoalComplete bool ")
+	expectProblem(t, contract, wireFiles(), "field PlanState.DatasetOrigin cannot cross the wire")
+}
+
+func TestModelMapsTheSessionControlEventAndOwnershipFamilies(t *testing.T) {
+	m := realModel(t)
+	services := map[string]*service{}
+	methods := map[string]*rpcMethod{}
+	for _, svc := range m.services {
+		services[svc.name] = svc
+		for _, method := range svc.methods {
+			methods[method.name] = method
+		}
+	}
+	for name, contract := range map[string]string{"Sessions": contractState, "Control": contractState, "Events": contractState,
+		"Ownership": contractBoth} {
+		if services[name] == nil || services[name].contract != contract {
+			t.Fatalf("service %s is not mapped as a %s service", name, contract)
+		}
+	}
+	if !services["Ownership"].optional || services["Sessions"].optional {
+		t.Error("only Ownership is optional")
+	}
+	for name, path := range map[string]string{"GetSession": "session.messages", "ListSessions": "sessions",
+		"LoadTranscript": "messages", "LoadTranscriptThrough": "messages", "ListSessionCleanupIntents": "intents",
+		"ListSessionCleanupTurns": "turns"} {
+		if method := methods[name]; method == nil || method.stream != streamSnapshot || batchedName(method) != path || method.class != classBulk {
+			t.Errorf("%s is not a bulk batched read of %q", name, path)
+		}
+	}
+	for name, class := range map[string]string{"Describe": classHealth, "ResolveOperation": classControl,
+		"AppendExecutionEvent": classControl, "GetArtifact": classBulk} {
+		if methods[name] == nil || methods[name].class != class {
+			t.Errorf("%s is not a %s call", name, class)
+		}
+	}
+	records := map[string]bool{}
+	for _, rec := range m.records {
+		records[rec.name] = true
+	}
+	for _, name := range []string{"SessionRecord", "SessionMessage", "SessionCleanupIntent", "SessionTurn", "OutboxProjection",
+		"ExecutionEvent", "SessionExecutionEvent", "UsageObservation", "ControllerEpoch", "OperationOutcome",
+		"ResolveOperationRequest", "AdvanceControllerEpochRequest", "ControllerEpochMirrorState", "CompleteSessionCleanupRequest"} {
+		if !records[name] {
+			t.Errorf("record %s is not mapped", name)
+		}
+	}
+}

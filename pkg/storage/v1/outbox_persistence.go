@@ -8,8 +8,8 @@ import (
 // Kubernetes epoch fence. Its methods persist records but do not treat a
 // SQLite controller_epochs row as authoritative.
 type OutboxPersistenceStore interface {
-	EnqueueOutboxProjectionRecord(context.Context, *OutboxProjection, ControllerEpochFence) (*OutboxProjection, error)
-	GetOutboxProjection(context.Context, string) (*OutboxProjection, error)
-	ClaimOutboxProjectionRecords(context.Context, ClaimOutboxProjectionsRequest) ([]OutboxProjection, error)
-	CompleteOutboxProjectionRecord(context.Context, CompleteOutboxProjectionRequest) (*OutboxProjection, error)
+	EnqueueOutboxProjectionRecord(ctx context.Context, projection *OutboxProjection, fence ControllerEpochFence) (*OutboxProjection, error)
+	GetOutboxProjection(ctx context.Context, id string) (*OutboxProjection, error)
+	ClaimOutboxProjectionRecords(ctx context.Context, request ClaimOutboxProjectionsRequest) ([]OutboxProjection, error)
+	CompleteOutboxProjectionRecord(ctx context.Context, request CompleteOutboxProjectionRequest) (*OutboxProjection, error)
 }

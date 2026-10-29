@@ -176,6 +176,100 @@ func (x *ControllerEpochFence) GetHolderId() string {
 	return ""
 }
 
+// ControllerEpoch is the durable compare-and-swap record of controller
+// ownership.
+type ControllerEpoch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Epoch         int64                  `protobuf:"varint,2,opt,name=epoch,proto3" json:"epoch,omitempty"`
+	HolderId      string                 `protobuf:"bytes,3,opt,name=holder_id,json=holderId,proto3" json:"holder_id,omitempty"`
+	RequestDigest string                 `protobuf:"bytes,4,opt,name=request_digest,json=requestDigest,proto3" json:"request_digest,omitempty"`
+	Version       int64                  `protobuf:"varint,5,opt,name=version,proto3" json:"version,omitempty"`
+	AcquiredAt    *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=acquired_at,json=acquiredAt,proto3" json:"acquired_at,omitempty"`
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ControllerEpoch) Reset() {
+	*x = ControllerEpoch{}
+	mi := &file_orka_storage_v1_common_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControllerEpoch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControllerEpoch) ProtoMessage() {}
+
+func (x *ControllerEpoch) ProtoReflect() protoreflect.Message {
+	mi := &file_orka_storage_v1_common_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControllerEpoch.ProtoReflect.Descriptor instead.
+func (*ControllerEpoch) Descriptor() ([]byte, []int) {
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ControllerEpoch) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ControllerEpoch) GetEpoch() int64 {
+	if x != nil {
+		return x.Epoch
+	}
+	return 0
+}
+
+func (x *ControllerEpoch) GetHolderId() string {
+	if x != nil {
+		return x.HolderId
+	}
+	return ""
+}
+
+func (x *ControllerEpoch) GetRequestDigest() string {
+	if x != nil {
+		return x.RequestDigest
+	}
+	return ""
+}
+
+func (x *ControllerEpoch) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *ControllerEpoch) GetAcquiredAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.AcquiredAt
+	}
+	return nil
+}
+
+func (x *ControllerEpoch) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
 // WriteEnvelope carries the cross-cutting identity of one controller write.
 // It travels as the binary request header orka-storage-envelope-bin, never in
 // a request message.
@@ -193,7 +287,7 @@ type WriteEnvelope struct {
 
 func (x *WriteEnvelope) Reset() {
 	*x = WriteEnvelope{}
-	mi := &file_orka_storage_v1_common_proto_msgTypes[3]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -205,7 +299,7 @@ func (x *WriteEnvelope) String() string {
 func (*WriteEnvelope) ProtoMessage() {}
 
 func (x *WriteEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_orka_storage_v1_common_proto_msgTypes[3]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -218,7 +312,7 @@ func (x *WriteEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WriteEnvelope.ProtoReflect.Descriptor instead.
 func (*WriteEnvelope) Descriptor() ([]byte, []int) {
-	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *WriteEnvelope) GetDatasetId() string {
@@ -276,7 +370,7 @@ type ProviderLimits struct {
 
 func (x *ProviderLimits) Reset() {
 	*x = ProviderLimits{}
-	mi := &file_orka_storage_v1_common_proto_msgTypes[4]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -288,7 +382,7 @@ func (x *ProviderLimits) String() string {
 func (*ProviderLimits) ProtoMessage() {}
 
 func (x *ProviderLimits) ProtoReflect() protoreflect.Message {
-	mi := &file_orka_storage_v1_common_proto_msgTypes[4]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -301,7 +395,7 @@ func (x *ProviderLimits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderLimits.ProtoReflect.Descriptor instead.
 func (*ProviderLimits) Descriptor() ([]byte, []int) {
-	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ProviderLimits) GetMaxArtifactBytes() int64 {
@@ -352,7 +446,7 @@ type ProviderInfo struct {
 
 func (x *ProviderInfo) Reset() {
 	*x = ProviderInfo{}
-	mi := &file_orka_storage_v1_common_proto_msgTypes[5]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -364,7 +458,7 @@ func (x *ProviderInfo) String() string {
 func (*ProviderInfo) ProtoMessage() {}
 
 func (x *ProviderInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_orka_storage_v1_common_proto_msgTypes[5]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -377,7 +471,7 @@ func (x *ProviderInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProviderInfo.ProtoReflect.Descriptor instead.
 func (*ProviderInfo) Descriptor() ([]byte, []int) {
-	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ProviderInfo) GetContractVersion() string {
@@ -474,7 +568,7 @@ type ServerInfo struct {
 
 func (x *ServerInfo) Reset() {
 	*x = ServerInfo{}
-	mi := &file_orka_storage_v1_common_proto_msgTypes[6]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -486,7 +580,7 @@ func (x *ServerInfo) String() string {
 func (*ServerInfo) ProtoMessage() {}
 
 func (x *ServerInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_orka_storage_v1_common_proto_msgTypes[6]
+	mi := &file_orka_storage_v1_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -499,7 +593,7 @@ func (x *ServerInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerInfo.ProtoReflect.Descriptor instead.
 func (*ServerInfo) Descriptor() ([]byte, []int) {
-	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_orka_storage_v1_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ServerInfo) GetProtocolRevision() int64 {
@@ -542,7 +636,17 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\x14ControllerEpochFence\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\x12\x1b\n" +
-	"\tholder_id\x18\x03 \x01(\tR\bholderId\"\x8a\x02\n" +
+	"\tholder_id\x18\x03 \x01(\tR\bholderId\"\x91\x02\n" +
+	"\x0fControllerEpoch\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\x12\x1b\n" +
+	"\tholder_id\x18\x03 \x01(\tR\bholderId\x12%\n" +
+	"\x0erequest_digest\x18\x04 \x01(\tR\rrequestDigest\x12\x18\n" +
+	"\aversion\x18\x05 \x01(\x03R\aversion\x12;\n" +
+	"\vacquired_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"acquiredAt\x129\n" +
+	"\n" +
+	"updated_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\x8a\x02\n" +
 	"\rWriteEnvelope\x12\x1d\n" +
 	"\n" +
 	"dataset_id\x18\x01 \x01(\tR\tdatasetId\x12;\n" +
@@ -592,30 +696,33 @@ func file_orka_storage_v1_common_proto_rawDescGZIP() []byte {
 	return file_orka_storage_v1_common_proto_rawDescData
 }
 
-var file_orka_storage_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_orka_storage_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_orka_storage_v1_common_proto_goTypes = []any{
 	(*NullableTime)(nil),          // 0: orka.storage.v1.NullableTime
 	(*JSONValue)(nil),             // 1: orka.storage.v1.JSONValue
 	(*ControllerEpochFence)(nil),  // 2: orka.storage.v1.ControllerEpochFence
-	(*WriteEnvelope)(nil),         // 3: orka.storage.v1.WriteEnvelope
-	(*ProviderLimits)(nil),        // 4: orka.storage.v1.ProviderLimits
-	(*ProviderInfo)(nil),          // 5: orka.storage.v1.ProviderInfo
-	(*ServerInfo)(nil),            // 6: orka.storage.v1.ServerInfo
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
+	(*ControllerEpoch)(nil),       // 3: orka.storage.v1.ControllerEpoch
+	(*WriteEnvelope)(nil),         // 4: orka.storage.v1.WriteEnvelope
+	(*ProviderLimits)(nil),        // 5: orka.storage.v1.ProviderLimits
+	(*ProviderInfo)(nil),          // 6: orka.storage.v1.ProviderInfo
+	(*ServerInfo)(nil),            // 7: orka.storage.v1.ServerInfo
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 9: google.protobuf.Duration
 }
 var file_orka_storage_v1_common_proto_depIdxs = []int32{
-	7, // 0: orka.storage.v1.NullableTime.value:type_name -> google.protobuf.Timestamp
-	2, // 1: orka.storage.v1.WriteEnvelope.fence:type_name -> orka.storage.v1.ControllerEpochFence
-	7, // 2: orka.storage.v1.WriteEnvelope.issued_at:type_name -> google.protobuf.Timestamp
-	8, // 3: orka.storage.v1.ProviderLimits.receipt_retention:type_name -> google.protobuf.Duration
-	4, // 4: orka.storage.v1.ProviderInfo.limits:type_name -> orka.storage.v1.ProviderLimits
-	7, // 5: orka.storage.v1.ProviderInfo.observed_at:type_name -> google.protobuf.Timestamp
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	8, // 0: orka.storage.v1.NullableTime.value:type_name -> google.protobuf.Timestamp
+	8, // 1: orka.storage.v1.ControllerEpoch.acquired_at:type_name -> google.protobuf.Timestamp
+	8, // 2: orka.storage.v1.ControllerEpoch.updated_at:type_name -> google.protobuf.Timestamp
+	2, // 3: orka.storage.v1.WriteEnvelope.fence:type_name -> orka.storage.v1.ControllerEpochFence
+	8, // 4: orka.storage.v1.WriteEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	9, // 5: orka.storage.v1.ProviderLimits.receipt_retention:type_name -> google.protobuf.Duration
+	5, // 6: orka.storage.v1.ProviderInfo.limits:type_name -> orka.storage.v1.ProviderLimits
+	8, // 7: orka.storage.v1.ProviderInfo.observed_at:type_name -> google.protobuf.Timestamp
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_orka_storage_v1_common_proto_init() }
@@ -630,7 +737,7 @@ func file_orka_storage_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_orka_storage_v1_common_proto_rawDesc), len(file_orka_storage_v1_common_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

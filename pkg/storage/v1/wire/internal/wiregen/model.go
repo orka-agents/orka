@@ -22,7 +22,8 @@ type model struct {
 }
 
 // Contracts a service serves: one contract part, or both for the Dataset
-// service every provider serves.
+// service every provider serves and for an optional service either part's
+// provider may serve.
 const (
 	contractState     = "state"
 	contractArtifacts = "artifacts"
@@ -34,7 +35,11 @@ type service struct {
 	name       string
 	interfaces []*types.TypeName
 	contract   string
-	methods    []*rpcMethod
+	// optional is set for a service whose interfaces neither contract part
+	// requires yet; a server serves it only from a provider that implements
+	// them.
+	optional bool
+	methods  []*rpcMethod
 }
 
 // streamShape is how an RPC carries its request and response.
@@ -47,6 +52,16 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
+	// streamSnapshot is a server-streaming read whose response list crosses
+	// in batches.
+	streamSnapshot
+)
+
+// Call classes, named as the wire package's Class constants.
+const (
+	classHealth  = "ClassHealth"
+	classControl = "ClassControl"
+	classBulk    = "ClassBulk"
 )
 
 type rpcMethod struct {
@@ -57,6 +72,10 @@ type rpcMethod struct {
 	kind    storagepb.MethodKind
 	since   int
 	stream  streamShape
+	class   string
+	// batched is the path to the response list a snapshot RPC carries in
+	// batches.
+	batched []protoreflect.FieldDescriptor
 	// inline is set when the method's only parameter is a contract record
 	// named <Method>Request; that record's wire message is the request.
 	inline  *record
@@ -193,6 +212,16 @@ func blobField(field protoreflect.FieldDescriptor) bool {
 	return value
 }
 
+func optionalService(desc protoreflect.ServiceDescriptor) bool {
+	value, _ := proto.GetExtension(desc.Options(), storagepb.E_Optional).(bool)
+	return value
+}
+
+func batchedOption(rpc protoreflect.MethodDescriptor) string {
+	value, _ := proto.GetExtension(rpc.Options(), storagepb.E_Batched).(string)
+	return value
+}
+
 func fieldGoName(field protoreflect.FieldDescriptor) string {
 	value, _ := proto.GetExtension(field.Options(), storagepb.E_GoName).(string)
 	return value
@@ -201,7 +230,7 @@ func fieldGoName(field protoreflect.FieldDescriptor) string {
 // buildService maps one service to the Go interfaces it names. mapped
 // records which service already maps each Go method.
 func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[string]string) *service {
-	svc := &service{desc: desc, name: string(desc.Name())}
+	svc := &service{desc: desc, name: string(desc.Name()), optional: optionalService(desc)}
 	interfaceNames, _ := proto.GetExtension(desc.Options(), storagepb.E_GoInterface).([]string)
 	if len(interfaceNames) == 0 {
 		b.problemf("service %s names no Go interface", desc.Name())
@@ -209,6 +238,7 @@ func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[s
 	}
 	goMethods := map[string]*types.Func{}
 	inState, inArtifacts := true, true
+	inEither := false
 	for _, name := range interfaceNames {
 		object, ok := b.contract.Scope().Lookup(name).(*types.TypeName)
 		if !ok {
@@ -221,13 +251,20 @@ func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[s
 			continue
 		}
 		svc.interfaces = append(svc.interfaces, object)
-		inState = inState && b.providerImplements("StateProvider", iface)
-		inArtifacts = inArtifacts && b.providerImplements("ArtifactProvider", iface)
+		state, artifacts := b.providerImplements("StateProvider", iface), b.providerImplements("ArtifactProvider", iface)
+		inState = inState && state
+		inArtifacts = inArtifacts && artifacts
+		inEither = inEither || state || artifacts
 		for goMethod := range iface.Methods() {
 			goMethods[goMethod.Name()] = goMethod
 		}
 	}
 	switch {
+	case svc.optional && inEither:
+		b.problemf("optional service %s names an interface a contract part requires; a service of required "+
+			"interfaces is not optional", desc.Name())
+	case svc.optional:
+		svc.contract = contractBoth
 	case inState && inArtifacts:
 		svc.contract = contractBoth
 	case inState:
@@ -235,7 +272,8 @@ func (b *builder) buildService(desc protoreflect.ServiceDescriptor, mapped map[s
 	case inArtifacts:
 		svc.contract = contractArtifacts
 	default:
-		b.problemf("service %s mixes state.v1 and artifacts.v1 interfaces; a service serves one contract part or both", desc.Name())
+		b.problemf("service %s mixes state.v1 and artifacts.v1 interfaces, or names interfaces neither part requires "+
+			"without being optional; a service serves one contract part, both, or is optional", desc.Name())
 	}
 
 	rpcs := map[string]protoreflect.MethodDescriptor{}
@@ -290,8 +328,13 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 		return nil
 	case rpc.IsStreamingClient():
 		method.stream = streamUpload
+	case rpc.IsStreamingServer() && batchedOption(rpc) != "":
+		method.stream = streamSnapshot
 	case rpc.IsStreamingServer():
 		method.stream = streamDownload
+	}
+	if batchedOption(rpc) != "" && method.stream != streamSnapshot {
+		b.problemf("%s declares batched but does not stream only its response", where)
 	}
 	if rpc.Input().Name() != protoreflect.Name(method.name+"Request") ||
 		rpc.Output().Name() != protoreflect.Name(method.name+"Response") {
@@ -305,8 +348,22 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 	if method.stream == streamUpload && method.kind != storagepb.MethodKind_METHOD_KIND_WRITE {
 		b.problemf("%s streams its request, so it must be a write", where)
 	}
-	if method.stream == streamDownload && method.kind != storagepb.MethodKind_METHOD_KIND_READ {
+	if (method.stream == streamDownload || method.stream == streamSnapshot) && method.kind != storagepb.MethodKind_METHOD_KIND_READ {
 		b.problemf("%s streams its response, so it must be a read", where)
+	}
+	switch {
+	case svc.contract == contractBoth && !svc.optional:
+		method.class = classHealth
+		if method.stream != streamNone {
+			b.problemf("%s is a health call, which cannot stream", where)
+		}
+	case method.stream != streamNone:
+		method.class = classBulk
+	default:
+		method.class = classControl
+	}
+	if method.stream == streamSnapshot {
+		method.batched = b.batchedPath(rpc)
 	}
 	since, _ := proto.GetExtension(rpc.Options(), storagepb.E_RpcSince).(int32)
 	method.since = int(since)
@@ -336,11 +393,37 @@ func (b *builder) checkBlobs(method *rpcMethod) {
 			b.problemf("%s: %s", where, path.problem)
 		}
 	}
-	want := map[streamShape][2]int{streamNone: {0, 0}, streamUpload: {1, 0}, streamDownload: {0, 1}}[method.stream]
+	want := map[streamShape][2]int{streamNone: {0, 0}, streamUpload: {1, 0}, streamDownload: {0, 1}, streamSnapshot: {0, 0}}[method.stream]
 	if len(request) != want[0] || len(response) != want[1] {
-		b.problemf("%s has %d blob fields in its request and %d in its response; a unary RPC has none, "+
-			"and a streaming RPC exactly one, in the direction it streams", where, len(request), len(response))
+		b.problemf("%s has %d blob fields in its request and %d in its response; a unary RPC and a batched "+
+			"read have none, and a blob RPC exactly one, in the direction it streams", where, len(request), len(response))
 	}
+}
+
+// batchedPath resolves a snapshot RPC's batched option: field names from the
+// response message, through singular message fields outside any oneof, to a
+// repeated message field.
+func (b *builder) batchedPath(rpc protoreflect.MethodDescriptor) []protoreflect.FieldDescriptor {
+	where, option := string(rpc.FullName()), batchedOption(rpc)
+	message := rpc.Output()
+	names := strings.Split(option, ".")
+	path := make([]protoreflect.FieldDescriptor, 0, len(names))
+	for index, name := range names {
+		field := message.Fields().ByName(protoreflect.Name(name))
+		if field == nil {
+			b.problemf("%s batches %q, but %s has no field %q", where, option, message.Name(), name)
+			return nil
+		}
+		path = append(path, field)
+		last := index == len(names)-1
+		if field.ContainingOneof() != nil || field.IsMap() || field.Message() == nil || field.IsList() != last {
+			b.problemf("%s batches %q, which must reach a repeated message field through singular message fields "+
+				"outside any oneof", where, option)
+			return nil
+		}
+		message = field.Message()
+	}
+	return path
 }
 
 // blobPath is the chain of fields from a request or response message to one
@@ -555,8 +638,9 @@ func (b *builder) record(name string, wireName protoreflect.FullName) *record {
 	claimed := map[protoreflect.FieldNumber]bool{}
 	for index := 0; index < structType.NumFields(); index++ {
 		goField := structType.Field(index)
-		if !goField.Exported() || goField.Embedded() {
-			b.problemf("field %s.%s cannot cross the wire: only exported, named fields can", name, goField.Name())
+		if !goField.Exported() || (goField.Embedded() && b.contractRecord(goField.Type()) == nil) {
+			b.problemf("field %s.%s cannot cross the wire: only exported fields, and embedded contract records, can",
+				name, goField.Name())
 			continue
 		}
 		field := b.fieldFor(message, goField.Name())

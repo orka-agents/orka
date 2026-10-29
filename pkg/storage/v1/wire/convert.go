@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"strings"
@@ -116,10 +117,11 @@ func jsonMapToWire(value map[string]any, field string) (*storagepb.JSONValue, er
 	return jsonToWire(value, field)
 }
 
-// rawJSONToWire carries json.RawMessage bytes unchanged. Empty bytes are an
-// absent field.
+// rawJSONToWire carries json.RawMessage bytes unchanged. Empty bytes, and
+// bytes that are only JSON whitespace, are an absent field: the contract
+// stores such content as no content, and a request digest counts it as zero.
 func rawJSONToWire(value json.RawMessage, field string) (*storagepb.JSONValue, error) {
-	if len(value) == 0 {
+	if len(bytes.Trim(value, jsonWhitespace)) == 0 {
 		return nil, nil
 	}
 	if !json.Valid(value) {
@@ -142,8 +144,11 @@ func jsonFromWire[T any](encoded *storagepb.JSONValue, field string) (T, error) 
 	return value, nil
 }
 
+// jsonWhitespace is the whitespace JSON allows between tokens.
+const jsonWhitespace = " \t\r\n"
+
 func rawJSONFromWire(encoded *storagepb.JSONValue, field string) (json.RawMessage, error) {
-	if encoded == nil || len(encoded.GetJson()) == 0 {
+	if encoded == nil || len(bytes.Trim(encoded.GetJson(), jsonWhitespace)) == 0 {
 		return nil, nil
 	}
 	if !json.Valid(encoded.GetJson()) {

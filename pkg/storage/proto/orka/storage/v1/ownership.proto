@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Ownership settles operations and advances each dataset's controller epoch.
+// Its methods carry no write envelope. No provider is required to serve it
+// yet, so a server whose providers do not implement it answers
+// UNIMPLEMENTED. A transport failure after ResolveOperation,
+// PruneOperationReceipts or AdvanceControllerEpoch may have been sent is an
+// unknown outcome; each is safe to repeat.
+service Ownership {
+  option (go_interface) = "OperationReceiptStore";
+  option (go_interface) = "ControllerEpochAdvancer";
+  option (optional) = true;
+
+  rpc ResolveOperation(ResolveOperationRequest) returns (ResolveOperationResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc PruneOperationReceipts(PruneOperationReceiptsRequest) returns (PruneOperationReceiptsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AdvanceControllerEpoch(AdvanceControllerEpochRequest) returns (AdvanceControllerEpochResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetControllerEpochMirror(GetControllerEpochMirrorRequest) returns (GetControllerEpochMirrorResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+}
+
+// ResolveOperationRequest is both the contract record ResolveOperation takes
+// and the RPC's request message.
+message ResolveOperationRequest {
+  string dataset_id = 1;
+  string operation_id = 2;
+  string method = 3;
+  string request_digest = 4;
+  google.protobuf.Timestamp issued_at = 5;
+}
+
+message OperationOutcome {
+  string operation_id = 1;
+  string method = 2;
+  string request_digest = 3;
+  string state = 4;
+  ControllerEpochFence fence = 5;
+  google.protobuf.Timestamp issued_at = 6;
+  google.protobuf.Timestamp recorded_at = 7;
+}
+
+message ResolveOperationResponse {
+  OperationOutcome outcome = 1;
+}
+
+message PruneOperationReceiptsRequest {
+  int64 limit = 1;
+}
+
+message PruneOperationReceiptsResponse {
+  int64 removed = 1;
+}
+
+// AdvanceControllerEpochRequest is both the contract record
+// AdvanceControllerEpoch takes and the RPC's request message.
+message AdvanceControllerEpochRequest {
+  string dataset_id = 1;
+  ControllerEpoch epoch = 2;
+  string installation_id = 3;
+}
+
+message ControllerEpochMirrorState {
+  string dataset_id = 1;
+  ControllerEpoch epoch = 2;
+  string installation_id = 3;
+  ControllerEpochFence previous = 4;
+  google.protobuf.Timestamp advanced_at = 5;
+}
+
+message AdvanceControllerEpochResponse {
+  ControllerEpochMirrorState state = 1;
+}
+
+message GetControllerEpochMirrorRequest {
+  string name = 1;
+}
+
+message GetControllerEpochMirrorResponse {
+  ControllerEpochMirrorState state = 1;
+}

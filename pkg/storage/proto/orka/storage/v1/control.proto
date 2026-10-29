@@ -1,0 +1,495 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Control serves the store halves of the Kubernetes control protocols: Session
+// cleanup intents and receipts, the controller epoch mirror, the projection
+// outbox and Task Job authority. ListSessionCleanupIntents and
+// ListSessionCleanupTurns return lists the contract does not bound by size,
+// so their responses stream the list in batches from one provider result.
+service Control {
+  option (go_interface) = "SessionCleanupPersistenceStore";
+  option (go_interface) = "ControllerEpochMirror";
+  option (go_interface) = "OutboxPersistenceStore";
+  option (go_interface) = "OutboxBacklogReader";
+  option (go_interface) = "TaskJobAuthorityStore";
+
+  rpc GetSessionTurnCleanupReceipt(GetSessionTurnCleanupReceiptRequest) returns (GetSessionTurnCleanupReceiptResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc GetSessionCleanupIntent(GetSessionCleanupIntentRequest) returns (GetSessionCleanupIntentResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc ListSessionCleanupIntents(ListSessionCleanupIntentsRequest) returns (stream ListSessionCleanupIntentsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "intents";
+  }
+  rpc ListSessionCleanupTurns(ListSessionCleanupTurnsRequest) returns (stream ListSessionCleanupTurnsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "turns";
+  }
+  rpc GetSessionCleanupCompletion(GetSessionCleanupCompletionRequest) returns (GetSessionCleanupCompletionResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc HasSessionCleanupFenceForUID(HasSessionCleanupFenceForUIDRequest) returns (HasSessionCleanupFenceForUIDResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc GetSessionCleanupIdentity(GetSessionCleanupIdentityRequest) returns (GetSessionCleanupIdentityResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc BindSessionCleanupIdentity(BindSessionCleanupIdentityRequest) returns (BindSessionCleanupIdentityResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc HasSessionCleanupIntent(HasSessionCleanupIntentRequest) returns (HasSessionCleanupIntentResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc PrepareSessionCleanup(PrepareSessionCleanupRequest) returns (PrepareSessionCleanupResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc CompleteSessionCleanup(CompleteSessionCleanupRequest) returns (CompleteSessionCleanupResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc SyncControllerEpochMirror(SyncControllerEpochMirrorRequest) returns (SyncControllerEpochMirrorResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc EnqueueOutboxProjectionRecord(EnqueueOutboxProjectionRecordRequest) returns (EnqueueOutboxProjectionRecordResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetOutboxProjection(GetOutboxProjectionRequest) returns (GetOutboxProjectionResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc ClaimOutboxProjectionRecords(ClaimOutboxProjectionRecordsRequest) returns (ClaimOutboxProjectionRecordsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc CompleteOutboxProjectionRecord(CompleteOutboxProjectionRecordRequest) returns (CompleteOutboxProjectionRecordResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc CountUnsettledOutboxProjections(CountUnsettledOutboxProjectionsRequest) returns (CountUnsettledOutboxProjectionsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc RevokeTaskJob(RevokeTaskJobRequest) returns (RevokeTaskJobResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc CheckTaskJobAuthority(CheckTaskJobAuthorityRequest) returns (CheckTaskJobAuthorityResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteTaskJobRevocations(DeleteTaskJobRevocationsRequest) returns (DeleteTaskJobRevocationsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+}
+
+message RemoteRefState {
+  bool absent = 1;
+  string sha = 2;
+}
+
+message VerifiedBranchBaseline {
+  string repository_id = 1;
+  string ref = 2;
+  string sha = 3;
+}
+
+message SessionCleanupBranchClaim {
+  string id = 1;
+  string object_uid = 2;
+  int64 expected_version = 3;
+  int64 expected_generation = 4;
+  string expected_repository_id = 5;
+  string expected_ref = 6;
+  string expected_owner_uid = 7;
+  RemoteRefState expected_last_verified = 8;
+  string expected_availability = 9;
+  string expected_blocked_reason = 10;
+  string expected_publication_id = 11;
+  string expected_request_digest = 12;
+}
+
+message GatewaySessionCleanupProof {
+  string gateway_uid = 1;
+  string binding_uid = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp terminal_cutoff = 4;
+}
+
+message SessionCleanupIntent {
+  string namespace = 1;
+  string session_name = 2;
+  string session_uid = 3;
+  string control_object_uid = 4;
+  string control_request_digest = 5;
+  int64 expected_control_version = 6;
+  int64 expected_lease_generation = 7;
+  string expected_control_last_operation_id = 8;
+  string expected_control_last_digest = 9;
+  VerifiedBranchBaseline expected_verified_baseline = 10;
+  string lease_name = 11;
+  string lease_object_uid = 12;
+  repeated SessionCleanupBranchClaim branch_claims = 13;
+  string operation_id = 14;
+  string operation_digest = 15;
+  google.protobuf.Timestamp prepared_at = 16;
+  GatewaySessionCleanupProof gateway = 17;
+}
+
+message SessionCleanupCompletion {
+  string namespace = 1;
+  string session_name = 2;
+  string session_uid = 3;
+  string operation_id = 4;
+  string operation_digest = 5;
+  google.protobuf.Timestamp completed_at = 6;
+}
+
+message SessionTurnKey {
+  string session_uid = 1;
+  int64 lease_generation = 2;
+  string task_uid = 3;
+  int64 attempt = 4;
+  string prompt_id = 5;
+}
+
+message PreparedPublicationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string tree_sha = 3;
+  string commit_sha = 4;
+  string manifest_digest = 5;
+  string relative_root = 6;
+  string bundle_artifact_id = 7;
+  string bundle_digest = 8;
+  int64 bundle_size_bytes = 9;
+  string bundle_media_type = 10;
+  string bundle_ref = 11;
+  google.protobuf.Timestamp prepared_at = 12;
+}
+
+message PublishOperationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string target_repository_id = 3;
+  string target_ref = 4;
+  RemoteRefState remote_before = 5;
+  string expected_commit_sha = 6;
+  bool acknowledgement_unknown = 7;
+  google.protobuf.Timestamp published_at = 8;
+}
+
+message PublicationVerificationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string outcome = 3;
+  string expected_commit_sha = 4;
+  RemoteRefState observed_remote = 5;
+  string descendant_proof_digest = 6;
+  google.protobuf.Timestamp verified_at = 7;
+}
+
+message PullRequestOperationReceipt {
+  string operation_id = 1;
+  string request_digest = 2;
+  string intent_key = 3;
+  string forge_id = 4;
+  string url = 5;
+  string state = 6;
+  string head_sha = 7;
+  google.protobuf.Timestamp reconciled_at = 8;
+}
+
+message PublicationReceipt {
+  string publication_id = 1;
+  int64 generation = 2;
+  string state = 3;
+  PreparedPublicationReceipt prepared = 4;
+  PublishOperationReceipt publish = 5;
+  PublicationVerificationReceipt verification = 6;
+  PullRequestOperationReceipt pull_request = 7;
+}
+
+message SessionTurn {
+  string id = 1;
+  SessionTurnKey key = 2;
+  string prompt_attempt_id = 3;
+  string request_digest = 4;
+  string user_prompt = 5;
+  string state = 6;
+  string terminal_kind = 7;
+  string terminal_content = 8;
+  string finalization_digest = 9;
+  string native_session_digest = 10;
+  string publication_id = 11;
+  PublicationReceipt publication_receipt = 12;
+  string projection_id = 13;
+  string projection_kind = 14;
+  string projection_digest = 15;
+  google.protobuf.Timestamp projection_available_at = 16;
+  string controller_epoch_name = 17;
+  int64 controller_epoch = 18;
+  int64 version = 19;
+  google.protobuf.Timestamp created_at = 20;
+  NullableTime finalized_at = 21;
+  google.protobuf.Timestamp updated_at = 22;
+}
+
+message SessionTurnCleanupReceipt {
+  string namespace = 1;
+  string session_name = 2;
+  string operation_id = 3;
+  string operation_digest = 4;
+  string turn_id = 5;
+  SessionTurnKey key = 6;
+  string prompt_attempt_id = 7;
+  string terminal_kind = 8;
+  google.protobuf.Timestamp finalized_at = 9;
+  string publication_id = 10;
+  PublicationReceipt publication_receipt = 11;
+  string projection_id = 12;
+  string projection_kind = 13;
+  string projection_digest = 14;
+  string aggregate_kind = 15;
+  string aggregate_id = 16;
+  bytes payload = 17;
+  string payload_digest = 18;
+  string projection_state = 19;
+  string delivery_digest = 20;
+  NullableTime delivered_at = 21;
+}
+
+message OutboxProjection {
+  string id = 1;
+  string aggregate_kind = 2;
+  string aggregate_id = 3;
+  string projection_kind = 4;
+  string payload_digest = 5;
+  JSONValue payload = 6;
+  string state = 7;
+  int64 attempts = 8;
+  google.protobuf.Timestamp initial_available_at = 9;
+  google.protobuf.Timestamp available_at = 10;
+  string lease_owner = 11;
+  NullableTime lease_expires_at = 12;
+  string delivery_digest = 13;
+  string last_error = 14;
+  string last_operation_id = 15;
+  string last_operation_digest = 16;
+  string controller_epoch_name = 17;
+  int64 controller_epoch = 18;
+  int64 version = 19;
+  google.protobuf.Timestamp created_at = 20;
+  google.protobuf.Timestamp updated_at = 21;
+  NullableTime delivered_at = 22;
+}
+
+message ClaimOutboxProjectionsRequest {
+  ControllerEpochFence fence = 1;
+  string worker_id = 2;
+  int64 limit = 3;
+  google.protobuf.Duration lease_duration = 4;
+  google.protobuf.Timestamp now = 5;
+}
+
+message CompleteOutboxProjectionRequest {
+  string id = 1;
+  ControllerEpochFence fence = 2;
+  int64 expected_version = 3;
+  string lease_owner = 4;
+  string operation_id = 5;
+  string operation_digest = 6;
+  string new_state = 7;
+  string delivery_digest = 8;
+  string last_error = 9;
+  google.protobuf.Timestamp available_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message TaskJobIdentity {
+  string namespace = 1;
+  string task_uid = 2;
+  string job_uid = 3;
+}
+
+message GetSessionTurnCleanupReceiptRequest {
+  string namespace = 1;
+  string session_name = 2;
+  string prompt_attempt_id = 3;
+}
+
+message GetSessionTurnCleanupReceiptResponse {
+  SessionTurnCleanupReceipt receipt = 1;
+}
+
+message GetSessionCleanupIntentRequest {
+  string namespace = 1;
+  string session_name = 2;
+}
+
+message GetSessionCleanupIntentResponse {
+  SessionCleanupIntent intent = 1;
+}
+
+message ListSessionCleanupIntentsRequest {}
+
+message ListSessionCleanupIntentsResponse {
+  repeated SessionCleanupIntent intents = 1;
+}
+
+message ListSessionCleanupTurnsRequest {
+  SessionCleanupIntent intent = 1;
+}
+
+message ListSessionCleanupTurnsResponse {
+  repeated SessionTurn turns = 1;
+}
+
+message GetSessionCleanupCompletionRequest {
+  string namespace = 1;
+  string session_name = 2;
+}
+
+message GetSessionCleanupCompletionResponse {
+  SessionCleanupCompletion completion = 1;
+}
+
+message HasSessionCleanupFenceForUIDRequest {
+  string session_uid = 1;
+}
+
+message HasSessionCleanupFenceForUIDResponse {
+  bool fenced = 1;
+}
+
+message GetSessionCleanupIdentityRequest {
+  string namespace = 1;
+  string session_name = 2;
+}
+
+message GetSessionCleanupIdentityResponse {
+  string session_uid = 1;
+}
+
+message BindSessionCleanupIdentityRequest {
+  string namespace = 1;
+  string session_name = 2;
+  string session_uid = 3;
+}
+
+message BindSessionCleanupIdentityResponse {}
+
+message HasSessionCleanupIntentRequest {
+  string namespace = 1;
+  string session_name = 2;
+}
+
+message HasSessionCleanupIntentResponse {
+  bool exists = 1;
+}
+
+message PrepareSessionCleanupRequest {
+  SessionCleanupIntent intent = 1;
+}
+
+message PrepareSessionCleanupResponse {
+  SessionCleanupIntent intent = 1;
+}
+
+// CompleteSessionCleanupRequest is both the contract record
+// CompleteSessionCleanup takes and the RPC's request message.
+message CompleteSessionCleanupRequest {
+  string namespace = 1;
+  string session_name = 2;
+  string operation_id = 3;
+  string operation_digest = 4;
+}
+
+message CompleteSessionCleanupResponse {}
+
+message SyncControllerEpochMirrorRequest {
+  ControllerEpoch epoch = 1;
+}
+
+message SyncControllerEpochMirrorResponse {}
+
+message EnqueueOutboxProjectionRecordRequest {
+  OutboxProjection projection = 1;
+  ControllerEpochFence fence = 2;
+}
+
+message EnqueueOutboxProjectionRecordResponse {
+  OutboxProjection projection = 1;
+}
+
+message GetOutboxProjectionRequest {
+  string id = 1;
+}
+
+message GetOutboxProjectionResponse {
+  OutboxProjection projection = 1;
+}
+
+message ClaimOutboxProjectionRecordsRequest {
+  ClaimOutboxProjectionsRequest request = 1;
+}
+
+message ClaimOutboxProjectionRecordsResponse {
+  repeated OutboxProjection projections = 1;
+}
+
+message CompleteOutboxProjectionRecordRequest {
+  CompleteOutboxProjectionRequest request = 1;
+}
+
+message CompleteOutboxProjectionRecordResponse {
+  OutboxProjection projection = 1;
+}
+
+message CountUnsettledOutboxProjectionsRequest {}
+
+message CountUnsettledOutboxProjectionsResponse {
+  int64 count = 1;
+}
+
+message RevokeTaskJobRequest {
+  TaskJobIdentity identity = 1;
+}
+
+message RevokeTaskJobResponse {}
+
+message CheckTaskJobAuthorityRequest {
+  TaskJobIdentity identity = 1;
+}
+
+message CheckTaskJobAuthorityResponse {}
+
+message DeleteTaskJobRevocationsRequest {
+  string namespace = 1;
+  string task_name = 2;
+  string task_uid = 3;
+}
+
+message DeleteTaskJobRevocationsResponse {}

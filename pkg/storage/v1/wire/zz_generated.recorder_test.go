@@ -5,6 +5,7 @@ package wire_test
 import (
 	"context"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"time"
 )
 
 // wireMethods lists every contract method with a wire RPC.
@@ -13,12 +14,44 @@ var wireMethods = []string{
 	"GetArtifact",
 	"ListArtifacts",
 	"SaveArtifact",
+	"BindSessionCleanupIdentity",
+	"CheckTaskJobAuthority",
+	"ClaimOutboxProjectionRecords",
+	"CompleteOutboxProjectionRecord",
+	"CompleteSessionCleanup",
+	"CountUnsettledOutboxProjections",
+	"DeleteTaskJobRevocations",
+	"EnqueueOutboxProjectionRecord",
+	"GetOutboxProjection",
+	"GetSessionCleanupCompletion",
+	"GetSessionCleanupIdentity",
+	"GetSessionCleanupIntent",
+	"GetSessionTurnCleanupReceipt",
+	"HasSessionCleanupFenceForUID",
+	"HasSessionCleanupIntent",
+	"ListSessionCleanupIntents",
+	"ListSessionCleanupTurns",
+	"PrepareSessionCleanup",
+	"RevokeTaskJob",
+	"SyncControllerEpochMirror",
 	"Describe",
 	"HealthCheck",
+	"AppendExecutionEvent",
+	"AppendExecutionEventIfAbsent",
+	"AppendExecutionEventWithPlanIfAbsent",
+	"DeleteExecutionEvents",
+	"GetLatestExecutionEventSeq",
+	"GetLatestExecutionEventSeqs",
+	"ListExecutionEvents",
+	"ListSessionExecutionEvents",
 	"DeleteParentMessages",
 	"DeleteTaskMessages",
 	"GetMessages",
 	"SendMessage",
+	"AdvanceControllerEpoch",
+	"GetControllerEpochMirror",
+	"PruneOperationReceipts",
+	"ResolveOperation",
 	"DeletePlan",
 	"DeleteResult",
 	"GetPlan",
@@ -27,6 +60,30 @@ var wireMethods = []string{
 	"SavePlan",
 	"SavePromptResultReceipt",
 	"SaveResult",
+	"AcquireChatTurn",
+	"AcquireLock",
+	"AppendMessages",
+	"AppendMessagesWithLock",
+	"CommitSessionTurn",
+	"CreateSession",
+	"DeleteSession",
+	"EnsureSessionSoulWithLock",
+	"GetSession",
+	"GetSessionLineage",
+	"GetSessionType",
+	"IsLocked",
+	"ListSessions",
+	"ListSessionsPage",
+	"LoadTranscript",
+	"LoadTranscriptThrough",
+	"ProjectSessionLineage",
+	"ReadSessionSoul",
+	"ReleaseChatTurn",
+	"ReleaseLock",
+	"ReleaseLockWithTokenUsage",
+	"SearchTranscript",
+	"UpdateTokenCounts",
+	"UpdateTokenCountsWithLock",
 }
 
 func (p *recordingProvider) DeleteArtifacts(ctx context.Context, owner storagev1.ArtifactOwner) error {
@@ -51,6 +108,112 @@ func (p *recordingProvider) SaveArtifact(ctx context.Context, request storagev1.
 	return err
 }
 
+func (p *recordingProvider) BindSessionCleanupIdentity(ctx context.Context, namespace string, sessionName string, sessionUID string) error {
+	results, err := p.called(ctx, "BindSessionCleanupIdentity", namespace, sessionName, sessionUID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) CheckTaskJobAuthority(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	results, err := p.called(ctx, "CheckTaskJobAuthority", identity)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) ClaimOutboxProjectionRecords(ctx context.Context, request storagev1.ClaimOutboxProjectionsRequest) ([]storagev1.OutboxProjection, error) {
+	results, err := p.called(ctx, "ClaimOutboxProjectionRecords", request)
+	return resultAs[[]storagev1.OutboxProjection](results, 0), err
+}
+
+func (p *recordingProvider) CompleteOutboxProjectionRecord(ctx context.Context, request storagev1.CompleteOutboxProjectionRequest) (*storagev1.OutboxProjection, error) {
+	results, err := p.called(ctx, "CompleteOutboxProjectionRecord", request)
+	return resultAs[*storagev1.OutboxProjection](results, 0), err
+}
+
+func (p *recordingProvider) CompleteSessionCleanup(ctx context.Context, request storagev1.CompleteSessionCleanupRequest) error {
+	results, err := p.called(ctx, "CompleteSessionCleanup", request)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) CountUnsettledOutboxProjections(ctx context.Context) (int64, error) {
+	results, err := p.called(ctx, "CountUnsettledOutboxProjections")
+	return resultAs[int64](results, 0), err
+}
+
+func (p *recordingProvider) DeleteTaskJobRevocations(ctx context.Context, namespace string, taskName string, taskUID string) error {
+	results, err := p.called(ctx, "DeleteTaskJobRevocations", namespace, taskName, taskUID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) EnqueueOutboxProjectionRecord(ctx context.Context, projection *storagev1.OutboxProjection, fence storagev1.ControllerEpochFence) (*storagev1.OutboxProjection, error) {
+	results, err := p.called(ctx, "EnqueueOutboxProjectionRecord", projection, fence)
+	return resultAs[*storagev1.OutboxProjection](results, 0), err
+}
+
+func (p *recordingProvider) GetOutboxProjection(ctx context.Context, id string) (*storagev1.OutboxProjection, error) {
+	results, err := p.called(ctx, "GetOutboxProjection", id)
+	return resultAs[*storagev1.OutboxProjection](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionCleanupCompletion(ctx context.Context, namespace string, sessionName string) (*storagev1.SessionCleanupCompletion, error) {
+	results, err := p.called(ctx, "GetSessionCleanupCompletion", namespace, sessionName)
+	return resultAs[*storagev1.SessionCleanupCompletion](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionCleanupIdentity(ctx context.Context, namespace string, sessionName string) (string, error) {
+	results, err := p.called(ctx, "GetSessionCleanupIdentity", namespace, sessionName)
+	return resultAs[string](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionCleanupIntent(ctx context.Context, namespace string, sessionName string) (*storagev1.SessionCleanupIntent, error) {
+	results, err := p.called(ctx, "GetSessionCleanupIntent", namespace, sessionName)
+	return resultAs[*storagev1.SessionCleanupIntent](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionTurnCleanupReceipt(ctx context.Context, namespace string, sessionName string, promptAttemptID string) (*storagev1.SessionTurnCleanupReceipt, error) {
+	results, err := p.called(ctx, "GetSessionTurnCleanupReceipt", namespace, sessionName, promptAttemptID)
+	return resultAs[*storagev1.SessionTurnCleanupReceipt](results, 0), err
+}
+
+func (p *recordingProvider) HasSessionCleanupFenceForUID(ctx context.Context, sessionUID string) (bool, error) {
+	results, err := p.called(ctx, "HasSessionCleanupFenceForUID", sessionUID)
+	return resultAs[bool](results, 0), err
+}
+
+func (p *recordingProvider) HasSessionCleanupIntent(ctx context.Context, namespace string, sessionName string) (bool, error) {
+	results, err := p.called(ctx, "HasSessionCleanupIntent", namespace, sessionName)
+	return resultAs[bool](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionCleanupIntents(ctx context.Context) ([]storagev1.SessionCleanupIntent, error) {
+	results, err := p.called(ctx, "ListSessionCleanupIntents")
+	return resultAs[[]storagev1.SessionCleanupIntent](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionCleanupTurns(ctx context.Context, intent storagev1.SessionCleanupIntent) ([]storagev1.SessionTurn, error) {
+	results, err := p.called(ctx, "ListSessionCleanupTurns", intent)
+	return resultAs[[]storagev1.SessionTurn](results, 0), err
+}
+
+func (p *recordingProvider) PrepareSessionCleanup(ctx context.Context, intent storagev1.SessionCleanupIntent) (*storagev1.SessionCleanupIntent, error) {
+	results, err := p.called(ctx, "PrepareSessionCleanup", intent)
+	return resultAs[*storagev1.SessionCleanupIntent](results, 0), err
+}
+
+func (p *recordingProvider) RevokeTaskJob(ctx context.Context, identity storagev1.TaskJobIdentity) error {
+	results, err := p.called(ctx, "RevokeTaskJob", identity)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) SyncControllerEpochMirror(ctx context.Context, epoch storagev1.ControllerEpoch) error {
+	results, err := p.called(ctx, "SyncControllerEpochMirror", epoch)
+	_ = results
+	return err
+}
+
 func (p *recordingProvider) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 	results, err := p.called(ctx, "Describe")
 	return resultAs[storagev1.ProviderInfo](results, 0), err
@@ -60,6 +223,47 @@ func (p *recordingProvider) HealthCheck(ctx context.Context) error {
 	results, err := p.called(ctx, "HealthCheck")
 	_ = results
 	return err
+}
+
+func (p *recordingProvider) AppendExecutionEvent(ctx context.Context, event *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "AppendExecutionEvent", event)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) AppendExecutionEventIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventIfAbsent", event, dedupeKey)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) AppendExecutionEventWithPlanIfAbsent(ctx context.Context, event *storagev1.ExecutionEvent, dedupeKey string, plan *storagev1.PlanState) (*storagev1.ExecutionEvent, bool, error) {
+	results, err := p.called(ctx, "AppendExecutionEventWithPlanIfAbsent", event, dedupeKey, plan)
+	return resultAs[*storagev1.ExecutionEvent](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) DeleteExecutionEvents(ctx context.Context, namespace string, streamType string, streamID string) error {
+	results, err := p.called(ctx, "DeleteExecutionEvents", namespace, streamType, streamID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeq(ctx context.Context, namespace string, streamType string, streamID string) (int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeq", namespace, streamType, streamID)
+	return resultAs[int64](results, 0), err
+}
+
+func (p *recordingProvider) GetLatestExecutionEventSeqs(ctx context.Context, namespace string, streamType string, streamIDs []string) (map[string]int64, error) {
+	results, err := p.called(ctx, "GetLatestExecutionEventSeqs", namespace, streamType, streamIDs)
+	return resultAs[map[string]int64](results, 0), err
+}
+
+func (p *recordingProvider) ListExecutionEvents(ctx context.Context, filter storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
+	results, err := p.called(ctx, "ListExecutionEvents", filter)
+	return resultAs[[]storagev1.ExecutionEvent](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionExecutionEvents(ctx context.Context, filter storagev1.SessionExecutionEventFilter) ([]storagev1.SessionExecutionEvent, int64, error) {
+	results, err := p.called(ctx, "ListSessionExecutionEvents", filter)
+	return resultAs[[]storagev1.SessionExecutionEvent](results, 0), resultAs[int64](results, 1), err
 }
 
 func (p *recordingProvider) DeleteParentMessages(ctx context.Context, namespace string, parentTask string) error {
@@ -83,6 +287,26 @@ func (p *recordingProvider) SendMessage(ctx context.Context, msg *storagev1.Mess
 	results, err := p.called(ctx, "SendMessage", msg)
 	_ = results
 	return err
+}
+
+func (p *recordingProvider) AdvanceControllerEpoch(ctx context.Context, request storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "AdvanceControllerEpoch", request)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) GetControllerEpochMirror(ctx context.Context, name string) (storagev1.ControllerEpochMirrorState, error) {
+	results, err := p.called(ctx, "GetControllerEpochMirror", name)
+	return resultAs[storagev1.ControllerEpochMirrorState](results, 0), err
+}
+
+func (p *recordingProvider) PruneOperationReceipts(ctx context.Context, limit int) (int, error) {
+	results, err := p.called(ctx, "PruneOperationReceipts", limit)
+	return resultAs[int](results, 0), err
+}
+
+func (p *recordingProvider) ResolveOperation(ctx context.Context, request storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	results, err := p.called(ctx, "ResolveOperation", request)
+	return resultAs[storagev1.OperationOutcome](results, 0), err
 }
 
 func (p *recordingProvider) DeletePlan(ctx context.Context, namespace string, taskName string) error {
@@ -126,6 +350,138 @@ func (p *recordingProvider) SavePromptResultReceipt(ctx context.Context, receipt
 
 func (p *recordingProvider) SaveResult(ctx context.Context, namespace string, taskName string, data []byte) error {
 	results, err := p.called(ctx, "SaveResult", namespace, taskName, data)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) AcquireChatTurn(ctx context.Context, session *storagev1.SessionRecord, turnID string, expiresAt time.Time) (bool, error) {
+	results, err := p.called(ctx, "AcquireChatTurn", session, turnID, expiresAt)
+	return resultAs[bool](results, 0), err
+}
+
+func (p *recordingProvider) AcquireLock(ctx context.Context, namespace string, name string, taskName string, taskUID string) error {
+	results, err := p.called(ctx, "AcquireLock", namespace, name, taskName, taskUID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) AppendMessages(ctx context.Context, namespace string, name string, messages []storagev1.SessionMessage) error {
+	results, err := p.called(ctx, "AppendMessages", namespace, name, messages)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) AppendMessagesWithLock(ctx context.Context, namespace string, name string, ownerName string, ownerUID string, messages []storagev1.SessionMessage) error {
+	results, err := p.called(ctx, "AppendMessagesWithLock", namespace, name, ownerName, ownerUID, messages)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) CommitSessionTurn(ctx context.Context, session *storagev1.SessionRecord, turnID string, expectedMessageCount int, messages []storagev1.SessionMessage, inputTokens int, outputTokens int) error {
+	results, err := p.called(ctx, "CommitSessionTurn", session, turnID, expectedMessageCount, messages, inputTokens, outputTokens)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) CreateSession(ctx context.Context, session *storagev1.SessionRecord) error {
+	results, err := p.called(ctx, "CreateSession", session)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) DeleteSession(ctx context.Context, namespace string, name string) error {
+	results, err := p.called(ctx, "DeleteSession", namespace, name)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) EnsureSessionSoulWithLock(ctx context.Context, namespace string, name string, taskName string, taskUID string, digest string) error {
+	results, err := p.called(ctx, "EnsureSessionSoulWithLock", namespace, name, taskName, taskUID, digest)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) GetSession(ctx context.Context, namespace string, name string) (*storagev1.SessionRecord, error) {
+	results, err := p.called(ctx, "GetSession", namespace, name)
+	return resultAs[*storagev1.SessionRecord](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionLineage(ctx context.Context, namespace string, sessionName string) (*storagev1.SessionLineage, error) {
+	results, err := p.called(ctx, "GetSessionLineage", namespace, sessionName)
+	return resultAs[*storagev1.SessionLineage](results, 0), err
+}
+
+func (p *recordingProvider) GetSessionType(ctx context.Context, namespace string, name string) (string, error) {
+	results, err := p.called(ctx, "GetSessionType", namespace, name)
+	return resultAs[string](results, 0), err
+}
+
+func (p *recordingProvider) IsLocked(ctx context.Context, namespace string, name string, currentTask string, currentTaskUID string) (bool, error) {
+	results, err := p.called(ctx, "IsLocked", namespace, name, currentTask, currentTaskUID)
+	return resultAs[bool](results, 0), err
+}
+
+func (p *recordingProvider) ListSessions(ctx context.Context, namespace string) ([]storagev1.SessionMetadata, error) {
+	results, err := p.called(ctx, "ListSessions", namespace)
+	return resultAs[[]storagev1.SessionMetadata](results, 0), err
+}
+
+func (p *recordingProvider) ListSessionsPage(ctx context.Context, namespace string, after *storagev1.SessionPageCursor, limit int, excludeType string) ([]storagev1.SessionMetadata, bool, error) {
+	results, err := p.called(ctx, "ListSessionsPage", namespace, after, limit, excludeType)
+	return resultAs[[]storagev1.SessionMetadata](results, 0), resultAs[bool](results, 1), err
+}
+
+func (p *recordingProvider) LoadTranscript(ctx context.Context, namespace string, name string, maxMessages int) ([]storagev1.SessionMessage, error) {
+	results, err := p.called(ctx, "LoadTranscript", namespace, name, maxMessages)
+	return resultAs[[]storagev1.SessionMessage](results, 0), err
+}
+
+func (p *recordingProvider) LoadTranscriptThrough(ctx context.Context, namespace string, name string, throughMessageID string, maxMessages int) ([]storagev1.SessionMessage, error) {
+	results, err := p.called(ctx, "LoadTranscriptThrough", namespace, name, throughMessageID, maxMessages)
+	return resultAs[[]storagev1.SessionMessage](results, 0), err
+}
+
+func (p *recordingProvider) ProjectSessionLineage(ctx context.Context, lineage storagev1.SessionLineage) (*storagev1.SessionLineage, error) {
+	results, err := p.called(ctx, "ProjectSessionLineage", lineage)
+	return resultAs[*storagev1.SessionLineage](results, 0), err
+}
+
+func (p *recordingProvider) ReadSessionSoul(ctx context.Context, namespace string, name string, taskName string, taskUID string) (storagev1.SessionSoulState, error) {
+	results, err := p.called(ctx, "ReadSessionSoul", namespace, name, taskName, taskUID)
+	return resultAs[storagev1.SessionSoulState](results, 0), err
+}
+
+func (p *recordingProvider) ReleaseChatTurn(ctx context.Context, namespace string, name string, turnID string, deleteEmptyCreatedSession bool) error {
+	results, err := p.called(ctx, "ReleaseChatTurn", namespace, name, turnID, deleteEmptyCreatedSession)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) ReleaseLock(ctx context.Context, namespace string, name string, taskName string, taskUID string) error {
+	results, err := p.called(ctx, "ReleaseLock", namespace, name, taskName, taskUID)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) ReleaseLockWithTokenUsage(ctx context.Context, namespace string, name string, ownerName string, ownerUID string, inputTokens int, outputTokens int) error {
+	results, err := p.called(ctx, "ReleaseLockWithTokenUsage", namespace, name, ownerName, ownerUID, inputTokens, outputTokens)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) SearchTranscript(ctx context.Context, filter storagev1.TranscriptSearchFilter) ([]storagev1.TranscriptSearchResult, error) {
+	results, err := p.called(ctx, "SearchTranscript", filter)
+	return resultAs[[]storagev1.TranscriptSearchResult](results, 0), err
+}
+
+func (p *recordingProvider) UpdateTokenCounts(ctx context.Context, namespace string, name string, inputTokens int, outputTokens int) error {
+	results, err := p.called(ctx, "UpdateTokenCounts", namespace, name, inputTokens, outputTokens)
+	_ = results
+	return err
+}
+
+func (p *recordingProvider) UpdateTokenCountsWithLock(ctx context.Context, namespace string, name string, ownerName string, ownerUID string, inputTokens int, outputTokens int) error {
+	results, err := p.called(ctx, "UpdateTokenCountsWithLock", namespace, name, ownerName, ownerUID, inputTokens, outputTokens)
 	_ = results
 	return err
 }

@@ -22,14 +22,14 @@ type SessionSoulState struct {
 // caller still owns the legacy Task lock. No schema or transcript content changes
 // are needed to retain the revision across Task cleanup.
 type SessionSoulReader interface {
-	ReadSessionSoul(context.Context, string, string, string, string) (SessionSoulState, error)
+	ReadSessionSoul(ctx context.Context, namespace, name, taskName, taskUID string) (SessionSoulState, error)
 }
 
 // SessionSoulWriter durably pins ordinary AI Session identity under its exact
 // Task lock before execution. It writes only digest metadata, never persona text.
 // An empty digest pins absence of a soul so an empty turn cannot permit later opt-in.
 type SessionSoulWriter interface {
-	EnsureSessionSoulWithLock(context.Context, string, string, string, string, string) error
+	EnsureSessionSoulWithLock(ctx context.Context, namespace, name, taskName, taskUID, digest string) error
 }
 
 // SessionSoulDigestMetadata is controller-authored prompt revision metadata, not

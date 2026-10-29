@@ -91,6 +91,14 @@ var file_orka_storage_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 		Filename:      "orka/storage/v1/options.proto",
 	},
 	{
+		ExtendedType:  (*descriptorpb.ServiceOptions)(nil),
+		ExtensionType: (*bool)(nil),
+		Field:         51002,
+		Name:          "orka.storage.v1.optional",
+		Tag:           "varint,51002,opt,name=optional",
+		Filename:      "orka/storage/v1/options.proto",
+	},
+	{
 		ExtendedType:  (*descriptorpb.MethodOptions)(nil),
 		ExtensionType: (*MethodKind)(nil),
 		Field:         51011,
@@ -104,6 +112,14 @@ var file_orka_storage_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 		Field:         51012,
 		Name:          "orka.storage.v1.rpc_since",
 		Tag:           "varint,51012,opt,name=rpc_since",
+		Filename:      "orka/storage/v1/options.proto",
+	},
+	{
+		ExtendedType:  (*descriptorpb.MethodOptions)(nil),
+		ExtensionType: (*string)(nil),
+		Field:         51013,
+		Name:          "orka.storage.v1.batched",
+		Tag:           "bytes,51013,opt,name=batched",
 		Filename:      "orka/storage/v1/options.proto",
 	},
 	{
@@ -155,6 +171,12 @@ var (
 	//
 	// repeated string go_interface = 51001;
 	E_GoInterface = &file_orka_storage_v1_options_proto_extTypes[0]
+	// optional marks a service whose interfaces neither contract part requires
+	// yet. A server serves it only when one of its providers implements every
+	// interface, and answers its RPCs with UNIMPLEMENTED otherwise.
+	//
+	// optional bool optional = 51002;
+	E_Optional = &file_orka_storage_v1_options_proto_extTypes[1]
 )
 
 // Extension fields to descriptorpb.MethodOptions.
@@ -162,12 +184,21 @@ var (
 	// kind states whether the RPC may change stored state.
 	//
 	// optional orka.storage.v1.MethodKind kind = 51011;
-	E_Kind = &file_orka_storage_v1_options_proto_extTypes[1]
+	E_Kind = &file_orka_storage_v1_options_proto_extTypes[2]
 	// rpc_since is the protocol revision that introduced the RPC. A client
 	// calls the RPC only on a server of at least that revision.
 	//
 	// optional int32 rpc_since = 51012;
-	E_RpcSince = &file_orka_storage_v1_options_proto_extTypes[2]
+	E_RpcSince = &file_orka_storage_v1_options_proto_extTypes[3]
+	// batched marks a server-streaming read whose response list crosses in
+	// batches. It names that repeated message field as a path of field names
+	// from the response message, separated by dots and reached through singular
+	// message fields, such as "session.messages". The provider still returns
+	// the whole result at once, from one snapshot; the server library splits the
+	// list into messages, and the client reassembles it.
+	//
+	// optional string batched = 51013;
+	E_Batched = &file_orka_storage_v1_options_proto_extTypes[4]
 )
 
 // Extension fields to descriptorpb.MessageOptions.
@@ -176,7 +207,7 @@ var (
 	// for a nullable time.
 	//
 	// optional bool wire_only = 51021;
-	E_WireOnly = &file_orka_storage_v1_options_proto_extTypes[3]
+	E_WireOnly = &file_orka_storage_v1_options_proto_extTypes[5]
 )
 
 // Extension fields to descriptorpb.FieldOptions.
@@ -185,24 +216,24 @@ var (
 	// is not the wire field's name in camel case.
 	//
 	// optional string go_name = 51031;
-	E_GoName = &file_orka_storage_v1_options_proto_extTypes[4]
+	E_GoName = &file_orka_storage_v1_options_proto_extTypes[6]
 	// since is the protocol revision that added a request field to an existing
 	// RPC. A client sets the field only on a server of at least that revision.
 	//
 	// optional int32 since = 51032;
-	E_Since = &file_orka_storage_v1_options_proto_extTypes[5]
+	E_Since = &file_orka_storage_v1_options_proto_extTypes[7]
 	// library marks a response field the server library sets, which has no Go
 	// contract counterpart.
 	//
 	// optional bool library = 51033;
-	E_Library = &file_orka_storage_v1_options_proto_extTypes[6]
+	E_Library = &file_orka_storage_v1_options_proto_extTypes[8]
 	// blob marks the bytes field a streaming RPC carries in chunks. A
 	// client-streaming RPC has exactly one blob field in its request, and a
 	// server-streaming RPC exactly one in its response, either at the top level
 	// or inside singular message fields. A unary RPC has none.
 	//
 	// optional bool blob = 51034;
-	E_Blob = &file_orka_storage_v1_options_proto_extTypes[7]
+	E_Blob = &file_orka_storage_v1_options_proto_extTypes[9]
 )
 
 var File_orka_storage_v1_options_proto protoreflect.FileDescriptor
@@ -215,9 +246,11 @@ const file_orka_storage_v1_options_proto_rawDesc = "" +
 	"\x17METHOD_KIND_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10METHOD_KIND_READ\x10\x01\x12\x15\n" +
 	"\x11METHOD_KIND_WRITE\x10\x02:D\n" +
-	"\fgo_interface\x12\x1f.google.protobuf.ServiceOptions\x18\xb9\x8e\x03 \x03(\tR\vgoInterface:Q\n" +
+	"\fgo_interface\x12\x1f.google.protobuf.ServiceOptions\x18\xb9\x8e\x03 \x03(\tR\vgoInterface:=\n" +
+	"\boptional\x12\x1f.google.protobuf.ServiceOptions\x18\xba\x8e\x03 \x01(\bR\boptional:Q\n" +
 	"\x04kind\x12\x1e.google.protobuf.MethodOptions\x18Î\x03 \x01(\x0e2\x1b.orka.storage.v1.MethodKindR\x04kind:=\n" +
-	"\trpc_since\x12\x1e.google.protobuf.MethodOptions\x18Ď\x03 \x01(\x05R\brpcSince:>\n" +
+	"\trpc_since\x12\x1e.google.protobuf.MethodOptions\x18Ď\x03 \x01(\x05R\brpcSince::\n" +
+	"\abatched\x12\x1e.google.protobuf.MethodOptions\x18Ŏ\x03 \x01(\tR\abatched:>\n" +
 	"\twire_only\x12\x1f.google.protobuf.MessageOptions\x18͎\x03 \x01(\bR\bwireOnly:8\n" +
 	"\ago_name\x12\x1d.google.protobuf.FieldOptions\x18\u05ce\x03 \x01(\tR\x06goName:5\n" +
 	"\x05since\x12\x1d.google.protobuf.FieldOptions\x18؎\x03 \x01(\x05R\x05since:9\n" +
@@ -245,20 +278,22 @@ var file_orka_storage_v1_options_proto_goTypes = []any{
 	(*descriptorpb.FieldOptions)(nil),   // 4: google.protobuf.FieldOptions
 }
 var file_orka_storage_v1_options_proto_depIdxs = []int32{
-	1, // 0: orka.storage.v1.go_interface:extendee -> google.protobuf.ServiceOptions
-	2, // 1: orka.storage.v1.kind:extendee -> google.protobuf.MethodOptions
-	2, // 2: orka.storage.v1.rpc_since:extendee -> google.protobuf.MethodOptions
-	3, // 3: orka.storage.v1.wire_only:extendee -> google.protobuf.MessageOptions
-	4, // 4: orka.storage.v1.go_name:extendee -> google.protobuf.FieldOptions
-	4, // 5: orka.storage.v1.since:extendee -> google.protobuf.FieldOptions
-	4, // 6: orka.storage.v1.library:extendee -> google.protobuf.FieldOptions
-	4, // 7: orka.storage.v1.blob:extendee -> google.protobuf.FieldOptions
-	0, // 8: orka.storage.v1.kind:type_name -> orka.storage.v1.MethodKind
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	8, // [8:9] is the sub-list for extension type_name
-	0, // [0:8] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	1,  // 0: orka.storage.v1.go_interface:extendee -> google.protobuf.ServiceOptions
+	1,  // 1: orka.storage.v1.optional:extendee -> google.protobuf.ServiceOptions
+	2,  // 2: orka.storage.v1.kind:extendee -> google.protobuf.MethodOptions
+	2,  // 3: orka.storage.v1.rpc_since:extendee -> google.protobuf.MethodOptions
+	2,  // 4: orka.storage.v1.batched:extendee -> google.protobuf.MethodOptions
+	3,  // 5: orka.storage.v1.wire_only:extendee -> google.protobuf.MessageOptions
+	4,  // 6: orka.storage.v1.go_name:extendee -> google.protobuf.FieldOptions
+	4,  // 7: orka.storage.v1.since:extendee -> google.protobuf.FieldOptions
+	4,  // 8: orka.storage.v1.library:extendee -> google.protobuf.FieldOptions
+	4,  // 9: orka.storage.v1.blob:extendee -> google.protobuf.FieldOptions
+	0,  // 10: orka.storage.v1.kind:type_name -> orka.storage.v1.MethodKind
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	10, // [10:11] is the sub-list for extension type_name
+	0,  // [0:10] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_orka_storage_v1_options_proto_init() }
@@ -273,7 +308,7 @@ func file_orka_storage_v1_options_proto_init() {
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_orka_storage_v1_options_proto_rawDesc), len(file_orka_storage_v1_options_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   0,
-			NumExtensions: 8,
+			NumExtensions: 10,
 			NumServices:   0,
 		},
 		GoTypes:           file_orka_storage_v1_options_proto_goTypes,

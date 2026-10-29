@@ -7,6 +7,31 @@ import (
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
+func toWireAdvanceControllerEpochRequest(in storagev1.AdvanceControllerEpochRequest) (*storagepb.AdvanceControllerEpochRequest, error) {
+	out := &storagepb.AdvanceControllerEpochRequest{}
+	var err error
+	out.DatasetId = in.DatasetID
+	if out.Epoch, err = toWireControllerEpoch(in.Epoch); err != nil {
+		return nil, err
+	}
+	out.InstallationId = in.InstallationID
+	return out, err
+}
+
+func fromWireAdvanceControllerEpochRequest(in *storagepb.AdvanceControllerEpochRequest) (storagev1.AdvanceControllerEpochRequest, error) {
+	var out storagev1.AdvanceControllerEpochRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.DatasetID = in.DatasetId
+	if out.Epoch, err = fromWireControllerEpoch(in.Epoch); err != nil {
+		return out, err
+	}
+	out.InstallationID = in.InstallationId
+	return out, err
+}
+
 func toWireArtifactKey(in storagev1.ArtifactKey) (*storagepb.ArtifactKey, error) {
 	out := &storagepb.ArtifactKey{}
 	var err error
@@ -78,6 +103,150 @@ func fromWireArtifactOwner(in *storagepb.ArtifactOwner) (storagev1.ArtifactOwner
 	return out, err
 }
 
+func toWireClaimOutboxProjectionsRequest(in storagev1.ClaimOutboxProjectionsRequest) (*storagepb.ClaimOutboxProjectionsRequest, error) {
+	out := &storagepb.ClaimOutboxProjectionsRequest{}
+	var err error
+	if out.Fence, err = toWireControllerEpochFence(in.Fence); err != nil {
+		return nil, err
+	}
+	out.WorkerId = in.WorkerID
+	out.Limit = int64(in.Limit)
+	out.LeaseDuration = durationToWire(in.LeaseDuration)
+	if out.Now, err = timeToWire(in.Now, "ClaimOutboxProjectionsRequest.Now"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireClaimOutboxProjectionsRequest(in *storagepb.ClaimOutboxProjectionsRequest) (storagev1.ClaimOutboxProjectionsRequest, error) {
+	var out storagev1.ClaimOutboxProjectionsRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.Fence, err = fromWireControllerEpochFence(in.Fence); err != nil {
+		return out, err
+	}
+	out.WorkerID = in.WorkerId
+	out.Limit = int(in.Limit)
+	if out.LeaseDuration, err = durationFromWire(in.LeaseDuration, "ClaimOutboxProjectionsRequest.LeaseDuration"); err != nil {
+		return out, err
+	}
+	if out.Now, err = timeFromWire(in.Now, "ClaimOutboxProjectionsRequest.Now"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireCompleteOutboxProjectionRequest(in storagev1.CompleteOutboxProjectionRequest) (*storagepb.CompleteOutboxProjectionRequest, error) {
+	out := &storagepb.CompleteOutboxProjectionRequest{}
+	var err error
+	out.Id = in.ID
+	if out.Fence, err = toWireControllerEpochFence(in.Fence); err != nil {
+		return nil, err
+	}
+	out.ExpectedVersion = in.ExpectedVersion
+	out.LeaseOwner = in.LeaseOwner
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	out.NewState = string(in.NewState)
+	out.DeliveryDigest = in.DeliveryDigest
+	out.LastError = in.LastError
+	if out.AvailableAt, err = timeToWire(in.AvailableAt, "CompleteOutboxProjectionRequest.AvailableAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "CompleteOutboxProjectionRequest.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireCompleteOutboxProjectionRequest(in *storagepb.CompleteOutboxProjectionRequest) (storagev1.CompleteOutboxProjectionRequest, error) {
+	var out storagev1.CompleteOutboxProjectionRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	if out.Fence, err = fromWireControllerEpochFence(in.Fence); err != nil {
+		return out, err
+	}
+	out.ExpectedVersion = in.ExpectedVersion
+	out.LeaseOwner = in.LeaseOwner
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	out.NewState = storagev1.OutboxProjectionState(in.NewState)
+	out.DeliveryDigest = in.DeliveryDigest
+	out.LastError = in.LastError
+	if out.AvailableAt, err = timeFromWire(in.AvailableAt, "CompleteOutboxProjectionRequest.AvailableAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "CompleteOutboxProjectionRequest.UpdatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireCompleteSessionCleanupRequest(in storagev1.CompleteSessionCleanupRequest) (*storagepb.CompleteSessionCleanupRequest, error) {
+	out := &storagepb.CompleteSessionCleanupRequest{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	return out, err
+}
+
+func fromWireCompleteSessionCleanupRequest(in *storagepb.CompleteSessionCleanupRequest) (storagev1.CompleteSessionCleanupRequest, error) {
+	var out storagev1.CompleteSessionCleanupRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	return out, err
+}
+
+func toWireControllerEpoch(in storagev1.ControllerEpoch) (*storagepb.ControllerEpoch, error) {
+	out := &storagepb.ControllerEpoch{}
+	var err error
+	out.Name = in.Name
+	out.Epoch = in.Epoch
+	out.HolderId = in.HolderID
+	out.RequestDigest = in.RequestDigest
+	out.Version = in.Version
+	if out.AcquiredAt, err = timeToWire(in.AcquiredAt, "ControllerEpoch.AcquiredAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "ControllerEpoch.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireControllerEpoch(in *storagepb.ControllerEpoch) (storagev1.ControllerEpoch, error) {
+	var out storagev1.ControllerEpoch
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Name = in.Name
+	out.Epoch = in.Epoch
+	out.HolderID = in.HolderId
+	out.RequestDigest = in.RequestDigest
+	out.Version = in.Version
+	if out.AcquiredAt, err = timeFromWire(in.AcquiredAt, "ControllerEpoch.AcquiredAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "ControllerEpoch.UpdatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
 func toWireControllerEpochFence(in storagev1.ControllerEpochFence) (*storagepb.ControllerEpochFence, error) {
 	out := &storagepb.ControllerEpochFence{}
 	var err error
@@ -96,6 +265,247 @@ func fromWireControllerEpochFence(in *storagepb.ControllerEpochFence) (storagev1
 	out.Name = in.Name
 	out.Epoch = in.Epoch
 	out.HolderID = in.HolderId
+	return out, err
+}
+
+func toWireControllerEpochMirrorState(in storagev1.ControllerEpochMirrorState) (*storagepb.ControllerEpochMirrorState, error) {
+	out := &storagepb.ControllerEpochMirrorState{}
+	var err error
+	out.DatasetId = in.DatasetID
+	if out.Epoch, err = toWireControllerEpoch(in.Epoch); err != nil {
+		return nil, err
+	}
+	out.InstallationId = in.InstallationID
+	if in.Previous != nil {
+		if out.Previous, err = toWireControllerEpochFence(*in.Previous); err != nil {
+			return nil, err
+		}
+	}
+	if out.AdvancedAt, err = timeToWire(in.AdvancedAt, "ControllerEpochMirrorState.AdvancedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireControllerEpochMirrorState(in *storagepb.ControllerEpochMirrorState) (storagev1.ControllerEpochMirrorState, error) {
+	var out storagev1.ControllerEpochMirrorState
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.DatasetID = in.DatasetId
+	if out.Epoch, err = fromWireControllerEpoch(in.Epoch); err != nil {
+		return out, err
+	}
+	out.InstallationID = in.InstallationId
+	if in.Previous != nil {
+		var v1 storagev1.ControllerEpochFence
+		if v1, err = fromWireControllerEpochFence(in.Previous); err != nil {
+			return out, err
+		}
+		out.Previous = &v1
+	}
+	if out.AdvancedAt, err = timeFromWire(in.AdvancedAt, "ControllerEpochMirrorState.AdvancedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireExecutionEvent(in storagev1.ExecutionEvent) (*storagepb.ExecutionEvent, error) {
+	out := &storagepb.ExecutionEvent{}
+	var err error
+	out.Id = in.ID
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamId = in.StreamID
+	out.Seq = in.Seq
+	out.Type = in.Type
+	out.Severity = in.Severity
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AgentName = in.AgentName
+	out.ToolName = in.ToolName
+	out.ToolCallId = in.ToolCallID
+	out.Summary = in.Summary
+	if out.Content, err = rawJSONToWire(in.Content, "ExecutionEvent.Content"); err != nil {
+		return nil, err
+	}
+	out.ContentText = in.ContentText
+	if in.Truncation != nil {
+		if out.Truncation, err = toWireExecutionEventTruncation(*in.Truncation); err != nil {
+			return nil, err
+		}
+	}
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "ExecutionEvent.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if in.Usage != nil {
+		if out.Usage, err = toWireExecutionEventUsage(*in.Usage); err != nil {
+			return nil, err
+		}
+	}
+	return out, err
+}
+
+func fromWireExecutionEvent(in *storagepb.ExecutionEvent) (storagev1.ExecutionEvent, error) {
+	var out storagev1.ExecutionEvent
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamID = in.StreamId
+	out.Seq = in.Seq
+	out.Type = in.Type
+	out.Severity = in.Severity
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AgentName = in.AgentName
+	out.ToolName = in.ToolName
+	out.ToolCallID = in.ToolCallId
+	out.Summary = in.Summary
+	if out.Content, err = rawJSONFromWire(in.Content, "ExecutionEvent.Content"); err != nil {
+		return out, err
+	}
+	out.ContentText = in.ContentText
+	if in.Truncation != nil {
+		var v2 storagev1.ExecutionEventTruncation
+		if v2, err = fromWireExecutionEventTruncation(in.Truncation); err != nil {
+			return out, err
+		}
+		out.Truncation = &v2
+	}
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "ExecutionEvent.CreatedAt"); err != nil {
+		return out, err
+	}
+	if in.Usage != nil {
+		var v3 storagev1.ExecutionEventUsage
+		if v3, err = fromWireExecutionEventUsage(in.Usage); err != nil {
+			return out, err
+		}
+		out.Usage = &v3
+	}
+	return out, err
+}
+
+func toWireExecutionEventFilter(in storagev1.ExecutionEventFilter) (*storagepb.ExecutionEventFilter, error) {
+	out := &storagepb.ExecutionEventFilter{}
+	var err error
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamId = in.StreamID
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	for _, e4 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e4))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int64(in.Limit)
+	return out, err
+}
+
+func fromWireExecutionEventFilter(in *storagepb.ExecutionEventFilter) (storagev1.ExecutionEventFilter, error) {
+	var out storagev1.ExecutionEventFilter
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.StreamType = in.StreamType
+	out.StreamID = in.StreamId
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	if len(in.EventTypes) > 0 {
+		out.EventTypes = make([]string, 0, len(in.EventTypes))
+	}
+	for _, e5 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e5))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int(in.Limit)
+	return out, err
+}
+
+func toWireExecutionEventTruncation(in storagev1.ExecutionEventTruncation) (*storagepb.ExecutionEventTruncation, error) {
+	out := &storagepb.ExecutionEventTruncation{}
+	var err error
+	out.SummaryTruncated = in.SummaryTruncated
+	out.SummaryOriginalChars = int64(in.SummaryOriginalChars)
+	out.ContentTextTruncated = in.ContentTextTruncated
+	out.ContentTextOriginalChars = int64(in.ContentTextOriginalChars)
+	out.ContentJsonTruncated = in.ContentJSONTruncated
+	out.ContentJsonOriginalBytes = int64(in.ContentJSONOriginalBytes)
+	return out, err
+}
+
+func fromWireExecutionEventTruncation(in *storagepb.ExecutionEventTruncation) (storagev1.ExecutionEventTruncation, error) {
+	var out storagev1.ExecutionEventTruncation
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.SummaryTruncated = in.SummaryTruncated
+	out.SummaryOriginalChars = int(in.SummaryOriginalChars)
+	out.ContentTextTruncated = in.ContentTextTruncated
+	out.ContentTextOriginalChars = int(in.ContentTextOriginalChars)
+	out.ContentJSONTruncated = in.ContentJsonTruncated
+	out.ContentJSONOriginalBytes = int(in.ContentJsonOriginalBytes)
+	return out, err
+}
+
+func toWireExecutionEventUsage(in storagev1.ExecutionEventUsage) (*storagepb.ExecutionEventUsage, error) {
+	out := &storagepb.ExecutionEventUsage{}
+	var err error
+	if out.Observation, err = toWireUsageObservation(in.Observation); err != nil {
+		return nil, err
+	}
+	out.KeepFirstObservedAt = in.KeepFirstObservedAt
+	return out, err
+}
+
+func fromWireExecutionEventUsage(in *storagepb.ExecutionEventUsage) (storagev1.ExecutionEventUsage, error) {
+	var out storagev1.ExecutionEventUsage
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.Observation, err = fromWireUsageObservation(in.Observation); err != nil {
+		return out, err
+	}
+	out.KeepFirstObservedAt = in.KeepFirstObservedAt
+	return out, err
+}
+
+func toWireGatewaySessionCleanupProof(in storagev1.GatewaySessionCleanupProof) (*storagepb.GatewaySessionCleanupProof, error) {
+	out := &storagepb.GatewaySessionCleanupProof{}
+	var err error
+	out.GatewayUid = in.GatewayUID
+	out.BindingUid = in.BindingUID
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "GatewaySessionCleanupProof.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.TerminalCutoff, err = timeToWire(in.TerminalCutoff, "GatewaySessionCleanupProof.TerminalCutoff"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireGatewaySessionCleanupProof(in *storagepb.GatewaySessionCleanupProof) (storagev1.GatewaySessionCleanupProof, error) {
+	var out storagev1.GatewaySessionCleanupProof
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.GatewayUID = in.GatewayUid
+	out.BindingUID = in.BindingUid
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "GatewaySessionCleanupProof.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.TerminalCutoff, err = timeFromWire(in.TerminalCutoff, "GatewaySessionCleanupProof.TerminalCutoff"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
@@ -129,6 +539,134 @@ func fromWireMessage(in *storagepb.Message) (storagev1.Message, error) {
 	out.Content = in.Content
 	out.Read = in.Read
 	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "Message.CreatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireOperationOutcome(in storagev1.OperationOutcome) (*storagepb.OperationOutcome, error) {
+	out := &storagepb.OperationOutcome{}
+	var err error
+	out.OperationId = in.OperationID
+	out.Method = in.Method
+	out.RequestDigest = in.RequestDigest
+	out.State = string(in.State)
+	if out.Fence, err = toWireControllerEpochFence(in.Fence); err != nil {
+		return nil, err
+	}
+	if out.IssuedAt, err = timeToWire(in.IssuedAt, "OperationOutcome.IssuedAt"); err != nil {
+		return nil, err
+	}
+	if out.RecordedAt, err = timeToWire(in.RecordedAt, "OperationOutcome.RecordedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireOperationOutcome(in *storagepb.OperationOutcome) (storagev1.OperationOutcome, error) {
+	var out storagev1.OperationOutcome
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.OperationID = in.OperationId
+	out.Method = in.Method
+	out.RequestDigest = in.RequestDigest
+	out.State = storagev1.OperationState(in.State)
+	if out.Fence, err = fromWireControllerEpochFence(in.Fence); err != nil {
+		return out, err
+	}
+	if out.IssuedAt, err = timeFromWire(in.IssuedAt, "OperationOutcome.IssuedAt"); err != nil {
+		return out, err
+	}
+	if out.RecordedAt, err = timeFromWire(in.RecordedAt, "OperationOutcome.RecordedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireOutboxProjection(in storagev1.OutboxProjection) (*storagepb.OutboxProjection, error) {
+	out := &storagepb.OutboxProjection{}
+	var err error
+	out.Id = in.ID
+	out.AggregateKind = in.AggregateKind
+	out.AggregateId = in.AggregateID
+	out.ProjectionKind = in.ProjectionKind
+	out.PayloadDigest = in.PayloadDigest
+	if out.Payload, err = rawJSONToWire(in.Payload, "OutboxProjection.Payload"); err != nil {
+		return nil, err
+	}
+	out.State = string(in.State)
+	out.Attempts = in.Attempts
+	if out.InitialAvailableAt, err = timeToWire(in.InitialAvailableAt, "OutboxProjection.InitialAvailableAt"); err != nil {
+		return nil, err
+	}
+	if out.AvailableAt, err = timeToWire(in.AvailableAt, "OutboxProjection.AvailableAt"); err != nil {
+		return nil, err
+	}
+	out.LeaseOwner = in.LeaseOwner
+	if out.LeaseExpiresAt, err = nullableTimeToWire(in.LeaseExpiresAt, "OutboxProjection.LeaseExpiresAt"); err != nil {
+		return nil, err
+	}
+	out.DeliveryDigest = in.DeliveryDigest
+	out.LastError = in.LastError
+	out.LastOperationId = in.LastOperationID
+	out.LastOperationDigest = in.LastOperationDigest
+	out.ControllerEpochName = in.ControllerEpochName
+	out.ControllerEpoch = in.ControllerEpoch
+	out.Version = in.Version
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "OutboxProjection.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "OutboxProjection.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	if out.DeliveredAt, err = nullableTimeToWire(in.DeliveredAt, "OutboxProjection.DeliveredAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireOutboxProjection(in *storagepb.OutboxProjection) (storagev1.OutboxProjection, error) {
+	var out storagev1.OutboxProjection
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	out.AggregateKind = in.AggregateKind
+	out.AggregateID = in.AggregateId
+	out.ProjectionKind = in.ProjectionKind
+	out.PayloadDigest = in.PayloadDigest
+	if out.Payload, err = rawJSONFromWire(in.Payload, "OutboxProjection.Payload"); err != nil {
+		return out, err
+	}
+	out.State = storagev1.OutboxProjectionState(in.State)
+	out.Attempts = in.Attempts
+	if out.InitialAvailableAt, err = timeFromWire(in.InitialAvailableAt, "OutboxProjection.InitialAvailableAt"); err != nil {
+		return out, err
+	}
+	if out.AvailableAt, err = timeFromWire(in.AvailableAt, "OutboxProjection.AvailableAt"); err != nil {
+		return out, err
+	}
+	out.LeaseOwner = in.LeaseOwner
+	if out.LeaseExpiresAt, err = nullableTimeFromWire(in.LeaseExpiresAt, "OutboxProjection.LeaseExpiresAt"); err != nil {
+		return out, err
+	}
+	out.DeliveryDigest = in.DeliveryDigest
+	out.LastError = in.LastError
+	out.LastOperationID = in.LastOperationId
+	out.LastOperationDigest = in.LastOperationDigest
+	out.ControllerEpochName = in.ControllerEpochName
+	out.ControllerEpoch = in.ControllerEpoch
+	out.Version = in.Version
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "OutboxProjection.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "OutboxProjection.UpdatedAt"); err != nil {
+		return out, err
+	}
+	if out.DeliveredAt, err = nullableTimeFromWire(in.DeliveredAt, "OutboxProjection.DeliveredAt"); err != nil {
 		return out, err
 	}
 	return out, err
@@ -175,6 +713,49 @@ func fromWirePlanState(in *storagepb.PlanState) (storagev1.PlanState, error) {
 	return out, err
 }
 
+func toWirePreparedPublicationReceipt(in storagev1.PreparedPublicationReceipt) (*storagepb.PreparedPublicationReceipt, error) {
+	out := &storagepb.PreparedPublicationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.TreeSha = in.TreeSHA
+	out.CommitSha = in.CommitSHA
+	out.ManifestDigest = in.ManifestDigest
+	out.RelativeRoot = in.RelativeRoot
+	out.BundleArtifactId = in.BundleArtifactID
+	out.BundleDigest = in.BundleDigest
+	out.BundleSizeBytes = in.BundleSizeBytes
+	out.BundleMediaType = in.BundleMediaType
+	out.BundleRef = in.BundleRef
+	if out.PreparedAt, err = timeToWire(in.PreparedAt, "PreparedPublicationReceipt.PreparedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePreparedPublicationReceipt(in *storagepb.PreparedPublicationReceipt) (storagev1.PreparedPublicationReceipt, error) {
+	var out storagev1.PreparedPublicationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.TreeSHA = in.TreeSha
+	out.CommitSHA = in.CommitSha
+	out.ManifestDigest = in.ManifestDigest
+	out.RelativeRoot = in.RelativeRoot
+	out.BundleArtifactID = in.BundleArtifactId
+	out.BundleDigest = in.BundleDigest
+	out.BundleSizeBytes = in.BundleSizeBytes
+	out.BundleMediaType = in.BundleMediaType
+	out.BundleRef = in.BundleRef
+	if out.PreparedAt, err = timeFromWire(in.PreparedAt, "PreparedPublicationReceipt.PreparedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
 func toWirePromptResultReceipt(in storagev1.PromptResultReceipt) (*storagepb.PromptResultReceipt, error) {
 	out := &storagepb.PromptResultReceipt{}
 	var err error
@@ -209,14 +790,14 @@ func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, err
 	out := &storagepb.ProviderInfo{}
 	var err error
 	out.ContractVersion = in.ContractVersion
-	for _, e1 := range in.Contracts {
-		out.Contracts = append(out.Contracts, string(e1))
+	for _, e6 := range in.Contracts {
+		out.Contracts = append(out.Contracts, string(e6))
 	}
 	out.DatasetId = in.DatasetID
 	out.DatasetOrigin = string(in.DatasetOrigin)
 	out.SchemaVersion = in.SchemaVersion
-	for _, e2 := range in.Capabilities {
-		out.Capabilities = append(out.Capabilities, string(e2))
+	for _, e7 := range in.Capabilities {
+		out.Capabilities = append(out.Capabilities, string(e7))
 	}
 	if out.Limits, err = toWireProviderLimits(in.Limits); err != nil {
 		return nil, err
@@ -240,8 +821,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo) (storagev1.ProviderInfo, e
 	if len(in.Contracts) > 0 {
 		out.Contracts = make([]string, 0, len(in.Contracts))
 	}
-	for _, e3 := range in.Contracts {
-		out.Contracts = append(out.Contracts, string(e3))
+	for _, e8 := range in.Contracts {
+		out.Contracts = append(out.Contracts, string(e8))
 	}
 	out.DatasetID = in.DatasetId
 	out.DatasetOrigin = storagev1.DatasetOrigin(in.DatasetOrigin)
@@ -249,8 +830,8 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo) (storagev1.ProviderInfo, e
 	if len(in.Capabilities) > 0 {
 		out.Capabilities = make([]string, 0, len(in.Capabilities))
 	}
-	for _, e4 := range in.Capabilities {
-		out.Capabilities = append(out.Capabilities, string(e4))
+	for _, e9 := range in.Capabilities {
+		out.Capabilities = append(out.Capabilities, string(e9))
 	}
 	if out.Limits, err = fromWireProviderLimits(in.Limits); err != nil {
 		return out, err
@@ -289,6 +870,234 @@ func fromWireProviderLimits(in *storagepb.ProviderLimits) (storagev1.ProviderLim
 	return out, err
 }
 
+func toWirePublicationReceipt(in storagev1.PublicationReceipt) (*storagepb.PublicationReceipt, error) {
+	out := &storagepb.PublicationReceipt{}
+	var err error
+	out.PublicationId = in.PublicationID
+	out.Generation = in.Generation
+	out.State = string(in.State)
+	if in.Prepared != nil {
+		if out.Prepared, err = toWirePreparedPublicationReceipt(*in.Prepared); err != nil {
+			return nil, err
+		}
+	}
+	if in.Publish != nil {
+		if out.Publish, err = toWirePublishOperationReceipt(*in.Publish); err != nil {
+			return nil, err
+		}
+	}
+	if in.Verification != nil {
+		if out.Verification, err = toWirePublicationVerificationReceipt(*in.Verification); err != nil {
+			return nil, err
+		}
+	}
+	if in.PullRequest != nil {
+		if out.PullRequest, err = toWirePullRequestOperationReceipt(*in.PullRequest); err != nil {
+			return nil, err
+		}
+	}
+	return out, err
+}
+
+func fromWirePublicationReceipt(in *storagepb.PublicationReceipt) (storagev1.PublicationReceipt, error) {
+	var out storagev1.PublicationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.PublicationID = in.PublicationId
+	out.Generation = in.Generation
+	out.State = storagev1.PublicationState(in.State)
+	if in.Prepared != nil {
+		var v10 storagev1.PreparedPublicationReceipt
+		if v10, err = fromWirePreparedPublicationReceipt(in.Prepared); err != nil {
+			return out, err
+		}
+		out.Prepared = &v10
+	}
+	if in.Publish != nil {
+		var v11 storagev1.PublishOperationReceipt
+		if v11, err = fromWirePublishOperationReceipt(in.Publish); err != nil {
+			return out, err
+		}
+		out.Publish = &v11
+	}
+	if in.Verification != nil {
+		var v12 storagev1.PublicationVerificationReceipt
+		if v12, err = fromWirePublicationVerificationReceipt(in.Verification); err != nil {
+			return out, err
+		}
+		out.Verification = &v12
+	}
+	if in.PullRequest != nil {
+		var v13 storagev1.PullRequestOperationReceipt
+		if v13, err = fromWirePullRequestOperationReceipt(in.PullRequest); err != nil {
+			return out, err
+		}
+		out.PullRequest = &v13
+	}
+	return out, err
+}
+
+func toWirePublicationVerificationReceipt(in storagev1.PublicationVerificationReceipt) (*storagepb.PublicationVerificationReceipt, error) {
+	out := &storagepb.PublicationVerificationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.Outcome = string(in.Outcome)
+	out.ExpectedCommitSha = in.ExpectedCommitSHA
+	if out.ObservedRemote, err = toWireRemoteRefState(in.ObservedRemote); err != nil {
+		return nil, err
+	}
+	out.DescendantProofDigest = in.DescendantProofDigest
+	if out.VerifiedAt, err = timeToWire(in.VerifiedAt, "PublicationVerificationReceipt.VerifiedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePublicationVerificationReceipt(in *storagepb.PublicationVerificationReceipt) (storagev1.PublicationVerificationReceipt, error) {
+	var out storagev1.PublicationVerificationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.Outcome = storagev1.PublicationState(in.Outcome)
+	out.ExpectedCommitSHA = in.ExpectedCommitSha
+	if out.ObservedRemote, err = fromWireRemoteRefState(in.ObservedRemote); err != nil {
+		return out, err
+	}
+	out.DescendantProofDigest = in.DescendantProofDigest
+	if out.VerifiedAt, err = timeFromWire(in.VerifiedAt, "PublicationVerificationReceipt.VerifiedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWirePublishOperationReceipt(in storagev1.PublishOperationReceipt) (*storagepb.PublishOperationReceipt, error) {
+	out := &storagepb.PublishOperationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.TargetRepositoryId = in.TargetRepositoryID
+	out.TargetRef = in.TargetRef
+	if out.RemoteBefore, err = toWireRemoteRefState(in.RemoteBefore); err != nil {
+		return nil, err
+	}
+	out.ExpectedCommitSha = in.ExpectedCommitSHA
+	out.AcknowledgementUnknown = in.AcknowledgementUnknown
+	if out.PublishedAt, err = timeToWire(in.PublishedAt, "PublishOperationReceipt.PublishedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePublishOperationReceipt(in *storagepb.PublishOperationReceipt) (storagev1.PublishOperationReceipt, error) {
+	var out storagev1.PublishOperationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.TargetRepositoryID = in.TargetRepositoryId
+	out.TargetRef = in.TargetRef
+	if out.RemoteBefore, err = fromWireRemoteRefState(in.RemoteBefore); err != nil {
+		return out, err
+	}
+	out.ExpectedCommitSHA = in.ExpectedCommitSha
+	out.AcknowledgementUnknown = in.AcknowledgementUnknown
+	if out.PublishedAt, err = timeFromWire(in.PublishedAt, "PublishOperationReceipt.PublishedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWirePullRequestOperationReceipt(in storagev1.PullRequestOperationReceipt) (*storagepb.PullRequestOperationReceipt, error) {
+	out := &storagepb.PullRequestOperationReceipt{}
+	var err error
+	out.OperationId = in.OperationID
+	out.RequestDigest = in.RequestDigest
+	out.IntentKey = in.IntentKey
+	out.ForgeId = in.ForgeID
+	out.Url = in.URL
+	out.State = in.State
+	out.HeadSha = in.HeadSHA
+	if out.ReconciledAt, err = timeToWire(in.ReconciledAt, "PullRequestOperationReceipt.ReconciledAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWirePullRequestOperationReceipt(in *storagepb.PullRequestOperationReceipt) (storagev1.PullRequestOperationReceipt, error) {
+	var out storagev1.PullRequestOperationReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.OperationID = in.OperationId
+	out.RequestDigest = in.RequestDigest
+	out.IntentKey = in.IntentKey
+	out.ForgeID = in.ForgeId
+	out.URL = in.Url
+	out.State = in.State
+	out.HeadSHA = in.HeadSha
+	if out.ReconciledAt, err = timeFromWire(in.ReconciledAt, "PullRequestOperationReceipt.ReconciledAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireRemoteRefState(in storagev1.RemoteRefState) (*storagepb.RemoteRefState, error) {
+	out := &storagepb.RemoteRefState{}
+	var err error
+	out.Absent = in.Absent
+	out.Sha = in.SHA
+	return out, err
+}
+
+func fromWireRemoteRefState(in *storagepb.RemoteRefState) (storagev1.RemoteRefState, error) {
+	var out storagev1.RemoteRefState
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Absent = in.Absent
+	out.SHA = in.Sha
+	return out, err
+}
+
+func toWireResolveOperationRequest(in storagev1.ResolveOperationRequest) (*storagepb.ResolveOperationRequest, error) {
+	out := &storagepb.ResolveOperationRequest{}
+	var err error
+	out.DatasetId = in.DatasetID
+	out.OperationId = in.OperationID
+	out.Method = in.Method
+	out.RequestDigest = in.RequestDigest
+	if out.IssuedAt, err = timeToWire(in.IssuedAt, "ResolveOperationRequest.IssuedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireResolveOperationRequest(in *storagepb.ResolveOperationRequest) (storagev1.ResolveOperationRequest, error) {
+	var out storagev1.ResolveOperationRequest
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.DatasetID = in.DatasetId
+	out.OperationID = in.OperationId
+	out.Method = in.Method
+	out.RequestDigest = in.RequestDigest
+	if out.IssuedAt, err = timeFromWire(in.IssuedAt, "ResolveOperationRequest.IssuedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
 func toWireSaveArtifactRequest(in storagev1.SaveArtifactRequest) (*storagepb.SaveArtifactRequest, error) {
 	out := &storagepb.SaveArtifactRequest{}
 	var err error
@@ -316,6 +1125,907 @@ func fromWireSaveArtifactRequest(in *storagepb.SaveArtifactRequest) (storagev1.S
 	if out.Data == nil {
 		out.Data = []byte{}
 	}
+	return out, err
+}
+
+func toWireSessionCleanupBranchClaim(in storagev1.SessionCleanupBranchClaim) (*storagepb.SessionCleanupBranchClaim, error) {
+	out := &storagepb.SessionCleanupBranchClaim{}
+	var err error
+	out.Id = in.ID
+	out.ObjectUid = in.ObjectUID
+	out.ExpectedVersion = in.ExpectedVersion
+	out.ExpectedGeneration = in.ExpectedGeneration
+	out.ExpectedRepositoryId = in.ExpectedRepositoryID
+	out.ExpectedRef = in.ExpectedRef
+	out.ExpectedOwnerUid = in.ExpectedOwnerUID
+	if out.ExpectedLastVerified, err = toWireRemoteRefState(in.ExpectedLastVerified); err != nil {
+		return nil, err
+	}
+	out.ExpectedAvailability = string(in.ExpectedAvailability)
+	out.ExpectedBlockedReason = in.ExpectedBlockedReason
+	out.ExpectedPublicationId = in.ExpectedPublicationID
+	out.ExpectedRequestDigest = in.ExpectedRequestDigest
+	return out, err
+}
+
+func fromWireSessionCleanupBranchClaim(in *storagepb.SessionCleanupBranchClaim) (storagev1.SessionCleanupBranchClaim, error) {
+	var out storagev1.SessionCleanupBranchClaim
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	out.ObjectUID = in.ObjectUid
+	out.ExpectedVersion = in.ExpectedVersion
+	out.ExpectedGeneration = in.ExpectedGeneration
+	out.ExpectedRepositoryID = in.ExpectedRepositoryId
+	out.ExpectedRef = in.ExpectedRef
+	out.ExpectedOwnerUID = in.ExpectedOwnerUid
+	if out.ExpectedLastVerified, err = fromWireRemoteRefState(in.ExpectedLastVerified); err != nil {
+		return out, err
+	}
+	out.ExpectedAvailability = storagev1.BranchClaimAvailability(in.ExpectedAvailability)
+	out.ExpectedBlockedReason = in.ExpectedBlockedReason
+	out.ExpectedPublicationID = in.ExpectedPublicationId
+	out.ExpectedRequestDigest = in.ExpectedRequestDigest
+	return out, err
+}
+
+func toWireSessionCleanupCompletion(in storagev1.SessionCleanupCompletion) (*storagepb.SessionCleanupCompletion, error) {
+	out := &storagepb.SessionCleanupCompletion{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.SessionUid = in.SessionUID
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	if out.CompletedAt, err = timeToWire(in.CompletedAt, "SessionCleanupCompletion.CompletedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionCleanupCompletion(in *storagepb.SessionCleanupCompletion) (storagev1.SessionCleanupCompletion, error) {
+	var out storagev1.SessionCleanupCompletion
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.SessionUID = in.SessionUid
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	if out.CompletedAt, err = timeFromWire(in.CompletedAt, "SessionCleanupCompletion.CompletedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionCleanupIntent(in storagev1.SessionCleanupIntent) (*storagepb.SessionCleanupIntent, error) {
+	out := &storagepb.SessionCleanupIntent{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.SessionUid = in.SessionUID
+	out.ControlObjectUid = in.ControlObjectUID
+	out.ControlRequestDigest = in.ControlRequestDigest
+	out.ExpectedControlVersion = in.ExpectedControlVersion
+	out.ExpectedLeaseGeneration = in.ExpectedLeaseGeneration
+	out.ExpectedControlLastOperationId = in.ExpectedControlLastOperationID
+	out.ExpectedControlLastDigest = in.ExpectedControlLastDigest
+	if in.ExpectedVerifiedBaseline != nil {
+		if out.ExpectedVerifiedBaseline, err = toWireVerifiedBranchBaseline(*in.ExpectedVerifiedBaseline); err != nil {
+			return nil, err
+		}
+	}
+	out.LeaseName = in.LeaseName
+	out.LeaseObjectUid = in.LeaseObjectUID
+	for _, e14 := range in.BranchClaims {
+		w15, err := toWireSessionCleanupBranchClaim(e14)
+		if err != nil {
+			return nil, err
+		}
+		out.BranchClaims = append(out.BranchClaims, w15)
+	}
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	if out.PreparedAt, err = timeToWire(in.PreparedAt, "SessionCleanupIntent.PreparedAt"); err != nil {
+		return nil, err
+	}
+	if in.Gateway != nil {
+		if out.Gateway, err = toWireGatewaySessionCleanupProof(*in.Gateway); err != nil {
+			return nil, err
+		}
+	}
+	return out, err
+}
+
+func fromWireSessionCleanupIntent(in *storagepb.SessionCleanupIntent) (storagev1.SessionCleanupIntent, error) {
+	var out storagev1.SessionCleanupIntent
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.SessionUID = in.SessionUid
+	out.ControlObjectUID = in.ControlObjectUid
+	out.ControlRequestDigest = in.ControlRequestDigest
+	out.ExpectedControlVersion = in.ExpectedControlVersion
+	out.ExpectedLeaseGeneration = in.ExpectedLeaseGeneration
+	out.ExpectedControlLastOperationID = in.ExpectedControlLastOperationId
+	out.ExpectedControlLastDigest = in.ExpectedControlLastDigest
+	if in.ExpectedVerifiedBaseline != nil {
+		var v16 storagev1.VerifiedBranchBaseline
+		if v16, err = fromWireVerifiedBranchBaseline(in.ExpectedVerifiedBaseline); err != nil {
+			return out, err
+		}
+		out.ExpectedVerifiedBaseline = &v16
+	}
+	out.LeaseName = in.LeaseName
+	out.LeaseObjectUID = in.LeaseObjectUid
+	if len(in.BranchClaims) > 0 {
+		out.BranchClaims = make([]storagev1.SessionCleanupBranchClaim, 0, len(in.BranchClaims))
+	}
+	for _, e17 := range in.BranchClaims {
+		g18, err := fromWireSessionCleanupBranchClaim(e17)
+		if err != nil {
+			return out, err
+		}
+		out.BranchClaims = append(out.BranchClaims, g18)
+	}
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	if out.PreparedAt, err = timeFromWire(in.PreparedAt, "SessionCleanupIntent.PreparedAt"); err != nil {
+		return out, err
+	}
+	if in.Gateway != nil {
+		var v19 storagev1.GatewaySessionCleanupProof
+		if v19, err = fromWireGatewaySessionCleanupProof(in.Gateway); err != nil {
+			return out, err
+		}
+		out.Gateway = &v19
+	}
+	return out, err
+}
+
+func toWireSessionExecutionEvent(in storagev1.SessionExecutionEvent) (*storagepb.SessionExecutionEvent, error) {
+	out := &storagepb.SessionExecutionEvent{}
+	var err error
+	if out.ExecutionEvent, err = toWireExecutionEvent(in.ExecutionEvent); err != nil {
+		return nil, err
+	}
+	out.SessionSeq = in.SessionSeq
+	out.TaskSeq = in.TaskSeq
+	return out, err
+}
+
+func fromWireSessionExecutionEvent(in *storagepb.SessionExecutionEvent) (storagev1.SessionExecutionEvent, error) {
+	var out storagev1.SessionExecutionEvent
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.ExecutionEvent, err = fromWireExecutionEvent(in.ExecutionEvent); err != nil {
+		return out, err
+	}
+	out.SessionSeq = in.SessionSeq
+	out.TaskSeq = in.TaskSeq
+	return out, err
+}
+
+func toWireSessionExecutionEventFilter(in storagev1.SessionExecutionEventFilter) (*storagepb.SessionExecutionEventFilter, error) {
+	out := &storagepb.SessionExecutionEventFilter{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	for _, e20 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e20))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int64(in.Limit)
+	return out, err
+}
+
+func fromWireSessionExecutionEventFilter(in *storagepb.SessionExecutionEventFilter) (storagev1.SessionExecutionEventFilter, error) {
+	var out storagev1.SessionExecutionEventFilter
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	if len(in.EventTypes) > 0 {
+		out.EventTypes = make([]string, 0, len(in.EventTypes))
+	}
+	for _, e21 := range in.EventTypes {
+		out.EventTypes = append(out.EventTypes, string(e21))
+	}
+	out.AfterSeq = in.AfterSeq
+	out.Limit = int(in.Limit)
+	return out, err
+}
+
+func toWireSessionLineage(in storagev1.SessionLineage) (*storagepb.SessionLineage, error) {
+	out := &storagepb.SessionLineage{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.NamespaceUid = in.NamespaceUID
+	out.SessionUid = in.SessionUID
+	out.ContractVersion = in.ContractVersion
+	out.LineageGeneration = in.LineageGeneration
+	out.RuntimeIdentity = in.RuntimeIdentity
+	out.ConfigDigest = in.ConfigDigest
+	out.Version = in.Version
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "SessionLineage.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "SessionLineage.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionLineage(in *storagepb.SessionLineage) (storagev1.SessionLineage, error) {
+	var out storagev1.SessionLineage
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.NamespaceUID = in.NamespaceUid
+	out.SessionUID = in.SessionUid
+	out.ContractVersion = in.ContractVersion
+	out.LineageGeneration = in.LineageGeneration
+	out.RuntimeIdentity = in.RuntimeIdentity
+	out.ConfigDigest = in.ConfigDigest
+	out.Version = in.Version
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "SessionLineage.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "SessionLineage.UpdatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionMessage(in storagev1.SessionMessage) (*storagepb.SessionMessage, error) {
+	out := &storagepb.SessionMessage{}
+	var err error
+	out.Id = in.ID
+	out.Order = in.Order
+	out.Role = in.Role
+	out.Content = in.Content
+	out.Name = in.Name
+	if out.Input, err = jsonMapToWire(in.Input, "SessionMessage.Input"); err != nil {
+		return nil, err
+	}
+	if out.ToolCalls, err = jsonToWire(in.ToolCalls, "SessionMessage.ToolCalls"); err != nil {
+		return nil, err
+	}
+	out.ToolCallId = in.ToolCallID
+	out.SourceType = in.SourceType
+	out.SourceRef = in.SourceRef
+	out.Metadata = map[string]string(in.Metadata)
+	if out.Timestamp, err = timeToWire(in.Timestamp, "SessionMessage.Timestamp"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionMessage(in *storagepb.SessionMessage) (storagev1.SessionMessage, error) {
+	var out storagev1.SessionMessage
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	out.Order = in.Order
+	out.Role = in.Role
+	out.Content = in.Content
+	out.Name = in.Name
+	if out.Input, err = jsonFromWire[map[string]any](in.Input, "SessionMessage.Input"); err != nil {
+		return out, err
+	}
+	if out.ToolCalls, err = jsonFromWire[any](in.ToolCalls, "SessionMessage.ToolCalls"); err != nil {
+		return out, err
+	}
+	out.ToolCallID = in.ToolCallId
+	out.SourceType = in.SourceType
+	out.SourceRef = in.SourceRef
+	out.Metadata = map[string]string(in.Metadata)
+	if out.Timestamp, err = timeFromWire(in.Timestamp, "SessionMessage.Timestamp"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionMetadata(in storagev1.SessionMetadata) (*storagepb.SessionMetadata, error) {
+	out := &storagepb.SessionMetadata{}
+	var err error
+	out.Name = in.Name
+	out.SessionType = in.SessionType
+	out.MessageCount = int64(in.MessageCount)
+	out.InputTokens = int64(in.InputTokens)
+	out.OutputTokens = int64(in.OutputTokens)
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "SessionMetadata.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "SessionMetadata.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	out.ActiveTask = in.ActiveTask
+	out.ActiveTaskUid = in.ActiveTaskUID
+	return out, err
+}
+
+func fromWireSessionMetadata(in *storagepb.SessionMetadata) (storagev1.SessionMetadata, error) {
+	var out storagev1.SessionMetadata
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Name = in.Name
+	out.SessionType = in.SessionType
+	out.MessageCount = int(in.MessageCount)
+	out.InputTokens = int(in.InputTokens)
+	out.OutputTokens = int(in.OutputTokens)
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "SessionMetadata.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "SessionMetadata.UpdatedAt"); err != nil {
+		return out, err
+	}
+	out.ActiveTask = in.ActiveTask
+	out.ActiveTaskUID = in.ActiveTaskUid
+	return out, err
+}
+
+func toWireSessionPageCursor(in storagev1.SessionPageCursor) (*storagepb.SessionPageCursor, error) {
+	out := &storagepb.SessionPageCursor{}
+	var err error
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "SessionPageCursor.CreatedAt"); err != nil {
+		return nil, err
+	}
+	out.Name = in.Name
+	return out, err
+}
+
+func fromWireSessionPageCursor(in *storagepb.SessionPageCursor) (storagev1.SessionPageCursor, error) {
+	var out storagev1.SessionPageCursor
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "SessionPageCursor.CreatedAt"); err != nil {
+		return out, err
+	}
+	out.Name = in.Name
+	return out, err
+}
+
+func toWireSessionRecord(in storagev1.SessionRecord) (*storagepb.SessionRecord, error) {
+	out := &storagepb.SessionRecord{}
+	var err error
+	out.Namespace = in.Namespace
+	out.Name = in.Name
+	out.SessionType = in.SessionType
+	out.ActiveTask = in.ActiveTask
+	out.ActiveTaskUid = in.ActiveTaskUID
+	out.MessageCount = int64(in.MessageCount)
+	out.InputTokens = int64(in.InputTokens)
+	out.OutputTokens = int64(in.OutputTokens)
+	out.Cancelled = in.Cancelled
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "SessionRecord.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "SessionRecord.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	for _, e22 := range in.Messages {
+		w23, err := toWireSessionMessage(e22)
+		if err != nil {
+			return nil, err
+		}
+		out.Messages = append(out.Messages, w23)
+	}
+	return out, err
+}
+
+func fromWireSessionRecord(in *storagepb.SessionRecord) (storagev1.SessionRecord, error) {
+	var out storagev1.SessionRecord
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.Name = in.Name
+	out.SessionType = in.SessionType
+	out.ActiveTask = in.ActiveTask
+	out.ActiveTaskUID = in.ActiveTaskUid
+	out.MessageCount = int(in.MessageCount)
+	out.InputTokens = int(in.InputTokens)
+	out.OutputTokens = int(in.OutputTokens)
+	out.Cancelled = in.Cancelled
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "SessionRecord.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "SessionRecord.UpdatedAt"); err != nil {
+		return out, err
+	}
+	if len(in.Messages) > 0 {
+		out.Messages = make([]storagev1.SessionMessage, 0, len(in.Messages))
+	}
+	for _, e24 := range in.Messages {
+		g25, err := fromWireSessionMessage(e24)
+		if err != nil {
+			return out, err
+		}
+		out.Messages = append(out.Messages, g25)
+	}
+	return out, err
+}
+
+func toWireSessionSoulState(in storagev1.SessionSoulState) (*storagepb.SessionSoulState, error) {
+	out := &storagepb.SessionSoulState{}
+	var err error
+	out.Established = in.Established
+	out.Digest = in.Digest
+	out.MessageCount = int64(in.MessageCount)
+	out.FirstMessageId = in.FirstMessageID
+	out.SessionType = in.SessionType
+	return out, err
+}
+
+func fromWireSessionSoulState(in *storagepb.SessionSoulState) (storagev1.SessionSoulState, error) {
+	var out storagev1.SessionSoulState
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Established = in.Established
+	out.Digest = in.Digest
+	out.MessageCount = int(in.MessageCount)
+	out.FirstMessageID = in.FirstMessageId
+	out.SessionType = in.SessionType
+	return out, err
+}
+
+func toWireSessionTurn(in storagev1.SessionTurn) (*storagepb.SessionTurn, error) {
+	out := &storagepb.SessionTurn{}
+	var err error
+	out.Id = in.ID
+	if out.Key, err = toWireSessionTurnKey(in.Key); err != nil {
+		return nil, err
+	}
+	out.PromptAttemptId = in.PromptAttemptID
+	out.RequestDigest = in.RequestDigest
+	out.UserPrompt = in.UserPrompt
+	out.State = string(in.State)
+	out.TerminalKind = string(in.TerminalKind)
+	out.TerminalContent = in.TerminalContent
+	out.FinalizationDigest = in.FinalizationDigest
+	out.NativeSessionDigest = in.NativeSessionDigest
+	out.PublicationId = in.PublicationID
+	if in.PublicationReceipt != nil {
+		if out.PublicationReceipt, err = toWirePublicationReceipt(*in.PublicationReceipt); err != nil {
+			return nil, err
+		}
+	}
+	out.ProjectionId = in.ProjectionID
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	if out.ProjectionAvailableAt, err = timeToWire(in.ProjectionAvailableAt, "SessionTurn.ProjectionAvailableAt"); err != nil {
+		return nil, err
+	}
+	out.ControllerEpochName = in.ControllerEpochName
+	out.ControllerEpoch = in.ControllerEpoch
+	out.Version = in.Version
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "SessionTurn.CreatedAt"); err != nil {
+		return nil, err
+	}
+	if out.FinalizedAt, err = nullableTimeToWire(in.FinalizedAt, "SessionTurn.FinalizedAt"); err != nil {
+		return nil, err
+	}
+	if out.UpdatedAt, err = timeToWire(in.UpdatedAt, "SessionTurn.UpdatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionTurn(in *storagepb.SessionTurn) (storagev1.SessionTurn, error) {
+	var out storagev1.SessionTurn
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	if out.Key, err = fromWireSessionTurnKey(in.Key); err != nil {
+		return out, err
+	}
+	out.PromptAttemptID = in.PromptAttemptId
+	out.RequestDigest = in.RequestDigest
+	out.UserPrompt = in.UserPrompt
+	out.State = storagev1.SessionTurnState(in.State)
+	out.TerminalKind = storagev1.SessionTurnTerminalKind(in.TerminalKind)
+	out.TerminalContent = in.TerminalContent
+	out.FinalizationDigest = in.FinalizationDigest
+	out.NativeSessionDigest = in.NativeSessionDigest
+	out.PublicationID = in.PublicationId
+	if in.PublicationReceipt != nil {
+		var v26 storagev1.PublicationReceipt
+		if v26, err = fromWirePublicationReceipt(in.PublicationReceipt); err != nil {
+			return out, err
+		}
+		out.PublicationReceipt = &v26
+	}
+	out.ProjectionID = in.ProjectionId
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	if out.ProjectionAvailableAt, err = timeFromWire(in.ProjectionAvailableAt, "SessionTurn.ProjectionAvailableAt"); err != nil {
+		return out, err
+	}
+	out.ControllerEpochName = in.ControllerEpochName
+	out.ControllerEpoch = in.ControllerEpoch
+	out.Version = in.Version
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "SessionTurn.CreatedAt"); err != nil {
+		return out, err
+	}
+	if out.FinalizedAt, err = nullableTimeFromWire(in.FinalizedAt, "SessionTurn.FinalizedAt"); err != nil {
+		return out, err
+	}
+	if out.UpdatedAt, err = timeFromWire(in.UpdatedAt, "SessionTurn.UpdatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionTurnCleanupReceipt(in storagev1.SessionTurnCleanupReceipt) (*storagepb.SessionTurnCleanupReceipt, error) {
+	out := &storagepb.SessionTurnCleanupReceipt{}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationId = in.OperationID
+	out.OperationDigest = in.OperationDigest
+	out.TurnId = in.TurnID
+	if out.Key, err = toWireSessionTurnKey(in.Key); err != nil {
+		return nil, err
+	}
+	out.PromptAttemptId = in.PromptAttemptID
+	out.TerminalKind = string(in.TerminalKind)
+	if out.FinalizedAt, err = timeToWire(in.FinalizedAt, "SessionTurnCleanupReceipt.FinalizedAt"); err != nil {
+		return nil, err
+	}
+	out.PublicationId = in.PublicationID
+	if in.PublicationReceipt != nil {
+		if out.PublicationReceipt, err = toWirePublicationReceipt(*in.PublicationReceipt); err != nil {
+			return nil, err
+		}
+	}
+	out.ProjectionId = in.ProjectionID
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	out.AggregateKind = in.AggregateKind
+	out.AggregateId = in.AggregateID
+	out.Payload = []byte(in.Payload)
+	out.PayloadDigest = in.PayloadDigest
+	out.ProjectionState = string(in.ProjectionState)
+	out.DeliveryDigest = in.DeliveryDigest
+	if out.DeliveredAt, err = nullableTimeToWire(in.DeliveredAt, "SessionTurnCleanupReceipt.DeliveredAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireSessionTurnCleanupReceipt(in *storagepb.SessionTurnCleanupReceipt) (storagev1.SessionTurnCleanupReceipt, error) {
+	var out storagev1.SessionTurnCleanupReceipt
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.SessionName = in.SessionName
+	out.OperationID = in.OperationId
+	out.OperationDigest = in.OperationDigest
+	out.TurnID = in.TurnId
+	if out.Key, err = fromWireSessionTurnKey(in.Key); err != nil {
+		return out, err
+	}
+	out.PromptAttemptID = in.PromptAttemptId
+	out.TerminalKind = storagev1.SessionTurnTerminalKind(in.TerminalKind)
+	if out.FinalizedAt, err = timeFromWire(in.FinalizedAt, "SessionTurnCleanupReceipt.FinalizedAt"); err != nil {
+		return out, err
+	}
+	out.PublicationID = in.PublicationId
+	if in.PublicationReceipt != nil {
+		var v27 storagev1.PublicationReceipt
+		if v27, err = fromWirePublicationReceipt(in.PublicationReceipt); err != nil {
+			return out, err
+		}
+		out.PublicationReceipt = &v27
+	}
+	out.ProjectionID = in.ProjectionId
+	out.ProjectionKind = in.ProjectionKind
+	out.ProjectionDigest = in.ProjectionDigest
+	out.AggregateKind = in.AggregateKind
+	out.AggregateID = in.AggregateId
+	out.Payload = []byte(in.Payload)
+	if out.Payload == nil {
+		out.Payload = []byte{}
+	}
+	out.PayloadDigest = in.PayloadDigest
+	out.ProjectionState = storagev1.OutboxProjectionState(in.ProjectionState)
+	out.DeliveryDigest = in.DeliveryDigest
+	if out.DeliveredAt, err = nullableTimeFromWire(in.DeliveredAt, "SessionTurnCleanupReceipt.DeliveredAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireSessionTurnKey(in storagev1.SessionTurnKey) (*storagepb.SessionTurnKey, error) {
+	out := &storagepb.SessionTurnKey{}
+	var err error
+	out.SessionUid = in.SessionUID
+	out.LeaseGeneration = in.LeaseGeneration
+	out.TaskUid = in.TaskUID
+	out.Attempt = in.Attempt
+	out.PromptId = in.PromptID
+	return out, err
+}
+
+func fromWireSessionTurnKey(in *storagepb.SessionTurnKey) (storagev1.SessionTurnKey, error) {
+	var out storagev1.SessionTurnKey
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.SessionUID = in.SessionUid
+	out.LeaseGeneration = in.LeaseGeneration
+	out.TaskUID = in.TaskUid
+	out.Attempt = in.Attempt
+	out.PromptID = in.PromptId
+	return out, err
+}
+
+func toWireTaskJobIdentity(in storagev1.TaskJobIdentity) (*storagepb.TaskJobIdentity, error) {
+	out := &storagepb.TaskJobIdentity{}
+	var err error
+	out.Namespace = in.Namespace
+	out.TaskUid = in.TaskUID
+	out.JobUid = in.JobUID
+	return out, err
+}
+
+func fromWireTaskJobIdentity(in *storagepb.TaskJobIdentity) (storagev1.TaskJobIdentity, error) {
+	var out storagev1.TaskJobIdentity
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.TaskUID = in.TaskUid
+	out.JobUID = in.JobUid
+	return out, err
+}
+
+func toWireTranscriptSearchFilter(in storagev1.TranscriptSearchFilter) (*storagepb.TranscriptSearchFilter, error) {
+	out := &storagepb.TranscriptSearchFilter{}
+	var err error
+	out.Namespace = in.Namespace
+	out.Query = in.Query
+	out.SessionName = in.SessionName
+	for _, e28 := range in.SessionNames {
+		out.SessionNames = append(out.SessionNames, string(e28))
+	}
+	for _, e29 := range in.HistoryBounds {
+		w30, err := toWireTranscriptSearchHistoryBound(e29)
+		if err != nil {
+			return nil, err
+		}
+		out.HistoryBounds = append(out.HistoryBounds, w30)
+	}
+	out.ExcludeSessionName = in.ExcludeSessionName
+	for _, e31 := range in.Roles {
+		out.Roles = append(out.Roles, string(e31))
+	}
+	out.Limit = int64(in.Limit)
+	out.MaxSnippetLength = int64(in.MaxSnippetLength)
+	return out, err
+}
+
+func fromWireTranscriptSearchFilter(in *storagepb.TranscriptSearchFilter) (storagev1.TranscriptSearchFilter, error) {
+	var out storagev1.TranscriptSearchFilter
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.Namespace = in.Namespace
+	out.Query = in.Query
+	out.SessionName = in.SessionName
+	if len(in.SessionNames) > 0 {
+		out.SessionNames = make([]string, 0, len(in.SessionNames))
+	}
+	for _, e32 := range in.SessionNames {
+		out.SessionNames = append(out.SessionNames, string(e32))
+	}
+	if len(in.HistoryBounds) > 0 {
+		out.HistoryBounds = make([]storagev1.TranscriptSearchHistoryBound, 0, len(in.HistoryBounds))
+	}
+	for _, e33 := range in.HistoryBounds {
+		g34, err := fromWireTranscriptSearchHistoryBound(e33)
+		if err != nil {
+			return out, err
+		}
+		out.HistoryBounds = append(out.HistoryBounds, g34)
+	}
+	out.ExcludeSessionName = in.ExcludeSessionName
+	if len(in.Roles) > 0 {
+		out.Roles = make([]string, 0, len(in.Roles))
+	}
+	for _, e35 := range in.Roles {
+		out.Roles = append(out.Roles, string(e35))
+	}
+	out.Limit = int(in.Limit)
+	out.MaxSnippetLength = int(in.MaxSnippetLength)
+	return out, err
+}
+
+func toWireTranscriptSearchHistoryBound(in storagev1.TranscriptSearchHistoryBound) (*storagepb.TranscriptSearchHistoryBound, error) {
+	out := &storagepb.TranscriptSearchHistoryBound{}
+	var err error
+	out.SessionName = in.SessionName
+	out.MaxMessages = int64(in.MaxMessages)
+	out.ThroughMessageId = in.ThroughMessageID
+	return out, err
+}
+
+func fromWireTranscriptSearchHistoryBound(in *storagepb.TranscriptSearchHistoryBound) (storagev1.TranscriptSearchHistoryBound, error) {
+	var out storagev1.TranscriptSearchHistoryBound
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.SessionName = in.SessionName
+	out.MaxMessages = int(in.MaxMessages)
+	out.ThroughMessageID = in.ThroughMessageId
+	return out, err
+}
+
+func toWireTranscriptSearchResult(in storagev1.TranscriptSearchResult) (*storagepb.TranscriptSearchResult, error) {
+	out := &storagepb.TranscriptSearchResult{}
+	var err error
+	out.SessionName = in.SessionName
+	out.MessageId = in.MessageID
+	out.StableMessageId = in.StableMessageID
+	out.Role = in.Role
+	out.Name = in.Name
+	out.Snippet = in.Snippet
+	if out.CreatedAt, err = timeToWire(in.CreatedAt, "TranscriptSearchResult.CreatedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireTranscriptSearchResult(in *storagepb.TranscriptSearchResult) (storagev1.TranscriptSearchResult, error) {
+	var out storagev1.TranscriptSearchResult
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.SessionName = in.SessionName
+	out.MessageID = in.MessageId
+	out.StableMessageID = in.StableMessageId
+	out.Role = in.Role
+	out.Name = in.Name
+	out.Snippet = in.Snippet
+	if out.CreatedAt, err = timeFromWire(in.CreatedAt, "TranscriptSearchResult.CreatedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireUsageObservation(in storagev1.UsageObservation) (*storagepb.UsageObservation, error) {
+	out := &storagepb.UsageObservation{}
+	var err error
+	out.Id = in.ID
+	out.Namespace = in.Namespace
+	out.NamespaceUid = in.NamespaceUID
+	out.TaskUid = in.TaskUID
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AttemptId = in.AttemptID
+	out.CounterId = in.CounterID
+	out.Scope = in.Scope
+	out.Source = in.Source
+	out.Provider = in.Provider
+	out.Model = in.Model
+	if in.InputTokens != nil {
+		v36 := int64(*in.InputTokens)
+		out.InputTokens = &v36
+	}
+	if in.OutputTokens != nil {
+		v37 := int64(*in.OutputTokens)
+		out.OutputTokens = &v37
+	}
+	if in.CachedInputTokens != nil {
+		v38 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v38
+	}
+	if in.CacheWriteInputTokens != nil {
+		v39 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v39
+	}
+	out.Status = in.Status
+	out.Complete = in.Complete
+	if out.ObservedAt, err = timeToWire(in.ObservedAt, "UsageObservation.ObservedAt"); err != nil {
+		return nil, err
+	}
+	return out, err
+}
+
+func fromWireUsageObservation(in *storagepb.UsageObservation) (storagev1.UsageObservation, error) {
+	var out storagev1.UsageObservation
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.ID = in.Id
+	out.Namespace = in.Namespace
+	out.NamespaceUID = in.NamespaceUid
+	out.TaskUID = in.TaskUid
+	out.TaskName = in.TaskName
+	out.SessionName = in.SessionName
+	out.AttemptID = in.AttemptId
+	out.CounterID = in.CounterId
+	out.Scope = in.Scope
+	out.Source = in.Source
+	out.Provider = in.Provider
+	out.Model = in.Model
+	if in.InputTokens != nil {
+		v40 := int64(*in.InputTokens)
+		out.InputTokens = &v40
+	}
+	if in.OutputTokens != nil {
+		v41 := int64(*in.OutputTokens)
+		out.OutputTokens = &v41
+	}
+	if in.CachedInputTokens != nil {
+		v42 := int64(*in.CachedInputTokens)
+		out.CachedInputTokens = &v42
+	}
+	if in.CacheWriteInputTokens != nil {
+		v43 := int64(*in.CacheWriteInputTokens)
+		out.CacheWriteInputTokens = &v43
+	}
+	out.Status = in.Status
+	out.Complete = in.Complete
+	if out.ObservedAt, err = timeFromWire(in.ObservedAt, "UsageObservation.ObservedAt"); err != nil {
+		return out, err
+	}
+	return out, err
+}
+
+func toWireVerifiedBranchBaseline(in storagev1.VerifiedBranchBaseline) (*storagepb.VerifiedBranchBaseline, error) {
+	out := &storagepb.VerifiedBranchBaseline{}
+	var err error
+	out.RepositoryId = in.RepositoryID
+	out.Ref = in.Ref
+	out.Sha = in.SHA
+	return out, err
+}
+
+func fromWireVerifiedBranchBaseline(in *storagepb.VerifiedBranchBaseline) (storagev1.VerifiedBranchBaseline, error) {
+	var out storagev1.VerifiedBranchBaseline
+	if in == nil {
+		return out, nil
+	}
+	var err error
+	out.RepositoryID = in.RepositoryId
+	out.Ref = in.Ref
+	out.SHA = in.Sha
 	return out, err
 }
 

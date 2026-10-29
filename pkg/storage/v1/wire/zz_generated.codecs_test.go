@@ -11,6 +11,17 @@ import (
 
 var recordCodecs = []recordCodec{
 	{
+		name:    "AdvanceControllerEpochRequest",
+		goType:  reflect.TypeFor[storagev1.AdvanceControllerEpochRequest](),
+		newWire: func() proto.Message { return &storagepb.AdvanceControllerEpochRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireAdvanceControllerEpochRequest(value.(storagev1.AdvanceControllerEpochRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireAdvanceControllerEpochRequest(message.(*storagepb.AdvanceControllerEpochRequest))
+		},
+	},
+	{
 		name:     "ArtifactKey",
 		goType:   reflect.TypeFor[storagev1.ArtifactKey](),
 		newWire:  func() proto.Message { return &storagepb.ArtifactKey{} },
@@ -38,6 +49,50 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "ClaimOutboxProjectionsRequest",
+		goType:  reflect.TypeFor[storagev1.ClaimOutboxProjectionsRequest](),
+		newWire: func() proto.Message { return &storagepb.ClaimOutboxProjectionsRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireClaimOutboxProjectionsRequest(value.(storagev1.ClaimOutboxProjectionsRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireClaimOutboxProjectionsRequest(message.(*storagepb.ClaimOutboxProjectionsRequest))
+		},
+	},
+	{
+		name:    "CompleteOutboxProjectionRequest",
+		goType:  reflect.TypeFor[storagev1.CompleteOutboxProjectionRequest](),
+		newWire: func() proto.Message { return &storagepb.CompleteOutboxProjectionRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireCompleteOutboxProjectionRequest(value.(storagev1.CompleteOutboxProjectionRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireCompleteOutboxProjectionRequest(message.(*storagepb.CompleteOutboxProjectionRequest))
+		},
+	},
+	{
+		name:    "CompleteSessionCleanupRequest",
+		goType:  reflect.TypeFor[storagev1.CompleteSessionCleanupRequest](),
+		newWire: func() proto.Message { return &storagepb.CompleteSessionCleanupRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireCompleteSessionCleanupRequest(value.(storagev1.CompleteSessionCleanupRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireCompleteSessionCleanupRequest(message.(*storagepb.CompleteSessionCleanupRequest))
+		},
+	},
+	{
+		name:    "ControllerEpoch",
+		goType:  reflect.TypeFor[storagev1.ControllerEpoch](),
+		newWire: func() proto.Message { return &storagepb.ControllerEpoch{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireControllerEpoch(value.(storagev1.ControllerEpoch))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireControllerEpoch(message.(*storagepb.ControllerEpoch))
+		},
+	},
+	{
 		name:    "ControllerEpochFence",
 		goType:  reflect.TypeFor[storagev1.ControllerEpochFence](),
 		newWire: func() proto.Message { return &storagepb.ControllerEpochFence{} },
@@ -49,6 +104,70 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "ControllerEpochMirrorState",
+		goType:  reflect.TypeFor[storagev1.ControllerEpochMirrorState](),
+		newWire: func() proto.Message { return &storagepb.ControllerEpochMirrorState{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireControllerEpochMirrorState(value.(storagev1.ControllerEpochMirrorState))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireControllerEpochMirrorState(message.(*storagepb.ControllerEpochMirrorState))
+		},
+	},
+	{
+		name:    "ExecutionEvent",
+		goType:  reflect.TypeFor[storagev1.ExecutionEvent](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEvent{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireExecutionEvent(value.(storagev1.ExecutionEvent)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireExecutionEvent(message.(*storagepb.ExecutionEvent))
+		},
+	},
+	{
+		name:    "ExecutionEventFilter",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventFilter](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventFilter{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventFilter(value.(storagev1.ExecutionEventFilter))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireExecutionEventFilter(message.(*storagepb.ExecutionEventFilter))
+		},
+	},
+	{
+		name:    "ExecutionEventTruncation",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventTruncation](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventTruncation{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventTruncation(value.(storagev1.ExecutionEventTruncation))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireExecutionEventTruncation(message.(*storagepb.ExecutionEventTruncation))
+		},
+	},
+	{
+		name:    "ExecutionEventUsage",
+		goType:  reflect.TypeFor[storagev1.ExecutionEventUsage](),
+		newWire: func() proto.Message { return &storagepb.ExecutionEventUsage{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireExecutionEventUsage(value.(storagev1.ExecutionEventUsage))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireExecutionEventUsage(message.(*storagepb.ExecutionEventUsage))
+		},
+	},
+	{
+		name:    "GatewaySessionCleanupProof",
+		goType:  reflect.TypeFor[storagev1.GatewaySessionCleanupProof](),
+		newWire: func() proto.Message { return &storagepb.GatewaySessionCleanupProof{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireGatewaySessionCleanupProof(value.(storagev1.GatewaySessionCleanupProof))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireGatewaySessionCleanupProof(message.(*storagepb.GatewaySessionCleanupProof))
+		},
+	},
+	{
 		name:     "Message",
 		goType:   reflect.TypeFor[storagev1.Message](),
 		newWire:  func() proto.Message { return &storagepb.Message{} },
@@ -56,11 +175,44 @@ var recordCodecs = []recordCodec{
 		fromWire: func(message proto.Message) (any, error) { return fromWireMessage(message.(*storagepb.Message)) },
 	},
 	{
+		name:    "OperationOutcome",
+		goType:  reflect.TypeFor[storagev1.OperationOutcome](),
+		newWire: func() proto.Message { return &storagepb.OperationOutcome{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireOperationOutcome(value.(storagev1.OperationOutcome))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireOperationOutcome(message.(*storagepb.OperationOutcome))
+		},
+	},
+	{
+		name:    "OutboxProjection",
+		goType:  reflect.TypeFor[storagev1.OutboxProjection](),
+		newWire: func() proto.Message { return &storagepb.OutboxProjection{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireOutboxProjection(value.(storagev1.OutboxProjection))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireOutboxProjection(message.(*storagepb.OutboxProjection))
+		},
+	},
+	{
 		name:     "PlanState",
 		goType:   reflect.TypeFor[storagev1.PlanState](),
 		newWire:  func() proto.Message { return &storagepb.PlanState{} },
 		toWire:   func(value any) (proto.Message, error) { return toWirePlanState(value.(storagev1.PlanState)) },
 		fromWire: func(message proto.Message) (any, error) { return fromWirePlanState(message.(*storagepb.PlanState)) },
+	},
+	{
+		name:    "PreparedPublicationReceipt",
+		goType:  reflect.TypeFor[storagev1.PreparedPublicationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PreparedPublicationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePreparedPublicationReceipt(value.(storagev1.PreparedPublicationReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePreparedPublicationReceipt(message.(*storagepb.PreparedPublicationReceipt))
+		},
 	},
 	{
 		name:    "PromptResultReceipt",
@@ -92,6 +244,70 @@ var recordCodecs = []recordCodec{
 		},
 	},
 	{
+		name:    "PublicationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublicationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublicationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublicationReceipt(value.(storagev1.PublicationReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePublicationReceipt(message.(*storagepb.PublicationReceipt))
+		},
+	},
+	{
+		name:    "PublicationVerificationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublicationVerificationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublicationVerificationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublicationVerificationReceipt(value.(storagev1.PublicationVerificationReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePublicationVerificationReceipt(message.(*storagepb.PublicationVerificationReceipt))
+		},
+	},
+	{
+		name:    "PublishOperationReceipt",
+		goType:  reflect.TypeFor[storagev1.PublishOperationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PublishOperationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePublishOperationReceipt(value.(storagev1.PublishOperationReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePublishOperationReceipt(message.(*storagepb.PublishOperationReceipt))
+		},
+	},
+	{
+		name:    "PullRequestOperationReceipt",
+		goType:  reflect.TypeFor[storagev1.PullRequestOperationReceipt](),
+		newWire: func() proto.Message { return &storagepb.PullRequestOperationReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWirePullRequestOperationReceipt(value.(storagev1.PullRequestOperationReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWirePullRequestOperationReceipt(message.(*storagepb.PullRequestOperationReceipt))
+		},
+	},
+	{
+		name:    "RemoteRefState",
+		goType:  reflect.TypeFor[storagev1.RemoteRefState](),
+		newWire: func() proto.Message { return &storagepb.RemoteRefState{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireRemoteRefState(value.(storagev1.RemoteRefState)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireRemoteRefState(message.(*storagepb.RemoteRefState))
+		},
+	},
+	{
+		name:    "ResolveOperationRequest",
+		goType:  reflect.TypeFor[storagev1.ResolveOperationRequest](),
+		newWire: func() proto.Message { return &storagepb.ResolveOperationRequest{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireResolveOperationRequest(value.(storagev1.ResolveOperationRequest))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireResolveOperationRequest(message.(*storagepb.ResolveOperationRequest))
+		},
+	},
+	{
 		name:    "SaveArtifactRequest",
 		goType:  reflect.TypeFor[storagev1.SaveArtifactRequest](),
 		newWire: func() proto.Message { return &storagepb.SaveArtifactRequest{} },
@@ -100,6 +316,214 @@ var recordCodecs = []recordCodec{
 		},
 		fromWire: func(message proto.Message) (any, error) {
 			return fromWireSaveArtifactRequest(message.(*storagepb.SaveArtifactRequest))
+		},
+	},
+	{
+		name:    "SessionCleanupBranchClaim",
+		goType:  reflect.TypeFor[storagev1.SessionCleanupBranchClaim](),
+		newWire: func() proto.Message { return &storagepb.SessionCleanupBranchClaim{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionCleanupBranchClaim(value.(storagev1.SessionCleanupBranchClaim))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionCleanupBranchClaim(message.(*storagepb.SessionCleanupBranchClaim))
+		},
+	},
+	{
+		name:    "SessionCleanupCompletion",
+		goType:  reflect.TypeFor[storagev1.SessionCleanupCompletion](),
+		newWire: func() proto.Message { return &storagepb.SessionCleanupCompletion{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionCleanupCompletion(value.(storagev1.SessionCleanupCompletion))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionCleanupCompletion(message.(*storagepb.SessionCleanupCompletion))
+		},
+	},
+	{
+		name:    "SessionCleanupIntent",
+		goType:  reflect.TypeFor[storagev1.SessionCleanupIntent](),
+		newWire: func() proto.Message { return &storagepb.SessionCleanupIntent{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionCleanupIntent(value.(storagev1.SessionCleanupIntent))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionCleanupIntent(message.(*storagepb.SessionCleanupIntent))
+		},
+	},
+	{
+		name:    "SessionExecutionEvent",
+		goType:  reflect.TypeFor[storagev1.SessionExecutionEvent](),
+		newWire: func() proto.Message { return &storagepb.SessionExecutionEvent{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionExecutionEvent(value.(storagev1.SessionExecutionEvent))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionExecutionEvent(message.(*storagepb.SessionExecutionEvent))
+		},
+	},
+	{
+		name:    "SessionExecutionEventFilter",
+		goType:  reflect.TypeFor[storagev1.SessionExecutionEventFilter](),
+		newWire: func() proto.Message { return &storagepb.SessionExecutionEventFilter{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionExecutionEventFilter(value.(storagev1.SessionExecutionEventFilter))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionExecutionEventFilter(message.(*storagepb.SessionExecutionEventFilter))
+		},
+	},
+	{
+		name:    "SessionLineage",
+		goType:  reflect.TypeFor[storagev1.SessionLineage](),
+		newWire: func() proto.Message { return &storagepb.SessionLineage{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireSessionLineage(value.(storagev1.SessionLineage)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionLineage(message.(*storagepb.SessionLineage))
+		},
+	},
+	{
+		name:    "SessionMessage",
+		goType:  reflect.TypeFor[storagev1.SessionMessage](),
+		newWire: func() proto.Message { return &storagepb.SessionMessage{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireSessionMessage(value.(storagev1.SessionMessage)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionMessage(message.(*storagepb.SessionMessage))
+		},
+	},
+	{
+		name:    "SessionMetadata",
+		goType:  reflect.TypeFor[storagev1.SessionMetadata](),
+		newWire: func() proto.Message { return &storagepb.SessionMetadata{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionMetadata(value.(storagev1.SessionMetadata))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionMetadata(message.(*storagepb.SessionMetadata))
+		},
+	},
+	{
+		name:    "SessionPageCursor",
+		goType:  reflect.TypeFor[storagev1.SessionPageCursor](),
+		newWire: func() proto.Message { return &storagepb.SessionPageCursor{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionPageCursor(value.(storagev1.SessionPageCursor))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionPageCursor(message.(*storagepb.SessionPageCursor))
+		},
+	},
+	{
+		name:    "SessionRecord",
+		goType:  reflect.TypeFor[storagev1.SessionRecord](),
+		newWire: func() proto.Message { return &storagepb.SessionRecord{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireSessionRecord(value.(storagev1.SessionRecord)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionRecord(message.(*storagepb.SessionRecord))
+		},
+	},
+	{
+		name:    "SessionSoulState",
+		goType:  reflect.TypeFor[storagev1.SessionSoulState](),
+		newWire: func() proto.Message { return &storagepb.SessionSoulState{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionSoulState(value.(storagev1.SessionSoulState))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionSoulState(message.(*storagepb.SessionSoulState))
+		},
+	},
+	{
+		name:     "SessionTurn",
+		goType:   reflect.TypeFor[storagev1.SessionTurn](),
+		newWire:  func() proto.Message { return &storagepb.SessionTurn{} },
+		toWire:   func(value any) (proto.Message, error) { return toWireSessionTurn(value.(storagev1.SessionTurn)) },
+		fromWire: func(message proto.Message) (any, error) { return fromWireSessionTurn(message.(*storagepb.SessionTurn)) },
+	},
+	{
+		name:    "SessionTurnCleanupReceipt",
+		goType:  reflect.TypeFor[storagev1.SessionTurnCleanupReceipt](),
+		newWire: func() proto.Message { return &storagepb.SessionTurnCleanupReceipt{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireSessionTurnCleanupReceipt(value.(storagev1.SessionTurnCleanupReceipt))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionTurnCleanupReceipt(message.(*storagepb.SessionTurnCleanupReceipt))
+		},
+	},
+	{
+		name:    "SessionTurnKey",
+		goType:  reflect.TypeFor[storagev1.SessionTurnKey](),
+		newWire: func() proto.Message { return &storagepb.SessionTurnKey{} },
+		toWire:  func(value any) (proto.Message, error) { return toWireSessionTurnKey(value.(storagev1.SessionTurnKey)) },
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireSessionTurnKey(message.(*storagepb.SessionTurnKey))
+		},
+	},
+	{
+		name:    "TaskJobIdentity",
+		goType:  reflect.TypeFor[storagev1.TaskJobIdentity](),
+		newWire: func() proto.Message { return &storagepb.TaskJobIdentity{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireTaskJobIdentity(value.(storagev1.TaskJobIdentity))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireTaskJobIdentity(message.(*storagepb.TaskJobIdentity))
+		},
+	},
+	{
+		name:    "TranscriptSearchFilter",
+		goType:  reflect.TypeFor[storagev1.TranscriptSearchFilter](),
+		newWire: func() proto.Message { return &storagepb.TranscriptSearchFilter{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireTranscriptSearchFilter(value.(storagev1.TranscriptSearchFilter))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireTranscriptSearchFilter(message.(*storagepb.TranscriptSearchFilter))
+		},
+	},
+	{
+		name:    "TranscriptSearchHistoryBound",
+		goType:  reflect.TypeFor[storagev1.TranscriptSearchHistoryBound](),
+		newWire: func() proto.Message { return &storagepb.TranscriptSearchHistoryBound{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireTranscriptSearchHistoryBound(value.(storagev1.TranscriptSearchHistoryBound))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireTranscriptSearchHistoryBound(message.(*storagepb.TranscriptSearchHistoryBound))
+		},
+	},
+	{
+		name:    "TranscriptSearchResult",
+		goType:  reflect.TypeFor[storagev1.TranscriptSearchResult](),
+		newWire: func() proto.Message { return &storagepb.TranscriptSearchResult{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireTranscriptSearchResult(value.(storagev1.TranscriptSearchResult))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireTranscriptSearchResult(message.(*storagepb.TranscriptSearchResult))
+		},
+	},
+	{
+		name:    "UsageObservation",
+		goType:  reflect.TypeFor[storagev1.UsageObservation](),
+		newWire: func() proto.Message { return &storagepb.UsageObservation{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireUsageObservation(value.(storagev1.UsageObservation))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireUsageObservation(message.(*storagepb.UsageObservation))
+		},
+	},
+	{
+		name:    "VerifiedBranchBaseline",
+		goType:  reflect.TypeFor[storagev1.VerifiedBranchBaseline](),
+		newWire: func() proto.Message { return &storagepb.VerifiedBranchBaseline{} },
+		toWire: func(value any) (proto.Message, error) {
+			return toWireVerifiedBranchBaseline(value.(storagev1.VerifiedBranchBaseline))
+		},
+		fromWire: func(message proto.Message) (any, error) {
+			return fromWireVerifiedBranchBaseline(message.(*storagepb.VerifiedBranchBaseline))
 		},
 	},
 	{
