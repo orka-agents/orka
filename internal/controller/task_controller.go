@@ -244,38 +244,23 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
 		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
-		phaseSucceeded, outcomeSucceeded := taskReportsSuccess(task)
+		reported := taskSuccessOf(task)
 		mutate(task)
-		phaseSucceeds, outcomeSucceeds := taskReportsSuccess(task)
-		reportsSuccess := (phaseSucceeds && !phaseSucceeded) || (outcomeSucceeds && !outcomeSucceeded)
 		write := func(writeCtx context.Context) error {
 			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
 				if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, previousJob); err != nil {
 					return err
 				}
 			}
-			if reportsSuccess {
-				// A Task reports success only while storage is not held for
-				// recovery, including a hold raised after the writes above.
-				return r.ControllerEpochManager.AdmitWork(writeCtx, func(ctx context.Context) error {
-					return r.Status().Update(ctx, task)
-				})
-			}
-			return r.Status().Update(writeCtx, task)
+			return admitTaskStatus(writeCtx, r.ControllerEpochManager, reported, task, func(ctx context.Context) error {
+				return r.Status().Update(ctx, task)
+			})
 		}
 		if hadACPExecution && taskDataAuthorityEnded(task) {
 			return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
 		}
 		return write(ctx)
 	})
-}
-
-// taskReportsSuccess reports whether a Task's phase, and the execution
-// outcome it recorded, say it succeeded. The outcome is recorded before the
-// phase changes, so each reports success on its own.
-func taskReportsSuccess(task *corev1alpha1.Task) (phase, outcome bool) {
-	return task.Status.Phase == corev1alpha1.TaskPhaseSucceeded,
-		task.Status.ExecutionOutcome != nil && task.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseSucceeded
 }
 
 func retryTaskStatusOnConflict(backoff wait.Backoff, write func() error) error {

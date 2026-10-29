@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -650,6 +651,34 @@ func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	metrics.StorageRecoveryHold.Reset()
 	metrics.StorageRecoveryHold.WithLabelValues(string(hold.Reason)).Set(1)
 	m.drainAdmittedWork()
+}
+
+// taskSuccess says whether a Task's phase, and the execution outcome it
+// recorded, report success. The outcome is recorded before the phase
+// changes, so each reports success on its own.
+type taskSuccess struct{ phase, outcome bool }
+
+func taskSuccessOf(task *corev1alpha1.Task) taskSuccess {
+	return taskSuccess{
+		phase:   task.Status.Phase == corev1alpha1.TaskPhaseSucceeded,
+		outcome: task.Status.ExecutionOutcome != nil && task.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseSucceeded,
+	}
+}
+
+// admitTaskStatus runs write, which publishes task's status, through
+// epochs.AdmitWork when that status reports success that reported did not.
+// No Task then reports success while storage is held for recovery, also
+// when the hold is raised after the storage writes that came before the
+// status write. Other status writes run as they are.
+func admitTaskStatus(
+	ctx context.Context, epochs *ControllerEpochManager, reported taskSuccess,
+	task *corev1alpha1.Task, write func(context.Context) error,
+) error {
+	reports := taskSuccessOf(task)
+	if (reports.phase && !reported.phase) || (reports.outcome && !reported.outcome) {
+		return epochs.AdmitWork(ctx, write)
+	}
+	return write(ctx)
 }
 
 // closeFences closes every contract's write fence until it opens again, then

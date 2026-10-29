@@ -1070,3 +1070,39 @@ func TestHeldTaskWithASucceededOutcomeKeepsItsPhase(t *testing.T) {
 		t.Fatalf("Task phase after the hold was released = %q, want Succeeded", got)
 	}
 }
+
+// Recording a succeeded execution outcome, as a Task entering finalization
+// does before its phase changes, waits for a hold as the phase does.
+func TestHeldTaskRecordsNoSucceededOutcome(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	manager := &ControllerEpochManager{ready: make(chan struct{})}
+	r.ControllerEpochManager = manager
+	manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+	finalize := func(task *corev1alpha1.Task) {
+		task.Status.Phase = corev1alpha1.TaskPhaseFinalizing
+		task.Status.ExecutionOutcome = &corev1alpha1.TaskWorkloadExecutionOutcome{
+			Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now(),
+		}
+	}
+
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), finalize); !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("succeeded outcome recorded while held = %v; want ErrStorageRecoveryRequired", err)
+	}
+	var current corev1alpha1.Task
+	if err := r.Get(ctx, client.ObjectKeyFromObject(task), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseRunning || current.Status.ExecutionOutcome != nil {
+		t.Fatalf("Task status while held = %q with outcome %+v; want it unchanged", current.Status.Phase, current.Status.ExecutionOutcome)
+	}
+	manager.clearHold()
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), finalize); err != nil {
+		t.Fatalf("succeeded outcome recorded after the hold was released = %v", err)
+	}
+}
