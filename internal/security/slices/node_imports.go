@@ -161,8 +161,8 @@ func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 
 var (
 	// The conditions Node matches for import syntax and for require calls.
-	nodeImportConditions  = []string{"import", "node", "default"}
-	nodeRequireConditions = []string{nodeRequireSyntax, "node", "default"}
+	nodeImportConditions  = []string{"import", "node", "node-addons", "default"}
+	nodeRequireConditions = []string{nodeRequireSyntax, "node", "node-addons", "default"}
 )
 
 // nodeExportTarget returns a string export target. For a condition object it
@@ -175,6 +175,16 @@ func nodeExportTarget(raw json.RawMessage, conditions []string, depth int) strin
 		return target
 	}
 	if depth > 2 {
+		return ""
+	}
+	// A fallback array uses its first valid target.
+	var fallbacks []json.RawMessage
+	if json.Unmarshal(raw, &fallbacks) == nil {
+		for _, fallback := range fallbacks {
+			if target := nodeExportTarget(fallback, conditions, depth+1); target != "" {
+				return target
+			}
+		}
 		return ""
 	}
 	keys, values, ok := orderedJSONObject(raw)

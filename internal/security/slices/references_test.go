@@ -382,3 +382,23 @@ func TestMorePreciseNodePatternPrefersTheLongerPrefix(t *testing.T) {
 		t.Fatalf("pattern order = %s", got)
 	}
 }
+
+func TestReferenceFilesFollowNodeAddonsAndFallbackArrays(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "addon/package.json", `{"name":"@app/addon","exports":{"node-addons":"./native.ts","default":"./wasm.ts"}}`)
+	writeFile(t, root, "addon/native.ts", "export const n = 1\n")
+	writeFile(t, root, "addon/wasm.ts", "export const w = 1\n")
+	writeFile(t, root, "fallback/package.json", `{"name":"@app/fallback","exports":{".":[{"worker":"./worker.ts"},"./main.ts"]}}`)
+	writeFile(t, root, "fallback/main.ts", "export const m = 1\n")
+	writeFile(t, root, "app/main.ts", "import { n } from '@app/addon'\nimport { m } from '@app/fallback'\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/main.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	for _, want := range []string{"addon/native.ts=imports", "fallback/main.ts=imports"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("references = %s, want %s", got, want)
+		}
+	}
+}
