@@ -63,8 +63,8 @@ type ControllerEpochStatus struct {
 	StorageEpochs []StorageEpochAcknowledgement `json:"storageEpochs,omitempty"`
 
 	// StorageRecovery is the installation's storage recovery hold. While it is
-	// set, Orka refuses every storage write and control-store change, creates
-	// no Jobs and reports no Task success. An operator releases it, after
+	// set, Orka refuses storage contract writes and control-store changes,
+	// creates no Jobs and reports no Task success. An operator releases it, after
 	// recovering storage, by setting the storage.orka.ai/recovery-acknowledged
 	// annotation of this object to the hold's ID.
 	// +optional

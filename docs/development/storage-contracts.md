@@ -621,11 +621,15 @@ and the acknowledged and stored values, and sets the `StorageRecoveryRequired`
 condition. While it is recorded, every contract's write fence and
 `CurrentFence` refuse with an error that matches `ErrNotReady` (and
 `store.ErrStorageRecoveryRequired`), so the storage client refuses every
-write, control-store changes stop, no Task Job is created and no Task reports
-success; reads continue. Task Jobs also wait while any contract's fence is
-closed, so a restarted controller starts no work before every dataset passed
-its takeover checks, and `CurrentFence` waits whenever the state fence is
-closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
+contract write, as well as memory proposal application and scan ingestion,
+which wait for the state fence before their embedded transactions;
+control-store changes stop, no Task Job is created and no Task reports
+success; reads continue. The other embedded families (connector custody,
+agent execution snapshots, native session imports and Session turn records)
+do not wait for a fence yet and are still written while held. Task Jobs also
+wait while any contract's fence is closed, so a restarted controller starts no
+work before every dataset passed its takeover checks, and `CurrentFence` waits
+whenever the state fence is closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
 A restarted controller reads the hold and stays held: it checks and opens
 nothing, and only advances each dataset that still serves the contract it
 acknowledged, so a replaced controller cannot write to it. A check after a

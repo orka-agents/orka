@@ -116,9 +116,13 @@ hold on the whole installation. It also holds when a storage contract is served
 by a different dataset than before, and when a dataset whose durability class is
 `async-replicated` restarts or fails over. While held:
 
-- every storage write and control-store change is refused as temporarily
-  unavailable, so API calls that write storage answer 503; no Task Job is
+- every storage contract write and control-store change is refused as
+  temporarily unavailable, and so are memory proposal application and scan
+  result ingestion, so API calls that make them answer 503; no Task Job is
   created, no agent prompt is dispatched and no Task reports success;
+- connector credentials and consents, agent execution snapshots, native
+  session imports and Session turn records are not part of the storage
+  contract yet and are still written while held;
 - reads and status reporting keep working;
 - the hold is recorded in the `ControllerEpoch` status, so a controller
   restart keeps it.

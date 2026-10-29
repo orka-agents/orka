@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -750,6 +751,90 @@ func TestEmbeddedFamiliesRunAgainstAStrictStore(t *testing.T) {
 	}
 	if _, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns", ID: proposal.ID, AppliedBy: "applier"}); err != nil {
 		t.Fatalf("memory proposal application: %v", err)
+	}
+}
+
+// holdableFences serves staticFences until held is set, then reports a
+// storage recovery hold, as the controller epoch manager does.
+type holdableFences struct {
+	staticFences
+	held atomic.Bool
+}
+
+func (f *holdableFences) WriteFence(ctx context.Context, contract string) (string, storagev1.ControllerEpochFence, error) {
+	if f.held.Load() {
+		return "", storagev1.ControllerEpochFence{}, &store.StorageHoldError{
+			Hold: store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch},
+		}
+	}
+	return f.staticFences.WriteFence(ctx, contract)
+}
+
+// Memory proposal application and scan ingestion run inside the embedded
+// store rather than through an envelope, so they wait for the state write
+// fence themselves: while storage is held they are refused before anything
+// is written, and they run again once the hold is gone.
+func TestEmbeddedMutatorsAreRefusedWhileStorageIsHeld(t *testing.T) {
+	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	backend.RequireWriteEnvelopes()
+	fences := &holdableFences{staticFences: staticFences{datasetID: advanceTestDataset(t, backend, testFence), fence: testFence}}
+	client, err := New(Options{State: backend, Artifacts: backend, Embedded: backend, Fences: fences})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+
+	identity := store.ScanTaskIdentity{Namespace: "ns", RepositoryScan: "repo", ScanRunID: "run", TaskName: "review", TaskUID: "task-uid", Stage: "review", SliceID: "slice"}
+	if err := client.CreateScanRun(ctx, &store.ScanRun{ID: "run", Namespace: "ns", RepositoryScan: "repo", Phase: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	proposal := &store.MemoryProposal{Namespace: "ns", Type: "memory", Title: "title", Content: "remember this"}
+	if err := client.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: "ns", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer"}); err != nil {
+		t.Fatal(err)
+	}
+	ingested := 0
+	ingest := func() (bool, error) {
+		return client.ApplyScanTaskIngestion(ctx, &store.ScanTaskIngestion{ScanTaskIdentity: identity}, nil,
+			func(tx store.SecurityStore, current *store.ScanRun) error {
+				ingested++
+				return tx.UpsertObservedFinding(ctx, &store.Finding{ID: "finding", Namespace: "ns", RepositoryScan: "repo", ScanRunID: "run", Fingerprint: "finding"})
+			})
+	}
+	apply := func() (*store.Memory, error) {
+		return client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns", ID: proposal.ID, AppliedBy: "applier"})
+	}
+
+	fences.held.Store(true)
+	if memory, err := apply(); memory != nil || !errors.Is(err, store.ErrStorageRecoveryRequired) || !errors.Is(err, storagev1.ErrNotReady) {
+		t.Fatalf("memory proposal application while held = %v, %v; want a refusal that is not ready", memory, err)
+	}
+	stored, err := client.GetMemoryProposal(ctx, "ns", proposal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AppliedMemoryID != "" {
+		t.Fatalf("memory proposal applied while held as %q", stored.AppliedMemoryID)
+	}
+	if applied, err := ingest(); applied || ingested != 0 || !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("scan ingestion while held = %v (callback ran %d times), %v; want a refusal", applied, ingested, err)
+	}
+	if _, err := client.GetFinding(ctx, "ns", "finding"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("finding written while held: %v", err)
+	}
+
+	fences.held.Store(false)
+	if memory, err := apply(); err != nil || memory == nil {
+		t.Fatalf("memory proposal application after the hold = %v, %v", memory, err)
+	}
+	if applied, err := ingest(); err != nil || !applied || ingested != 1 {
+		t.Fatalf("scan ingestion after the hold = %v (callback ran %d times), %v", applied, ingested, err)
 	}
 }
 

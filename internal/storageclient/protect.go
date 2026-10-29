@@ -11,6 +11,7 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // The methods in this file apply Orka's redaction and sanitization policy
@@ -218,7 +219,13 @@ func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryPr
 }
 
 // ApplyMemoryProposal redacts the applier identity before applying a proposal.
+// It waits for the state write fence first, as a contract write does, so it
+// is refused while the fence is closed, including while storage is held for
+// recovery.
 func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
+	if _, _, err := c.ops.writeFence(ctx, storagev1.StateContract); err != nil {
+		return nil, err
+	}
 	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
 	return c.Embedded.ApplyMemoryProposal(ctx, apply)
 }
@@ -257,13 +264,17 @@ func saveThreatModelIfVersion(ctx context.Context, writer threatModelWriter, mod
 }
 
 // ApplyScanTaskIngestion gives the ingestion callback a transaction-scoped
-// security store that applies the same sanitization as the client.
+// security store that applies the same sanitization as the client. It waits
+// for the state write fence first, as ApplyMemoryProposal does.
 func (c *Client) ApplyScanTaskIngestion(
 	ctx context.Context,
 	ingestion *store.ScanTaskIngestion,
 	validate func(*store.ScanRun) error,
 	apply func(store.SecurityStore, *store.ScanRun) error,
 ) (bool, error) {
+	if _, _, err := c.ops.writeFence(ctx, storagev1.StateContract); err != nil {
+		return false, err
+	}
 	return c.Embedded.ApplyScanTaskIngestion(ctx, ingestion, validate, protectIngestionApply(apply))
 }
 

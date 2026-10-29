@@ -948,3 +948,81 @@ func TestSettingAHoldWaitsForAdmittedWork(t *testing.T) {
 		t.Fatalf("work after the hold ran=%v err=%v; want it refused", ran, err)
 	}
 }
+
+// holdAfterRevokeStore runs revoked after each Task Job revocation the
+// store accepts.
+type holdAfterRevokeStore struct {
+	*sqlite.Store
+	revoked func()
+}
+
+func (s holdAfterRevokeStore) RevokeTaskJob(ctx context.Context, identity store.TaskJobIdentity) error {
+	if err := s.Store.RevokeTaskJob(ctx, identity); err != nil {
+		return err
+	}
+	s.revoked()
+	return nil
+}
+
+// A hold raised after a finishing Task's Job authority was revoked, and
+// before its status is written, keeps the Task from reporting success until
+// the hold is released. Other status updates keep working while held.
+func TestHoldRaisedAfterJobRevocationKeepsTheTaskFromSucceeding(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, JobName: "task-job", JobUID: "job-uid"},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	manager := &ControllerEpochManager{ready: make(chan struct{})}
+	r.ControllerEpochManager = manager
+	results, ok := r.ResultStore.(*sqlite.Store)
+	if !ok {
+		t.Fatalf("unit reconciler result store is %T, want *sqlite.Store", r.ResultStore)
+	}
+	revocations := 0
+	var raised sync.Once
+	r.ResultStore = holdAfterRevokeStore{Store: results, revoked: func() {
+		revocations++
+		raised.Do(func() {
+			manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+		})
+	}}
+	succeed := func(task *corev1alpha1.Task) {
+		task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+		task.Status.Message = "done"
+	}
+	phase := func() corev1alpha1.TaskPhase {
+		t.Helper()
+		var current corev1alpha1.Task
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), &current); err != nil {
+			t.Fatal(err)
+		}
+		return current.Status.Phase
+	}
+
+	err := r.updateStatusWithRetry(ctx, task.DeepCopy(), succeed)
+	if !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("success reported after a hold was raised = %v; want ErrStorageRecoveryRequired", err)
+	}
+	if revocations != 1 {
+		t.Fatalf("Job revocations before the status write = %d, want 1", revocations)
+	}
+	if got := phase(); got != corev1alpha1.TaskPhaseRunning {
+		t.Fatalf("Task phase while held = %q, want Running", got)
+	}
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), func(task *corev1alpha1.Task) {
+		task.Status.Message = "waiting for storage recovery"
+	}); err != nil {
+		t.Fatalf("status update that reports no success while held = %v", err)
+	}
+
+	manager.clearHold()
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), succeed); err != nil {
+		t.Fatalf("success reported after the hold was released = %v", err)
+	}
+	if got := phase(); got != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("Task phase after the hold was released = %q, want Succeeded", got)
+	}
+}

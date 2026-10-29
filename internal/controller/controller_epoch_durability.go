@@ -97,7 +97,7 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		if hold := record.Hold; hold != nil {
 			t.manager.setHold(*hold)
 			if record.AcknowledgedHoldID != hold.ID {
-				log.Info("Storage is held for recovery; every storage write and control-store change is refused until an operator acknowledges the hold",
+				log.Info("Storage is held for recovery; storage contract writes and control-store changes are refused until an operator acknowledges the hold",
 					"hold", hold.ID, "reason", hold.Reason, "message", hold.Message)
 				t.fenceHeld(ctx, record)
 				if err := t.waitForAcknowledgement(ctx, hold.ID); err != nil {
@@ -122,7 +122,7 @@ func (t *storageTakeover) run(ctx context.Context) error {
 		// dataset known to have lost writes while Kubernetes is slow. A hold
 		// that cannot be recorded stays in place until the process stops.
 		t.manager.setHold(*hold)
-		log.Error(errors.New(hold.Message), "Storage lost acknowledged writes or switched unsafely; holding every storage write and control-store change for recovery",
+		log.Error(errors.New(hold.Message), "Storage lost acknowledged writes or switched unsafely; holding storage contract writes and control-store changes for recovery",
 			"hold", hold.ID, "reason", hold.Reason, "contract", hold.Contract, "dataset", hold.DatasetID)
 		recorded, err := retryEpochStorageStep(ctx, "record the storage recovery hold", func(ctx context.Context) (store.StorageRecoveryHold, error) {
 			return t.records.HoldStorage(ctx, t.fence, *hold)
