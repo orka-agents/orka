@@ -32,9 +32,10 @@ func (s *lostResponseReceiptStore) SavePromptResultReceipt(ctx context.Context, 
 }
 
 // P5: a lost receipt response leaves the attempt Running, so the dispatcher
-// never moves it to Settling without knowing its receipt is stored; settling
-// again finds the stored receipt by its attempt ID and converges.
-func TestSettlingConvergesAfterLostResultReceiptResponse(t *testing.T) {
+// never moves it to Settling without knowing its receipt is stored. The step
+// is idempotent by its attempt ID: settling the same result again finds the
+// stored receipt and moves the attempt once, and another result is refused.
+func TestSettlingAfterLostResultReceiptResponseIsIdempotent(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
 	task := configureRecoveryJournalIdentity(t, fixture)

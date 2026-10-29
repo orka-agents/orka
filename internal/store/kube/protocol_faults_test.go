@@ -417,6 +417,9 @@ func TestOutboxProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 	if err != nil || completed.State != controlstore.OutboxProjectionDelivered || completed.DeliveryDigest != testDigest("delivered-b") {
 		t.Fatalf("successor completion = %#v, %v", completed, err)
 	}
+	// A step the replaced controller starts after the takeover is refused by
+	// the Kubernetes epoch check before it reaches the store.
+	storeSteps := replaced.half.count("CompleteOutboxProjectionRecord")
 	if _, err := replaced.store.CompleteOutboxProjection(ctx, controlstore.CompleteOutboxProjectionRequest{
 		ID: "p3-delayed", Fence: replaced.fence, ExpectedVersion: completed.Version, LeaseOwner: "projector-a",
 		OperationID: "complete-a-again", OperationDigest: testDigest("complete-a-again"),
@@ -424,6 +427,9 @@ func TestOutboxProtocolRefusesCompletionDelayedPastTakeover(t *testing.T) {
 		UpdatedAt: testNow.Add(4 * time.Minute),
 	}); !errors.Is(err, controlstore.ErrConflict) {
 		t.Fatalf("replaced controller completion after the takeover = %v, want a fence conflict", err)
+	}
+	if got := replaced.half.count("CompleteOutboxProjectionRecord"); got != storeSteps {
+		t.Fatalf("a completion the replaced controller started after the takeover reached the store")
 	}
 }
 

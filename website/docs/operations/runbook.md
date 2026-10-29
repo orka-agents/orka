@@ -160,7 +160,9 @@ requires is missing from storage or differs from what Kubernetes recorded.
 Today this happens when a prompt attempt reached `Settling` but the store no
 longer holds its result receipt. Recovery then leaves the attempt in
 `Settling`: it does not run the prompt again, does not guess its outcome,
-does not report success and deletes nothing. Other Tasks keep running.
+does not report success and deletes nothing. Tasks on other Sessions keep
+running; later Tasks on the held Task's Session wait until the hold is
+released.
 
 Find held Tasks with:
 
@@ -183,7 +185,9 @@ kubectl -n <namespace> annotate task <name> \
 
 Recovery then records the prompt's outcome as unknown, without running it
 again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
-An annotation that names any other hold releases nothing.
+An annotation that names any other hold releases nothing. The Gateway Task
+admission policy admits this change on Gateway-owned Tasks too, as long as
+the annotation is the only thing it changes.
 
 ## Security scan operations
 

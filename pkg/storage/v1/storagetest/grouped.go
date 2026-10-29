@@ -60,7 +60,7 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 		require.True(t, appended, "the failed group kept its dedupe key")
 	})
 
-	t.Run("a chat turn whose last message is already stored leaves nothing", func(t *testing.T) {
+	t.Run("a chat turn whose last message reuses a stored message ID leaves nothing", func(t *testing.T) {
 		p, ctx := newProvider(t), t.Context()
 		reservedChat(t, p)
 		require.NoError(t, p.CommitSessionTurn(ctx, chatSession(), "turn-1", 0,
@@ -72,10 +72,15 @@ func runGroupedWrites(t *testing.T, newProvider StateFactory) {
 		before, err := p.GetSession(ctx, "tenant", "chat")
 		require.NoError(t, err)
 
+		// m1 is stored with other content, so the commit reuses an
+		// identifier and must be refused, whichever message a provider
+		// writes first.
 		err = p.CommitSessionTurn(ctx, chatSession(), "turn-2", 1, []storagev1.SessionMessage{
-			{ID: "m2", Role: "user", Content: "again"}, {ID: "m1", Role: "user", Content: "hello"},
+			{ID: "m2", Role: "user", Content: "again"}, {ID: "m1", Role: "user", Content: "a different message"},
 		}, 5, 6)
-		require.ErrorIs(t, err, storagev1.ErrConflict, "a message the transcript already holds")
+		require.Error(t, err)
+		require.True(t, errors.Is(err, storagev1.ErrConflict) || errors.Is(err, storagev1.ErrDuplicateMismatch),
+			"a reused message ID: %v", err)
 
 		after, err := p.GetSession(ctx, "tenant", "chat")
 		require.NoError(t, err)
