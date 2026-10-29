@@ -248,7 +248,12 @@ the observable parts.
   also tagged `json:"-"`: it carries the usage observation Orka derived from
   the event (see "Orka policy above the client").
 - **What the wire preserves.** Nil and empty slices and maps are equivalent,
-  so a caller must not tell a nil result apart from an empty one. Strings are
+  so a caller must not tell a nil result apart from an empty one. Orka's own
+  callers of the families on the wire check lengths or turn a nil list into an
+  empty one before encoding it, and compare cleanup intents through JSON whose
+  optional lists are `omitempty`. A `json.RawMessage` that is empty or only
+  JSON whitespace crosses as no content, as SQLite stores it and as the
+  request digest counts it. Strings are
   valid UTF-8. Times are within 0001-01-01 and 9999-12-31 UTC; the zero
   `time.Time` means "no time", and a `*time.Time` keeps nil apart from a
   pointer to the zero time.
@@ -610,19 +615,35 @@ a pair of types is outside the mapping table. CI regenerates the code and
 fails on a difference.
 
 The wire currently serves `Describe` and `HealthCheck`, inter-agent messages,
-plan state, Task results, prompt result receipts and the whole `artifacts.v1`
-contract. The other state families stay in process until their RPCs land.
+plan state, Task results, prompt result receipts, Sessions (transcripts,
+locks, chat turns, souls and lineage), the store halves of the control
+protocols (Session cleanup, the controller epoch mirror, the projection outbox
+and Task Job authority), execution events, and the whole `artifacts.v1`
+contract. The gateway, security, repository monitor, usage and memory families
+stay in process until their RPCs land. The `Ownership` service carries
+`ResolveOperation`, `PruneOperationReceipts`, `AdvanceControllerEpoch` and
+`GetControllerEpochMirror`. No provider is required to implement those yet, so
+the service is optional: a server serves it from its state provider when that
+implements `OperationReceiptStore` and `ControllerEpochAdvancer`, else from its
+artifacts provider when that does, and otherwise answers it as unimplemented.
 `wiretest.State` serves a state provider over an in-memory loopback with TLS
-1.3 and bearer authentication, sending each family that has RPCs through the
-server library and the generated client, and `wiretest.Artifacts` serves an
-artifacts provider entirely over the wire; the SQLite provider passes both
-suites that way.
+1.3 and bearer authentication, sending each `state.v1` family that has RPCs
+through the server library and the generated client, and `wiretest.Artifacts`
+serves an artifacts provider entirely over the wire; the SQLite provider
+passes both suites that way. Ownership is not part of `state.v1` yet, so its
+RPCs are tested through the client directly.
 
 - **Call metadata.** Every request names `orka-storage-contract`
   (`orka.storage.v1`) and its `orka-storage-revision`; the server refuses a
   call without them (`CONTRACT_MISMATCH`). A write's `WriteEnvelope` travels as the
   binary header `orka-storage-envelope-bin`, and the server puts it in the
-  provider's context with `WithWriteEnvelope`.
+  provider's context with `WithWriteEnvelope`. Only methods the method
+  catalog classifies as writes carry one: the client never attaches it to a
+  read or an administrative method, such as `ResolveOperation` or
+  `AdvanceControllerEpoch`, and the server refuses a call to one of those that
+  names an envelope (`VALIDATION`). A transport failure of an administrative
+  method after it may have been sent is still an unknown outcome, as a
+  write's is.
 - **Dataset binding.** Every request names the dataset it expects in
   `orka-storage-dataset`; only `Describe` and `HealthCheck` may omit it, so a
   client can learn the dataset before it binds. The server describes its
@@ -654,6 +675,22 @@ suites that way.
   tell empty bytes from absent ones, so decoded bytes are never nil: a
   provider receives an empty result, receipt or artifact as an empty slice,
   as it would in process.
+- **Batched reads.** A read whose result the contract does not bound by size
+  streams its list in batches: `GetSession` (the transcript),
+  `LoadTranscript`, `LoadTranscriptThrough`, `ListSessions`,
+  `ListSessionCleanupIntents` and `ListSessionCleanupTurns`. The provider still
+  returns the whole result at once, from one snapshot; the server library
+  splits the list only after the provider returned, so the stream holds
+  nothing open in the provider. The first message carries every other
+  response field and the first batch; each later message carries only the
+  next batch, never empty. A batch holds records of at most 1 MiB in total, or
+  one larger record, and a record that does not fit the 16 MiB message limit
+  fails the call as a provider error before anything is sent. The response
+  headers `orka-storage-snapshot-records` and `orka-storage-snapshot-bytes`
+  declare the whole list, so the client refuses a list over its limit (256 MiB
+  by default) before reading it, and refuses a response that does not match
+  its declaration. Batched reads use the bulk connection and the `bulk` call
+  class.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream
   (`UNSUPPORTED_FIELD`), so an older server never ignores a newer
@@ -662,7 +699,8 @@ suites that way.
   at least the revision that introduced it.
 - **Server limits.** A server can cap the calls it runs at once per class
   (`health` for `Describe` and `HealthCheck`, `control` for other unary calls,
-  `bulk` for streaming calls) and how long each class may run. A call over its
+  including `Ownership`, and `bulk` for streaming calls and batched reads) and
+  how long each class may run. A call over its
   class's limit is refused with `OVERLOADED` before the provider runs, which
   the client returns as `ErrUnavailable`. The duration limit covers the whole
   call, including the first description of the providers and every message a
@@ -711,8 +749,10 @@ settle timeout (10 seconds by default), to finish a commit it has already sent
 after the caller's context ends, so the outcome the client reports as unknown
 is settled for its retry or resolution; the grace period should exceed the
 settle timeout.
-The server library does not yet recompute a write's request digest; that check
-needs the canonical request digest the operation receipts define.
+The server library does not yet recompute a write's request digest from the
+decoded request and compare it with the envelope's. That check also needs the
+mapping to decode dynamic values losslessly, as "Request digests" requires;
+today it decodes JSON numbers as float64.
 
 ### Orka policy above the client
 

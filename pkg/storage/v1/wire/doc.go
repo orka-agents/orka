@@ -19,7 +19,9 @@
 // another dataset before the provider runs. Blobs, such as artifact bytes,
 // move on streaming RPCs in parts of at most [MaxChunkBytes], and the Server
 // calls the provider only with a whole blob that matches its declared size
-// and digest. Package adapterkit serves a provider as a separately deployed
+// and digest. A read whose result the contract does not bound by size, such
+// as a Session's transcript, streams its list in batches from one provider
+// result. Package adapterkit serves a provider as a separately deployed
 // adapter with TLS, client authentication, limits and probes.
 package wire
 

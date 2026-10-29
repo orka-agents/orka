@@ -40,6 +40,17 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // its response the same way, with the size and digest in the response
 // headers.
 //
+// Batched reads
+//
+// A server-streaming read marked with the batched option returns a list the
+// contract does not bound by size. The first message carries every other
+// response field and the first batch of the list; each later message carries
+// only the next batch, never empty, in the same field. A batch holds records
+// of at most 1 MiB in total, or one larger record. The response headers
+// orka-storage-snapshot-records and orka-storage-snapshot-bytes (decimal)
+// declare the number of records and the sum of their encoded sizes, so a
+// client can refuse a list larger than it accepts before reading it.
+//
 // Errors
 //
 // Every status the server library or a provider produces carries a
