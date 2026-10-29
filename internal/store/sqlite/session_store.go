@@ -429,12 +429,26 @@ func rejectLegacyNativeSession(ctx context.Context, q controlQueryRower, namespa
 }
 
 func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, taskUID string, expiresAt *time.Time) error {
-	if err := rejectLegacyNativeSession(ctx, s.taskDataExecutor(ctx), namespace, name); err != nil {
+	// The checks and the update share one transaction, so a Session deleted
+	// between them is reported as not found rather than as locked, and the
+	// update never acts on a gateway ownership check that no longer holds.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		return acquireSessionLock(ctx, q, namespace, name, taskName, taskUID, expiresAt)
+	})
+}
+
+func acquireSessionLock(
+	ctx context.Context,
+	q taskDataExecutor,
+	namespace, name, taskName, taskUID string,
+	expiresAt *time.Time,
+) error {
+	if err := rejectLegacyNativeSession(ctx, q, namespace, name); err != nil {
 		return err
 	}
 	// Check if session exists
 	var count int
-	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
 	).Scan(&count)
@@ -445,7 +459,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return store.ErrNotFound
 	}
 	var ownerType string
-	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT owner_type FROM sessions WHERE namespace = ? AND name = ?`,
+	if err := q.QueryRowContext(ctx, `SELECT owner_type FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name).Scan(&ownerType); err != nil {
 		return err
 	}
@@ -455,7 +469,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		}
 		var eventState store.GatewayEventState
 		var storedTaskUID string
-		err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT state, task_uid FROM gateway_events
+		err := q.QueryRowContext(ctx, `SELECT state, task_uid FROM gateway_events
 			WHERE namespace = ? AND session_name = ? AND task_name = ?
 			ORDER BY created_at DESC, id DESC LIMIT 1`,
 			namespace, name, taskName,
@@ -487,7 +501,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		expiresValue = *expiresAt
 	}
 	now := time.Now().UTC()
-	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
+	result, err := q.ExecContext(ctx,
 		`UPDATE sessions SET active_task = ?, active_task_uid = ?, active_task_expires_at = ?,
 		   chat_turn_id = '', chat_turn_expires_at = NULL
 		 WHERE namespace = ? AND name = ? AND (active_task = '' OR
@@ -509,10 +523,10 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	if rows == 0 {
-		if err := rejectLegacyNativeSession(ctx, s.taskDataExecutor(ctx), namespace, name); err != nil {
+		if err := rejectLegacyNativeSession(ctx, q, namespace, name); err != nil {
 			return err
 		}
-		if pending, pendingErr := s.HasSessionCleanupIntent(ctx, namespace, name); pendingErr != nil {
+		if pending, pendingErr := sessionCleanupIntentExists(ctx, q, namespace, name); pendingErr != nil {
 			return pendingErr
 		} else if pending {
 			return fmt.Errorf("%w: session %s/%s is being deleted", store.ErrConflict, namespace, name)
