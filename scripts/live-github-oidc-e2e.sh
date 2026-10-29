@@ -12,6 +12,8 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${script_dir}/lib/e2e-admission-tls.sh"
+# shellcheck source=scripts/lib/deployment-rollout.sh
+. "${script_dir}/lib/deployment-rollout.sh"
 cluster="${KIND_CLUSTER:-orka-live-github-oidc-e2e}"
 namespace="${ORKA_NAMESPACE:-orka-system}"
 deployment="${ORKA_CONTROLLER_DEPLOYMENT:-orka-controller-manager}"
@@ -141,7 +143,8 @@ kubectl -n "${namespace}" set env deployment/"${deployment}" \
   ORKA_CONTEXT_TOKEN_PROFILE- \
   ORKA_CONTEXT_TOKEN_ISSUER- \
   ORKA_CONTEXT_TOKEN_AUDIENCE-
-kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout=5m
+rollout_timeout="$(deployment_rollout_timeout kubectl -n "${namespace}" "${deployment}")"
+kubectl -n "${namespace}" rollout status deployment/"${deployment}" --timeout="${rollout_timeout}"
 start_api_port_forward
 wait_for_api
 # GitHub Actions OIDC tokens are short-lived; fetch immediately before use so
