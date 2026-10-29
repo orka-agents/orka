@@ -199,21 +199,28 @@ the observable parts.
   in-process store, SQLite returns its driver's errors for infrastructure
   failures; no commit outcome can be lost in transit.
 - **Write envelope.** `WriteEnvelope{DatasetID, Fence, OperationID,
-  RequestDigest}` is reserved and travels in the context
+  RequestDigest, IssuedAt, Sequence}` travels in the context
   (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
-  providers must accept writes without one. Operation receipts (step 3) will
-  check the dataset, the controller epoch fence and the operation identity at
-  commit time. Only the outbox family takes a `ControllerEpochFence` today, as
-  an explicit parameter that stays authoritative for it; the envelope reaches
-  every other write family without another change to each of the contract's
-  roughly 190 context-taking methods. Operation-specific preconditions, such
-  as an expected version or message count, stay explicit parameters.
+  providers must accept writes without one. The checks it carries, operation
+  receipts and forward-only controller ownership are described in "Write
+  envelopes, operation receipts and controller ownership" below. Only the
+  outbox family takes a `ControllerEpochFence` today, as an explicit parameter
+  that stays authoritative for it and must equal the envelope fence; the
+  envelope reaches every other write family without another change to each of
+  the contract's roughly 200 context-taking methods. Operation-specific
+  preconditions, such as an expected version or message count, stay explicit
+  parameters.
 - **Provider description.** `Describe(ctx)` on both providers returns
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
   optional capabilities beyond the contract parts (none in v1), size limits
   and the durability class. It is there for startup validation (step 4),
   installation binding (step 5) and migration; nothing in Orka calls it yet.
+  It also has fields for the dataset's write state (`ready`, `migrating` or
+  `importing`), an `Incarnation` that changes when the serving database may
+  have restarted or switched, the provider clock when `Describe` ran
+  (`ObservedAt`), and the operation receipt retention and result limit. They
+  stay empty until providers report them.
 - **Times.** A provider preserves every caller-supplied time exactly, to the
   nanosecond, and returns stored times in UTC. Connector consent and
   completion encryption bind `ExpiresAt.UTC().UnixNano()` into associated
@@ -256,6 +263,243 @@ the observable parts.
   `Message.CreatedAt` are `time.Time`; the API's JSON output keeps the format
   it had when they were strings.
 
+### Write envelopes, operation receipts and controller ownership
+
+These rules make retried writes safe and keep a replaced controller from
+writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
+`RequestDigest`, the method catalog (`LookupMethod`, `Methods`),
+`OperationReceiptStore`, `ControllerEpochAdvancer`, the errors
+`ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
+`ErrClockSkew`, and the new `ProviderInfo` fields. Nothing enforces the rules
+yet: Orka does not attach envelopes, SQLite does not check them, providers
+must keep accepting writes without one, and the shared suite does not test
+them. They become provider obligations when the storage client attaches
+envelopes. The suite's write catalog (`storagetest`) then gains one case per
+write method.
+
+- **Method catalog.** Every provider method is a read, a write or an
+  administrative method. Reads carry no envelope and need no stored receipt.
+  Every write carries an envelope and leaves an operation receipt.
+  `AdvanceControllerEpoch`, `ResolveOperation`, `PruneOperationReceipts` and,
+  until it is replaced, `SyncControllerEpochMirror` are administrative: they
+  carry no envelope and are not checked against the current fence.
+  `GetMessages` counts as a write because it can mark messages read, until it
+  is split into a plain read and a consuming write, and so does `IsLocked`,
+  because SQLite clears an expired Task lock when it finds one. A contract
+  test fails when a provider interface method is missing from the catalog, so
+  no new method can ship unclassified. A write may also name its natural key:
+  request values, such as a dedupe key or a cleanup operation ID, by which the
+  provider recognizes a repeat, so running it again as a new operation
+  returns the stored outcome or fails, but never repeats its effect.
+- **Envelope.** `WriteEnvelope` names the dataset as `Describe` reports it,
+  the issuing controller's fence for that dataset, an operation ID of at most
+  256 bytes, the request digest, the controller time the operation was
+  created (`IssuedAt`) and its issue order within the fence (`Sequence`).
+  Every retry of an operation reuses the whole envelope. `Validate` checks the
+  fields; a write without a valid envelope returns `ErrValidation`. A method
+  that already takes an explicit `ControllerEpochFence` keeps it
+  authoritative, and it must equal the envelope fence.
+- **Checks at commit.** In the transaction that commits a write, a provider
+  checks, in this order:
+  1. the dataset, or `ErrDatasetMismatch`;
+  2. the operation receipt. A committed receipt with the same method and
+     digest returns the original outcome without the later checks, so a
+     retry reads the original result even under a stale fence and changes
+     nothing. A different method or digest returns `ErrDuplicateMismatch`, and
+     an aborted operation returns `ErrOperationAborted`;
+  3. the operation's age: `IssuedAt` more than `MaxOperationAge` (15 minutes)
+     before the provider clock returns `ErrOperationExpired`, and more than
+     `MaxClockSkew` (30 seconds) after it returns `ErrClockSkew`;
+  4. the dataset state: anything but `ready` returns `ErrNotReady`;
+  5. the fence, which must equal the dataset's stored controller epoch, or
+     `ErrFenced`. The provider reads it under a lock that conflicts with an
+     epoch advance;
+  6. the method's own preconditions.
+
+  It then writes the change and its receipt together. A refusal commits
+  nothing and records no receipt, so a later attempt is evaluated again.
+- **Request digests.** `RequestDigest(method, args...)` hashes the method and
+  the arguments after the context. It walks Go values, not JSON, so fields
+  tagged `json:"-"` are covered outside dynamic values. It stays stable
+  across additive changes and
+  across a process boundary, so a network server can recompute it from the
+  request it decoded: zero struct fields are left out, so a field added later
+  and left unset does not change the digest; a non-nil pointer counts even
+  when it points to a zero value; maps are sorted; times are UTC seconds and
+  nanoseconds; and dynamic values (`any`, non-empty maps of `any` and
+  `json.RawMessage`) are canonical JSON with sorted keys and every number
+  kept exactly as written, so distinct numbers, such as
+  `1152921504606846976` and `1152921504606847000`, never share a digest. A
+  JSON null counts as absent; an empty JSON array or object is a value. A
+  server that recomputes the digest must decode dynamic values losslessly,
+  with `UseNumber` or as `json.RawMessage` bytes, as it must anyway to store
+  them unchanged; a copy decoded into float64 is only guaranteed to match a
+  typed value's floating-point numbers and integers up to 2^53, and where it
+  rewrote a number it fails the digest check rather than matching another
+  request.
+- **Receipts.** A receipt commits with its change. A replay returns the
+  original outcome and changes nothing; a provider either keeps the typed
+  result with the receipt, up to `MaxReceiptResultBytes` (1 MiB) in its own
+  encoding, or reads it again from the records the write made, so the replay
+  carries the original result, including any identifiers the write assigned.
+  Outputs the records do not hold, such as a created flag or a count, are
+  always kept with the receipt. A result read again reflects records that
+  changed or were deleted since, and a method whose replay can differ that
+  way says so. `ResolveOperation` reports only the
+  state; a caller reads a committed result by retrying with the same
+  envelope. A successful write that changed nothing is a
+  committed outcome and gets a receipt, so a delayed duplicate cannot act
+  later, for example by releasing a lock the same Task acquired again. A
+  receipt never holds plaintext protected data. A provider keeps receipts for
+  at least `MinReceiptRetention` (1 hour) on its own clock, which is longer
+  than `MaxOperationAge` plus `MaxClockSkew`, so every retry it can still
+  accept finds its receipt. `PruneOperationReceipts` removes older receipts in
+  bounded batches, and `Describe` reports the retention and the result limit.
+- **Unknown outcomes.** When a write's outcome is unknown (`ErrOutcomeUnknown`,
+  or a transport failure after the request was sent), the storage client
+  retries the same envelope until its deadline and then calls
+  `ResolveOperation` with the operation's `IssuedAt`. That returns the
+  committed outcome, or durably records the operation as aborted so it can
+  never commit later. Any controller may resolve an operation, including one
+  whose fence is stale, because resolution can only prevent a change. A
+  missing receipt proves nothing committed only while any receipt the
+  operation could have left is still kept, so for an operation older than
+  `MinReceiptRetention` minus `MaxClockSkew`, `ResolveOperation`
+  records nothing and returns `ErrOperationExpired`: the outcome stays unknown
+  for good, and the affected work is held for recovery. The bound uses the
+  contract's minimum retention, so raising a provider's retention never
+  turns a receipt pruned earlier into a false abort. While an outcome
+  cannot be settled, the client refuses new writes to that dataset with
+  `ErrNotReady` and keeps trying to resolve it; an outcome found to be
+  permanently unknown moves to a recovery hold on the affected work and stops
+  blocking the dataset. A refusal of a retry settles only that attempt: the
+  earlier attempt whose outcome was unknown may have committed and had its
+  receipt pruned since, or may still commit, for example after a migration
+  finishes. The operation is settled only by a replay, by
+  `ErrOperationAborted` or by a `ResolveOperation` result. For one operation
+  ID, a provider makes the receipt check and commit of each attempt and an
+  abort recorded by `ResolveOperation` atomic with respect to one another,
+  for example by claiming the operation ID first, so an operation never both
+  commits and aborts. `ErrOutcomeUnknown` is
+  neither success nor failure: an API handler answers 503 and a reconciler
+  requeues, and neither repeats the effect nor reports success. An operation
+  ID names one operation instance and is never derived from a durable
+  identity, so an aborted instance does not block a later one. A durable
+  operation run again after a restart is a new operation. Its natural key, or
+  for a write such as a delete the state it changes, makes that safe; a write
+  with neither, such as a send or a counter update, must not be run again
+  unless the caller can observe whether the first one committed.
+- **Messages, counters and chat turns.** Receipts make these retries safe: a
+  replayed `SendMessage` returns the assigned ID without a second message, a
+  replayed counter update adds nothing, a replayed chat-turn reservation or
+  commit returns its original outcome, and a replayed consuming message read
+  returns the same messages, which are marked read by ID. Consuming reads are
+  bounded per call. Before computing the digest, the client assigns transcript
+  message, memory and finding IDs and fills zero record times from
+  `IssuedAt`, so every retry sends the same request.
+- **Artifact and result identity.** Artifact writes and deletes are bound to
+  the Task UID. A delete leaves a tombstone for that UID, which refuses a
+  delayed save for the deleted Task. A replacement carries the envelope's
+  epoch and sequence, so an older write cannot overwrite a newer one or reach
+  a later Task with the same name. Results follow the same rules and gain a
+  `MaxResultBytes` limit equal to the API's 10 MiB. Files stored before UIDs
+  were recorded belong to the current holder of the Task name until its first
+  delete.
+- **Controller ownership.** Kubernetes decides which controller may act. Each
+  dataset holds its own controller epoch, which `AdvanceControllerEpoch`
+  moves to the exact record the Kubernetes compare-and-swap produced. The
+  request also carries the installation identity (`InstallationID`); Orka
+  passes the UID of the installation's ControllerEpoch object. The advance
+  only moves forward. A lower epoch or another installation returns
+  `ErrFenced`, a repeat of the stored epoch with the same holder and request
+  digest succeeds, any other record at the same epoch returns `ErrConflict`,
+  and forward jumps are allowed. A refused advance commits nothing. A dataset
+  that holds an epoch but no installation binds the installation of its first
+  successful advance, including a repeat of the stored epoch. The advance
+  waits for fenced writes in progress, and once it returns, no write with an
+  older fence commits, however long it was delayed. Today the controller
+  epoch manager syncs each mirror it is given with `SyncControllerEpochMirror`
+  and then opens one fence.
+  Once providers implement the advance, at takeover Orka acquires the epoch in
+  Kubernetes, reads the epoch each dataset acknowledged earlier, and then,
+  for each distinct dataset it is bound to:
+  1. advances the dataset;
+  2. stops for recovery if the dataset's previous epoch is below its
+     acknowledgement, because the store lost an acknowledged advance;
+  3. records the new acknowledgement in Kubernetes, in the ControllerEpoch
+     status until an installation record exists;
+  4. opens that dataset's fence for writes.
+
+  Each dataset's fence opens independently, and a write waits only for the
+  fence of the contract that serves it (`MethodInfo.Contract`), so an
+  artifacts outage at takeover does not stop state writes. This is safe
+  because no transaction spans the two contracts and each store checks its
+  own fence at commit. Until a store's own advance, the replaced controller's
+  delayed writes can still commit there, but the successor does not write
+  that store until then, so each store has one writing controller at a time.
+  Kubernetes-only mutations keep using the Kubernetes fence.
+- **Single writer and schema migration.** A store refuses writes under any
+  fence but its current one, and a dataset bound to one installation refuses
+  another installation's advance. A schema change moves the dataset to
+  `migrating` under the same lock as an epoch advance, so writes in progress
+  finish first and later new writes return `ErrNotReady` until the dataset is
+  `ready` again; a replay of a committed operation is still served. A crash
+  during migration leaves the dataset `migrating`. While the dataset is not
+  ready, `ResolveOperation` returns an outcome it already holds and otherwise
+  returns `ErrNotReady`, recording nothing. A provider that imports a dataset
+  either carries its operation receipts and aborted records with it or gives
+  the imported dataset a new dataset ID, so a resolution can never report a
+  committed operation as aborted. `Describe` reports the state. SQLite keeps
+  its process lock as well.
+- **Lease clocks.** A provider decides a lease only by comparing times passed
+  in the same request with stored times that came from requests. It never
+  compares a caller's time with its own clock. Leases are therefore decided on
+  the controller clock, and the commit-time fence makes an early reclaim after
+  a takeover harmless. A request's times are fixed for the operation and
+  covered by its digest, so a retry is judged at the original request time.
+  The provider clock is used only for operation age and the clock-skew check,
+  receipt and tombstone retention, `ObservedAt`, and informational times the
+  provider assigns when a caller leaves them zero. Orka estimates the clock
+  offset from `ObservedAt` and refuses writes while it exceeds
+  `MaxClockSkew`. Gateway claims, outbox claims and gateway message admission
+  already carry the request time and lease they need; chat turns, Session
+  locks and `IsLocked` gain them.
+- **Durability and lost writes.** A nil error means the change and its
+  receipt survive what the provider's `DurabilityClass` promises: an
+  automatic switch loses no acknowledged write under `synchronous-replicated`;
+  `local-fsync` survives a host crash; `local-buffered`, the SQLite default,
+  may lose the latest writes in a host crash; and `async-replicated` may lose
+  acknowledged writes in a switch. `Describe` reports an `Incarnation` that
+  changes when the database may have restarted or switched. After a change,
+  Orka validates the dataset again and checks that the store still holds the
+  current epoch. After a switch of an `async-replicated` provider, it stops
+  all work until an operator acknowledges the switch.
+- **Detection and recovery holds.** Orka detects missing or conflicting
+  records at three levels. At the dataset level, a store's epoch is below its
+  Kubernetes acknowledgement, or a periodic write watermark is below the value
+  Kubernetes recorded, which also catches a restore from an older copy with
+  the same identity. At the record level, a Kubernetes record requires a
+  store record that is missing or different, such as a settling prompt
+  attempt without its result receipt. At the operation level, an outcome
+  cannot be settled. A dataset-level signal places a recovery hold on the
+  whole installation; a record-level signal holds the affected Task or Session
+  with a `StorageRecoveryRequired` condition. Held work makes no side effects,
+  is never retried as a new operation and never reports success. An operator
+  releases a hold explicitly after recovery.
+- **Store halves of the Kubernetes control protocols.** Session turn
+  creation, finalization and projection activation, outbox enqueue, claim and
+  completion, Session cleanup preparation and completion, prompt result
+  receipts and gateway Task cleanup receipts are store writes inside protocols
+  that Kubernetes drives. Each commits only under the current fence, so a
+  delayed step from a replaced controller is refused. A step whose response
+  was lost is retried safely through its operation receipt. A step run again
+  by a successor controller as a new operation is safe only where the
+  catalog names a natural key for it or the step is idempotent by the state
+  it changes, as an outbox claim or a receipt deletion is; Session cleanup
+  preparation has no natural key, because after completion it records a new
+  intent. The Session turn steps are still an embedded family; they follow
+  these rules once they join `state.v1`.
+
 ### Rules reserved for later steps
 
 The contract states these now so later slices build on them; code follows in
@@ -280,8 +524,9 @@ the named step.
   creation times, Task result timestamps, and in SQLite the repository monitor
   times it fills when a caller leaves them zero or always sets, such as in
   `UpsertRepositoryMonitor` and `CancelWorkActions`. Those two clocks diverge
-  once the store is a separate service; operation receipts (step 3) decide
-  which side owns each time.
+  once the store is a separate service. The lease-clock rule in "Write
+  envelopes, operation receipts and controller ownership" decides which side
+  owns each time; the request changes that carry lease times follow it.
 - **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
   `ListActiveScanRuns` and `GetMessages` return
   every match. They gain limits and cursors in the same signature sweep as the
