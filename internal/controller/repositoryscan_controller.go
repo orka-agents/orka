@@ -1390,9 +1390,8 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
 	}
-	// Until a review is queued to a RuntimePool, the run's pool and its
-	// capacity are unknown, so the first batch assumes one prompt. Reviews
-	// are queued within moments, and the window then grows to the pool.
+	// Until the run's threat model or a review is queued to a RuntimePool,
+	// its pool and capacity are unknown, so the batch assumes one prompt.
 	prompts := 1
 	if _, live := r.reviewRuntimePool(ctx, tasks, runID); live > 0 {
 		prompts = live
@@ -1400,16 +1399,18 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
 }
 
-// reviewRuntimePool returns the RuntimePool a run's review Tasks are queued
-// to and its prompt capacity, or zero before any is queued. An existing pool
-// keeps the capacity it was created with.
+// reviewRuntimePool returns the RuntimePool a run's agent Tasks are queued
+// to and its prompt capacity, or zero before any is queued. The threat model
+// runs on the same Agent, so the pool is known before the first review
+// batch. An existing pool keeps the capacity it was created with.
 func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
 	if r.Client == nil {
 		return types.NamespacedName{}, 0
 	}
 	for i := range tasks {
 		task := &tasks[i]
-		if scanTaskRunID(task) != runID || taskSecurityStage(task) != security.StageReview || task.Status.Execution == nil {
+		stage := taskSecurityStage(task)
+		if scanTaskRunID(task) != runID || (stage != security.StageReview && stage != security.StageThreatModel) || task.Status.Execution == nil {
 			continue
 		}
 		name := strings.TrimSpace(task.Status.Execution.RuntimePoolName)

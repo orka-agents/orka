@@ -7800,3 +7800,26 @@ func TestReviewTaskBudgetIsSharedPerRuntimePool(t *testing.T) {
 		t.Fatalf("reviewTaskBudget() = %d, want the 1 place left on the shared pool", got)
 	}
 }
+
+func TestReviewTaskWindowKnowsThePoolFromTheThreatModel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Name: "acp-codex-pool", Namespace: defaultNS}}
+	pool.Status.Capacity.MaxRunningPrompts = 8
+	threatModel := corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "kaset-threat", Namespace: defaultNS, Labels: map[string]string{
+			labels.LabelSecurityStage: security.StageThreatModel, labels.LabelSecurityScanID: "scan_first",
+		}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, Execution: &corev1alpha1.TaskExecutionStatus{RuntimePoolName: pool.Name}},
+	}
+	reconciler := &RepositoryScanReconciler{
+		Client:                        fake.NewClientBuilder().WithScheme(scheme).WithObjects(pool).Build(),
+		ACPDispatchMaxConcurrentTasks: 8,
+	}
+	// The first review batch is sized from the pool the threat model ran on.
+	if got := reconciler.reviewTaskWindow(context.Background(), []corev1alpha1.Task{threatModel}, "scan_first"); got != 32 {
+		t.Fatalf("reviewTaskWindow(threat model on an eight-prompt pool) = %d, want 32", got)
+	}
+}
