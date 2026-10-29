@@ -7,7 +7,8 @@
 // without Orka's internal packages. Cases assert contract behavior: identity
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
-// concurrent callers, exact nanosecond times and the provider description.
+// concurrent callers, exact nanosecond times, the provider description and
+// the store halves of the Kubernetes control protocols.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 package storagetest
@@ -61,6 +62,8 @@ var stateFamilies = []stateFamily{
 	{"operation-receipts", runOperationReceipts},
 	{"controller-ownership", runControllerOwnership},
 	{"lost-responses", runLostResponses},
+	{"grouped-writes", runGroupedWrites},
+	{"protocols", runProtocols},
 	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
 		runWriteCatalog(t, newProvider, stateWriteCases)
 	}},
