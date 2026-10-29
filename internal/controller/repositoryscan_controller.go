@@ -1387,18 +1387,18 @@ func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks [
 	// capacity are unknown, so the first batch assumes one prompt. Reviews
 	// are queued within moments, and the window then grows to the pool.
 	prompts := 1
-	if live := r.reviewRuntimePoolPrompts(ctx, tasks, runID); live > 0 {
+	if _, live := r.reviewRuntimePool(ctx, tasks, runID); live > 0 {
 		prompts = live
 	}
 	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
 }
 
-// reviewRuntimePoolPrompts returns the prompt capacity of the RuntimePool a
-// run's review Tasks are queued to, or zero before any is queued. An
-// existing pool keeps the capacity it was created with.
-func (r *RepositoryScanReconciler) reviewRuntimePoolPrompts(ctx context.Context, tasks []corev1alpha1.Task, runID string) int {
+// reviewRuntimePool returns the RuntimePool a run's review Tasks are queued
+// to and its prompt capacity, or zero before any is queued. An existing pool
+// keeps the capacity it was created with.
+func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
 	if r.Client == nil {
-		return 0
+		return types.NamespacedName{}, 0
 	}
 	for i := range tasks {
 		task := &tasks[i]
@@ -1409,37 +1409,46 @@ func (r *RepositoryScanReconciler) reviewRuntimePoolPrompts(ctx context.Context,
 		if name == "" {
 			continue
 		}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: name}
 		pool := &corev1alpha1.RuntimePool{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, pool); err != nil {
-			return 0
+		if err := r.Get(ctx, key, pool); err != nil {
+			return types.NamespacedName{}, 0
 		}
 		if pool.Status.Capacity.MaxRunningPrompts > 0 {
-			return int(pool.Status.Capacity.MaxRunningPrompts)
+			return key, int(pool.Status.Capacity.MaxRunningPrompts)
 		}
 		if pool.Spec.Capacity != nil && pool.Spec.Capacity.MaxRunningPrompts > 0 {
-			return int(pool.Spec.Capacity.MaxRunningPrompts)
+			return key, int(pool.Spec.Capacity.MaxRunningPrompts)
 		}
-		return 0
+		return types.NamespacedName{}, 0
 	}
-	return 0
+	return types.NamespacedName{}, 0
 }
 
 // reviewTaskBudget returns how many review Tasks a run may create now: what
-// its own window leaves, within a budget all scans share, because ACP
-// dispatch capacity is controller-wide. A scan whose reviews do not fit waits
-// for places instead of queueing Tasks that would outlive their deadline.
+// its own window leaves, within budgets all scans share, because ACP dispatch
+// capacity is controller-wide and scans can share a RuntimePool. A scan whose
+// reviews do not fit waits for places instead of queueing Tasks that would
+// outlive their deadline.
 func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTasks []corev1alpha1.Task, runID string) (int, error) {
 	available := max(r.reviewTaskWindow(ctx, runTasks, runID)-outstandingReviewTasks(runTasks, runID), 0)
 	var all corev1alpha1.TaskList
 	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
 		return 0, err
 	}
-	shared := 0
+	pool, poolPrompts := r.reviewRuntimePool(ctx, runTasks, runID)
+	shared, onPool := 0, 0
 	listed := make(map[types.NamespacedName]struct{}, len(all.Items))
 	for i := range all.Items {
-		listed[client.ObjectKeyFromObject(&all.Items[i])] = struct{}{}
-		if phase := all.Items[i].Status.Phase; phase == "" || isActiveTaskPhase(phase) {
-			shared++
+		task := &all.Items[i]
+		listed[client.ObjectKeyFromObject(task)] = struct{}{}
+		if phase := task.Status.Phase; phase != "" && !isActiveTaskPhase(phase) {
+			continue
+		}
+		shared++
+		if poolPrompts > 0 && task.Namespace == pool.Namespace && task.Status.Execution != nil &&
+			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
+			onPool++
 		}
 	}
 	// The cache can lag reviews created moments ago, for this or another scan.
@@ -1448,7 +1457,13 @@ func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTask
 	if dispatch <= 0 {
 		dispatch = DefaultACPDispatchWorkers
 	}
-	return min(available, max(maxOutstandingReviewTasks/DefaultACPDispatchWorkers*dispatch-shared, 0)), nil
+	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
+	available = min(available, max(perPlace*dispatch-shared, 0))
+	// Scans whose reviews run on the same RuntimePool share its capacity too.
+	if poolPrompts > 0 {
+		available = min(available, max(perPlace*poolPrompts-onPool, 0))
+	}
+	return available, nil
 }
 
 func (r *RepositoryScanReconciler) reviewTaskLedger() *createdTasks {

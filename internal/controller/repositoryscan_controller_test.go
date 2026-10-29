@@ -7768,3 +7768,35 @@ func TestMergeFindingValidationStateEndsPendingWithError(t *testing.T) {
 		t.Fatalf("refuted canonical = %q, want its verdict kept", refuted.ValidationStatus)
 	}
 }
+
+func TestReviewTaskBudgetIsSharedPerRuntimePool(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	pool := &corev1alpha1.RuntimePool{ObjectMeta: metav1.ObjectMeta{Name: "acp-codex-one", Namespace: defaultNS}}
+	pool.Status.Capacity.MaxRunningPrompts = 1
+	queued := func(name, runID string) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS, Labels: map[string]string{
+				labels.LabelSecurityStage: security.StageReview, labels.LabelSecurityScanID: runID,
+			}},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending, Execution: &corev1alpha1.TaskExecutionStatus{RuntimePoolName: pool.Name}},
+		}
+	}
+	own := queued("this-00", "scan_this")
+	objects := []client.Object{pool, own, queued("other-00", "scan_other"), queued("other-01", "scan_other")}
+	reconciler := &RepositoryScanReconciler{
+		Client:                        fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+		ACPDispatchMaxConcurrentTasks: 8,
+	}
+	// The one-prompt pool allows four outstanding reviews across both scans;
+	// three are taken, so this run may add one though its window has three.
+	got, err := reconciler.reviewTaskBudget(context.Background(), []corev1alpha1.Task{*own}, "scan_this")
+	if err != nil {
+		t.Fatalf("reviewTaskBudget() error = %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("reviewTaskBudget() = %d, want the 1 place left on the shared pool", got)
+	}
+}

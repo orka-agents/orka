@@ -64,21 +64,22 @@ func appendReferenceFilesPrompt(prompt *strings.Builder, references []ReviewCont
 		return
 	}
 	files := map[string][]string{}
-	repositoryFiles := 0
+	repositoryFiles, lastIndexed := 0, ""
 	for _, file := range references {
 		if file.Relation == ReferenceRelationRepository {
 			repositoryFiles++
+			lastIndexed = file.Path
 			continue
 		}
 		files[file.Relation] = append(files[file.Relation], file.Path)
 	}
 	prompt.WriteString("\nREFERENCE FILES:\nThis extends the context's rule to cite only included file ranges: beyond the excerpts, you may read these files in your workspace and cite any of their lines. Evidence citing any other file is dropped:\n")
 	if repositoryFiles > 0 {
-		fmt.Fprintf(prompt, "- any of the %d indexed repository source and configuration files (vendored, generated, and build output directories are not indexed", repositoryFiles)
-		if repositoryFiles >= MaxReviewContextReferenceFiles {
-			prompt.WriteString("; this repository exceeds the index bound, which keeps source code before configuration")
-		}
-		prompt.WriteString(")\n")
+		// The index lists source code by path, then other files by path, and a
+		// bound trims it from the end, so its last path tells the reviewer
+		// exactly which files it holds.
+		fmt.Fprintf(prompt, "- any of the %d indexed repository files: source code files by path, then other files by path, through %s; "+
+			"files after it in that order, and vendored, generated, and build output directories, are not indexed\n", repositoryFiles, lastIndexed)
 	}
 	for _, relation := range []struct{ key, label string }{
 		{ReferenceRelationSlice, "this slice's own files, including lines past the excerpts"},

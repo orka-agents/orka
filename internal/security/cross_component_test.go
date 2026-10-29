@@ -338,3 +338,18 @@ func TestMarshalReviewContextsFailsWhenExcerptsAloneExceedTheBound(t *testing.T)
 		t.Fatal("MarshalReviewContexts() = nil error, want the oversized batch rejected")
 	}
 }
+
+func TestReviewPromptNamesTheLastIndexedRepositoryFile(t *testing.T) {
+	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
+	manifest := testReviewContextManifest("slice_inv")
+	manifest.ReferenceFiles = []ReviewContextReferenceFile{
+		{Path: "api/a.go", Lines: 10, Relation: ReferenceRelationRepository},
+		{Path: "store/b.go", Lines: 10, Relation: ReferenceRelationRepository},
+		{Path: "deploy/config.yaml", Lines: 10, Relation: ReferenceRelationRepository},
+	}
+	slice := store.ReviewSlice{ID: "slice_inv", Title: "Investigation", Kind: SliceKindInvestigation}
+	got := BuildReviewResultPrompt(scan, "initial", "", "", "", slice, testResultBinding(), manifest, FindingsV2Repository{RepoURL: scan.Spec.RepoURL, Branch: "main"})
+	if !strings.Contains(got, "any of the 3 indexed repository files") || !strings.Contains(got, "through deploy/config.yaml;") {
+		t.Fatalf("review prompt does not name the index boundary:\n%s", got)
+	}
+}
