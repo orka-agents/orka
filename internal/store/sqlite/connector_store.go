@@ -724,38 +724,56 @@ func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID stri
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM connector_credentials WHERE connection_uid = ? AND version = ?`, connectionUID, expectedVersion)
+	deleted, remaining, err := s.shredConnectorCredentialTx(ctx, connectionUID, expectedVersion)
 	if err != nil {
-		return fmt.Errorf("shred connector credential: %w", err)
+		return err
+	}
+	var fenced error
+	switch {
+	case deleted:
+	case remaining:
+		fenced = store.ErrConflict
+	default:
+		fenced = store.ErrNotFound
 	}
 	// A shred is a crypto-shred only once the log frames that carried the
 	// row are gone too. The truncation runs whether or not this call was the
 	// one that removed the row, so a retry after a busy log finishes it.
-	fenced := s.connectorRowFenced(ctx, result, connectionUID)
 	if err := s.truncateWAL(ctx); err != nil && fenced == nil {
 		return err
 	}
 	return fenced
 }
 
-// connectorRowFenced turns a zero-row fenced write into ErrConflict when the
-// row still exists at another version, or ErrNotFound when it is gone.
-func (s *Store) connectorRowFenced(ctx context.Context, result sql.Result, connectionUID string) error {
+// shredConnectorCredentialTx deletes the record at expectedVersion and, when
+// nothing was deleted, reports in the same transaction whether a record at
+// another version remains. Reading the record after the delete's transaction
+// would report a grant committed in between as a conflict, which matches no
+// serial order.
+func (s *Store) shredConnectorCredentialTx(ctx context.Context, connectionUID string, expectedVersion int64) (deleted, remaining bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, false, fmt.Errorf("begin connector credential shred: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `DELETE FROM connector_credentials WHERE connection_uid = ? AND version = ?`, connectionUID, expectedVersion)
+	if err != nil {
+		return false, false, fmt.Errorf("shred connector credential: %w", err)
+	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("inspect connector credential write: %w", err)
+		return false, false, fmt.Errorf("inspect connector credential write: %w", err)
 	}
-	if affected > 0 {
-		return nil
+	if affected == 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_credentials WHERE connection_uid = ?)`,
+			connectionUID).Scan(&remaining); err != nil {
+			return false, false, fmt.Errorf("inspect connector credential row: %w", err)
+		}
 	}
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM connector_credentials WHERE connection_uid = ?`, connectionUID).Scan(&count); err != nil {
-		return fmt.Errorf("inspect connector credential row: %w", err)
+	if err := tx.Commit(); err != nil {
+		return false, false, fmt.Errorf("commit connector credential shred: %w", err)
 	}
-	if count == 0 {
-		return store.ErrNotFound
-	}
-	return store.ErrConflict
+	return affected > 0, remaining, nil
 }
 
 // DeleteConnectorCredential implements storagev1.SealedConnectorCustodyStore.

@@ -2,7 +2,9 @@ package storagetest
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,6 +221,10 @@ func runSealedConnectorCustody(t *testing.T, newProvider StateFactory) {
 			"a fence taken against the shredded record does not match the new one")
 	})
 
+	t.Run("a shred racing the grant it names deletes it or finds nothing", func(t *testing.T) {
+		shredDuringGrants(t, newProvider(t))
+	})
+
 	t.Run("retired material is pruned and bounded", func(t *testing.T) {
 		provider := newProvider(t)
 		ctx := t.Context()
@@ -286,6 +292,54 @@ func runSealedConnectorCustody(t *testing.T, newProvider StateFactory) {
 		require.Empty(t, custody.Retired)
 		putGrant(t, provider, sealedConnectorCredential("uid-b", 1, "other"))
 	})
+}
+
+// shredDuringGrants races shreds against the first grant of new Connections.
+// Readers shred the Connection the writer is about to grant, fenced on the
+// version a first grant takes. A shred whose version matches the record must
+// delete it or, ordered before the grant or after another shred, report it
+// missing: a conflict matches no serial order. A provider that classifies a
+// shred that deleted nothing by reading the record outside the delete's
+// transaction reports a grant made in between as a conflict.
+func shredDuringGrants(t *testing.T, provider storagev1.StateProvider) {
+	const rounds = 50
+	ctx := t.Context()
+	fence := putGrant(t, provider, sealedConnectorCredential("shred-probe", 1, "probe")).Version
+	// created holds the number of Connections granted so far; readers shred
+	// the next one.
+	var created atomic.Int64
+	var versions, conflicts [rounds]atomic.Int64
+	readDuringWrites(t, rounds, func(i int) error {
+		stored, err := provider.PutSealedConnectorCredential(ctx, storagev1.PutSealedConnectorCredentialRequest{
+			Credential: sealedConnectorCredential(fmt.Sprintf("shred-%d", i), 1, "raced"), Now: connectorNow,
+		})
+		if err != nil {
+			return err
+		}
+		versions[i].Store(stored.Version)
+		created.Store(int64(i) + 1)
+		return nil
+	}, func() error {
+		next := created.Load()
+		if next >= rounds {
+			return nil
+		}
+		err := provider.ShredConnectorCredential(ctx, fmt.Sprintf("shred-%d", next), fence)
+		switch {
+		case err == nil, errors.Is(err, storagev1.ErrNotFound):
+			return nil
+		case errors.Is(err, storagev1.ErrConflict):
+			conflicts[next].Add(1)
+			return nil
+		default:
+			return fmt.Errorf("shred Connection shred-%d: %w", next, err)
+		}
+	})
+	for i := range rounds {
+		if versions[i].Load() == fence {
+			require.Zero(t, conflicts[i].Load(), "a shred of shred-%d at its own version reported a conflict", i)
+		}
+	}
 }
 
 func runSealedConnectorConsents(t *testing.T, newProvider StateFactory) {
