@@ -9,18 +9,22 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
+
+// settledTestResult is the result the hold tests settle with.
+const settledTestResult = "the settled result"
 
 // settlingTaskWithReceipt moves the fixture's attempt to Settling through the
 // settling transition, which saves the result receipt first, and returns the
 // Task, the receipt and the attempt's settling digest.
-func settlingTaskWithReceipt(t *testing.T, fixture *recoveryFixture, result string) (*corev1alpha1.Task, *store.PromptResultReceipt, string) {
+func settlingTaskWithReceipt(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Task, *store.PromptResultReceipt, string) {
 	t.Helper()
 	task := configureRecoveryJournalIdentity(t, fixture)
 	appendRecoveryOpenPrompt(t, fixture, task)
 	if err := fixture.dispatcher.transitionAttemptToSettlingWithResult(
-		fixture.ctx, task, fixture.attemptID, fixture.fence, []byte(result),
+		fixture.ctx, task, fixture.attemptID, fixture.fence, []byte(settledTestResult),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +125,7 @@ func requireTaskStorageCondition(t *testing.T, fixture *recoveryFixture, task *c
 func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
-	task, _, digest := settlingTaskWithReceipt(t, fixture, "the settled result")
+	task, _, digest := settlingTaskWithReceipt(t, fixture)
 	loseResultReceipt(t, fixture, task)
 	hold := taskStorageRecordHold{
 		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
@@ -160,7 +164,7 @@ func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptIsMissing(t *testing.T)
 func TestACPDispatcherReleasesTaskHoldWhenResultReceiptIsRestored(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
-	task, receipt, digest := settlingTaskWithReceipt(t, fixture, "the settled result")
+	task, receipt, digest := settlingTaskWithReceipt(t, fixture)
 	loseResultReceipt(t, fixture, task)
 	requireTaskHeld(t, fixture, task, taskStorageRecordHold{
 		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
@@ -181,7 +185,7 @@ func TestACPDispatcherReleasesTaskHoldWhenResultReceiptIsRestored(t *testing.T) 
 		t.Fatalf("restored attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionSucceeded)
 	}
 	result, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
-	if err != nil || string(result) != "the settled result" {
+	if err != nil || string(result) != settledTestResult {
 		t.Fatalf("restored result = %q, %v", result, err)
 	}
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
@@ -192,7 +196,7 @@ func TestACPDispatcherReleasesTaskHoldWhenResultReceiptIsRestored(t *testing.T) 
 func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptConflicts(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
 	defer fixture.close(t)
-	task, receipt, digest := settlingTaskWithReceipt(t, fixture, "the settled result")
+	task, receipt, digest := settlingTaskWithReceipt(t, fixture)
 	loseResultReceipt(t, fixture, task)
 	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
 	if err != nil {
@@ -213,6 +217,92 @@ func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptConflicts(t *testing.T)
 		reason: corev1alpha1.StorageRecoveryConflictingRecordReason, record: promptResultReceiptRecord,
 		key: fixture.attemptID, expected: digest,
 	})
+}
+
+// A journaled completion does not stand in for a lost receipt: the result the
+// receipt protected may be gone too, or belong to something else.
+func TestACPDispatcherHoldsJournaledCompletionWhoseResultReceiptIsMissing(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, _, digest := settlingTaskWithReceipt(t, fixture)
+	appendRecoveryPromptTerminal(t, fixture, task, harnessv2.EventCompleted, false)
+	loseResultReceipt(t, fixture, task)
+	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte("a result from elsewhere")); err != nil {
+		t.Fatal(err)
+	}
+	hold := taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
+		key: fixture.attemptID, expected: digest,
+	}
+	err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx)
+	if !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("recovery error = %v, want a storage recovery hold", err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionSettling {
+		t.Fatalf("held attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionSettling)
+	}
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, hold.reason)
+
+	acknowledgeTaskStorageHold(t, fixture, task, hold.id())
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("recovery after acknowledgement: %v", err)
+	}
+	attempt, err = fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown {
+		t.Fatalf("acknowledged attempt state = %s, want %s", attempt.ExecutionState, store.PromptExecutionOutcomeUnknown)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.ResultRef != nil {
+		t.Fatalf("acknowledged Task published the unverified result: %#v", updated.Status.ResultRef)
+	}
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
+}
+
+// A restore that changed the Task's UID recovers the source attempt through
+// another path, which holds the restored Task the same way.
+func TestACPDispatcherHoldsRestoredTaskWhoseResultReceiptIsMissing(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, _, digest := settlingTaskWithReceipt(t, fixture)
+	loseResultReceipt(t, fixture, task)
+	_, restoredUID := restoreACPRecoveryFixtureTask(t, fixture)
+	hold := taskStorageRecordHold{
+		reason: corev1alpha1.StorageRecoveryMissingRecordReason, record: promptResultReceiptRecord,
+		key: fixture.attemptID, expected: digest,
+	}
+	requireTaskHeld(t, fixture, task, hold)
+
+	acknowledgeTaskStorageHold(t, fixture, task, hold.id())
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("recovery after acknowledgement: %v", err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.TerminalReason != acpRestoreIdentityChangedReason {
+		t.Fatalf("acknowledged restored attempt = %s/%s, want OutcomeUnknown/%s",
+			attempt.ExecutionState, attempt.TerminalReason, acpRestoreIdentityChangedReason)
+	}
+	restored := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), restored); err != nil {
+		t.Fatal(err)
+	}
+	if restored.UID != restoredUID || restored.Status.Execution == nil ||
+		restored.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown || restored.Status.ResultRef != nil {
+		t.Fatalf("acknowledged restored Task status = %#v", restored.Status)
+	}
+	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
 }
 
 // An attempt that reached Settling without the settling transition never
