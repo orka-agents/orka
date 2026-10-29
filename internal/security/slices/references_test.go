@@ -311,3 +311,26 @@ func TestReferenceFilesFollowPackageExports(t *testing.T) {
 		}
 	}
 }
+
+func TestReferenceFilesFollowRequireExportConditions(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "lib/package.json", `{"name":"@app/lib","exports":{".":{"import":"./src/esm.ts","require":"./src/cjs.ts"}}}`)
+	writeFile(t, root, "lib/src/esm.ts", "export const esm = 1\n")
+	writeFile(t, root, "lib/src/cjs.ts", "module.exports = 1\n")
+	writeFile(t, root, "app/package.json", `{"name":"@app/app"}`)
+	writeFile(t, root, "app/modern.ts", "import { esm } from '@app/lib'\n")
+	writeFile(t, root, "app/legacy.js", "const lib = require('@app/lib')\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{
+		{ID: "modern", OwnedFiles: []store.ReviewSliceFile{{Path: "app/modern.ts"}}},
+		{ID: "legacy", OwnedFiles: []store.ReviewSliceFile{{Path: "app/legacy.js"}}},
+	})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	if got := referenceSummary(refs["modern"]); !strings.Contains(got, "lib/src/esm.ts=imports") || strings.Contains(got, "cjs.ts") {
+		t.Fatalf("modern references = %s, want the import target", got)
+	}
+	if got := referenceSummary(refs["legacy"]); !strings.Contains(got, "lib/src/cjs.ts=imports") || strings.Contains(got, "esm.ts") {
+		t.Fatalf("legacy references = %s, want the require target", got)
+	}
+}
