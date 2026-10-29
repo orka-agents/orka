@@ -153,6 +153,38 @@ The controller then advances each dataset again, records what each one holds
 now as acknowledged, clears the hold, and resumes work. An annotation that
 names any other hold releases nothing.
 
+### Task storage holds
+
+A single agent Task can also be held, when a record its Kubernetes state
+requires is missing from storage or differs from what Kubernetes recorded.
+Today this happens when a prompt attempt reached `Settling` but the store no
+longer holds its result receipt. Recovery then leaves the attempt in
+`Settling`: it does not run the prompt again, does not guess its outcome,
+does not report success and deletes nothing. Other Tasks keep running.
+
+Find held Tasks with:
+
+```bash
+kubectl get tasks -A -o json | jq -r '.items[]
+  | select(any(.status.conditions[]?; .type == "StorageRecoveryRequired" and .status == "True"))
+  | "\(.metadata.namespace)/\(.metadata.name)"'
+```
+
+The condition's reason is `MissingRecord` or `ConflictingRecord`, and its
+message names the record, its key, the digest Kubernetes recorded and the
+hold ID. If restoring storage brings the record back, recovery settles the
+Task from it and sets the condition to `False` with reason `RecordFound`. If
+the record cannot be recovered, release that exact hold:
+
+```bash
+kubectl -n <namespace> annotate task <name> \
+  storage.orka.ai/recovery-acknowledged=<hold-id> --overwrite
+```
+
+Recovery then records the prompt's outcome as unknown, without running it
+again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
+An annotation that names any other hold releases nothing.
+
 ## Security scan operations
 
 Repository security scanning runs **one scan at a time per repository** — a
