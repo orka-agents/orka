@@ -25,6 +25,8 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 . "${script_dir}/lib/kind-local-registry.sh"
 # shellcheck source=scripts/lib/e2e-admission-tls.sh
 . "${script_dir}/lib/e2e-admission-tls.sh"
+# shellcheck source=scripts/lib/deployment-rollout.sh
+. "${script_dir}/lib/deployment-rollout.sh"
 
 e2e_run_id="$(sanitize_image_tag "${ORKA_SECURITY_SCAN_RUN_ID:-${GITHUB_RUN_ID:-manual}-$(date -u +%Y%m%d%H%M%S)}")"
 default_kind_suffix="${e2e_run_id:0:32}"
@@ -733,7 +735,9 @@ patch_controller_images() {
       )
     ' | kubectl apply -f -
 
-  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  local rollout_timeout
+  rollout_timeout="$(deployment_rollout_timeout kubectl -n "${orka_namespace}" "${orka_controller_deployment}")"
+  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout="${rollout_timeout}"
 }
 
 reset_e2e_resources() {
@@ -1284,7 +1288,9 @@ main() {
     ACP_COPILOT_RUNTIME_IMG="example.invalid/orka/acp-copilot@${placeholder_digest}" \
     ACP_OPENCODE_RUNTIME_IMG="example.invalid/orka/acp-opencode@${placeholder_digest}"
   run kubectl wait --for=condition=Established crd/repositoryscans.core.orka.ai --timeout=60s
-  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout=5m
+  local rollout_timeout
+  rollout_timeout="$(deployment_rollout_timeout kubectl -n "${orka_namespace}" "${orka_controller_deployment}")"
+  run kubectl -n "${orka_namespace}" rollout status deployment/"${orka_controller_deployment}" --timeout="${rollout_timeout}"
   apply_authority_observer "${fake_runtime_ref}"
   patch_controller_images incoming
   reset_e2e_resources

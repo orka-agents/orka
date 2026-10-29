@@ -4,6 +4,7 @@
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
+{{- include "orka.validateAgentHosts" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -181,6 +182,14 @@ spec:
             {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
+            {{- end }}
+            {{- if include "orka.agentHostsEnabled" . }}
+            - --enable-agent-hosts=true
+            - {{ printf "--agent-host-namespace=%s" (include "orka.agentHostNamespace" .) | quote }}
+            - {{ printf "--agent-host-agent-image=%s" (include "orka.agentHostAgentImage" .) | quote }}
+            # Matches this template's Pod label; each host's NetworkPolicy
+            # admits only these Pods from the release namespace.
+            - --agent-host-controller-pod-labels=orka.ai/network-role=controller
             {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}
