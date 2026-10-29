@@ -281,7 +281,8 @@ func UploadArtifactsWithRequestAuthorizationContext(
 		}
 		if fi.Size() > MaxArtifactFileBytes {
 			_ = file.Close()
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), MaxArtifactFileBytes)
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n",
+				filename, fi.Size(), MaxArtifactFileBytes)
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(file, MaxArtifactFileBytes+1))
@@ -293,7 +294,8 @@ func UploadArtifactsWithRequestAuthorizationContext(
 		}
 
 		if len(data) > MaxArtifactFileBytes {
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), MaxArtifactFileBytes)
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n",
+				filename, len(data), MaxArtifactFileBytes)
 			continue
 		}
 		totalSize += int64(len(data))

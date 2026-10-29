@@ -372,7 +372,8 @@ func runSecurityMapper(ctx context.Context) error {
 	// The uploader skips a file over its per-file limit, which would leave
 	// the run without its slices.
 	if len(data) > common.MaxArtifactFileBytes {
-		return fmt.Errorf("security slices artifact is %d bytes, above the %d byte artifact limit", len(data), common.MaxArtifactFileBytes)
+		return fmt.Errorf("security slices artifact is %d bytes, above the %d byte artifact limit",
+			len(data), common.MaxArtifactFileBytes)
 	}
 	// The contexts share the upload limit with the slices artifact; keep
 	// headroom for the run's other artifacts.

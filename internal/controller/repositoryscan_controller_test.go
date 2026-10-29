@@ -7728,7 +7728,8 @@ func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
 		}
 	}
 	// Another scan already has 14 reviews waiting for the shared dispatcher.
-	objects := []client.Object{review("other-done", "scan_other", corev1alpha1.TaskPhaseSucceeded)}
+	objects := make([]client.Object, 0, 15)
+	objects = append(objects, review("other-done", "scan_other", corev1alpha1.TaskPhaseSucceeded))
 	for i := range 14 {
 		objects = append(objects, review(fmt.Sprintf("other-%02d", i), "scan_other", corev1alpha1.TaskPhasePending))
 	}
