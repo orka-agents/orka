@@ -231,8 +231,12 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	if security.IsSuspended(scan) {
 		// Suspension pauses new runs; a run already admitted keeps starting
-		// its queued review slices so it can finish.
+		// its next stage and its queued review slices so it can finish.
 		if err := r.topUpReviewTasks(ctx, scan); err != nil {
+			return ctrl.Result{}, err
+		}
+		progressed, err := r.progressLatestScanRun(ctx, scan)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if scan.Status.Phase != repositoryScanPhaseSuspended {
@@ -242,6 +246,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if progressed {
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		return ctrl.Result{}, nil
 	}
