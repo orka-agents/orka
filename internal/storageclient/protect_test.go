@@ -16,6 +16,7 @@ import (
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // recordingStore is the in-process SQLite provider with a recorder in front
@@ -174,9 +175,24 @@ func (r *recordingStore) RecordUsage(ctx context.Context, observation store.Usag
 	return r.Store.RecordUsage(ctx, observation)
 }
 
-func (r *recordingStore) CommitSessionTurnFinalization(ctx context.Context, request store.CommitSessionTurnFinalizationRequest) (*store.SessionTurn, error) {
-	r.record("CommitSessionTurnFinalization", request)
-	return r.Store.CommitSessionTurnFinalization(ctx, request)
+func (r *recordingStore) CommitSealedSessionTurnFinalization(ctx context.Context, finalization storagev1.SealedSessionTurnFinalization) (*store.SessionTurn, error) {
+	r.record("CommitSealedSessionTurnFinalization", finalization)
+	return r.Store.CommitSealedSessionTurnFinalization(ctx, finalization)
+}
+
+func (r *recordingStore) CreateSealedAgentExecutionSnapshot(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
+	r.record("CreateSealedAgentExecutionSnapshot", snapshot)
+	return r.Store.CreateSealedAgentExecutionSnapshot(ctx, snapshot)
+}
+
+func (r *recordingStore) SaveSealedNativeSession(ctx context.Context, request storagev1.SaveSealedNativeSessionRequest) error {
+	r.record("SaveSealedNativeSession", request)
+	return r.Store.SaveSealedNativeSession(ctx, request)
+}
+
+func (r *recordingStore) StageSealedNativeSessionImport(ctx context.Context, request storagev1.StageSealedNativeSessionImportRequest) (*store.NativeSessionImportReceipt, error) {
+	r.record("StageSealedNativeSessionImport", request)
+	return r.Store.StageSealedNativeSessionImport(ctx, request)
 }
 
 func (r *recordingStore) requireCalled(t *testing.T, methods ...string) {

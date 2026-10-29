@@ -76,7 +76,6 @@ import (
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
-	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
@@ -1304,8 +1303,11 @@ func main() {
 	}
 
 	// Acquire SQLite exclusivity and validate durable dataset history before
-	// deciding whether an absent snapshot key may be created.
-	sqliteStore, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
+	// deciding whether an absent snapshot key may be created. Application
+	// consumers reach storage only through the storage client, which holds
+	// the snapshot key; the SQLite store is its in-process provider and a
+	// manager runnable.
+	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
@@ -1316,19 +1318,12 @@ func main() {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
 	}
-	if err := sqliteStore.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
+	if err := appStorage.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
-		os.Exit(1)
-	}
-	// Application consumers reach storage only through the storage client.
-	// The SQLite store is its in-process provider and a manager runnable.
-	appStorage, err := storageclient.NewEmbedded(sqliteStore)
-	if err != nil {
-		setupLog.Error(err, "unable to create the application storage client")
 		os.Exit(1)
 	}
 	if usageRetention < 0 {
@@ -2606,7 +2601,7 @@ func currentPodNamespace() string {
 	return strings.TrimSpace(string(data))
 }
 
-// loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
+// loadAgentExecutionSnapshotKey reads the AES-256 snapshot key from a file
 // holding either exactly 32 raw bytes or whitespace-padded base64 text.
 func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
@@ -2614,14 +2609,6 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 		return nil, err
 	}
 	return decodeAgentExecutionSnapshotKey(raw)
-}
-
-func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
-	key, err := loadAgentExecutionSnapshotKey(path)
-	if err != nil {
-		return nil, err
-	}
-	return sqlite.NewAgentExecutionSnapshotCipher(key)
 }
 
 // connectorStateKeyInfo is the HKDF label separating the connector state

@@ -31,19 +31,19 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	}
 	// A failed key load after schema creation must release the lock and leave
 	// resumable fresh history rather than misclassifying file existence.
-	failed, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+	failed, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
 		return nil, errors.New("unavailable key service")
 	})
 	require.ErrorContains(t, err, "unavailable key service")
 	require.Nil(t, failed)
-	s, key, err := openControllerSQLiteStore(path, loader)
+	s, _, key, err := openControllerSQLiteStore(path, loader)
 	require.NoError(t, err)
 	first, err := s.DatasetInfo()
 	require.NoError(t, err)
 	require.False(t, first.CanBootstrapSnapshotKey)
 	require.NoError(t, s.SaveResult(ctx, "ns", "task", []byte("retained result")))
 	require.NoError(t, s.Close())
-	s, again, err := openControllerSQLiteStore(path, loader)
+	s, _, again, err := openControllerSQLiteStore(path, loader)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(key, again), "restart replaced key")
 	info, err := s.DatasetInfo()
@@ -57,7 +57,7 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	require.NoError(t, c.Get(ctx, ref, secret))
 	secret.Data = nil
 	require.NoError(t, c.Update(ctx, secret))
-	failed, _, err = openControllerSQLiteStore(path, loader)
+	failed, _, _, err = openControllerSQLiteStore(path, loader)
 	require.ErrorContains(t, err, "restore the Secret from backup")
 	require.Nil(t, failed)
 	require.NoError(t, c.Get(ctx, ref, secret))
@@ -69,7 +69,7 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	_, err = raw.Exec(`DELETE FROM results`)
 	require.NoError(t, err)
 	require.NoError(t, raw.Close())
-	failed, _, err = openControllerSQLiteStore(path, loader)
+	failed, _, _, err = openControllerSQLiteStore(path, loader)
 	require.Error(t, err)
 	require.Nil(t, failed)
 }
@@ -81,7 +81,7 @@ func TestControllerSQLiteBootstrapExcludesCompetingKeyMint(t *testing.T) {
 	done := make(chan *sqlite.Store, 1)
 	errs := make(chan error, 1)
 	go func() {
-		s, _, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
+		s, _, _, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 			close(entered)
 			<-release
 			return bytes.Repeat([]byte{0x42}, 32), nil
@@ -97,7 +97,7 @@ func TestControllerSQLiteBootstrapExcludesCompetingKeyMint(t *testing.T) {
 		t.Fatal("first store did not reach key loading")
 	}
 	called := false
-	second, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+	second, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
 		called = true
 		return nil, nil
 	})
@@ -118,7 +118,7 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	called := false
-	s, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+	s, _, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
 		called = true
 		return nil, nil
 	})
@@ -141,14 +141,14 @@ func TestControllerSQLiteBootstrapResumesAfterKeyWriteLostResponse(t *testing.T)
 		// Simulate losing the startup result after the API server committed the key.
 		return nil, errors.New("lost startup response")
 	}
-	failed, _, err := openControllerSQLiteStore(path, firstLoader)
+	failed, _, _, err := openControllerSQLiteStore(path, firstLoader)
 	require.ErrorContains(t, err, "lost startup response")
 	require.Nil(t, failed)
 	secret := &corev1.Secret{}
 	require.NoError(t, c.Get(ctx, ref, secret))
 	expected, err := decodeAgentExecutionSnapshotKey(secret.Data["key"])
 	require.NoError(t, err)
-	s, actual, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
+	s, _, actual, err := openControllerSQLiteStore(path, func(info sqlite.DatasetInfo) ([]byte, error) {
 		require.True(t, info.CanBootstrapSnapshotKey)
 		return ensureAgentExecutionSnapshotKey(ctx, c, c, ref.Namespace, opts, info.CanBootstrapSnapshotKey)
 	})

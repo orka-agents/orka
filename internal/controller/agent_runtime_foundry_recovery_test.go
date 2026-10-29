@@ -245,7 +245,7 @@ func TestAgentRuntimeFoundryRecoveryCleansOnlyExposedTaskAndPreservesUnknownOutc
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	persistence := sqlite.NewStore(db, "foundry-recovery")
-	f.control, err = storekube.NewComposite(f.r.Client, defaultNS, persistence, storekube.WithAPIReader(f.r.APIReader))
+	f.control, err = storekube.NewComposite(f.r.Client, defaultNS, sealedStore(t, persistence), storekube.WithAPIReader(f.r.APIReader))
 	if err != nil {
 		t.Fatal(err)
 	}

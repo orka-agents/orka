@@ -38,7 +38,7 @@ func gatewayCleanupFixture(t *testing.T) (*Store, store.SessionCleanupIntent, st
 		t.Fatal(err)
 	}
 	payload := []byte(`{"phase":"Succeeded"}`)
-	turn, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+	turn, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 		Key: turn.Key, Namespace: event.Namespace, SessionName: event.SessionName, Fence: fence,
 		ExpectedTurnVersion: turn.Version, FinalizationDigest: controlTestDigest("cleanup-finalization"),
 		TerminalKind: store.SessionTurnAssistantResult, TerminalContent: "a terminal answer", SkipTranscriptAppend: true,
@@ -326,7 +326,7 @@ func TestGatewayCleanupMixedAgeTurnsAndAtomicReceiptArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte(`{"phase":"Succeeded"}`)
-	second, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+	second, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 		Key: key, Namespace: event.Namespace, SessionName: event.SessionName, Fence: fence,
 		ExpectedTurnVersion: second.Version, FinalizationDigest: controlTestDigest("newer-finalization"),
 		TerminalKind: store.SessionTurnAssistantResult, TerminalContent: "newer answer", SkipTranscriptAppend: true,

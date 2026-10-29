@@ -16,6 +16,15 @@ into the frozen historical schema and verifies missing/wrong/right key behavior
 through the production startup function in both managed Secret and key-file
 modes.
 
+`connector-custody.sql` contains connector custody for one synthetic
+Connection, sealed by the embedded store before connector sealing moved into
+the storage client, under the same test-only `0x42` key: current custody, a
+re-consent's retired grant, a refresh's retired grant, retired refresh
+material, a pending consent and two parked completions, one committed. Its
+tokens and verifiers are synthetic `fixture-*` strings that expire in 2099. The
+connector custody tests load it into the current schema and verify the storage
+client authenticates, opens and commits over it unchanged.
+
 The store upgrade tests additionally populate supported historical layouts with
 synthetic results, transcripts, ordered events, messages, sealed connector
 custody and native-session state using unchanged record formats. They compare

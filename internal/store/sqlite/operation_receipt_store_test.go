@@ -69,14 +69,15 @@ func TestSessionTurnPersistenceCommitsOnlyUnderTheCurrentFence(t *testing.T) {
 		TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
 		Projection: request.Projection, FinalizedAt: request.FinalizedAt,
 	}
-	_, err = s.CommitSessionTurnFinalization(ctx, finalization)
+	client := orkaClient(t, s)
+	_, err = client.CommitSessionTurnFinalization(ctx, finalization)
 	require.ErrorIs(t, err, store.ErrFenced, "a delayed finalization from the replaced controller")
 	transcript, err := s.LoadTranscript(ctx, "ns", "session", 0)
 	require.NoError(t, err)
 	require.Empty(t, transcript, "the refused finalization wrote nothing")
 
 	finalization.Fence = successor
-	finalized, err := s.CommitSessionTurnFinalization(ctx, finalization)
+	finalized, err := client.CommitSessionTurnFinalization(ctx, finalization)
 	require.NoError(t, err)
 	activation := store.ActivateSessionTurnProjectionRequest{
 		TurnID: finalized.ID, ProjectionID: finalized.ProjectionID, Fence: request.Fence,

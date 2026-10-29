@@ -57,8 +57,35 @@ var (
 // yet, each with the reason. A provider still runs their commit-time checks;
 // the suite gains their cases with the change named.
 var deferredStateWrites = map[string]string{
-	"CompleteScanTaskIngestion": "scan task ingestion becomes a conditional command first",
+	"CompleteScanTaskIngestion":            "scan task ingestion becomes a conditional command first",
+	"ActivateSessionTurnProjection":        sealedWriteDeferral,
+	"CommitSealedConnectorCompletion":      sealedWriteDeferral,
+	"CommitSealedSessionTurnFinalization":  sealedWriteDeferral,
+	"ConsumeSealedConnectorCompletion":     sealedWriteDeferral,
+	"ConsumeSealedConnectorConsent":        sealedWriteDeferral,
+	"CreateSealedAgentExecutionSnapshot":   sealedWriteDeferral,
+	"CreateSealedConnectorCompletion":      sealedWriteDeferral,
+	"CreateSealedConnectorConsent":         sealedWriteDeferral,
+	"CreateSessionTurnRecord":              sealedWriteDeferral,
+	"DeleteAgentExecutionSnapshot":         sealedWriteDeferral,
+	"DeleteAgentExecutionSnapshots":        sealedWriteDeferral,
+	"DeleteConnectorCompletion":            sealedWriteDeferral,
+	"DeleteConnectorConsentsForConnection": sealedWriteDeferral,
+	"DeleteConnectorCredential":            sealedWriteDeferral,
+	"PutSealedConnectorCredential":         sealedWriteDeferral,
+	"ReplaceSealedConnectorCredential":     sealedWriteDeferral,
+	"RetireSealedConnectorCredential":      sealedWriteDeferral,
+	"SaveSealedNativeSession":              sealedWriteDeferral,
+	"ShredConnectorCredential":             sealedWriteDeferral,
+	"StageSealedNativeSessionImport":       sealedWriteDeferral,
+	"TombstoneConnectorCustody":            sealedWriteDeferral,
 }
+
+// sealedWriteDeferral is the reason for the sealed snapshot, native session,
+// SessionTurn and connector writes, which joined state.v1 alongside the
+// write envelope: the embedded store does not run them through its envelope
+// checks yet.
+const sealedWriteDeferral = "the embedded store does not run sealed and SessionTurn writes through its envelope checks yet"
 
 // writeCaseProvider is what the write checks need from a provider.
 type writeCaseProvider interface {

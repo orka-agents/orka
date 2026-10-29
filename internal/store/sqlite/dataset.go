@@ -132,30 +132,6 @@ func datasetHasRecords(ctx context.Context, tx *sql.Tx) (bool, error) {
 	return false, nil
 }
 
-// completeDatasetBootstrap records successful key activation before controller
-// consumers can start. Encryption authentication and permitted key rotation
-// remain the responsibility of SetAgentExecutionSnapshotCipher.
-func (s *Store) completeDatasetBootstrap() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	record, err := readDataset(tx)
-	if err != nil {
-		return err
-	}
-	if !record.complete {
-		if _, err := tx.Exec(`UPDATE store_dataset SET bootstrap_complete = 1 WHERE singleton = 1`); err != nil {
-			return err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return synchronizeDatasetMetadata(s.db)
-}
-
 // NORMAL synchronous mode does not sync each WAL commit. A full checkpoint
 // synchronizes the WAL and database before startup can rely on dataset identity
 // or completed bootstrap history. Keep the existing mode for ordinary writes.

@@ -52,7 +52,7 @@ func TestDatasetBindingEmbeddedNeedsTheProcessLock(t *testing.T) {
 		},
 		"completed": func(t *testing.T) *Store {
 			s, _ := lockedTestStore(t)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			activateTestKey(t, s)
 			return s
 		},
 		"holding records": func(t *testing.T) *Store {
