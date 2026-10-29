@@ -9,6 +9,7 @@ package storagepb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	durationpb "google.golang.org/protobuf/types/known/durationpb"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
@@ -184,6 +185,8 @@ type WriteEnvelope struct {
 	Fence         *ControllerEpochFence  `protobuf:"bytes,2,opt,name=fence,proto3" json:"fence,omitempty"`
 	OperationId   string                 `protobuf:"bytes,3,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	RequestDigest string                 `protobuf:"bytes,4,opt,name=request_digest,json=requestDigest,proto3" json:"request_digest,omitempty"`
+	IssuedAt      *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=issued_at,json=issuedAt,proto3" json:"issued_at,omitempty"`
+	Sequence      uint64                 `protobuf:"varint,6,opt,name=sequence,proto3" json:"sequence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -246,13 +249,29 @@ func (x *WriteEnvelope) GetRequestDigest() string {
 	return ""
 }
 
+func (x *WriteEnvelope) GetIssuedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.IssuedAt
+	}
+	return nil
+}
+
+func (x *WriteEnvelope) GetSequence() uint64 {
+	if x != nil {
+		return x.Sequence
+	}
+	return 0
+}
+
 // ProviderLimits states a provider's size limits.
 type ProviderLimits struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	MaxArtifactBytes int64                  `protobuf:"varint,1,opt,name=max_artifact_bytes,json=maxArtifactBytes,proto3" json:"max_artifact_bytes,omitempty"`
-	MaxValueBytes    int64                  `protobuf:"varint,2,opt,name=max_value_bytes,json=maxValueBytes,proto3" json:"max_value_bytes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	MaxArtifactBytes      int64                  `protobuf:"varint,1,opt,name=max_artifact_bytes,json=maxArtifactBytes,proto3" json:"max_artifact_bytes,omitempty"`
+	MaxValueBytes         int64                  `protobuf:"varint,2,opt,name=max_value_bytes,json=maxValueBytes,proto3" json:"max_value_bytes,omitempty"`
+	ReceiptRetention      *durationpb.Duration   `protobuf:"bytes,3,opt,name=receipt_retention,json=receiptRetention,proto3" json:"receipt_retention,omitempty"`
+	MaxReceiptResultBytes int64                  `protobuf:"varint,4,opt,name=max_receipt_result_bytes,json=maxReceiptResultBytes,proto3" json:"max_receipt_result_bytes,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *ProviderLimits) Reset() {
@@ -299,6 +318,20 @@ func (x *ProviderLimits) GetMaxValueBytes() int64 {
 	return 0
 }
 
+func (x *ProviderLimits) GetReceiptRetention() *durationpb.Duration {
+	if x != nil {
+		return x.ReceiptRetention
+	}
+	return nil
+}
+
+func (x *ProviderLimits) GetMaxReceiptResultBytes() int64 {
+	if x != nil {
+		return x.MaxReceiptResultBytes
+	}
+	return 0
+}
+
 // ProviderInfo describes a provider and the dataset it serves.
 type ProviderInfo struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -310,6 +343,9 @@ type ProviderInfo struct {
 	Capabilities    []string               `protobuf:"bytes,6,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	Limits          *ProviderLimits        `protobuf:"bytes,7,opt,name=limits,proto3" json:"limits,omitempty"`
 	Durability      string                 `protobuf:"bytes,8,opt,name=durability,proto3" json:"durability,omitempty"`
+	State           string                 `protobuf:"bytes,9,opt,name=state,proto3" json:"state,omitempty"`
+	Incarnation     string                 `protobuf:"bytes,10,opt,name=incarnation,proto3" json:"incarnation,omitempty"`
+	ObservedAt      *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=observed_at,json=observedAt,proto3" json:"observed_at,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -400,6 +436,27 @@ func (x *ProviderInfo) GetDurability() string {
 	return ""
 }
 
+func (x *ProviderInfo) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *ProviderInfo) GetIncarnation() string {
+	if x != nil {
+		return x.Incarnation
+	}
+	return ""
+}
+
+func (x *ProviderInfo) GetObservedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ObservedAt
+	}
+	return nil
+}
+
 // ServerInfo describes the server library that serves a provider, rather
 // than the provider itself.
 type ServerInfo struct {
@@ -477,7 +534,7 @@ var File_orka_storage_v1_common_proto protoreflect.FileDescriptor
 
 const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\n" +
-	"\x1corka/storage/v1/common.proto\x12\x0forka.storage.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dorka/storage/v1/options.proto\"F\n" +
+	"\x1corka/storage/v1/common.proto\x12\x0forka.storage.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dorka/storage/v1/options.proto\"F\n" +
 	"\fNullableTime\x120\n" +
 	"\x05value\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x05value:\x04\xe8\xf4\x18\x01\"%\n" +
 	"\tJSONValue\x12\x12\n" +
@@ -485,16 +542,20 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\x14ControllerEpochFence\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05epoch\x18\x02 \x01(\x03R\x05epoch\x12\x1b\n" +
-	"\tholder_id\x18\x03 \x01(\tR\bholderId\"\xb5\x01\n" +
+	"\tholder_id\x18\x03 \x01(\tR\bholderId\"\x8a\x02\n" +
 	"\rWriteEnvelope\x12\x1d\n" +
 	"\n" +
 	"dataset_id\x18\x01 \x01(\tR\tdatasetId\x12;\n" +
 	"\x05fence\x18\x02 \x01(\v2%.orka.storage.v1.ControllerEpochFenceR\x05fence\x12!\n" +
 	"\foperation_id\x18\x03 \x01(\tR\voperationId\x12%\n" +
-	"\x0erequest_digest\x18\x04 \x01(\tR\rrequestDigest\"f\n" +
+	"\x0erequest_digest\x18\x04 \x01(\tR\rrequestDigest\x127\n" +
+	"\tissued_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bissuedAt\x12\x1a\n" +
+	"\bsequence\x18\x06 \x01(\x04R\bsequence\"\xe7\x01\n" +
 	"\x0eProviderLimits\x12,\n" +
 	"\x12max_artifact_bytes\x18\x01 \x01(\x03R\x10maxArtifactBytes\x12&\n" +
-	"\x0fmax_value_bytes\x18\x02 \x01(\x03R\rmaxValueBytes\"\xc1\x02\n" +
+	"\x0fmax_value_bytes\x18\x02 \x01(\x03R\rmaxValueBytes\x12F\n" +
+	"\x11receipt_retention\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x10receiptRetention\x127\n" +
+	"\x18max_receipt_result_bytes\x18\x04 \x01(\x03R\x15maxReceiptResultBytes\"\xb6\x03\n" +
 	"\fProviderInfo\x12)\n" +
 	"\x10contract_version\x18\x01 \x01(\tR\x0fcontractVersion\x12\x1c\n" +
 	"\tcontracts\x18\x02 \x03(\tR\tcontracts\x12\x1d\n" +
@@ -506,7 +567,12 @@ const file_orka_storage_v1_common_proto_rawDesc = "" +
 	"\x06limits\x18\a \x01(\v2\x1f.orka.storage.v1.ProviderLimitsR\x06limits\x12\x1e\n" +
 	"\n" +
 	"durability\x18\b \x01(\tR\n" +
-	"durability\"\xb4\x01\n" +
+	"durability\x12\x14\n" +
+	"\x05state\x18\t \x01(\tR\x05state\x12 \n" +
+	"\vincarnation\x18\n" +
+	" \x01(\tR\vincarnation\x12;\n" +
+	"\vobserved_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"observedAt\"\xb4\x01\n" +
 	"\n" +
 	"ServerInfo\x12+\n" +
 	"\x11protocol_revision\x18\x01 \x01(\x03R\x10protocolRevision\x12'\n" +
@@ -536,16 +602,20 @@ var file_orka_storage_v1_common_proto_goTypes = []any{
 	(*ProviderInfo)(nil),          // 5: orka.storage.v1.ProviderInfo
 	(*ServerInfo)(nil),            // 6: orka.storage.v1.ServerInfo
 	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
 }
 var file_orka_storage_v1_common_proto_depIdxs = []int32{
 	7, // 0: orka.storage.v1.NullableTime.value:type_name -> google.protobuf.Timestamp
 	2, // 1: orka.storage.v1.WriteEnvelope.fence:type_name -> orka.storage.v1.ControllerEpochFence
-	4, // 2: orka.storage.v1.ProviderInfo.limits:type_name -> orka.storage.v1.ProviderLimits
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	7, // 2: orka.storage.v1.WriteEnvelope.issued_at:type_name -> google.protobuf.Timestamp
+	8, // 3: orka.storage.v1.ProviderLimits.receipt_retention:type_name -> google.protobuf.Duration
+	4, // 4: orka.storage.v1.ProviderInfo.limits:type_name -> orka.storage.v1.ProviderLimits
+	7, // 5: orka.storage.v1.ProviderInfo.observed_at:type_name -> google.protobuf.Timestamp
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_orka_storage_v1_common_proto_init() }

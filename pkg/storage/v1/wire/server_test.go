@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/orka-agents/orka/pkg/storage/v1/wire"
@@ -153,6 +154,8 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 		Fence:         storagev1.ControllerEpochFence{Name: "orka", Epoch: 7, HolderID: "holder"},
 		OperationID:   "operation-1",
 		RequestDigest: storagev1.CanonicalBytesDigest([]byte("request")),
+		IssuedAt:      time.Date(2026, 10, 29, 1, 2, 3, 456789000, time.UTC),
+		Sequence:      42,
 	}
 	ctx := storagev1.WithWriteEnvelope(t.Context(), envelope)
 
@@ -168,6 +171,29 @@ func TestWriteEnvelopeReachesTheProviderOnWrites(t *testing.T) {
 
 	require.NoError(t, client.DeletePlan(t.Context(), "n", "t"))
 	require.False(t, provider.callsTo("DeletePlan")[0].hasEnvelope, "a write without an envelope is accepted")
+}
+
+// Only contract writes carry an envelope, so a call to a read that names one
+// is refused before the provider runs, and never sees an envelope the
+// contract does not give it.
+func TestServerRefusesAnEnvelopeOnAMethodWithoutOne(t *testing.T) {
+	provider := newRecordingProvider()
+	plans := storagepb.NewResultsClient(wiretest.Dial(t, serveBoth(provider)))
+	encoded, err := proto.Marshal(&storagepb.WriteEnvelope{DatasetId: recordingDataset, OperationId: "operation-1"})
+	require.NoError(t, err)
+	ctx := metadata.AppendToOutgoingContext(contractContext(t.Context()), wire.HeaderEnvelope, string(encoded))
+
+	_, err = plans.GetPlan(ctx, &storagepb.GetPlanRequest{Namespace: "n", TaskName: "t"})
+	code, reason := reasonOf(t, err)
+	require.Equal(t, codes.InvalidArgument, code)
+	require.Equal(t, wire.ReasonValidation, reason)
+	require.Empty(t, provider.callsTo("GetPlan"), "a refused call never reaches the provider")
+
+	_, err = plans.DeletePlan(ctx, &storagepb.DeletePlanRequest{Namespace: "n", TaskName: "t"})
+	require.NoError(t, err, "a write takes the same envelope")
+	calls := provider.callsTo("DeletePlan")
+	require.Len(t, calls, 1)
+	require.True(t, calls[0].hasEnvelope)
 }
 
 func TestProviderFailuresCrossTheWire(t *testing.T) {

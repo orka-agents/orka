@@ -528,7 +528,7 @@ func (s *Server) admit(ctx context.Context, m *method) (_ context.Context, relea
 	if err := s.checkDataset(ctx, m, header); err != nil {
 		return nil, nil, err
 	}
-	if ctx, err = withEnvelope(ctx, header); err != nil {
+	if ctx, err = withEnvelope(ctx, m, header); err != nil {
 		return nil, nil, err
 	}
 	accepted = true
@@ -580,11 +580,17 @@ func datasetMismatchStatus(message string) error {
 }
 
 // withEnvelope decodes a write's envelope header into ctx, where the provider
-// reads it exactly as it does in process.
-func withEnvelope(ctx context.Context, header metadata.MD) (context.Context, error) {
+// reads it exactly as it does in process. A call to a method that carries no
+// envelope, a read or an administrative method, is refused when it names one,
+// so a provider never sees an envelope where the contract has none.
+func withEnvelope(ctx context.Context, m *method, header metadata.MD) (context.Context, error) {
 	values := header.Get(HeaderEnvelope)
 	if len(values) == 0 {
 		return ctx, nil
+	}
+	if !m.takesEnvelope() {
+		message := "the call carries a write envelope, which " + m.name + " does not take"
+		return ctx, errorStatus(codes.InvalidArgument, ReasonValidation, message, map[string]string{messageKey: message})
 	}
 	if len(values) > 1 {
 		return ctx, errorStatus(codes.InvalidArgument, ReasonValidation, "the call carries more than one write envelope",

@@ -41,6 +41,9 @@ var contractSentinels = map[string]error{
 	"ErrTaskJobRevoked":               storagev1.ErrTaskJobRevoked,
 	"ErrUsageSelectionTooLarge":       storagev1.ErrUsageSelectionTooLarge,
 	"ErrDatasetMismatch":              storagev1.ErrDatasetMismatch,
+	"ErrOperationExpired":             storagev1.ErrOperationExpired,
+	"ErrOperationAborted":             storagev1.ErrOperationAborted,
+	"ErrClockSkew":                    storagev1.ErrClockSkew,
 }
 
 // A contract error the codec does not know would reach the client as a

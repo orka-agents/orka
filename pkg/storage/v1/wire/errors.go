@@ -36,6 +36,9 @@ const (
 	ReasonTaskJobRevoked               = "TASK_JOB_REVOKED"
 	ReasonUsageSelectionTooLarge       = "USAGE_SELECTION_TOO_LARGE"
 	ReasonDatasetMismatch              = "DATASET_MISMATCH"
+	ReasonOperationExpired             = "OPERATION_EXPIRED"
+	ReasonOperationAborted             = "OPERATION_ABORTED"
+	ReasonClockSkew                    = "CLOCK_SKEW"
 	ReasonTooLarge                     = "TOO_LARGE"
 	ReasonUnavailable                  = "UNAVAILABLE"
 	ReasonOutcomeUnknown               = "OUTCOME_UNKNOWN"
@@ -91,6 +94,9 @@ var sentinelReasons = []struct {
 	{ReasonTaskJobRevoked, codes.FailedPrecondition, storagev1.ErrTaskJobRevoked},
 	{ReasonUsageSelectionTooLarge, codes.ResourceExhausted, storagev1.ErrUsageSelectionTooLarge},
 	{ReasonDatasetMismatch, codes.FailedPrecondition, storagev1.ErrDatasetMismatch},
+	{ReasonOperationExpired, codes.FailedPrecondition, storagev1.ErrOperationExpired},
+	{ReasonOperationAborted, codes.FailedPrecondition, storagev1.ErrOperationAborted},
+	{ReasonClockSkew, codes.FailedPrecondition, storagev1.ErrClockSkew},
 	{ReasonNotFound, codes.NotFound, storagev1.ErrNotFound},
 	{ReasonNotReady, codes.Unavailable, storagev1.ErrNotReady},
 	{ReasonCapacity, codes.ResourceExhausted, storagev1.ErrCapacity},

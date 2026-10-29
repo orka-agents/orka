@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package orka.storage.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "orka/storage/v1/options.proto";
 
@@ -47,8 +48,9 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // reasons are NOT_FOUND, CONFLICT, FENCED, SESSION_CONFIGURATION_MISMATCH,
 // NOT_READY, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
 // VALIDATION, GATEWAY_OWNED_SESSION, GATEWAY_SESSION_CLEANUP_PENDING,
-// TASK_JOB_REVOKED, USAGE_SELECTION_TOO_LARGE, DATASET_MISMATCH, TOO_LARGE,
-// UNAVAILABLE, OUTCOME_UNKNOWN, UNAUTHENTICATED, CONTRACT_MISMATCH,
+// TASK_JOB_REVOKED, USAGE_SELECTION_TOO_LARGE, DATASET_MISMATCH,
+// OPERATION_EXPIRED, OPERATION_ABORTED, CLOCK_SKEW, TOO_LARGE, UNAVAILABLE,
+// OUTCOME_UNKNOWN, UNAUTHENTICATED, CONTRACT_MISMATCH,
 // UNSUPPORTED_FIELD, OVERLOADED and PROVIDER_ERROR. VALIDATION, FENCED and
 // CONFLICT carry a client-safe "message" in the ErrorInfo metadata; TOO_LARGE
 // carries "what", "size" and "limit".
@@ -84,12 +86,16 @@ message WriteEnvelope {
   ControllerEpochFence fence = 2;
   string operation_id = 3;
   string request_digest = 4;
+  google.protobuf.Timestamp issued_at = 5;
+  uint64 sequence = 6;
 }
 
 // ProviderLimits states a provider's size limits.
 message ProviderLimits {
   int64 max_artifact_bytes = 1;
   int64 max_value_bytes = 2;
+  google.protobuf.Duration receipt_retention = 3;
+  int64 max_receipt_result_bytes = 4;
 }
 
 // ProviderInfo describes a provider and the dataset it serves.
@@ -102,6 +108,9 @@ message ProviderInfo {
   repeated string capabilities = 6;
   ProviderLimits limits = 7;
   string durability = 8;
+  string state = 9;
+  string incarnation = 10;
+  google.protobuf.Timestamp observed_at = 11;
 }
 
 // ServerInfo describes the server library that serves a provider, rather

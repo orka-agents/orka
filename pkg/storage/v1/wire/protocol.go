@@ -3,6 +3,7 @@ package wire
 import (
 	"runtime/debug"
 
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb"
 )
 
@@ -118,6 +119,16 @@ type method struct {
 	// contract is the contract part the RPC belongs to, or empty for the
 	// Dataset RPCs every provider serves.
 	contract string
+}
+
+// takesEnvelope reports whether m carries a write envelope. Only the methods
+// the contract's method catalog classifies as writes do; reads and the
+// administrative methods that establish the fence or settle operations never
+// do, even though a transport failure of an administrative method is an
+// unknown outcome like a write's.
+func (m *method) takesEnvelope() bool {
+	info, ok := storagev1.LookupMethod(m.name)
+	return ok && info.Kind == storagev1.MethodWrite
 }
 
 func methodByFullName(fullName string) *method {

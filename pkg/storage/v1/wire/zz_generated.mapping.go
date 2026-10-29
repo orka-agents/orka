@@ -222,6 +222,11 @@ func toWireProviderInfo(in storagev1.ProviderInfo) (*storagepb.ProviderInfo, err
 		return nil, err
 	}
 	out.Durability = string(in.Durability)
+	out.State = string(in.State)
+	out.Incarnation = in.Incarnation
+	if out.ObservedAt, err = timeToWire(in.ObservedAt, "ProviderInfo.ObservedAt"); err != nil {
+		return nil, err
+	}
 	return out, err
 }
 
@@ -251,6 +256,11 @@ func fromWireProviderInfo(in *storagepb.ProviderInfo) (storagev1.ProviderInfo, e
 		return out, err
 	}
 	out.Durability = storagev1.DurabilityClass(in.Durability)
+	out.State = storagev1.DatasetState(in.State)
+	out.Incarnation = in.Incarnation
+	if out.ObservedAt, err = timeFromWire(in.ObservedAt, "ProviderInfo.ObservedAt"); err != nil {
+		return out, err
+	}
 	return out, err
 }
 
@@ -259,6 +269,8 @@ func toWireProviderLimits(in storagev1.ProviderLimits) (*storagepb.ProviderLimit
 	var err error
 	out.MaxArtifactBytes = in.MaxArtifactBytes
 	out.MaxValueBytes = in.MaxValueBytes
+	out.ReceiptRetention = durationToWire(in.ReceiptRetention)
+	out.MaxReceiptResultBytes = in.MaxReceiptResultBytes
 	return out, err
 }
 
@@ -270,6 +282,10 @@ func fromWireProviderLimits(in *storagepb.ProviderLimits) (storagev1.ProviderLim
 	var err error
 	out.MaxArtifactBytes = in.MaxArtifactBytes
 	out.MaxValueBytes = in.MaxValueBytes
+	if out.ReceiptRetention, err = durationFromWire(in.ReceiptRetention, "ProviderLimits.ReceiptRetention"); err != nil {
+		return out, err
+	}
+	out.MaxReceiptResultBytes = in.MaxReceiptResultBytes
 	return out, err
 }
 
@@ -312,6 +328,10 @@ func toWireWriteEnvelope(in storagev1.WriteEnvelope) (*storagepb.WriteEnvelope, 
 	}
 	out.OperationId = in.OperationID
 	out.RequestDigest = in.RequestDigest
+	if out.IssuedAt, err = timeToWire(in.IssuedAt, "WriteEnvelope.IssuedAt"); err != nil {
+		return nil, err
+	}
+	out.Sequence = in.Sequence
 	return out, err
 }
 
@@ -327,5 +347,9 @@ func fromWireWriteEnvelope(in *storagepb.WriteEnvelope) (storagev1.WriteEnvelope
 	}
 	out.OperationID = in.OperationId
 	out.RequestDigest = in.RequestDigest
+	if out.IssuedAt, err = timeFromWire(in.IssuedAt, "WriteEnvelope.IssuedAt"); err != nil {
+		return out, err
+	}
+	out.Sequence = in.Sequence
 	return out, err
 }

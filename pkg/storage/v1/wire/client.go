@@ -198,7 +198,7 @@ func (c *Client) prepare(ctx context.Context, m *method, req proto.Message, conn
 	if c.dataset != "" {
 		pairs = append(pairs, HeaderDataset, c.dataset)
 	}
-	if envelope, ok := storagev1.WriteEnvelopeFrom(ctx); ok && m.kind == KindWrite {
+	if envelope, ok := storagev1.WriteEnvelopeFrom(ctx); ok && m.takesEnvelope() {
 		encoded, err := toWireWriteEnvelope(envelope)
 		if err != nil {
 			return nil, nil, err
