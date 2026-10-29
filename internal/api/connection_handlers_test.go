@@ -2011,3 +2011,38 @@ func TestConnectionViewsMarkDuplicateLinksUnready(t *testing.T) {
 		}
 	}
 }
+
+// A link whose person declined an agent host gets none, so relinking it
+// neither discloses one nor has clients wait for one.
+func TestConnectionPromisesAHostOnlyToALinkThatGetsOne(t *testing.T) {
+	provider := acceptedTestProvider()
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	h := newConnectorTestHarness(t, provider)
+	first := h.create("readOnly")
+	if !first.AgentHost {
+		t.Fatal("linking a provider that serves hosts must promise one")
+	}
+	connection := &corev1alpha1.Connection{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: connectorTestNamespace, Name: first.Connection.Name}, connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.Annotations = map[string]string{corev1alpha1.ConnectionAnnotationAgentHost: corev1alpha1.ConnectionAgentHostDeclined}
+	if err := h.client.Update(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if again := h.create("readOnly"); again.AgentHost {
+		t.Fatal("a link whose person declined a host must not be promised one")
+	}
+}
+
+// Clients disclose an agent host before consent from the provider view.
+func TestConnectorProviderResponseSaysWhenItServesAgentHosts(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{ObjectMeta: metav1.ObjectMeta{Name: "github"}}
+	if connectorProviderResponse(provider).AgentHost {
+		t.Fatal("a provider without agentHost serves no hosts")
+	}
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	if !connectorProviderResponse(provider).AgentHost {
+		t.Fatal("the provider view must say it serves agent hosts")
+	}
+}

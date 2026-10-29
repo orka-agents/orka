@@ -221,6 +221,11 @@ func TestConnectorProviderSpecRules(t *testing.T) {
 			tool(s)["http"] = map[string]any{"url": "https://api.github.com/x"}
 		}, wantError: true},
 		{name: "builtin with description", mutate: func(s map[string]any) { tool(s)["description"] = "x" }, wantError: true},
+		{name: "no tools", mutate: func(s map[string]any) { delete(s, "tools") }, wantError: true},
+		{name: "no tools for an agent-host provider", mutate: func(s map[string]any) {
+			delete(s, "tools")
+			s["agentHost"] = map[string]any{"templateRef": map[string]any{"name": "copilotd"}}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			errs, _ := validator.Validate(t.Context(), nil, structural, makeSpec(test.mutate), nil, celconfig.RuntimeCELCostBudget)

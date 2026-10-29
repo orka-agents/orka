@@ -21,6 +21,7 @@ values are in [Configuration](configuration.md), and HTTP endpoints are in the
 | [RepositoryScan](#repositoryscan) | `core.orka.ai` | A repository to scan for security findings. |
 | [RepositoryMonitor](#repositorymonitor) | `core.orka.ai` | A repository whose pull requests and issues agents review, implement, and repair. |
 | [SubstrateActorPool](#substrateactorpool) | `core.orka.ai` | A pool of Agent Substrate actors for MCP Tools. |
+| AgentHostTemplate and AgentHost | `core.orka.ai` | An operator's definition of a long-lived, single-user agent host, and one user's host from it. See [Agent hosts](../operations/agent-hosts.md). |
 | AgentRuntime | `core.orka.ai` | An external agent runtime registration. See [Bring your own agent runtime](../guides/bring-your-own-agent-runtime.md). |
 | GatewayClass, Gateway, GatewayBinding | `gateway.orka.ai` | Connections to chat apps and other agents. See [Gateways](../guides/gateways.md) and the [Gateway API](gateway-api.md). |
 | ExecutionWorkspaceClass and related resources | `workspace.orka.ai` | Sandboxed execution workspaces from separately installed providers. See [Workspace providers](configuration.md#workspace-providers). |

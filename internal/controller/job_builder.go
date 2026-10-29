@@ -547,6 +547,19 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		},
 	}
 
+	if task.Spec.Type == corev1alpha1.TaskTypeAI && !validationTask && agent != nil {
+		// Name selectors can be installed before the Agent exists; restrict them
+		// to same-namespace Agents so the policy namespace supplies the scope.
+		if agent.Name != "" && agent.Namespace == task.Namespace {
+			job.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+			job.Spec.Template.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+		}
+		if agent.UID != "" {
+			job.Labels[labels.LabelAgentUID] = string(agent.UID)
+			job.Spec.Template.Labels[labels.LabelAgentUID] = string(agent.UID)
+		}
+	}
+
 	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
 	taskmeta.ApplyTransactionMetadata(&job.Spec.Template.ObjectMeta, task.Spec.Transaction)
 
