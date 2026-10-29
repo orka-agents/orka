@@ -56,12 +56,34 @@ spec:
         dyn(object.metadata).all(k, k == 'finalizers' || k == 'managedFields' ||
           (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
         dyn(oldObject.metadata).all(k, k == 'finalizers' || k == 'managedFields' || k in dyn(object.metadata))
+    # An operator releases a Task storage hold by setting only the
+    # storage.orka.ai/recovery-acknowledged annotation, which can do nothing but
+    # release the hold it names. Every other field must remain unchanged.
+    - name: storageRecoveryAcknowledgement
+      expression: >-
+        request.operation == 'UPDATE' &&
+        (!has(request.subResource) || request.subResource == '') &&
+        has(object.metadata.annotations) &&
+        'storage.orka.ai/recovery-acknowledged' in object.metadata.annotations &&
+        dyn(object).all(k, k == 'metadata' ||
+          (k in dyn(oldObject) && dyn(object)[k] == dyn(oldObject)[k])) &&
+        dyn(oldObject).all(k, k == 'metadata' || k in dyn(object)) &&
+        dyn(object.metadata).all(k, k == 'annotations' || k == 'managedFields' ||
+          (k in dyn(oldObject.metadata) && dyn(object.metadata)[k] == dyn(oldObject.metadata)[k])) &&
+        dyn(oldObject.metadata).all(k, k == 'annotations' || k == 'managedFields' || k in dyn(object.metadata)) &&
+        object.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+          (has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+            object.metadata.annotations[k] == oldObject.metadata.annotations[k])) &&
+        (!has(oldObject.metadata.annotations) ||
+          oldObject.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
+            k in object.metadata.annotations))
   validations:
     - expression: >-
         (request.operation == 'DELETE' &&
           (variables.garbageCollector ||
            request.userInfo.username == 'system:serviceaccount:kube-system:namespace-controller')) ||
         variables.foregroundFinalizerRemoval ||
+        variables.storageRecoveryAcknowledgement ||
         request.userInfo.username == 'system:serviceaccount:' + variables.controllerNamespace + ':' + variables.controllerServiceAccount ||
         request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.aiWorkerServiceAccount ||
         request.userInfo.username == 'system:serviceaccount:' + variables.gatewayNamespace + ':' + variables.vendorWorkerServiceAccount ||
