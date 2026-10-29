@@ -276,24 +276,31 @@ func (s *Store) listScanRuns(ctx context.Context, namespace, repositoryScan, pre
 // RequestScanRunCancellation freezes ordinary progress before Task deletion.
 // Each new request fences older cleanup attempts so they cannot erase a retry.
 func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanRun, reason string) error {
-	err := s.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
-		SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
-		    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
-		    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
-		WHERE namespace = ? AND id = ? AND repository_scan = ?
-		  AND repository_scan_uid = ? AND repository_scan_generation = ?
-		RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
-		run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&run.CancellationVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
-			return err
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction.
+	version := run.CancellationVersion
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		err := tx.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
+			SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
+			    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
+			    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
+			WHERE namespace = ? AND id = ? AND repository_scan = ?
+			  AND repository_scan_uid = ? AND repository_scan_generation = ?
+			RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
+			run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
 		}
-		return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
+		return err
+	}); err != nil {
+		return err
 	}
-	if err == nil {
-		run.CancellationPending = true
-	}
-	return err
+	run.CancellationVersion = version
+	run.CancellationPending = true
+	return nil
 }
 
 // CompleteScanRunCancellation releases active reservations only after cleanup.
