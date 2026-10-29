@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -230,5 +231,24 @@ func runMemories(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Equal(t, storagev1.MemoryProposalStatusArchived, archived.Status)
 		require.ErrorIs(t, p.ArchiveMemoryProposal(ctx, memoryTenant, "missing"), storagev1.ErrNotFound)
+	})
+
+	t.Run("concurrent reviews have one winner", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		proposal := &storagev1.MemoryProposal{Namespace: memoryTenant, Type: storagev1.MemoryProposalTypeMemory,
+			Title: "Contended", CreatedAt: at, UpdatedAt: at}
+		require.NoError(t, p.CreateMemoryProposal(ctx, proposal))
+		errs := runConcurrently(func(caller int) error {
+			status := storagev1.MemoryProposalStatusAccepted
+			if caller%2 == 1 {
+				status = storagev1.MemoryProposalStatusRejected
+			}
+			return p.ReviewMemoryProposal(ctx, storagev1.MemoryProposalReview{Namespace: memoryTenant, ID: proposal.ID,
+				Status: status, Reviewer: fmt.Sprintf("reviewer-%d", caller)})
+		})
+		winner := requireOneWinner(t, errs, storagev1.ErrValidation)
+		reviewed, err := p.GetMemoryProposal(ctx, memoryTenant, proposal.ID)
+		require.NoError(t, err)
+		require.Equal(t, fmt.Sprintf("reviewer-%d", winner), reviewed.Reviewer, "the winning review is the one stored")
 	})
 }

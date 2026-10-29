@@ -156,14 +156,16 @@ func TestNewDashboardCmd_WithoutToken(t *testing.T) {
 	root := newRootCmd()
 	root.AddCommand(cmd)
 
-	// Without --token, it will try createServiceAccountToken which needs kubectl.
-	// This should error in test environment.
+	// Without --token the command mints a ServiceAccount token with kubectl.
+	// Fail that step here instead of reaching whatever cluster kubectl uses.
+	tokenErr := errors.New("kubectl create token failed")
+	origCreate := serviceAccountTokenFunc
+	serviceAccountTokenFunc = func(string, string) (string, error) { return "", tokenErr }
+	t.Cleanup(func() { serviceAccountTokenFunc = origCreate })
 	root.SetArgs([]string{"dashboard", "--server", "http://test:8080"})
 
-	err := root.Execute()
-	// Expect error since kubectl is likely not available or service account doesn't exist
-	if err == nil {
-		t.Log("dashboard without token succeeded (kubectl available)")
+	if err := root.Execute(); !errors.Is(err, tokenErr) {
+		t.Fatalf("Execute() error = %v, want the token creation failure", err)
 	}
 }
 

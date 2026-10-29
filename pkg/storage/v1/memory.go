@@ -189,9 +189,9 @@ type MemoryStore interface {
 //   - ReviewMemoryProposal records MemoryProposalStatusAccepted or
 //     MemoryProposalStatusRejected, with the reviewer, note and review time,
 //     once and only on a pending proposal that is not applied; any other
-//     status, or any other proposal, returns ErrValidation. When two reviews
-//     race, one succeeds and the other returns an error without changing the
-//     proposal. A review never applies a proposal.
+//     status, or any other proposal, returns ErrValidation. When reviews
+//     race, one succeeds and the others return ErrValidation without
+//     changing the proposal. A review never applies a proposal.
 //   - ArchiveMemoryProposal is idempotent and refuses an applied proposal
 //     with ErrValidation.
 //
