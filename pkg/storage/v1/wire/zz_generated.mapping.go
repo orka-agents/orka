@@ -199,6 +199,9 @@ func fromWirePromptResultReceipt(in *storagepb.PromptResultReceipt) (storagev1.P
 	out.OperationID = in.OperationId
 	out.OperationDigest = in.OperationDigest
 	out.Data = []byte(in.Data)
+	if out.Data == nil {
+		out.Data = []byte{}
+	}
 	return out, err
 }
 
@@ -294,6 +297,9 @@ func fromWireSaveArtifactRequest(in *storagepb.SaveArtifactRequest) (storagev1.S
 	out.Filename = in.Filename
 	out.ContentType = in.ContentType
 	out.Data = []byte(in.Data)
+	if out.Data == nil {
+		out.Data = []byte{}
+	}
 	return out, err
 }
 

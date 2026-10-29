@@ -405,7 +405,10 @@ suites that way.
   provider. The client refuses a blob over its own limit, or an artifact over
   the provider's described limit, without sending it. Given a second
   connection (`ClientConfig.Bulk`), the client sends streaming calls over it,
-  so a large transfer has its own HTTP/2 flow-control window.
+  so a large transfer has its own HTTP/2 flow-control window. Protobuf cannot
+  tell empty bytes from absent ones, so decoded bytes are never nil: a
+  provider receives an empty result, receipt or artifact as an empty slice,
+  as it would in process.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream
   (`UNSUPPORTED_FIELD`), so an older server never ignores a newer

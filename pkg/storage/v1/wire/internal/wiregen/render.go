@@ -244,7 +244,12 @@ func fromWire(f *goFile, target, source string, c *conversion, label, onErr stri
 		value := f.fresh("v")
 		elem := f.typeString(c.goType.(*types.Pointer).Elem())
 		f.printf("if %s != nil {\n%s := %s(*%s)\n%s = &%s\n}\n", source, value, elem, source, target, value)
-	case convBytes, convStringMap:
+	case convBytes:
+		// Protobuf decodes empty bytes as nil. A decoded bytes value is never
+		// nil, so a present record keeps an empty value a provider may
+		// require, as it would receive in process.
+		f.printf("%s = %s(%s)\nif %s == nil {\n%s = %s{}\n}\n", target, goType(), source, target, target, goType())
+	case convStringMap:
 		f.printf("%s = %s(%s)\n", target, goType(), source)
 	case convTime:
 		f.printf("if %s, err = timeFromWire(%s, %q); err != nil {\n%s\n}\n", target, source, label, onErr)

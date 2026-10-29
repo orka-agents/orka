@@ -112,6 +112,9 @@ func (client *Client) GetArtifact(ctx context.Context, key storagev1.ArtifactKey
 	}
 	var r0 []byte
 	r0 = []byte(wireResponse.Data)
+	if r0 == nil {
+		r0 = []byte{}
+	}
 	var r1 string
 	r1 = wireResponse.ContentType
 	return r0, r1, nil
@@ -374,6 +377,9 @@ func (client *Client) GetResult(ctx context.Context, namespace string, taskName 
 	}
 	var r0 []byte
 	r0 = []byte(wireResponse.Data)
+	if r0 == nil {
+		r0 = []byte{}
+	}
 	return r0, nil
 }
 
@@ -791,6 +797,9 @@ func (service *resultsService) SaveResult(stream grpc.ClientStreamingServer[stor
 	a1 = wireRequest.TaskName
 	var a2 []byte
 	a2 = []byte(wireRequest.Data)
+	if a2 == nil {
+		a2 = []byte{}
+	}
 	err = service.provider.SaveResult(ctx, a0, a1, a2)
 	if err != nil {
 		return service.server.providerError(ctx, &methodSaveResult, err)

@@ -73,7 +73,10 @@ func TestBlobsCrossTheWireWhole(t *testing.T) {
 	provider.set("GetPromptResultReceipt", []any{&empty}, nil)
 	gotReceipt, err = client.GetPromptResultReceipt(t.Context(), "e")
 	require.NoError(t, err)
-	require.Equal(t, &empty, gotReceipt, "a receipt with no bytes stays present")
+	require.NotNil(t, gotReceipt, "a receipt with no bytes stays present")
+	require.Equal(t, "e", gotReceipt.AttemptID)
+	require.NotNil(t, gotReceipt.Data, "its bytes decode as an empty value, not nil")
+	require.Empty(t, gotReceipt.Data)
 
 	require.NoError(t, client.SaveResult(t.Context(), "n", "t", nil))
 	require.Empty(t, provider.callsTo("SaveResult")[0].args[2])
