@@ -302,7 +302,7 @@ func taskTypeParts() []promptPart {
     • curl: "cgr.dev/chainguard/curl:latest"
     • git: "cgr.dev/chainguard/git:latest-dev"
   All containers run as non-root with read-only root filesystem.
-  Writable paths: /tmp, /home/nonroot. Do NOT assume root access.
+  Writable paths: /tmp always; /workspace and /home/worker only with a workspace. Do NOT assume root access.
 `, requires: []string{promptToolContainerTask}},
 		{text: `- ai: Run an LLM-powered task. Use create_ai_task; omit providerRef unless the user explicitly requests another provider.
   Use for: reasoning, analysis, content generation, code review, summarization,

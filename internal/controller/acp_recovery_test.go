@@ -3484,6 +3484,13 @@ type recoveryFixture struct {
 
 func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *recoveryFixture {
 	t.Helper()
+	return newACPRecoveryFixtureWithBinding(t, target, nil)
+}
+
+// newACPRecoveryFixtureWithBinding binds the old-epoch attempt to binding when
+// it enters Planned, as standalone dispatch does before RuntimeSession creation.
+func newACPRecoveryFixtureWithBinding(t *testing.T, target store.PromptExecutionState, binding *attemptRuntimeBinding) *recoveryFixture {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -3532,10 +3539,16 @@ func newACPRecoveryFixture(t *testing.T, target store.PromptExecutionState) *rec
 		if attempt.ExecutionState == target {
 			break
 		}
-		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, store.PromptAttemptExecutionTransition{
+		transition := store.PromptAttemptExecutionTransition{
 			ID: attempt.ID, Fence: oldFence, ExpectedVersion: attempt.Version, ExpectedState: attempt.ExecutionState, NewState: next,
 			OperationID: "recover-" + string(next), OperationDigest: testControlDigestForDispatcher("recover-" + string(next)), UpdatedAt: time.Now().UTC(),
-		})
+		}
+		if binding != nil && next == store.PromptExecutionPlanned {
+			transition.RuntimeInstanceID = binding.RuntimeInstanceID
+			transition.SessionUID = binding.SessionUID
+			transition.SessionLeaseGeneration = binding.SessionGeneration
+		}
+		attempt, err = controlStore.TransitionPromptAttemptExecution(ctx, transition)
 		if err != nil {
 			t.Fatal(err)
 		}

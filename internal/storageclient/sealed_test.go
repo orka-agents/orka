@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -368,4 +369,66 @@ func TestClientRejectsWrongKeysAndModifiedRecords(t *testing.T) {
 	native, err := client.GetNativeSession(ctx, "tenant", "imported", "")
 	require.NoError(t, err)
 	require.Equal(t, imported.Snapshot.Data, native.Snapshot.Data)
+}
+
+// TestConcurrentSnapshotPersistsOfOneKey races persists of one snapshot key.
+// Identical persists all succeed. Persists with different content store one
+// snapshot, and every other caller learns its content differs. A snapshot's
+// digest covers only its body, so the content that differs is the schema
+// version.
+func TestConcurrentSnapshotPersistsOfOneKey(t *testing.T) {
+	const callers = 8
+	race := func(persist func(caller int) error) []error {
+		errs := make([]error, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for caller := range callers {
+			wg.Go(func() {
+				<-start
+				errs[caller] = persist(caller)
+			})
+		}
+		close(start)
+		wg.Wait()
+		return errs
+	}
+	body := []byte(`{"prompt":"contended snapshot"}`)
+
+	t.Run("identical content", func(t *testing.T) {
+		client := activatedClient(t, openSQLite(t), sealedTestKey)
+		snapshot := snapshotFor("task-identical", body)
+		errs := race(func(int) error { return client.PersistAgentExecutionSnapshot(t.Context(), snapshot) })
+		for caller, err := range errs {
+			require.NoError(t, err, "caller %d", caller)
+		}
+		stored, err := client.GetAgentExecutionSnapshot(t.Context(),
+			store.AgentExecutionSnapshotKey{TaskUID: snapshot.TaskUID, Digest: snapshot.Digest})
+		require.NoError(t, err)
+		require.Equal(t, body, stored.Body)
+	})
+
+	t.Run("different content", func(t *testing.T) {
+		client := activatedClient(t, openSQLite(t), sealedTestKey)
+		snapshots := make([]store.AgentExecutionSnapshot, callers)
+		for caller := range snapshots {
+			snapshots[caller] = snapshotFor("task-different", body)
+			snapshots[caller].SchemaVersion += int32(caller)
+		}
+		errs := race(func(caller int) error { return client.PersistAgentExecutionSnapshot(t.Context(), snapshots[caller]) })
+		winner := -1
+		for caller, err := range errs {
+			if err == nil {
+				require.Equal(t, -1, winner, "callers %d and %d both stored the snapshot", winner, caller)
+				winner = caller
+				continue
+			}
+			require.ErrorIs(t, err, store.ErrDuplicateMismatch, "caller %d", caller)
+		}
+		require.NotEqual(t, -1, winner, "no caller stored the snapshot")
+		stored, err := client.GetAgentExecutionSnapshot(t.Context(),
+			store.AgentExecutionSnapshotKey{TaskUID: snapshots[winner].TaskUID, Digest: snapshots[winner].Digest})
+		require.NoError(t, err)
+		require.Equal(t, snapshots[winner].SchemaVersion, stored.SchemaVersion, "the stored snapshot is the winner's")
+		require.Equal(t, body, stored.Body)
+	})
 }

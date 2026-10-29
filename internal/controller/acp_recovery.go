@@ -672,29 +672,64 @@ func (d *ACPDispatcher) readRecoverableTask(
 		return nil, false, nil
 	}
 	if !latest.DeletionTimestamp.IsZero() && !acpTaskHasUnvalidatedSourceIdentity(latest) {
-		// A deleting standalone Task may still need its terminal projection after
-		// publication failed. Recover only an already settled attempt with exact
-		// runtime cleanup proof; deleting prompts must never be replayed.
-		if !taskDispatchableByACP(latest) || latest.Spec.SessionRef != nil || latest.Status.Execution == nil ||
-			acpTaskHasRestoredSourceIdentityBinding(latest) || !taskScopedRuntimeSessionCleanupComplete(latest) {
-			return nil, false, nil
-		}
-		attemptID, idErr := promptAttemptIDFromTask(latest)
-		if idErr != nil {
-			return nil, false, idErr
-		}
-		attempt, getErr := d.Store.GetPromptAttempt(ctx, attemptID)
-		if errors.Is(getErr, store.ErrNotFound) {
-			return nil, false, nil
-		}
-		if getErr != nil {
-			return nil, false, getErr
-		}
-		if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) || !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
-			return nil, false, nil
+		recoverable, err := d.deletingTaskRecoverable(ctx, latest)
+		if err != nil || !recoverable {
+			return nil, false, err
 		}
 	}
 	return latest, true, nil
+}
+
+// deletingTaskRecoverable reports whether stale recovery may re-fence a
+// deleting Task. Deleting prompts are never replayed, and recovery must not
+// drop runtime cleanup authority the Task finalizer still waits on. Two cases
+// qualify:
+//   - The attempt and the Task's own execution status are still before prompt
+//     submission, and the attempt holds no RuntimeSession binding. Recovery
+//     only moves the Task to the current epoch, where admission settlement
+//     cancels the deleting Task before any runtime contact.
+//   - A standalone attempt already settled. Recovery may still need to finish
+//     its terminal projection, for example after publication failed.
+func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 ||
+		acpTaskHasRestoredSourceIdentityBinding(task) || !taskScopedRuntimeSessionCleanupComplete(task) {
+		return false, nil
+	}
+	attemptID, err := promptAttemptIDFromTask(task)
+	if err != nil {
+		return false, err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch attempt.ExecutionState {
+	case store.PromptExecutionQueued, store.PromptExecutionReserved,
+		store.PromptExecutionSessionStarting, store.PromptExecutionPlanned:
+		if !acpTaskExecutionBeforeSubmission(task.Status.Execution.State) {
+			return false, nil
+		}
+		bound, err := promptAttemptSessionBound(attempt)
+		return err == nil && !bound, err
+	}
+	return task.Spec.SessionRef == nil && store.IsTerminalPromptExecutionState(attempt.ExecutionState) &&
+		store.IsTerminalPromptDeliveryState(attempt.DeliveryState), nil
+}
+
+// acpTaskExecutionBeforeSubmission reports whether a Task's own execution
+// status is still before prompt submission. Re-fencing rewrites that state, so
+// a Task that already records a terminal or later state must keep it.
+func acpTaskExecutionBeforeSubmission(state corev1alpha1.TaskExecutionState) bool {
+	switch state {
+	case corev1alpha1.TaskExecutionStateQueued, corev1alpha1.TaskExecutionStateReserved,
+		corev1alpha1.TaskExecutionStateSessionStarting, corev1alpha1.TaskExecutionStatePlanned:
+		return true
+	default:
+		return false
+	}
 }
 
 //nolint:gocyclo // Stale-task recovery handles each persisted lifecycle phase under one fence.

@@ -26,6 +26,24 @@ func (s *Store) securityReadSnapshot(ctx context.Context, read func(securityDB) 
 	return readInTransaction(ctx, s.db, func(tx *sql.Tx) error { return read(tx) })
 }
 
+// writeTransaction runs write in one transaction and commits it, so a method
+// that changes a record and reads it back returns the state its own commit
+// produced. Inside a task-data transaction it reuses that transaction.
+func (s *Store) writeTransaction(ctx context.Context, write func(taskDataExecutor) error) error {
+	if tx := s.taskDataTx(ctx); tx != nil {
+		return write(tx)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := write(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func readInTransaction(ctx context.Context, db *sql.DB, read func(*sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
