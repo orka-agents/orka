@@ -16,6 +16,7 @@ import (
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -314,13 +315,16 @@ func cancelNativeTaskAfterPromptRunning(
 				return
 			}
 			if attempt.ExecutionState == store.PromptExecutionRunning {
-				target := &corev1alpha1.Task{}
-				if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(timedOut), target); err != nil {
-					cancelled <- err
-					return
-				}
-				target.Status.Phase = corev1alpha1.TaskPhaseCancelled
-				cancelled <- fixture.kubeClient.Status().Update(ctx, target)
+				// The dispatcher keeps writing Task status while the prompt runs;
+				// a cancelling writer must retry its update after a conflict.
+				cancelled <- retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					target := &corev1alpha1.Task{}
+					if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(timedOut), target); err != nil {
+						return err
+					}
+					target.Status.Phase = corev1alpha1.TaskPhaseCancelled
+					return fixture.kubeClient.Status().Update(ctx, target)
+				})
 				return
 			}
 			select {

@@ -227,7 +227,11 @@ func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservat
 }
 
 func (s *Store) recordUsageWrite(ctx context.Context, observation store.UsageObservation) error {
-	return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
+	// The Task lookup, the deduplicating insert and the replay comparison share
+	// one transaction, so retention cannot remove the observation between them.
+	return s.usageTransaction(ctx, func(ctx context.Context) error {
+		return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
+	})
 }
 
 func recordUsage(ctx context.Context, db taskDataExecutor, observation store.UsageObservation) error {
