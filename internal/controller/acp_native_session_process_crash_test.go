@@ -160,7 +160,7 @@ func TestACPDispatcherNativeProcessCrashChild(t *testing.T) {
 	require.NoError(t, err)
 	dispatcher := &ACPDispatcher{
 		Client: kube, APIReader: kube, Store: controls, ResultStore: persistence,
-		EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: epochs,
+		EventStore: persistence, Snapshots: persistence, Sessions: continuity, Epochs: epochs,
 	}
 	if config.Recover {
 		task := &corev1alpha1.Task{}

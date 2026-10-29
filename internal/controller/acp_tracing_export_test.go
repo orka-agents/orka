@@ -186,7 +186,7 @@ func RunACPTraceBoundary(t *testing.T, tasks []*corev1alpha1.Task, agent *corev1
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := &ACPDispatcher{Client: kc, APIReader: kc, Store: control, ResultStore: persistence, EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity}
+	dispatcher := &ACPDispatcher{Client: kc, APIReader: kc, Store: control, ResultStore: persistence, EventStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity}
 	var wg sync.WaitGroup
 	for _, task := range tasks {
 		wg.Go(func() { dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy()) })

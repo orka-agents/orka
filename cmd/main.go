@@ -1714,9 +1714,8 @@ func main() {
 	}
 	acpDispatcher := &controller.ACPDispatcher{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
-		EventStore: appStorage, PlanStore: appStorage,
-		Snapshots: agentExecutionSnapshotStore,
-		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
+		EventStore: appStorage, Snapshots: agentExecutionSnapshotStore,
+		Epochs: controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,

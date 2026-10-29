@@ -430,7 +430,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
-		EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		EventStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 		PromptLeases: &ACPMCPPromptLeaseRegistry{},
 	}
 	return &externalACPDispatchFixture{
