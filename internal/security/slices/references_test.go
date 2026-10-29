@@ -287,3 +287,27 @@ func TestMapRepositoryKeepsNodeTestsOutOfOwnedFiles(t *testing.T) {
 		t.Fatalf("tests = %v, want helm.test.ts with the package test command", tests)
 	}
 }
+
+func TestReferenceFilesFollowPackageExports(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "lib/package.json", `{"name":"@app/lib","exports":{
+  ".": {"types": "./src/index.ts", "import": "./src/index.ts"},
+  "./client": "./src/client/main.ts",
+  "./utils/*": "./src/utils/*.ts"
+}}`)
+	writeFile(t, root, "lib/src/index.ts", "export const lib = 1\n")
+	writeFile(t, root, "lib/src/client/main.ts", "export const client = 1\n")
+	writeFile(t, root, "lib/src/utils/token.ts", "export const token = 1\n")
+	writeFile(t, root, "app/package.json", `{"name":"@app/app"}`)
+	writeFile(t, root, "app/server.ts", "import { lib } from '@app/lib'\nimport { client } from '@app/lib/client'\nimport { token } from '@app/lib/utils/token'\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/server.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	for _, want := range []string{"lib/src/index.ts=imports", "lib/src/client/main.ts=imports", "lib/src/utils/token.ts=imports"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("references = %s, want %s", got, want)
+		}
+	}
+}

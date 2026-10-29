@@ -32,6 +32,9 @@ type nodePackage struct {
 	name string
 	dir  string
 	main string
+	// exports maps package.json "exports" subpaths, such as "." or "./api"
+	// or "./*", to repository-relative targets.
+	exports map[string]string
 }
 
 // Only files with a line count, which are regular and within the reference
@@ -100,16 +103,104 @@ func resolveNodeImport(fromDir, spec string, known map[string]struct{}, packages
 		}
 	}
 	for _, pkg := range packages {
+		if spec != pkg.name && !strings.HasPrefix(spec, pkg.name+"/") {
+			continue
+		}
+		if target := pkg.exportTarget("." + strings.TrimPrefix(spec, pkg.name)); target != "" {
+			if found := resolveNodeBase(target, known); found != "" {
+				return found
+			}
+		}
 		if spec == pkg.name && pkg.main != "" {
 			if _, ok := known[pkg.main]; ok {
 				return pkg.main
 			}
 		}
-		if spec == pkg.name || strings.HasPrefix(spec, pkg.name+"/") {
-			return resolveNodeBase(path.Join(pkg.dir, strings.TrimPrefix(spec, pkg.name)), known)
+		return resolveNodeBase(path.Join(pkg.dir, strings.TrimPrefix(spec, pkg.name)), known)
+	}
+	return ""
+}
+
+// exportTarget resolves a subpath through the package's exports map,
+// including a single "*" pattern such as "./*": "./src/*.ts".
+func (p nodePackage) exportTarget(subpath string) string {
+	if target, ok := p.exports[subpath]; ok {
+		return target
+	}
+	patterns := make([]string, 0, len(p.exports))
+	for pattern := range p.exports {
+		patterns = append(patterns, pattern)
+	}
+	// The most specific pattern wins.
+	sort.Slice(patterns, func(i, j int) bool {
+		if len(patterns[i]) != len(patterns[j]) {
+			return len(patterns[i]) > len(patterns[j])
+		}
+		return patterns[i] < patterns[j]
+	})
+	for _, pattern := range patterns {
+		target := p.exports[pattern]
+		prefix, suffix, wildcard := strings.Cut(pattern, "*")
+		if !wildcard || len(subpath) < len(prefix)+len(suffix) || !strings.HasPrefix(subpath, prefix) || !strings.HasSuffix(subpath, suffix) {
+			continue
+		}
+		return strings.Replace(target, "*", subpath[len(prefix):len(subpath)-len(suffix)], 1)
+	}
+	return ""
+}
+
+// nodeExportConditions are the export conditions tried, in order, for a
+// target given as a condition object.
+var nodeExportConditions = []string{"import", "default", "require", "node", "types"}
+
+// nodeExportTarget returns a string export target, or the first string
+// target among the known conditions of a condition object.
+func nodeExportTarget(raw json.RawMessage, depth int) string {
+	var target string
+	if json.Unmarshal(raw, &target) == nil {
+		return target
+	}
+	var conditions map[string]json.RawMessage
+	if depth > 2 || json.Unmarshal(raw, &conditions) != nil {
+		return ""
+	}
+	for _, condition := range nodeExportConditions {
+		if nested, ok := conditions[condition]; ok {
+			if target := nodeExportTarget(nested, depth+1); target != "" {
+				return target
+			}
 		}
 	}
 	return ""
+}
+
+func readNodeExports(raw json.RawMessage, dir string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	exports := map[string]string{}
+	var subpaths map[string]json.RawMessage
+	if json.Unmarshal(raw, &subpaths) == nil && len(subpaths) > 0 {
+		for subpath := range subpaths {
+			if !strings.HasPrefix(subpath, ".") {
+				// A condition object for the package root.
+				if target := nodeExportTarget(raw, 0); target != "" {
+					exports["."] = path.Join(dir, target)
+				}
+				return exports
+			}
+		}
+		for subpath, value := range subpaths {
+			if target := nodeExportTarget(value, 0); target != "" {
+				exports[subpath] = path.Join(dir, target)
+			}
+		}
+		return exports
+	}
+	if target := nodeExportTarget(raw, 0); target != "" {
+		exports["."] = path.Join(dir, target)
+	}
+	return exports
 }
 
 func resolveNodeBase(base string, known map[string]struct{}) string {
@@ -255,13 +346,14 @@ func readNodePackage(fullPath, dir string) (nodePackage, bool) {
 		return nodePackage{}, false
 	}
 	var manifest struct {
-		Name string `json:"name"`
-		Main string `json:"main"`
+		Name    string          `json:"name"`
+		Main    string          `json:"main"`
+		Exports json.RawMessage `json:"exports"`
 	}
 	if json.Unmarshal(data, &manifest) != nil || strings.TrimSpace(manifest.Name) == "" {
 		return nodePackage{}, false
 	}
-	pkg := nodePackage{name: strings.TrimSpace(manifest.Name), dir: dir}
+	pkg := nodePackage{name: strings.TrimSpace(manifest.Name), dir: dir, exports: readNodeExports(manifest.Exports, dir)}
 	if manifest.Main != "" {
 		pkg.main = path.Join(dir, manifest.Main)
 	}
