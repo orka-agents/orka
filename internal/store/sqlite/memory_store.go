@@ -476,7 +476,17 @@ func (s *Store) reviewMemoryProposalWrite(ctx context.Context, review store.Memo
 	if err != nil {
 		return err
 	}
-	return ensureRowsAffected(res)
+	if err := ensureRowsAffected(res); !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	// A concurrent review or archive changed the proposal after the check
+	// above. Report what a review run after it would: the proposal is no
+	// longer pending, unless it is gone.
+	current, err := s.GetMemoryProposal(ctx, review.Namespace, review.ID)
+	if err != nil {
+		return err
+	}
+	return store.ValidationErrorf("proposal status %q cannot be reviewed", current.Status)
 }
 
 // ArchiveMemoryProposal archives a proposal without applying it.

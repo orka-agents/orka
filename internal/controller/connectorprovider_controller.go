@@ -194,6 +194,22 @@ func (r *ConnectorProviderReconciler) referenceReader() client.Reader {
 	return r.Client
 }
 
+// requestsForAgentHostTemplate enqueues the providers whose agent hosts use
+// the template, so a missing or changed template shows on them at once.
+func (r *ConnectorProviderReconciler) requestsForAgentHostTemplate(ctx context.Context, object client.Object) []reconcile.Request {
+	providers := &corev1alpha1.ConnectorProviderList{}
+	if err := r.List(ctx, providers, client.InNamespace(object.GetNamespace())); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range providers.Items {
+		if host := providers.Items[i].Spec.AgentHost; host != nil && host.TemplateRef.Name == object.GetName() {
+			requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&providers.Items[i])})
+		}
+	}
+	return requests
+}
+
 func (r *ConnectorProviderReconciler) requestsForSecret(ctx context.Context, object client.Object) []reconcile.Request {
 	providers := &corev1alpha1.ConnectorProviderList{}
 	if err := r.List(ctx, providers, client.InNamespace(object.GetNamespace())); err != nil {
@@ -217,6 +233,7 @@ func (r *ConnectorProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.ConnectorProvider{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.requestsForSecret)).
+		Watches(&corev1alpha1.AgentHostTemplate{}, handler.EnqueueRequestsFromMapFunc(r.requestsForAgentHostTemplate)).
 		Named("connectorprovider").
 		Complete(r)
 }
