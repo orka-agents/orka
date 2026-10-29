@@ -1026,3 +1026,47 @@ func TestHoldRaisedAfterJobRevocationKeepsTheTaskFromSucceeding(t *testing.T) {
 		t.Fatalf("Task phase after the hold was released = %q, want Succeeded", got)
 	}
 }
+
+// A Task whose recorded execution outcome already says it succeeded, as one
+// that is finalizing, moves its phase to Succeeded only while storage is not
+// held.
+func TestHeldTaskWithASucceededOutcomeKeepsItsPhase(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "task", Namespace: "default", UID: "task-uid", Generation: 1},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, Prompt: "prompt"},
+		Status: corev1alpha1.TaskStatus{
+			Phase:            corev1alpha1.TaskPhaseFinalizing,
+			ExecutionOutcome: &corev1alpha1.TaskWorkloadExecutionOutcome{Phase: corev1alpha1.TaskPhaseSucceeded, Attempt: 1, RecordedAt: metav1.Now()},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	manager := &ControllerEpochManager{ready: make(chan struct{})}
+	r.ControllerEpochManager = manager
+	manager.setHold(store.StorageRecoveryHold{ID: "hold-1", Reason: store.StorageRecoveryUnsafeSwitch})
+	succeed := func(task *corev1alpha1.Task) {
+		task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	}
+	phase := func() corev1alpha1.TaskPhase {
+		t.Helper()
+		var current corev1alpha1.Task
+		if err := r.Get(ctx, client.ObjectKeyFromObject(task), &current); err != nil {
+			t.Fatal(err)
+		}
+		return current.Status.Phase
+	}
+
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), succeed); !errors.Is(err, store.ErrStorageRecoveryRequired) {
+		t.Fatalf("phase moved to Succeeded while held = %v; want ErrStorageRecoveryRequired", err)
+	}
+	if got := phase(); got != corev1alpha1.TaskPhaseFinalizing {
+		t.Fatalf("Task phase while held = %q, want Finalizing", got)
+	}
+	manager.clearHold()
+	if err := r.updateStatusWithRetry(ctx, task.DeepCopy(), succeed); err != nil {
+		t.Fatalf("phase moved to Succeeded after the hold was released = %v", err)
+	}
+	if got := phase(); got != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("Task phase after the hold was released = %q, want Succeeded", got)
+	}
+}

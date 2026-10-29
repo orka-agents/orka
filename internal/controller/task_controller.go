@@ -244,9 +244,10 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 		previousJob := store.TaskJobIdentity{Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID}
 		previousJobName := task.Status.JobName
 		hadACPExecution := task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0
-		reportedSuccess := taskReportsSuccess(task)
+		phaseSucceeded, outcomeSucceeded := taskReportsSuccess(task)
 		mutate(task)
-		reportsSuccess := !reportedSuccess && taskReportsSuccess(task)
+		phaseSucceeds, outcomeSucceeds := taskReportsSuccess(task)
+		reportsSuccess := (phaseSucceeds && !phaseSucceeded) || (outcomeSucceeds && !outcomeSucceeded)
 		write := func(writeCtx context.Context) error {
 			if taskJobAuthorityChanged(previousJob, previousJobName, task) {
 				if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, previousJob); err != nil {
@@ -269,11 +270,12 @@ func (r *TaskReconciler) updateStatusWithRetry(ctx context.Context, task *corev1
 	})
 }
 
-// taskReportsSuccess reports whether a Task's status says it succeeded:
-// its phase, or the execution outcome it recorded.
-func taskReportsSuccess(task *corev1alpha1.Task) bool {
-	return task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
-		(task.Status.ExecutionOutcome != nil && task.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseSucceeded)
+// taskReportsSuccess reports whether a Task's phase, and the execution
+// outcome it recorded, say it succeeded. The outcome is recorded before the
+// phase changes, so each reports success on its own.
+func taskReportsSuccess(task *corev1alpha1.Task) (phase, outcome bool) {
+	return task.Status.Phase == corev1alpha1.TaskPhaseSucceeded,
+		task.Status.ExecutionOutcome != nil && task.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseSucceeded
 }
 
 func retryTaskStatusOnConflict(backoff wait.Backoff, write func() error) error {
