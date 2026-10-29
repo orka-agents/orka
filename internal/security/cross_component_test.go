@@ -311,7 +311,7 @@ func TestMarshalReviewContextsKeepsTheRunWithinTheUploadBound(t *testing.T) {
 			})
 		}
 	}
-	encoded, err := MarshalReviewContexts(manifests)
+	encoded, err := MarshalReviewContexts(manifests, MaxReviewContextsBytes)
 	if err != nil {
 		t.Fatalf("MarshalReviewContexts() error = %v", err)
 	}
@@ -334,7 +334,7 @@ func TestMarshalReviewContextsFailsWhenExcerptsAloneExceedTheBound(t *testing.T)
 	for i := range manifests {
 		manifests[i] = ReviewContextManifest{SchemaVersion: SchemaVersionReviewContext, SliceID: fmt.Sprintf("slice_%02d", i), Prompt: prompt}
 	}
-	if _, err := MarshalReviewContexts(manifests); err == nil {
+	if _, err := MarshalReviewContexts(manifests, MaxReviewContextsBytes); err == nil {
 		t.Fatal("MarshalReviewContexts() = nil error, want the oversized batch rejected")
 	}
 }

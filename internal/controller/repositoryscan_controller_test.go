@@ -7713,3 +7713,33 @@ func TestRecordValidationErrorKeepsAnEarlierVerdict(t *testing.T) {
 		t.Fatalf("first validation = %q %s, want error", first.ValidationStatus, first.ValidationJSON)
 	}
 }
+
+func TestReviewTaskBudgetIsSharedAcrossScans(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	review := func(name, runID string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: defaultNS, Labels: map[string]string{
+				labels.LabelSecurityStage: security.StageReview, labels.LabelSecurityScanID: runID,
+			}},
+			Status: corev1alpha1.TaskStatus{Phase: phase},
+		}
+	}
+	// Another scan already has 14 reviews waiting for the shared dispatcher.
+	objects := []client.Object{review("other-done", "scan_other", corev1alpha1.TaskPhaseSucceeded)}
+	for i := range 14 {
+		objects = append(objects, review(fmt.Sprintf("other-%02d", i), "scan_other", corev1alpha1.TaskPhasePending))
+	}
+	reconciler := &RepositoryScanReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()}
+	// This run's own window is 4 before its pool is known, but only 2 of the
+	// 16 shared places are free.
+	got, err := reconciler.reviewTaskBudget(context.Background(), nil, "scan_this")
+	if err != nil {
+		t.Fatalf("reviewTaskBudget() error = %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("reviewTaskBudget() = %d, want the 2 shared places left", got)
+	}
+}

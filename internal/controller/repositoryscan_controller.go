@@ -1116,7 +1116,10 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err != nil {
 			return err
 		}
-		available := max(r.reviewTaskWindow(ctx, existing.Items, run.ID)-outstandingReviewTasks(existing.Items, run.ID), 0)
+		available, err := r.reviewTaskBudget(ctx, existing.Items, run.ID)
+		if err != nil {
+			return err
+		}
 		reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
 	}
 	for _, reviewSlice := range reviewSlices {
@@ -1414,6 +1417,29 @@ func (r *RepositoryScanReconciler) reviewRuntimePoolPrompts(ctx context.Context,
 		return 0
 	}
 	return 0
+}
+
+// reviewTaskBudget returns how many review Tasks a run may create now: what
+// its own window leaves, within a budget all scans share, because ACP
+// dispatch capacity is controller-wide. A scan whose reviews do not fit waits
+// for places instead of queueing Tasks that would outlive their deadline.
+func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTasks []corev1alpha1.Task, runID string) (int, error) {
+	available := max(r.reviewTaskWindow(ctx, runTasks, runID)-outstandingReviewTasks(runTasks, runID), 0)
+	var all corev1alpha1.TaskList
+	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
+		return 0, err
+	}
+	shared := 0
+	for i := range all.Items {
+		if phase := all.Items[i].Status.Phase; phase == "" || isActiveTaskPhase(phase) {
+			shared++
+		}
+	}
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	return min(available, max(maxOutstandingReviewTasks/DefaultACPDispatchWorkers*dispatch-shared, 0)), nil
 }
 
 func outstandingReviewTasks(tasks []corev1alpha1.Task, runID string) int {

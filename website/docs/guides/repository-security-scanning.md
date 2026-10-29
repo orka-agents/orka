@@ -196,9 +196,9 @@ repeat is stored as a duplicate of the first finding and does not count toward
 Review slices run as concurrent Tasks, up to the smaller of the controller's ACP dispatch
 limit (`controller.acpRuntime.dispatch.maxConcurrentTasks`) and the RuntimePool's
 `maxRunningPrompts`; both default to 4. A run keeps at most four review Tasks outstanding per
-prompt it can run at once (16 by default; four until a review is queued to its RuntimePool) and
-starts more as earlier reviews finish, so queued slices do not spend their Task deadline
-waiting for a runtime.
+prompt it can run at once (16 by default; four until a review is queued to its RuntimePool),
+and all scans together keep at most four per dispatch place. More start as earlier reviews
+finish, so queued slices do not spend their Task deadline waiting for a runtime.
 
 A review slice is retried once when its prompt fails or returns an invalid result. If the
 retry prompt also fails, for example because the model provider stopped the response, the

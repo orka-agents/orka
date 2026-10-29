@@ -31,8 +31,8 @@ const (
 	artifactsDirEnv           = "ORKA_ARTIFACTS_DIR"
 	defaultArtifactsDir       = "/tmp/artifacts"
 	workspaceArtifactsDirName = ".orka-artifacts"
-	maxTotalSize              = 50 << 20 // 50 MB
-	maxFileSize               = 10 << 20 // 10 MB
+	MaxArtifactTotalBytes     = 50 << 20 // 50 MB
+	MaxArtifactFileBytes      = 10 << 20 // 10 MB
 	artifactPath              = "internal/v1/artifacts"
 )
 
@@ -279,12 +279,12 @@ func UploadArtifactsWithRequestAuthorizationContext(
 			_ = file.Close()
 			continue
 		}
-		if fi.Size() > maxFileSize {
+		if fi.Size() > MaxArtifactFileBytes {
 			_ = file.Close()
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), maxFileSize)
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, fi.Size(), MaxArtifactFileBytes)
 			continue
 		}
-		data, err := io.ReadAll(io.LimitReader(file, maxFileSize+1))
+		data, err := io.ReadAll(io.LimitReader(file, MaxArtifactFileBytes+1))
 		_ = file.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "artifact: failed to read %s: %v\n", filename, err)
@@ -292,13 +292,13 @@ func UploadArtifactsWithRequestAuthorizationContext(
 			continue
 		}
 
-		if len(data) > maxFileSize {
-			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), maxFileSize)
+		if len(data) > MaxArtifactFileBytes {
+			fmt.Fprintf(os.Stderr, "artifact: skipping %s (%d bytes exceeds %d byte limit)\n", filename, len(data), MaxArtifactFileBytes)
 			continue
 		}
 		totalSize += int64(len(data))
-		if totalSize > maxTotalSize {
-			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, maxTotalSize)
+		if totalSize > MaxArtifactTotalBytes {
+			return fmt.Errorf("total artifact size %d bytes exceeds limit of %d", totalSize, MaxArtifactTotalBytes)
 		}
 		pending = append(pending, pendingArtifact{
 			filename:    filename,

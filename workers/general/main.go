@@ -354,15 +354,6 @@ func runSecurityMapper(ctx context.Context) error {
 		manifest.ReferenceFiles = references[contextSlice.ID]
 		manifests = append(manifests, manifest)
 	}
-	encoded, err := security.MarshalReviewContexts(manifests)
-	if err != nil {
-		return fmt.Errorf("marshal security review contexts: %w", err)
-	}
-	for i := range slices {
-		if err := common.WriteArtifactFile(security.ReviewContextArtifactName(slices[i].ID), encoded[i]); err != nil {
-			return err
-		}
-	}
 	artifact := security.ReviewSlicesArtifact{
 		SchemaVersion:        security.SchemaVersionReviewSlices,
 		BaseCommit:           baseCommit,
@@ -377,6 +368,24 @@ func runSecurityMapper(ctx context.Context) error {
 	data, err := json.MarshalIndent(artifact, "", "  ")
 	if err != nil {
 		return err
+	}
+	// The uploader skips a file over its per-file limit, which would leave
+	// the run without its slices.
+	if len(data) > common.MaxArtifactFileBytes {
+		return fmt.Errorf("security slices artifact is %d bytes, above the %d byte artifact limit", len(data), common.MaxArtifactFileBytes)
+	}
+	// The contexts share the upload limit with the slices artifact; keep
+	// headroom for the run's other artifacts.
+	const otherArtifactsBytes = 2 << 20
+	encoded, err := security.MarshalReviewContexts(manifests,
+		min(security.MaxReviewContextsBytes, common.MaxArtifactTotalBytes-otherArtifactsBytes-len(data)))
+	if err != nil {
+		return fmt.Errorf("marshal security review contexts: %w", err)
+	}
+	for i := range slices {
+		if err := common.WriteArtifactFile(security.ReviewContextArtifactName(slices[i].ID), encoded[i]); err != nil {
+			return err
+		}
 	}
 	if err := common.WriteArtifactFile(security.ArtifactSlices, data); err != nil {
 		return err

@@ -87,10 +87,10 @@ func MarshalReviewContext(manifest ReviewContextManifest) ([]byte, error) {
 // publishes together, below the worker's 50 MiB artifact upload limit.
 const MaxReviewContextsBytes = 40 << 20
 
-// MarshalReviewContexts encodes a mapper run's review contexts within
-// MaxReviewContextsBytes in total. While they do not fit, the longest
-// reference listing is halved, keeping its most relevant entries.
-func MarshalReviewContexts(manifests []ReviewContextManifest) ([][]byte, error) {
+// MarshalReviewContexts encodes a mapper run's review contexts within budget
+// bytes in total. While they do not fit, the longest reference listing is
+// halved, keeping its most relevant entries.
+func MarshalReviewContexts(manifests []ReviewContextManifest, budget int) ([][]byte, error) {
 	encoded := make([][]byte, len(manifests))
 	total := 0
 	for i := range manifests {
@@ -101,7 +101,7 @@ func MarshalReviewContexts(manifests []ReviewContextManifest) ([][]byte, error) 
 		encoded[i] = data
 		total += len(data)
 	}
-	for total > MaxReviewContextsBytes {
+	for total > budget {
 		longest := -1
 		for i := range manifests {
 			if len(manifests[i].ReferenceFiles) > 0 && (longest < 0 || len(manifests[i].ReferenceFiles) > len(manifests[longest].ReferenceFiles)) {
@@ -109,7 +109,7 @@ func MarshalReviewContexts(manifests []ReviewContextManifest) ([][]byte, error) 
 			}
 		}
 		if longest < 0 {
-			return nil, fmt.Errorf("review contexts total %d bytes even without reference files, above the %d byte limit", total, MaxReviewContextsBytes)
+			return nil, fmt.Errorf("review contexts total %d bytes even without reference files, above the %d byte limit", total, budget)
 		}
 		references := manifests[longest].ReferenceFiles
 		manifests[longest].ReferenceFiles = references[:len(references)/2]

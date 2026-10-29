@@ -347,9 +347,9 @@ func TestUploadArtifactsRejectsSymlinkArtifactRoot(t *testing.T) {
 
 func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 	prepareArtifactsDir(t)
-	// Create multiple files each under maxFileSize but totalling over maxTotalSize
-	fileSize := int64(maxFileSize - 1)
-	numFiles := (maxTotalSize / fileSize) + 2
+	// Create multiple files each under MaxArtifactFileBytes but totalling over MaxArtifactTotalBytes
+	fileSize := int64(MaxArtifactFileBytes - 1)
+	numFiles := (MaxArtifactTotalBytes / fileSize) + 2
 	for i := range numFiles {
 		createSparseArtifactFile(t, fmt.Sprintf("file-%d.bin", i), fileSize)
 	}
@@ -373,7 +373,7 @@ func TestUploadArtifacts_ReturnsErrorWhenTotalSizeExceeded(t *testing.T) {
 
 func TestUploadArtifacts_SkipsOversizedIndividualFiles(t *testing.T) {
 	prepareArtifactsDir(t)
-	createSparseArtifactFile(t, "too-large.bin", maxFileSize+1)
+	createSparseArtifactFile(t, "too-large.bin", MaxArtifactFileBytes+1)
 	writeArtifactFile(t, "small.txt", []byte("ok"))
 
 	var mu sync.Mutex
