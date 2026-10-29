@@ -1,6 +1,7 @@
 package slices
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -371,5 +372,13 @@ func TestReferenceFilesResolveExtensionlessPackageMain(t *testing.T) {
 	}
 	if got := referenceSummary(refs["app"]); !strings.Contains(got, "lib/lib/entry.ts=imports") {
 		t.Fatalf("references = %s, want the extensionless main resolved", got)
+	}
+}
+
+func TestMorePreciseNodePatternPrefersTheLongerPrefix(t *testing.T) {
+	patterns := []string{"./*/b", "./a/*", "./*", "@/lib/*", "@/*"}
+	sort.Slice(patterns, func(i, j int) bool { return morePreciseNodePattern(patterns[i], patterns[j]) })
+	if got := strings.Join(patterns, " "); got != "@/lib/* ./a/* ./*/b ./* @/*" {
+		t.Fatalf("pattern order = %s", got)
 	}
 }

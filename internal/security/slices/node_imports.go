@@ -144,13 +144,7 @@ func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 	for pattern := range p.exports {
 		patterns = append(patterns, pattern)
 	}
-	// The most specific pattern wins.
-	sort.Slice(patterns, func(i, j int) bool {
-		if len(patterns[i]) != len(patterns[j]) {
-			return len(patterns[i]) > len(patterns[j])
-		}
-		return patterns[i] < patterns[j]
-	})
+	sort.Slice(patterns, func(i, j int) bool { return morePreciseNodePattern(patterns[i], patterns[j]) })
 	for _, pattern := range patterns {
 		prefix, suffix, wildcard := strings.Cut(pattern, "*")
 		if !wildcard || len(subpath) < len(prefix)+len(suffix) || !strings.HasPrefix(subpath, prefix) || !strings.HasSuffix(subpath, suffix) {
@@ -272,6 +266,26 @@ func resolveNodeBase(base string, known map[string]struct{}) string {
 	return ""
 }
 
+// morePreciseNodePattern orders wildcard patterns as Node does for exports
+// and TypeScript does for paths: the longer prefix before "*" first, then
+// the longer pattern, then by text for a stable order.
+func morePreciseNodePattern(a, b string) bool {
+	prefixA, prefixB := strings.Index(a, "*"), strings.Index(b, "*")
+	if prefixA < 0 {
+		prefixA = len(a)
+	}
+	if prefixB < 0 {
+		prefixB = len(b)
+	}
+	if prefixA != prefixB {
+		return prefixA > prefixB
+	}
+	if len(a) != len(b) {
+		return len(a) > len(b)
+	}
+	return a < b
+}
+
 // nodePathAlias is one tsconfig compilerOptions.paths entry, such as
 // "@/*": ["./src/*"], with targets made repository-relative.
 type nodePathAlias struct {
@@ -317,13 +331,7 @@ func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
 		}
 		out = append(out, alias)
 	}
-	// Longer patterns are more specific.
-	sort.Slice(out, func(i, j int) bool {
-		if len(out[i].pattern) != len(out[j].pattern) {
-			return len(out[i].pattern) > len(out[j].pattern)
-		}
-		return out[i].pattern < out[j].pattern
-	})
+	sort.Slice(out, func(i, j int) bool { return morePreciseNodePattern(out[i].pattern, out[j].pattern) })
 	return out
 }
 
