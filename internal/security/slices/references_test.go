@@ -402,3 +402,34 @@ func TestReferenceFilesFollowNodeAddonsAndFallbackArrays(t *testing.T) {
 		}
 	}
 }
+
+func TestReferenceFilesFollowInheritedAliasesAndSubpathImports(t *testing.T) {
+	root := t.TempDir()
+	// A shared base outside the package's own directories defines the alias.
+	writeFile(t, root, "configs/tsconfig.base.json", `{"compilerOptions":{"paths":{"@shared/*":["../shared/src/*"]}}}`)
+	writeFile(t, root, "packages/web/tsconfig.json", `{"extends":"../../configs/tsconfig.base","compilerOptions":{"strict":true}}`)
+	writeFile(t, root, "packages/web/package.json", `{"name":"@app/web"}`)
+	writeFile(t, root, "packages/web/src/app.ts", "import { util } from '@shared/util'\n")
+	writeFile(t, root, "shared/src/util.ts", "export const util = 1\n")
+	// Subpath imports resolve through the importer's own package.
+	writeFile(t, root, "packages/api/package.json", `{"name":"@app/api","imports":{"#db":"./src/db.ts","#internal/*":{"node":"./src/internal/*.ts"}}}`)
+	writeFile(t, root, "packages/api/src/server.ts", "import { db } from '#db'\nimport { auth } from '#internal/auth'\n")
+	writeFile(t, root, "packages/api/src/db.ts", "export const db = 1\n")
+	writeFile(t, root, "packages/api/src/internal/auth.ts", "export const auth = 1\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{
+		{ID: "web", OwnedFiles: []store.ReviewSliceFile{{Path: "packages/web/src/app.ts"}}},
+		{ID: "api", OwnedFiles: []store.ReviewSliceFile{{Path: "packages/api/src/server.ts"}}},
+	})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	if got := referenceSummary(refs["web"]); !strings.Contains(got, "shared/src/util.ts=imports") {
+		t.Fatalf("web references = %s, want the inherited alias resolved", got)
+	}
+	api := referenceSummary(refs["api"])
+	for _, want := range []string{"packages/api/src/db.ts=imports", "packages/api/src/internal/auth.ts=imports"} {
+		if !strings.Contains(api, want) {
+			t.Fatalf("api references = %s, want %s", api, want)
+		}
+	}
+}

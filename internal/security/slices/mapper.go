@@ -46,6 +46,7 @@ const (
 	extZsh              = ".zsh"
 	extYAML             = ".yaml"
 	extYML              = ".yml"
+	extJSON             = ".json"
 	packageJSONFile     = "package.json"
 	goModFile           = "go.mod"
 	pyprojectFile       = "pyproject.toml"
@@ -193,7 +194,7 @@ func isReviewableFile(rel string) bool {
 	}
 	switch strings.ToLower(path.Ext(rel)) {
 	case extGo, extTS, extTSX, extJS, extJSX, extMJS, extCJS, extPython, extShell, extBash, extZsh,
-		extYAML, extYML, ".json", ".toml", ".cfg":
+		extYAML, extYML, extJSON, ".toml", ".cfg":
 		return true
 	}
 	switch name {

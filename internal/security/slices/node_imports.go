@@ -40,6 +40,9 @@ type nodePackage struct {
 	// exports maps package.json "exports" subpaths, such as "." or "./api"
 	// or "./*", to their targets: a path or a condition object.
 	exports map[string]json.RawMessage
+	// imports maps package.json "imports" specifiers, such as "#db" or
+	// "#internal/*", to their targets.
+	imports map[string]json.RawMessage
 }
 
 // Only files with a line count, which are regular and within the reference
@@ -56,7 +59,7 @@ func newNodeImportGraph(root string, files []repoFile, lines map[string]int) *no
 				packages = append(packages, pkg)
 			}
 		}
-		if strings.HasPrefix(file.Name, "tsconfig") && path.Ext(file.Name) == ".json" {
+		if strings.HasPrefix(file.Name, "tsconfig") && path.Ext(file.Name) == extJSON {
 			aliases[file.Dir] = append(aliases[file.Dir], readTSConfigAliases(filepath.Join(root, filepath.FromSlash(file.Path)), file.Dir)...)
 		}
 	}
@@ -87,6 +90,26 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 	if strings.HasPrefix(spec, "./") || strings.HasPrefix(spec, "../") {
 		return resolveNodeBase(path.Join(fromDir, spec), known)
 	}
+	conditions := nodeImportConditions
+	if require {
+		conditions = nodeRequireConditions
+	}
+	// Subpath imports such as "#db" resolve through the nearest package.
+	if strings.HasPrefix(spec, "#") {
+		pkg, ok := nearestNodePackage(fromDir, packages)
+		if !ok {
+			return ""
+		}
+		target := nodeMappedTarget(pkg.imports, spec, conditions)
+		if strings.HasPrefix(target, "./") {
+			return resolveNodeBase(path.Join(pkg.dir, target), known)
+		}
+		if target == "" || strings.HasPrefix(target, "#") {
+			return ""
+		}
+		// A target may name another package.
+		return resolveNodeImport(pkg.dir, target, require, known, packages, aliases)
+	}
 	// The nearest tsconfig with path aliases applies, as for the compiler.
 	for dir := fromDir; ; dir = path.Dir(dir) {
 		if list, ok := aliases[dir]; ok && len(list) > 0 {
@@ -108,12 +131,8 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 		}
 	}
 	for _, pkg := range packages {
-		if spec != pkg.name && !strings.HasPrefix(spec, pkg.name+"/") {
+		if pkg.name == "" || (spec != pkg.name && !strings.HasPrefix(spec, pkg.name+"/")) {
 			continue
-		}
-		conditions := nodeImportConditions
-		if require {
-			conditions = nodeRequireConditions
 		}
 		if target := pkg.exportTarget("."+strings.TrimPrefix(spec, pkg.name), conditions); target != "" {
 			if found := resolveNodeBase(target, known); found != "" {
@@ -130,18 +149,40 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 	return ""
 }
 
+// nearestNodePackage returns the package whose directory most closely
+// contains dir.
+func nearestNodePackage(dir string, packages []nodePackage) (nodePackage, bool) {
+	best, found := nodePackage{}, false
+	for _, pkg := range packages {
+		if pkg.dir != "." && dir != pkg.dir && !strings.HasPrefix(dir, pkg.dir+"/") {
+			continue
+		}
+		if !found || len(pkg.dir) > len(best.dir) || best.dir == "." {
+			best, found = pkg, true
+		}
+	}
+	return best, found
+}
+
 // exportTarget resolves a subpath through the package's exports map,
 // including a single "*" pattern such as "./*": "./src/*.ts", choosing the
 // first of conditions a condition object names.
 func (p nodePackage) exportTarget(subpath string, conditions []string) string {
-	if raw, ok := p.exports[subpath]; ok {
-		if target := nodeExportTarget(raw, conditions, 0); target != "" {
-			return path.Join(p.dir, target)
-		}
-		return ""
+	if target := nodeMappedTarget(p.exports, subpath, conditions); target != "" {
+		return path.Join(p.dir, target)
 	}
-	patterns := make([]string, 0, len(p.exports))
-	for pattern := range p.exports {
+	return ""
+}
+
+// nodeMappedTarget resolves a key through an exports or imports map, with
+// exact keys first and then single-"*" patterns, most precise first.
+func nodeMappedTarget(mapping map[string]json.RawMessage, key string, conditions []string) string {
+	subpath := key
+	if raw, ok := mapping[subpath]; ok {
+		return nodeExportTarget(raw, conditions, 0)
+	}
+	patterns := make([]string, 0, len(mapping))
+	for pattern := range mapping {
 		patterns = append(patterns, pattern)
 	}
 	sort.Slice(patterns, func(i, j int) bool { return morePreciseNodePattern(patterns[i], patterns[j]) })
@@ -150,11 +191,11 @@ func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 		if !wildcard || len(subpath) < len(prefix)+len(suffix) || !strings.HasPrefix(subpath, prefix) || !strings.HasSuffix(subpath, suffix) {
 			continue
 		}
-		target := nodeExportTarget(p.exports[pattern], conditions, 0)
+		target := nodeExportTarget(mapping[pattern], conditions, 0)
 		if target == "" {
 			return ""
 		}
-		return path.Join(p.dir, strings.Replace(target, "*", subpath[len(prefix):len(subpath)-len(suffix)], 1))
+		return strings.Replace(target, "*", subpath[len(prefix):len(subpath)-len(suffix)], 1)
 	}
 	return ""
 }
@@ -315,6 +356,16 @@ func (a nodePathAlias) match(spec string) (string, bool) {
 }
 
 func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
+	return readTSConfigAliasesFrom(fullPath, dir, 0)
+}
+
+// maxTSConfigExtendsDepth bounds how many inherited tsconfig files are read.
+const maxTSConfigExtendsDepth = 4
+
+// readTSConfigAliasesFrom reads a tsconfig's path aliases, inheriting them
+// through a relative "extends" chain within the repository when the file
+// defines none, as the compiler does.
+func readTSConfigAliasesFrom(fullPath, dir string, depth int) []nodePathAlias {
 	info, err := os.Lstat(fullPath)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageJSONBytes {
 		return nil
@@ -324,12 +375,44 @@ func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
 		return nil
 	}
 	var config struct {
+		Extends         json.RawMessage `json:"extends"`
 		CompilerOptions struct {
 			BaseURL string              `json:"baseUrl"`
 			Paths   map[string][]string `json:"paths"`
 		} `json:"compilerOptions"`
 	}
 	if json.Unmarshal(stripJSONComments(data), &config) != nil {
+		return nil
+	}
+	if len(config.CompilerOptions.Paths) == 0 {
+		if depth >= maxTSConfigExtendsDepth {
+			return nil
+		}
+		// TypeScript 5 accepts several bases; later ones take precedence.
+		var bases []string
+		var single string
+		if json.Unmarshal(config.Extends, &single) == nil {
+			bases = []string{single}
+		} else if json.Unmarshal(config.Extends, &bases) != nil {
+			return nil
+		}
+		for _, base := range slices.Backward(bases) {
+			base = strings.TrimSpace(base)
+			// Package-name bases live outside the repository.
+			if !strings.HasPrefix(base, "./") && !strings.HasPrefix(base, "../") {
+				continue
+			}
+			if path.Ext(base) != extJSON {
+				base += extJSON
+			}
+			baseDir := path.Join(dir, path.Dir(base))
+			if baseDir == ".." || strings.HasPrefix(baseDir, "../") {
+				continue
+			}
+			if aliases := readTSConfigAliasesFrom(filepath.Join(filepath.Dir(fullPath), filepath.FromSlash(base)), baseDir, depth+1); len(aliases) > 0 {
+				return aliases
+			}
+		}
 		return nil
 	}
 	base := path.Join(dir, config.CompilerOptions.BaseURL)
@@ -408,14 +491,15 @@ func readNodePackage(fullPath, dir string) (nodePackage, bool) {
 		return nodePackage{}, false
 	}
 	var manifest struct {
-		Name    string          `json:"name"`
-		Main    string          `json:"main"`
-		Exports json.RawMessage `json:"exports"`
+		Name    string                     `json:"name"`
+		Main    string                     `json:"main"`
+		Exports json.RawMessage            `json:"exports"`
+		Imports map[string]json.RawMessage `json:"imports"`
 	}
-	if json.Unmarshal(data, &manifest) != nil || strings.TrimSpace(manifest.Name) == "" {
+	if json.Unmarshal(data, &manifest) != nil || (strings.TrimSpace(manifest.Name) == "" && len(manifest.Imports) == 0) {
 		return nodePackage{}, false
 	}
-	pkg := nodePackage{name: strings.TrimSpace(manifest.Name), dir: dir, exports: readNodeExports(manifest.Exports)}
+	pkg := nodePackage{name: strings.TrimSpace(manifest.Name), dir: dir, exports: readNodeExports(manifest.Exports), imports: manifest.Imports}
 	if manifest.Main != "" {
 		pkg.main = path.Join(dir, manifest.Main)
 	}
