@@ -33,6 +33,7 @@ Available Commands:
   dashboard     Open the Orka dashboard in your browser, signed in
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
+  host          See and manage your agent host for the Copilot app
   memory        Manage durable memory
   models        List compatible model IDs
   monitor       Manage repository monitors
@@ -588,7 +589,7 @@ Global Flags:
 ## `orka connect`
 
 ```text
-Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link to become ready. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
+Start the OAuth consent for a connector provider as the signed-in person, open the consent page in your browser, and wait for the link and any agent host to become ready within one timeout. The token you use must identify you as a person (OIDC or context token); ServiceAccount tokens cannot link accounts.
 
 Usage:
   orka connect <provider> [flags]
@@ -598,7 +599,7 @@ Flags:
       --mode string        Link mode: readOnly or readWrite (write tools ask for approval) (default "readOnly")
       --no-open            Print the consent URL without opening a browser
       --no-wait            Return as soon as consent has started
-      --timeout duration   How long to wait for the link to become ready (default 5m0s)
+      --timeout duration   Total time to wait for the link and any agent host to become ready (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
@@ -1147,6 +1148,95 @@ Flags:
   -h, --help              help for list
       --limit int         Maximum number of results (default 100)
   -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host`
+
+```text
+Your agent host runs the Copilot app's environment on Orka. Orka creates it when you link GitHub through a provider that serves agent hosts, and it appears in the Copilot app as orka-<host>.
+
+Usage:
+  orka host [command]
+
+Available Commands:
+  delete      Delete your agent host and its volume
+  status      Show your agent host
+  wake        Start your agent host after it idled out
+
+Flags:
+  -h, --help   help for host
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka host [command] --help" for more information about a command.
+```
+
+## `orka host delete`
+
+```text
+Delete your agent host and its volume: its clones, worktrees and sessions are lost. While you stay linked, Orka creates a fresh host; disconnect with 'orka connection delete' to have none.
+
+Usage:
+  orka host delete [flags]
+
+Flags:
+  -h, --help   help for delete
+      --yes    Confirm deleting the host and its volume
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host status`
+
+```text
+Show your agent host
+
+Usage:
+  orka host status [flags]
+
+Flags:
+  -h, --help            help for status
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka host wake`
+
+```text
+Start your agent host after it idled out
+
+Usage:
+  orka host wake [flags]
+
+Flags:
+  -h, --help   help for wake
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

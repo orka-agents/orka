@@ -1,10 +1,8 @@
 package sqlite
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -393,39 +391,31 @@ func insertOperationReceipt(ctx context.Context, tx *sql.Tx, receipt operationRe
 	return nil
 }
 
-// receiptValue wraps a result so gob also encodes a nil pointer or a zero
-// value.
-type receiptValue[R any] struct {
-	Value R
-}
-
-// encodeReceiptResult encodes a write's result for its receipt. gob walks Go
-// values rather than their JSON form, so fields Orka's API leaves out are
-// kept, and a decoded result equals the original apart from empty slices and
-// maps, which decode as nil.
+// encodeReceiptResult encodes a write's result for its receipt with the
+// receipt codec, so a replay returns a value equal to the original.
 func encodeReceiptResult[R any](method string, result R) ([]byte, error) {
 	if _, ok := any(result).(noResult); ok {
 		return nil, nil
 	}
-	var buffer bytes.Buffer
-	if err := gob.NewEncoder(&buffer).Encode(receiptValue[R]{Value: result}); err != nil {
+	encoded, err := marshalReceiptValue(result)
+	if err != nil {
 		return nil, fmt.Errorf("encode %s result for its operation receipt: %w", method, err)
 	}
-	if buffer.Len() > maxReceiptResultBytes {
-		return nil, fmt.Errorf("%w: %s result is %d bytes, more than an operation receipt keeps", storagev1.ErrTooLarge, method, buffer.Len())
+	if len(encoded) > maxReceiptResultBytes {
+		return nil, fmt.Errorf("%w: %s result is %d bytes, more than an operation receipt keeps", storagev1.ErrTooLarge, method, len(encoded))
 	}
-	return buffer.Bytes(), nil
+	return encoded, nil
 }
 
 func decodeReceiptResult[R any](method string, data []byte) (R, error) {
-	var value receiptValue[R]
-	if _, ok := any(value.Value).(noResult); ok {
-		return value.Value, nil
+	var value R
+	if _, ok := any(value).(noResult); ok {
+		return value, nil
 	}
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&value); err != nil {
-		return value.Value, fmt.Errorf("decode %s result from its operation receipt: %w", method, err)
+	if err := unmarshalReceiptValue(data, &value); err != nil {
+		return value, fmt.Errorf("decode %s result from its operation receipt: %w", method, err)
 	}
-	return value.Value, nil
+	return value, nil
 }
 
 // ResolveOperation implements storagev1.OperationReceiptStore.
