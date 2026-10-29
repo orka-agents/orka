@@ -127,8 +127,8 @@ type ProviderInfo struct {
 	// is opaque to Orka beyond equality.
 	SchemaVersion string
 	// Capabilities lists optional families the provider serves beyond the
-	// contract parts in Contracts. Version 1 defines none; families added later
-	// are detected here rather than assumed.
+	// contract parts in Contracts, such as [ExportCapability]. Families added
+	// later are detected here rather than assumed.
 	Capabilities []string
 	// Limits states the provider's size limits.
 	Limits ProviderLimits
@@ -149,6 +149,14 @@ type ProviderInfo struct {
 	// [DatasetBindingStore.GetDatasetBinding] returns it, or nil when the
 	// dataset is unbound.
 	Binding *DatasetBinding
+	// Source names the dataset this dataset was imported from (see
+	// [DatasetImporter]). It is set exactly when DatasetOrigin is
+	// [DatasetOriginMigrated].
+	Source *DatasetSource
+	// MigratedTo lists the contract parts of this dataset that were migrated
+	// to another dataset, ordered by contract part, or is empty (see
+	// [MigrationMarkerStore]).
+	MigratedTo []MigrationMarker
 }
 
 // ProviderDescriber reports what a provider serves and guarantees.

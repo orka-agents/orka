@@ -21,10 +21,13 @@ var catalogInterfaces = map[string]reflect.Type{
 	"OperationReceiptStore":   reflect.TypeFor[storagev1.OperationReceiptStore](),
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
 	"DatasetBindingStore":     reflect.TypeFor[storagev1.DatasetBindingStore](),
+	"DatasetExporter":         reflect.TypeFor[storagev1.DatasetExporter](),
+	"DatasetImporter":         reflect.TypeFor[storagev1.DatasetImporter](),
+	"MigrationMarkerStore":    reflect.TypeFor[storagev1.MigrationMarkerStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
-var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck"}
+var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck", "Export"}
 
 // writesNamedLikeReads are writes whose names start with a read prefix.
 var writesNamedLikeReads = []string{"GetMessages", "IsLocked"}
@@ -101,6 +104,12 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"IsLocked":                    storagev1.MethodWrite,
 		"Describe":                    storagev1.MethodRead,
 		"SaveArtifact":                storagev1.MethodWrite,
+		"ExportRecords":               storagev1.MethodRead,
+		"GetImportProgress":           storagev1.MethodRead,
+		"BeginImport":                 storagev1.MethodAdmin,
+		"ImportRecords":               storagev1.MethodAdmin,
+		"CompleteImport":              storagev1.MethodAdmin,
+		"MarkDatasetMigrated":         storagev1.MethodAdmin,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)

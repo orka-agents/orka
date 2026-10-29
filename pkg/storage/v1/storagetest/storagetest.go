@@ -7,7 +7,8 @@
 // without Orka's internal packages. Cases assert contract behavior: identity
 // and namespace isolation, the typed errors providers return, idempotent
 // replays, atomic grouped writes, bounded queries, one winner among
-// concurrent callers, exact nanosecond times and the provider description.
+// concurrent callers, exact nanosecond times, the provider description and,
+// for a provider that reports the export capability, export and import.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 package storagetest
@@ -76,6 +77,7 @@ var stateFamilies = []stateFamily{
 	{"write-envelopes", func(t *testing.T, newProvider StateFactory) {
 		runWriteCatalog(t, newProvider, stateWriteCases)
 	}},
+	{"export-import", runStateExportImport},
 }
 
 // RunState runs every state.v1 case against providers from newProvider.
@@ -101,5 +103,8 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
 		runDatasetBinding(t, newProvider, func(t *testing.T, provider storagev1.ArtifactProvider) {
 			saveArtifact(t, provider, artifactOwner("tenant-a", "task-1"), "report.txt", "text/plain", []byte("report"))
 		})
+	})
+	t.Run("export-import", func(t *testing.T) {
+		runArtifactsExportImport(t, newProvider)
 	})
 }

@@ -72,6 +72,17 @@
 // The controller epoch advance accepts only the bound installation. Both
 // providers implement it; Orka does not call it yet.
 //
+// # Export and import
+//
+// A provider that reports [ExportCapability] also implements
+// [DatasetExporter], [DatasetImporter] and [MigrationMarkerStore]: a raw
+// record surface that copies a whole dataset to another provider while
+// writes are stopped, in the canonical encoding of [ExportSchemas]. Sealed
+// records move as the opaque bytes the provider stored. An imported dataset
+// gets a new dataset ID, origin [DatasetOriginMigrated] and its source in
+// [ProviderInfo.Source], and the source marks each moved contract part so it
+// refuses writes. Orka does not call it yet.
+//
 // # Records and wire format
 //
 // The records in this package carry JSON tags for Orka's API, not a storage

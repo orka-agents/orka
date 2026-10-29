@@ -39,9 +39,10 @@ var ErrClockSkew = errors.New("clock skew")
 //  3. IssuedAt is at most [MaxOperationAge] older than the provider clock, or
 //     [ErrOperationExpired], and at most [MaxClockSkew] ahead of it, or
 //     [ErrClockSkew].
-//  4. The dataset is [DatasetReady], or [ErrNotReady], and its installation
-//     has not detached it, or [ErrDatasetDetached], which matches ErrNotReady
-//     (see [DatasetBindingStore]).
+//  4. The dataset is [DatasetReady], or [ErrNotReady], its installation has
+//     not detached it, or [ErrDatasetDetached], and the write's contract part
+//     has not been migrated to another dataset, or [ErrDatasetMigrated]; both
+//     match ErrNotReady (see [DatasetBindingStore] and [MigrationMarkerStore]).
 //  5. Fence equals the controller epoch the dataset holds (name, epoch and
 //     holder), or a [FencedError]. This check is linearized with
 //     AdvanceControllerEpoch (see [ControllerEpochAdvancer]): once an advance

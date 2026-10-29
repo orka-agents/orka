@@ -231,8 +231,10 @@ the observable parts.
 - **Provider description.** `Describe(ctx)` on both providers returns
   `ProviderInfo`: the contract version and parts served, the dataset ID and
   its origin (`new`, `adopted` or `migrated`), the provider's schema version,
-  optional capabilities beyond the contract parts (none in v1), size limits
-  and the durability class. It is there for startup validation (step 4),
+  optional capabilities beyond the contract parts (`export.v1`, see
+  "Migration export and import"), size limits and the durability class. An
+  imported dataset also names its source (`Source`), and a dataset whose
+  contract parts moved lists its migration markers (`MigratedTo`). It is there for startup validation (step 4),
   installation binding (step 5) and migration; nothing in Orka calls it yet.
   It also has fields for the dataset's write state (`ready`, `migrating` or
   `importing`), an `Incarnation` that changes when the serving database may
@@ -327,9 +329,10 @@ without one until the storage client does.
   3. the operation's age: `IssuedAt` more than `MaxOperationAge` (15 minutes)
      before the provider clock returns `ErrOperationExpired`, and more than
      `MaxClockSkew` (30 seconds) after it returns `ErrClockSkew`;
-  4. the dataset state: anything but `ready` returns `ErrNotReady`, and a
-     dataset its installation has detached returns `ErrDatasetDetached`,
-     which matches `ErrNotReady`;
+  4. the dataset state: anything but `ready` returns `ErrNotReady`, a
+     dataset its installation has detached returns `ErrDatasetDetached`, and
+     a write to a contract part migrated to another dataset returns
+     `ErrDatasetMigrated`; both match `ErrNotReady`;
   5. the fence, which must equal the dataset's stored controller epoch, or
      `ErrFenced`. The provider reads it under a lock that conflicts with an
      epoch advance;
@@ -592,6 +595,99 @@ later.
   and repeating the identical request synchronizes again. A row whose binding columns contradict one another is refused when the
   store opens, never repaired.
 
+### Migration export and import
+
+An existing installation moves its data to another provider, for example from
+embedded SQLite to a network backend, by copying the dataset while writes are
+stopped. Behavioral methods cannot copy a dataset: they assign sequences, IDs
+and times, apply quotas and deduplication, and some records have no public
+writer. `pkg/storage/v1` therefore defines a raw record surface that a
+provider reporting the `export.v1` capability implements for every contract
+part it serves: `DatasetExporter`, `DatasetImporter` and
+`MigrationMarkerStore`. Backup can reuse it. Nothing in Orka calls it yet,
+and no provider implements it yet; the SQLite exporter and importer, the
+migration Job with its verification, and rollback come later.
+
+- **Families.** `ExportSchemas` lists every family of `state.v1` and
+  `artifacts.v1`, in the order an import copies them, Sessions before the
+  records that belong to a Session. A family's schema names its fields, their
+  kinds (string, int, bool, time or bytes), whether each may be absent, and
+  the key fields that identify a record. A family holds what the contract
+  requires a provider to keep for one kind of record, field for field,
+  including provider-assigned values (IDs, sequences, versions and
+  generations), domain tombstones, natural-key receipts, cleanup intents and
+  completions, usage watermarks and every time to the nanosecond. Field names
+  are the embedded store's column names, which also serve as the canonical
+  names; other providers map their own layout to them. `sequence_heads` holds
+  the last value each provider-assigned sequence issued, which can be higher
+  than the largest value still stored after records were deleted, so an import
+  never issues a value a client may have seen. A test pins the families to
+  SQLite's layout: every table is a family with the same columns and primary
+  key, or is excluded with a reason.
+- **What is not copied.** Operation receipts: writes are stopped, so no
+  operation is unresolved, and the imported dataset has a new dataset ID, so a
+  late request naming the old one is refused with `ErrDatasetMismatch`. The
+  controller epoch mirror, which the next takeover advances. The dataset
+  identity and binding, which the import mints and an explicit storage switch
+  creates. The duplicate SQL control tables (see "Kubernetes control
+  authority and retained SQL compatibility"). The harness-v1 wrapper ledger
+  and the ACP artifact transport are outside both contracts.
+- **Encoding.** A `RawRecord` carries its family, its key, the encoding name
+  `orka.storage.v1/export/<family>/v<version>` and the canonical body: the
+  field count, then each field in schema order as a tag byte and its value
+  (strings and bytes length-prefixed and byte for byte, integers as varints,
+  times as Unix seconds and nanoseconds). A record has exactly one encoding,
+  and `ExportFamilySchema.Decode` refuses any other, including a key that
+  does not match the key fields. The encoding does not use the records' JSON
+  tags.
+- **Sealed records move as they are.** Snapshot, native session and
+  connector ciphertext, nonces and the fields bound into their associated
+  data are copied byte for byte. Associated data binds row identity, never
+  the dataset or the backend, so every copied record still authenticates
+  under the installation's key, and the providers never receive key
+  material.
+- **Digests.** `FamilyDigester` computes a family's count and an
+  order-independent digest: SHA-256 over the family's encoding, the count and
+  the sorted digests of the records. `ExportDigest` returns it from the
+  provider, and `ManifestDigest` summarizes the digests of every copied
+  family.
+- **Import.** `BeginImport` requires a new dataset that is ready, unclaimed,
+  unmarked, has not completed its bootstrap and holds no record of any kind.
+  It records the source dataset, its schema version and the manifest digest,
+  mints a new dataset ID and moves the dataset to `importing`, where every
+  write, the controller epoch advance and `BindDataset` return `ErrNotReady`.
+  `ImportRecords` commits one batch atomically; batches are numbered per
+  family, a repeated batch is accepted only when the family already holds its
+  records unchanged, and a record whose key is held with another body returns
+  `ErrConflict`. References between families can be circular, so a provider
+  never refuses a record because a record it refers to has not arrived yet; it
+  checks references, if it does, when the import completes. `CompleteImport`
+  compares every family with the manifest (`ImportVerificationError` names the
+  first that differs), moves every provider-assigned sequence past both its
+  imported head and the largest imported value, and leaves the dataset
+  `ready`, unbound, with origin `migrated` and `ProviderInfo.Source` naming
+  the source, until an explicit storage switch binds it with the `migrated`
+  bind mode. `AbortImport` discards the import and leaves an empty dataset
+  under another new dataset ID.
+- **Markers.** After the copy, the source records a write-once
+  `MigrationMarker` for each moved contract part, naming the dataset it moved
+  to. While a contract part is marked, its writes return `ErrDatasetMigrated`
+  (which matches `ErrNotReady`), with or without a write envelope; reads,
+  exports and the other contract part are unaffected, so state can move while
+  artifacts stay. Only an explicit rollback clears a marker. `Describe`
+  reports markers in `ProviderInfo.MigratedTo`.
+- **Suite.** `storagetest.RunExportImport` copies a seeded dataset between two
+  providers and checks the families, canonical records and digests, the
+  import's lifecycle and refusals, completion, abort and markers. `RunState`
+  and `RunArtifacts` run it for a provider that reports `export.v1`, with
+  seeds whose highest message ID and session event sequences were deleted
+  before the export, and check that the imported dataset continues message
+  IDs, transcript order and event sequences past them, refuses writes while
+  it imports and refuses writes to a marked contract part. Sequences the
+  contract does not expose, such as usage accounting order, are left to a
+  provider's own tests. An in-memory reference provider in the suite's own
+  tests runs the shared cases today.
+
 ### Rules reserved for later steps
 
 The contract states these now so later slices build on them; code follows in
@@ -631,12 +727,6 @@ the named step.
   `state.v1` targets a transactional database with secondary indexes; a
   key-value provider is not a goal. Moving these methods above the client onto
   primitive reads is needed only if that changes.
-- **Migration export and import.** Behavioral methods cannot copy a dataset:
-  they assign sequences, IDs and times, apply quotas and deduplication, and
-  some records have no public writer. Migration (step 3 or 5) uses a reserved
-  per-family raw record surface, `Export(family, cursor)` and
-  `Import(family, records)` into an empty dataset, with the wire encoding
-  above. Backup can reuse it.
 - **Suite isolation.** A suite factory may return a fresh isolated dataset on
   a shared provider (a schema or key prefix) instead of a new provider per
   case, so the suite stays practical against a managed database.

@@ -162,6 +162,15 @@ func requireValidProviderInfo(t *testing.T, provider storagev1.ProviderDescriber
 	require.NotEmpty(t, info.SchemaVersion)
 	require.True(t, storagev1.IsValidDurabilityClass(info.Durability), "durability class %q", info.Durability)
 	require.GreaterOrEqual(t, info.Limits.MaxValueBytes, int64(0))
+	require.Equal(t, info.DatasetOrigin == storagev1.DatasetOriginMigrated, info.Source != nil,
+		"a dataset names its source exactly when it was imported")
+	if info.Source != nil {
+		require.NoError(t, info.Source.Validate())
+	}
+	for _, marker := range info.MigratedTo {
+		require.Contains(t, info.Contracts, marker.Contract, "a migration marker names a served contract part")
+		require.NotEmpty(t, marker.TargetDatasetID)
+	}
 	again, err := provider.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, info.DatasetID, again.DatasetID, "the dataset ID is stable")
