@@ -909,8 +909,12 @@ func TestBuildSystemPromptLimitsGuidanceToAvailableChatTools(t *testing.T) {
 	if strings.Contains(limited, "<capabilities>") {
 		t.Error("limited prompt must not claim the unrestricted capabilities")
 	}
-	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, "Writable paths") {
-		t.Error("container guidance must stay when create_container_task is offered")
+	const wantWritable = "Writable paths: /tmp always; /workspace and /home/worker only with a workspace. Do NOT assume root access."
+	if !strings.Contains(limited, "- container:") || !strings.Contains(limited, wantWritable) {
+		t.Error("container guidance must stay when create_container_task is offered and pin writable paths")
+	}
+	if strings.Contains(limited, "/home/nonroot") {
+		t.Error("container guidance must not reference non-writable /home/nonroot")
 	}
 	for _, unavailable := range []string{"create_ai_task", "create_agent_task", "create_agent"} {
 		if regexp.MustCompile(`\b` + unavailable + `\b`).MatchString(limited) {
@@ -941,8 +945,17 @@ func TestBuildSystemPromptKeepsGuidanceForEachOfferedTaskTool(t *testing.T) {
 		}
 	}
 	containerOnly := build("create_container_task")
-	if !strings.Contains(containerOnly, "you MUST include the tool\ncall in the SAME response.") || !strings.Contains(containerOnly, "Act first, summarize after.") {
-		t.Error("prompt without polling tools must keep the rule to call tools in the same response")
+	for _, want := range []string{
+		"you MUST include the tool\ncall in the SAME response.",
+		"Act first, summarize after.",
+		"Writable paths: /tmp always; /workspace and /home/worker only with a workspace. Do NOT assume root access.",
+	} {
+		if !strings.Contains(containerOnly, want) {
+			t.Errorf("container-task-only prompt is missing %q", want)
+		}
+	}
+	if strings.Contains(containerOnly, "/home/nonroot") {
+		t.Error("container-task-only prompt must not reference non-writable /home/nonroot")
 	}
 	// Whole words, so the coordinator's own wait_for_tasks tool does not count.
 	unoffered := regexp.MustCompile(`\b(?:wait_for_task|create_ai_task)\b`)

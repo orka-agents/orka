@@ -154,37 +154,37 @@ func (s *Store) savePromptResultReceiptWrite(ctx context.Context, receipt store.
 	if len(receipt.Data) > store.MaxResultBytes {
 		return store.TooLargeError{What: "prompt result receipt data", Size: int64(len(receipt.Data)), Limit: store.MaxResultBytes}
 	}
-	tx, err := s.beginTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := requireOwnerLive(ctx, tx, resultOwnerTombstones, "result", receipt.Namespace, receipt.TaskName, receipt.TaskUID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO prompt_result_receipts
+	// The tombstone check, the insert and the comparison share one
+	// transaction, so the receipt compared is the one stored when this call
+	// committed.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		if err := requireOwnerLive(ctx, q, resultOwnerTombstones, "result", receipt.Namespace, receipt.TaskName, receipt.TaskUID); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO prompt_result_receipts
 		 (attempt_id, namespace, task_name, task_uid, operation_id, operation_digest, data)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(attempt_id) DO NOTHING`,
-		receipt.AttemptID, receipt.Namespace, receipt.TaskName, receipt.TaskUID,
-		receipt.OperationID, receipt.OperationDigest, receipt.Data,
-	); err != nil {
-		return err
-	}
-	persisted, err := readPromptResultReceipt(ctx, tx, receipt.AttemptID)
-	if err != nil {
-		return err
-	}
-	// A receipt saved before receipts recorded a UID belongs to the Task that
-	// holds its name, so a repeat with that name and a UID matches it.
-	sameTask := persisted.TaskUID == receipt.TaskUID || persisted.TaskUID == ""
-	if persisted.Namespace != receipt.Namespace || persisted.TaskName != receipt.TaskName || !sameTask ||
-		persisted.OperationID != receipt.OperationID || persisted.OperationDigest != receipt.OperationDigest ||
-		!bytes.Equal(persisted.Data, receipt.Data) {
-		return fmt.Errorf("%w: prompt result receipt %q was reused with different data", store.ErrDuplicateMismatch, receipt.AttemptID)
-	}
-	return tx.Commit()
+			receipt.AttemptID, receipt.Namespace, receipt.TaskName, receipt.TaskUID,
+			receipt.OperationID, receipt.OperationDigest, receipt.Data,
+		); err != nil {
+			return err
+		}
+		persisted, err := getPromptResultReceipt(ctx, q, receipt.AttemptID)
+		if err != nil {
+			return err
+		}
+		// A receipt saved before receipts recorded a UID belongs to the Task
+		// that holds its name, so a repeat with that name and a UID matches it.
+		sameTask := persisted.TaskUID == receipt.TaskUID || persisted.TaskUID == ""
+		if persisted.Namespace != receipt.Namespace || persisted.TaskName != receipt.TaskName || !sameTask ||
+			persisted.OperationID != receipt.OperationID || persisted.OperationDigest != receipt.OperationDigest ||
+			!bytes.Equal(persisted.Data, receipt.Data) {
+			return fmt.Errorf("%w: prompt result receipt %q was reused with different data", store.ErrDuplicateMismatch, receipt.AttemptID)
+		}
+		return nil
+	})
 }
 
 // GetPromptResultReceipt returns the immutable receipt for one PromptAttempt.
@@ -193,10 +193,10 @@ func (s *Store) GetPromptResultReceipt(ctx context.Context, attemptID string) (*
 	if err := store.ValidateControlIdentifier("prompt result receipt attempt ID", attemptID); err != nil {
 		return nil, err
 	}
-	return readPromptResultReceipt(ctx, s.taskDataExecutor(ctx), attemptID)
+	return getPromptResultReceipt(ctx, s.taskDataExecutor(ctx), attemptID)
 }
 
-func readPromptResultReceipt(ctx context.Context, q ownerQuerier, attemptID string) (*store.PromptResultReceipt, error) {
+func getPromptResultReceipt(ctx context.Context, q queryRower, attemptID string) (*store.PromptResultReceipt, error) {
 	receipt := &store.PromptResultReceipt{AttemptID: attemptID}
 	err := q.QueryRowContext(ctx,
 		`SELECT namespace, task_name, task_uid, operation_id, operation_digest, data

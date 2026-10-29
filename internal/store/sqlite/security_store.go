@@ -146,45 +146,50 @@ func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 func (s *Store) updateScanRunWrite(ctx context.Context, run *store.ScanRun) error {
 	run.StartedAt = utcTime(run.StartedAt)
 	run.CompletedAt = utcTimePtr(run.CompletedAt)
-	result, err := s.securityDB().ExecContext(ctx,
-		`UPDATE security_scan_runs
-		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
-		     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
-		     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
-		     summary = ?, error_message = ?, completed_at = ?
-		 WHERE namespace = ? AND id = ? AND repository_scan = ?
-		   AND repository_scan_uid = ? AND repository_scan_generation = ?
-		   AND cancellation_version = 0
-		   AND (? NOT IN ('pending', 'running') OR (
-		     security_scan_runs.phase IN ('pending', 'running') AND NOT EXISTS (
-		       SELECT 1 FROM security_scan_runs other
-		       WHERE other.namespace = security_scan_runs.namespace
-		         AND other.repository_scan = security_scan_runs.repository_scan
-		         AND other.id <> security_scan_runs.id AND other.phase IN ('pending', 'running')
-		     ) AND NOT EXISTS (
-		       SELECT 1 FROM security_scan_runs newer
-		       WHERE newer.namespace = security_scan_runs.namespace
-		         AND newer.repository_scan = security_scan_runs.repository_scan
-		         AND newer.rowid > security_scan_runs.rowid
-		     )
-		   ))`,
-		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
-		run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
-		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
-		run.Summary, run.ErrorMessage, run.CompletedAt, run.Namespace, run.ID, run.RepositoryScan,
-		run.RepositoryScanUID, run.RepositoryScanGeneration, run.Phase,
-	)
-	if err != nil {
-		return err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil || updated == 1 {
-		return err
-	}
-	if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
-		return err
-	}
-	return fmt.Errorf("%w: scan run identity changed, cancellation was requested, or a newer run was admitted", store.ErrConflict)
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction, so a run created after the update is not reported as a
+	// conflict.
+	return s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx,
+			`UPDATE security_scan_runs
+			 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
+			     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
+			     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
+			     summary = ?, error_message = ?, completed_at = ?
+			 WHERE namespace = ? AND id = ? AND repository_scan = ?
+			   AND repository_scan_uid = ? AND repository_scan_generation = ?
+			   AND cancellation_version = 0
+			   AND (? NOT IN ('pending', 'running') OR (
+			     security_scan_runs.phase IN ('pending', 'running') AND NOT EXISTS (
+			       SELECT 1 FROM security_scan_runs other
+			       WHERE other.namespace = security_scan_runs.namespace
+			         AND other.repository_scan = security_scan_runs.repository_scan
+			         AND other.id <> security_scan_runs.id AND other.phase IN ('pending', 'running')
+			     ) AND NOT EXISTS (
+			       SELECT 1 FROM security_scan_runs newer
+			       WHERE newer.namespace = security_scan_runs.namespace
+			         AND newer.repository_scan = security_scan_runs.repository_scan
+			         AND newer.rowid > security_scan_runs.rowid
+			     )
+			   ))`,
+			run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
+			run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
+			run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
+			run.Summary, run.ErrorMessage, run.CompletedAt, run.Namespace, run.ID, run.RepositoryScan,
+			run.RepositoryScanUID, run.RepositoryScanGeneration, run.Phase,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil || updated == 1 {
+			return err
+		}
+		if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: scan run identity changed, cancellation was requested, or a newer run was admitted", store.ErrConflict)
+	})
 }
 
 // GetScanRun fetches a scan run by ID.
@@ -291,24 +296,31 @@ func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanR
 }
 
 func (s *Store) requestScanRunCancellationWrite(ctx context.Context, run *store.ScanRun, reason string) error {
-	err := s.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
-		SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
-		    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
-		    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
-		WHERE namespace = ? AND id = ? AND repository_scan = ?
-		  AND repository_scan_uid = ? AND repository_scan_generation = ?
-		RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
-		run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&run.CancellationVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
-			return err
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction.
+	version := run.CancellationVersion
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		err := tx.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
+			SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
+			    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
+			    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
+			WHERE namespace = ? AND id = ? AND repository_scan = ?
+			  AND repository_scan_uid = ? AND repository_scan_generation = ?
+			RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
+			run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
 		}
-		return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
+		return err
+	}); err != nil {
+		return err
 	}
-	if err == nil {
-		run.CancellationPending = true
-	}
-	return err
+	run.CancellationVersion = version
+	run.CancellationPending = true
+	return nil
 }
 
 // CompleteScanRunCancellation releases active reservations only after cleanup.
@@ -321,26 +333,33 @@ func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.Scan
 }
 
 func (s *Store) completeScanRunCancellationWrite(ctx context.Context, run *store.ScanRun) error {
-	result, err := s.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
-		SET cancellation_pending = FALSE,
-		    phase = CASE WHEN phase IN ('pending', 'running') THEN 'failed' ELSE phase END,
-		    completed_at = CASE WHEN phase IN ('pending', 'running') THEN ? ELSE completed_at END
-		WHERE namespace = ? AND id = ? AND repository_scan = ?
-		  AND repository_scan_uid = ? AND repository_scan_generation = ?
-		  AND cancellation_version = ? AND cancellation_version > 0`, time.Now().UTC(),
-		run.Namespace, run.ID, run.RepositoryScan, run.RepositoryScanUID, run.RepositoryScanGeneration, run.CancellationVersion)
-	if err != nil {
-		return err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if updated != 1 {
-		if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction.
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
+			SET cancellation_pending = FALSE,
+			    phase = CASE WHEN phase IN ('pending', 'running') THEN 'failed' ELSE phase END,
+			    completed_at = CASE WHEN phase IN ('pending', 'running') THEN ? ELSE completed_at END
+			WHERE namespace = ? AND id = ? AND repository_scan = ?
+			  AND repository_scan_uid = ? AND repository_scan_generation = ?
+			  AND cancellation_version = ? AND cancellation_version > 0`, time.Now().UTC(),
+			run.Namespace, run.ID, run.RepositoryScan, run.RepositoryScanUID, run.RepositoryScanGeneration, run.CancellationVersion)
+		if err != nil {
 			return err
 		}
-		return fmt.Errorf("%w: scan run cancellation changed during cleanup", store.ErrConflict)
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated != 1 {
+			if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: scan run cancellation changed during cleanup", store.ErrConflict)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	run.CancellationPending = false
 	return nil
@@ -1490,41 +1509,52 @@ func (s *Store) updatePatchProposalWrite(ctx context.Context, proposal *store.Pa
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
 	now := time.Now().UTC()
-	result, err := s.securityDB().ExecContext(ctx,
-		`UPDATE security_patch_proposals
-		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
-		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
-		proposal.PRURL, now, proposal.Namespace, proposal.ID,
-	)
-	if err != nil {
+	// The update and the read that classifies a refused update share one
+	// transaction, so they see the same proposal.
+	var current *store.PatchProposal
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx,
+			`UPDATE security_patch_proposals
+			 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
+			 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
+			proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
+			proposal.PRURL, now, proposal.Namespace, proposal.ID,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 1 {
+			return nil
+		}
+		existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, tx.securityDB(), proposal.Namespace, proposal.ID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(evidenceJSON) == "" {
+			return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
+		}
+		if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
+			existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
+			existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
+			existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
+			current = &existing
+			return nil
+		}
+		return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}); err != nil {
 		return err
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if updated == 1 {
-		proposal.UpdatedAt = now
+	if current != nil {
+		proposal.CreatedAt = current.CreatedAt
+		proposal.UpdatedAt = current.UpdatedAt
 		return nil
 	}
-
-	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.securityDB(), proposal.Namespace, proposal.ID)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(evidenceJSON) == "" {
-		return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
-	}
-	if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
-		existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
-		existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
-		existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
-		proposal.CreatedAt = existing.CreatedAt
-		proposal.UpdatedAt = existing.UpdatedAt
-		return nil
-	}
-	return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	proposal.UpdatedAt = now
+	return nil
 }
 
 // ListPatchProposals lists patch proposals for a finding, newest first.

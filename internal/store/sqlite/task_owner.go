@@ -88,15 +88,9 @@ func (w writeStamp) replaceCondition(table string) string {
 	return fmt.Sprintf(" WHERE (%[1]s.write_epoch, %[1]s.write_seq) < (excluded.write_epoch, excluded.write_seq)", table)
 }
 
-// ownerQuerier is what the tombstone helpers need from a transaction or the
-// database.
-type ownerQuerier interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
 // requireOwnerLive refuses a write for a Task UID whose results or artifacts
 // were deleted.
-func requireOwnerLive(ctx context.Context, q ownerQuerier, tombstones, what, namespace, taskName, taskUID string) error {
+func requireOwnerLive(ctx context.Context, q queryRower, tombstones, what, namespace, taskName, taskUID string) error {
 	var deleted int
 	err := q.QueryRowContext(ctx,
 		`SELECT 1 FROM `+tombstones+` WHERE namespace = ? AND task_uid = ?`, namespace, taskUID,

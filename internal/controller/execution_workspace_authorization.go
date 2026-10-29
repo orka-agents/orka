@@ -39,22 +39,49 @@ func (a WorkspaceClassAuthorizer) AuthorizeCheckpointSource(ctx context.Context,
 }
 
 func (a WorkspaceClassAuthorizer) authorizeResource(ctx context.Context, namespace, resource, className string, caller authenticationv1.UserInfo) error {
-	if a.Client == nil {
-		return fmt.Errorf("workspace class authorizer client is required")
+	return authorizeUse(ctx, a.Client, "workspace.orka.ai", resource, "workspace class", namespace, className, caller)
+}
+
+// authorizeUse submits a direct SubjectAccessReview for verb use on one
+// namespaced object, as the live admission caller.
+func authorizeUse(
+	ctx context.Context,
+	c client.Client,
+	group, resource, label, namespace, className string,
+	caller authenticationv1.UserInfo,
+) error {
+	return authorizeVerb(ctx, c, "use", group, resource, label, namespace, className, caller)
+}
+
+// authorizeVerb submits a direct SubjectAccessReview for one verb on one
+// namespaced object, as the live admission caller.
+func authorizeVerb(
+	ctx context.Context,
+	c client.Client,
+	verb, group, resource, label, namespace, className string,
+	caller authenticationv1.UserInfo,
+) error {
+	if c == nil {
+		return fmt.Errorf("%s authorizer client is required", label)
 	}
 	namespace = strings.TrimSpace(namespace)
 	className = strings.TrimSpace(className)
 	if namespace == "" || className == "" {
-		return fmt.Errorf("workspace class namespace and name are required")
+		return fmt.Errorf("%s namespace and name are required", label)
 	}
 	username := strings.TrimSpace(caller.Username)
 	if username == "" {
-		return fmt.Errorf("workspace class use requires admission caller username")
+		return fmt.Errorf("%s %s requires admission caller username", label, verb)
 	}
 
 	extra := make(map[string]authorizationv1.ExtraValue, len(caller.Extra))
 	for key, values := range caller.Extra {
 		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+	}
+	// Orka's resources are v1alpha1; core resources such as Secrets are v1.
+	version := "v1alpha1"
+	if group == "" {
+		version = "v1"
 	}
 	review := &authorizationv1.SubjectAccessReview{
 		Spec: authorizationv1.SubjectAccessReviewSpec{
@@ -64,23 +91,49 @@ func (a WorkspaceClassAuthorizer) authorizeResource(ctx context.Context, namespa
 			Extra:  extra,
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
 				Namespace: namespace,
-				Verb:      "use",
-				Group:     "workspace.orka.ai",
-				Version:   "v1alpha1",
+				Verb:      verb,
+				Group:     group,
+				Version:   version,
 				Resource:  resource,
 				Name:      className,
 			},
 		},
 	}
-	if err := a.Client.Create(ctx, review); err != nil {
-		return fmt.Errorf("authorize workspace class use: %w", err)
+	if err := c.Create(ctx, review); err != nil {
+		return fmt.Errorf("authorize %s %s: %w", label, verb, err)
 	}
 	if !review.Status.Allowed || review.Status.Denied || review.Status.EvaluationError != "" {
 		reason := strings.TrimSpace(review.Status.Reason)
 		if reason == "" {
 			reason = "access denied"
 		}
-		return fmt.Errorf("workspace class %s/%s use denied: %s", namespace, className, reason)
+		return fmt.Errorf("%s %s/%s %s denied: %s", label, namespace, className, verb, reason)
 	}
 	return nil
+}
+
+// AgentHostTemplateAuthorizer checks the live admission caller's use
+// permission on an AgentHostTemplate.
+type AgentHostTemplateAuthorizer struct {
+	Client client.Client
+}
+
+// AuthorizeAgentHostTemplate submits a SubjectAccessReview for verb use on the template.
+func (a AgentHostTemplateAuthorizer) AuthorizeAgentHostTemplate(
+	ctx context.Context,
+	namespace, name string,
+	caller authenticationv1.UserInfo,
+) error {
+	return authorizeUse(ctx, a.Client, "core.orka.ai", "agenthosttemplates", "agent host template", namespace, name, caller)
+}
+
+// AuthorizeSecretRead checks that the caller may read the Secret an AgentHost
+// names as its GitHub token source, so a host can only carry a credential its
+// creator could read.
+func (a AgentHostTemplateAuthorizer) AuthorizeSecretRead(
+	ctx context.Context,
+	namespace, name string,
+	caller authenticationv1.UserInfo,
+) error {
+	return authorizeVerb(ctx, a.Client, "get", "", "secrets", "secret", namespace, name, caller)
 }

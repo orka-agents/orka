@@ -1,0 +1,149 @@
+{{- /*
+The GitHub agent-host provider and the copilotd template it names (ADR 0036):
+each person who links GitHub gets their own host, and nothing is applied by
+hand. The template's body is the copilotd sample's, which a test keeps in
+step. Template specs are immutable; to change one, delete it and upgrade, and
+hosts move to the new template on their volumes.
+
+People's Connections outlive an uninstall, as CRDs do, and a provider is
+deleted only once no Connection references it. So Helm keeps the provider, its
+template and the client Secret it created; reinstalling adopts them.
+*/ -}}
+{{- if include "orka.agentHostGitHubEnabled" . }}
+{{- $github := include "orka.agentHostGitHub" . | fromYaml }}
+{{- $template := include "orka.agentHostTemplate" . | fromYaml }}
+{{- $namespace := include "orka.watchNamespace" . }}
+{{- if $github.clientSecret.value }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "orka.agentHostGitHubSecretName" . | quote }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+stringData:
+  {{ $github.clientSecret.key | toString | quote }}: {{ $github.clientSecret.value | quote }}
+---
+{{- end }}
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentHostTemplate
+metadata:
+  name: {{ $template.name | toString | quote }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+  initContainers:
+    # Copies the vendor's published, digest-pinned binaries into a scratch
+    # volume the host mounts read-only.
+    - name: copy-binaries
+      image: {{ $template.copilotdImage | quote }}
+      command: ["/bin/sh", "-c", "cp /usr/local/bin/copilotd /usr/local/bin/gh /opt/agent-bin/"]
+      volumeMounts:
+        - name: bin
+          mountPath: /opt/agent-bin
+  containers:
+    - name: host
+      image: {{ $template.hostImage | quote }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          # Bootstrap on system paths only: the agent can write to directories on
+          # its own PATH, and the tokens are readable until they are consumed.
+          agent_path=$PATH
+          PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          mkdir -p "$HOME" /workspace/src /workspace/worktrees /workspace/.copilotd/state /workspace/.copilotd/copilot-home
+          # The connection token gates the loopback listener. Read it once,
+          # delete it, and pass it as one length-prefixed frame on stdin.
+          tok=$(cat "$ORKA_CONNECTION_TOKEN_FILE"); rm -f "$ORKA_CONNECTION_TOKEN_FILE"
+          len=${#tok}
+          rm -f /tmp/token.fifo
+          mkfifo /tmp/token.fifo
+          ( printf "\\$(printf '%03o' $(( (len >> 24) & 255 )))\\$(printf '%03o' $(( (len >> 16) & 255 )))\\$(printf '%03o' $(( (len >> 8) & 255 )))\\$(printf '%03o' $(( len & 255 )))"
+            printf '%s' "$tok" ) > /tmp/token.fifo &
+          unset tok
+          # The relay registration credential must be present at start; the
+          # mounted file then carries rotations.
+          COPILOTD_MISSION_CONTROL_TOKEN=$(cat "$ORKA_GITHUB_TOKEN_FILE")
+          export COPILOTD_MISSION_CONTROL_TOKEN
+          PATH=$agent_path
+          export PATH
+          # The container's PID 1 adopts orphaned processes, such as git's
+          # detached maintenance, and the daemon never reaps them. Orka's init
+          # does, and forwards signals to the daemon.
+          exec "$ORKA_HOST_AGENT" init -- /opt/agent-bin/copilotd --relay --no-update-check \
+            --mission-control-token-file "$ORKA_GITHUB_TOKEN_FILE" \
+            --compute-id "$ORKA_HOST_ID" --environment-name "orka-$ORKA_HOST_NAME" \
+            --listen 127.0.0.1:7777 --connection-token-stream stdin \
+            --require-sealed-auth --require-connection-binding \
+            --idle-status-file "$ORKA_STATUS_DIR/idle.json" \
+            --workspace /workspace --clone-root /workspace/src --worktree-root /workspace/worktrees \
+            --host-home /workspace/.copilotd/state --runtime-home /workspace/.copilotd/copilot-home \
+            --log-level info < /tmp/token.fifo
+      env:
+        - name: HOME
+          value: /workspace/home
+        - name: GOPATH
+          value: /workspace/home/go
+        - name: GOCACHE
+          value: /workspace/home/.cache/go-build
+        # The daemon unpacks its agent runtime under the cache directory; keep
+        # it on a per-Pod volume, never on the agent-writable state volume.
+        - name: XDG_CACHE_HOME
+          value: /var/cache/agent
+        - name: PATH
+          value: /opt/agent-bin:/usr/local/go/bin:/workspace/home/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      resources:
+        {{- toYaml $template.resources | nindent 8 }}
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: bin
+          mountPath: /opt/agent-bin
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /var/cache/agent
+  volumes:
+    - name: bin
+    - name: tmp
+    - name: cache
+  storage:
+    size: {{ $template.storage | quote }}
+  listenPort: 7777
+  access: Relay
+  githubToken: Required
+  idleStatusFile: idle.json
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  name: {{ $github.providerName | toString | quote }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  displayName: {{ $github.displayName | quote }}
+  oauth:
+    authorizeURL: https://github.com/login/oauth/authorize
+    tokenURL: https://github.com/login/oauth/access_token
+    clientID: {{ $github.clientID | quote }}
+    clientSecretRef:
+      name: {{ include "orka.agentHostGitHubSecretName" . | quote }}
+      key: {{ $github.clientSecret.key | toString | quote }}
+  agentHost:
+    templateRef:
+      name: {{ $template.name | toString | quote }}
+{{- end }}

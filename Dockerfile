@@ -37,7 +37,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-admission ./cmd/orka-admission \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o provider-auth-proxy ./cmd/orka-provider-auth-proxy \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o scm-egress-proxy ./cmd/orka-scm-egress-proxy \
-    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o compat-router ./cmd/orka-compat-router
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o compat-router ./cmd/orka-compat-router \
+    && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o orka-host-agent ./cmd/orka-host-agent
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
@@ -48,6 +49,7 @@ COPY --from=builder /workspace/orka-admission .
 COPY --from=builder /workspace/provider-auth-proxy .
 COPY --from=builder /workspace/scm-egress-proxy .
 COPY --from=builder /workspace/compat-router .
+COPY --from=builder /workspace/orka-host-agent .
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]
