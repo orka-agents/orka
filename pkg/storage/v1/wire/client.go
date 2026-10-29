@@ -65,6 +65,9 @@ type ClientConfig struct {
 	// read, such as a Session's transcript. Zero means
 	// DefaultMaxSnapshotBytes.
 	MaxSnapshotBytes int64
+	// MaxSnapshotRecords caps the number of records the client accepts from
+	// one batched read. Zero means DefaultMaxSnapshotRecords.
+	MaxSnapshotRecords int64
 	// Limits are the provider's limits from its Describe. The client refuses
 	// an artifact larger than Limits.MaxArtifactBytes without sending it.
 	// Zero leaves that check to the server.
@@ -86,7 +89,9 @@ type Client struct {
 	serverRevision   int
 	maxBlobBytes     int64
 	maxSnapshotBytes int64
-	limits           storagev1.ProviderLimits
+	// maxSnapshotRecords caps the records of one batched read.
+	maxSnapshotRecords int64
+	limits             storagev1.ProviderLimits
 }
 
 // DialConfig configures Dial. It takes no other gRPC options, so no caller
@@ -147,6 +152,10 @@ func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	if maxSnapshot <= 0 {
 		maxSnapshot = DefaultMaxSnapshotBytes
 	}
+	maxRecords := config.MaxSnapshotRecords
+	if maxRecords <= 0 {
+		maxRecords = DefaultMaxSnapshotRecords
+	}
 	bulk := config.Bulk
 	if bulk == nil {
 		bulk = conn
@@ -156,7 +165,7 @@ func NewClient(conn grpc.ClientConnInterface, config ClientConfig) *Client {
 	return &Client{
 		stubs: newClientStubs(conn), bulk: newClientStubs(bulk), conn: direct, bulkConn: bulkDirect,
 		dataset: config.Dataset, serverRevision: revision, maxBlobBytes: maxBlob, maxSnapshotBytes: maxSnapshot,
-		limits: config.Limits,
+		maxSnapshotRecords: maxRecords, limits: config.Limits,
 	}
 }
 

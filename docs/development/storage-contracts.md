@@ -687,9 +687,11 @@ RPCs are tested through the client directly.
   one larger record, and a record that does not fit the 16 MiB message limit
   fails the call as a provider error before anything is sent. The response
   headers `orka-storage-snapshot-records` and `orka-storage-snapshot-bytes`
-  declare the whole list, so the client refuses a list over its limit (256 MiB
-  by default) before reading it, and refuses a response that does not match
-  its declaration. Batched reads use the bulk connection and the `bulk` call
+  declare the whole list: its records and their encoded size in the list, each
+  record's tag and length prefix included, so even an empty record counts. The
+  client refuses a list over its limits (256 MiB and 1,048,576 records by
+  default) before reading it, and refuses a response that does not match its
+  declaration. Batched reads use the bulk connection and the `bulk` call
   class.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream

@@ -48,8 +48,9 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // only the next batch, never empty, in the same field. A batch holds records
 // of at most 1 MiB in total, or one larger record. The response headers
 // orka-storage-snapshot-records and orka-storage-snapshot-bytes (decimal)
-// declare the number of records and the sum of their encoded sizes, so a
-// client can refuse a list larger than it accepts before reading it.
+// declare the number of records and their encoded size as elements of the
+// list, each record's tag and length prefix included, so a client can refuse
+// a list larger than it accepts before reading it.
 //
 // Errors
 //

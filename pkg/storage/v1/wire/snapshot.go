@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -28,9 +29,11 @@ import (
 // in the same list field. A batch holds records of at most MaxChunkBytes in
 // total, or a single larger record, and every message stays within
 // MaxMessageBytes. The response headers HeaderSnapshotRecords and
-// HeaderSnapshotBytes declare the whole list, so the client refuses a list
-// larger than it accepts before reading any of it, and checks the
-// reassembled list against them.
+// HeaderSnapshotBytes declare the whole list: its number of records and their
+// encoded size in the list, each record's field tag and length prefix
+// included, so even an empty record counts. The client refuses a list with
+// more records or bytes than it accepts before reading any of it, and checks
+// the reassembled list against the declaration.
 
 // errSnapshotFraming marks a batched response that breaks the framing rules
 // or does not match its declared size.
@@ -131,6 +134,13 @@ func laterRecords(message protoreflect.Message, path []protoreflect.FieldDescrip
 	return nil, nil
 }
 
+// recordSize is the encoded size of record as an element of the list field:
+// its tag, its length prefix and its bytes. It is at least two bytes, so a
+// byte limit also bounds the number of records.
+func recordSize(field protoreflect.FieldDescriptor, record protoreflect.Message) int64 {
+	return int64(protowire.SizeTag(field.Number()) + protowire.SizeBytes(proto.Size(record.Interface())))
+}
+
 // snapshotHeader is the list a batched response declares.
 type snapshotHeader struct {
 	records int64
@@ -156,21 +166,21 @@ func parseSnapshotHeader(header metadata.MD) (snapshotHeader, error) {
 	return snapshotHeader{records: count, bytes: size}, nil
 }
 
-// batchRecords splits records into batches of at most MaxChunkBytes in
-// total, with at least one record in each batch, and returns the batches and
-// the records' total encoded size.
-func batchRecords(records []protoreflect.Message) ([][]protoreflect.Message, int64) {
+// batchRecords splits records, the elements of list field field, into
+// batches of at most MaxChunkBytes in total, with at least one record in each
+// batch, and returns the batches and the records' total size (recordSize).
+func batchRecords(field protoreflect.FieldDescriptor, records []protoreflect.Message) ([][]protoreflect.Message, int64) {
 	var batches [][]protoreflect.Message
-	var total int64
-	start, size := 0, 0
+	var total, size int64
+	start := 0
 	for index, record := range records {
-		recordSize := proto.Size(record.Interface())
-		total += int64(recordSize)
-		if index > start && size+recordSize > MaxChunkBytes {
+		encoded := recordSize(field, record)
+		total += encoded
+		if index > start && size+encoded > MaxChunkBytes {
 			batches = append(batches, records[start:index])
 			start, size = index, 0
 		}
-		size += recordSize
+		size += encoded
 	}
 	if start < len(records) {
 		batches = append(batches, records[start:])
@@ -189,7 +199,7 @@ func (s *Server) sendSnapshot(stream grpc.ServerStream, m *method, response prot
 	}
 	path := batchedPathOf(response.ProtoReflect().Descriptor(), m.batched)
 	records := takeRecords(response.ProtoReflect(), path)
-	batches, total := batchRecords(records)
+	batches, total := batchRecords(path[len(path)-1], records)
 	messages := []proto.Message{response}
 	for index, batch := range batches {
 		message := response
@@ -228,10 +238,11 @@ func (s *Server) sendSnapshot(stream grpc.ServerStream, m *method, response prot
 func reassembleRecords(first proto.Message, path []protoreflect.FieldDescriptor, declared snapshotHeader,
 	next func() (proto.Message, error)) error {
 	var count, size int64
+	list := path[len(path)-1]
 	account := func(records []protoreflect.Message) error {
 		for _, record := range records {
 			count++
-			size += int64(proto.Size(record.Interface()))
+			size += recordSize(list, record)
 		}
 		if count > declared.records || size > declared.bytes {
 			return fmt.Errorf("%w: the response carries more than it declared", errSnapshotFraming)
@@ -248,9 +259,9 @@ func reassembleRecords(first proto.Message, path []protoreflect.FieldDescriptor,
 		message = message.Get(field).Message()
 	}
 	if message != nil {
-		list := message.Get(path[len(path)-1]).List()
-		for index := range list.Len() {
-			firstRecords = append(firstRecords, list.Get(index).Message())
+		values := message.Get(list).List()
+		for index := range values.Len() {
+			firstRecords = append(firstRecords, values.Get(index).Message())
 		}
 	}
 	if err := account(firstRecords); err != nil {
@@ -305,6 +316,9 @@ func (c *Client) snapshot(ctx context.Context, m *method, request, response prot
 	declared, headerErr := parseSnapshotHeader(header)
 	if headerErr == nil && declared.bytes > c.maxSnapshotBytes {
 		return storagev1.TooLargeError{What: m.name + " response", Size: declared.bytes, Limit: c.maxSnapshotBytes}
+	}
+	if headerErr == nil && declared.records > c.maxSnapshotRecords {
+		return storagev1.TooLargeError{What: m.name + " response records", Size: declared.records, Limit: c.maxSnapshotRecords}
 	}
 	if err := stream.RecvMsg(response); err != nil {
 		// A refused call carries its status instead of a response.

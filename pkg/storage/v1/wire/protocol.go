@@ -27,9 +27,9 @@ const (
 	HeaderBlobSize   = "orka-storage-blob-size"
 	HeaderBlobSHA256 = "orka-storage-blob-sha256"
 	// HeaderSnapshotRecords and HeaderSnapshotBytes describe the whole list a
-	// batched read returns: its number of records, and the sum of their
-	// encoded sizes in bytes, both in decimal. The server sends them as
-	// response headers.
+	// batched read returns: its number of records, and their encoded size in
+	// the list in bytes, each record's field tag and length prefix included,
+	// both in decimal. The server sends them as response headers.
 	HeaderSnapshotRecords = "orka-storage-snapshot-records"
 	HeaderSnapshotBytes   = "orka-storage-snapshot-bytes"
 )
@@ -53,6 +53,11 @@ const DefaultMaxBlobBytes = 64 << 20
 // DefaultMaxSnapshotBytes is the largest list a client accepts from one
 // batched read unless it is configured otherwise.
 const DefaultMaxSnapshotBytes = 256 << 20
+
+// DefaultMaxSnapshotRecords is the most records a client accepts from one
+// batched read unless it is configured otherwise, so a list of many small
+// records cannot hold the client's memory far beyond its byte limit.
+const DefaultMaxSnapshotRecords = 1 << 20
 
 // Kind states whether a method may change stored state.
 type Kind int

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -182,12 +183,23 @@ func declare(records int, size int) metadata.MD {
 	return metadata.Pairs(wire.HeaderSnapshotRecords, strconv.Itoa(records), wire.HeaderSnapshotBytes, strconv.Itoa(size))
 }
 
+// framed returns the encoded size of messages as elements of
+// SessionRecord.messages: each one's tag, length prefix and bytes.
+func framed(messages ...*storagepb.SessionMessage) int {
+	number := (&storagepb.SessionRecord{}).ProtoReflect().Descriptor().Fields().ByName("messages").Number()
+	size := 0
+	for _, message := range messages {
+		size += protowire.SizeTag(number) + protowire.SizeBytes(proto.Size(message))
+	}
+	return size
+}
+
 // The client reassembles only a list that follows the framing rules and
 // matches its declared count and size.
 func TestClientRefusesMalformedBatchedReads(t *testing.T) {
 	first := &storagepb.SessionMessage{Id: "m-1", Content: "first"}
 	second := &storagepb.SessionMessage{Id: "m-2", Content: "second"}
-	size := proto.Size(first) + proto.Size(second)
+	size := framed(first, second)
 	session := func(messages ...*storagepb.SessionMessage) *storagepb.GetSessionResponse {
 		return &storagepb.GetSessionResponse{Session: &storagepb.SessionRecord{Name: "s", Messages: messages}}
 	}
@@ -209,7 +221,7 @@ func TestClientRefusesMalformedBatchedReads(t *testing.T) {
 		{"no declaration", &craftedSessions{messages: []*storagepb.GetSessionResponse{session(first)}}},
 		{"fewer records than declared", &craftedSessions{header: declare(2, size),
 			messages: []*storagepb.GetSessionResponse{session(first)}}},
-		{"more records than declared", &craftedSessions{header: declare(1, proto.Size(first)),
+		{"more records than declared", &craftedSessions{header: declare(1, framed(first)),
 			messages: []*storagepb.GetSessionResponse{session(first), later(second)}}},
 		{"more bytes than declared", &craftedSessions{header: declare(2, size-1),
 			messages: []*storagepb.GetSessionResponse{session(first), later(second)}}},
@@ -218,8 +230,10 @@ func TestClientRefusesMalformedBatchedReads(t *testing.T) {
 				Messages: []*storagepb.SessionMessage{second}}}}}},
 		{"an empty later message", &craftedSessions{header: declare(2, size),
 			messages: []*storagepb.GetSessionResponse{session(first), {}, later(second)}}},
-		{"records for a record the first message leaves out", &craftedSessions{header: declare(1, proto.Size(second)),
+		{"records for a record the first message leaves out", &craftedSessions{header: declare(1, framed(second)),
 			messages: []*storagepb.GetSessionResponse{{}, later(second)}}},
+		{"empty records declared as no bytes", &craftedSessions{header: declare(3, 0),
+			messages: []*storagepb.GetSessionResponse{session(), later(&storagepb.SessionMessage{}, &storagepb.SessionMessage{}, &storagepb.SessionMessage{})}}},
 	} {
 		t.Run(broken.name, func(t *testing.T) {
 			_, err := serveCrafted(t, broken.sessions).GetSession(t.Context(), "n", "s")
@@ -228,6 +242,36 @@ func TestClientRefusesMalformedBatchedReads(t *testing.T) {
 			require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown))
 		})
 	}
+}
+
+// A list declared with more records than the client accepts is refused
+// before any record is read, so many empty records cannot hold its memory.
+func TestClientRefusesTooManyBatchedRecords(t *testing.T) {
+	huge := serveCrafted(t, &craftedSessions{header: declare(1<<40, 0),
+		messages: []*storagepb.GetSessionResponse{{Session: &storagepb.SessionRecord{Name: "s"}}}})
+	_, err := huge.GetSession(t.Context(), "n", "s")
+	var tooLarge storagev1.TooLargeError
+	require.ErrorAs(t, err, &tooLarge, "a declared record count over the limit is refused, whatever the declared bytes")
+	require.Equal(t, int64(wire.DefaultMaxSnapshotRecords), tooLarge.Limit)
+
+	provider := newRecordingProvider()
+	limited := wire.NewClient(wiretest.Dial(t, serveBoth(provider)), wire.ClientConfig{Dataset: recordingDataset, MaxSnapshotRecords: 3})
+	provider.set("LoadTranscript", []any{transcript(4, 1)}, nil)
+	_, err = limited.LoadTranscript(t.Context(), "n", "s", 0)
+	require.ErrorAs(t, err, &tooLarge)
+	require.Equal(t, int64(3), tooLarge.Limit)
+	require.Equal(t, int64(4), tooLarge.Size)
+	provider.set("LoadTranscript", []any{transcript(3, 1)}, nil)
+	loaded, err := limited.LoadTranscript(t.Context(), "n", "s", 0)
+	require.NoError(t, err)
+	require.Len(t, loaded, 3)
+
+	empty := serveCrafted(t, &craftedSessions{header: declare(2, framed(&storagepb.SessionMessage{}, &storagepb.SessionMessage{})),
+		messages: []*storagepb.GetSessionResponse{{Session: &storagepb.SessionRecord{Name: "s"}},
+			{Session: &storagepb.SessionRecord{Messages: []*storagepb.SessionMessage{{}, {}}}}}})
+	got, err := empty.GetSession(t.Context(), "n", "s")
+	require.NoError(t, err, "empty records count their framing")
+	require.Len(t, got.Messages, 2)
 }
 
 // Batched reads use the bulk connection.
