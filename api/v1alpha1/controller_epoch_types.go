@@ -111,15 +111,28 @@ type StorageEpochAcknowledgement struct {
 
 const (
 	// StorageRecoveryAcknowledgedAnnotation releases the storage recovery hold
-	// whose ID it names. An operator sets it on the ControllerEpoch after
-	// recovering storage.
+	// whose ID it names. An operator sets it, after recovering storage, on the
+	// ControllerEpoch for the installation's hold, or on the held Task for a
+	// record hold.
 	StorageRecoveryAcknowledgedAnnotation = "storage.orka.ai/recovery-acknowledged"
-	// ConditionStorageRecoveryRequired is True while the installation is held
-	// for storage recovery.
+	// ConditionStorageRecoveryRequired is True while the installation, or a
+	// Task that carries the condition, is held for storage recovery.
 	ConditionStorageRecoveryRequired = "StorageRecoveryRequired"
 	// StorageRecoveryAcknowledgedReason is the reason of a
 	// StorageRecoveryRequired condition that an operator released.
 	StorageRecoveryAcknowledgedReason = "RecoveryAcknowledged"
+	// StorageRecoveryMissingRecordReason is the reason of a Task's
+	// StorageRecoveryRequired condition when a store record its Kubernetes
+	// records require is missing.
+	StorageRecoveryMissingRecordReason = "MissingRecord"
+	// StorageRecoveryConflictingRecordReason is the reason of a Task's
+	// StorageRecoveryRequired condition when a store record its Kubernetes
+	// records require differs from what they recorded.
+	StorageRecoveryConflictingRecordReason = "ConflictingRecord"
+	// StorageRecoveryRecordFoundReason is the reason of a Task's
+	// StorageRecoveryRequired condition once the record it was held for is
+	// found again, after a restore.
+	StorageRecoveryRecordFoundReason = "RecordFound"
 )
 
 // StorageRecoveryReason says why Orka held the installation for storage

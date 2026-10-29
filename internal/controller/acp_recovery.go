@@ -1187,6 +1187,13 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 	if !ok {
 		return nil, fmt.Errorf("ACP settling recovery requires a result store with prompt result receipts")
 	}
+	// An attempt the settling transition moved to Settling had its result
+	// receipt acknowledged first (P5), so the store must still hold it. Any
+	// other way into Settling records no receipt.
+	settledWithReceipt := attempt.LastOperationID == operationID
+	hold := taskStorageRecordHold{
+		record: promptResultReceiptRecord, key: attempt.ID, expected: attempt.LastOperationDigest,
+	}
 	receipt, receiptErr := receipts.GetPromptResultReceipt(ctx, attempt.ID)
 	switch {
 	case receiptErr == nil:
@@ -1197,7 +1204,11 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 		if receipt.Namespace != task.Namespace || receipt.TaskName != task.Name ||
 			receipt.OperationID != operationID || receipt.OperationDigest != digest ||
 			attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
-			return nil, nil
+			if !settledWithReceipt {
+				return nil, nil
+			}
+			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
+			return nil, d.settleTaskStorageRecordHold(ctx, task, hold)
 		}
 		result = receipt.Data
 		if err := d.persistTaskResult(ctx, task, result); err != nil {
@@ -1206,21 +1217,30 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 	case errors.Is(receiptErr, store.ErrNotFound):
 		var err error
 		result, err = d.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, nil
-		}
-		if err != nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, err
 		}
-		digest, err := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
-		if err != nil {
-			return nil, err
+		matched := false
+		if err == nil {
+			digest, digestErr := acpSettlingTransitionDigest(attempt.ID, receiptVersion, result)
+			if digestErr != nil {
+				return nil, digestErr
+			}
+			matched = attempt.LastOperationID == operationID && attempt.LastOperationDigest == digest
 		}
-		if attempt.LastOperationID != operationID || attempt.LastOperationDigest != digest {
-			return nil, nil
+		if !matched {
+			if !settledWithReceipt {
+				return nil, nil
+			}
+			// The result the receipt protected cannot stand in for it.
+			hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
+			return nil, d.settleTaskStorageRecordHold(ctx, task, hold)
 		}
 	default:
 		return nil, receiptErr
+	}
+	if err := d.clearTaskStorageRecordHold(ctx, task); err != nil {
+		return nil, err
 	}
 	if attempt.UpdatedAt.IsZero() {
 		return nil, fmt.Errorf("settling prompt attempt %s has no receipt timestamp", attempt.ID)
