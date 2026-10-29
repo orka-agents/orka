@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +44,35 @@ func seedUsageAPIWork(t *testing.T, backend *sqlite.Store, namespace string, tok
 	require.NoError(t, backend.LinkUsagePullRequest(t.Context(), store.UsagePRLink{Namespace: namespace, WorkID: work, Repository: "org/repo", Number: 2, Origin: store.UsagePRCreated, EvidenceID: "publication", LinkedAt: at}))
 	require.NoError(t, backend.RecordUsagePullRequest(t.Context(), store.UsagePullRequest{Namespace: namespace, NamespaceUID: namespaceUID, Repository: "org/repo", Number: 2, URL: "https://github.com/org/repo/pull/2", GitHubID: "PR_2", State: "merged", MergedAt: &at, ObservedAt: at}))
 	return work
+}
+
+// usageReportHasNumber reports whether any JSON number in a usage response
+// equals want. Matching decoded numbers rather than raw text keeps nanosecond
+// timestamps, which can contain the same digits, from deciding the result.
+func usageReportHasNumber(t *testing.T, body string, want int64) bool {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var document any
+	require.NoError(t, decoder.Decode(&document))
+	target := json.Number(strconv.FormatInt(want, 10))
+	var contains func(any) bool
+	contains = func(value any) bool {
+		switch typed := value.(type) {
+		case json.Number:
+			return typed == target
+		case map[string]any:
+			for _, child := range typed {
+				if contains(child) {
+					return true
+				}
+			}
+		case []any:
+			return slices.ContainsFunc(typed, contains)
+		}
+		return false
+	}
+	return contains(document)
 }
 
 func TestUsageAPIReportAndDetailUseSameCohort(t *testing.T) {
@@ -342,11 +374,11 @@ func TestUsageAPIGatewayAccessSurvivesTaskCleanup(t *testing.T) {
 	status, body := f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
 	require.NotContains(t, body, "private-task")
-	require.NotContains(t, body, "7654")
+	require.False(t, usageReportHasNumber(t, body, 7654), body)
 	f.allowRoute(t, "GET /api/v1/usage", authorizationv1.ResourceAttributes{Namespace: "default", Group: gatewayv1alpha1.GroupVersion.Group, Resource: "gateways", Verb: "get", Name: "private"})
 	status, body = f.request(t, http.MethodGet, "/api/v1/usage?from=2000-01-01", "")
 	require.Equal(t, http.StatusOK, status, body)
-	require.Contains(t, body, "7654")
+	require.True(t, usageReportHasNumber(t, body, 7654), body)
 }
 
 func TestUsageAPIHidesEveryWorkSharingAnInaccessiblePRTask(t *testing.T) {
@@ -388,7 +420,7 @@ func TestUsageAPIHidesEveryWorkSharingAnInaccessiblePRTask(t *testing.T) {
 	require.Len(t, report.Works, 1)
 	require.Equal(t, works[4], report.Works[0].ID)
 	require.EqualValues(t, 100, report.Summary.TotalTokens)
-	require.NotContains(t, body, "7654")
+	require.False(t, usageReportHasNumber(t, body, 7654), body)
 	f.allowRoute(t, "GET /api/v1/usage/work/:id")
 	for _, work := range []string{first, works[3]} {
 		status, body = f.request(t, http.MethodGet, "/api/v1/usage/work/"+work, "")

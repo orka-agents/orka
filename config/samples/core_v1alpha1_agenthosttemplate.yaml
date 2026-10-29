@@ -1,0 +1,101 @@
+# An Agent Host Protocol daemon (copilotd) that registers itself as an
+# environment on the user's GitHub account and accepts client connections
+# through GitHub's relay, so the cluster needs no inbound path. The host serves
+# exactly one GitHub user: the owner of the token in the AgentHost's
+# githubTokenSecretRef.
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentHostTemplate
+metadata:
+  name: copilotd
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+  initContainers:
+    # Copies the vendor's published, digest-pinned binaries into a scratch
+    # volume the host mounts read-only.
+    - name: copy-binaries
+      image: ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f
+      command: ["/bin/sh", "-c", "cp /usr/local/bin/copilotd /usr/local/bin/gh /opt/agent-bin/"]
+      volumeMounts:
+        - name: bin
+          mountPath: /opt/agent-bin
+  containers:
+    - name: host
+      image: mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          # Bootstrap on system paths only: the agent can write to directories on
+          # its own PATH, and the tokens are readable until they are consumed.
+          agent_path=$PATH
+          PATH=/usr/sbin:/usr/bin:/sbin:/bin
+          mkdir -p "$HOME" /workspace/src /workspace/worktrees /workspace/.copilotd/state /workspace/.copilotd/copilot-home
+          # The connection token gates the loopback listener. Read it once,
+          # delete it, and pass it as one length-prefixed frame on stdin.
+          tok=$(cat "$ORKA_CONNECTION_TOKEN_FILE"); rm -f "$ORKA_CONNECTION_TOKEN_FILE"
+          len=${#tok}
+          rm -f /tmp/token.fifo
+          mkfifo /tmp/token.fifo
+          ( printf "\\$(printf '%03o' $(( (len >> 24) & 255 )))\\$(printf '%03o' $(( (len >> 16) & 255 )))\\$(printf '%03o' $(( (len >> 8) & 255 )))\\$(printf '%03o' $(( len & 255 )))"
+            printf '%s' "$tok" ) > /tmp/token.fifo &
+          unset tok
+          # The relay registration credential must be present at start; the
+          # mounted file then carries rotations.
+          COPILOTD_MISSION_CONTROL_TOKEN=$(cat "$ORKA_GITHUB_TOKEN_FILE")
+          export COPILOTD_MISSION_CONTROL_TOKEN
+          PATH=$agent_path
+          export PATH
+          # The container's PID 1 adopts orphaned processes, such as git's
+          # detached maintenance, and the daemon never reaps them. Orka's init
+          # does, and forwards signals to the daemon.
+          exec "$ORKA_HOST_AGENT" init -- /opt/agent-bin/copilotd --relay --no-update-check \
+            --mission-control-token-file "$ORKA_GITHUB_TOKEN_FILE" \
+            --compute-id "$ORKA_HOST_ID" --environment-name "orka-$ORKA_HOST_NAME" \
+            --listen 127.0.0.1:7777 --connection-token-stream stdin \
+            --require-sealed-auth --require-connection-binding \
+            --idle-status-file "$ORKA_STATUS_DIR/idle.json" \
+            --workspace /workspace --clone-root /workspace/src --worktree-root /workspace/worktrees \
+            --host-home /workspace/.copilotd/state --runtime-home /workspace/.copilotd/copilot-home \
+            --log-level info < /tmp/token.fifo
+      env:
+        - name: HOME
+          value: /workspace/home
+        - name: GOPATH
+          value: /workspace/home/go
+        - name: GOCACHE
+          value: /workspace/home/.cache/go-build
+        # The daemon unpacks its agent runtime under the cache directory; keep
+        # it on a per-Pod volume, never on the agent-writable state volume.
+        - name: XDG_CACHE_HOME
+          value: /var/cache/agent
+        - name: PATH
+          value: /opt/agent-bin:/usr/local/go/bin:/workspace/home/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: bin
+          mountPath: /opt/agent-bin
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /var/cache/agent
+  volumes:
+    - name: bin
+    - name: tmp
+    - name: cache
+  storage:
+    size: 20Gi
+  listenPort: 7777
+  access: Relay
+  githubToken: Required
+  idleStatusFile: idle.json

@@ -38,6 +38,7 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agenthost"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -669,8 +670,18 @@ func validScopeToken(scope string) bool {
 
 func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin BuiltinToolCheck) *Issue {
 	tools := provider.Spec.Tools
-	if len(tools) == 0 {
-		return invalid("tools requires at least one entry")
+	if len(tools) == 0 && provider.Spec.AgentHost == nil {
+		return invalid("tools requires at least one entry unless the provider serves agent hosts")
+	}
+	if host := provider.Spec.AgentHost; host != nil {
+		if strings.TrimSpace(host.TemplateRef.Name) == "" {
+			return invalid("agentHost.templateRef.name is required")
+		}
+		// Orka asks api.github.com whose a host's token is, so the token
+		// must come from github.com, and never goes anywhere else.
+		if endpoint, err := url.Parse(provider.Spec.OAuth.TokenURL); err != nil || endpoint.Host != "github.com" {
+			return invalid("agentHost requires a github.com provider: oauth.tokenURL must be on github.com")
+		}
 	}
 	if len(tools) > maxToolCount {
 		return invalid("tools has too many entries")
@@ -857,6 +868,25 @@ func ResolveProviderReferences(ctx context.Context, reader client.Reader, provid
 	if value, ok := secret.Data[ref.Key]; !ok || len(strings.TrimSpace(string(value))) == 0 {
 		return unresolved(ReasonReferenceInvalid, "client secret Secret key was not found or is empty"), nil
 	}
+	// A provider that serves agent hosts is ready only once their template
+	// exists and reaches each host only through its owner's account.
+	if host := provider.Spec.AgentHost; host != nil {
+		template := &corev1alpha1.AgentHostTemplate{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: provider.Namespace, Name: host.TemplateRef.Name}, template); err != nil {
+			if apierrors.IsNotFound(err) {
+				return unresolved(ReasonReferenceNotFound, "agentHost template was not found"), nil
+			}
+			return nil, fmt.Errorf("resolve agent host template: %w", err)
+		}
+		if template.Spec.Access != corev1alpha1.AgentHostAccessRelay {
+			return unresolved(ReasonReferenceInvalid, "agentHost template must use access: Relay"), nil
+		}
+		// A template the AgentHost reconciler would refuse leaves every host
+		// it provisions failed, so the provider is not offered meanwhile.
+		if err := agenthost.ValidateTemplate(template); err != nil {
+			return unresolved(ReasonReferenceInvalid, fmt.Sprintf("agentHost template is invalid: %v", err)), nil
+		}
+	}
 	return nil, nil
 }
 
@@ -995,6 +1025,12 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(builtins, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range builtins {
 		parts = append(parts, "builtin", tool.Name, string(tool.Class), BuiltinConnectorToolAudience)
+	}
+	// Serving agent hosts hands the person's access tokens to their host,
+	// where its code can read them: a consent that never disclosed that does
+	// not cover it.
+	if host := provider.Spec.AgentHost; host != nil {
+		parts = append(parts, "agentHost", host.TemplateRef.Name)
 	}
 	return lengthPrefixedDigest(parts)
 }
