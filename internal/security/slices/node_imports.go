@@ -1,6 +1,7 @@
 package slices
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path"
@@ -165,31 +166,67 @@ func (p nodePackage) exportTarget(subpath string, conditions []string) string {
 }
 
 var (
-	// Export conditions tried, in order, for import syntax and for
-	// require calls when a target is a condition object.
-	nodeImportConditions  = []string{"import", "default", nodeRequireSyntax, "node", "types"}
-	nodeRequireConditions = []string{nodeRequireSyntax, "node", "default", "import", "types"}
+	// The conditions Node matches for import syntax and for require calls.
+	nodeImportConditions  = []string{"import", "node", "default"}
+	nodeRequireConditions = []string{nodeRequireSyntax, "node", "default"}
 )
 
-// nodeExportTarget returns a string export target, or the first string
-// target among conditions in a condition object.
+// nodeExportTarget returns a string export target. For a condition object it
+// follows Node: the first key, in the object's own order, that is one of
+// conditions. A types-only target is the fallback, since TypeScript-only
+// workspace packages export nothing else.
 func nodeExportTarget(raw json.RawMessage, conditions []string, depth int) string {
 	var target string
 	if json.Unmarshal(raw, &target) == nil {
 		return target
 	}
-	var object map[string]json.RawMessage
-	if depth > 2 || json.Unmarshal(raw, &object) != nil {
+	if depth > 2 {
 		return ""
 	}
-	for _, condition := range conditions {
-		if nested, ok := object[condition]; ok {
-			if target := nodeExportTarget(nested, conditions, depth+1); target != "" {
+	keys, values, ok := orderedJSONObject(raw)
+	if !ok {
+		return ""
+	}
+	typesTarget := ""
+	for i, key := range keys {
+		if slices.Contains(conditions, key) {
+			if target := nodeExportTarget(values[i], conditions, depth+1); target != "" {
 				return target
 			}
 		}
+		if key == "types" && typesTarget == "" {
+			typesTarget = nodeExportTarget(values[i], conditions, depth+1)
+		}
 	}
-	return ""
+	return typesTarget
+}
+
+// orderedJSONObject returns a JSON object's keys and values in document
+// order, which Node uses to choose among export conditions.
+func orderedJSONObject(raw json.RawMessage) ([]string, []json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, nil, false
+	}
+	var keys []string
+	var values []json.RawMessage
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, nil, false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, nil, false
+		}
+		keys = append(keys, key)
+		values = append(values, value)
+	}
+	return keys, values, true
 }
 
 // readNodeExports returns a package's exports map by subpath. A string or a

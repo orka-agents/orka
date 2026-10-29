@@ -3985,6 +3985,9 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
 		return false, err
 	}
+	// A retry replaces its failed first attempt rather than waiting for the
+	// shared review budget, but it is counted there like any new review.
+	r.reviewTaskLedger().record(client.ObjectKeyFromObject(desired), time.Now())
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return false, err

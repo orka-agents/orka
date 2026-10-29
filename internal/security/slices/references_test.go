@@ -334,3 +334,28 @@ func TestReferenceFilesFollowRequireExportConditions(t *testing.T) {
 		t.Fatalf("legacy references = %s, want the require target", got)
 	}
 }
+
+// Node picks the first matching condition in the package's own key order.
+func TestReferenceFilesHonorExportConditionOrder(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "nodefirst/package.json", `{"name":"@app/nodefirst","exports":{"node":"./node.ts","default":"./fallback.ts"}}`)
+	writeFile(t, root, "nodefirst/node.ts", "export const a = 1\n")
+	writeFile(t, root, "nodefirst/fallback.ts", "export const a = 2\n")
+	writeFile(t, root, "defaultfirst/package.json", `{"name":"@app/defaultfirst","exports":{"default":"./fallback.ts","node":"./node.ts"}}`)
+	writeFile(t, root, "defaultfirst/node.ts", "export const b = 1\n")
+	writeFile(t, root, "defaultfirst/fallback.ts", "export const b = 2\n")
+	writeFile(t, root, "app/main.ts", "import { a } from '@app/nodefirst'\nimport { b } from '@app/defaultfirst'\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/main.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	for _, want := range []string{"nodefirst/node.ts=imports", "defaultfirst/fallback.ts=imports"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("references = %s, want %s", got, want)
+		}
+	}
+	if strings.Contains(got, "nodefirst/fallback.ts") || strings.Contains(got, "defaultfirst/node.ts") {
+		t.Fatalf("references = %s, want only the first matching condition", got)
+	}
+}
