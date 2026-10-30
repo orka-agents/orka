@@ -91,6 +91,19 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 			}
 			return nil
 		}
+		// A tool that only names a Secret in a Task it creates never reads it
+		// through the authorized client, so the caller's own get permission
+		// on that Secret is checked here.
+		secretRead := tc.AuthorizeSecretRead
+		tc.AuthorizeSecretRead = func(ctx context.Context, namespace, secretName string) *tools.ChatToolError {
+			if err := authorization.authorize(ctx, namespace, gatewayVerbGet, "", "secrets", secretName); err != nil {
+				return &tools.ChatToolError{Type: externalToolPermissionDenied, Message: err.Error(), Suggestion: externalToolRBACSuggestion}
+			}
+			if secretRead != nil {
+				return secretRead(ctx, namespace, secretName)
+			}
+			return nil
+		}
 		tc.RequireGitHubTaskCredentials = true
 		tc.AuthorizeCodeExecResources = func(ctx context.Context, objects []client.Object) error {
 			for _, obj := range objects {

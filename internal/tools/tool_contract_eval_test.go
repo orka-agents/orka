@@ -1234,10 +1234,12 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 		{
 			name: "create_container_task env and retryPolicy",
 			limits: func() []string {
-				limits := make([]string, 0, 16)
+				limits := make([]string, 0, 26)
 				for _, label := range []string{"chat", "worker"} {
 					for _, limit := range []string{
 						".env maxItems=64", ".env[] additionalProperties=false", ".env[].name maxLength=1024", ".env[].name required", ".env[].value maxLength=32768",
+						".env[].valueFrom.secretKeyRef additionalProperties=false", ".env[].valueFrom.secretKeyRef.key required",
+						".env[].valueFrom.secretKeyRef.name required", ".secretRef additionalProperties=false", ".secretRef.name required",
 						".retryPolicy.backoffMultiplier maximum=10", ".retryPolicy.backoffMultiplier minimum=1",
 						".retryPolicy.maxRetries maximum=5", ".retryPolicy.maxRetries minimum=0",
 					} {
@@ -1261,7 +1263,10 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 					return `"env":[` + strings.Join(items, ",") + `]`
 				}
 				retry := func(field, value string) string { return `"retryPolicy":{"` + field + `":` + value + `}` }
-				checks := make([]func() (bool, string), 0, 16)
+				secretKey := func(ref string) string {
+					return `"env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":` + ref + `}}]`
+				}
+				checks := make([]func() (bool, string), 0, 26)
 				for _, call := range []evalCall{chatContainer, workerContainer} {
 					checks = append(checks,
 						func() (bool, string) { return evalRejectsChange(call, args(envs(64)), args(envs(65)), "env") },
@@ -1290,6 +1295,21 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 						},
 						func() (bool, string) {
 							return evalRejectsChange(call, args(retry("maxRetries", "0")), args(retry("maxRetries", "-1")), "maxRetries")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(secretKey(`{"name":"s","key":"k"}`)), args(secretKey(`{"name":"s","key":"k","optional":true}`)), "secretKeyRef")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(secretKey(`{"name":"s","key":"k"}`)), args(secretKey(`{"name":"s"}`)), "key")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(secretKey(`{"name":"s","key":"k"}`)), args(secretKey(`{"key":"k"}`)), "name")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(`"secretRef":{"name":"s"}`), args(`"secretRef":{"name":"s","mode":"env"}`), "secretRef")
+						},
+						func() (bool, string) {
+							return evalRejectsChange(call, args(`"secretRef":{"name":"s"}`), args(`"secretRef":{}`), "secretRef.name")
 						},
 					)
 				}
@@ -2258,6 +2278,8 @@ func evalArgumentValue(path []string, schema map[string]any) any {
 		return "100m"
 	case "retryPolicy.initialDelay":
 		return "10s"
+	case "env.[].valueFrom":
+		return map[string]any{"secretKeyRef": map[string]any{"name": evalPlaceholder, "key": evalPlaceholder}}
 	case "execution.runtimeClassName":
 		return "" // Without an operator allowlist only an omitted runtime class is valid.
 	case "roles.[]":
