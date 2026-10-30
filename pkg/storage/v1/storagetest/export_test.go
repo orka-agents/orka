@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -22,6 +23,17 @@ import (
 // implements them.
 func TestRunExportImportAgainstAReferenceProvider(t *testing.T) {
 	RunExportImport(t, func(t *testing.T) ExportProvider { return newMemoryExport() }, seedMemoryExport)
+}
+
+// TestRunExportImportSplitsBatchesAProviderRefuses runs the cases against a
+// provider that accepts one record per batch and refuses larger batches with
+// ErrTooLarge, as the contract permits.
+func TestRunExportImportSplitsBatchesAProviderRefuses(t *testing.T) {
+	RunExportImport(t, func(t *testing.T) ExportProvider {
+		m := newMemoryExport()
+		m.maxBatchRecords = 1
+		return m
+	}, seedMemoryExport)
 }
 
 // seedMemoryExport stores four records of every family, each field holding
@@ -57,6 +69,8 @@ type memoryExport struct {
 	markers   map[string]storagev1.MigrationMarker
 	records   map[string]map[string]storagev1.RawRecord
 	session   *memoryImport
+	// maxBatchRecords, when set, is the largest batch ImportRecords accepts.
+	maxBatchRecords int
 }
 
 type memoryImport struct {
@@ -242,6 +256,10 @@ func (m *memoryExport) ImportRecords(_ context.Context, request storagev1.Import
 	}
 	if session.completed {
 		return storagev1.ImportFamilyProgress{}, storagev1.ConflictErrorf("the import completed")
+	}
+	if m.maxBatchRecords > 0 && len(request.Records) > m.maxBatchRecords {
+		return storagev1.ImportFamilyProgress{}, fmt.Errorf("%w: batch holds %d records, more than %d",
+			storagev1.ErrTooLarge, len(request.Records), m.maxBatchRecords)
 	}
 	expected, ok := session.manifest[request.Family]
 	if !ok {

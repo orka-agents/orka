@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"strconv"
@@ -400,8 +401,10 @@ func beginImportRequest(t *testing.T, source storagev1.ProviderInfo, manifest []
 }
 
 // importDataset imports records family by family, in manifest order, in
-// small batches. With replay set, it repeats each family's first batch after
-// committing it. It returns each family's next batch sequence.
+// small batches. A batch the provider refuses with ErrTooLarge is sent again
+// in halves under the same sequence, as the contract permits. With replay
+// set, it repeats each family's first batch after committing it. It returns
+// each family's next batch sequence.
 func importDataset(
 	t *testing.T, target ExportProvider, sessionID string,
 	manifest []storagev1.FamilyDigest, records map[string][]storagev1.RawRecord, replay bool,
@@ -411,10 +414,18 @@ func importDataset(
 	for _, family := range manifest {
 		sequence := int64(1)
 		var imported int64
-		for chunk := range slices.Chunk(records[family.Family], importBatchRecords) {
+		pending := slices.Collect(slices.Chunk(records[family.Family], importBatchRecords))
+		for len(pending) > 0 {
+			chunk := pending[0]
 			request := storagev1.ImportRecordsRequest{SessionID: sessionID, Family: family.Family, Sequence: sequence, Records: chunk}
 			progress, err := target.ImportRecords(t.Context(), request)
+			if errors.Is(err, storagev1.ErrTooLarge) && len(chunk) > 1 {
+				half := len(chunk) / 2
+				pending = append([][]storagev1.RawRecord{chunk[:half], chunk[half:]}, pending[1:]...)
+				continue
+			}
 			require.NoError(t, err, "family %s batch %d", family.Family, sequence)
+			pending = pending[1:]
 			imported += int64(len(chunk))
 			require.Equal(t, storagev1.ImportFamilyProgress{Family: family.Family, Sequence: sequence, Imported: imported}, progress)
 			if replay && sequence == 1 {
