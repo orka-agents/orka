@@ -1686,7 +1686,7 @@ func (h *Handlers) GetRepositoryMonitorImplementationPatchPreview(c fiber.Ctx) e
 	if strings.TrimSpace(job.TaskName) == "" || strings.TrimSpace(job.PatchArtifactID) == "" {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation job has no patch artifact")
 	}
-	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), namespace, job.TaskName, job.PatchArtifactID)
+	data, contentType, err := h.artifactStore.GetArtifact(c.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: job.TaskName}, Filename: job.PatchArtifactID})
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, "monitor implementation patch artifact not found")
 	}

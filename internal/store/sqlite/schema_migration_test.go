@@ -426,7 +426,7 @@ func TestSchemaVersion1StoreMatchesProductionStore(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { require.NoError(t, s.close()) }()
 			if state.complete {
-				require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+				activateTestKey(t, s)
 			}
 			production := readVersion1StoreState(t, s.db, path)
 			require.Equal(t, state.canBootstrap, production.canBootstrap)

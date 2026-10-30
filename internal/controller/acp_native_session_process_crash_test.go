@@ -81,16 +81,12 @@ type nativeProcessCrashAck struct {
 	Epoch int64  `json:"epoch,omitempty"`
 }
 
-func openNativeProcessCrashPersistence(path string) (*sqlite.Store, *sql.DB, error) {
+func openNativeProcessCrashPersistence(path string) (*sealedTestStore, *sql.DB, error) {
 	db, err := sqlite.NewDB(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	persistence := sqlite.NewStore(db, "native-process-crash")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err == nil {
-		err = persistence.SetAgentExecutionSnapshotCipher(cipher)
-	}
+	persistence, err := newSealedTestStore(sqlite.NewStore(db, "native-process-crash"))
 	if err != nil {
 		_ = db.Close()
 		return nil, nil, err
@@ -98,7 +94,7 @@ func openNativeProcessCrashPersistence(path string) (*sqlite.Store, *sql.DB, err
 	return persistence, db, nil
 }
 
-func nativeProcessCrashPersistence(t *testing.T, path string) (*sqlite.Store, *sql.DB) {
+func nativeProcessCrashPersistence(t *testing.T, path string) (*sealedTestStore, *sql.DB) {
 	t.Helper()
 	persistence, db, err := openNativeProcessCrashPersistence(path)
 	require.NoError(t, err)

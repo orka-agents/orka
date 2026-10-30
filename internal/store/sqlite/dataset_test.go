@@ -19,14 +19,17 @@ func loadPriorSchemaFixture(t *testing.T) string {
 	path, db := historicalSchemaDB(t, "abd2c040")
 	seedMigrationRecords(t, db, path)
 	s := NewStore(db, path)
-	s.snapshotCipher = testSnapshotCipher(t) // Produce pre-metadata ciphertext with the original format.
+	// The storage client seals with the record formats earlier releases used;
+	// the pre-metadata layout has no bootstrap history to complete.
+	c := orkaClient(t, s)
+	require.NoError(t, c.ActivateSnapshotKey(t.Context(), testSnapshotKey))
 	body := []byte(`{"prompt":"retained encrypted prompt"}`)
-	require.NoError(t, s.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{
+	require.NoError(t, c.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
 	require.NoError(t, s.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	require.NoError(t, s.SaveArtifact(t.Context(), "fixture", "task", "proof.txt", "text/plain", []byte("retained artifact")))
-	_, err := s.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
+	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
+	_, err := c.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	return path
@@ -94,15 +97,15 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	var version int
 	require.NoError(t, s.db.QueryRow(`PRAGMA user_version`).Scan(&version))
 	require.Equal(t, SchemaVersion, version)
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	c := activateTestKey(t, s)
 	body := []byte(`{"prompt":"retained encrypted prompt"}`)
-	snapshot, err := s.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)})
+	snapshot, err := c.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)})
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(body, snapshot.Body), "snapshot plaintext changed")
 	credential, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
 	require.NoError(t, err)
 	require.True(t, credential.AccessToken == "fixture-token-not-a-credential", "connector plaintext changed")
-	data, contentType, err := s.GetArtifact(t.Context(), "fixture", "task", "proof.txt")
+	data, contentType, err := s.GetArtifact(t.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt"})
 	require.NoError(t, err)
 	require.Equal(t, "retained artifact", string(data))
 	require.Equal(t, "text/plain", contentType)
@@ -118,7 +121,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	again, err := reopened.DatasetInfo()
 	require.NoError(t, err)
 	require.Equal(t, info, again)
-	require.NoError(t, reopened.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	activateTestKey(t, reopened)
 	data, err = reopened.GetResult(t.Context(), "fixture", "new-task")
 	require.NoError(t, err)
 	require.Equal(t, "new result", string(data))
@@ -143,7 +146,7 @@ func TestDatasetFreshAndInterruptedBootstrap(t *testing.T) {
 			again, err := s.DatasetInfo()
 			require.NoError(t, err)
 			require.Equal(t, first, again)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			activateTestKey(t, s)
 			complete, err := s.DatasetInfo()
 			require.NoError(t, err)
 			require.Equal(t, first.ID, complete.ID)
@@ -191,7 +194,7 @@ func TestDatasetMetadataSynchronizedBeforeStartupReturns(t *testing.T) {
 			info, err := s.DatasetInfo()
 			require.NoError(t, err)
 			requireCheckpointedDataset(t, path, info.ID, false)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			activateTestKey(t, s)
 			requireCheckpointedDataset(t, path, info.ID, true)
 			var mode int
 			require.NoError(t, s.db.QueryRow(`PRAGMA synchronous`).Scan(&mode))
@@ -216,14 +219,15 @@ func TestDatasetCompletionCheckpointBusyFailsClosedAndRetries(t *testing.T) {
 	require.Zero(t, complete)
 	_, err = s.db.Exec(`PRAGMA busy_timeout=20`)
 	require.NoError(t, err)
-	err = s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	// Startup closes the store when completion fails, so consumers never
+	// receive a store whose bootstrap history is not synchronized.
+	_, err = activateSnapshotKey(t, s, testSnapshotKey)
 	require.ErrorContains(t, err, "checkpoint incomplete")
-	require.Nil(t, s.snapshotCipher, "consumers must not receive an activated store before synchronization")
 	requireCheckpointedDataset(t, s.dbPath, info.ID, false)
 	require.NoError(t, tx.Rollback())
 	// The first completion transaction committed. A retry must synchronize even
 	// when its read already observes bootstrap_complete=1.
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	activateTestKey(t, s)
 	requireCheckpointedDataset(t, s.dbPath, info.ID, true)
 }
 
