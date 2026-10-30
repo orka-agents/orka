@@ -149,6 +149,10 @@ the controller, and any `diff` field is stripped so it does not flood the coordi
 }
 ```
 
+A child whose result is a structured JSON result also returns its `summary`, `outcome`,
+`verdict`, `data`, and `artifacts`; see the
+[recommended result shape](../guides/container-tasks.md#recommended-result-shape).
+
 A child delegated with `auto_retry: true` that failed carries `failureDetails` with its
 message, `retryCount`, and `maxRetries`. The tool does not retry it; see
 [retrying failed children](../guides/multi-agent-coordination.md#retry-failed-children).
@@ -157,7 +161,9 @@ message, `retryCount`, and `maxRetries`. The tool does not retry it; see
 
 Creates a `type: container` Task from the chat and from coordinator Agents alike. The
 fields below map onto the Task spec; every limit is checked before anything is created.
-See [Container tasks](../guides/container-tasks.md) for the filesystem and image rules.
+See [Container tasks](../guides/container-tasks.md) for the filesystem and image rules, and
+the [custom-image contract](../guides/container-tasks.md#custom-image-result-and-artifact-contract)
+for how a custom image posts its result and artifacts.
 
 | Parameter | Description |
 | --- | --- |

@@ -100,8 +100,8 @@ A container Task with a custom `image` gets no ServiceAccount token. Its Pod ins
 projected, Pod-bound token for the audience `orka.ai/task-callback`, at the path in
 `ORKA_SA_TOKEN_PATH`. The Kubernetes API server rejects that audience, so the token grants
 no Kubernetes API access. Orka accepts it only to post the Pod's own result, artifacts, and
-execution events while its Task is active; every other route refuses it. See
-[Container tasks](../guides/container-tasks.md).
+execution events while its Task is active; every other route refuses it. See the
+[custom-image contract](../guides/container-tasks.md#custom-image-result-and-artifact-contract).
 
 Container Tasks are untrusted compute. A Task's `spec.secretRef` is mounted only when an
 operator sets `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; without it the mount is omitted and the
