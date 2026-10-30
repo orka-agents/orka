@@ -353,3 +353,25 @@ func TestReviewPromptNamesTheLastIndexedRepositoryFile(t *testing.T) {
 		t.Fatalf("review prompt does not name the index boundary:\n%s", got)
 	}
 }
+
+// A reviewer that writes "file" for an evidence path keeps the finding, and a
+// test file it cites does not become the finding's primary location.
+func TestFindingEvidenceAcceptsFileKeyAndAnchorsOnSource(t *testing.T) {
+	var finding FindingsV2Finding
+	data := `{"title":"t","evidence":[{"file":"src/registry.test.ts","startLine":5,"endLine":9,"role":"context"},` +
+		`{"file":"src/registry.ts","startLine":20,"endLine":30,"role":"root_control"},{"path":"src/api.ts","startLine":1,"endLine":2,"file":"ignored.ts"}]}`
+	if err := json.Unmarshal([]byte(data), &finding); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	paths := make([]string, 0, len(finding.Evidence))
+	for _, ref := range finding.Evidence {
+		paths = append(paths, ref.Path)
+	}
+	if got := strings.Join(paths, " "); got != "src/registry.test.ts src/registry.ts src/api.ts" {
+		t.Fatalf("evidence paths = %s", got)
+	}
+	stored := ToFindingV2("ns", "scan", "run", "task", FindingsV2Repository{RepoURL: "https://github.com/example/project", Branch: "main"}, FindingsV2Scan{SliceID: "slice"}, finding)
+	if stored.FilePath != "src/api.ts" || stored.Line != 1 || stored.Evidence[len(stored.Evidence)-1].Path != "src/registry.test.ts" {
+		t.Fatalf("primary location = %s:%d, evidence = %#v", stored.FilePath, stored.Line, stored.Evidence)
+	}
+}

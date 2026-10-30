@@ -293,6 +293,24 @@ type FindingsV2EvidenceRef struct {
 	Role string `json:"role,omitempty"`
 }
 
+// UnmarshalJSON also accepts "file" for the path, which reviewers sometimes
+// write; the location is still verified against the review context.
+func (r *FindingsV2EvidenceRef) UnmarshalJSON(data []byte) error {
+	type plain FindingsV2EvidenceRef
+	var raw struct {
+		plain
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = FindingsV2EvidenceRef(raw.plain)
+	if strings.TrimSpace(r.Path) == "" {
+		r.Path = raw.File
+	}
+	return nil
+}
+
 // Evidence roles a finding location may carry.
 var findingEvidenceRoles = map[string]struct{}{
 	"entrypoint": {}, "source": {}, "propagation": {}, "root_control": {}, "sink": {}, "context": {},

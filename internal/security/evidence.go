@@ -395,9 +395,14 @@ func ToFindingV2(
 	}
 }
 
+// canonicalEvidenceRefs orders evidence by location, with test files last so
+// a finding's primary location is the code it is about.
 func canonicalEvidenceRefs(refs []FindingsV2EvidenceRef) []FindingsV2EvidenceRef {
 	out := append([]FindingsV2EvidenceRef{}, refs...)
 	sort.Slice(out, func(i, j int) bool {
+		if left, right := isTestPath(out[i].Path), isTestPath(out[j].Path); left != right {
+			return right
+		}
 		return canonicalEvidenceKey(findingV2FingerprintEvidenceRef{
 			Path:      out[i].Path,
 			StartLine: out[i].StartLine,
