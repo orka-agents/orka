@@ -495,6 +495,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
+	if err := b.validateContainerTaskEnvSources(task); err != nil {
+		return nil, err
+	}
 	if task.Spec.Type == corev1alpha1.TaskTypeAI {
 		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
 			return nil, err
@@ -993,6 +996,42 @@ func otlpSignalFromEnvName(name string) string {
 		}
 	}
 	return ""
+}
+
+// validateContainerTaskEnvSources applies the direct Secret mount policy to
+// spec.env. The kubelet resolves secretKeyRef and configMapKeyRef with node
+// credentials, so passing them through would hand a container Task any Secret
+// in its namespace that the controller refuses to mount from spec.secretRef.
+// Only sources that read the Pod's own metadata are always allowed; any other
+// source, including ones added to the API later, needs the operator opt-in.
+func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) error {
+	if !isUntrustedComputeTask(task) || b.directSecretMountsAllowed(task) {
+		return nil
+	}
+	for i, envVar := range task.Spec.Env {
+		source := envVar.ValueFrom
+		if source == nil {
+			continue
+		}
+		var field string
+		switch {
+		case source.SecretKeyRef != nil:
+			field = "valueFrom.secretKeyRef"
+		case source.ConfigMapKeyRef != nil:
+			field = "valueFrom.configMapKeyRef"
+		case source.FileKeyRef != nil:
+			field = "valueFrom.fileKeyRef"
+		case source.FieldRef != nil || source.ResourceFieldRef != nil:
+			continue
+		default:
+			field = "an unrecognized valueFrom source"
+		}
+		return fmt.Errorf(
+			"container Task spec.env[%d] (%s) uses %s, which container Tasks receive only when the operator enables direct Secret mounts (%s=true); valueFrom.fieldRef and valueFrom.resourceFieldRef are always allowed",
+			i, envVar.Name, field, directSecretMountsEnvVar,
+		)
+	}
+	return nil
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
@@ -2429,7 +2468,7 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 		{Name: TaskNamespaceEnvVar, Value: task.Namespace},
 		{Name: ControllerURLEnvVar, Value: b.ControllerURL},
 	}
-	envVars = append(envVars, task.Spec.Env...)
+	envVars = append(envVars, workspaceInitPassthroughEnv(task.Spec.Env)...)
 	if task.Spec.PriorTaskRef != nil {
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.PriorTask, Value: task.Spec.PriorTaskRef.Name})
 		priorNS := task.Spec.PriorTaskRef.Namespace
@@ -2443,6 +2482,28 @@ func (b *JobBuilder) workspaceInitEnvVars(task *corev1alpha1.Task, validationTas
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.GitRefShallow, Value: scheduledRunLabelValue})
 	}
 	return envVars
+}
+
+// workspaceInitPassthroughEnv is the part of a Task's env that reaches the
+// workspace preparation init container. That container holds the clone
+// credential, and Git honours variables such as GIT_CONFIG_PARAMETERS,
+// GIT_ASKPASS, and GIT_SSH_COMMAND that would run a caller-chosen command
+// with it, so only the HTTP proxy variables a clone may need pass through,
+// plus the prior-Task patch digest that a repository mutation Task pins so
+// preparation can refuse a changed patch.
+func workspaceInitPassthroughEnv(env []corev1.EnvVar) []corev1.EnvVar {
+	var out []corev1.EnvVar
+	for _, envVar := range env {
+		if envVar.Name == workerenv.PriorTaskDiffSHA256 {
+			out = append(out, envVar)
+			continue
+		}
+		switch strings.ToUpper(envVar.Name) {
+		case "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY":
+			out = append(out, envVar)
+		}
+	}
+	return out
 }
 
 func workspaceWorkingDir(task *corev1alpha1.Task) string {
