@@ -355,6 +355,9 @@ spec:
             {{- with dig "browser" "image" dict .Values.workers }}
             {{- if .repository }}
             - --browser-worker-image={{ include "orka.imageRef" . }}
+            {{- if dig "browser" "liveView" false $.Values.workers }}
+            - --browser-live-view
+            {{- end }}
             {{- end }}
             {{- end }}
             {{- with dig "containerTasks" "runtimeClasses" list .Values.workers }}

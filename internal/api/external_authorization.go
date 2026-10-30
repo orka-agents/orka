@@ -95,6 +95,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/artifacts/:filename": coreAPIPolicy("get", "tasks", "id"),
+	"GET /api/v1/tasks/:id/live":                coreAPIPolicy("get", "tasks", "id"),
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),

@@ -191,6 +191,32 @@ prompt that produces it, in three forms:
 A run that may already have acted must not be retried blindly; see
 [Retry only runs that can safely repeat](container-tasks.md#recommended-result-shape).
 
+## Watch a browser Task live
+
+With live view on, a running browser Task's page in the dashboard shows what its browser
+shows, refreshed about twice a second while the page changes. It is view only: nothing done
+in the dashboard reaches the browser.
+
+Turn it on with the Helm value `workers.browser.liveView: true`, which renders
+`--browser-live-view`. Only Tasks on the configured browser image stream. Their Chromium then
+also listens for DevTools on `127.0.0.1` inside the Pod, and the worker screencasts the
+pages that Playwright or `chromium-headless` opens, up to four at a time.
+
+- **Who can see it.** Anyone allowed to read the Task's artifacts. A frame shows whatever
+  the page shows, including account data, and Orka redacts nothing, so turn live view on
+  only where that is acceptable.
+- **What is kept.** Only the latest frame, in controller memory, until the Task stops
+  running. Nothing is written to disk. To keep a record, have the script save a Playwright
+  video or trace in `/tmp/artifacts`.
+- **What it shows.** The page that last repainted. A page that does not change sends no
+  frames, and with several pages open the view follows whichever changed last.
+- **What does not stream.** Images other than the configured browser image, including
+  [your own](#bring-your-own-image), a Task whose `command` replaces the entrypoint, and a
+  persistent context whose `userDataDir` is outside `/tmp`: the worker finds browsers by
+  the profiles Chromium keeps directly under `/tmp`. Nor do `chromium-headless`'s
+  one-shot `--screenshot`, `--dump-dom`, and `--print-to-pdf` runs: Chromium refuses those
+  commands with a DevTools port, so they run without one.
+
 ## Stronger isolation
 
 `--no-sandbox` removes Chromium's own sandbox, so the container boundary is all that

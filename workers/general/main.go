@@ -137,7 +137,11 @@ func run() (err error) {
 		cmd.Dir = workDir
 	}
 
+	// With live view on, the browser the command opens is screencast to the
+	// dashboard until the command returns.
+	stopLiveView := common.StartLiveView(runCtx)
 	stopped, err := runCommand(runCtx, cmd)
+	stopLiveView()
 	if errOutputHeldOpen(err) {
 		fmt.Fprintln(os.Stderr, "warning: the command exited but left processes holding its output open; they were stopped")
 		err = nil

@@ -218,6 +218,11 @@ const (
 	// TerminationMessagePath is the kubelet's default termination message file.
 	TerminationMessagePath = "/dev/termination-log"
 
+	// BrowserLiveView is "1" when the operator streams a live view of a
+	// browser Task to the dashboard. The browser image's Chromium then
+	// listens for DevTools on 127.0.0.1, and the worker screencasts it.
+	BrowserLiveView = "ORKA_BROWSER_LIVE_VIEW"
+
 	// RepositoryValidationUnavailableExitCode identifies a validation worker
 	// that could not exec the configured validation command. The controller
 	// treats this as unavailable infrastructure rather than a command failure.

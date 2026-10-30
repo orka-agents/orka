@@ -17,6 +17,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 func TestJobBuilder_Build_NativeWorkerImagePullPolicies(t *testing.T) {
@@ -211,6 +212,51 @@ func TestJobBuilder_Build_UserTaskImagePullPolicyUnchanged(t *testing.T) {
 			}
 			if container.ImagePullPolicy != corev1.PullIfNotPresent {
 				t.Errorf("ImagePullPolicy = %q, want %q", container.ImagePullPolicy, corev1.PullIfNotPresent)
+			}
+		})
+	}
+}
+
+func TestJobBuilder_Build_BrowserLiveViewSwitch(t *testing.T) {
+	const browser = "ghcr.io/orka-agents/orka/browser-worker:0.0.0-dev"
+	tests := []struct {
+		name     string
+		liveView bool
+		image    string
+		taskEnv  string
+		command  []string
+		want     string
+	}{
+		{name: "on, browser image", liveView: true, image: browser, want: "1"},
+		{name: "off, browser image", image: browser},
+		{name: "off, a Task cannot turn it on", image: browser, taskEnv: "1"},
+		{name: "on, other image", liveView: true, image: "docker.io/library/busybox:1.36"},
+		{name: "on, command replaces the entrypoint", liveView: true, image: browser, command: []string{"sh", "-c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			builder.BrowserWorkerImage = browser
+			builder.BrowserLiveView = tt.liveView
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: tt.image, Command: tt.command, Args: []string{"true"}},
+			}
+			if tt.taskEnv != "" {
+				task.Spec.Env = []corev1.EnvVar{{Name: workerenv.BrowserLiveView, Value: tt.taskEnv}}
+			}
+			job, err := builder.Build(context.Background(), task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			got, count := "", 0
+			for _, env := range job.Spec.Template.Spec.Containers[0].Env {
+				if env.Name == workerenv.BrowserLiveView {
+					got, count = env.Value, count+1
+				}
+			}
+			if got != tt.want || count > 1 {
+				t.Errorf("%s = %q (%d entries), want %q", workerenv.BrowserLiveView, got, count, tt.want)
 			}
 		})
 	}

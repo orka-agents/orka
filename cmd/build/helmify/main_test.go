@@ -194,6 +194,23 @@ func TestStaticChartContainerTaskRuntimeClassesFlag(t *testing.T) {
 	}
 }
 
+func TestStaticChartBrowserLiveViewFlag(t *testing.T) {
+	const flag = "- --browser-live-view\n"
+	if rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml"); strings.Contains(rendered, flag) {
+		t.Fatalf("live view must be off by default:\n%s", rendered)
+	}
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml", "--set", "workers.browser.liveView=true")
+	if strings.Count(rendered, flag) != 1 {
+		t.Fatalf("workers.browser.liveView=true must render exactly one live view flag:\n%s", rendered)
+	}
+	// Live view needs the browser image; without it the flag would stop the controller.
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "workers.browser.liveView=true", "--set-string", "workers.browser.image.repository=")
+	if strings.Contains(rendered, flag) {
+		t.Fatalf("live view without the browser image must not render:\n%s", rendered)
+	}
+}
+
 func TestStaticChartBrowserWorkerImageFlag(t *testing.T) {
 	const flag = "--browser-worker-image="
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")

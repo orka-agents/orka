@@ -8,6 +8,8 @@ package browser
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -86,5 +88,73 @@ func TestBrowserWorkerDockerfileIsPinnedAndHardened(t *testing.T) {
 	}
 	if strings.Contains(finalStage, "\nCMD ") {
 		t.Error("the final stage must not set CMD: a Task's args are the command the worker runs")
+	}
+}
+
+// chromeWrapper is the script the image puts in front of each Chromium binary.
+func chromeWrapper(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	start := strings.Index(contents, `mv "$chrome" "$chrome.orka"; \`)
+	end := strings.Index(contents, `> "$chrome"; \`)
+	if start < 0 || end < start {
+		t.Fatal("the Chromium wrapper is missing from the Dockerfile")
+	}
+	var script strings.Builder
+	for _, m := range regexp.MustCompile(`(?m)^\s*'(.*)' \\$`).FindAllStringSubmatch(contents[start:end], -1) {
+		script.WriteString(m[1] + "\n")
+	}
+	return script.String()
+}
+
+// With live view on, Chromium opens a loopback DevTools port for the worker
+// to screencast, except for the one-shot commands that refuse one ("Headless
+// commands are not compatible with remote debugging").
+func TestChromiumWrapperOpensDevToolsOnlyWhereChromiumAllowsIt(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	dir := t.TempDir()
+	chrome := filepath.Join(dir, "chrome-headless-shell")
+	if err := os.WriteFile(chrome, []byte(chromeWrapper(t)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chrome+".orka", []byte("#!/bin/sh\necho \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run := func(liveView string, args ...string) string {
+		cmd := exec.Command(chrome, args...)
+		cmd.Env = append(os.Environ(), "ORKA_BROWSER_LIVE_VIEW="+liveView)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	playwright := []string{
+		"--headless", "--remote-debugging-pipe", "--user-data-dir=/tmp/playwright_chromiumdev_profile-x",
+	}
+	if got, want := run("1", playwright...), "--remote-debugging-port=0 "+strings.Join(playwright, " "); got != want {
+		t.Errorf("with live view on, Playwright's launch ran %q, want %q", got, want)
+	}
+	if got, want := run("", playwright...), strings.Join(playwright, " "); got != want {
+		t.Errorf("with live view off, Playwright's launch ran %q, want %q", got, want)
+	}
+	for _, command := range [][]string{
+		{"--screenshot=/tmp/artifacts/page.png", "--window-size=1280,800", "https://example.com"},
+		{"--screenshot", "https://example.com"},
+		{"--dump-dom", "https://example.com"},
+		{"--print-to-pdf=/tmp/artifacts/page.pdf", "https://example.com"},
+		{"-dump-dom", "https://example.com"},
+	} {
+		args := append([]string{"--no-sandbox"}, command...)
+		if got, want := run("1", args...), strings.Join(args, " "); got != want {
+			t.Errorf("a one-shot command ran %q, want %q: Chromium refuses it with a DevTools port", got, want)
+		}
 	}
 }

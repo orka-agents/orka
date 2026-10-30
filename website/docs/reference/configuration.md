@@ -73,6 +73,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `workers.browser.image.repository` | `ghcr.io/orka-agents/orka/browser-worker` | Browser worker image; renders `--browser-worker-image`. Set to `""` to leave browser guidance out of the chat prompt. |
+| `workers.browser.liveView` | `false` | Show the dashboard a view-only screencast of running Tasks on the browser image; renders `--browser-live-view`. Frames stay in controller memory and are never stored. |
 | `workers.containerTasks.runtimeClasses` | `[]` | RuntimeClasses agents may request for container Tasks through `create_container_task`; renders `--container-task-runtime-classes`. |
 | `service.type` | `ClusterIP` | Service type |
 | `client.create` | `true` | Create client ServiceAccount for API access |
@@ -440,6 +441,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--browser-worker-image` / `ORKA_BROWSER_WORKER_IMAGE` | `""` | Browser worker image the chat prompt points browser container tasks at, with guidance on when to use one. Empty leaves that guidance out. The Helm chart sets it from `workers.browser.image`. |
+| `--browser-live-view` | `false` | Stream a view-only screencast of running Tasks on `--browser-worker-image` to the dashboard, for people who can read the Task's artifacts. Frames stay in controller memory and are never stored. Requires `--browser-worker-image`. |
 | `--container-task-runtime-classes` / `ORKA_CONTAINER_TASK_RUNTIME_CLASSES` | `""` | Comma-separated RuntimeClass names that `create_container_task` may set as `execution.runtimeClassName`. Empty refuses the field. Invalid names fail startup. |
 | `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
 | `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |

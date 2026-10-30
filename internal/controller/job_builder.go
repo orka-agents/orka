@@ -128,7 +128,10 @@ type JobBuilder struct {
 	// BrowserWorkerImage is the operator-configured browser worker image. A
 	// Task that names it is still a custom-image Task, but its mutable tag is
 	// pulled like the other worker images so an upgrade reaches every node.
+	// BrowserLiveView mirrors --browser-live-view: Tasks on that image stream
+	// a screencast of their browser to the dashboard.
 	BrowserWorkerImage                         string
+	BrowserLiveView                            bool
 	InitImage                                  string
 	AIWorkerServiceAccountName                 string
 	ContainerWorkerServiceAccountName          string
@@ -973,6 +976,12 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 		envVars = b.addWorkspaceEnvVars(envVars, task)
 		envVars = setControllerEnv(envVars, workerenv.TimeoutSeconds, containerWorkerTimeoutSeconds(task, opts))
 		envVars = setControllerEnv(envVars, workerenv.Deadline, containerWorkerDeadline(task, opts, time.Now()))
+		if b.BrowserWorkerImage != "" && task.Spec.Image == b.BrowserWorkerImage {
+			// Only the operator turns live view on; a Task cannot opt in itself.
+			// A command replaces the entrypoint and the worker that would stream.
+			liveView := b.BrowserLiveView && len(task.Spec.Command) == 0
+			envVars = setControllerEnv(envVars, workerenv.BrowserLiveView, browserLiveViewEnvValue(liveView))
+		}
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	frozenBindings := ""
@@ -2100,6 +2109,15 @@ func setControllerEnvValue(envVars []corev1.EnvVar, name, value string) []corev1
 		out = append(out, corev1.EnvVar{Name: name, Value: value})
 	}
 	return out
+}
+
+// browserLiveViewEnvValue is the worker's live view switch: "1" streams, and
+// an empty value removes any copy the Task's own env carried.
+func browserLiveViewEnvValue(enabled bool) string {
+	if enabled {
+		return "1"
+	}
+	return ""
 }
 
 func setControllerEnv(envVars []corev1.EnvVar, name, value string) []corev1.EnvVar {

@@ -493,6 +493,11 @@ workers:
       repository: ghcr.io/orka-agents/orka/browser-worker
       tag: "0.0.0-dev"
       digest: ""
+    # Show the dashboard a view-only screencast of running Tasks on this image,
+    # for people who can read the Task's artifacts. Frames stay in controller
+    # memory and are never stored, but they show whatever the page shows,
+    # including account data: turn it on only where that is acceptable.
+    liveView: false
 
   # Container Tasks that agents create with create_container_task.
   containerTasks:
