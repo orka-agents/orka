@@ -678,6 +678,27 @@ func TestBuildSystemPrompt(t *testing.T) {
 		}
 	})
 
+	t.Run("a cluster change keeps the fixed sections as an unchanged prefix", func(t *testing.T) {
+		empty, err := NewSystemPromptBuilder(fake.NewClientBuilder().WithScheme(scheme).Build(), "default", ACPRuntimeAvailability{}).
+			BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "default"}}
+		withAgent, err := NewSystemPromptBuilder(fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build(), "default", ACPRuntimeAvailability{}).
+			BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		catalog := strings.Index(empty, "<available_agents>")
+		if catalog < 0 || catalog < strings.Index(empty, "<examples>") {
+			t.Fatalf("catalog at %d, want it after the examples", catalog)
+		}
+		if !strings.HasPrefix(withAgent, empty[:catalog]) {
+			t.Error("adding an Agent changed the prompt before the catalog")
+		}
+	})
+
 	t.Run("user system prompt appended", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})

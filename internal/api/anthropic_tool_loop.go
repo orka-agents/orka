@@ -818,17 +818,19 @@ func runToolLoopWithObserver(
 			return resp, nil
 		}
 
-		// Truncate conversation if it exceeds the session size budget
+		// Truncate a view of the whole conversation if it exceeds the session
+		// size budget, never the conversation itself, so the cut stays where
+		// it was and the prompt prefix stays cacheable.
+		sent := messages
 		if config.MaxSessionSize > 0 {
-			tokenBudget := config.MaxSessionSize / 4
-			messages = llm.TruncateMessages(messages, tokenBudget)
+			sent = llm.TruncateMessages(messages, config.MaxSessionSize/4)
 		}
 
 		// Call LLM with tools
 		compReqCopy := *req
 		compReq := &compReqCopy
 		compReq.Model = model
-		compReq.Messages = messages
+		compReq.Messages = sent
 
 		resp, err := provider.Complete(ctx, compReq)
 		if err != nil && isStreamingRequiredErr(err) {
@@ -841,10 +843,10 @@ func runToolLoopWithObserver(
 		}
 		if err != nil && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
-			for _, m := range messages {
+			for _, m := range sent {
 				tokenEstimate += len(m.Content) / 4
 			}
-			messages = llm.TruncateMessages(messages, tokenEstimate/2)
+			messages = llm.TruncateMessages(sent, tokenEstimate/2)
 			compReq.Messages = messages
 			resp, err = provider.Complete(ctx, compReq)
 			if err != nil && isStreamingRequiredErr(err) {

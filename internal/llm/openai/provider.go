@@ -8,8 +8,11 @@ package openai
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -85,6 +88,7 @@ type Provider struct {
 	azureDeploymentName                 string
 	mode                                atomic.Int32 // apiMode
 	allowBareResponsesForbiddenFallback bool
+	sendPromptCacheKey                  bool
 }
 
 // NewProvider creates a new OpenAI provider
@@ -124,7 +128,30 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		providerType:                        providerType,
 		azureDeploymentName:                 config.AzureDeploymentName,
 		allowBareResponsesForbiddenFallback: isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
+		sendPromptCacheKey:                  providerType == providerTypeOpenAI && !isCustomOpenAIBaseURL(config.ProviderType, config.BaseURL),
 	}, nil
+}
+
+// promptCacheKey names the conversation a request belongs to, so OpenAI routes
+// the steps of one conversation to the machine that holds its cached prefix.
+// OpenAI caches without a key, but spreads requests across machines. The key
+// hashes what every step repeats from the start: the model, the instructions
+// and the first message, which truncation always keeps. Only OpenAI's own API
+// gets it: compatible servers and Azure API versions may refuse a field they
+// do not know.
+func (p *Provider) promptCacheKey(req *llm.CompletionRequest) string {
+	if !p.sendPromptCacheKey {
+		return ""
+	}
+	h := sha256.New()
+	for _, part := range []string{req.Model, req.SystemPrompt} {
+		_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
+	}
+	if len(req.Messages) > 0 {
+		first := req.Messages[0]
+		_, _ = fmt.Fprintf(h, "%d:%s%d:%s", len(first.Role), first.Role, len(first.Content), first.Content)
+	}
+	return "orka-" + hex.EncodeToString(h.Sum(nil))[:32]
 }
 
 // requestModel resolves only the upstream routing identity, leaving the
@@ -422,6 +449,9 @@ func convertResponsesTools(tools []llm.Tool) []responses.ToolUnionParam {
 func (p *Provider) completeResponses(ctx context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	params := buildResponsesParams(req)
 	params.Model = p.requestModel(req.Model)
+	if key := p.promptCacheKey(req); key != "" {
+		params.PromptCacheKey = openai.String(key)
+	}
 
 	resp, err := p.client.Responses.New(ctx, params)
 	if err != nil {
@@ -1061,6 +1091,9 @@ func (p *Provider) streamResponses(ctx context.Context, req *llm.CompletionReque
 		send := newStreamSender(ctx, ch)
 		params := buildResponsesParams(req)
 		params.Model = p.requestModel(req.Model)
+		if key := p.promptCacheKey(req); key != "" {
+			params.PromptCacheKey = openai.String(key)
+		}
 		streamResponsesEvents(p.client.Responses.NewStreaming(ctx, params), p.TelemetryProviderName(), send, req.ResponsesInput)
 	}()
 	return ch
@@ -1212,6 +1245,9 @@ func (p *Provider) completeChatCompletions(ctx context.Context, req *llm.Complet
 		Model:    p.requestModel(req.Model),
 		Messages: convertChatRequestMessages(req),
 	}
+	if key := p.promptCacheKey(req); key != "" {
+		params.PromptCacheKey = openai.String(key)
+	}
 	if req.Store != nil {
 		params.Store = openai.Bool(*req.Store)
 	}
@@ -1288,6 +1324,9 @@ func (p *Provider) streamChatCompletionsWithUsage(ctx context.Context, req *llm.
 		params := openai.ChatCompletionNewParams{
 			Model:    p.requestModel(req.Model),
 			Messages: convertChatRequestMessages(req),
+		}
+		if key := p.promptCacheKey(req); key != "" {
+			params.PromptCacheKey = openai.String(key)
 		}
 		if req.Store != nil {
 			params.Store = openai.Bool(*req.Store)

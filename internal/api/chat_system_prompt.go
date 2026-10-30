@@ -165,7 +165,12 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString(b.availableChatToolsSection())
 	}
 
-	// Dynamic context
+	sb.WriteString(b.rulesSection())
+	sb.WriteString(b.examplesSection())
+
+	// The cluster catalog comes after every fixed section: a provider caches the
+	// prompt up to its first changed byte, so a new Agent or Tool leaves the
+	// instructions before it cached.
 	sb.WriteString("<available_agents>\n")
 	sb.WriteString("Skills are loaded on-demand. Read skill content only when relevant to the current task.\n")
 	sb.WriteString(agentsSection)
@@ -186,9 +191,6 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 		sb.WriteString(skillsSection)
 		sb.WriteString("</available_skills>\n\n")
 	}
-
-	sb.WriteString(b.rulesSection())
-	sb.WriteString(b.examplesSection())
 
 	if userSystemPrompt != "" {
 		sb.WriteString("\n<user_instructions>\n")
@@ -322,7 +324,7 @@ func taskTypeParts() []promptPart {
 		{text: `  When the task involves a git repository, ALWAYS include workspace.gitRepo so
   the repository workspace is prepared for the runtime:
     create_agent_task({"agentRef": "coder", "prompt": "...", "workspace": {"gitRepo": "https://github.com/org/repo"}, "timeout": "15m"})
-  When creating new agents for coding tasks, check the agent_runtimes in the Runtime line above.
+  When creating new agents for coding tasks, check the agent_runtimes in the Runtime line.
   OpenCode is supported there as a built-in ACP RuntimePool profile when its image is configured. It requires
   model.name plus reviewed model.contextWindow and model.maxTokens ceilings, uses the controller provider proxy,
   and does not use runtime.secretRef. When omitted, OpenCode defaults defaultAllowedTools to Read, Write, Edit, Bash, Glob,
