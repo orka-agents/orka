@@ -224,7 +224,9 @@ token. The same operations are available over the API; see the
   Sessions they continue, are shown through Orka's API, CLI and dashboard only to the
   person who sent them: everyone else signed in to the namespace gets `404` for them,
   does not see them in lists or usage, and cannot continue them with a Task of their own.
-  ServiceAccounts keep the access RBAC grants them.
+  Usage reports keep showing the person their turns' usage after the Tasks are cleaned
+  up. Usage that names no requester, such as a chat's in an AHP session, is shown only to
+  ServiceAccounts. ServiceAccounts keep the access RBAC grants them.
 - **Sessions.** A session runs in an Orka Session, which is bound to one runtime profile.
   When the person picks another model, the session moves to a new Orka Session that
   starts with the conversation so far as context. A branch a turn already published

@@ -182,6 +182,11 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 	if existing.GatewayOwner != nil {
 		task.GatewayOwner = existing.GatewayOwner
 	}
+	if existing.Requester != nil {
+		task.Requester = existing.Requester
+	}
+	// A Task once private stays so, whatever later happens to its labels.
+	task.AHPTurn = task.AHPTurn || existing.AHPTurn
 	task.StartedAt = existing.StartedAt
 	if task.WorkID == "" {
 		task.WorkID = existing.WorkID
@@ -461,6 +466,54 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 		result.RetainedSince = &at
 	}
 	return result, nil
+}
+
+func (s *Store) UsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	// Names compare as the controller reads them, without surrounding space
+	// of any kind: SQL narrows the rows to those whose session name holds a
+	// wanted one, and the exact comparison is made here. The names travel as
+	// one JSON array, so the query keeps its shape however many there are.
+	wanted := map[string]bool{}
+	for _, session := range sessions {
+		wanted[session] = true
+	}
+	names, err := json.Marshal(sessions)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx,
+		`SELECT data FROM usage_tasks
+		 WHERE namespace = ? AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
+		   AND COALESCE(json_extract(data, '$.sessionName'), '') LIKE '%ahp-%'
+		   AND EXISTS (SELECT 1 FROM json_each(?) AS wanted
+		               WHERE INSTR(COALESCE(json_extract(usage_tasks.data, '$.sessionName'), ''), wanted.value) > 0)`,
+		namespace, namespaceUID, namespaceUID, string(names))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var tasks []store.UsageTask
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var task store.UsageTask
+		if err := json.Unmarshal([]byte(data), &task); err != nil {
+			return nil, err
+		}
+		if !wanted[strings.TrimSpace(task.SessionName)] {
+			continue
+		}
+		if len(tasks) == limit {
+			return nil, store.ErrUsageSelectionTooLarge
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 func readUsageJSON(ctx context.Context, db taskDataExecutor, target any, query string, args ...any) error {

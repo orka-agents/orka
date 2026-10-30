@@ -2,6 +2,7 @@
 package usage
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"slices"
@@ -322,6 +323,7 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 			}
 		}
 		task.PhaseHistory = nil
+		task.Requester, task.AHPTurn = nil, false
 		if !task.StartedAt.After(asOf) {
 			tasks[taskKey(task.Namespace, task.TaskUID)] = Task{UsageTask: task, Measurements: []Measurement{}}
 		}
@@ -331,6 +333,7 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 	// it when combining namespaces; runtime sequences restart per prompt.
 	sort.SliceStable(observations, func(i, j int) bool { return observations[i].ObservedAt.Before(observations[j].ObservedAt) })
 	counters := map[string]*counter{}
+	shared := sharedCounters(data, tasks, asOf)
 	seen := map[string]bool{}
 	for _, observation := range observations {
 		id := taskKey(observation.Namespace, observation.ID)
@@ -344,15 +347,23 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 			current = &counter{byTask: map[measurementOwner]*Measurement{}}
 			counters[key] = current
 		}
-		uid := observation.TaskUID
-		if uid == "" {
-			uid = "call-" + observation.CounterID
-		}
+		uid := observationTaskUID(observation)
 		tk := taskKey(observation.Namespace, uid)
 		if _, exists := tasks[tk]; !exists {
 			tasks[tk] = Task{UsageTask: store.UsageTask{Namespace: observation.Namespace, TaskUID: uid, TaskName: observation.TaskName,
 				SessionName: observation.SessionName, StartedAt: observation.ObservedAt, Role: unassociatedRole, Phase: unknownTaskPhase}, Measurements: []Measurement{}}
 		}
+		if shared[key] {
+			// A gain on it may be a hidden Task's: it is credited to no Task,
+			// and the counter has no baseline to show. A hidden Task's report
+			// changes nothing a visible Task shows.
+			if !data.HiddenTasks[tk] {
+				observedBy(current, observation, tk)
+				current.gap = sharedCounterGap
+			}
+			continue
+		}
+		// A baseline a hidden Task's report starts is its earlier usage.
 		if baselineKey := addSessionBaseline(current, observation, tasks); baselineKey != "" && data.HiddenTasks[tk] {
 			data.HiddenTasks[baselineKey] = true
 		}
@@ -385,6 +396,61 @@ func measuredTasks(data store.UsageData, asOf time.Time) map[string]Task {
 		tasks[key] = finishTaskMeasurements(task, key)
 	}
 	return tasks
+}
+
+// observationTaskUID names the Task an observation counts toward: its own,
+// or, for usage with no Task such as a chat's, one per counter.
+func observationTaskUID(observation store.UsageObservation) string {
+	return cmp.Or(observation.TaskUID, "call-"+observation.CounterID)
+}
+
+// ObservationTaskKey is the key UsageData.HiddenTasks hides an observation's
+// usage by, also for usage with no Task.
+func ObservationTaskKey(observation store.UsageObservation) string {
+	return taskKey(observation.Namespace, observationTaskUID(observation))
+}
+
+// sharedCounterGap marks usage on a counter a hidden Task may share.
+const sharedCounterGap = "Shared with a Task this report does not show; usage on it is not attributed to a Task"
+
+// sharedCounters returns the counters that may hold a hidden Task's usage:
+// those a hidden Task reported on, and the session counters of a session a
+// hidden Task continued. A session counter spans the session's turns, so a
+// gain on such a counter may be the hidden Task's even when it never
+// reported; it is credited to no visible Task.
+func sharedCounters(data store.UsageData, tasks map[string]Task, asOf time.Time) map[string]bool {
+	hiddenSessions := map[string]bool{}
+	// A hidden reporter the report has no row for, as a Task whose row
+	// retention pruned while keeping its usage as counter history, shares
+	// no counter: its own usage stays hidden, and later Tasks' gains are
+	// theirs.
+	rows := map[string]bool{}
+	for _, task := range data.Tasks {
+		rows[taskKey(task.Namespace, task.TaskUID)] = true
+		session := strings.TrimSpace(task.SessionName)
+		if session != "" && !task.StartedAt.After(asOf) && data.HiddenTasks[taskKey(task.Namespace, task.TaskUID)] {
+			hiddenSessions[taskKey(task.Namespace, session)] = true
+		}
+	}
+	shared := map[string]bool{}
+	for _, observation := range data.Observations {
+		if observation.ObservedAt.After(asOf) {
+			continue
+		}
+		key := taskKey(observation.Namespace, observation.Scope+"/"+observation.CounterID)
+		tk := ObservationTaskKey(observation)
+		if data.HiddenTasks[tk] {
+			if rows[tk] {
+				shared[key] = true
+			}
+		} else if observation.Scope == store.UsageScopeSession {
+			session := cmp.Or(observation.SessionName, tasks[tk].SessionName)
+			if hiddenSessions[taskKey(observation.Namespace, strings.TrimSpace(session))] {
+				shared[key] = true
+			}
+		}
+	}
+	return shared
 }
 
 // The first session total may predate this Task. Keep it visible as
@@ -459,7 +525,9 @@ func finishTaskMeasurements(task Task, key string) Task {
 	return task
 }
 
-func applyObservation(c *counter, observation store.UsageObservation, taskID string) {
+// observedBy returns the measurement of the observing Task's attempt on a
+// counter, brought up to the observation's time, provider, model and status.
+func observedBy(c *counter, observation store.UsageObservation, taskID string) *Measurement {
 	owner := measurementOwner{taskID: taskID, attemptID: observation.AttemptID}
 	m := c.byTask[owner]
 	if m == nil {
@@ -476,6 +544,11 @@ func applyObservation(c *counter, observation store.UsageObservation, taskID str
 	if m.Status != store.UsageStatusCompleted && m.Status != store.UsageStatusFailed && m.Status != store.UsageStatusCancelled {
 		m.Status = observation.Status
 	}
+	return m
+}
+
+func applyObservation(c *counter, observation store.UsageObservation, taskID string) {
+	m := observedBy(c, observation, taskID)
 	counts := [4]*int64{observation.InputTokens, observation.OutputTokens, observation.CachedInputTokens, observation.CacheWriteInputTokens}
 	targets := [4]**int64{&m.InputTokens, &m.OutputTokens, &m.CachedInputTokens, &m.CacheWriteInputTokens}
 	for i, count := range counts {

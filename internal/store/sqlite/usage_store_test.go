@@ -900,3 +900,40 @@ func TestTaskTokenUsageAttributesOnlyTheTaskShare(t *testing.T) {
 		require.Equal(t, [2]int64{tt.input, tt.output}, [2]int64{input, output}, "%s/%s", tt.namespace, tt.task)
 	}
 }
+
+// Rows are found by session name as the controller reads it, without
+// surrounding space of any kind, and however many names are asked for.
+func TestUsageTasksInSessions(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for uid, session := range map[string]string{
+		"plain": "ahp-one", "padded": " ahp-one\t", "longer": "ahp-one-2", "other": "ahp-two", "team": "team-session",
+	} {
+		require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team", TaskUID: uid, TaskName: uid, SessionName: session,
+			Phase: "Succeeded", StartedAt: at}))
+	}
+	names := make([]string, 0, 1501)
+	names = append(names, "ahp-one")
+	for i := range 1500 {
+		names = append(names, fmt.Sprintf("ahp-absent-%d", i))
+	}
+	tasks, err := s.UsageTasksInSessions(ctx, "team", "", names, 100)
+	require.NoError(t, err)
+	found := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		found = append(found, task.TaskUID)
+	}
+	require.ElementsMatch(t, []string{"plain", "padded"}, found)
+	_, err = s.UsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 1)
+	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+	// An earlier namespace of the same name stays out.
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "new", TaskUID: "new-turn", TaskName: "new-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	tasks, err = s.UsageTasksInSessions(ctx, "uids", "new", []string{"ahp-one"}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "new-turn", tasks[0].TaskUID)
+}
