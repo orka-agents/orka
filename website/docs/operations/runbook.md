@@ -187,7 +187,9 @@ Recovery then records the prompt's outcome as unknown, without running it
 again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
 An annotation that names any other hold releases nothing. The Gateway Task
 admission policy admits this change on Gateway-owned Tasks too, as long as
-the annotation is the only thing it changes.
+the annotation is the only thing it changes. As with any update of a Task
+that selects an execution workspace class, the operator also needs `use`
+permission on that class, and on the checkpoint the Task restores from.
 
 ## Security scan operations
 
