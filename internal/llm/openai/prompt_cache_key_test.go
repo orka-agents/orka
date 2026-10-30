@@ -44,6 +44,11 @@ func TestPromptCacheKeyFollowsConversation(t *testing.T) {
 	if got := p.promptCacheKey(next); got != key {
 		t.Errorf("next step key = %q, want %q", got, key)
 	}
+	split := &llm.CompletionRequest{Model: "m", SystemPrompt: "sys catalog-1", SystemPromptStable: len("sys "), Messages: step.Messages}
+	changed := &llm.CompletionRequest{Model: "m", SystemPrompt: "sys catalog-2", SystemPromptStable: len("sys "), Messages: step.Messages}
+	if p.promptCacheKey(split) != p.promptCacheKey(changed) {
+		t.Error("a change after the stable system prompt changed the key")
+	}
 	for name, other := range map[string]*llm.CompletionRequest{
 		"model":         {Model: "m2", SystemPrompt: "sys", Messages: step.Messages},
 		"system":        {Model: "m", SystemPrompt: "other", Messages: step.Messages},

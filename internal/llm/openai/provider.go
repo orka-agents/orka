@@ -135,16 +135,20 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 // promptCacheKey names the conversation a request belongs to, so OpenAI routes
 // the steps of one conversation to the machine that holds its cached prefix.
 // OpenAI caches without a key, but spreads requests across machines. The key
-// hashes what every step repeats from the start: the model, the instructions
-// and the first message, which truncation always keeps. Only OpenAI's own API
+// hashes what every step repeats from the start: the model, the stable part of
+// the instructions and the first message, which truncation always keeps. Only OpenAI's own API
 // gets it: compatible servers and Azure API versions may refuse a field they
 // do not know.
 func (p *Provider) promptCacheKey(req *llm.CompletionRequest) string {
 	if !p.sendPromptCacheKey {
 		return ""
 	}
+	system := req.SystemPrompt
+	if stable := req.SystemPromptStable; stable > 0 && stable < len(system) {
+		system = system[:stable] // a changed catalog after it keeps the conversation's key
+	}
 	h := sha256.New()
-	for _, part := range []string{req.Model, req.SystemPrompt} {
+	for _, part := range []string{req.Model, system} {
 		_, _ = fmt.Fprintf(h, "%d:%s", len(part), part)
 	}
 	if len(req.Messages) > 0 {
