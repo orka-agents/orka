@@ -109,6 +109,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0011](0011-vendor-neutral-transaction-and-outbound-access.md) | Separate transaction governance from outbound resource access | Accepted |
 | [0019](0019-genai-semconv-constants-strategy.md) | Hand-roll GenAI semantic-convention constants | Accepted |
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
+| [0038](0038-agent-policy-discovery.md) | Tell agents which policies apply before they act | Proposed |
 
 ### Agent hosts and the Agent Host Protocol
 
