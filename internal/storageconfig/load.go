@@ -1,6 +1,7 @@
 package storageconfig
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 
+	yamlv3 "go.yaml.in/yaml/v3"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	kjson "sigs.k8s.io/json"
@@ -144,10 +146,13 @@ type fileBindings struct {
 	Artifacts string `json:"artifacts"`
 }
 
-// parse decodes and validates a configuration file. Field names match
-// exactly, and unknown and duplicate fields are rejected, so a misspelled or
-// repeated setting cannot be silently ignored.
+// parse decodes and validates a configuration file. It holds at most one
+// YAML document, field names match exactly, and unknown and duplicate fields
+// are rejected, so no setting is silently ignored.
 func parse(data []byte, storePath string) (*Config, error) {
+	if err := requireOneDocument(data); err != nil {
+		return nil, invalidf("decode storage configuration: %w", err)
+	}
 	jsonData, err := yaml.YAMLToJSONStrict(data)
 	if err != nil {
 		return nil, invalidf("decode storage configuration: %w", err)
@@ -179,6 +184,26 @@ func parse(data []byte, storePath string) (*Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// requireOneDocument rejects a file with more than one YAML document. The
+// strict decoder reads only the first, so a later document would otherwise
+// go unvalidated and outside the digest.
+func requireOneDocument(data []byte) error {
+	decoder := yamlv3.NewDecoder(bytes.NewReader(data))
+	for documents := 0; ; documents++ {
+		var node yamlv3.Node
+		err := decoder.Decode(&node)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if documents == 1 {
+			return errors.New("the file must hold one YAML document")
+		}
+	}
 }
 
 func sqliteBinding(contract, path string) Binding {

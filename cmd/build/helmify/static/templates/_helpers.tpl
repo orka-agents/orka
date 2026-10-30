@@ -375,10 +375,16 @@ must have exactly one elected writer and must not overlap Pods during rollout.
 Storage bindings. Each contract is served by embedded SQLite ("sqlite") or by
 an adapter named under storage.adapters. A missing storage block, as left by
 helm upgrade --reuse-values from an older chart, binds both contracts to
-SQLite. orka.storageBindings returns the resolved bindings as JSON.
+SQLite. orka.storageBindings validates the shape of the storage block and
+returns the resolved bindings as JSON. Only a missing or null value takes a
+default; any other value of the wrong type fails, so it cannot silently leave
+a contract on SQLite.
 */}}
 {{- define "orka.storageBindings" -}}
-{{- $storage := .Values.storage | default dict -}}
+{{- $storage := .Values.storage -}}
+{{- if kindIs "invalid" $storage -}}
+{{- $storage = dict -}}
+{{- end -}}
 {{- if not (kindIs "map" $storage) -}}
 {{- fail "storage must be a map with bindings and adapters" -}}
 {{- end -}}
@@ -387,7 +393,14 @@ SQLite. orka.storageBindings returns the resolved bindings as JSON.
 {{- fail (printf "storage.%s is not a storage setting; use storage.bindings and storage.adapters" $key) -}}
 {{- end -}}
 {{- end -}}
-{{- $bindings := $storage.bindings | default dict -}}
+{{- $adapters := $storage.adapters -}}
+{{- if not (or (kindIs "invalid" $adapters) (kindIs "map" $adapters)) -}}
+{{- fail "storage.adapters must be a map of adapter names to adapter settings" -}}
+{{- end -}}
+{{- $bindings := $storage.bindings -}}
+{{- if kindIs "invalid" $bindings -}}
+{{- $bindings = dict -}}
+{{- end -}}
 {{- if not (kindIs "map" $bindings) -}}
 {{- fail "storage.bindings must be a map with state and artifacts" -}}
 {{- end -}}
@@ -442,9 +455,6 @@ field again when it loads the file.
 {{- $bindings := include "orka.storageBindings" . | fromJson -}}
 {{- $storage := .Values.storage | default dict -}}
 {{- $adapters := $storage.adapters | default dict -}}
-{{- if not (kindIs "map" $adapters) -}}
-{{- fail "storage.adapters must be a map of adapter names to adapter settings" -}}
-{{- end -}}
 {{- range $contract := list "state" "artifacts" -}}
 {{- $backend := get $bindings $contract -}}
 {{- if and (ne $backend "sqlite") (not (hasKey $adapters $backend)) -}}

@@ -338,6 +338,21 @@ func TestStaticChartRejectsInvalidStorageValues(t *testing.T) {
 			want:   "storage.bindings must be a map",
 		},
 		{
+			name:   "empty list as the storage block",
+			values: "storage: []\n",
+			want:   "storage must be a map",
+		},
+		{
+			name:   "false as the bindings",
+			values: "storage: {bindings: false}\n",
+			want:   "storage.bindings must be a map",
+		},
+		{
+			name:   "empty list as the adapters",
+			values: "storage: {adapters: []}\n",
+			want:   "storage.adapters must be a map",
+		},
+		{
 			name:   "adapters as a list",
 			values: "storage: {adapters: [postgres]}\n",
 			want:   "storage.adapters must be a map",

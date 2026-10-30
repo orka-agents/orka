@@ -268,6 +268,8 @@ func TestLoadRejectsInvalidFiles(t *testing.T) {
 		{name: "unknown top-level field", content: "bindings: {state: sqlite, artifacts: sqlite}\nlimits: {}\n", want: "unknown field"},
 		{name: "unknown nested field", content: bound + "    serviceRef: {name: pg, port: 8443}\n    tls: {serverNmae: pg}\n" + auth, want: "unknown field"},
 		{name: "duplicate field", content: "bindings: {state: sqlite, artifacts: sqlite}\nbindings: {state: sqlite, artifacts: sqlite}\n", want: "decode storage configuration"},
+		{name: "trailing document", content: "bindings: {state: sqlite, artifacts: sqlite}\n---\nbindings: {state: pg, artifacts: pg}\n", want: "one YAML document"},
+		{name: "trailing empty document", content: "bindings: {state: sqlite, artifacts: sqlite}\n---\n", want: "one YAML document"},
 		{name: "field name in another case", content: "Bindings: {state: sqlite, artifacts: sqlite}\n", want: "unknown field"},
 		{name: "duplicate field in another case", content: "bindings: {state: sqlite, State: pg, artifacts: sqlite}\n", want: "unknown field"},
 		{name: "unbound state", content: "bindings: {artifacts: sqlite}\n", want: "bindings.state: Required value"},
@@ -320,5 +322,18 @@ func TestLoadAcceptsUnusedStorePathWithAdapters(t *testing.T) {
 	}
 	if cfg.Digest != goldenAdapterDigest {
 		t.Fatalf("digest = %s; an unused --store-path must not change it", cfg.Digest)
+	}
+}
+
+func TestLoadAcceptsOneDocumentWithMarkers(t *testing.T) {
+	for _, content := range []string{
+		"---\nbindings: {state: sqlite, artifacts: sqlite}\n",
+		"# storage\nbindings: {state: sqlite, artifacts: sqlite}\n...\n",
+	} {
+		cfg, err := loadFlags(t, "--storage-config="+writeConfig(t, content))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", content, err)
+		}
+		requireSQLiteBindings(t, cfg, DefaultStorePath)
 	}
 }

@@ -363,7 +363,8 @@ adapters:
       bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
 ```
 
-Loading rejects unknown and duplicate fields, a binding that names no adapter,
+Loading rejects more than one YAML document, field names in another case,
+unknown and duplicate fields, a binding that names no adapter,
 an adapter bound to no contract, an adapter named `sqlite`, an adapter with
 both or neither of `serviceRef` and `url`, a URL that is not `https://` or has
 credentials, a query or a fragment, and an adapter without
