@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/publisher"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestSecurityPatchDecorationPreservesEditedPublisherBody(t *testing.T) {
@@ -79,7 +80,7 @@ func TestIngestPatchTaskBindsPublishedFileModes(t *testing.T) {
 			}
 			assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
 			diffName, _ := patchArtifactNames(fixture.finding.ID)
-			data, _, err := fixture.store.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+			data, _, err := fixture.store.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}, Filename: diffName})
 			if err != nil || string(data) != tc.diff {
 				t.Fatal("verified artifact did not preserve the published file-mode transition")
 			}

@@ -101,6 +101,7 @@ func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, erro
 		if err := rows.Scan(&m.ID, &m.FromTask, &m.ToTask, &m.ParentTask, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
+		m.CreatedAt = m.CreatedAt.UTC()
 		messages = append(messages, m)
 	}
 	if err := rows.Err(); err != nil {

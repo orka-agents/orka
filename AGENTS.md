@@ -63,6 +63,7 @@ Single test: `go test ./internal/api/ -run TestHandlerName -v`
 - `manifest_staging/deploy/orka.yaml`, `manifest_staging/charts/orka/**` — `make manifests`
 - `deploy/**`, `charts/orka/**` — `make promote-staging-manifest` (release-preparation only)
 - `**/zz_generated.*.go` — `make generate`
+- `pkg/storage/v1/wire/storagepb/**` — `make generate` (from `pkg/storage/proto`)
 - `PROJECT` — kubebuilder CLI
 - `ui/src/routeTree.gen.ts` — TanStack Router
 
