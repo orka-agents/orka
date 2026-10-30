@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -218,7 +219,34 @@ func buildRequestParams(req *llm.CompletionRequest) anthropic.MessageNewParams {
 		params.Tools = buildToolParams(req.Tools)
 	}
 
+	markPromptCache(&params)
 	return params
+}
+
+// markPromptCache asks Anthropic to cache the request's prefix. Anthropic
+// caches nothing unless a block names a cache_control breakpoint, and a later
+// request reuses everything up to an earlier breakpoint whose prefix is byte
+// for byte the same. The breakpoint on the last system block covers the tools
+// too, since they render before it, so instructions stay cached when history
+// is truncated. The breakpoint on the last message block moves forward every
+// step, so each tool-loop step reuses the whole conversation before it. Two of
+// the four breakpoints a request may name.
+func markPromptCache(params *anthropic.MessageNewParams) {
+	if n := len(params.System); n > 0 && params.System[n-1].Text != "" {
+		params.System[n-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+	if n := len(params.Messages); n > 0 {
+		blocks := params.Messages[n-1].Content
+		for _, block := range slices.Backward(blocks) {
+			if text := block.OfText; text != nil && text.Text == "" {
+				continue // the API refuses cache_control on an empty text block
+			}
+			if cacheControl := block.GetCacheControl(); cacheControl != nil {
+				*cacheControl = anthropic.NewCacheControlEphemeralParam()
+				return
+			}
+		}
+	}
 }
 
 // handleStreamEvent processes a single stream event and sends chunks via send.

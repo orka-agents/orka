@@ -622,12 +622,16 @@ func (b *SystemPromptBuilder) examplesSection() string {
 }
 
 // buildDynamicContext fetches agents, tools, and providers from the cluster and formats them.
+// Each list is sorted by name: a cached client lists in no fixed order, and the
+// system prompt must not change between requests while the cluster does not, or
+// every request misses the provider's prompt cache.
 func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSection, toolsSection, providersSection, skillsSection string, err error) {
 	// Fetch agents
 	var agentList corev1alpha1.AgentList
 	if err := b.client.List(ctx, &agentList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing agents: %w", err)
 	}
+	slices.SortFunc(agentList.Items, func(a, b corev1alpha1.Agent) int { return strings.Compare(a.Name, b.Name) })
 
 	agentLines := make([]string, 0, len(agentList.Items))
 	for i := range agentList.Items {
@@ -647,6 +651,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &toolList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing tools: %w", err)
 	}
+	slices.SortFunc(toolList.Items, func(a, b corev1alpha1.Tool) int { return strings.Compare(a.Name, b.Name) })
 
 	toolLines := make([]string, 0, len(toolList.Items)+5)
 	// Built-in tools
@@ -670,6 +675,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &providerList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing providers: %w", err)
 	}
+	slices.SortFunc(providerList.Items, func(a, b corev1alpha1.Provider) int { return strings.Compare(a.Name, b.Name) })
 
 	providerNames := make([]string, 0, len(providerList.Items))
 	for i := range providerList.Items {
@@ -707,6 +713,7 @@ func (b *SystemPromptBuilder) buildDynamicContext(ctx context.Context) (agentsSe
 	if err := b.client.List(ctx, &skillList, client.InNamespace(b.namespace)); err != nil {
 		return "", "", "", "", fmt.Errorf("listing skills: %w", err)
 	}
+	slices.SortFunc(skillList.Items, func(a, b corev1alpha1.Skill) int { return strings.Compare(a.Name, b.Name) })
 	if len(skillList.Items) > 0 {
 		skillLines := make([]string, 0, len(skillList.Items))
 		for i := range skillList.Items {

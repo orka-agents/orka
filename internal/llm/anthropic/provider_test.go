@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -920,5 +921,138 @@ func TestInitRegistersProvider(t *testing.T) {
 	}
 	if provider.Name() != testProviderAnthropic {
 		t.Errorf("provider.Name() = %q, want anthropic", provider.Name())
+	}
+}
+
+// withoutCacheControl is v as JSON with every cache_control removed: the
+// prompt the cache matches on, without the breakpoints that move each step.
+func withoutCacheControl(t *testing.T, v any) string {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var tree any
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var strip func(any)
+	strip = func(node any) {
+		switch n := node.(type) {
+		case map[string]any:
+			delete(n, "cache_control")
+			for _, child := range n {
+				strip(child)
+			}
+		case []any:
+			for _, child := range n {
+				strip(child)
+			}
+		}
+	}
+	strip(tree)
+	out, _ := json.Marshal(tree)
+	return string(out)
+}
+
+func cacheMarks(t *testing.T, v any) int {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return strings.Count(string(raw), `"cache_control"`)
+}
+
+func toolLoopRequest() *llm.CompletionRequest {
+	return &llm.CompletionRequest{
+		Model:        "claude-3",
+		SystemPrompt: "be helpful",
+		Tools: []llm.Tool{
+			{Name: testToolNameSearch, Description: "desc", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`)},
+		},
+		Messages: []llm.Message{
+			{Role: "user", Content: "find it"},
+			{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"it"}`)}}},
+			{Role: "tool", ToolCallID: "call_1", Content: "found"},
+		},
+	}
+}
+
+func TestBuildRequestParamsMarksPromptCache(t *testing.T) {
+	t.Run("system and last message", func(t *testing.T) {
+		params := buildRequestParams(toolLoopRequest())
+		if got := cacheMarks(t, params); got != 2 {
+			t.Fatalf("cache_control count = %d, want 2", got)
+		}
+		if cacheMarks(t, params.System[len(params.System)-1]) != 1 {
+			t.Error("last system block has no cache_control")
+		}
+		if cacheMarks(t, params.Messages[len(params.Messages)-1]) != 1 {
+			t.Error("last message has no cache_control")
+		}
+	})
+
+	t.Run("no system prompt", func(t *testing.T) {
+		req := toolLoopRequest()
+		req.SystemPrompt = ""
+		params := buildRequestParams(req)
+		if got := cacheMarks(t, params); got != 1 {
+			t.Fatalf("cache_control count = %d, want 1", got)
+		}
+	})
+
+	t.Run("skips an empty text block", func(t *testing.T) {
+		req := toolLoopRequest()
+		req.Messages = append(req.Messages, llm.Message{Role: "assistant"})
+		params := buildRequestParams(req)
+		if got := cacheMarks(t, params.Messages[len(params.Messages)-1]); got != 0 {
+			t.Fatalf("empty text block has %d cache_control, want 0", got)
+		}
+	})
+}
+
+// TestBuildRequestParamsKeepsPromptPrefix checks that the next tool-loop step
+// sends the step before it unchanged, so the prefix cache can match it.
+func TestBuildRequestParamsKeepsPromptPrefix(t *testing.T) {
+	step := toolLoopRequest()
+	next := toolLoopRequest()
+	next.Messages = append(next.Messages,
+		llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_2", Name: testToolNameSearch, Arguments: json.RawMessage(`{"q":"more"}`)}}},
+		llm.Message{Role: "tool", ToolCallID: "call_2", Content: "more found"},
+	)
+	a, b := buildRequestParams(step), buildRequestParams(next)
+
+	if withoutCacheControl(t, a.Tools) != withoutCacheControl(t, b.Tools) {
+		t.Error("tools differ between steps")
+	}
+	if withoutCacheControl(t, a.System) != withoutCacheControl(t, b.System) {
+		t.Error("system differs between steps")
+	}
+	for i := range a.Messages {
+		if withoutCacheControl(t, a.Messages[i]) != withoutCacheControl(t, b.Messages[i]) {
+			t.Errorf("message %d differs between steps", i)
+		}
+	}
+}
+
+func TestComplete_SendsPromptCacheControl(t *testing.T) {
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(llm.ProviderConfig{APIKey: "test-key", BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	if _, err := provider.Complete(context.Background(), toolLoopRequest()); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if got := strings.Count(string(body), `"cache_control":{"type":"ephemeral"}`); got != 2 {
+		t.Fatalf("request carries %d ephemeral cache_control, want 2: %s", got, body)
 	}
 }
