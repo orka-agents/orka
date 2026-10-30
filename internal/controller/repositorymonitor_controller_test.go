@@ -5614,7 +5614,7 @@ func TestRepositoryMonitorIssueImplementToPRFakeGitHubE2E(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Phase != repositoryMonitorIssuePhasePROpened || jobs[0].PRNumber != 177 || jobs[0].Branch != branch || jobs[0].PatchArtifactID == "" {
 		t.Fatalf("implementation job final = %#v, want direct ACP delivery on branch %q with summary artifact", jobs, branch)
 	}
-	artifact, contentType, err := monitorStore.GetArtifact(ctx, "default", implTaskName, jobs[0].PatchArtifactID)
+	artifact, contentType, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: implTaskName}, Filename: jobs[0].PatchArtifactID})
 	if err != nil || contentType != "application/json" || !strings.Contains(string(artifact), "orka.issueImplementation.delivery.v1") {
 		t.Fatalf("delivery summary artifact = %q, %q, %v", artifact, contentType, err)
 	}
@@ -6312,10 +6312,10 @@ func TestRepositoryMonitorIssuePatchValidationArtifacts(t *testing.T) {
 	if got := repositoryMonitorPatchValidationReason(t, reconciler, ctx, monitor, item, record, task, valid); got != "" {
 		t.Fatalf("valid patch reason = %q, want empty", got)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task"}, Filename: repositoryMonitorIssuePatchDiffArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("diff artifact missing: %v", err)
 	}
-	if _, _, err := monitorStore.GetArtifact(ctx, "default", "impl-task", repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")); err != nil {
+	if _, _, err := monitorStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "impl-task"}, Filename: repositoryMonitorIssuePatchSummaryArtifact(55, "act-impl")}); err != nil {
 		t.Fatalf("summary artifact missing: %v", err)
 	}
 }
