@@ -171,40 +171,76 @@ func TestAgentKitDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	helper, err := os.ReadFile(filepath.Join("agentkit", "prepare-overlay.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	contents := string(data)
 	for _, required := range []string{
 		"ARG AGENTKIT_RUNTIME_IMAGE",
 		"ARG AGENTKIT_ADAPTER_DIGEST",
-		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}",
+		"FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE} AS runtime-source",
+		"FROM supervisor-builder AS runtime-preparer",
+		"RUN --mount=from=runtime-source,target=/runtime,ro",
+		"sh workers/acp/images/agentkit/prepare-overlay.sh /runtime /out/prepared",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("AgentKit Dockerfile is missing %q", required)
+		}
+	}
+	preparation := contents + "\n" + string(helper)
+	for _, required := range []string{
 		"case \"$AGENTKIT_RUNTIME_IMAGE\" in *@sha256:*",
+		"test \"${#digest}\" -eq 64",
+		"case \"$digest\" in *[!0-9a-f]*)",
 		"case \"$AGENTKIT_ADAPTER_DIGEST\" in sha256:*",
+		"test \"${#adapter_digest}\" -eq 64",
+		"case \"$adapter_digest\" in *[!0-9a-f]*)",
 		"test \"$AGENTKIT_ADAPTER_DIGEST\" = \"sha256:$digest\"",
-		"test -x /opt/agentkit/bin/agentkit-serve",
-		"test -s /agent/agent.yaml",
-		"chown -R 0:0 /opt/agentkit",
-		"chmod -R a+rX,go-w /opt/agentkit",
-		"chown 0:0 /agent /agent/agent.yaml",
-		"chmod 0555 /agent",
-		"chmod 0444 /agent/agent.yaml",
+		"serve=$(resolve_source /opt/agentkit/bin/agentkit-serve)",
+		"test -x \"$serve\"",
+		"config=$(resolve_source /agent/agent.yaml)",
+		"test -s \"$config\"",
+		"chown -R 0:0 \"$overlay/opt/agentkit\"",
+		"chmod -R a+rX,go-w \"$overlay/opt/agentkit\"",
+		"chown 0:0 \"$overlay/agent\" \"$overlay${config#\"$source\"}\"",
+		"chmod 0555 \"$overlay/agent\"",
+		"chmod 0711 \"$overlay/sessions\"",
+		"chmod 0444 \"$overlay${config#\"$source\"}\"",
+	} {
+		if !strings.Contains(preparation, required) {
+			t.Errorf("AgentKit build-stage preparation is missing %q", required)
+		}
+	}
+	for _, forbidden := range universalForbiddenSubstrings {
+		if strings.Contains(preparation, forbidden) {
+			t.Errorf("AgentKit composition contains forbidden mutable or secret-bearing surface %q", forbidden)
+		}
+	}
+
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("AgentKit runtime image is not the final base stage")
+	}
+	finalStage := contents[lastFrom:]
+	for line := range strings.SplitSeq(finalStage, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "RUN") {
+			t.Errorf("AgentKit final stage must not execute RUN instructions: %s", line)
+		}
+	}
+	for _, required := range []string{
+		"COPY --from=runtime-preparer /out/prepared/ /",
 		"ORKA_ACP_PROVIDER=agentkit",
 		"ORKA_ACP_AGENTKIT_ADAPTER_DIGEST=${AGENTKIT_ADAPTER_DIGEST}",
 		"ai.orka.acp.adapter.name=\"agentkit-serve-acp\"",
 		"CMD []",
 		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
 	} {
-		if !strings.Contains(contents, required) {
-			t.Errorf("AgentKit Dockerfile is missing %q", required)
+		if !strings.Contains(finalStage, required) {
+			t.Errorf("AgentKit final stage is missing %q", required)
 		}
-	}
-	for _, forbidden := range universalForbiddenSubstrings {
-		if strings.Contains(contents, forbidden) {
-			t.Errorf("AgentKit Dockerfile contains forbidden mutable or secret-bearing surface %q", forbidden)
-		}
-	}
-	lastFrom := strings.LastIndex(contents, "FROM ")
-	finalBase := "FROM --platform=$TARGETPLATFORM ${AGENTKIT_RUNTIME_IMAGE}\n"
-	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
-		t.Fatal("AgentKit runtime image is not the final base stage")
 	}
 }
 
