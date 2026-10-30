@@ -369,7 +369,7 @@ The default providers need nothing extra installed:
 
 | Provider | Operations | Authoritative |
 | --- | --- | --- |
-| `orka-policy` | Describe and Check, covering:<br>- the frozen tool and approval policies, and each tool's effect;<br>- workspace intent;<br>- publication constraints: `createPR`, `expectedRemoteSHA`, `maxChangedFiles`, `allowedPaths`, `denyRepositoryControlPaths`, `rejectBinaryFiles` and `rejectSecretLikeContent`;<br>- namespace scope;<br>- Task and delegation limits;<br>- Agent runtime ceilings, once #865 lands;<br>- transaction-token scope constraints, never the token itself;<br>- the OutboundAccessPolicy each allowed HTTP Tool references;<br>- fixed RuntimePool egress and the fixed writable paths;<br>- once #952 lands, an admitted enforcement requirement: format, capabilities and requirement digest. | Yes, tied to the frozen digests, with three exceptions:<br>- the enforcement requirement, whose receipt is historical (`authoritative: false`);<br>- fixed egress and writable paths, which the cluster's network plugin and container runtime enforce, not Orka (`authoritative: false`);<br>- the connector-read check for `list_connections`. It's authoritative only at that moment, because its scopes come from current controller configuration rather than a frozen digest. Its `versions` entry is a digest of the connector-read scopes and the enforcement mode, which the controller reads from its startup flags. |
+| `orka-policy` | Describe and Check, covering:<br>- the frozen tool and approval policies, and each tool's effect;<br>- workspace intent;<br>- publication constraints: `createPR`, `expectedRemoteSHA`, `maxChangedFiles`, `allowedPaths`, `denyRepositoryControlPaths`, `rejectBinaryFiles` and `rejectSecretLikeContent`;<br>- namespace scope;<br>- Task and delegation limits;<br>- Agent runtime ceilings, once #865 lands;<br>- transaction-token scope constraints, never the token itself;<br>- the OutboundAccessPolicy each allowed HTTP Tool references;<br>- fixed RuntimePool egress and the fixed writable paths;<br>- once #952 lands, an admitted enforcement requirement: format, capabilities and requirement digest. | Yes, tied to the frozen digests, with four exceptions:<br>- the enforcement requirement, whose receipt is historical (`authoritative: false`);<br>- fixed egress and writable paths, which the cluster's network plugin and container runtime enforce, not Orka (`authoritative: false`);<br>- the connector-read check for `list_connections`. It's authoritative only at that moment, because its scopes come from current controller configuration rather than a frozen digest. Its `versions` entry is a digest of the connector-read scopes and the enforcement mode, which the controller reads from its startup flags;<br>- OutboundAccessPolicies. The resolver reads each one live on every call, and only connector-backed Tools pin a policy's UID and generation at dispatch. So these answers are authoritative only at that moment. Each carries its own version: the policy's UID, its generation, a digest of its contents, and its readiness. |
 | `kubernetes-authorization` | Check, with a SubjectAccessReview for the identity that will make the request: the controller or worker ServiceAccount. Never the agent's own identity, because ACP runtime Pods have no Kubernetes RBAC. | Yes, for RBAC at that moment |
 | `kubernetes-dry-run` | Check, with a server-side dry run of the proposed object for that same identity. It records the denying webhook or policy, its message and any warnings. It covers ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in admission plugins such as ResourceQuota. It runs only when the agent asks. | Yes, for admission at that moment |
 
@@ -523,11 +523,15 @@ classes, each with a closed set of codes:
     `tool_failed`).
 
   **Retry rule.**
-  - `retry: later` and `no_effect` need evidence that the call had no effect. Any of these
-    counts:
+  - `retry: later` and `no_effect` need evidence that the whole invocation had no effect.
+    Any of these counts:
     - the tool never started;
     - the endpoint or an enforcement point refused the request;
     - the tool is read-only.
+
+    A refusal of one request doesn't count if an earlier request in the same call already
+    had an effect. For example, `delegate_task` creates the child Task before a later
+    token step can fail, and its cleanup is best-effort.
   - When a call that isn't known to be read-only could have had an effect and its outcome
     isn't confirmed, the refusal is `outcome_unknown` / `tool_outcome_unknown`,
     `retry: never`.
@@ -561,7 +565,7 @@ Each happens before a request can be parsed, so neither can carry a classified r
 | Surface | Today | Decision |
 | --- | --- | --- |
 | Proxy: not an allowed brokered tool | JSON-RPC `-32001` | `isError`: `not_allowed` / `tool_not_brokered`, `retry: never`. The message says when the name is a provider-native tool, and points to `tools/list` and `policy_describe`. |
-| Supervisor: ACP permission request for a provider-native tool outside the policy | A rejected ACP permission outcome | Unchanged. An ACP permission outcome has no field for a reason, and the runtime decides what the model sees. Describe and the `tools/list` hints cover provider-native tools before the call. |
+| Supervisor: ACP permission request for a provider-native tool outside the policy | A rejected ACP permission outcome | Unchanged. An ACP permission outcome has no field for a reason, and the runtime decides what the model sees. `tools/list` lists only brokered tools, so its hints don't cover provider-native tools. Describe covers them before the call, but only for sessions that opt into `policy_describe`. For other sessions, this is a discovery gap. |
 | Proxy: prompt authority inactive before the call | `-32001` | A protocol error with its own code: `prompt_inactive` |
 | Proxy: prompt authority revoked during the call (lease expiry, deactivation, cancellation) | `-32002` | The broker may already have started the call, so it depends on the tool's frozen effect:<br>- consequential: `isError` with `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- read-only: a protocol error, `prompt_inactive`. |
 | Proxy: session at capacity | `-32003` | `isError`: `transient` / `session_at_capacity`, `retry: later` |
@@ -729,6 +733,11 @@ Implementation issues, in this order:
   `services` list, and has to keep enforcement-only entries meaning what they mean today.
 - Describe answers from the same frozen data the broker enforces, and carries the same
   digests. Any change to how tool policy is frozen has to keep the two in step.
+- Some inputs aren't frozen, and are evaluated at the moment of the answer.
+  - Connector-read scopes and OutboundAccessPolicies each carry their own version, so a
+    changed constraint can't appear under an unchanged version.
+  - The Kubernetes checks carry only `evaluatedAt` and `validUntil`. A SubjectAccessReview
+    and a dry run return no version, so their answers can't be compared by version.
 
 **What this rules out.**
 
