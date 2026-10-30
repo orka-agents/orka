@@ -471,3 +471,36 @@ func TestReferenceFilesRespectPackageExportsEncapsulation(t *testing.T) {
 		t.Fatalf("references = %s, want no unexported subpath", got)
 	}
 }
+
+// A baseUrl resolves bare specifiers from its directory after every paths
+// entry, and workspace packages still resolve when it has no match.
+func TestReferenceFilesFollowTSConfigBaseURL(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "web/tsconfig.json", `{"compilerOptions":{"baseUrl":"src","paths":{"@lib/*":["lib/*"]}}}`)
+	writeFile(t, root, "web/src/app.ts", "import { session } from 'auth/session'\nimport { x } from '@lib/x'\nimport { shared } from '@app/shared'\n")
+	writeFile(t, root, "web/src/auth/session.ts", "export const session = 1\n")
+	writeFile(t, root, "web/src/lib/x.ts", "export const x = 1\n")
+	writeFile(t, root, "shared/package.json", `{"name":"@app/shared","main":"./index.ts"}`)
+	writeFile(t, root, "shared/index.ts", "export const shared = 1\n")
+	// An inherited baseUrl applies to a config that sets neither option.
+	writeFile(t, root, "api/tsconfig.base.json", `{"compilerOptions":{"baseUrl":"."}}`)
+	writeFile(t, root, "api/tsconfig.json", `{"extends":"./tsconfig.base.json"}`)
+	writeFile(t, root, "api/server.ts", "import { db } from 'store/db'\n")
+	writeFile(t, root, "api/store/db.ts", "export const db = 1\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{
+		{ID: "web", OwnedFiles: []store.ReviewSliceFile{{Path: "web/src/app.ts"}}},
+		{ID: "api", OwnedFiles: []store.ReviewSliceFile{{Path: "api/server.ts"}}},
+	})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	web := referenceSummary(refs["web"])
+	for _, want := range []string{"web/src/auth/session.ts=imports", "web/src/lib/x.ts=imports", "shared/index.ts=imports"} {
+		if !strings.Contains(web, want) {
+			t.Fatalf("web references = %s, want %s", web, want)
+		}
+	}
+	if api := referenceSummary(refs["api"]); !strings.Contains(api, "api/store/db.ts=imports") {
+		t.Fatalf("api references = %s, want the inherited baseUrl resolved", api)
+	}
+}
