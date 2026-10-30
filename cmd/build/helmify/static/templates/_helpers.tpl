@@ -379,7 +379,24 @@ SQLite. orka.storageBindings returns the resolved bindings as JSON.
 */}}
 {{- define "orka.storageBindings" -}}
 {{- $storage := .Values.storage | default dict -}}
+{{- if not (kindIs "map" $storage) -}}
+{{- fail "storage must be a map with bindings and adapters" -}}
+{{- end -}}
+{{- range $key, $_ := $storage -}}
+{{- if not (has $key (list "bindings" "adapters")) -}}
+{{- fail (printf "storage.%s is not a storage setting; use storage.bindings and storage.adapters" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- $bindings := $storage.bindings | default dict -}}
+{{- if not (kindIs "map" $bindings) -}}
+{{- fail "storage.bindings must be a map with state and artifacts" -}}
+{{- end -}}
+{{- /* A misspelled contract must fail rather than leave that contract on SQLite. */ -}}
+{{- range $key, $_ := $bindings -}}
+{{- if not (has $key (list "state" "artifacts")) -}}
+{{- fail (printf "storage.bindings.%s is not a storage contract; use state or artifacts" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- $resolved := dict -}}
 {{- range $contract := list "state" "artifacts" -}}
 {{- $backend := "sqlite" -}}

@@ -323,6 +323,21 @@ func TestStaticChartRejectsInvalidStorageValues(t *testing.T) {
 			want: "storage.adapters.sqlite is reserved",
 		},
 		{
+			name:   "misspelled contract without adapters",
+			values: "storage: {bindings: {State: postgres}}\n",
+			want:   "storage.bindings.State is not a storage contract",
+		},
+		{
+			name:   "misspelled storage setting",
+			values: "storage: {binding: {state: postgres}}\n",
+			want:   "storage.binding is not a storage setting",
+		},
+		{
+			name:   "bindings not a map",
+			values: "storage: {bindings: postgres}\n",
+			want:   "storage.bindings must be a map",
+		},
+		{
 			name:   "adapters as a list",
 			values: "storage: {adapters: [postgres]}\n",
 			want:   "storage.adapters must be a map",
