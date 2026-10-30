@@ -187,6 +187,9 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 		{name: "runtime class without allowlist", fragment: `"execution":{"runtimeClassName":"gvisor"}`, errorType: "runtime_class_not_allowed", mention: "gvisor"},
 		{name: "unlisted runtime class", allowed: []string{"kata-qemu"}, fragment: `"execution":{"runtimeClassName":"gvisor"}`, errorType: "runtime_class_not_allowed", mention: "kata-qemu"},
 		{name: "node placement", allowed: []string{"gvisor"}, fragment: `"execution":{"runtimeClassName":"gvisor","nodeSelector":{"pool":"gpu"}}`, mention: "execution.nodeSelector"},
+		// A live agent passed command [""] for "leave command empty"; the Pod failed with StartError.
+		{name: "empty command entry", fragment: `"command":[""]`, mention: "command[0]"},
+		{name: "blank command entry", fragment: `"command":["  ","-c","true"]`, mention: "Omit command"},
 	}
 	for _, tt := range tests {
 		for _, path := range containerSpecArgsPaths() {

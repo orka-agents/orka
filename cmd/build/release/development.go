@@ -16,6 +16,7 @@ var developmentDockerfiles = map[string]string{
 	controllerImage:      "Dockerfile",
 	aiWorkerImage:        "workers/ai/Dockerfile",
 	generalWorkerImage:   "workers/general/Dockerfile",
+	browserWorkerImage:   "workers/browser/Dockerfile",
 	codexRuntimeImage:    "workers/acp/images/codex/Dockerfile",
 	claudeRuntimeImage:   "workers/acp/images/claude/Dockerfile",
 	copilotRuntimeImage:  "workers/acp/images/copilot/Dockerfile",
@@ -190,7 +191,7 @@ func developmentValues(digests map[string]string) map[string]any {
 		"controller": controller,
 		"publisher":  developmentComponentValues{image(publisherImage)},
 		"workers": map[string]developmentComponentValues{
-			"ai": {image(aiWorkerImage)}, "general": {image(generalWorkerImage)},
+			"ai": {image(aiWorkerImage)}, "general": {image(generalWorkerImage)}, "browser": {image(browserWorkerImage)},
 		},
 	}
 }

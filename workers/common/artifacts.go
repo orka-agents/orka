@@ -49,6 +49,13 @@ func artifactsDir() string {
 	return defaultArtifactsDir
 }
 
+// EnsureArtifactsDir creates the upload directory, so a command can write
+// into it without creating it first. Tools such as Chromium's --screenshot
+// fail silently when the directory is missing.
+func EnsureArtifactsDir() error {
+	return os.MkdirAll(artifactsDir(), 0o755)
+}
+
 // EnsureWorkspaceArtifactsLink exposes /tmp/artifacts inside the repo root so
 // runtime agents can write artifacts using a workspace-relative path.
 func EnsureWorkspaceArtifactsLink(workspaceDir string) error {
@@ -402,7 +409,7 @@ func detectContentType(filename string, data []byte) string {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	case ".zip":
 		return "application/zip"
-	case ".json":
+	case ".json", ".har":
 		return "application/json"
 	case ".csv":
 		return "text/csv"

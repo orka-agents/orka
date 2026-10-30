@@ -1262,3 +1262,52 @@ func TestSystemPromptAgentTaskExamplesMatchSchema(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildSystemPromptRoutesBrowserWorkToTheBrowserWorkerImage(t *testing.T) {
+	const image = "ghcr.io/orka-agents/orka/browser-worker@sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+
+	plain, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "Browser tasks") {
+		t.Error("browser guidance must stay out until a browser worker image is configured")
+	}
+
+	b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{})
+	b.SetBrowserWorkerImage(" " + image + " ")
+	prompt, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, browser, ai := strings.Index(prompt, "- container:"), strings.Index(prompt, "Browser tasks"), strings.Index(prompt, "- ai:")
+	if container < 0 || browser < container || ai < browser {
+		t.Fatalf("browser guidance must follow the container task type: container=%d browser=%d ai=%d", container, browser, ai)
+	}
+	for _, want := range []string{
+		`use image "` + image + `"`,
+		"put the script in args and omit command",
+		"/tmp/artifacts",
+		"no connector or skill covers the site",
+		"search snippets never establish availability, price, or booking state",
+		"never put credentials in literal env values",
+		`require("playwright")`,
+		"the image has no Python, and playwright install is unnecessary",
+		"locator(...).evaluateAll instead of page.$$eval",
+		"a timeout such as 5m",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("browser guidance is missing %q", want)
+		}
+	}
+
+	b.SetAvailableChatTools([]string{"create_ai_task", "wait_for_task"})
+	limited, err := b.BuildSystemPrompt(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(limited, "Browser tasks") {
+		t.Error("browser guidance must stay out when create_container_task is not offered")
+	}
+}

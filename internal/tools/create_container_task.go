@@ -46,7 +46,7 @@ func (t *CreateContainerTaskTool) Description() string {
 
 func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 	return mustMarshalSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{"image": map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Container image to run. Leave empty to use the default worker image which includes common tools (kubectl, sh) and writes results to a ConfigMap. Only set a custom image if you need a specific runtime not in the default worker. Custom images cannot publish workspace changes: do not combine with workspace.pushBranch."},
-		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute"},
+		"command": map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Command to execute, replacing the image entrypoint. Omit it to run the image entrypoint with args."},
 		"args":    map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Arguments to the command"}, workspaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Git workspace for the command. Required when the command validates, builds, tests, or inspects repository files. Orka prepares /workspace before running the container and records workspace provenance in the result.", jsonSchemaPropertiesField: map[string]any{
 			"gitRepo":                  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source Git repository URL"},
 			branchField:                map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Source branch to clone from (must exist). Omit to use the default branch."},
@@ -518,6 +518,12 @@ func containerTaskSecretNameSchema(fields ...string) map[string]any {
 // so nothing is created from a value the schema would have refused. Every
 // Secret the Task would reference is authorized for the caller first.
 func applyContainerTaskSpecArgs(ctx context.Context, tc *ToolContext, namespace string, a map[string]any, task *corev1alpha1.Task) (string, bool) {
+	// A command whose first entry is blank names no executable: the container
+	// fails to start. Models write [""] when told to leave command empty.
+	if len(task.Spec.Command) > 0 && strings.TrimSpace(task.Spec.Command[0]) == "" {
+		return containerTaskArgError("command[0] is empty, so the container would have nothing to run",
+			"Omit command to run the image entrypoint, and put the script in args"), false
+	}
 	env, errResult, ok := parseContainerTaskEnvArg(a)
 	if !ok {
 		return errResult, false

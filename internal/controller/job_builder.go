@@ -123,8 +123,12 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
-	AIWorkerImage                              string
-	GeneralWorkerImage                         string
+	AIWorkerImage      string
+	GeneralWorkerImage string
+	// BrowserWorkerImage is the operator-configured browser worker image. A
+	// Task that names it is still a custom-image Task, but its mutable tag is
+	// pulled like the other worker images so an upgrade reaches every node.
+	BrowserWorkerImage                         string
 	InitImage                                  string
 	AIWorkerServiceAccountName                 string
 	ContainerWorkerServiceAccountName          string
@@ -722,6 +726,9 @@ func (b *JobBuilder) buildContainerWithOptions(ctx context.Context, task *corev1
 	case corev1alpha1.TaskTypeContainer:
 		if task.Spec.Image != "" {
 			container.Image = task.Spec.Image
+			if b.BrowserWorkerImage != "" && task.Spec.Image == b.BrowserWorkerImage {
+				container.ImagePullPolicy = platformImagePullPolicy(container.Image)
+			}
 			if effectiveWorkspace(task) != nil {
 				container.WorkingDir = workspaceWorkingDir(task)
 				if !envVarExists(container.Env, "HOME") {

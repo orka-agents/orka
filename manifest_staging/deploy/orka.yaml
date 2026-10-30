@@ -2673,6 +2673,7 @@ spec:
         - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
         - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
         - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+        - --browser-worker-image=ghcr.io/orka-agents/orka/browser-worker:0.1.1
         - --gateway-enabled=true
         - --gateway-pending-per-session=100
         - --gateway-max-records-per-gateway=1000

@@ -352,6 +352,11 @@ spec:
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
+            {{- with dig "browser" "image" dict .Values.workers }}
+            {{- if .repository }}
+            - --browser-worker-image={{ include "orka.imageRef" . }}
+            {{- end }}
+            {{- end }}
             {{- with dig "containerTasks" "runtimeClasses" list .Values.workers }}
             - {{ printf "--container-task-runtime-classes=%s" (join "," .) | quote }}
             {{- end }}

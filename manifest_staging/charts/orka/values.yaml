@@ -485,6 +485,15 @@ workers:
       tag: "0.0.0-dev"
       digest: ""
 
+  # Playwright Chromium behind the general worker entrypoint. The chat prompt
+  # points browser container tasks at this image; set repository to "" to
+  # leave that guidance out.
+  browser:
+    image:
+      repository: ghcr.io/orka-agents/orka/browser-worker
+      tag: "0.0.0-dev"
+      digest: ""
+
   # Container Tasks that agents create with create_container_task.
   containerTasks:
     # RuntimeClasses an agent may request through execution.runtimeClassName,

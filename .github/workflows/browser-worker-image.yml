@@ -1,0 +1,80 @@
+name: Browser Worker Image
+
+# Builds the browser worker image and proves it works under the restrictions
+# Orka puts on every Task Pod, before anything reaches kind: a read-only root
+# filesystem with only /tmp writable, UID/GID 1000, all capabilities dropped,
+# Docker's default seccomp profile, no privilege escalation, and no network.
+on:
+  pull_request:
+    paths:
+      - "workers/browser/**"
+      - "workers/general/**"
+      - "workers/common/**"
+      - ".github/workflows/browser-worker-image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "workers/browser/**"
+      - "workers/general/**"
+      - "workers/common/**"
+      - ".github/workflows/browser-worker-image.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('browser-worker-image-pr-{0}', github.event.pull_request.number) || format('browser-worker-image-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    name: Hardened screenshot smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build the image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: workers/browser/Dockerfile
+          load: true
+          tags: orka-browser-worker:smoke
+          # The Playwright browser download is the slow layer; reuse it.
+          cache-from: type=gha,scope=browser-worker-smoke
+          cache-to: type=gha,scope=browser-worker-smoke,mode=max
+
+      - name: Take screenshots under hardened defaults
+        run: |
+          set -euo pipefail
+          cat >"${RUNNER_TEMP}/smoke.sh" <<'SMOKE'
+          set -eu
+          test "$(id -u):$(id -g)" = 1000:1000
+          test "$HOME" = /tmp
+          if touch /usr/local/bin/writable 2>/dev/null; then echo "root filesystem is writable" >&2; exit 1; fi
+          playwright --version
+          mkdir -p /tmp/artifacts
+          playwright screenshot --browser=chromium 'data:text/html,<h1>Orka browser worker</h1>' /tmp/artifacts/page.png
+          test -s /tmp/artifacts/page.png
+          chromium-headless --screenshot=/tmp/raw.png --window-size=800,600 'data:text/html,<h1>raw</h1>'
+          test -s /tmp/raw.png
+          node -e "require('playwright')"
+          echo browser-smoke-ok
+          SMOKE
+          # The image entrypoint is Orka's /worker, which runs the arguments as
+          # the command; without controller settings it only prints the output.
+          output="$(docker run --rm \
+            --read-only --tmpfs /tmp:rw,size=512m,mode=1777 \
+            --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
+            --network none \
+            -v "${RUNNER_TEMP}/smoke.sh:/opt/smoke.sh:ro" \
+            orka-browser-worker:smoke sh /opt/smoke.sh 2>&1)" || { printf '%s\n' "$output"; exit 1; }
+          printf '%s\n' "$output"
+          grep -Fx browser-smoke-ok <<<"$output" >/dev/null

@@ -34,6 +34,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	distributionref "github.com/distribution/reference"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -136,6 +137,19 @@ func parseContainerTaskRuntimeClasses(raw string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// parseBrowserWorkerImage requires a valid image reference, so the prompt never
+// sends agents to a name that cannot be pulled.
+func parseBrowserWorkerImage(raw string) (string, error) {
+	image := strings.TrimSpace(raw)
+	if image == "" {
+		return "", nil
+	}
+	if _, err := distributionref.ParseNormalizedNamed(image); err != nil {
+		return "", fmt.Errorf("--browser-worker-image: %q is not a valid image reference: %w", image, err)
+	}
+	return image, nil
 }
 
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
@@ -259,6 +273,7 @@ func main() {
 	var watchNamespace string
 	var generalWorkerImage string
 	var containerTaskRuntimeClassesFlag string
+	var browserWorkerImage string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
 	var containerWorkerServiceAccountName string
@@ -454,6 +469,8 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&browserWorkerImage, "browser-worker-image", os.Getenv("ORKA_BROWSER_WORKER_IMAGE"),
+		"Orka browser worker image that the chat prompt points browser container tasks at. Empty leaves browser guidance out.")
 	flag.StringVar(&containerTaskRuntimeClassesFlag, "container-task-runtime-classes",
 		os.Getenv("ORKA_CONTAINER_TASK_RUNTIME_CLASSES"),
 		"Comma-separated RuntimeClass names that create_container_task may request through execution.runtimeClassName. Empty refuses the field.")
@@ -822,6 +839,10 @@ func main() {
 	acpUpgradeDrainOptions.WatchNamespace = watchNamespace
 	containerTaskRuntimeClasses, err := parseContainerTaskRuntimeClasses(containerTaskRuntimeClassesFlag)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if browserWorkerImage, err = parseBrowserWorkerImage(browserWorkerImage); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -1547,6 +1568,7 @@ func main() {
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	jobBuilder.ContainerTaskRuntimeClasses = containerTaskRuntimeClasses
+	jobBuilder.BrowserWorkerImage = browserWorkerImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
@@ -2131,6 +2153,7 @@ func main() {
 			MaxPrematureEndRetries:      chatMaxPrematureEndRetries,
 			RuntimeAvailability:         runtimeAvailability,
 			ContainerTaskRuntimeClasses: containerTaskRuntimeClasses,
+			BrowserWorkerImage:          browserWorkerImage,
 		},
 	})
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{

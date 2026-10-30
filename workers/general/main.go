@@ -116,6 +116,9 @@ func run() (err error) {
 	if len(command) == 0 {
 		return fmt.Errorf("command cannot be empty")
 	}
+	if err := common.EnsureArtifactsDir(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot create the artifacts directory: %v\n", err)
+	}
 
 	// Execute the command and print output to stdout/stderr.
 	// The controller captures pod logs and writes them to a result ConfigMap.

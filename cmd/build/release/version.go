@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-var versionedImages = []string{controllerImage, publisherImage, aiWorkerImage, generalWorkerImage}
+var versionedImages = []string{controllerImage, publisherImage, aiWorkerImage, generalWorkerImage, browserWorkerImage}
 
 var versionedRuntimeProviders = []string{"codex", "claude", "copilot", "opencode"}
 
@@ -28,6 +28,7 @@ func updateVersion(root, tag string) error {
 		"config/manager/manager.yaml": {
 			{pattern: `(ghcr\.io/orka-agents/orka/ai-worker:)[^\s]+`, value: "${1}" + version, count: 1},
 			{pattern: `(ghcr\.io/orka-agents/orka/general-worker:)[^\s]+`, value: "${1}" + version, count: 1},
+			{pattern: `(ghcr\.io/orka-agents/orka/browser-worker:)[^\s]+`, value: "${1}" + version, count: 1},
 		},
 		"config/manager/kustomization.yaml": {{pattern: `^(\s*newTag:)\s*.*$`, value: "${1} " + version, count: 1}},
 	}

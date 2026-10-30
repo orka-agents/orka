@@ -32,10 +32,15 @@ func renderInstallationDefaults(t *testing.T, overrides ...string) (string, erro
 
 func developmentImageArgs() []string {
 	args := make([]string, 0, 8)
-	for _, setting := range []string{"controller.image", "publisher.image", "workers.ai.image", "workers.general.image"} {
+	for _, setting := range developmentImageSettings {
 		args = append(args, "--set-string", setting+".tag=source-test")
 	}
 	return args
+}
+
+// developmentImageSettings are the chart's tag-or-digest image values.
+var developmentImageSettings = []string{
+	"controller.image", "publisher.image", "workers.ai.image", "workers.general.image", "workers.browser.image",
 }
 
 func TestStaticChartDevelopmentDefaultsUseRollingImages(t *testing.T) {
@@ -60,8 +65,8 @@ func TestStaticChartDevelopmentDefaultsUseRollingImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(regexp.MustCompile(`(?m)^\s+tag: "0.0.0-dev"$`).FindAll(values, -1)); got != 4 {
-		t.Fatalf("source chart has %d development image tags, want all four", got)
+	if got := len(regexp.MustCompile(`(?m)^\s+tag: "0.0.0-dev"$`).FindAll(values, -1)); got != 5 {
+		t.Fatalf("source chart has %d development image tags, want all five", got)
 	}
 	for _, provider := range []string{"codex", "claude", "copilot", "opencode"} {
 		ref := provider + "Image: ghcr.io/orka-agents/orka/acp-" + provider + "-runtime:0.0.0-dev"
@@ -76,7 +81,7 @@ func TestStaticChartDevelopmentDefaultsUseRollingImages(t *testing.T) {
 	if !strings.Contains(rendered, "imagePullPolicy: Always") {
 		t.Error("rolling development images do not pull on each pod start")
 	}
-	for _, setting := range []string{"controller.image", "publisher.image", "workers.ai.image", "workers.general.image"} {
+	for _, setting := range developmentImageSettings {
 		t.Run(setting, func(t *testing.T) {
 			args := append(developmentImageArgs(), "--set-string", setting+".tag=")
 			if _, err := renderInstallationDefaults(t, args...); err == nil {
@@ -118,7 +123,7 @@ func TestStaticChartUsesVersionedImagesByDefault(t *testing.T) {
 		t.Fatalf("installation defaults do not render: %v\n%s", err, rendered)
 	}
 	for _, image := range []string{
-		"orka", "orka/workspace-publisher", "orka/ai-worker", "orka/general-worker",
+		"orka", "orka/workspace-publisher", "orka/ai-worker", "orka/general-worker", "orka/browser-worker",
 		"orka/acp-codex-runtime", "orka/acp-claude-runtime", "orka/acp-copilot-runtime", "orka/acp-opencode-runtime",
 	} {
 		want := "ghcr.io/orka-agents/" + image + ":" + version
@@ -146,7 +151,7 @@ func TestStaticChartUsesVersionedImagesByDefault(t *testing.T) {
 func TestStaticChartDigestOverridesTakePrecedence(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	overrides := make([]string, 0, 24)
-	for _, setting := range []string{"controller.image", "publisher.image", "workers.ai.image", "workers.general.image"} {
+	for _, setting := range developmentImageSettings {
 		overrides = append(overrides, "--set-string", setting+".digest="+digest, "--set-string", setting+".tag=ignored-tag")
 	}
 	for _, provider := range []string{"codex", "claude", "copilot", "opencode"} {
@@ -160,6 +165,7 @@ func TestStaticChartDigestOverridesTakePrecedence(t *testing.T) {
 	for _, image := range []string{
 		"ghcr.io/orka-agents/orka", "ghcr.io/orka-agents/orka/workspace-publisher",
 		"ghcr.io/orka-agents/orka/ai-worker", "ghcr.io/orka-agents/orka/general-worker",
+		"ghcr.io/orka-agents/orka/browser-worker",
 		"registry.example/codex", "registry.example/claude", "registry.example/copilot", "registry.example/opencode",
 	} {
 		if !strings.Contains(rendered, image+"@"+digest) {

@@ -94,6 +94,8 @@ func TestDetectContentType_KeyExtensions(t *testing.T) {
 		},
 		{filename: "doc.pdf", want: "application/pdf"},
 		{filename: "notes.txt", want: "text/plain"},
+		{filename: "page.har", want: "application/json"},
+		{filename: "trace.zip", want: "application/zip"},
 	}
 
 	for _, tt := range tests {
