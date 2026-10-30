@@ -246,6 +246,7 @@ func main() {
 	var nativeSessionMaxBytes int
 	var watchNamespace string
 	var generalWorkerImage string
+	var sessionLoaderImage string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
 	var containerWorkerServiceAccountName string
@@ -441,6 +442,8 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&sessionLoaderImage, "session-loader-image", controller.DefaultInitImage,
+		"SHA256-digest-pinned session transcript fetcher (requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep).")
 	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
 		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
@@ -797,6 +800,11 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	sessionLoaderImage, loaderImageErr := normalizeSessionLoaderImage(sessionLoaderImage)
+	if loaderImageErr != nil {
+		fmt.Fprintln(os.Stderr, loaderImageErr)
+		os.Exit(1)
 	}
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
@@ -1525,6 +1533,7 @@ func main() {
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.InitImage = sessionLoaderImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
@@ -1547,6 +1556,7 @@ func main() {
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
 		"general", generalWorkerImage,
+		"sessionLoader", sessionLoaderImage,
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
