@@ -18,7 +18,8 @@ Native `type: ai` Tasks run Orka's AI worker, which builds its tool list from th
    [core tool](#core-tools), an [opt-in GitHub tool](#github-tools), or a custom
    [`Tool`](resources.md#tool) resource.
 2. **Tools Orka adds automatically.**
-   - Every `type: ai` Task gets the [memory tools](#memory-tools).
+   - An Agent with `coordination.enabled: true` gets the [memory tools](#memory-tools)
+     alongside the coordination tools. A Task may also select memory tools explicitly.
    - An Agent with `coordination.enabled: true` gets the [coordination tools](#coordination-tools),
      the [GitHub pull request tools](#github-tools), [agent management](#agent-management-tools),
      and `update_plan`. With `coordination.autonomous: true` it also gets `request_approval`.
@@ -26,8 +27,9 @@ Native `type: ai` Tasks run Orka's AI worker, which builds its tool list from th
      on a built-in coding-agent runtime.
    - A Task that came in through a [gateway](../guides/gateways.md) can get `reply_in_conversation`.
 3. **Nothing else.** The annotation `orka.ai/disable-coordination-tool-injection: "true"` on a
-   Task turns off the automatic coordination, approval, and child-messaging tools. Memory tools
-   stay, and tools you selected explicitly still apply.
+   Task turns off the automatic coordination, approval, memory, and child-messaging tools.
+   Memory tools selected explicitly still apply, and tools you selected explicitly otherwise
+   still apply.
 
 Coding-agent Tasks (`type: agent`) use their CLI's own tools, such as `Read`, `Grep`, and
 `Bash`, controlled by the Agent's `runtime.defaultAllowedTools` and the Task's
@@ -54,8 +56,11 @@ endpoints also offer the first five to clients.
 
 ## Memory tools
 
-Every `type: ai` Task receives these. `remember` and `propose_memory` create proposals for a
-person to review; they never change durable memory directly. See [Memory](../concepts/memory.md).
+For native `type: ai` Tasks, Orka automatically adds these when the Agent enables
+`coordination.enabled`, unless the Task sets `orka.ai/disable-coordination-tool-injection: "true"`.
+Memory tools explicitly selected by the Agent or Task remain available even with that annotation.
+`remember` and `propose_memory` create proposals for a person to review; they never change durable
+memory directly. See [Memory](../concepts/memory.md).
 
 | Tool | Description | Parameters |
 |------|-------------|------------|

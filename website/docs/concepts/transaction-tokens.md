@@ -53,14 +53,15 @@ When authorization is enabled, Orka defaults to operation-specific scopes such a
 ## Restricted tool grants
 
 A `tctx.allowedTools` constraint must cover every tool a Task will expose, including the
-tools Orka adds automatically: memory tools on every `type: ai` Task, the coordination set
+tools Orka adds automatically: memory tools for coordinator Agents, the coordination set
 for coordinator Agents, `request_approval` for autonomous coordinators, and the messaging
-tools for delegated children. [Built-in tools](../reference/built-in-tools.md#who-gets-which-tools)
+tools for delegated children. Explicitly selected memory tools must also be included.
+[Built-in tools](../reference/built-in-tools.md#who-gets-which-tools)
 lists exactly which tools each Task receives. Task admission and delegated child validation
 both compute this effective tool set, and a token that omits a required tool is rejected.
 
 - The annotation `orka.ai/disable-coordination-tool-injection: "true"` suppresses implicit
-  coordination, approval, and child messaging tools. Memory tools stay, and explicitly
+  coordination, approval, memory, and child messaging tools. Explicitly
   selected tools still need grants.
 - Agent Tasks using `runtimeRef` receive no implicit coordination or child messaging tools;
   the registered runtime tool policy is authoritative.

@@ -82,8 +82,6 @@ const (
 		"Memory proposals are review-only and are not automatically applied."
 )
 
-var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
-
 const modelLoopEventTimeout = 250 * time.Millisecond
 const maxSessionContextBytes = 96 << 10
 const roleUser = "user"
@@ -253,11 +251,8 @@ func run(transcriptPath string) (err error) {
 		return err
 	}
 
-	// Memory tools use the controller's internal API and are safe to register
-	// independently of coordination mode. Auto-enable them when the controller
-	// context needed to execute them is present.
+	// Registration does not enable tools omitted by the controller.
 	registerMemoryTools()
-	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
 	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
@@ -809,20 +804,6 @@ func memoryControllerConfigPresent() bool {
 	return strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskName)) != ""
-}
-
-func autoEnableMemoryTools(enabled []string) []string {
-	normalized := normalizeEnabledTools(enabled)
-	if !memoryControllerConfigPresent() {
-		return normalized
-	}
-
-	for _, name := range memoryToolNames {
-		if !containsTool(normalized, name) {
-			normalized = append(normalized, name)
-		}
-	}
-	return normalized
 }
 
 func containsTool(enabled []string, name string) bool {

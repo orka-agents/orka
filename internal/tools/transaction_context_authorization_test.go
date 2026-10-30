@@ -890,8 +890,8 @@ func TestChildTransactionEffectiveAIToolsSkipsDisabledCoordinationInjection(t *t
 		}
 	}
 	for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
-		if !strings.Contains(got, tool) {
-			t.Fatalf("expected memory tool %q in %q", tool, got)
+		if strings.Contains(got, tool) {
+			t.Fatalf("unexpected memory tool %q in %q", tool, got)
 		}
 	}
 	for _, tool := range []string{"delegate_task", "send_message", "check_messages", "request_approval", "merge_pull_request", "auto_merge_pull_request"} {

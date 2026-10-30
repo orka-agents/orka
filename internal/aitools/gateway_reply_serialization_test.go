@@ -69,7 +69,7 @@ func TestResolveGatewayReplyPolicyThroughKubernetesJSON(t *testing.T) {
 				require.NotContains(t, got, GatewayReplyToolName,
 					"serialization must not turn explicit denial into an implicit grant: Agent=%s Task=%s", agentJSON, taskJSON)
 			}
-			require.Contains(t, got, "recall_memory")
+			require.NotContains(t, got, "recall_memory")
 			require.Equal(t, agent.Spec.Tools, storedAgent.Spec.Tools)
 			require.Equal(t, task.Spec.AI.Tools, storedTask.Spec.AI.Tools)
 			require.NotContains(t, ResolveWithGatewayReply(&storedTask, &storedAgent, false), GatewayReplyToolName)

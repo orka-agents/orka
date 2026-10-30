@@ -70,8 +70,8 @@ The first four options below are for native Agents, which list tools in `spec.to
 Agents reject `spec.tools`; see [coding-agent tools](#coding-agent-tools).
 
 **Built-in tools.** List names such as `web_search`, `code_exec`, `web_fetch`, `file_read`, and
-`file_write` in the Agent's `spec.tools`. Orka adds memory tools to every native Task, and
-coordination and GitHub tools to coordinators. [Built-in tools](../reference/built-in-tools.md)
+`file_write` in the Agent's `spec.tools`. Orka adds memory tools to coordinators (or when
+selected explicitly), and coordination and GitHub tools to coordinators. [Built-in tools](../reference/built-in-tools.md)
 has the full list and parameters.
 
 **Your own HTTP API.** Describe it with a [Tool](../reference/resources.md#tool) resource — a

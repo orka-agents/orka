@@ -2539,8 +2539,8 @@ func TestAddAIEnvVars_ChildTaskMessagingDisabled(t *testing.T) {
 	}
 	tools := workerenv.SplitCSV(envMap[workerenv.AITools])
 	for _, tool := range []string{"recall_memory", "remember", "propose_memory", "search_transcript"} {
-		if !slices.Contains(tools, tool) {
-			t.Fatalf("%s = %#v, want memory tool %q", workerenv.AITools, tools, tool)
+		if slices.Contains(tools, tool) {
+			t.Fatalf("%s = %#v, want no implicit memory tool %q", workerenv.AITools, tools, tool)
 		}
 	}
 	for _, tool := range []string{"send_message", "check_messages", "delegate_task", "request_approval"} {

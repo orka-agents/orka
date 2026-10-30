@@ -26,13 +26,18 @@ func TestResolve(t *testing.T) {
 		want  []string
 	}{
 		{
-			name: "configured tools and memory are canonicalized",
+			name: "configured tools are canonicalized",
 			task: aiToolTask(nil, nil, []string{"task_tool", " agent_tool ", ""}),
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{
 				{Name: " agent_tool ", Enabled: &enabled},
 				{Name: "disabled_tool", Enabled: &disabled},
 			}}},
-			want: []string{"agent_tool", "task_tool", "recall_memory", "remember", "propose_memory", "search_transcript"},
+			want: []string{"agent_tool", "task_tool"},
+		},
+		{
+			name: "explicit memory tool is preserved without coordination",
+			task: aiToolTask(nil, nil, []string{"recall_memory"}),
+			want: []string{"recall_memory"},
 		},
 		{
 			name: "autonomous coordination adds approval",
@@ -45,12 +50,12 @@ func TestResolve(t *testing.T) {
 		{
 			name: "parent label adds messaging",
 			task: aiToolTask(map[string]string{labels.LabelParentTask: "parent"}, nil, nil),
-			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
+			want: []string{"send_message", "check_messages"},
 		},
 		{
 			name: "parent annotation adds messaging",
 			task: aiToolTask(nil, map[string]string{labels.AnnotationParentTaskName: "long-parent-name"}, nil),
-			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
+			want: []string{"send_message", "check_messages"},
 		},
 		{
 			name: "agent child ignores AI fields and keeps messaging",
@@ -110,7 +115,7 @@ func TestResolve(t *testing.T) {
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{
 				Enabled: true, Autonomous: true,
 			}}},
-			want: []string{"explicit_tool", "recall_memory", "remember", "propose_memory", "search_transcript"},
+			want: []string{"explicit_tool"},
 		},
 	}
 
@@ -222,6 +227,19 @@ func TestIsImplicitTool(t *testing.T) {
 	}
 	if IsImplicitTool(aiToolTask(nil, nil, []string{"list_issues"}), nil, "list_issues") {
 		t.Fatal("explicit issue tool was classified as implicit")
+	}
+	if !IsImplicitTool(aiToolTask(nil, nil, []string{"recall_memory"}), nil, "recall_memory") {
+		t.Fatal("explicit memory tool was not classified as a platform tool")
+	}
+	if IsImplicitTool(aiToolTask(nil, nil, nil), nil, "recall_memory") {
+		t.Fatal("memory tool was implicitly exposed without coordination or explicit selection")
+	}
+	coordinatedAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}
+	if IsImplicitTool(aiToolTask(nil, nil, nil), coordinatedAgent, "custom_tool") {
+		t.Fatal("custom tool was classified as an implicit platform tool with coordination enabled")
+	}
+	if !IsImplicitTool(aiToolTask(nil, nil, nil), coordinatedAgent, "recall_memory") {
+		t.Fatal("memory tool was not classified as implicit with coordination enabled")
 	}
 	child.Spec.Type = corev1alpha1.TaskTypeAgent
 	if IsImplicitTool(child, nil, "send_message") {

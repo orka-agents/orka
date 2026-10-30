@@ -91,7 +91,7 @@ var childMessagingToolNames = []string{
 	checkMessagesToolName,
 }
 
-// MemoryToolNames returns the AI worker's always-on memory tool names.
+// MemoryToolNames returns the names of the built-in memory tools.
 func MemoryToolNames() []string {
 	return append([]string(nil), memoryToolNames...)
 }
@@ -137,11 +137,42 @@ func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name str
 			}
 		}
 	}
-	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI && containsTool(memoryToolNames, name)
+	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI &&
+		containsTool(memoryToolNames, name) &&
+		(memoryToolsImplicitlyEnabled(task, agent) || memoryToolSelected(task, agent, name))
 }
 
 func containsTool(tools []string, name string) bool {
 	return slices.Contains(tools, name)
+}
+
+func memoryToolsImplicitlyEnabled(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || !usesAIWorkerToolRegistry(task, agent) {
+		return false
+	}
+	if task.Annotations[labels.AnnotationDisableCoordinationToolInject] == trueStr {
+		return false
+	}
+	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
+}
+
+func memoryToolSelected(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name string) bool {
+	if !containsTool(memoryToolNames, name) {
+		return false
+	}
+	if agent != nil {
+		for _, tool := range agent.Spec.Tools {
+			if tool.Enabled != nil && !*tool.Enabled {
+				continue
+			}
+			if strings.TrimSpace(tool.Name) == name {
+				return true
+			}
+		}
+	}
+	return task != nil && task.Spec.AI != nil && slices.ContainsFunc(task.Spec.AI.Tools, func(tool string) bool {
+		return strings.TrimSpace(tool) == name
+	})
 }
 
 func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
@@ -175,7 +206,7 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 // Resolve returns the ordered, de-duplicated configured and implicit tool set
 // exposed for task. Container tasks do not expose AI tools. Agent tasks retain
 // configured/brokered tools and built-in agent children get messaging tools.
-// The in-process AI worker additionally gets its always-on memory tools.
+// Memory tools are exposed when explicitly selected or when coordination is enabled.
 // Consumers loading Tool CRs must also enforce ValidateRemoteMCPSelection;
 // this name-only resolver cannot distinguish remote backends from legacy Tools.
 func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
@@ -226,7 +257,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 		appendTools(childMessagingToolNames)
 	}
 
-	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI {
+	if memoryToolsImplicitlyEnabled(task, agent) {
 		appendTools(memoryToolNames)
 	}
 

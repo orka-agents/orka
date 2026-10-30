@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -287,6 +286,32 @@ func TestBuildLLMTools_Empty(t *testing.T) {
 	}
 }
 
+func TestBuildLLMTools_MemoryFollowsEnabledList(t *testing.T) {
+	restore := replaceDefaultToolRegistryForTest(t)
+	defer restore()
+	registerMemoryTools()
+	for _, tc := range []struct {
+		name    string
+		enabled []string
+	}{
+		{name: "no opt-in"},
+		{name: "explicit", enabled: []string{"recall_memory"}},
+		{name: "coordination", enabled: []string{"recall_memory", "remember", "propose_memory", "search_transcript"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildLLMTools(normalizeEnabledTools(tc.enabled), nil)
+			if len(got) != len(tc.enabled) {
+				t.Fatalf("got %d tools, want %d", len(got), len(tc.enabled))
+			}
+			for i, tool := range got {
+				if tool.Name != tc.enabled[i] {
+					t.Fatalf("tool %d = %q, want %q", i, tool.Name, tc.enabled[i])
+				}
+			}
+		})
+	}
+}
+
 func TestBuildLLMTools_NotFound(t *testing.T) {
 	enabledTools := []string{"nonexistent_tool"}
 	customTools := map[string]*corev1alpha1.Tool{}
@@ -377,35 +402,6 @@ func TestAppendMemoryReflectionGuidance_IncludesRememberGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("reflection guidance missing %q:\n%s", want, got)
-		}
-	}
-}
-
-func TestAutoEnableMemoryTools_WhenControllerConfigPresent(t *testing.T) {
-	t.Setenv("ORKA_CONTROLLER_URL", "http://controller.example")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_TASK_NAME", "task-1")
-
-	got := autoEnableMemoryTools([]string{"web_search", "recall_memory", " web_search "})
-	want := []string{"web_search", "recall_memory", "remember", "propose_memory", "search_transcript"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
-	}
-}
-
-func TestAutoEnableMemoryTools_NoControllerConfigDoesNotMutateTools(t *testing.T) {
-	t.Setenv("ORKA_CONTROLLER_URL", "")
-	t.Setenv("ORKA_TASK_NAMESPACE", "default")
-	t.Setenv("ORKA_TASK_NAME", "task-1")
-
-	got := autoEnableMemoryTools([]string{"web_search"})
-	want := []string{"web_search"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("autoEnableMemoryTools() = %#v, want %#v", got, want)
-	}
-	for _, toolName := range memoryToolNames {
-		if containsTool(got, toolName) {
-			t.Fatalf("autoEnableMemoryTools() added memory tool %q without controller config: %#v", toolName, got)
 		}
 	}
 }
