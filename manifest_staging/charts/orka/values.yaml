@@ -485,6 +485,13 @@ workers:
       tag: "0.0.0-dev"
       digest: ""
 
+  # Container Tasks that agents create with create_container_task.
+  containerTasks:
+    # RuntimeClasses an agent may request through execution.runtimeClassName,
+    # for example [gvisor, kata-qemu]. Each must exist in the cluster. Empty
+    # refuses the field.
+    runtimeClasses: []
+
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
 github:

@@ -177,4 +177,8 @@ compile and test their own work. They are given the same rules above in their sy
 prompt, so they usually get it right — but if you see an agent looping on
 `go: command not found`, this page is what it failed to apply.
 
+The tool can also set literal `env` values, `resources`, a `retryPolicy`, and an
+`execution.runtimeClassName` from the operator's allowlist. Its
+[parameter reference](../reference/built-in-tools.md#create_container_task) lists the limits.
+
 See [Multi-agent coordination](multi-agent-coordination.md).

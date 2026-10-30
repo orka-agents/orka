@@ -142,7 +142,10 @@ type JobBuilder struct {
 	OutboundAccessTrustedGatewayServices       string
 	OutboundAccessTrustedTokenEndpointServices string
 	EnableTelemetry                            bool
-	directSecrets                              directRuntimeSecretPolicy
+	// ContainerTaskRuntimeClasses is the RuntimeClass allowlist AI workers
+	// apply to create_container_task's execution.runtimeClassName.
+	ContainerTaskRuntimeClasses []string
+	directSecrets               directRuntimeSecretPolicy
 }
 
 type directRuntimeSecretPolicy struct {
@@ -867,6 +870,14 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	envVars = setControllerEnvValue(envVars, workerenv.AutonomousMode, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, "")
 	envVars = setControllerEnvValue(envVars, workerenv.ApprovalRequiredTools, "")
+	if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		// Pinned even when empty: a container's env takes precedence over its
+		// envFrom, so an Agent Secret key of this name cannot supply an
+		// allowlist the operator never set.
+		envVars = setControllerEnvValue(envVars, workerenv.ContainerTaskRuntimeClasses, workerenv.JoinCSV(b.ContainerTaskRuntimeClasses))
+	} else {
+		envVars = setControllerEnv(envVars, workerenv.ContainerTaskRuntimeClasses, "")
+	}
 	envVars = setTransactionCredentialAuthorizationEnv(
 		envVars,
 		task.Spec.Transaction,

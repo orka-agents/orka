@@ -3049,14 +3049,17 @@ func (r *TaskReconciler) remainingRetryDelay(task *corev1alpha1.Task, now time.T
 
 // calculateRetryDelay calculates the delay before retry using exponential backoff
 func (r *TaskReconciler) calculateRetryDelay(task *corev1alpha1.Task) time.Duration {
-	if task.Spec.RetryPolicy == nil || task.Spec.RetryPolicy.InitialDelay == nil {
-		return 10 * time.Second // Default delay
-	}
-
-	initialDelay := task.Spec.RetryPolicy.InitialDelay.Duration
-	multiplier := task.Spec.RetryPolicy.BackoffMultiplier
-	if multiplier == 0 {
-		multiplier = 2
+	// The documented defaults apply field by field, so a policy that sets only
+	// maxRetries or backoffMultiplier still backs off from 10s.
+	initialDelay := 10 * time.Second
+	multiplier := 2.0
+	if policy := task.Spec.RetryPolicy; policy != nil {
+		if policy.InitialDelay != nil {
+			initialDelay = policy.InitialDelay.Duration
+		}
+		if policy.BackoffMultiplier != 0 {
+			multiplier = policy.BackoffMultiplier
+		}
 	}
 
 	// Calculate delay with exponential backoff

@@ -352,6 +352,9 @@ spec:
             - --store-path={{ .Values.store.path }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
+            {{- with dig "containerTasks" "runtimeClasses" list .Values.workers }}
+            - {{ printf "--container-task-runtime-classes=%s" (join "," .) | quote }}
+            {{- end }}
             - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}
             - --vendor-worker-service-account-name={{ include "orka.vendorWorkerServiceAccountName" . }}
             - --container-worker-service-account-name={{ include "orka.containerWorkerServiceAccountName" . }}

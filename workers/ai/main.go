@@ -351,6 +351,7 @@ func run(transcriptPath string) (err error) {
 			workerEnv.TransactionCredentialReadScopes,
 		),
 		RequireSecretReadAuthorization: workerEnv.EnforceTransactionCredentialAuth,
+		ContainerTaskRuntimeClasses:    workerenv.SplitCSV(os.Getenv(workerenv.ContainerTaskRuntimeClasses)),
 		// Children this worker creates inherit the requester's connector
 		// authority only when the controller seals them on this worker's
 		// authenticated request.

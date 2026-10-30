@@ -1359,6 +1359,17 @@ func TestCalculateRetryDelay(t *testing.T) {
 		}
 	})
 
+	t.Run("nil initialDelay backs off from the default", func(t *testing.T) {
+		task := &corev1alpha1.Task{
+			Spec:   corev1alpha1.TaskSpec{RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3, BackoffMultiplier: 3}},
+			Status: corev1alpha1.TaskStatus{Attempts: 3},
+		}
+		// 10s * 3 * 3 = 90s
+		if d := r.calculateRetryDelay(task); d != 90*time.Second {
+			t.Errorf("expected 90s, got %v", d)
+		}
+	})
+
 	t.Run("first attempt uses initial delay", func(t *testing.T) {
 		task := &corev1alpha1.Task{
 			Spec: corev1alpha1.TaskSpec{RetryPolicy: &corev1alpha1.RetryPolicy{

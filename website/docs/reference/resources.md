@@ -84,7 +84,7 @@ spec:
 | `sessionRef` | `ai`, `agent` | Conversation continuity: `name`, `create` (default `false`), `append` (default `true`), and `maxMessages` (default `50`). Immutable after creation. |
 | `timeout` | all | Maximum wall-clock duration. Coding-agent Tasks default to `30m`, measured from Task creation, including queueing and runtime admission. |
 | `priority` | all | Queue priority from 0 to 1000, default `500`. Higher runs first. |
-| `retryPolicy` | all | `maxRetries` (default `0`), `backoffMultiplier` (default `2`), and `initialDelay`. |
+| `retryPolicy` | all | `maxRetries` (default `0`), `backoffMultiplier` (default `2`), and `initialDelay` (default `10s`). |
 | `webhookURL` | all | URL called when the Task completes. |
 | `resources` | `ai`, `container` | CPU and memory requests and limits for the worker Pod. Coding-agent Tasks reject custom resources; their pool profile sets them. |
 | `execution` | `ai`, `container`; `workspace` only for `agent` | Runtime class and placement. See [Execution](#execution). |

@@ -88,11 +88,14 @@ const (
 	CoordinationMaxChildren   = "ORKA_COORDINATION_MAX_CHILDREN"
 	CoordinationAllowedAgents = "ORKA_COORDINATION_ALLOWED_AGENTS"
 	CoordinationDepth         = "ORKA_COORDINATION_DEPTH"
-	AutonomousMode            = "ORKA_AUTONOMOUS_MODE"
-	AutonomousIteration       = "ORKA_AUTONOMOUS_ITERATION"
-	AutonomousMaxIterations   = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
-	TaskUID                   = "ORKA_TASK_UID"
-	ApprovalRequiredTools     = "ORKA_APPROVAL_REQUIRED_TOOLS"
+	// ContainerTaskRuntimeClasses carries the operator's create_container_task
+	// RuntimeClass allowlist to AI workers, as a comma-separated list.
+	ContainerTaskRuntimeClasses = "ORKA_CONTAINER_TASK_RUNTIME_CLASSES"
+	AutonomousMode              = "ORKA_AUTONOMOUS_MODE"
+	AutonomousIteration         = "ORKA_AUTONOMOUS_ITERATION"
+	AutonomousMaxIterations     = "ORKA_AUTONOMOUS_MAX_ITERATIONS"
+	TaskUID                     = "ORKA_TASK_UID"
+	ApprovalRequiredTools       = "ORKA_APPROVAL_REQUIRED_TOOLS"
 	// ConnectorToolDigests is a JSON object mapping each connector-backed
 	// tool dispatched with the Job to the digest of its Tool spec at dispatch.
 	ConnectorToolDigests = "ORKA_CONNECTOR_TOOL_DIGESTS"
