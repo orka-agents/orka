@@ -81,16 +81,18 @@ func (h *AnthropicCompatHandler) handleStreamingMessages( //nolint:gocyclo
 			default:
 			}
 
-			// Truncate conversation if needed
+			// Truncate a view of the whole conversation if needed, never the
+			// conversation itself, so the cut stays where it was and the prompt
+			// prefix stays cacheable.
+			sent := messages
 			if h.config.MaxSessionSize > 0 {
-				tokenBudget := h.config.MaxSessionSize / 4
-				messages = llm.TruncateMessages(messages, tokenBudget)
+				sent = llm.TruncateMessages(messages, h.config.MaxSessionSize/4)
 			}
 
 			// Build request for this iteration
 			compReq := &llm.CompletionRequest{
 				Model:        model,
-				Messages:     messages,
+				Messages:     sent,
 				SystemPrompt: capturedReq.SystemPrompt,
 				Tools:        capturedReq.Tools,
 				MaxTokens:    capturedReq.MaxTokens,

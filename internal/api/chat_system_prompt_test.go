@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -522,6 +523,49 @@ func TestBuildDynamicContext(t *testing.T) {
 		}
 	})
 
+	t.Run("list order does not change the prompt", func(t *testing.T) {
+		objects := []client.Object{
+			&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "zeta", Namespace: "default"}},
+			&corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "default"}},
+			&corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "zeta-tool", Namespace: "default"}},
+			&corev1alpha1.Tool{ObjectMeta: metav1.ObjectMeta{Name: "alpha-tool", Namespace: "default"}},
+			&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "zeta-provider", Namespace: "default"}},
+			&corev1alpha1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "alpha-provider", Namespace: "default"}},
+			&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "zeta-skill", Namespace: "default"}},
+			&corev1alpha1.Skill{ObjectMeta: metav1.ObjectMeta{Name: "alpha-skill", Namespace: "default"}},
+		}
+		// A cached client lists in no fixed order; reverse every list to stand in for it.
+		reversed := interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			items, err := apimeta.ExtractList(list)
+			if err != nil {
+				return err
+			}
+			slices.Reverse(items)
+			return apimeta.SetList(list, items)
+		}}
+		build := func(funcs interceptor.Funcs) string {
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(funcs).Build()
+			agents, tools, providers, skills, err := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{}).buildDynamicContext(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			return agents + tools + providers + skills
+		}
+
+		got := build(interceptor.Funcs{})
+		if again := build(reversed); again != got {
+			t.Errorf("prompt depends on list order:\n%s\nvs\n%s", got, again)
+		}
+		for _, pair := range [][2]string{{"alpha", "zeta"}, {"alpha-tool", "zeta-tool"}, {"alpha-provider", "zeta-provider"}, {"alpha-skill", "zeta-skill"}} {
+			if strings.Index(got, pair[0]) > strings.Index(got, pair[1]) {
+				t.Errorf("%s listed after %s:\n%s", pair[0], pair[1], got)
+			}
+		}
+	})
+
 	t.Run("configured built-in runtime images are advertised without Agent secrets", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(scheme).Build()
 		b := NewSystemPromptBuilder(c, "default", ACPRuntimeAvailability{
@@ -631,6 +675,30 @@ func TestBuildSystemPrompt(t *testing.T) {
 			if !strings.Contains(prompt, section) {
 				t.Errorf("missing section %q", section)
 			}
+		}
+	})
+
+	t.Run("a cluster change keeps the fixed sections as an unchanged prefix", func(t *testing.T) {
+		empty, err := NewSystemPromptBuilder(fake.NewClientBuilder().WithScheme(scheme).Build(), "default", ACPRuntimeAvailability{}).
+			BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "coder", Namespace: "default"}}
+		withAgent, err := NewSystemPromptBuilder(fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build(), "default", ACPRuntimeAvailability{}).
+			BuildSystemPrompt(context.Background(), "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		catalog := strings.Index(empty, "<available_agents>")
+		if catalog < 0 || catalog < strings.Index(empty, "<examples>") {
+			t.Fatalf("catalog at %d, want it after the examples", catalog)
+		}
+		if !strings.HasPrefix(withAgent, empty[:catalog]) {
+			t.Error("adding an Agent changed the prompt before the catalog")
+		}
+		if got := chatPromptStable(withAgent); got != catalog {
+			t.Errorf("chatPromptStable = %d, want the catalog start %d", got, catalog)
 		}
 	})
 
