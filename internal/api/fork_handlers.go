@@ -131,6 +131,13 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 			newName = generatedForkTaskName(sourceName)
 		}
 	}
+	// A fork of an AHP turn carries the turn's prompt and conversation, so it
+	// is private as the turn is: marked a turn, and named, like any session it
+	// starts, with the AHP prefix. Generated names keep the source's.
+	ahpFork := ahpTurnTask(source)
+	if ahpFork && !strings.HasPrefix(newName, ahpNamePrefix) {
+		return fiber.NewError(fiber.StatusBadRequest, "a fork of an AHP turn must be named with the "+ahpNamePrefix+" prefix, which keeps it private")
+	}
 
 	spec := *source.Spec.DeepCopy()
 	applyForkRequestOverrides(&spec, req, namespace)
@@ -158,6 +165,9 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		},
 		Spec: spec,
 	}
+	if ahpFork {
+		forked.Labels[labels.LabelAHPTurn] = labels.LabelAHPTurnValue
+	}
 	if err := agentruntimepolicy.ResolveAndReplaceTaskRuntimeRefAllowedTools(
 		c.Context(), h.uncachedReader(), forked,
 	); err != nil {
@@ -169,6 +179,16 @@ func (h *Handlers) ForkTask(c fiber.Ctx) error {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(forked, GetUserInfo(c))
+	// The session the fork continues cannot be another person's AHP session.
+	if forked.Spec.SessionRef != nil {
+		hidden, err := h.forkSessionHidden(c.Context(), GetUserInfo(c), namespace, forked.Name, forked.Spec.SessionRef.Name)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up the session's owner: %v", err))
+		}
+		if hidden {
+			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+	}
 	if err := h.authorizeContextTokenTaskCreate(c, createTaskRequestFromTask(forked), namespace); err != nil {
 		return err
 	}
@@ -296,6 +316,33 @@ func deterministicForkTaskName(sourceName string, afterSeq int64, requester, ide
 	}
 	sum := sha256.Sum256([]byte(seed))
 	return fmt.Sprintf("%s-fork-%s", forkcontext.SanitizeTaskNamePrefix(sourceName), hex.EncodeToString(sum[:4]))
+}
+
+// forkSessionHidden reports a session a fork may not continue: another
+// person's AHP session. A fork of an AHP turn whose workspace is reused per
+// session starts a session named after itself, with the AHP prefix its name
+// inherits; that one is the fork's own while no Task continues it and no
+// Session by its name exists.
+func (h *Handlers) forkSessionHidden(ctx context.Context, ui *UserInfo, namespace, fork, session string) (bool, error) {
+	session, ahp := ahpSessionName(session)
+	if !ahpPerson(ui) || !ahp {
+		return false, nil
+	}
+	owners, err := ahpSessionOwnersIn(ctx, h.client, namespace, []string{session})
+	if err != nil {
+		return false, err
+	}
+	if session == fork && owners[session] == nil {
+		if h.sessionStore == nil {
+			return false, nil
+		}
+		if _, err := h.sessionStore.GetSession(ctx, namespace, session); errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+	}
+	return ahpSessionHiddenBy(ui, session, owners), nil
 }
 
 // generatedForkTaskName mints a unique fork name (random suffix). This is the

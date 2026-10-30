@@ -931,3 +931,47 @@ func TestExternalToolAITaskDefaultsProviderWithoutDiscoveryPermission(t *testing
 		})
 	}
 }
+
+// Chat tools act for the person calling them: another person's AHP turns are
+// as absent to them as to the Task API.
+func TestExternalToolExecutorProtectsAHPTurns(t *testing.T) {
+	clientset, _ := externalToolReviews(t, func(authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+		return externalToolReview(true), nil
+	})
+	turn := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "ahp-alice-t1", Namespace: externalToolNamespace, UID: "turn-uid",
+			Labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}},
+		Spec: corev1alpha1.TaskSpec{
+			RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"},
+			SessionRef:  &corev1alpha1.SessionReference{Name: "ahp-alice"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, ResultRef: &corev1alpha1.ResultReference{Available: true}},
+	}
+	executor, backend, results, sessions := newExternalToolExecutor(clientset, turn,
+		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "visible-task", Namespace: externalToolNamespace, UID: "visible-task-uid"}},
+	)
+	executor.userInfo = &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob", Username: "bob", Namespace: externalToolNamespace}
+	for _, tool := range []string{"check_task_progress", "fetch_task_output", "cancel_task"} {
+		if result := executeExternalTool(t, executor, tool, `{"name":"ahp-alice-t1","namespace":"tool-target"}`); result.Success {
+			t.Fatalf("%s reached another person's AHP turn", tool)
+		}
+	}
+	result := executeExternalTool(t, executor, "list_tasks", `{"namespace":"tool-target"}`)
+	data, err := json.Marshal(result.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success || strings.Contains(string(data), "ahp-alice-t1") || !strings.Contains(string(data), "visible-task") {
+		t.Fatalf("Task list did not leave out another person's AHP turn: %s, error=%s", data, result.Error)
+	}
+	if result := executeExternalTool(t, executor, "delete_session", `{"sessionId":"ahp-alice","namespace":"tool-target"}`); result.Success {
+		t.Fatal("delete_session removed another person's AHP session")
+	}
+	if result := executeExternalTool(t, executor, "create_ai_task",
+		`{"prompt":"repeat the conversation","namespace":"tool-target","sessionRef":"ahp-alice"}`); result.Success {
+		t.Fatal("create_ai_task continued another person's AHP session")
+	}
+	if backend.writes != 0 || results.reads != 0 || len(sessions.deleted) != 0 {
+		t.Fatalf("access reached backing state: writes=%d results=%d deleted=%v", backend.writes, results.reads, sessions.deleted)
+	}
+}

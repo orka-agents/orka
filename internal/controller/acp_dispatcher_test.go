@@ -36,6 +36,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
@@ -1902,7 +1903,10 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
 		Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		LiveEvents: liveevents.NewBroker(0),
 	}
+	live := dispatcher.LiveEvents.Subscribe(task.Namespace, task.Name)
+	defer live.Close()
 	prepareAdditionalTask := func(
 		name string,
 		uid types.UID,
@@ -1973,6 +1977,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		return additional, additionalAttemptID, parentID
 	}
 	dispatchQueuedTask(ctx, t, dispatcher, task.DeepCopy())
+	assertACPDispatcherPublishedLiveEvents(t, live, task)
 	completed := &corev1alpha1.Task{}
 	if err := kubeClient.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, completed); err != nil {
 		t.Fatal(err)
@@ -3989,6 +3994,7 @@ type dispatcherRuntimeServerOptions struct {
 	terminalEvents                   map[harnessv2.PromptID]harnessv2.EventType
 	disableAgentSessionConfiguration bool
 	disablePermissions               bool
+	nativePermissionAsk              bool
 	// rejectCreate answers a create request with the returned error response
 	// and status instead of creating the session when the response is non-nil.
 	// resident makes the runtime keep reporting the exact requested session as
@@ -4048,7 +4054,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 			Protocol: harnessv2.ProtocolVersion, Transport: "http+ndjson", ACPVersion: harnessv2.ACPProfileV1,
 			RuntimeProfileDigest: digest, ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 			AdapterDigests: profile.AdapterDigests, Limits: limits,
-			Provider:                          harnessv2.ProviderCapabilities{ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true, SupportsPermissions: !options.disablePermissions, SupportsTools: true},
+			Provider: harnessv2.ProviderCapabilities{
+				ProviderKinds: []string{profile.ProviderKind}, Models: []string{profile.Model}, SupportsCancel: true,
+				SupportsPermissions: !options.disablePermissions, SupportsTools: true, SupportsNativePermissionAsk: options.nativePermissionAsk,
+			},
 			WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
 			SupportsDrain:                     true,
 			SupportsNativeSessions:            options.nativeSnapshot != nil,
@@ -4130,7 +4139,10 @@ func newDispatcherRuntimeServerForPoolWithOptions(
 				Sequence: seq, RequestDigest: request.Metadata.RequestDigest, Timestamp: at,
 			}
 		}
-		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1}})
+		// Like a current supervisor, confirm live updates when asked.
+		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity(1, now), Accepted: &harnessv2.AcceptedEvent{
+			AcceptedAt: now, Lease: request.Lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: r.Header.Get(harnessv2.LiveUpdatesHeader) == "1",
+		}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(2, now.Add(time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "hello "}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(3, now.Add(2*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCall, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Kind: acpDispatcherToolKind, Status: harnessv2.ToolCallStatusPending}}})
 		_ = encoder.Encode(harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventUpdate, Identity: identity(4, now.Add(3*time.Millisecond)), Update: &harnessv2.UpdateEvent{Kind: harnessv2.UpdateToolCallUpdate, ToolCall: &harnessv2.ToolCallUpdate{ToolCallID: acpDispatcherToolCallID, Title: acpDispatcherToolTitle, Status: harnessv2.ToolCallStatusCompleted, Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: acpDispatcherToolResultPath}}}}})
@@ -6176,5 +6188,83 @@ func TestRenewPromptLeaseLoopStopsWhileWaitingForAdmission(t *testing.T) {
 	case <-cancelled:
 		t.Fatal("renewal loop cancelled the runtime before prompt admission")
 	default:
+	}
+}
+
+// assertACPDispatcherPublishedLiveEvents checks that every event of the
+// Task's prompt reached live subscribers in protocol order.
+func assertACPDispatcherPublishedLiveEvents(t *testing.T, live *liveevents.Subscription, task *corev1alpha1.Task) {
+	t.Helper()
+	var published []harnessv2.EventType
+	var last uint64
+	for drained := false; !drained; {
+		select {
+		case event := <-live.C():
+			if event.Runtime == nil || event.TaskUID != string(task.UID) {
+				t.Fatalf("live event = %#v", event)
+			}
+			if event.Runtime.Identity.Sequence <= last {
+				t.Fatalf("live events out of order: %d after %d", event.Runtime.Identity.Sequence, last)
+			}
+			last = event.Runtime.Identity.Sequence
+			published = append(published, event.Runtime.Type)
+		default:
+			drained = true
+		}
+	}
+	if len(published) < 3 || published[0] != harnessv2.EventAccepted || !published[len(published)-1].IsTerminal() ||
+		!slices.Contains(published, harnessv2.EventUpdate) {
+		t.Fatalf("published live events = %v", published)
+	}
+}
+
+func TestACPLivePublisherPatternRedactsTheFinalAnswer(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	secret := "github" + "_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz"
+	completed := harnessv2.Event{Type: harnessv2.EventCompleted, Completed: &harnessv2.CompletedEvent{
+		Result: harnessv2.PromptResult{Content: []harnessv2.ContentBlock{{Type: harnessv2.ContentBlockText, Text: "found " + secret}}},
+	}}
+	broker := liveevents.NewBroker(0)
+	live := broker.Subscribe("default", "task")
+	livePublisher := acpLivePublisher{broker: broker, task: task}
+	livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: true}})
+	livePublisher.observe(completed)
+	live.Close()
+	var final *harnessv2.Event
+	for event := range live.C() {
+		if event.Runtime != nil && event.Runtime.Type == harnessv2.EventCompleted {
+			final = event.Runtime
+		}
+	}
+	if final == nil {
+		t.Fatal("the completed event was not published")
+	}
+	if text := final.Completed.Result.Content[0].Text; strings.Contains(text, secret) {
+		t.Fatalf("published final answer kept a credential-shaped value: %q", text)
+	}
+	if completed.Completed.Result.Content[0].Text != "found "+secret {
+		t.Fatal("redacting the published copy changed the event the journal receives")
+	}
+}
+
+func TestACPLivePublisherPublishesOnlyConfirmedPrompts(t *testing.T) {
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "task", UID: "task-uid"}}
+	update := harnessv2.Event{Type: harnessv2.EventUpdate, Update: &harnessv2.UpdateEvent{
+		Kind: harnessv2.UpdateAssistantMessageChunk, AssistantMessage: &harnessv2.AssistantMessageChunk{Text: "text"},
+	}}
+	for _, confirmed := range []bool{false, true} {
+		broker := liveevents.NewBroker(0)
+		live := broker.Subscribe("default", "task")
+		livePublisher := acpLivePublisher{broker: broker, task: task}
+		livePublisher.observe(harnessv2.Event{Type: harnessv2.EventAccepted, Accepted: &harnessv2.AcceptedEvent{LiveUpdates: confirmed}})
+		livePublisher.observe(update)
+		live.Close()
+		published := 0
+		for range live.C() {
+			published++
+		}
+		if want := map[bool]int{false: 0, true: 2}[confirmed]; published != want {
+			t.Fatalf("confirmed=%v published %d events, want %d", confirmed, published, want)
+		}
 	}
 }

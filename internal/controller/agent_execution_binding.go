@@ -387,6 +387,9 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, fmt.Errorf("resolve frozen ACP MCP configuration: %w", err)
 	}
+	// The launch mode is frozen with the tool policy, so the RuntimeSession
+	// binding, the session create, and every prompt carry the same value.
+	mcpConfiguration.NativePermissions = taskNativePermissions(task.Spec.AgentRuntime)
 	frozenConnections, frozenClassification, frozenTools, err := freezeRequesterConnectionsClassified(ctx, reader, r.MCPRegistry, task, mcpConfiguration)
 	if err != nil {
 		return nil, fmt.Errorf("freeze requester connections: %w", err)
@@ -928,6 +931,9 @@ func validateAgentExecutionSnapshot(
 	if string(profileDigest) != body.ProfileDigest || body.ProfileDigest != binding.RuntimeProfileDigest {
 		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, errors.New("frozen RuntimeProfile digest does not exactly match the binding")
 	}
+	if err := validateFrozenNativePermissions(binding.Backend, body.RuntimeOverride, mcpConfiguration.NativePermissions); err != nil {
+		return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err
+	}
 	if binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint {
 		if err := validateExternalAgentExecutionSnapshot(binding, body); err != nil {
 			return ACPRuntimePlan{}, harnessv2.AgentSessionConfiguration{}, harnessv2.MCPPolicyConfiguration{}, err
@@ -983,6 +989,24 @@ func validateAgentExecutionSnapshot(
 		PoolName: body.PoolName, Image: body.RuntimeImage, Profile: body.RuntimeProfile, Digest: profileDigest,
 		Workspace: workspaceBinding,
 	}, configuration, mcpConfiguration, nil
+}
+
+// validateFrozenNativePermissions checks a snapshot's frozen launch mode.
+// Only a RuntimePool session can be launched to ask, and its mode must be
+// exactly the one the frozen permission decisions require.
+func validateFrozenNativePermissions(
+	backend corev1alpha1.AgentExecutionBackend,
+	runtimeOverride *corev1alpha1.AgentRuntimeSpec,
+	mode harnessv2.NativePermissionMode,
+) error {
+	want := taskNativePermissions(runtimeOverride)
+	if backend != corev1alpha1.AgentExecutionBackendRuntimePool && want != harnessv2.NativePermissionsPreapproved {
+		return errors.New("execution snapshot asks for requester permission decisions on a backend that cannot ask before each tool")
+	}
+	if mode != want {
+		return errors.New("frozen MCP policy native permission mode does not match the frozen permission decisions")
+	}
+	return nil
 }
 
 func validateExternalAgentExecutionSnapshot(

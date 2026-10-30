@@ -225,6 +225,36 @@ type MCPPolicyConfiguration struct {
 	MCPConfigurationDigest string            `json:"mcpConfigurationDigest"`
 	ToolPolicy             MCPToolPolicy     `json:"toolPolicy"`
 	ApprovalPolicy         MCPApprovalPolicy `json:"approvalPolicy"`
+	// NativePermissions selects how the runtime launches the provider-native
+	// tools the tool policy allows. It is part of the RuntimeSession's launch
+	// configuration: every prompt of the session must carry the same value.
+	NativePermissions NativePermissionMode `json:"nativePermissions,omitempty"`
+}
+
+// NativePermissionMode selects whether a runtime may pre-approve the
+// provider-native tools its frozen tool policy allows.
+type NativePermissionMode string
+
+const (
+	// NativePermissionsPreapproved, the empty value, lets the runtime launch
+	// the provider with the policy's native grants pre-approved. The provider
+	// asks only where it insists on asking itself.
+	NativePermissionsPreapproved NativePermissionMode = ""
+	// NativePermissionsAsk launches the provider so it sends a permission
+	// request before every policy-allowed native tool that acts: shell
+	// commands and file writes or edits. Tools outside the policy stay
+	// excluded or denied exactly as in the pre-approved mode.
+	NativePermissionsAsk NativePermissionMode = "ask"
+)
+
+// Validate accepts only the modes this protocol version defines.
+func (m NativePermissionMode) Validate() error {
+	switch m {
+	case NativePermissionsPreapproved, NativePermissionsAsk:
+		return nil
+	default:
+		return fmt.Errorf("native permission mode %q is unsupported", m)
+	}
 }
 
 // MCPPolicyRequiresPermissionCapability reports whether enforcing one policy
@@ -237,6 +267,9 @@ func MCPPolicyRequiresPermissionCapability(toolPolicy MCPToolPolicy, _ MCPApprov
 }
 
 func (c MCPPolicyConfiguration) validate() error {
+	if err := c.NativePermissions.Validate(); err != nil {
+		return err
+	}
 	if err := validateSHA256Digest(c.ToolPolicyDigest); err != nil {
 		return fmt.Errorf("tool policy digest: %w", err)
 	}

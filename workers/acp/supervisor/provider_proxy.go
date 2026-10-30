@@ -213,6 +213,11 @@ func (c ProviderProxyConfig) normalized() (ProviderProxyConfig, *url.URL, error)
 	if c.UpstreamBearerToken == "" || strings.IndexFunc(c.UpstreamBearerToken, func(value rune) bool { return value <= ' ' || value == 0x7f }) >= 0 {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token is required")
 	}
+	// Events are redacted of the exact token only from this length on: a
+	// shorter one could reach live events and the Task's result.
+	if len(c.UpstreamBearerToken) < minRedactedCredentialBytes {
+		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream bearer token must be at least %d bytes", minRedactedCredentialBytes)
+	}
 	if providerproxy.HasUnsafePathSegment(parsed.Path) {
 		return ProviderProxyConfig{}, nil, fmt.Errorf("provider proxy upstream URL is invalid")
 	}

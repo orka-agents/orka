@@ -1,11 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,9 +18,13 @@ import (
 )
 
 const (
-	acpUpdateToolCall       = "tool_call"
-	acpUpdateToolCallUpdate = "tool_call_update"
-	acpContentTypeText      = "text"
+	acpUpdateToolCall          = "tool_call"
+	acpUpdateToolCallUpdate    = "tool_call_update"
+	acpUpdateAgentThoughtChunk = "agent_thought_chunk"
+	acpContentTypeText         = "text"
+	acpContentTypeDiff         = "diff"
+	acpContentItemContent      = "content"
+	acpJSONNull                = "null"
 )
 
 const (
@@ -53,16 +59,168 @@ func promptContentToACP(blocks []harnessv2.ContentBlock) ([]acp.ContentBlock, er
 }
 
 func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent, string, bool, error) {
+	return mapACPUpdateWithOptions(notification, acpUpdateOptions{})
+}
+
+// acpUpdateOptions selects what a prompt's controller asked to receive.
+type acpUpdateOptions struct {
+	// live adds assistant thoughts and the tool name, raw input and file
+	// edits; a controller asks for them with the live-updates header.
+	live bool
+	// rawInputs holds the digest of each tool call's last sent raw input, so
+	// an adapter repeating it does not resend it.
+	rawInputs map[string]string
+	// exact replaces credential values in text before it is bounded, so a
+	// credential cut by the bound cannot leave an unmatched prefix.
+	exact func(string) string
+	// workspaceRoot is the session's workspace, the ACP session cwd; file
+	// edits are sent relative to it.
+	workspaceRoot string
+}
+
+func (o acpUpdateOptions) replace(value string) string {
+	if o.exact == nil {
+		return value
+	}
+	return o.exact(value)
+}
+
+// newRawInput returns the tool call's raw input if it is new, bounded, and a
+// JSON value; otherwise nil.
+func (o acpUpdateOptions) newRawInput(toolCallID string, raw json.RawMessage) json.RawMessage {
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || string(raw) == acpJSONNull || len(raw) > harnessv2.MaxToolCallRawInputBytes || !json.Valid(raw) {
+		return nil
+	}
+	digest := sha256.Sum256(raw)
+	encoded := hex.EncodeToString(digest[:])
+	if o.rawInputs != nil {
+		if o.rawInputs[toolCallID] == encoded {
+			return nil
+		}
+		o.rawInputs[toolCallID] = encoded
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+// liveToolContent is a live tool content snapshot: text content and the file
+// edits that fit, with whether either was left out.
+type liveToolContent struct {
+	blocks         []harnessv2.ContentBlock
+	diffs          []harnessv2.ToolCallDiff
+	contentOmitted bool
+	diffsOmitted   bool
+}
+
+// mapACPToolCallLiveContent keeps text content and file edits. Terminal or
+// unknown content omits the whole snapshot as the non-live mapping does. A
+// file edit outside the workspace root, or over the update bound, is left out
+// on its own, keeping the text content.
+func mapACPToolCallLiveContent(raw json.RawMessage, workspaceRoot string) (liveToolContent, error) {
+	var result liveToolContent
+	if len(raw) == 0 || string(raw) == acpJSONNull {
+		return result, nil
+	}
+	var items []struct {
+		Type    string          `json:"type"`
+		Content json.RawMessage `json:"content"`
+		Path    string          `json:"path"`
+		OldText *string         `json:"oldText"`
+		NewText *string         `json:"newText"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return result, fmt.Errorf("decode ACP tool call content: %w", err)
+	}
+	omitted := liveToolContent{contentOmitted: true}
+	diffBytes := 0
+	for index, item := range items {
+		if item.Type == acpContentTypeDiff {
+			relative, inside := workspaceRelativeDiffPath(workspaceRoot, item.Path)
+			size := 0
+			if item.NewText != nil {
+				size += len(*item.NewText)
+			}
+			if item.OldText != nil {
+				size += len(*item.OldText)
+			}
+			if !inside || item.NewText == nil || len(result.diffs) == harnessv2.MaxToolCallDiffs ||
+				diffBytes+size > harnessv2.MaxToolCallDiffBytes {
+				result.diffsOmitted = true
+				continue
+			}
+			diff := harnessv2.ToolCallDiff{Path: relative, NewText: *item.NewText}
+			if item.OldText != nil {
+				old := *item.OldText
+				diff.OldText = &old
+			}
+			if (harnessv2.ToolCallUpdate{ToolCallID: "bound", Status: harnessv2.ToolCallStatusPending,
+				Diffs: []harnessv2.ToolCallDiff{diff}}).Validate() != nil {
+				result.diffsOmitted = true
+				continue
+			}
+			diffBytes += size
+			result.diffs = append(result.diffs, diff)
+			continue
+		}
+		if len(result.blocks) == harnessv2.MaxContentBlocks || item.Type != acpContentItemContent || len(item.Content) == 0 {
+			return omitted, nil
+		}
+		var block acp.ContentBlock
+		if err := json.Unmarshal(item.Content, &block); err != nil {
+			return result, fmt.Errorf("decode ACP tool call content block %d: %w", index, err)
+		}
+		projected, ok, bounded, err := projectACPContentBlock(block)
+		if err != nil {
+			return result, fmt.Errorf("project ACP tool call content block %d: %w", index, err)
+		}
+		if bounded || !ok {
+			return omitted, nil
+		}
+		result.blocks = append(result.blocks, projected)
+	}
+	return result, nil
+}
+
+// workspaceRelativeDiffPath maps an ACP diff path to a path relative to the
+// session's workspace root. It reports false for an empty path, one outside
+// the root, or one with ".." segments.
+func workspaceRelativeDiffPath(workspaceRoot, value string) (string, bool) {
+	if strings.TrimSpace(value) == "" || strings.ContainsRune(value, 0) {
+		return "", false
+	}
+	if strings.Contains("/"+value+"/", "/../") {
+		return "", false
+	}
+	cleaned := path.Clean(value)
+	if path.IsAbs(cleaned) {
+		root := path.Clean(strings.TrimSpace(workspaceRoot))
+		if !path.IsAbs(root) {
+			return "", false
+		}
+		relative, inside := strings.CutPrefix(cleaned, strings.TrimSuffix(root, "/")+"/")
+		if !inside {
+			return "", false
+		}
+		cleaned = relative
+	}
+	if harnessv2.ValidateWorkspaceRelativePath(cleaned) != nil {
+		return "", false
+	}
+	return cleaned, true
+}
+
+//nolint:gocyclo // One switch maps every ACP session update kind.
+func mapACPUpdateWithOptions(notification *acp.SessionNotification, options acpUpdateOptions) (*harnessv2.UpdateEvent, string, bool, error) {
 	if notification == nil {
 		return nil, "", false, nil
 	}
 	var envelope struct {
+		acpToolCallIdentity
 		SessionUpdate string                   `json:"sessionUpdate"`
 		Content       json.RawMessage          `json:"content"`
-		ToolCallID    string                   `json:"toolCallId"`
-		Title         string                   `json:"title"`
 		Kind          string                   `json:"kind"`
 		Status        harnessv2.ToolCallStatus `json:"status"`
+		RawInput      json.RawMessage          `json:"rawInput"`
 		Entries       []harnessv2.PlanEntry    `json:"entries"`
 		Used          uint64                   `json:"used"`
 		Size          uint64                   `json:"size"`
@@ -86,22 +244,58 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			Kind:             harnessv2.UpdateAssistantMessageChunk,
 			AssistantMessage: &harnessv2.AssistantMessageChunk{Text: content.Text},
 		}, content.Text, true, nil
+	case acpUpdateAgentThoughtChunk:
+		if !options.live {
+			return nil, "", false, nil
+		}
+		var content struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(envelope.Content, &content); err != nil {
+			return nil, "", false, fmt.Errorf("decode ACP agent thought content: %w", err)
+		}
+		if content.Type != acpContentTypeText || content.Text == "" {
+			return nil, "", false, nil
+		}
+		return &harnessv2.UpdateEvent{
+			Kind:             harnessv2.UpdateAssistantThoughtChunk,
+			AssistantThought: &harnessv2.AssistantMessageChunk{Text: content.Text},
+		}, "", true, nil
 	case acpUpdateToolCall, acpUpdateToolCallUpdate:
 		toolCallID, err := canonicalACPToolCallID(envelope.ToolCallID)
 		if err != nil {
 			return nil, "", false, err
 		}
 		contentPresent := len(envelope.Content) > 0
-		toolContent, contentOmitted, err := mapACPToolCallContent(envelope.Content)
+		var toolContent []harnessv2.ContentBlock
+		var diffs []harnessv2.ToolCallDiff
+		var contentOmitted, diffsOmitted bool
+		if options.live {
+			var live liveToolContent
+			live, err = mapACPToolCallLiveContent(envelope.Content, options.workspaceRoot)
+			toolContent, diffs, contentOmitted, diffsOmitted = live.blocks, live.diffs, live.contentOmitted, live.diffsOmitted
+		} else {
+			toolContent, contentOmitted, err = mapACPToolCallContent(envelope.Content)
+		}
 		if err != nil {
 			return nil, "", false, err
+		}
+		var name string
+		var rawInput json.RawMessage
+		if options.live {
+			// A conflicting or oversized identity is not an error here: the
+			// permission path enforces identity, and the name is display data.
+			name, _ = envelope.name()
+			rawInput = options.newRawInput(toolCallID, envelope.RawInput)
 		}
 		// ACP adapters may stream tool output through provider-specific fields
 		// that harness v2 deliberately does not project. A status-less update
 		// with no visible metadata would otherwise become an unbounded series of
-		// synthetic in_progress events carrying identical state.
+		// synthetic in_progress events carrying identical state. A raw input is
+		// visible only when it changed.
 		if envelope.SessionUpdate == acpUpdateToolCallUpdate && envelope.Status == "" &&
-			envelope.Title == "" && envelope.Kind == "" && !contentPresent {
+			envelope.Title == "" && envelope.Kind == "" && !contentPresent && len(rawInput) == 0 {
 			return nil, "", false, nil
 		}
 		status := envelope.Status
@@ -119,8 +313,9 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		return &harnessv2.UpdateEvent{
 			Kind: kind,
 			ToolCall: &harnessv2.ToolCallUpdate{
-				ToolCallID: toolCallID, Title: boundACPToolCallTitle(envelope.Title), Kind: envelope.Kind, Status: status,
+				ToolCallID: toolCallID, Title: boundACPToolCallTitle(options.replace(envelope.Title)), Kind: envelope.Kind, Status: status,
 				Content: toolContent, ContentReplace: contentPresent && !contentOmitted, ContentOmitted: contentOmitted,
+				Name: name, RawInput: rawInput, Diffs: diffs, DiffsOmitted: diffsOmitted,
 			},
 		}, "", true, nil
 	case "plan":
@@ -138,7 +333,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			return nil, "", false, nil
 		}
 		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: usage}, "", true, nil
-	case "agent_thought_chunk", "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update", "notice":
+	case "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update", "notice":
 		return nil, "", false, nil
 	default:
 		return nil, "", false, nil
@@ -146,7 +341,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 }
 
 func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 || string(raw) == acpJSONNull {
 		return nil, false, nil
 	}
 	var items []struct {
@@ -161,7 +356,7 @@ func mapACPToolCallContent(raw json.RawMessage) ([]harnessv2.ContentBlock, bool,
 		if len(mapped) == harnessv2.MaxContentBlocks {
 			return nil, true, nil
 		}
-		if item.Type != "content" || len(item.Content) == 0 {
+		if item.Type != acpContentItemContent || len(item.Content) == 0 {
 			return nil, true, nil
 		}
 		var block acp.ContentBlock
@@ -232,37 +427,55 @@ func acpToolContentExceedsHarnessLimits(block harnessv2.ContentBlock) bool {
 		len(block.MimeType) > harnessv2.MaxContentMIMETypeBytes
 }
 
+// boundACPToolContentToEventLine keeps a tool update within one event line:
+// it drops the live raw input and file edits first, then the content snapshot,
+// which receivers then treat as omitted.
 func boundACPToolContentToEventLine(event *harnessv2.Event, maxLineBytes int) error {
-	if event == nil || event.Update == nil || event.Update.ToolCall == nil || len(event.Update.ToolCall.Content) == 0 {
+	if event == nil || event.Update == nil || event.Update.ToolCall == nil {
+		return nil
+	}
+	tool := event.Update.ToolCall
+	if len(tool.Content) == 0 && len(tool.Diffs) == 0 && len(tool.RawInput) == 0 {
 		return nil
 	}
 	if maxLineBytes <= 0 {
 		return fmt.Errorf("%w: max event line bytes must be positive", harnessv2.ErrEventLineTooLarge)
 	}
+	fits := func() (bool, error) {
+		line, err := json.Marshal(event)
+		if err != nil {
+			return false, fmt.Errorf("marshal projected ACP tool update: %w", err)
+		}
+		return len(line) <= maxLineBytes, nil
+	}
+	if ok, err := fits(); ok || err != nil {
+		return err
+	}
 
-	line, err := json.Marshal(event)
+	original := *tool
+	tool.RawInput = nil
+	if len(tool.Diffs) > 0 {
+		tool.Diffs, tool.DiffsOmitted = nil, true
+	}
+	if ok, err := fits(); ok || err != nil {
+		if err != nil {
+			*tool = original
+		}
+		return err
+	}
+	if len(tool.Content) > 0 {
+		tool.Content = nil
+		tool.ContentReplace = false
+		tool.ContentOmitted = true
+	}
+	ok, err := fits()
+	if err == nil && !ok {
+		err = fmt.Errorf("%w: projected ACP tool update exceeds %d bytes without telemetry content", harnessv2.ErrEventLineTooLarge, maxLineBytes)
+	}
 	if err != nil {
-		return fmt.Errorf("marshal projected ACP tool update: %w", err)
+		*tool = original
 	}
-	if len(line) <= maxLineBytes {
-		return nil
-	}
-
-	tool := event.Update.ToolCall
-	content, contentReplace, contentOmitted := tool.Content, tool.ContentReplace, tool.ContentOmitted
-	tool.Content = nil
-	tool.ContentReplace = false
-	tool.ContentOmitted = true
-	line, err = json.Marshal(event)
-	if err != nil {
-		tool.Content, tool.ContentReplace, tool.ContentOmitted = content, contentReplace, contentOmitted
-		return fmt.Errorf("marshal projected ACP tool update: %w", err)
-	}
-	if len(line) > maxLineBytes {
-		tool.Content, tool.ContentReplace, tool.ContentOmitted = content, contentReplace, contentOmitted
-		return fmt.Errorf("%w: projected ACP tool update exceeds %d bytes without telemetry content", harnessv2.ErrEventLineTooLarge, maxLineBytes)
-	}
-	return nil
+	return err
 }
 
 func boundACPToolCallTitle(value string) string {

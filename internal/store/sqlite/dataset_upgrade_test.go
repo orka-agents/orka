@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -134,25 +135,32 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
-	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
-		t.Run(revision, func(t *testing.T) {
-			path, db := historicalSchemaDB(t, revision)
-			seedMigrationRecords(t, db, path)
-			before := applicationRows(t, db)
-			beforeSchema := storedSchemaSQL(t, db)
-			_, err := db.Exec(`PRAGMA user_version=2`)
-			require.NoError(t, err)
-			require.NoError(t, db.Close())
-			s, err := OpenLockedStore(path)
-			require.ErrorContains(t, err, "unsupported SQLite schema version")
-			require.Nil(t, s)
-			require.Empty(t, migrationBackups(t, path))
-			raw := rawMigrationDB(t, path)
-			require.Equal(t, before, applicationRows(t, raw))
-			require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
-			version, err := readSchemaVersion(raw)
-			require.NoError(t, err)
-			require.Equal(t, 2, version)
-		})
+	// A version-1 marker on another layout is not the version-1 store the
+	// version-1 upgrade accepts; a newer marker is unsupported outright.
+	for _, marker := range []int{1, SchemaVersion + 1} {
+		for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
+			t.Run(fmt.Sprintf("%d/%s", marker, revision), func(t *testing.T) {
+				path, db := historicalSchemaDB(t, revision)
+				seedMigrationRecords(t, db, path)
+				before := applicationRows(t, db)
+				beforeSchema := storedSchemaSQL(t, db)
+				_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, marker))
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+				s, err := OpenLockedStore(path)
+				require.Error(t, err)
+				if marker > SchemaVersion {
+					require.ErrorContains(t, err, "unsupported SQLite schema version")
+				}
+				require.Nil(t, s)
+				require.Empty(t, migrationBackups(t, path))
+				raw := rawMigrationDB(t, path)
+				require.Equal(t, before, applicationRows(t, raw))
+				require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
+				version, err := readSchemaVersion(raw)
+				require.NoError(t, err)
+				require.Equal(t, marker, version)
+			})
+		}
 	}
 }

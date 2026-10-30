@@ -87,6 +87,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks/:id/approvals": coreAPIPolicy("get", "tasks", "id"),
 	"POST /api/v1/tasks/:id/approvals/:approvalID/decision": coreAPIPolicy("update", "tasks/approvals", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "patch", "id"}),
+	"POST /api/v1/tasks/:id/cancel": coreAPIPolicy("patch", "tasks", "id"),
 	"POST /api/v1/tasks/:id/fork": coreAPIPolicy("get", "tasks", "id",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "create", ""}),
 	"GET /api/v1/tasks/:id/result": coreAPIPolicy("get", "tasks", "id"),
@@ -249,6 +250,12 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /openai/v1/models":            coreAPIPolicy("list", "providers", ""),
 	"POST /anthropic/v1/messages":      coreAPIPolicy("create", "chats", ""),
 	"GET /anthropic/v1/models":         coreAPIPolicy("list", "providers", ""),
+
+	// AHP token routes are identity-only like Connections: the handlers
+	// require a verified OIDC or context-token owner and refuse ServiceAccounts.
+	"POST /api/v1/ahp-tokens":       {identityOnly: true},
+	"GET /api/v1/ahp-tokens":        {identityOnly: true},
+	"DELETE /api/v1/ahp-tokens/:id": {identityOnly: true},
 }
 
 // externalAPIRouter installs authorization on the endpoint, where Fiber has

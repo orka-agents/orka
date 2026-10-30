@@ -5,6 +5,7 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- include "orka.validateAgentHosts" . }}
+{{- include "orka.validateAHP" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -190,6 +191,36 @@ spec:
             # Matches this template's Pod label; each host's NetworkPolicy
             # admits only these Pods from the release namespace.
             - --agent-host-controller-pod-labels=orka.ai/network-role=controller
+            {{- end }}
+            {{- if include "orka.ahpEnabled" . }}
+            {{- with .Values.controller.ahp }}
+            - --enable-ahp-api=true
+            {{- if .tokenMaxTTL }}
+            - {{ printf "--ahp-token-max-ttl=%s" (toString .tokenMaxTTL) | quote }}
+            {{- end }}
+            {{- if .turnTimeout }}
+            - {{ printf "--ahp-turn-timeout=%s" (toString .turnTimeout) | quote }}
+            {{- end }}
+            {{- if .gitCredentialSecret }}
+            - {{ printf "--ahp-git-credential-secret=%s" .gitCredentialSecret | quote }}
+            {{- end }}
+            {{- if .workspaceClass }}
+            - {{ printf "--ahp-workspace-class=%s" .workspaceClass | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if include "orka.ahpWorkspacesEnabled" . }}
+            - {{ printf "--ahp-workspace-namespace=%s" (include "orka.ahpWorkspaceNamespace" .) | quote }}
+            - {{ printf "--ahp-workspace-image=%s" (include "orka.ahpWorkspaceImage" .) | quote }}
+            {{- /* Values reused from a release before AHP have no idle timeout;
+            the controller then keeps its own default. An explicit 0 is kept. */}}
+            {{- $idleTimeout := toString (dig "ahp" "workspaceIdleTimeout" "" .Values.controller) }}
+            {{- if $idleTimeout }}
+            - {{ printf "--ahp-workspace-idle-timeout=%s" $idleTimeout | quote }}
+            {{- end }}
+            {{- if .Values.controller.ahp.workspaceConnectorProvider }}
+            - {{ printf "--ahp-workspace-connector-provider=%s" .Values.controller.ahp.workspaceConnectorProvider | quote }}
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- with .Values.controller.oidc }}
             {{- if .issuer }}

@@ -60,6 +60,7 @@ const sidebars = {
             'reference/openai-compat',
             'reference/anthropic-compat',
             'operations/shared-compatibility-api',
+            'operations/agent-host-protocol',
             'guides/gateways',
           ],
         },

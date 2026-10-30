@@ -289,6 +289,17 @@ type promptState struct {
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
+	// live is set when the controller asked for live updates.
+	live bool
+	// redactor replaces the session's credentials in every event this prompt
+	// emits. The redaction streams hold back a chunk suffix that could begin
+	// a credential until the stream's next chunk or its end.
+	redactor           *credentialRedactor
+	assistantRedaction *redactionStream
+	thoughtRedaction   *redactionStream
+	rawInputs          map[string]string
+	// lastEventAt is the time of the prompt's last emitted event.
+	lastEventAt time.Time
 }
 
 type promptMutationExecutor interface {
@@ -783,6 +794,10 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
+		return
+	}
+	if request.MCPConfiguration.NativePermissions == harnessv2.NativePermissionsAsk && !s.cfg.Capabilities.Provider.SupportsNativePermissionAsk {
+		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider cannot launch a session that asks before each native tool", nil, false)
 		return
 	}
 	expected := s.expectedFence(request.Metadata.Fence.RuntimeSessionUID, request.Metadata.Fence.RuntimeSessionGeneration)
@@ -1308,6 +1323,7 @@ func (s *Server) createSession(
 		},
 		MCPServers:            []acp.MCPServer{mcpServer},
 		NewSessionMeta:        projection.NewSessionMeta,
+		RequiredModeID:        projection.RequiredModeID,
 		ResumeSessionID:       resumeSessionID,
 		AuthMethodID:          s.cfg.Provider.AuthMethodID,
 		InitializeTimeout:     defaultDuration(s.cfg.InitializeTimeout, acp.DefaultInitializeTimeout),

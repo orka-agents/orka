@@ -239,6 +239,46 @@ controller:
           cpu: "4"
           memory: 8Gi
 
+  # Agent Host Protocol at /ahp on the API port, for desktop AHP clients. Off by
+  # default; requires controller.oidc (issuer, audience and allowedSubjects):
+  # AHP connection tokens are minted for a person's own OIDC sign-in.
+  # Clients connect with wss://<API host>/ahp?tkn=<token>; expose the API
+  # Service through a TLS-terminating Ingress or Gateway that passes WebSocket
+  # upgrades.
+  ahp:
+    enabled: false
+    # Longest lifetime of an AHP connection token. Tokens default to 720h, or to
+    # this maximum when it is lower.
+    tokenMaxTTL: 2160h
+    # Timeout of each AHP turn's Task.
+    turnTimeout: 2h
+    # Secret in each AHP user's namespace whose token key clones and publishes
+    # their github.com repositories; it is never sent to another host. Empty
+    # clones public repositories read-only.
+    gitCredentialSecret: ""
+    # ExecutionWorkspaceClass for session-scoped workspaces. Needs an installed
+    # workspace provider and controller.executionWorkspace.dispatchEnabled.
+    workspaceClass: ""
+    # Digest-pinned image for per-user AHP workspace Pods, where clients run
+    # git and terminals, with sh, git and the common tools Orka's scripts run
+    # there (cat, dirname, find, grep, head, ls, mkdir, mktemp, mv, readlink,
+    # rm, sed, sleep, stat). Empty disables workspaces and terminals.
+    # When set, the chart creates workspaceNamespace with the restricted Pod
+    # Security profile, the controller's Role in it, and a NetworkPolicy that
+    # admits no ingress and allows egress only to DNS and TCP 443.
+    workspaceImage: ""
+    # Must differ from the Helm release namespace, controller.watchNamespace
+    # and controller.acpRuntime.namespace.
+    workspaceNamespace: orka-ahp-workspaces
+    # Remove a workspace this long after its last use, while no shell or turn
+    # runs and nothing in it is unpushed. 0 keeps workspaces until their
+    # user's last session ends.
+    workspaceIdleTimeout: 4h
+    # ConnectorProvider, in each user's namespace, whose github.com links give
+    # that user's workspace read access to their private repositories. Needs
+    # connectors enabled. Empty keeps workspaces to public repositories.
+    workspaceConnectorProvider: ""
+
   # OIDC/JWT authentication for external API requests
   oidc:
     # Issuer URL expected in bearer tokens. Requires audience when set.

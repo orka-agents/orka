@@ -65,7 +65,8 @@ resource and subresource fields and to the same slash-separated string in RBAC.
 
 The HTTP method does not define the permission. `PUT /api/v1/agents/:name` patches
 the Kubernetes Agent, so it requires `patch` on `agents`. Approval decisions require
-`update` on `tasks/approvals` and `patch` on the parent Task. A monitor run or
+`update` on `tasks/approvals` and `patch` on the parent Task; a permission request a
+built-in runtime holds for the Task's requester can be decided only by that requester. A monitor run or
 command also needs `patch` on its RepositoryMonitor. Commands also require named
 `create` on `repositorymonitors/runs` before the command or its derived run is
 stored. A scan, validation, or patch request that creates a Task also needs
@@ -167,6 +168,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/trace` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/approvals` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `POST` | `/api/v1/tasks/:id/approvals/:approvalID/decision` | `core.orka.ai` | `tasks/approvals` | `update` | `:id` | `Q` | `patch` on `core.orka.ai/tasks`, `:id`; Gateway operate |
+| `POST` | `/api/v1/tasks/:id/cancel` | `core.orka.ai` | `tasks` | `patch` | `:id` | `Q` | Gateway operate; a signed-in person must be the Task's requester |
 | `POST` | `/api/v1/tasks/:id/fork` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `create` on `core.orka.ai/tasks`, empty name; Gateway read; Class use; Checkpoint use |
 | `GET` | `/api/v1/tasks/:id/result` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/plan` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
@@ -289,6 +291,9 @@ otherwise. In the additional-checks column:
 | `DELETE` | `/api/v1/connections/:name` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/authorize` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject |
 | `POST` | `/api/v1/connections/:name/complete` | none | none | identity only | empty | not applicable | Verified OIDC or context-token identity with issuer and subject; ServiceAccount callers are refused; Connections are visible and mutable only to their owning subject; additionally requires the one-time completion token handed to the browser that finished consent |
+| `POST` | `/api/v1/ahp-tokens` | none | none | identity only | empty | `Q` | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `GET` | `/api/v1/ahp-tokens` | none | none | identity only | empty | `Q` | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
+| `DELETE` | `/api/v1/ahp-tokens/:id` | none | none | identity only | empty | `Q` | Verified OIDC sign-in with issuer and subject; ServiceAccount callers and delegated context tokens are refused |
 | `GET` | `/api/v1/secrets` | `""` | `secrets` | `list` | empty | `Q` | none |
 | `POST` | `/api/v1/chat` | `core.orka.ai` | `chats` | `create` | empty | `B` | Supplied JSON `sessionId`: `get` and `update` on `core.orka.ai/sessions` with that name; supplied JSON `agentRef`: `get core.orka.ai/agents` with that name; each nested tool requires its own resource permissions |
 | `GET` | `/api/v1/chat/config` | `core.orka.ai` | `chats/config` | `get` | empty | `Q` | none |

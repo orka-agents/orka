@@ -727,3 +727,96 @@ func (s *Source) refreshLostToConsent(ctx context.Context, cfg connectors.OAuthP
 	}
 	return winner, nil
 }
+
+// ResolveGitHubPersonCredential returns a person's current github.com token
+// from their link to provider, for an operation the person runs for
+// themselves rather than a Task, such as reading their repositories in their
+// own workspace. It binds the Connection as it is now: only a Ready link
+// owned by the person, whose provider is accepted, issues github.com tokens
+// and is unchanged since consent, serves it. The token stays valid for at
+// least horizon.
+func (s *Source) ResolveGitHubPersonCredential(ctx context.Context, namespace, provider, issuer, subject string, horizon time.Duration) (outboundaccess.ConnectionCredential, error) {
+	if s == nil || s.Client == nil || s.Credentials == nil {
+		return outboundaccess.ConnectionCredential{}, errors.New("connection credential source is not configured")
+	}
+	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(subject) == "" {
+		return outboundaccess.ConnectionCredential{}, errors.New("connection credential requires a verified person")
+	}
+	load := func() (*corev1alpha1.Connection, error) {
+		connection := &corev1alpha1.Connection{}
+		name := connectors.ConnectionName(provider, issuer, subject)
+		if err := s.reader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, connection); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, ErrNoPersonConnection
+			}
+			return nil, fmt.Errorf("load connection: %w", err)
+		}
+		if connection.Spec.Subject.Issuer != issuer || connection.Spec.Subject.Subject != subject || connection.Spec.ProviderRef.Name != provider {
+			return nil, errors.New("connection does not belong to the person")
+		}
+		if !connection.DeletionTimestamp.IsZero() || !connectors.ConnectionLinked(connection) {
+			return nil, errors.New("connection is not ready")
+		}
+		return connection, nil
+	}
+	connection, err := load()
+	if err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	credential, err := s.Credentials.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return outboundaccess.ConnectionCredential{}, errors.New("connection holds no credential; the person must reconnect")
+		}
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	validate := func(connection *corev1alpha1.Connection, credential store.ConnectorCredential) error {
+		// A Connection deleted and recreated under the same name can reach the
+		// same grant sequence; the credential belongs only to the one it was
+		// read for.
+		if string(connection.UID) != ref.ConnectionUID {
+			return errors.New("connection was replaced; try again")
+		}
+		if credential.GrantSequence <= 0 || credential.GrantSequence != connection.Status.GrantSequence {
+			return errors.New("connection was re-linked; try again")
+		}
+		accepted, err := s.validateProvider(ctx, connection, credential, nil)
+		if err != nil {
+			return err
+		}
+		if !connectors.ProviderIssuesGitHubCredentials(accepted) {
+			return errors.New("connector provider does not issue github.com credentials")
+		}
+		return nil
+	}
+	if err := validate(connection, credential); err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	if s.expiresWithin(credential, horizon) {
+		if credential, err = s.refreshSingleFlight(ctx, connection, ref, credential.GrantSequence, horizon); err != nil {
+			return outboundaccess.ConnectionCredential{}, err
+		}
+		if s.expiresWithin(credential, horizon) {
+			return outboundaccess.ConnectionCredential{}, errors.New("the provider issued a token that expires too soon")
+		}
+	}
+	// A disconnect or re-consent may have landed meanwhile; judge the
+	// Connection as it is now before releasing anything.
+	if connection, err = load(); err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	if err := validate(connection, credential); err != nil {
+		return outboundaccess.ConnectionCredential{}, err
+	}
+	return outboundaccess.ConnectionCredential{
+		AccessToken: credential.AccessToken, TokenType: credential.TokenType,
+		ConnectionUID: string(connection.UID), Generation: connection.Generation, Mode: connection.Spec.Mode,
+	}, nil
+}
+
+// ErrNoPersonConnection reports that the person has no link to the provider.
+var ErrNoPersonConnection = errors.New("the person has no connection to this provider")

@@ -80,6 +80,28 @@ data: {"lastSeq":3,"type":"TaskSucceeded"}
 
 Reconnect by passing the last observed SSE id as `after`.
 
+### Live events
+
+Add `live=true` to also receive a running agent Task's events as they arrive,
+before they are durable:
+
+```text
+event: live
+data: {"taskUID":"…","runtime":{"type":"update","update":{"kind":"assistant_message_chunk","assistantMessage":{"text":"Looking at the"}}}}
+```
+
+`runtime` is the runtime's event: assistant text and reasoning deltas, tool calls with
+their name, input, output and file edits, plan and usage updates, and the turn's end.
+Content is redacted before it leaves the runtime: the exact credentials the runtime holds
+are replaced, then the shared credential patterns are applied to each delta. A pattern
+split across deltas can escape the live redaction; the durable events, redacted once the
+text is complete, remain the record.
+
+Live frames have no SSE id and are not replayed on reconnect. A client that reads too
+slowly gets one `live_lagged` frame and no further live frames; the durable events
+continue. Live events exist only on the API server that runs the Task, and are lost
+when it restarts.
+
 ## Session event aggregation
 
 Session timelines aggregate task events whose `sessionName` equals the session id:

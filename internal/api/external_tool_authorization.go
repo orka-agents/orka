@@ -31,6 +31,7 @@ import (
 const (
 	externalToolAgentResource    = "agents"
 	externalToolTaskResource     = "tasks"
+	externalToolSessionResource  = "sessions"
 	externalToolCreateVerb       = "create"
 	externalToolDeleteVerb       = "delete"
 	externalToolRBACSuggestion   = "Check RBAC permissions"
@@ -50,7 +51,7 @@ func authorizeExternalToolContext(tc *tools.ToolContext, userInfo *UserInfo, eve
 		tc.ResultStore = &externalToolResultReader{reader: tc.ResultStore, client: authorizedClient}
 	}
 	if tc.SessionDeleter != nil {
-		tc.SessionDeleter = &externalToolSessionDeleter{deleter: tc.SessionDeleter, authorization: authorization}
+		tc.SessionDeleter = &externalToolSessionDeleter{deleter: tc.SessionDeleter, authorization: authorization, reader: authorizedClient.Client}
 	}
 	tc.AuthorizePodLogs = func(ctx context.Context, namespace, podName string) error {
 		return authorization.authorize(ctx, namespace, "get", "", "pods/log", podName)
@@ -265,7 +266,8 @@ func (c *externalToolClient) authorizeTask(ctx context.Context, task *corev1alph
 	}
 	// Gateway Tasks require the dedicated Gateway read/operate API checks.
 	// Generic chat tools cannot act on them or reveal their transcripts.
-	if gatewayOwned {
+	// Nor another person's AHP turns, which only their requester may see.
+	if gatewayOwned || ahpTaskHidden(c.authorization.userInfo, task) {
 		return apierrors.NewNotFound(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: externalToolTaskResource}, task.Name)
 	}
 	return nil
@@ -320,6 +322,17 @@ func (c *externalToolClient) List(ctx context.Context, list client.ObjectList, o
 func (c *externalToolClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
 	if err := c.authorize(ctx, obj, obj.GetNamespace(), externalToolCreateVerb, ""); err != nil {
 		return err
+	}
+	// A Task cannot continue another person's AHP session, which would read
+	// their conversation into it.
+	if task, ok := obj.(*corev1alpha1.Task); ok && task.Spec.SessionRef != nil {
+		hidden, err := ahpSessionHiddenIn(ctx, c.Client, c.authorization.userInfo, task.Namespace, task.Spec.SessionRef.Name)
+		if err != nil {
+			return err
+		}
+		if hidden {
+			return apierrors.NewNotFound(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: externalToolSessionResource}, task.Spec.SessionRef.Name)
+		}
 	}
 	return c.Client.Create(ctx, obj, opts...)
 }
@@ -415,11 +428,22 @@ type externalToolSessionDeleter struct {
 		DeleteSession(context.Context, string, string) error
 	}
 	authorization *externalToolAuthorization
+	// reader finds the owner of an AHP session.
+	reader client.Reader
 }
 
 func (d *externalToolSessionDeleter) DeleteSession(ctx context.Context, namespace, sessionID string) error {
-	if err := d.authorization.authorize(ctx, namespace, externalToolDeleteVerb, corev1alpha1.GroupVersion.Group, "sessions", sessionID); err != nil {
+	if err := d.authorization.authorize(ctx, namespace, externalToolDeleteVerb, corev1alpha1.GroupVersion.Group, externalToolSessionResource, sessionID); err != nil {
 		return err
+	}
+	if d.reader != nil {
+		hidden, err := ahpSessionHiddenIn(ctx, d.reader, d.authorization.userInfo, namespace, sessionID)
+		if err != nil {
+			return err
+		}
+		if hidden {
+			return apierrors.NewNotFound(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: externalToolSessionResource}, sessionID)
+		}
 	}
 	if d.deleter == nil || (reflect.ValueOf(d.deleter).Kind() == reflect.Pointer && reflect.ValueOf(d.deleter).IsNil()) {
 		return fmt.Errorf("session manager is unavailable")

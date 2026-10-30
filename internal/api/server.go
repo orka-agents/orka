@@ -22,9 +22,11 @@ import (
 	"github.com/gofiber/fiber/v3/middleware/requestid"
 	"github.com/valyala/fasthttp"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
@@ -32,6 +34,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -100,6 +103,16 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// AHP serves the Agent Host Protocol at /ahp and its token routes; nil
+	// leaves /ahp unrouted and the token routes answering 501.
+	AHP *ahphost.Host
+	// AHPBackend, with AHP, serves Orka's built-in runtimes as AHP agents.
+	AHPBackend *AHPBackendConfig
+	// LiveEvents carries running Tasks' events from the ACP dispatcher to live
+	// event streams and the AHP backend; nil disables them.
+	LiveEvents *liveevents.Broker
+	// RESTConfig lets the API server run commands in AHP workspaces.
+	RESTConfig *rest.Config
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
@@ -108,6 +121,8 @@ type ServerConfig struct {
 
 // Server is the REST API server
 type Server struct {
+	// ahpBackend is the AHP session backend, when AHP serves sessions.
+	ahpBackend          *ahpBackend
 	app                 *fiber.App
 	client              client.Client
 	config              ServerConfig
@@ -176,11 +191,28 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
+		LiveEvents:                config.LiveEvents,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
 		Connectors:                config.Connectors,
+		AHP:                       config.AHP,
 	})
+	if config.AHP != nil && config.AHPBackend != nil {
+		backend := newAHPBackend(server.handlers, config.AHP.Store(), config.LiveEvents, *config.AHPBackend)
+		backend.emitterFor = config.AHP.Emitter
+		backend.recheckToken = config.AHP.Recheck
+		backend.updateTerminals = config.AHP.UpdateTerminals
+		backend.workspaces = &ahpWorkspaces{
+			b: backend, clientset: config.Clientset, rest: config.RESTConfig,
+			namespace: config.AHPBackend.WorkspaceNamespace, image: config.AHPBackend.WorkspaceImage,
+		}
+		if err := config.AHP.RegisterBackend(backend); err != nil {
+			log.Error(err, "register the AHP session backend")
+		} else {
+			server.ahpBackend = backend
+		}
+	}
 	resolver := NewProviderResolver(c, config.Chat)
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -340,6 +372,12 @@ func (s *Server) setupRoutes() {
 	// state and the sealed PKCE verifier authenticate it instead.
 	s.app.Get(connectors.CallbackPath, s.handlers.ConnectionCallback)
 
+	// The AHP endpoint authenticates its own connection tokens before the
+	// WebSocket upgrade, so it sits outside the bearer-auth group.
+	if s.config.AHP != nil {
+		s.app.Get(ahpEndpointPath, ahpEndpoint(s.config.AHP))
+	}
+
 	externalAuth := NewAuthMiddleware(s.client, AuthConfig{OIDC: s.config.OIDC, ContextTokens: s.config.ContextTokens})
 
 	// API v1 group
@@ -348,29 +386,30 @@ func (s *Server) setupRoutes() {
 	// Task endpoints
 	api.Post("/tasks", s.handlers.CreateTask)
 	api.Get("/tasks", s.handlers.ListTasks)
-	api.Get("/tasks/:id", s.handlers.GetTask)
-	api.Delete("/tasks/:id", s.handlers.DeleteTask)
-	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
-	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
-	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
-	api.Get("/tasks/:id/trace", s.handlers.GetTaskTrace)
-	api.Get("/tasks/:id/approvals", s.handlers.ListTaskApprovals)
-	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.DecideTaskApproval)
-	api.Post("/tasks/:id/fork", s.handlers.ForkTask)
-	api.Get("/tasks/:id/result", s.handlers.GetTaskResult)
-	api.Get("/tasks/:id/plan", s.handlers.GetTaskPlan)
-	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
-	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
-	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+	api.Get("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.GetTask))
+	api.Delete("/tasks/:id", s.handlers.ahpTaskPrivate(s.handlers.DeleteTask))
+	api.Get("/tasks/:id/logs", s.handlers.ahpTaskPrivate(s.handlers.GetTaskLogs))
+	api.Get("/tasks/:id/events", s.handlers.ahpTaskPrivate(s.handlers.ListTaskEvents))
+	api.Get("/tasks/:id/stream", s.handlers.ahpTaskPrivate(s.handlers.StreamTaskEvents))
+	api.Get("/tasks/:id/trace", s.handlers.ahpTaskPrivate(s.handlers.GetTaskTrace))
+	api.Get("/tasks/:id/approvals", s.handlers.ahpTaskPrivate(s.handlers.ListTaskApprovals))
+	api.Post("/tasks/:id/approvals/:approvalID/decision", s.handlers.ahpTaskPrivate(s.handlers.DecideTaskApproval))
+	api.Post("/tasks/:id/cancel", s.handlers.ahpTaskPrivate(s.handlers.CancelTask))
+	api.Post("/tasks/:id/fork", s.handlers.ahpTaskPrivate(s.handlers.ForkTask))
+	api.Get("/tasks/:id/result", s.handlers.ahpTaskPrivate(s.handlers.GetTaskResult))
+	api.Get("/tasks/:id/plan", s.handlers.ahpTaskPrivate(s.handlers.GetTaskPlan))
+	api.Get("/tasks/:id/children", s.handlers.ahpTaskPrivate(s.handlers.GetTaskChildren))
+	api.Get("/tasks/:id/artifacts", s.handlers.ahpTaskPrivate(s.handlers.ListTaskArtifacts))
+	api.Get("/tasks/:id/artifacts/:filename", s.handlers.ahpTaskPrivate(s.handlers.DownloadTaskArtifact))
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
-	api.Get("/sessions/:id", s.handlers.GetSession)
-	api.Get("/sessions/:id/native", s.handlers.ExportNativeSession)
-	api.Post("/sessions/:id/native", s.handlers.ImportNativeSession)
-	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
-	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
-	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+	api.Get("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.GetSession))
+	api.Get("/sessions/:id/native", s.handlers.ahpSessionPrivate(s.handlers.ExportNativeSession))
+	api.Post("/sessions/:id/native", s.handlers.ahpSessionPrivate(s.handlers.ImportNativeSession))
+	api.Get("/sessions/:id/events", s.handlers.ahpSessionPrivate(s.handlers.ListSessionEvents))
+	api.Get("/sessions/:id/stream", s.handlers.ahpSessionPrivate(s.handlers.StreamSessionEvents))
+	api.Delete("/sessions/:id", s.handlers.ahpSessionPrivate(s.handlers.DeleteSession))
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)
@@ -514,6 +553,12 @@ func (s *Server) setupRoutes() {
 	api.Post("/agent-hosts/me/wake", s.handlers.WakeOwnAgentHost)
 	api.Delete("/agent-hosts/me", s.handlers.DeleteOwnAgentHost)
 
+	// AHP connection tokens. Every handler re-checks that the caller is a
+	// verified human identity and owns the token.
+	api.Post("/ahp-tokens", s.handlers.CreateAHPToken)
+	api.Get("/ahp-tokens", s.handlers.ListAHPTokens)
+	api.Delete("/ahp-tokens/:id", s.handlers.RevokeAHPToken)
+
 	// Reference endpoints (for dropdowns)
 	api.Get("/secrets", s.handlers.ListSecretNames)
 
@@ -614,6 +659,9 @@ func (s *Server) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	log.Info("starting API server", "address", addr)
 
+	if s.ahpBackend != nil {
+		go s.ahpBackend.workspaces.collectIdle(ctx)
+	}
 	// Start server in a goroutine
 	errCh := make(chan error, 1)
 	go func() {

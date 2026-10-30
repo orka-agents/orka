@@ -30,11 +30,13 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/ahphost"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
@@ -119,6 +121,7 @@ type Handlers struct {
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	executionEventStore       store.ExecutionEventStore
+	liveEvents                *liveevents.Broker
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
 	gatewayService            *gatewayruntime.Service
@@ -126,6 +129,7 @@ type Handlers struct {
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
+	ahp                       *ahphost.Host
 	completionLocks           *completionLocks
 }
 
@@ -150,10 +154,13 @@ type HandlersConfig struct {
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	ExecutionEventStore       store.ExecutionEventStore
+	LiveEvents                *liveevents.Broker
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	// AHP serves the Agent Host Protocol and its connection tokens; nil disables it.
+	AHP *ahphost.Host
 }
 
 // NewHandlers creates a new Handlers instance
@@ -182,6 +189,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		executionEventStore:       cfg.ExecutionEventStore,
+		liveEvents:                cfg.LiveEvents,
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,
 		gatewayService:            cfg.GatewayService,
@@ -189,6 +197,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
+		ahp:                       cfg.AHP,
 		completionLocks:           newCompletionLocks(),
 	}
 }
@@ -572,6 +581,17 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if spec.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
+	// Another person's AHP conversation cannot be read through a Task that
+	// continues it.
+	if spec.SessionRef != nil {
+		hidden, err := ahpSessionHiddenIn(c.Context(), h.client, GetUserInfo(c), namespace, spec.SessionRef.Name)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up the session's owner: %v", err))
+		}
+		if hidden {
+			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+	}
 	objectMeta := objectMetaFromRequest(name, namespace, req.Metadata)
 	objectMeta.Annotations = annotations
 	task := &corev1alpha1.Task{
@@ -703,6 +723,7 @@ func (h *Handlers) ListTasks(c fiber.Ctx) error {
 					return nil, "", err
 				}
 			}
+			allowed = allowed && !ahpTaskHidden(GetUserInfo(c), task)
 			if allowed {
 				// Server-side apply bookkeeping is about a third of each
 				// serialized Task and no API client reads it.
@@ -1063,30 +1084,56 @@ func (h *Handlers) ListSessions(c fiber.Ctx) error {
 	if limit <= MaxLimit {
 		pageLimit = int(limit)
 	}
-	sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, sessionCursor, pageLimit, store.SessionTypeGateway)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
-	}
-
-	items := make([]fiber.Map, 0, len(sessions))
+	// Sessions hidden from the caller are left out, and pages read on until
+	// one is full. The continue token names the last session listed, never
+	// a hidden one: the next page reads the rows after it again.
+	ui := GetUserInfo(c)
+	items := make([]fiber.Map, 0, pageLimit)
 	continueToken := ""
-	if more && len(sessions) > 0 {
+	cursor := sessionCursor
+	for len(items) < pageLimit {
+		sessions, more, err := h.sessionStore.ListSessionsPage(ctx, namespace, cursor, pageLimit, store.SessionTypeGateway)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
+		}
+		var ahpOwners map[string]*corev1alpha1.Task
+		if ahpPerson(ui) {
+			names := make([]string, 0, len(sessions))
+			for _, s := range sessions {
+				names = append(names, s.Name)
+			}
+			if ahpOwners, err = ahpSessionOwnersIn(ctx, h.client, namespace, names); err != nil {
+				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up session owners: %v", err))
+			}
+		}
+		for i, s := range sessions {
+			if ahpSessionHiddenBy(ui, s.Name, ahpOwners) {
+				continue
+			}
+			items = append(items, fiber.Map{
+				"id":             s.Name,
+				apiFieldName:     s.Name,
+				toolNamespaceArg: namespace,
+				"sessionType":    s.SessionType,
+				"messageCount":   s.MessageCount,
+				"inputTokens":    s.InputTokens,
+				"outputTokens":   s.OutputTokens,
+				"activeTask":     s.ActiveTask,
+				"createdAt":      s.CreatedAt.Format(time.RFC3339),
+				"updatedAt":      s.UpdatedAt.Format(time.RFC3339),
+			})
+			if len(items) == pageLimit {
+				if more || i < len(sessions)-1 {
+					continueToken = encodeSessionListCursor(store.SessionPageCursor{CreatedAt: s.CreatedAt, Name: s.Name})
+				}
+				break
+			}
+		}
+		if !more || len(sessions) == 0 {
+			break
+		}
 		last := sessions[len(sessions)-1]
-		continueToken = encodeSessionListCursor(store.SessionPageCursor{CreatedAt: last.CreatedAt, Name: last.Name})
-	}
-	for _, s := range sessions {
-		items = append(items, fiber.Map{
-			"id":             s.Name,
-			apiFieldName:     s.Name,
-			toolNamespaceArg: namespace,
-			"sessionType":    s.SessionType,
-			"messageCount":   s.MessageCount,
-			"inputTokens":    s.InputTokens,
-			"outputTokens":   s.OutputTokens,
-			"activeTask":     s.ActiveTask,
-			"createdAt":      s.CreatedAt.Format(time.RFC3339),
-			"updatedAt":      s.UpdatedAt.Format(time.RFC3339),
-		})
+		cursor = &store.SessionPageCursor{CreatedAt: last.CreatedAt, Name: last.Name}
 	}
 
 	response := ListResponse{

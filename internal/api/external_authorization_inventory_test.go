@@ -51,6 +51,7 @@ GET /api/v1/tasks/:id/stream | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/trace | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/approvals | get core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/approvals/:approvalID/decision | update core.orka.ai:tasks/approvals protected; patch core.orka.ai:tasks protected
+POST /api/v1/tasks/:id/cancel | patch core.orka.ai:tasks protected
 POST /api/v1/tasks/:id/fork | get core.orka.ai:tasks protected; create core.orka.ai:tasks
 GET /api/v1/tasks/:id/result | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
@@ -177,6 +178,9 @@ POST /api/v1/connections/:name/complete | identity
 GET /api/v1/agent-hosts/me | identity
 POST /api/v1/agent-hosts/me/wake | identity
 DELETE /api/v1/agent-hosts/me | identity
+POST /api/v1/ahp-tokens | identity
+GET /api/v1/ahp-tokens | identity
+DELETE /api/v1/ahp-tokens/:id | identity
 GET /api/v1/secrets | list :secrets
 POST /api/v1/chat | create core.orka.ai:chats
 GET /api/v1/chat/config | get core.orka.ai:chats/config

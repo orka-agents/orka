@@ -745,3 +745,62 @@ maps, and must render as a fresh install would. The defaults match values.yaml.
 {{- end -}}
 {{- toYaml $template -}}
 {{- end }}
+
+{{/*
+The Agent Host Protocol endpoint is opt-in. AHP
+workspaces are on only with a digest-pinned image; their Pods live in a
+namespace the controller never shares with its watch or ACP runtime namespaces.
+*/}}
+{{- define "orka.ahpEnabled" -}}
+{{- if dig "ahp" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.ahpWorkspaceImage" -}}
+{{- trim (toString (dig "ahp" "workspaceImage" "" .Values.controller)) -}}
+{{- end }}
+
+{{- define "orka.ahpWorkspacesEnabled" -}}
+{{- if and (include "orka.ahpEnabled" .) (include "orka.ahpWorkspaceImage" .) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+Values reused from a release before AHP have no workspace namespace; they get
+values.yaml's default. An explicitly empty one stays empty and is refused.
+*/}}
+{{- define "orka.ahpWorkspaceNamespace" -}}
+{{- $ahp := dig "ahp" (dict) .Values.controller -}}
+{{- if hasKey $ahp "workspaceNamespace" -}}
+{{- trim (toString $ahp.workspaceNamespace) -}}
+{{- else -}}
+orka-ahp-workspaces
+{{- end -}}
+{{- end }}
+
+{{- define "orka.validateAHP" -}}
+{{- if include "orka.ahpEnabled" . -}}
+{{- if not (and (dig "oidc" "issuer" "" .Values.controller) (dig "oidc" "audience" "" .Values.controller)) -}}
+{{- fail "controller.ahp.enabled requires controller.oidc.issuer and controller.oidc.audience: AHP connection tokens are minted only for a person's own OIDC sign-in" -}}
+{{- end -}}
+{{- if not (trim (toString (dig "oidc" "allowedSubjects" "" .Values.controller))) -}}
+{{- fail "controller.ahp.enabled requires controller.oidc.allowedSubjects: without it every OIDC sign-in is refused, so no one could mint or use an AHP token" -}}
+{{- end -}}
+{{- if and (trim (toString (dig "ahp" "workspaceClass" "" .Values.controller))) (not (dig "executionWorkspace" "dispatchEnabled" false .Values.controller)) -}}
+{{- fail "controller.ahp.workspaceClass requires controller.executionWorkspace.dispatchEnabled: AHP turns run in the class's workspace, which the controller dispatches only then" -}}
+{{- end -}}
+{{- if include "orka.ahpWorkspacesEnabled" . -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (include "orka.ahpWorkspaceImage" .)) -}}
+{{- fail "controller.ahp.workspaceImage must be pinned by digest: <repository>@sha256:<digest>" -}}
+{{- end -}}
+{{- $namespace := include "orka.ahpWorkspaceNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.ahp.workspaceNamespace is required when controller.ahp.workspaceImage is set" -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace (include "orka.watchNamespace" .)) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.ahp.workspaceNamespace %q must differ from the Helm release namespace, controller.watchNamespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- if and .Values.controller.ahp.workspaceConnectorProvider (not .Values.controller.connectors.enabled) -}}
+{{- fail "controller.ahp.workspaceConnectorProvider requires controller.connectors.enabled" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

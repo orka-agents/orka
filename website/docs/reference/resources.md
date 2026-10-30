@@ -410,9 +410,14 @@ spec:
       - Bash
       - Glob
       - Grep
+    # permissionDecisions: Requester
 ```
 
-[Agent runtimes](../concepts/agent-runtimes.md) explains how these Tasks run.
+[Agent runtimes](../concepts/agent-runtimes.md) explains how these Tasks run. With
+`permissionDecisions: Requester`, the built-in runtime is launched to ask before every shell
+command and file change, and each request the policy would allow waits for the Task's
+requester to decide; see
+[Permission requests from built-in runtimes](../guides/human-approval-v2.md#permission-requests-from-built-in-runtimes).
 
 ## Provider
 

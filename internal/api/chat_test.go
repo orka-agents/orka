@@ -2412,3 +2412,55 @@ func beginTestActiveChat(ch *ChatHandler, ctx context.Context, sessionID string)
 	}
 	return active, nil
 }
+
+// Another person cannot cancel, and so delete, an AHP session through chat;
+// its owner still can.
+func TestHandleCancelChatRefusesAnotherPersonsAHPSession(t *testing.T) {
+	ctx := context.Background()
+	ss := newTestSessionStore(t)
+	turn := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "ahp-alice-t1", Namespace: defaultNamespace,
+			Labels: map[string]string{labels.LabelAHPTurn: labels.LabelAHPTurnValue}},
+		Spec: corev1alpha1.TaskSpec{
+			Type:        corev1alpha1.TaskTypeAgent,
+			RequestedBy: &corev1alpha1.RequestedBy{Issuer: "https://issuer.example", Subject: "alice"},
+			SessionRef:  &corev1alpha1.SessionReference{Name: "ahp-alice"},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(turn).Build()
+	ch := newTestChatHandler(t, fakeClient, ss, newTestResultStore(t), DefaultChatConfig())
+	now := time.Now()
+	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{Namespace: defaultNamespace, Name: "ahp-alice", SessionType: "task", CreatedAt: now, UpdatedAt: now}))
+	var caller *UserInfo
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, caller)
+		return c.Next()
+	})
+	app.Delete("/api/v1/chat/:sessionId", ch.HandleCancelChat)
+	person := func(subject string) *UserInfo {
+		return &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: subject, Username: subject, Namespace: defaultNamespace}
+	}
+
+	caller = person("bob")
+	resp, err := app.Test(httptest.NewRequest(http.MethodDelete, "/api/v1/chat/ahp-alice", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	_, err = ss.GetSession(ctx, defaultNamespace, "ahp-alice")
+	require.NoError(t, err, "another person's cancellation left the session in place")
+
+	// Nor continue it, which would read the conversation into theirs.
+	app.Post("/api/v1/chat", ch.HandleChat)
+	body, err := json.Marshal(ChatRequest{Message: "what did we discuss?", SessionID: "ahp-alice"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	caller = person("alice")
+	resp, err = app.Test(httptest.NewRequest(http.MethodDelete, "/api/v1/chat/ahp-alice", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+}

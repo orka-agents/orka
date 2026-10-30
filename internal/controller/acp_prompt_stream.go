@@ -11,7 +11,11 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
-const acpPromptCancellationTimeout = 25 * time.Second
+const (
+	acpPromptCancellationTimeout = 25 * time.Second
+	// acpRequestedCancellationMessage ends a turn cancelled through the API.
+	acpRequestedCancellationMessage = "prompt cancelled by request"
+)
 
 type acpPromptCancellationResult struct {
 	reason   harnessv2.CancelReason
@@ -75,8 +79,11 @@ func streamACPPromptWithCancellation(
 		stopDrain := context.AfterFunc(drainCtx, cancelTransport)
 		defer stopDrain()
 		reason := harnessv2.CancelReasonControllerShutdown
-		if errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
+		switch cause := runtimeContextError(runtimeCtx); {
+		case errors.Is(cause, context.DeadlineExceeded):
 			reason = harnessv2.CancelReasonTaskTimeout
+		case errors.Is(cause, errACPTaskCancelRequested):
+			reason = harnessv2.CancelReasonUserRequested
 		}
 		cancellation = requestACPPromptCancellation(drainCtx, runtimeClient, sessionID, cancelTask, fence, reason)
 		if cancellation.err != nil || !cancellation.response.SettlementProven ||
