@@ -504,3 +504,33 @@ func TestReferenceFilesFollowTSConfigBaseURL(t *testing.T) {
 		t.Fatalf("api references = %s, want the inherited baseUrl resolved", api)
 	}
 }
+
+// A config's own paths resolve from the baseUrl it inherits.
+func TestReferenceFilesResolvePathsFromAnInheritedBaseURL(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app/tsconfig.base.json", `{"compilerOptions":{"baseUrl":"./src"}}`)
+	writeFile(t, root, "app/tsconfig.json", `{"extends":"./tsconfig.base.json","compilerOptions":{"paths":{"@feature/*":["features/*"]}}}`)
+	writeFile(t, root, "app/src/main.ts", "import { billing } from '@feature/billing'\n")
+	writeFile(t, root, "app/src/features/billing.ts", "export const billing = 1\n")
+	writeFile(t, root, "app/features/billing.ts", "export const billing = 2\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/src/main.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	if !strings.Contains(got, "app/src/features/billing.ts=imports") || strings.Contains(got, "app/features/billing.ts") {
+		t.Fatalf("references = %s, want the target under the inherited baseUrl", got)
+	}
+}
+
+func TestRepositoryEntrypointsSkipTestFiles(t *testing.T) {
+	files := []repoFile{
+		{Path: "testdata/main.go", Dir: "testdata", Name: "main.go"},
+		{Path: "e2e/index.ts", Dir: "e2e", Name: "index.ts"},
+		{Path: "cmd/app/main.go", Dir: "cmd/app", Name: "main.go"},
+	}
+	got := repositoryEntrypoints(files)
+	if len(got) != 1 || got[0].Path != "cmd/app/main.go" {
+		t.Fatalf("entrypoints = %#v, want only the production entrypoint", got)
+	}
+}

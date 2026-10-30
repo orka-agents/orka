@@ -90,6 +90,9 @@ func investigationFiles(files []repoFile, paths []string) []store.ReviewSliceFil
 func repositoryEntrypoints(files []repoFile) []store.ReviewSliceFile {
 	var candidates []repoFile
 	for _, file := range files {
+		if isTestFile(file) {
+			continue
+		}
 		switch file.Name {
 		case "main.go", "main.py", "__main__.py", "index.ts", "index.js", "server.ts", "server.js", "app.py":
 			candidates = append(candidates, file)

@@ -3148,6 +3148,8 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 		Evidence: []storepkg.FindingEvidenceRef{
 			{Kind: "file", Path: "internal/api/security.go", StartLine: 12, EndLine: 16, Label: "Confirmed sink path"},
 		},
+		Severity:   "medium",
+		Confidence: "medium",
 	}
 
 	task := &corev1alpha1.Task{
@@ -3179,6 +3181,9 @@ func TestIngestValidationTaskUpdatesFindingValidationDetails(t *testing.T) {
 	}
 	if !strings.Contains(updated.ValidationJSON, "Confirmed injection path") {
 		t.Fatalf("ValidationJSON = %q, want validation summary", updated.ValidationJSON)
+	}
+	if updated.Severity != "medium" || updated.Confidence != "medium" {
+		t.Fatalf("ratings = %s/%s, want the validator's calibrated medium/medium", updated.Severity, updated.Confidence)
 	}
 	if len(updated.Evidence) < 2 {
 		t.Fatalf("len(Evidence) = %d, want at least 2 refs", len(updated.Evidence))
@@ -7766,6 +7771,25 @@ func TestMergeFindingValidationStateEndsPendingWithError(t *testing.T) {
 	mergeFindingValidationState(refuted, errored)
 	if refuted.ValidationStatus != findingValidationStatusFailed {
 		t.Fatalf("refuted canonical = %q, want its verdict kept", refuted.ValidationStatus)
+	}
+}
+
+// A finding reported again keeps the ratings its earlier validation
+// calibrated; a refuted validation leaves the reviewer's ratings.
+func TestMergeFindingValidationStateKeepsCalibratedRatings(t *testing.T) {
+	existing := &storepkg.Finding{ID: "fnd_1", ScanRunID: "run_1", ValidationStatus: findingValidationStatusValidated,
+		ValidationJSON: `{"version":1,"finding_id":"fnd_1","status":"validated","severity":"low","confidence":"medium"}`}
+	reported := &storepkg.Finding{ID: "fnd_1", ScanRunID: "run_2", Severity: "high", Confidence: "high", ValidationStatus: "unvalidated"}
+	mergeFindingValidationState(reported, existing)
+	if reported.Severity != "low" || reported.Confidence != "medium" {
+		t.Fatalf("ratings = %s/%s, want the calibrated low/medium", reported.Severity, reported.Confidence)
+	}
+	refuted := &storepkg.Finding{ID: "fnd_2", ScanRunID: "run_1", ValidationStatus: findingValidationStatusFailed,
+		ValidationJSON: `{"version":1,"finding_id":"fnd_2","status":"failed","severity":"low","confidence":"low"}`}
+	again := &storepkg.Finding{ID: "fnd_2", ScanRunID: "run_2", Severity: "high", Confidence: "high", ValidationStatus: "unvalidated"}
+	mergeFindingValidationState(again, refuted)
+	if again.Severity != "high" || again.Confidence != "high" {
+		t.Fatalf("ratings = %s/%s, want the reviewer's high/high", again.Severity, again.Confidence)
 	}
 }
 

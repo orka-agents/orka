@@ -61,6 +61,20 @@ type ValidationArtifact struct {
 	Confidence string `json:"confidence,omitempty"`
 }
 
+// validationStatusValidated is the verdict of a confirmed finding.
+const validationStatusValidated = "validated"
+
+// CalibratedRatings returns the severity and confidence the validator
+// assigned to a finding it validated, each empty unless a known rating.
+func (a ValidationArtifact) CalibratedRatings() (severity, confidence string) {
+	if strings.TrimSpace(a.Status) != validationStatusValidated {
+		return "", ""
+	}
+	severity, _ = canonicalFindingSeverity(a.Severity)
+	confidence, _ = canonicalFindingConfidence(a.Confidence)
+	return severity, confidence
+}
+
 // UnmarshalJSON reads a validation artifact leniently: unknown keys are
 // ignored and list fields given as a single string become one entry. The
 // version, finding identity, status, and evidence are still validated.

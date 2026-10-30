@@ -4627,6 +4627,7 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 				return err
 			}
 			finding.ValidationJSON = string(data)
+			applyValidatedRatings(finding)
 			for _, ref := range artifact.Evidence {
 				ref.TaskName = task.Name
 				finding.Evidence = mergeEvidenceRefs(finding.Evidence, ref)
@@ -4710,6 +4711,24 @@ func mergeFindingValidationState(target, source *store.Finding) {
 	}
 	target.ValidationStatus = source.ValidationStatus
 	target.ValidationJSON = validationJSONForFinding(source.ValidationJSON, target.ID)
+	applyValidatedRatings(target)
+}
+
+// applyValidatedRatings adopts the severity and confidence a validator
+// calibrated for a finding it validated, so a merged or re-reported finding
+// keeps them too.
+func applyValidatedRatings(finding *store.Finding) {
+	var artifact security.ValidationArtifact
+	if json.Unmarshal([]byte(finding.ValidationJSON), &artifact) != nil {
+		return
+	}
+	severity, confidence := artifact.CalibratedRatings()
+	if severity != "" {
+		finding.Severity = severity
+	}
+	if confidence != "" {
+		finding.Confidence = confidence
+	}
 }
 
 func validationJSONForFinding(raw, findingID string) string {

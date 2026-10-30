@@ -355,9 +355,6 @@ func morePreciseNodePattern(a, b string) bool {
 type nodePathAlias struct {
 	pattern string
 	targets []string
-	// baseURL marks the lookup of bare specifiers from compilerOptions.baseUrl,
-	// which TypeScript tries after every paths entry.
-	baseURL bool
 }
 
 func (a nodePathAlias) match(spec string) (string, bool) {
@@ -371,25 +368,57 @@ func (a nodePathAlias) match(spec string) (string, bool) {
 	return spec[len(prefix) : len(spec)-len(suffix)], true
 }
 
+// readTSConfigAliases returns a tsconfig's path aliases with targets made
+// repository-relative, most precise first, followed by a lookup of bare
+// specifiers from baseUrl when one is set.
 func readTSConfigAliases(fullPath, dir string) []nodePathAlias {
-	return readTSConfigAliasesFrom(fullPath, dir, 0)
+	options := readTSConfigOptions(fullPath, dir, 0)
+	// TypeScript resolves paths targets from baseUrl when one is set, and
+	// otherwise from the tsconfig that sets paths.
+	root := options.pathsDir
+	if options.baseURL != "" {
+		root = options.baseURL
+	}
+	out := make([]nodePathAlias, 0, len(options.paths)+1)
+	for pattern, targets := range options.paths {
+		alias := nodePathAlias{pattern: pattern}
+		for _, target := range targets {
+			alias.targets = append(alias.targets, path.Join(root, target))
+		}
+		out = append(out, alias)
+	}
+	sort.Slice(out, func(i, j int) bool { return morePreciseNodePattern(out[i].pattern, out[j].pattern) })
+	if options.baseURL != "" {
+		out = append(out, nodePathAlias{pattern: "*", targets: []string{path.Join(options.baseURL, "*")}})
+	}
+	return out
 }
 
 // maxTSConfigExtendsDepth bounds how many inherited tsconfig files are read.
 const maxTSConfigExtendsDepth = 4
 
-// readTSConfigAliasesFrom reads a tsconfig's path aliases, inheriting them
-// through a relative "extends" chain within the repository when the file
-// defines none, as the compiler does. A baseUrl adds a lookup of bare
-// specifiers from that directory.
-func readTSConfigAliasesFrom(fullPath, dir string, depth int) []nodePathAlias {
+// tsconfigOptions are the compiler options that place imports, with
+// directories made repository-relative.
+type tsconfigOptions struct {
+	paths map[string][]string
+	// pathsDir is the directory of the tsconfig that sets paths.
+	pathsDir string
+	// baseURL is empty unless a tsconfig in the chain sets baseUrl.
+	baseURL string
+}
+
+// readTSConfigOptions reads a tsconfig's options. Each option it does not set
+// is inherited through a relative "extends" chain within the repository,
+// later bases taking precedence, as the compiler does.
+func readTSConfigOptions(fullPath, dir string, depth int) tsconfigOptions {
+	var options tsconfigOptions
 	info, err := os.Lstat(fullPath)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageJSONBytes {
-		return nil
+		return options
 	}
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
-		return nil
+		return options
 	}
 	var config struct {
 		Extends         json.RawMessage `json:"extends"`
@@ -399,62 +428,46 @@ func readTSConfigAliasesFrom(fullPath, dir string, depth int) []nodePathAlias {
 		} `json:"compilerOptions"`
 	}
 	if json.Unmarshal(stripJSONComments(data), &config) != nil {
-		return nil
+		return options
 	}
-	var out []nodePathAlias
-	if len(config.CompilerOptions.Paths) > 0 {
-		base := path.Join(dir, config.CompilerOptions.BaseURL)
-		for pattern, targets := range config.CompilerOptions.Paths {
-			alias := nodePathAlias{pattern: pattern}
-			for _, target := range targets {
-				alias.targets = append(alias.targets, path.Join(base, target))
-			}
-			out = append(out, alias)
+	if depth < maxTSConfigExtendsDepth {
+		// TypeScript 5 accepts several bases.
+		var bases []string
+		var single string
+		if json.Unmarshal(config.Extends, &single) == nil {
+			bases = []string{single}
+		} else if json.Unmarshal(config.Extends, &bases) != nil {
+			bases = nil
 		}
-	} else if depth < maxTSConfigExtendsDepth {
-		out = inheritedTSConfigAliases(fullPath, dir, config.Extends, depth)
+		for _, base := range bases {
+			base = strings.TrimSpace(base)
+			// Package-name bases live outside the repository.
+			if !strings.HasPrefix(base, "./") && !strings.HasPrefix(base, "../") {
+				continue
+			}
+			if path.Ext(base) != extJSON {
+				base += extJSON
+			}
+			baseDir := path.Join(dir, path.Dir(base))
+			if baseDir == ".." || strings.HasPrefix(baseDir, "../") {
+				continue
+			}
+			inherited := readTSConfigOptions(filepath.Join(filepath.Dir(fullPath), filepath.FromSlash(base)), baseDir, depth+1)
+			if len(inherited.paths) > 0 {
+				options.paths, options.pathsDir = inherited.paths, inherited.pathsDir
+			}
+			if inherited.baseURL != "" {
+				options.baseURL = inherited.baseURL
+			}
+		}
+	}
+	if len(config.CompilerOptions.Paths) > 0 {
+		options.paths, options.pathsDir = config.CompilerOptions.Paths, dir
 	}
 	if config.CompilerOptions.BaseURL != "" {
-		out = slices.DeleteFunc(out, func(alias nodePathAlias) bool { return alias.baseURL })
-		out = append(out, nodePathAlias{pattern: "*", targets: []string{path.Join(dir, config.CompilerOptions.BaseURL, "*")}, baseURL: true})
+		options.baseURL = path.Join(dir, config.CompilerOptions.BaseURL)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].baseURL != out[j].baseURL {
-			return out[j].baseURL
-		}
-		return morePreciseNodePattern(out[i].pattern, out[j].pattern)
-	})
-	return out
-}
-
-// inheritedTSConfigAliases reads the aliases of the bases a tsconfig extends.
-// TypeScript 5 accepts several bases; later ones take precedence.
-func inheritedTSConfigAliases(fullPath, dir string, extends json.RawMessage, depth int) []nodePathAlias {
-	var bases []string
-	var single string
-	if json.Unmarshal(extends, &single) == nil {
-		bases = []string{single}
-	} else if json.Unmarshal(extends, &bases) != nil {
-		return nil
-	}
-	for _, base := range slices.Backward(bases) {
-		base = strings.TrimSpace(base)
-		// Package-name bases live outside the repository.
-		if !strings.HasPrefix(base, "./") && !strings.HasPrefix(base, "../") {
-			continue
-		}
-		if path.Ext(base) != extJSON {
-			base += extJSON
-		}
-		baseDir := path.Join(dir, path.Dir(base))
-		if baseDir == ".." || strings.HasPrefix(baseDir, "../") {
-			continue
-		}
-		if aliases := readTSConfigAliasesFrom(filepath.Join(filepath.Dir(fullPath), filepath.FromSlash(base)), baseDir, depth+1); len(aliases) > 0 {
-			return aliases
-		}
-	}
-	return nil
+	return options
 }
 
 // stripJSONComments removes the comments and trailing commas tsconfig files

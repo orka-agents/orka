@@ -166,8 +166,9 @@ validation can be tuned with `validationMaxFindingsPerRun`, `validationMinSeveri
 `validationMinConfidence` (light defaults: 25, `medium`, `medium`). A `failed` validation means
 the validator refuted the finding, and such findings are excluded from recommended patch
 candidates. A validation that produced no verdict, for example because its result could not be
-decoded, is recorded as `error` and leaves the finding eligible. Validated findings rank above
-unvalidated findings of the same severity. Missing runtime reproduction alone does not fail a
+decoded, is recorded as `error` and leaves the finding eligible. A validated finding takes the
+severity and confidence its validator assigns, which the validator calibrates against the code.
+Validated findings rank above unvalidated findings of the same severity. Missing runtime reproduction alone does not fail a
 finding that its source supports.
 
 ## Cross-component review
