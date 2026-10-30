@@ -1970,6 +1970,20 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 			}
 			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
 		}
+		softDeadline, err := r.jobStoppedAtSoftDeadline(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if softDeadline {
+			// The worker stopped the command itself, shortly before the Job
+			// deadline, to deliver partial output. That is the timeout, and a
+			// run with an unknown outcome is not retried.
+			msg := softDeadlineTaskMessage(task)
+			if !validationCommandFailed {
+				return r.completeTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+			}
+			return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, msg)
+		}
 		// Job failed, check retry policy
 		if r.shouldRetry(task) {
 			failure := r.diagnoseFailedJob(ctx, task)
@@ -2099,6 +2113,64 @@ func timedOutTaskMessage(task *corev1alpha1.Task) string {
 		return "task timed out; " + task.Status.Message
 	}
 	return "task timed out"
+}
+
+func softDeadlineTaskMessage(task *corev1alpha1.Task) string {
+	return timedOutTaskMessage(task) + "; the worker stopped the command at the soft deadline to deliver its partial output"
+}
+
+// jobStoppedAtSoftDeadline reports a worker that stopped its command at the
+// Task's soft deadline and said so in its termination message. The exit code
+// alone cannot tell, since the command's own timeout(1) exits 124 too. The
+// decision gates a retry, so the Pods are read from the API server rather than
+// the cache, which can see the Job fail before it sees the Pod terminate, and a
+// read error is returned rather than taken as no.
+func (r *TaskReconciler) jobStoppedAtSoftDeadline(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task.Spec.Timeout == nil {
+		return false, nil
+	}
+	var podList corev1.PodList
+	if err := uncachedReader(r.APIReader, r.Client).List(ctx, &podList, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelTask: labels.SelectorValue(task.Name)}); err != nil {
+		return false, fmt.Errorf("list Pods of Task %s/%s for the soft-deadline check: %w", task.Namespace, task.Name, err)
+	}
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		// Only a Pod the current Job owns can speak for this attempt: the
+		// Task label alone, or a Job-name label, could come from an
+		// unrelated Pod and suppress a retry an ordinary failure deserves.
+		if !podOwnedByJob(pod, task.Status.JobName, task.Status.JobUID) {
+			continue
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			term := cs.State.Terminated
+			if term == nil {
+				term = cs.LastTerminationState.Terminated
+			}
+			if term != nil && strings.Contains(term.Message, workerenv.SoftDeadlineTerminationMessage) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// podOwnedByJob reports a Pod whose controller owner reference is exactly the
+// named Job, by UID when the Task recorded one.
+func podOwnedByJob(pod *corev1.Pod, jobName, jobUID string) bool {
+	if pod == nil || strings.TrimSpace(jobName) == "" {
+		return false
+	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind != "Job" || owner.Name != jobName || owner.Controller == nil || !*owner.Controller {
+			continue
+		}
+		if jobUID != "" && string(owner.UID) != jobUID {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func podWaitingForMountInitialization(pod *corev1.Pod) bool {

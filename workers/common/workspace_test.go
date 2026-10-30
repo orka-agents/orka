@@ -550,6 +550,76 @@ func TestFinalizeResult_GitRepoWithChanges(t *testing.T) {
 	}
 }
 
+func TestFinalizeResult_KeepsPrintedStructuredResult(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/initial.txt", []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+	if err := os.WriteFile(dir+"/shot.txt", []byte("shot\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Printed workspace and publication fields are the worker's to compute.
+	printed := `{"version":1,"outcome":"blocked","summary":"captcha on checkout",` +
+		`"data":{"step":"checkout","orderID":9007199254740993},` +
+		`"artifacts":[{"filename":"page.png","contentType":"image/png"}],` +
+		`"diff":"fake","files":["ghost.txt"],"pushBranch":"fake","pushError":"fake","baseSHA":"fake","headSHA":"fake"}` + "\n"
+	data, err := FinalizeResult(dir, printed)
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if sr.Outcome != "blocked" || sr.Summary != "captcha on checkout" || sr.Data["step"] != "checkout" ||
+		len(sr.Artifacts) != 1 || sr.Artifacts[0].Filename != "page.png" {
+		t.Fatalf("the printed structured result was not kept: %s", string(data))
+	}
+	// A large integer must come back as written, not rounded through float64.
+	if !strings.Contains(string(data), `"orderID":9007199254740993`) {
+		t.Fatalf("the printed number lost precision: %s", string(data))
+	}
+	if sr.BaseSHA == "" || sr.BaseSHA == "fake" || sr.HeadSHA == "" || sr.HeadSHA == "fake" ||
+		sr.Diff == "" || sr.Diff == "fake" || len(sr.Files) != 1 || sr.Files[0] == "ghost.txt" ||
+		sr.PushBranch != "" || sr.PushError != "" {
+		t.Fatalf("workspace fields were not computed by the worker: %s", string(data))
+	}
+}
+
+func TestFinalizeResult_KeepsTextAfterAPrintedResult(t *testing.T) {
+	dir := t.TempDir()
+	runGitWS(t, dir, "init")
+	runGitWS(t, dir, "config", "user.email", "test@test.com")
+	runGitWS(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(dir+"/initial.txt", []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitWS(t, dir, "add", ".")
+	runGitWS(t, dir, "commit", "-m", "initial")
+
+	// The worker appends the command's stderr to its stdout, so a printed
+	// result followed by an error is not a structured result: both are kept.
+	output := `{"version":1,"outcome":"completed","summary":"checked the page"}` + "\nError: page crashed\n"
+	data, err := FinalizeResult(dir, output)
+	if err != nil {
+		t.Fatalf("FinalizeResult failed: %v", err)
+	}
+	var sr StructuredResult
+	if err := json.Unmarshal(data, &sr); err != nil {
+		t.Fatalf("expected JSON result, got: %s", string(data))
+	}
+	if sr.Outcome != "" || !strings.Contains(sr.Summary, `"outcome":"completed"`) ||
+		!strings.Contains(sr.Summary, "Error: page crashed") {
+		t.Fatalf("the error after the printed result was dropped: %s", string(data))
+	}
+}
+
 func TestFinalizeResult_GitRepoNoChanges(t *testing.T) {
 	dir := t.TempDir()
 	runGitWS(t, dir, "init")

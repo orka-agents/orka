@@ -8870,3 +8870,54 @@ func TestRequestedTaskCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestJobStoppedAtSoftDeadline(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "deadline", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Timeout: &metav1.Duration{Duration: time.Minute}},
+		Status:     corev1alpha1.TaskStatus{JobName: "deadline-job", JobUID: "job-uid-1"},
+	}
+	controller := true
+	pod := func(name, jobName, jobUID, message string, exitCode int32) *corev1.Pod {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: map[string]string{
+				labels.LabelTask: labels.SelectorValue(task.Name), batchv1.JobNameLabel: jobName,
+			}},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  workerContainerName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exitCode, Message: message}},
+			}}},
+		}
+		if jobUID != "" {
+			p.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: jobName, UID: types.UID(jobUID), Controller: &controller}}
+		}
+		return p
+	}
+	marker := workerenv.SoftDeadlineTerminationMessage + "\n"
+	for _, tt := range []struct {
+		name string
+		pod  *corev1.Pod
+		want bool
+	}{
+		{name: "the worker marked a soft-deadline stop", pod: pod("p1", task.Status.JobName, task.Status.JobUID, marker, 124), want: true},
+		{name: "exit 124 without the marker is the command's own timeout", pod: pod("p2", task.Status.JobName, task.Status.JobUID, "", 124)},
+		{name: "another failure", pod: pod("p3", task.Status.JobName, task.Status.JobUID, "boom", 1)},
+		{name: "another Job's Pod does not count", pod: pod("p4", "earlier-job", "job-uid-0", marker, 124)},
+		{name: "a Pod with only the labels and no Job owner does not count", pod: pod("p5", task.Status.JobName, "", marker, 124)},
+		{name: "a Pod owned by a Job of the same name but another UID does not count", pod: pod("p6", task.Status.JobName, "job-uid-9", marker, 124)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newUnitReconciler(newTestScheme(), task)
+			// The Pod is visible only through the API reader, as it is when the
+			// cache has seen the Job fail but not yet the Pod terminate.
+			r.APIReader = fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tt.pod).Build()
+			got, err := r.jobStoppedAtSoftDeadline(context.Background(), task)
+			if err != nil {
+				t.Fatalf("jobStoppedAtSoftDeadline() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("jobStoppedAtSoftDeadline() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

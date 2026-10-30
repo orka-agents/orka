@@ -105,15 +105,19 @@ const (
 	ResolvedApprovals  = "ORKA_RESOLVED_APPROVALS"
 
 	// Agent runtime env vars.
-	Prompt                      = "ORKA_PROMPT"
-	Model                       = "ORKA_MODEL"
-	SystemPrompt                = "ORKA_SYSTEM_PROMPT"
-	MaxTurns                    = "ORKA_MAX_TURNS"
-	AgentReadOnly               = "ORKA_AGENT_READ_ONLY"
-	AllowedTools                = "ORKA_ALLOWED_TOOLS"
-	DisallowedTools             = "ORKA_DISALLOWED_TOOLS"
-	AllowBash                   = "ORKA_ALLOW_BASH"
-	TimeoutSeconds              = "ORKA_TIMEOUT_SECONDS"
+	Prompt          = "ORKA_PROMPT"
+	Model           = "ORKA_MODEL"
+	SystemPrompt    = "ORKA_SYSTEM_PROMPT"
+	MaxTurns        = "ORKA_MAX_TURNS"
+	AgentReadOnly   = "ORKA_AGENT_READ_ONLY"
+	AllowedTools    = "ORKA_ALLOWED_TOOLS"
+	DisallowedTools = "ORKA_DISALLOWED_TOOLS"
+	AllowBash       = "ORKA_ALLOW_BASH"
+	TimeoutSeconds  = "ORKA_TIMEOUT_SECONDS"
+	// Deadline is when a container Task's Job deadline ends, in RFC 3339. The
+	// worker measures its soft deadline from it, so the time the Pod spent
+	// pulling its image or cloning before the worker ran counts too.
+	Deadline                    = "ORKA_DEADLINE"
 	SessionName                 = "ORKA_SESSION_NAME"
 	SessionPromptIncluded       = "ORKA_SESSION_PROMPT_INCLUDED"
 	ClaudeBare                  = "ORKA_CLAUDE_BARE"
@@ -204,6 +208,15 @@ const (
 	TaskCallbackTokenFile = "/var/run/secrets/orka.ai/task-callback/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"
+
+	// SoftDeadlineTerminationMessage is what a container worker writes to its
+	// termination message when it stopped the command at the soft deadline.
+	// The controller treats that stop as the Task's timeout rather than a
+	// failure to retry; the exit code alone cannot tell, since timeout(1)
+	// exits 124 too.
+	SoftDeadlineTerminationMessage = "orka.ai/soft-deadline"
+	// TerminationMessagePath is the kubelet's default termination message file.
+	TerminationMessagePath = "/dev/termination-log"
 
 	// RepositoryValidationUnavailableExitCode identifies a validation worker
 	// that could not exec the configured validation command. The controller
