@@ -369,7 +369,7 @@ The default providers need nothing extra installed:
 
 | Provider | Operations | Authoritative |
 | --- | --- | --- |
-| `orka-policy` | Describe and Check, covering:<br>- the frozen tool and approval policies, and each tool's effect;<br>- workspace intent;<br>- publication constraints: `createPR`, `expectedRemoteSHA`, `maxChangedFiles`, `allowedPaths`, `denyRepositoryControlPaths`, `rejectBinaryFiles` and `rejectSecretLikeContent`;<br>- namespace scope;<br>- Task and delegation limits;<br>- Agent runtime ceilings, once #865 lands;<br>- transaction-token scope constraints, never the token itself;<br>- the OutboundAccessPolicy each allowed HTTP Tool references;<br>- fixed RuntimePool egress and the fixed writable paths;<br>- once #952 lands, an admitted enforcement requirement: format, capabilities and requirement digest. | Yes, tied to the frozen digests, with two exceptions marked `authoritative: false`:<br>- the enforcement requirement, whose receipt is historical;<br>- fixed egress and writable paths, which the cluster's network plugin and container runtime enforce, not Orka. |
+| `orka-policy` | Describe and Check, covering:<br>- the frozen tool and approval policies, and each tool's effect;<br>- workspace intent;<br>- publication constraints: `createPR`, `expectedRemoteSHA`, `maxChangedFiles`, `allowedPaths`, `denyRepositoryControlPaths`, `rejectBinaryFiles` and `rejectSecretLikeContent`;<br>- namespace scope;<br>- Task and delegation limits;<br>- Agent runtime ceilings, once #865 lands;<br>- transaction-token scope constraints, never the token itself;<br>- the OutboundAccessPolicy each allowed HTTP Tool references;<br>- fixed RuntimePool egress and the fixed writable paths;<br>- once #952 lands, an admitted enforcement requirement: format, capabilities and requirement digest. | Yes, tied to the frozen digests, with three exceptions:<br>- the enforcement requirement, whose receipt is historical (`authoritative: false`);<br>- fixed egress and writable paths, which the cluster's network plugin and container runtime enforce, not Orka (`authoritative: false`);<br>- the connector-read check for `list_connections`. It's authoritative only at that moment, because its scopes come from current controller configuration rather than a frozen digest. Its `versions` entry is a digest of the connector-read scopes and the enforcement mode, which the controller reads from its startup flags. |
 | `kubernetes-authorization` | Check, with a SubjectAccessReview for the identity that will make the request: the controller or worker ServiceAccount. Never the agent's own identity, because ACP runtime Pods have no Kubernetes RBAC. | Yes, for RBAC at that moment |
 | `kubernetes-dry-run` | Check, with a server-side dry run of the proposed object for that same identity. It records the denying webhook or policy, its message and any warnings. It covers ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in admission plugins such as ResourceQuota. It runs only when the agent asks. | Yes, for admission at that moment |
 
@@ -405,9 +405,17 @@ at that moment.
   refusal is `authorization_failed`, or an unclassified error from `code_exec` (section 5).
 - **Until then.** Discovery serves ACP sessions only. Describe reports `orka.api` as
   `not_covered` for every other caller.
-- **Why ACP doesn't need it.** ACP brokered calls run under the Task's frozen authority. The
-  broker sets none of the caller authorization hooks, only namespace isolation, and
-  `orka-policy`'s namespace scope covers that.
+- **Why ACP doesn't need it.** ACP brokered calls run under the Task's frozen authority.
+  - The broker's tool context sets namespace isolation, which `orka-policy`'s namespace
+    scope covers.
+  - For `list_connections`, the broker also adds `AuthorizeConnectorRead`, which checks the
+    Task's transaction scopes.
+    - It refuses only when three things hold: enforcement is on, connector-read scopes are
+      configured, and the Task has a transaction.
+    - The read scopes come from controller configuration, not a frozen digest. So
+      `orka-policy`'s answer for this check reflects the controller's current settings.
+    - `orka-policy` evaluates it as part of the transaction-token scopes it covers.
+  - The broker sets no other caller authorization hook.
 - **Native AI workers don't need it either.** Their tools act with the worker's
   ServiceAccount, which `kubernetes-authorization` covers.
 
@@ -416,6 +424,17 @@ at that moment.
 - **Gatekeeper Runtime:**
   - Explain and Observe for `runtime.network`, replacing #640's direct client;
   - Describe from activation receipts, if Gatekeeper Runtime gains an API for that.
+
+  **Evidence isolation.** Its evidence is container-scoped, so a session's own activity
+  can't be separated from other sessions in the same container.
+  - Explain returns that evidence only when the session is isolated, as #640 requires
+    today: a dedicated, Task-specific pool with one session and one prompt.
+  - A provider that can verifiably attribute evidence to a single session could lift that
+    requirement.
+  - Without either, Explain returns no Gatekeeper Runtime evidence. A RuntimeSession ID in
+    the capture request doesn't isolate the events by itself.
+  - Describe is unaffected. Policy in force on a container applies to every session in it,
+    so describing it discloses nothing about other sessions.
 - **Container enforcement providers from #952:** Describe and Explain, if they implement
   the discovery service.
 - **AuthZEN decision points,** through an adapter.
@@ -478,7 +497,7 @@ classes, each with a closed set of codes:
 | `approval` | `approval_pending`, `approval_declined`, `approval_expired`, `approval_cancelled`, `approval_stale` | The call needs a person, or needed one. |
 | `outcome_unknown` | `tool_outcome_unknown` | The tool may have run. Don't repeat it automatically. |
 | `no_effect` | `tool_failed_without_effect`, `request_not_sent` | The tool definitely did nothing. |
-| `transient` | `broker_unavailable`, `connection_binding_unavailable`, `session_at_capacity`, `rate_limited`, `token_exchange_unavailable`, `enforcement_uncertain` | Something was unavailable or busy, nothing happened, and trying later may help. |
+| `transient` | `broker_unavailable`, `connection_binding_unavailable`, `session_at_capacity`, `rate_limited`, `request_expired`, `token_exchange_unavailable`, `enforcement_uncertain` | Something was unavailable or busy, nothing happened, and trying later may help. |
 
 **Other codes.**
 
@@ -492,9 +511,29 @@ classes, each with a closed set of codes:
     at the supervisor's digest or validation step;
   - a type that contradicts the tool's schema, in `Registry.Execute`.
 
-  The broker runs the schema check before it reserves an external effect. A rejected
-  argument therefore never becomes `outcome_unknown`. Today that check runs inside the
-  effect, so this is a change the refusal-format work makes.
+  The broker already returns a registry argument rejection as a 200 `isError` result with
+  `code: invalid_arguments`.
+  - The refusal format puts it in the `invalid_arguments` class and renames the code to
+    `arguments_rejected`.
+  - The tool hasn't run, so the refusal isn't `outcome_unknown`. The exception is when a
+    post-call check fails: prompt authority, approval revalidation, or committing the
+    result. A consequential call then settles as unknown. An approval-required call, of
+    either kind, settles as unknown and returns `tool_outcome_unknown`. A read-only call
+    without approval has no effect record, and ends as a 502 (`internal_error` /
+    `tool_failed`).
+
+  **Retry rule.**
+  - `retry: later` and `no_effect` need evidence that the call had no effect. Any of these
+    counts:
+    - the tool never started;
+    - the endpoint or an enforcement point refused the request;
+    - the tool is read-only.
+  - When a call that isn't known to be read-only could have had an effect and its outcome
+    isn't confirmed, the refusal is `outcome_unknown` / `tool_outcome_unknown`,
+    `retry: never`.
+  - When Orka can't tell, it gives no retry guidance (`internal_error` / `tool_failed`).
+    "Can't tell" means it knows neither the tool's effect class nor whether the request
+    was sent, as with native and chat built-in tools today.
 - `authorization_failed`, an existing class, gains `transaction_scope_denied` and
   `resource_authorization_denied`.
 - The Check-only code `action_not_reachable` (section 3) is never a refusal.
@@ -503,13 +542,14 @@ classes, each with a closed set of codes:
 because MCP clients should pass those to the model. That includes every case where nothing
 happened and trying later may help.
 
-JSON-RPC protocol errors are kept only where the agent's turn is already over. They add
+JSON-RPC protocol errors are kept only for two cases: the agent's turn is already over, or
+the session can no longer be trusted to continue. They add
 `data: {"reason": …, "retry": "never"}`, with one of three reasons:
 
 - `prompt_inactive`;
 - `session_replaced`;
-- `session_invalid`: the supervisor and broker no longer agree on the session's identity
-  or request format.
+- `session_invalid`: the supervisor and broker no longer agree on the session's identity,
+  its request format, or what an operation contains.
 
 **Exceptions.** Two refusals stay outside this rule, and both are known gaps:
 
@@ -529,22 +569,27 @@ Each happens before a request can be parsed, so neither can carry a classified r
 | Proxy: the proxy-wide connection limit | HTTP 429 "MCP proxy is at capacity" | Unchanged, and a known gap. The response comes before any JSON-RPC exchange exists, and a transport-level rejection can close a client's shared MCP stream. Delivery step 1 records how each pinned runtime handles it. |
 | Supervisor: request not prepared or not sent (local digest, validation or signing failure) | `-32002` | Nothing was sent. It depends on why:<br>- prompt authority went inactive before sending: a protocol error, `prompt_inactive`;<br>- arguments that aren't a JSON object, won't canonicalize, or are too large, whether the digest step or validation catches them: `isError` with `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- any other cause: `isError` with `no_effect` / `request_not_sent`, `retry: later`. |
 | Supervisor: broker transport failure, invalid broker response, or call deadline | `-32002` | `isError`, depending on the tool's frozen effect. The proxy can't tell whether the broker ran a consequential tool.<br>- Consequential: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`.<br>- Read-only: `transient` / `broker_unavailable`, `retry: later`. |
+| Broker 400 or 403: the request's metadata expired in transit (it lives at most 30 seconds) | `-32002` | No tool ran. Depends on the prompt:<br>- prompt still active: `isError` with `transient` / `request_expired`, `retry: later`;<br>- prompt no longer active: a protocol error, `prompt_inactive`.<br><br>Today the expiry surfaces under generic messages: at `ValidateAt` as 400 "invalid MCP broker request", and at capability verification as 403 "MCP broker operation authorization failed". This is a broker change: report expiry as its own reason at both checks. |
 | Broker 401: pool authentication failed; broker 400: a malformed request, or one that doesn't match its authenticated pool identity | `-32002` | Protocol error: `session_invalid`. No tool ran. The supervisor checks arguments with the same validation before sending, so a broker 400 means the supervisor and broker disagree, not that the model's arguments were wrong. |
 | Broker 410: stale fence or policy | `-32002` | Protocol error: `session_replaced` |
-| Broker 403: the call's operation capability can't be verified, or the prompt isn't active | `-32002` | Protocol error: `prompt_inactive`. Either way, the call's authority can't be shown to be current. |
-| Broker 503: unavailable, before any tool runs | `-32002` | `isError`: `transient` / `broker_unavailable`, `retry: later` |
-| Broker 502: tool execution failed, or the tool returned an invalid result | `-32002` | `isError`, depending on the cause:<br>- arguments rejected by the tool's schema, checked before any effect is reserved: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- consequential tool whose outcome is settled as unknown: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- tool that reported no effect: `no_effect` / `tool_failed_without_effect`, `retry: with_changes`;<br>- read-only tool: `internal_error` / `tool_failed`, with no `retry`. |
+| Broker 403: the call's operation capability can't be verified for a reason other than expiry, or the prompt isn't active | `-32002` | Protocol error: `prompt_inactive`. Either way, the call's authority can't be shown to be current. |
+| Broker 503 before any tool runs: the broker is unavailable; approval storage is unavailable; or "MCP approval could not be recorded" (the approval request can't be stored before any approval exists) | `-32002` | `isError`: `transient` / `broker_unavailable`, `retry: later` |
+| Broker 503 after an approved call may have run: "MCP approval continuation is unavailable; the original call must not be repeated" | `-32002` | `isError`: `outcome_unknown` / `tool_outcome_unknown`, `retry: never` |
+| Broker 409: an approval call doesn't match its stored action, or an approval call's operation conflicts with a previous call (a reused call ID with a different payload) | `-32002` | Protocol error: `session_invalid`. No new tool run starts. |
+| Broker 200 `isError` results the broker already shapes: `code: invalid_arguments` (registry argument rejection) and `code: tool_execution_failed` (a custom tool's failure, or a read-only tool's request deadline) | `isError` with those codes | Map them into the shared vocabulary:<br>- `invalid_arguments`: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- `tool_execution_failed` on a consequential tool: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. A failure isn't evidence of no effect;<br>- `tool_execution_failed` on a read-only tool: `internal_error` / `tool_failed`, with no `retry`.<br><br>A replayed receipt carries the same mapping as the original result. |
+| Broker 502: tool execution failed, or the tool returned an invalid result | `-32002` | `isError`, depending on the cause:<br>- consequential tool whose outcome is settled as unknown: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- tool that reported no effect: `no_effect` / `tool_failed_without_effect`, `retry: with_changes`;<br>- read-only tool: `internal_error` / `tool_failed`, with no `retry`. |
 | Broker: connection binding unavailable | `-32002` | `isError`: `transient` / `connection_binding_unavailable`, `retry: later` |
 | A discovery tool over its rate limit | Not yet possible | `isError`: `transient` / `rate_limited`, `retry: later` |
 | Approval outcomes | `isError` with a code | Codes stay the same; each gains `errorType` and `retry`:<br>- `approval_declined`: `approval`, `never`;<br>- `approval_expired`: `approval`, `after_approval`;<br>- `approval_cancelled`: `approval`, `never`;<br>- `approval_stale`: `approval`, `never`;<br>- `tool_outcome_unknown`: `outcome_unknown`, `never`;<br>- `tool_failed_without_effect`: `no_effect`, `with_changes`. |
 | A call waiting for approval (#841) | Not yet possible | `approval` / `approval_pending`, `retry: after_approval` |
-| Kubernetes errors in built-in tools | Where tools use the shared classifier, every 403 becomes `permission_denied` and anything unrecognized becomes `internal_error`. Some paths return raw errors instead. | Every Kubernetes error goes through one classifier:<br>- an RBAC 403, recognized from the authorizer's own message ("… cannot `<verb>` resource …"): stays `permission_denied`, `retry: never`;<br>- an admission denial: `policy_denied` / `admission_denied`, with the message in `untrustedMessage`. It's recognized at any status code in one of three ways:<br>&nbsp;&nbsp;- a webhook denial, by the message prefix `admission webhook "<name>" denied the request`. A webhook chooses its own code, and the API server returns 400 when it sets none;<br>&nbsp;&nbsp;- a ValidatingAdmissionPolicy denial, by `ValidatingAdmissionPolicy '<policy>' [with binding '<binding>'] denied request`. It appears after the `is forbidden: ` wrapper and again in `details.causes`. Its code comes from the policy's `reason`, and is 422 when none is set;<br>&nbsp;&nbsp;- any other 403 that isn't from the authorizer. This covers built-in plugins such as ResourceQuota, LimitRange and NamespaceLifecycle, which deny without either text.<br><br>`enforcedBy` comes from the webhook or policy name in that text;<br>- a field-validation 422 that matches none of these: `invalid_arguments`, `retry: with_changes`.<br><br>Retry for `admission_denied` depends on the source:<br>- a webhook, a ValidatingAdmissionPolicy or LimitRange: `with_changes`;<br>- ResourceQuota ("exceeded quota"): `later`, since the quota can free up without any change;<br>- NamespaceLifecycle, for a terminating namespace: `never`.<br><br>Warnings go in `data.warnings`. |
+| Kubernetes errors in built-in tools | Where tools use the shared classifier, every 403 becomes `permission_denied` and anything unrecognized becomes `internal_error`. Some paths return raw errors instead. | Every Kubernetes error goes through one classifier:<br>- an RBAC 403, recognized from the authorizer's own message ("… cannot `<verb>` resource …"): stays `permission_denied`, `retry: never`;<br>- an admission denial: `policy_denied` / `admission_denied`, with the message in `untrustedMessage`. It's recognized at any status code in one of three ways:<br>&nbsp;&nbsp;- a webhook denial, by the message prefix `admission webhook "<name>" denied the request`. A webhook chooses its own code, and the API server returns 400 when it sets none;<br>&nbsp;&nbsp;- a ValidatingAdmissionPolicy denial, by `ValidatingAdmissionPolicy '<policy>' [with binding '<binding>'] denied request`. It appears after the `is forbidden: ` wrapper and again in `details.causes`. Its code comes from the policy's `reason`, and is 422 when none is set;<br>&nbsp;&nbsp;- a built-in plugin denial, by its own message. The recognized forms are:<br>&nbsp;&nbsp;&nbsp;&nbsp;- ResourceQuota's "exceeded quota";<br>&nbsp;&nbsp;&nbsp;&nbsp;- NamespaceLifecycle's "because it is being terminated".<br><br>LimitRange validates only Pods and PersistentVolumeClaims, and PodSecurity enforces only on Pods (it only warns on a Job). Built-in tools don't create Pods or PVCs directly. When a `code_exec` Job's Pod is rejected, the agent sees a Job that can't start, plus at most a create-time warning, not a refusal. That's a known gap.<br><br>A 403 with no positive admission evidence stays `permission_denied`. That includes Orka's own local authorization refusals, such as the compatibility API's "not authorized". A built-in denial in an unrecognized form also falls back to `permission_denied`, which is a known gap.<br><br>`enforcedBy` comes from the webhook or policy name in that text;<br>- a field-validation 422 that matches none of these: `invalid_arguments`, `retry: with_changes`.<br><br>Retry for `admission_denied` depends on the source:<br>- a webhook or a ValidatingAdmissionPolicy: `with_changes`;<br>- ResourceQuota ("exceeded quota"): `later`, since the quota can free up without any change;<br>- NamespaceLifecycle, for a terminating namespace: `never`.<br><br>Warnings go in `data.warnings`. |
 | Task creation limit for the turn | `limit_reached` | Add `retry: never`. The limit doesn't reset within the turn, and the message says it resets on the next one. |
 | Child transaction-token subset check or exchange | An unclassified error | - Refused: `authorization_failed` / `transaction_scope_denied`, `retry: never`.<br>- Exchange service unavailable: `transient` / `token_exchange_unavailable`, `retry: later`. |
 | Outbound transaction-token exchange for a native worker's HTTP Tool call | An unclassified error ("Error executing tool: …") | Same split as for child Tasks: `transaction_scope_denied` when refused, `token_exchange_unavailable` when the service is down |
 | An HTTP Tool's OutboundAccessPolicy refuses the call, in a native worker or the ACP broker | An unclassified error: "resolve outbound access policy: …", shown as "Error executing tool: …" or `-32002` | `policy_denied` / `outbound_access_denied`, `retry: never` |
 | `code_exec` resource authorization (chat and the compatibility API) | An unclassified error: "resource authorization: …" | `authorization_failed` / `resource_authorization_denied`, `retry: never` |
-| Native AI worker tool error | Free text "Error executing tool: …" | A `ChatToolResult`: `internal_error` / `tool_failed`, or `no_effect` / `tool_failed_without_effect` when the tool returns `NoEffectError` |
+| `list_connections` refused by `AuthorizeConnectorRead` (ACP broker) | `errorType: unauthorized_tool` | `authorization_failed` / `transaction_scope_denied`, `retry: never` |
+| Native AI worker tool error | Free text "Error executing tool: …" | A `ChatToolResult`, depending on the error:<br>- `NoEffectError`: `no_effect` / `tool_failed_without_effect`;<br>- `ToolRequestAttemptedError`, where the request was sent but the outcome isn't confirmed: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. Native workers don't use a tool's effect class (`brokeredToolClass` is ACP-only), so this applies to every such error;<br>- anything else: `internal_error` / `tool_failed`. |
 | Task failure | `FailedEvent{stopReason, code, message, retryable}` for ACP prompts; a Failed Task for other kinds | A policy-caused failure takes its `code` from the vocabulary above: `admission_denied`, `enforcement_refused` or `enforcement_uncertain`. #952's `EnforcementRefused` and `EnforcementUncertain` outcomes map to the last two. `FailedEvent.retryable` stays `false`, as it must for an accepted prompt; whether to retry the Task is up to the caller. |
 
 **Review gate.** The proxy and broker changes ship only after a security review of the
@@ -553,7 +598,8 @@ broker's fences, because they replace deliberately uniform errors.
 The new codes are a fixed vocabulary, and they reveal no policy contents. They do reveal
 operational state the agent can't see today, and the review must clear each item:
 
-- broker availability and session capacity (`broker_unavailable`, `session_at_capacity`);
+- broker availability, session capacity and request expiry (`broker_unavailable`,
+  `session_at_capacity`, `request_expired`);
 - connection-binding state (`connection_binding_unavailable`);
 - token-exchange availability (`token_exchange_unavailable`);
 - local preparation failures (`request_not_sent`, `arguments_rejected`);
@@ -665,6 +711,11 @@ Implementation issues, in this order:
 4. **Proxy and broker refusal classification,** after the security review.
 5. **A Gatekeeper Runtime provider** with Explain and Observe, plus `policy_explain`. It
    replaces #640's direct integration.
+   - Explain returns `runtime.*` evidence only for a session in a dedicated single-session
+     pool.
+   - #640's limits apply until they're lifted: native Deployment-backed pools only, and no
+     `sessionRef`, execution workspaces, Claude, Copilot or external runtimes.
+   - Once the workspace limit is lifted, a workspace-backed `acp-ws-*` pool would qualify.
 6. **The `kubernetes-authorization` and `kubernetes-dry-run` providers,** plus
    `policy_check`.
 7. **The same tools and refusal format** for native AI workers, chat and the compatibility
@@ -686,8 +737,16 @@ Implementation issues, in this order:
 - Provider text isn't copied by default.
 - Dry runs don't run on every write.
 
-**Changed behavior.** Code or tests that match the current `-32001` and `-32002` messages,
-or that expect `internal_error` for admission denials, will need to change.
+**Changed behavior.** Code or tests that rely on today's results will need to change:
+
+- matching the current `-32001` and `-32002` messages;
+- expecting `internal_error` for admission denials;
+- matching the codes the refusal format renames:
+  - the broker's `code: invalid_arguments` becomes `arguments_rejected`;
+  - `code: tool_execution_failed` becomes `tool_outcome_unknown` or `tool_failed`;
+  - `errorType: unauthorized_tool` from the ACP broker's connector-read refusal for
+    `list_connections` becomes `authorization_failed` / `transaction_scope_denied`. Its
+    uses in chat and the compatibility API are unchanged until Delivery step 7.
 
 **Limits.**
 

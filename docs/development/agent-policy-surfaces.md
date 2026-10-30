@@ -38,7 +38,7 @@ It describes current behavior. The contract for changing that behavior is
 | Linked accounts (Connections) used by built-in tools | The tools, through the controller's linked-account resolver | No | Depends on the tool. A bound Connection that can't be used fails the call closed instead of falling back. Through the ACP broker, an unavailable binding is the 502 behind `-32002`. | Partly, from the Task's frozen Connection binding |
 | Child transaction-token scopes | Subset check and token exchange when a child Task is created | No | An unclassified tool error | Partly: the subset rule can be checked, but the exchange itself can still refuse |
 | Kubernetes RBAC for the identity Orka acts as | API server | No | Through the shared classifier: a tool result with `permission_denied` and "Check RBAC permissions". On some paths: the raw error, unclassified. | Yes: a SubjectAccessReview for that identity |
-| Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota, LimitRange and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object |
+| Kubernetes admission: ValidatingAdmissionPolicy, MutatingAdmissionPolicy, Gatekeeper, Kyverno, Orka's own policies, and built-in plugins such as ResourceQuota and NamespaceLifecycle | API server | No | Through the shared classifier: a 403 denial (Gatekeeper, built-in plugins) becomes `permission_denied` "Check RBAC permissions"; a ValidatingAdmissionPolicy without a `reason`, or a webhook that sets no status code, becomes `internal_error`. On some paths: the raw error. Warnings are dropped. | Yes: server-side dry-run for the same identity and object |
 | Network egress from ACP RuntimePools, Kubernetes `code_exec` Jobs and validation Tasks | Kubernetes NetworkPolicy (default deny for RuntimePools), plus runtime enforcement where installed | No, though the fixed rules are documented | A connection failure or timeout that looks like an outage | Fixed rules: yes. Runtime enforcement policies: no |
 | Filesystem layout: read-only root filesystems; private per-session paths and UIDs for ACP children | Pod security context and the ACP supervisor | No | An ordinary filesystem error, such as `EROFS` or `EACCES` | Yes; the layout is fixed |
 | Model and provider route (ACP) | The supervisor's per-session provider proxy, checked against the immutable session profile | No | The runtime's provider call fails; what the model sees depends on the runtime | Yes, from the session profile |
@@ -104,10 +104,18 @@ It describes current behavior. The contract for changing that behavior is
 **Broker refusals all look the same.**
 
 - The broker answers with distinct statuses:
+  - 400 for a malformed or expired request, or one that doesn't match its pool identity;
+  - 401 when pool authentication fails;
   - 410 for a stale fence or policy;
   - 403 for a failed operation capability or an inactive prompt;
+  - 409 for an approval call that conflicts with its stored action or a previous call;
   - 502 for an unavailable connection binding or a failed tool;
-  - 503 when the broker is unavailable.
+  - 503 when the broker or approval storage is unavailable, including after an approved
+    call that may have run ("the original call must not be repeated").
+- Some tool failures come back as 200 `isError` results that the broker shapes itself:
+  - `code: invalid_arguments` for a registry argument rejection;
+  - `code: tool_execution_failed` for a custom tool's failure or a read-only tool's
+    request deadline.
 - The supervisor's broker client (`workers/acp/supervisor/mcp_broker_client.go`) collapses
   every non-200 response into one error.
 - The proxy then returns `-32002` "MCP broker call failed".
@@ -120,7 +128,7 @@ It describes current behavior. The contract for changing that behavior is
 
 **Why this matters to the model.** The MCP specification says clients *should* pass tool
 execution errors (`isError`) to the model, but only *may* pass protocol errors. None of
-these refusals is a tool execution error.
+the JSON-RPC errors above is a tool execution error. Only the 200 `isError` results are.
 
 ### Approval-required brokered tools
 
@@ -271,13 +279,17 @@ the agent unclassified:
     `<resource> "<name>" is forbidden: ` wrapper, and again in `details.causes`.
 - Built-in admission plugins also deny with 403, without either prefix. Examples:
   - ResourceQuota ("exceeded quota");
-  - LimitRange;
   - NamespaceLifecycle, for a namespace that is being terminated.
 
   So a quota on Tasks reaches the agent as "Check RBAC permissions" through tools that use
   the shared classifier.
-- An RBAC denial is the one 403 whose message comes from the authorizer: "… cannot
-  `<verb>` resource …".
+- LimitRange validates only Pods and PersistentVolumeClaims. PodSecurity enforces only on
+  Pods, and only warns on a Job. Built-in tools don't create Pods or PVCs directly: `code_exec`
+  creates a Job. If the Job's Pod is rejected, the agent sees a Job that can't start, plus
+  at most a create-time warning, not a refusal.
+- An RBAC denial's message comes from the authorizer: "… cannot `<verb>` resource …".
+- Orka's own local authorization refusals are 403s too, such as the compatibility API's
+  "not authorized". They carry neither the authorizer's form nor an admission form.
 
 **Orka's own policies without a `reason`.** These guard controller-owned objects, so
 agents don't normally reach them:
