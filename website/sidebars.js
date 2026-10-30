@@ -35,6 +35,7 @@ const sidebars = {
           collapsed: false,
           items: [
             'guides/container-tasks',
+            'guides/browser-tasks',
             'guides/scheduled-tasks',
             'guides/codex-session-migration',
           ],

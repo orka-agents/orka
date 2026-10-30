@@ -163,7 +163,8 @@ Creates a `type: container` Task from the chat and from coordinator Agents alike
 fields below map onto the Task spec; every limit is checked before anything is created.
 See [Container tasks](../guides/container-tasks.md) for the filesystem and image rules, and
 the [custom-image contract](../guides/container-tasks.md#custom-image-result-and-artifact-contract)
-for how a custom image posts its result and artifacts.
+for how a custom image posts its result and artifacts. For Playwright and Chromium, see
+[Browser tasks](../guides/browser-tasks.md).
 
 | Parameter | Description |
 | --- | --- |

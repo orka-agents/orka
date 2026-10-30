@@ -299,6 +299,11 @@ must not be retried after `unknown_outcome` or a failure. Reconcile it instead: 
 follow-up Task that checks at the source what actually happened.
 :::
 
+## Browsers
+
+Playwright and Chromium need a few extra settings to run under these rules. Orka publishes a
+browser worker image that handles them; see [Browser tasks](browser-tasks.md).
+
 ## When an agent creates these
 
 Coordinator agents create container Tasks through the `create_container_task` tool to
