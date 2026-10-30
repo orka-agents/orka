@@ -136,10 +136,10 @@ func TestResponsesHTTPAnthropicPreservesSystemRole(t *testing.T) {
 				require.Equal(t, "response.completed", events[len(events)-1]["type"])
 			}
 			request := <-captured
-			// The provider marks the last system block and the last message block as prompt cache breakpoints.
+			// The provider marks the first and last system blocks and the last message block as prompt cache breakpoints.
 			cacheControl := map[string]any{"type": "ephemeral"}
 			require.Equal(t, []any{
-				map[string]any{"type": "text", "text": "Keep it short."},
+				map[string]any{"type": "text", "text": "Keep it short.", "cache_control": cacheControl},
 				map[string]any{"type": "text", "text": "Answer only in JSON."},
 				map[string]any{"type": "text", "text": "Include a source.", "cache_control": cacheControl},
 			}, request["system"])

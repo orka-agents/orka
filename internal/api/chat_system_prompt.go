@@ -140,6 +140,16 @@ func promptSections() map[string][]promptPart {
 	}
 }
 
+// chatCatalogStart opens the cluster catalog, the first part of the chat
+// system prompt that changes with the cluster.
+const chatCatalogStart = "<available_agents>\n"
+
+// chatPromptStable is how many leading bytes of a chat system prompt are the
+// fixed sections, which stay the same while the cluster changes.
+func chatPromptStable(systemPrompt string) int {
+	return max(strings.Index(systemPrompt, chatCatalogStart), 0)
+}
+
 // BuildSystemPrompt assembles the full system prompt with dynamic context.
 func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemPrompt string) (string, error) {
 	agentsSection, toolsSection, providersSection, skillsSection, err := b.buildDynamicContext(ctx)
@@ -168,10 +178,11 @@ func (b *SystemPromptBuilder) BuildSystemPrompt(ctx context.Context, userSystemP
 	sb.WriteString(b.rulesSection())
 	sb.WriteString(b.examplesSection())
 
-	// The cluster catalog comes after every fixed section: a provider caches the
-	// prompt up to its first changed byte, so a new Agent or Tool leaves the
-	// instructions before it cached.
-	sb.WriteString("<available_agents>\n")
+	// The cluster catalog comes after every fixed section, so a new Agent or
+	// Tool leaves the instructions before it cached: a provider that caches
+	// prefixes itself reuses them up to the first changed byte, and
+	// chatPromptStable tells one that needs breakpoints where they end.
+	sb.WriteString(chatCatalogStart)
 	sb.WriteString("Skills are loaded on-demand. Read skill content only when relevant to the current task.\n")
 	sb.WriteString(agentsSection)
 	sb.WriteString("</available_agents>\n\n")

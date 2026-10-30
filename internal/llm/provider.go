@@ -27,15 +27,20 @@ type Provider interface {
 
 // CompletionRequest represents a completion request
 type CompletionRequest struct {
-	Model          string          `json:"model"`
-	Messages       []Message       `json:"messages"`
-	SystemPrompt   string          `json:"system_prompt,omitempty"`
-	MaxTokens      int             `json:"max_tokens,omitempty"`
-	Temperature    float64         `json:"temperature,omitempty"`
-	TemperatureSet bool            `json:"-"` // Preserves explicit zero for in-memory callers.
-	Tools          []Tool          `json:"tools,omitempty"`
-	StopSequences  []string        `json:"stop_sequences,omitempty"`
-	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Model        string    `json:"model"`
+	Messages     []Message `json:"messages"`
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+	// SystemPromptStable is how many leading bytes of SystemPrompt stay the
+	// same across requests while the rest may change, such as a catalog after
+	// fixed instructions. A provider whose cache needs explicit breakpoints
+	// marks the end of the stable part too. Zero means no split.
+	SystemPromptStable int             `json:"-"`
+	MaxTokens          int             `json:"max_tokens,omitempty"`
+	Temperature        float64         `json:"temperature,omitempty"`
+	TemperatureSet     bool            `json:"-"` // Preserves explicit zero for in-memory callers.
+	Tools              []Tool          `json:"tools,omitempty"`
+	StopSequences      []string        `json:"stop_sequences,omitempty"`
+	ResponseFormat     *ResponseFormat `json:"response_format,omitempty"`
 	// Store preserves explicit stateless requests through provider translation.
 	// Nil retains the provider default for existing callers.
 	Store *bool `json:"store,omitempty"`

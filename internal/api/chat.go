@@ -1094,11 +1094,12 @@ func (ch *ChatHandler) handleIterationLimit(
 	turnMessages = append(turnMessages, terminationPrompt)
 
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     ch.sessionView(messages),
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           ch.sessionView(messages),
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil {
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
@@ -1147,12 +1148,13 @@ func (ch *ChatHandler) callLLMWithRetry(
 	temperature float64,
 ) (*llm.CompletionResponse, []llm.Message, bool, error) {
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		Tools:        tools,
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           messages,
+		Tools:              tools,
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil && llm.IsContextTooLongErr(err) {
 		tokenEstimate := 0
@@ -1161,12 +1163,13 @@ func (ch *ChatHandler) callLLMWithRetry(
 		}
 		messages = llm.TruncateMessages(messages, tokenEstimate/2)
 		resp, err = provider.Complete(ctx, &llm.CompletionRequest{
-			Model:        model,
-			SystemPrompt: systemPrompt,
-			Messages:     messages,
-			Tools:        tools,
-			MaxTokens:    maxTokens,
-			Temperature:  temperature,
+			Model:              model,
+			SystemPrompt:       systemPrompt,
+			SystemPromptStable: chatPromptStable(systemPrompt),
+			Messages:           messages,
+			Tools:              tools,
+			MaxTokens:          maxTokens,
+			Temperature:        temperature,
 		})
 		return resp, messages, true, err
 	}

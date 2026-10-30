@@ -993,6 +993,22 @@ func TestBuildRequestParamsMarksPromptCache(t *testing.T) {
 		}
 	})
 
+	t.Run("stable part of a split system prompt", func(t *testing.T) {
+		req := toolLoopRequest()
+		req.SystemPrompt = "fixed instructions. catalog"
+		req.SystemPromptStable = len("fixed instructions. ")
+		params := buildRequestParams(req)
+		if len(params.System) != 2 || params.System[0].Text != "fixed instructions. " || params.System[1].Text != "catalog" {
+			t.Fatalf("system = %+v, want the stable part and the rest as two blocks", params.System)
+		}
+		if got := cacheMarks(t, params); got != 3 {
+			t.Fatalf("cache_control count = %d, want 3", got)
+		}
+		if cacheMarks(t, params.System[0]) != 1 {
+			t.Error("stable system block has no cache_control")
+		}
+	})
+
 	t.Run("no system prompt", func(t *testing.T) {
 		req := toolLoopRequest()
 		req.SystemPrompt = ""

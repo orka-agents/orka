@@ -2097,11 +2097,17 @@ func TestRunNonStreamingToolLoop_IterationLimitRequestIsTruncated(t *testing.T) 
 
 func TestConvertToAnthropicResponseReportsCacheBeside(t *testing.T) {
 	read, write := int64(100), int64(20)
-	got := convertToAnthropicResponse(&llm.CompletionResponse{
-		Content: "ok", InputTokens: 5, OutputTokens: 1, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
-	}, "test-model", "end_turn").Usage
 	want := AnthropicUsage{InputTokens: 5, OutputTokens: 1, CacheReadInputTokens: 100, CacheCreationInputTokens: 20}
-	if got != want {
-		t.Errorf("usage = %+v, want %+v", got, want)
+	for name, resp := range map[string]*llm.CompletionResponse{
+		"exclusive": {Content: "ok", InputTokens: 5, OutputTokens: 1, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true},
+		"inclusive": {Content: "ok", InputTokens: 125, OutputTokens: 1, CachedInputTokens: &read, CacheWriteInputTokens: &write},
+	} {
+		if got := convertToAnthropicResponse(resp, "test-model", "end_turn").Usage; got != want {
+			t.Errorf("%s usage = %+v, want %+v", name, got, want)
+		}
+	}
+	short := &llm.CompletionResponse{Content: "ok", InputTokens: 50, OutputTokens: 1, CachedInputTokens: &read}
+	if got := convertToAnthropicResponse(short, "test-model", "end_turn").Usage; got != (AnthropicUsage{InputTokens: 50, OutputTokens: 1}) {
+		t.Errorf("inconsistent inclusive usage = %+v, want it whole without a breakdown", got)
 	}
 }

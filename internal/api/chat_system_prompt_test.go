@@ -697,6 +697,9 @@ func TestBuildSystemPrompt(t *testing.T) {
 		if !strings.HasPrefix(withAgent, empty[:catalog]) {
 			t.Error("adding an Agent changed the prompt before the catalog")
 		}
+		if got := chatPromptStable(withAgent); got != catalog {
+			t.Errorf("chatPromptStable = %d, want the catalog start %d", got, catalog)
+		}
 	})
 
 	t.Run("user system prompt appended", func(t *testing.T) {

@@ -607,20 +607,26 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 	}
 }
 
-// anthropicUsage is a completion's usage in Anthropic's shape. An input count
-// that excludes the cache, as Anthropic's does, comes with the cache reads and
-// writes beside it, so the whole prompt is reported; an inclusive count already
-// holds them.
+// anthropicUsage is a completion's usage in Anthropic's shape: input_tokens
+// leaves out the cache reads and writes, which come beside it. An inclusive
+// count, as OpenAI's is, has them taken out, as the streaming path does; one
+// smaller than its own breakdown is reported whole, without one.
 func anthropicUsage(resp *llm.CompletionResponse) AnthropicUsage {
 	usage := AnthropicUsage{InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
-	if resp.InputExcludesCache {
-		if resp.CachedInputTokens != nil {
-			usage.CacheReadInputTokens = int(*resp.CachedInputTokens)
-		}
-		if resp.CacheWriteInputTokens != nil {
-			usage.CacheCreationInputTokens = int(*resp.CacheWriteInputTokens)
-		}
+	var read, write int
+	if resp.CachedInputTokens != nil {
+		read = int(*resp.CachedInputTokens)
 	}
+	if resp.CacheWriteInputTokens != nil {
+		write = int(*resp.CacheWriteInputTokens)
+	}
+	if !resp.InputExcludesCache {
+		if resp.InputTokens < read+write {
+			return usage
+		}
+		usage.InputTokens -= read + write
+	}
+	usage.CacheReadInputTokens, usage.CacheCreationInputTokens = read, write
 	return usage
 }
 
