@@ -273,7 +273,7 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			if spanRecording && len(finishReasons) > 0 {
 				span.SetAttributes(attribute.StringSlice(genai.AttrResponseFinishReasons, finishReasons))
 			}
-			if streamResp.InputTokens > 0 || streamResp.OutputTokens > 0 {
+			if streamResp.PromptTokens() > 0 || streamResp.OutputTokens > 0 {
 				streamResp.Model = selectedModel
 				if spanRecording {
 					setResponseAttributes(span, streamResp, selectedProviderName)
@@ -301,6 +301,13 @@ func (tp *TracingProvider) Stream(ctx context.Context, req *CompletionRequest) (
 			if chunk.InputTokens > 0 {
 				streamResp.InputTokens = chunk.InputTokens
 			}
+			if chunk.CachedInputTokens != nil {
+				streamResp.CachedInputTokens = chunk.CachedInputTokens
+			}
+			if chunk.CacheWriteInputTokens != nil {
+				streamResp.CacheWriteInputTokens = chunk.CacheWriteInputTokens
+			}
+			streamResp.InputExcludesCache = streamResp.InputExcludesCache || chunk.InputExcludesCache
 			if chunk.OutputTokens > 0 {
 				streamResp.OutputTokens = chunk.OutputTokens
 			}
@@ -474,11 +481,18 @@ func setResponseAttributes(span trace.Span, resp *CompletionResponse, providerNa
 		attribute.String(genai.AttrProviderName, providerName),
 		attribute.Int("llm.tool_calls", len(resp.ToolCalls)),
 	}
-	if resp.InputTokens > 0 {
+	// GenAI input tokens count the whole prompt, cache reads and writes too.
+	if input := resp.PromptTokens(); input > 0 {
 		attrs = append(attrs,
-			attribute.Int(genai.AttrUsageInputTokens, resp.InputTokens),
-			attribute.Int("llm.input_tokens", resp.InputTokens),
+			attribute.Int(genai.AttrUsageInputTokens, input),
+			attribute.Int("llm.input_tokens", input),
 		)
+	}
+	if resp.CachedInputTokens != nil {
+		attrs = append(attrs, attribute.Int64(genai.AttrUsageCacheReadInputTokens, *resp.CachedInputTokens))
+	}
+	if resp.CacheWriteInputTokens != nil {
+		attrs = append(attrs, attribute.Int64(genai.AttrUsageCacheCreateInputTokens, *resp.CacheWriteInputTokens))
 	}
 	if resp.OutputTokens > 0 {
 		attrs = append(attrs,
@@ -528,12 +542,16 @@ func (tp *TracingProvider) recordTimeToFirstChunk(ctx context.Context, seconds f
 
 func (tp *TracingProvider) recordTokenUsage(ctx context.Context, resp *CompletionResponse, providerName, model string) {
 	metrics := tp.metrics.Load()
-	if metrics == nil || metrics.usage == nil || resp == nil || (resp.InputTokens == 0 && resp.OutputTokens == 0) {
+	if metrics == nil || metrics.usage == nil || resp == nil {
+		return
+	}
+	input := resp.PromptTokens()
+	if input == 0 && resp.OutputTokens == 0 {
 		return
 	}
 	base := metricAttributes(providerName, model, "")
-	if resp.InputTokens > 0 {
-		metrics.usage.Record(ctx, int64(resp.InputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeInput))...))
+	if input > 0 {
+		metrics.usage.Record(ctx, int64(input), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeInput))...))
 	}
 	if resp.OutputTokens > 0 {
 		metrics.usage.Record(ctx, int64(resp.OutputTokens), metric.WithAttributes(append(base, attribute.String(genai.AttrTokenType, genai.TokenTypeOutput))...))
