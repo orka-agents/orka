@@ -2065,3 +2065,43 @@ func TestHandleStreamingMessages_MaxTokensTextTerminatesWithMaxTokens(t *testing
 		t.Fatalf("expected no non-streaming retry after the truncated text, got %d Complete calls", mock.callIdx)
 	}
 }
+
+// The final no-tools call at the iteration limit must be truncated to the
+// session budget like every other step, since the loop keeps the whole history.
+func TestRunNonStreamingToolLoop_IterationLimitRequestIsTruncated(t *testing.T) {
+	_, _ = setupTestAnthropicHandler()
+	mock := &mockAnthropicProvider{responses: []*llm.CompletionResponse{{Content: "summary", StopReason: "end_turn"}}}
+	history := make([]llm.Message, 0, 41)
+	history = append(history, llm.Message{Role: "user", Content: "start"})
+	for i := range 40 {
+		history = append(history, llm.Message{Role: "assistant", Content: fmt.Sprintf("earlier %02d %s", i, strings.Repeat("x", 80))})
+	}
+	req := &llm.CompletionRequest{Model: "test-model", Messages: history}
+
+	_, err := runNonStreamingToolLoop(context.Background(), mock, req, "test-model",
+		ChatConfig{MaxIterations: 0, MaxSessionSize: 800, ToolTimeout: 30 * time.Second}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mock.requests) != 1 {
+		t.Fatalf("expected one final call, got %d", len(mock.requests))
+	}
+	sent := mock.requests[0].Messages
+	if len(sent) >= len(history) {
+		t.Fatalf("final call sent %d of %d messages, want it truncated", len(sent), len(history))
+	}
+	if last := sent[len(sent)-1]; !strings.Contains(last.Content, "maximum number of iterations") {
+		t.Errorf("final call ends with %q, want the termination prompt", last.Content)
+	}
+}
+
+func TestConvertToAnthropicResponseReportsCacheBeside(t *testing.T) {
+	read, write := int64(100), int64(20)
+	got := convertToAnthropicResponse(&llm.CompletionResponse{
+		Content: "ok", InputTokens: 5, OutputTokens: 1, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
+	}, "test-model", "end_turn").Usage
+	want := AnthropicUsage{InputTokens: 5, OutputTokens: 1, CacheReadInputTokens: 100, CacheCreationInputTokens: 20}
+	if got != want {
+		t.Errorf("usage = %+v, want %+v", got, want)
+	}
+}

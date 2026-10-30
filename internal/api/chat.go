@@ -1025,7 +1025,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
-		usage.InputTokens += resp.InputTokens
+		usage.InputTokens += resp.PromptTokens()
 		usage.OutputTokens += resp.OutputTokens
 
 		if len(resp.ToolCalls) == 0 {
@@ -1105,7 +1105,7 @@ func (ch *ChatHandler) handleIterationLimit(
 		return "", true, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
 	}
 	usage.LLMCalls++
-	usage.InputTokens += resp.InputTokens
+	usage.InputTokens += resp.PromptTokens()
 	usage.OutputTokens += resp.OutputTokens
 
 	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})

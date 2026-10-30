@@ -187,6 +187,29 @@ type StreamChunk struct {
 	Error                 error     `json:"error,omitempty"`
 }
 
+// PromptTokens is the size of the whole prompt, cached or not.
+func (c *StreamChunk) PromptTokens() int {
+	return promptTokens(c.InputTokens, c.CachedInputTokens, c.CacheWriteInputTokens, c.InputExcludesCache)
+}
+
+// PromptTokens is the size of the whole prompt, cached or not.
+func (r *CompletionResponse) PromptTokens() int {
+	return promptTokens(r.InputTokens, r.CachedInputTokens, r.CacheWriteInputTokens, r.InputExcludesCache)
+}
+
+// promptTokens adds the cache reads and writes back to an input count that
+// excludes them, as Anthropic's does; an inclusive count already holds them.
+func promptTokens(input int, cached, cacheWrite *int64, excludesCache bool) int {
+	if excludesCache {
+		for _, n := range []*int64{cached, cacheWrite} {
+			if n != nil {
+				input += int(*n)
+			}
+		}
+	}
+	return input
+}
+
 // ProviderConfig holds configuration for creating a provider
 type ProviderConfig struct {
 	APIKey              string

@@ -145,8 +145,10 @@ type AnthropicResponse struct {
 
 // AnthropicUsage contains token usage statistics.
 type AnthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // AnthropicStreamEvent is a single SSE event in an Anthropic streaming response.
@@ -601,11 +603,25 @@ func convertToAnthropicResponse(resp *llm.CompletionResponse, model, stopReason 
 		Content:    content,
 		Model:      model,
 		StopReason: &stopReason,
-		Usage: AnthropicUsage{
-			InputTokens:  resp.InputTokens,
-			OutputTokens: resp.OutputTokens,
-		},
+		Usage:      anthropicUsage(resp),
 	}
+}
+
+// anthropicUsage is a completion's usage in Anthropic's shape. An input count
+// that excludes the cache, as Anthropic's does, comes with the cache reads and
+// writes beside it, so the whole prompt is reported; an inclusive count already
+// holds them.
+func anthropicUsage(resp *llm.CompletionResponse) AnthropicUsage {
+	usage := AnthropicUsage{InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
+	if resp.InputExcludesCache {
+		if resp.CachedInputTokens != nil {
+			usage.CacheReadInputTokens = int(*resp.CachedInputTokens)
+		}
+		if resp.CacheWriteInputTokens != nil {
+			usage.CacheCreationInputTokens = int(*resp.CacheWriteInputTokens)
+		}
+	}
+	return usage
 }
 
 // anthropicError returns an error in Anthropic API format.

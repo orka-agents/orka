@@ -788,6 +788,9 @@ func runToolLoopWithObserver(
 			finalReq := *req
 			finalReq.Model = model
 			finalReq.Messages = messages
+			if config.MaxSessionSize > 0 {
+				finalReq.Messages = llm.TruncateMessages(messages, config.MaxSessionSize/4)
+			}
 			finalReq.Tools = nil
 			resp, err := provider.Complete(ctx, &finalReq)
 			if err != nil && isStreamingRequiredErr(err) {

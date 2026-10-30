@@ -1778,6 +1778,26 @@ func TestRunToolLoopKeepsTruncatedPrefixStable(t *testing.T) {
 	assert.Equal(t, last, next[:len(last)], "the next turn cuts the transcript elsewhere")
 }
 
+// Chat usage counts the whole prompt: Anthropic's input count leaves out the
+// tokens read from and written to its cache.
+func TestRunToolLoopCountsCachedPromptTokens(t *testing.T) {
+	const sessionID = "cached-usage-session"
+	fakeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	ch := newTestChatHandler(t, fakeClient, newTestSessionStore(t), newTestResultStore(t), DefaultChatConfig())
+	turnID := reserveTestChatTurn(t, ch, sessionID)
+	read, write := int64(100), int64(20)
+	provider := &chatMockProvider{responses: []*llm.CompletionResponse{{
+		Content: "done", InputTokens: 5, OutputTokens: 3, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
+	}}}
+	exec := NewToolExecutor(fakeClient, nil, "default", sessionID, "", false, 5, time.Minute, newTestResultStore(t))
+	_, usage, _, err := ch.runToolLoop(
+		context.Background(), provider, []llm.Message{{Role: "user", Content: "hi"}}, "system prompt", nil, exec,
+		sessionID, "default", "test-model", 0.7, 4096, 0, nil, turnID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 125, usage.InputTokens)
+}
+
 // --- HandleChat ---
 
 func TestHandleChat(t *testing.T) {
