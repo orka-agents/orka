@@ -96,6 +96,13 @@ These workers use dedicated ServiceAccounts bound to `orka-ai-worker-role`,
 `orka-vendor-worker-role`, or `orka-container-worker-role`. Include these identities when
 auditing Kubernetes access.
 
+A container Task with a custom `image` gets no ServiceAccount token. Its Pod instead gets a
+projected, Pod-bound token for the audience `orka.ai/task-callback`, at the path in
+`ORKA_SA_TOKEN_PATH`. The Kubernetes API server rejects that audience, so the token grants
+no Kubernetes API access. Orka accepts it only to post the Pod's own result, artifacts, and
+execution events while its Task is active; every other route refuses it. See
+[Container tasks](../guides/container-tasks.md).
+
 Container Tasks are untrusted compute. A Task's `spec.secretRef` is mounted only when an
 operator sets `ORKA_AGENT_DIRECT_SECRET_MOUNTS=true`; without it the mount is omitted and the
 Task still runs. A `spec.env` entry that reads a Secret or ConfigMap through `valueFrom` is

@@ -194,6 +194,14 @@ const (
 	ServiceAccountTokenPath = "ORKA_SA_TOKEN_PATH"
 
 	ServiceAccountTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	// TaskCallbackTokenAudience is the audience of the projected token that
+	// custom-image container Pods present when they post results, artifacts,
+	// and execution events. The Kubernetes API server rejects it, so it grants
+	// no Kubernetes API access.
+	TaskCallbackTokenAudience = "orka.ai/task-callback"
+	// TaskCallbackTokenFile is where custom-image container Pods find that
+	// token; ServiceAccountTokenPath points to it.
+	TaskCallbackTokenFile = "/var/run/secrets/orka.ai/task-callback/token"
 
 	ResultStdoutPrefix = "ORKA_RESULT_B64:"
 

@@ -33,6 +33,7 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -563,8 +564,14 @@ func (s *Server) setupRoutes() {
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/origin",
 			NewAuthMiddleware(s.client, AuthConfig{ReportTokenReviewUnavailable: true}),
 			s.internalHandlers.GetGatewayReplyOrigin)
+		// Custom-image container Pods hold only an Orka-audience token. These
+		// are the only routes that accept it; each still resolves the caller
+		// Pod to the Task's current worker.
+		callbackAuth := NewAuthMiddleware(s.client, AuthConfig{TaskCallbackAudience: workerenv.TaskCallbackTokenAudience})
+		internal.Post("/results/:namespace/:taskName", callbackAuth, s.internalHandlers.SubmitResult)
+		internal.Post("/artifacts/:namespace/:taskName/:filename", callbackAuth, s.internalHandlers.UploadArtifact)
+		internal.Post("/events/:namespace/:streamType/:streamID", callbackAuth, s.internalHandlers.SubmitExecutionEvent)
 		internal.Use(NewAuthMiddleware(s.client))
-		internal.Post("/results/:namespace/:taskName", s.internalHandlers.SubmitResult)
 		// Native workers run connector-backed tools here; the person's token
 		// never leaves the controller.
 		internal.Post("/tasks/:namespace/:taskName/connector-tools/:tool", s.internalHandlers.ExecuteConnectorTool)
@@ -579,8 +586,6 @@ func (s *Server) setupRoutes() {
 		internal.Get("/plans/:namespace/:taskName", s.internalHandlers.GetPlan)
 		internal.Post("/messages/:namespace", s.internalHandlers.SendMessage)
 		internal.Get("/messages/:namespace/:taskName", s.internalHandlers.GetMessages)
-		internal.Post("/events/:namespace/:streamType/:streamID", s.internalHandlers.SubmitExecutionEvent)
-		internal.Post("/artifacts/:namespace/:taskName/:filename", s.internalHandlers.UploadArtifact)
 		internal.Get("/memories/:namespace", s.internalHandlers.ListMemories)
 		internal.Post("/memories/:namespace", s.internalHandlers.CreateMemory)
 		internal.Get("/memories/:namespace/:id", s.internalHandlers.GetMemory)
