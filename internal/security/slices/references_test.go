@@ -433,3 +433,41 @@ func TestReferenceFilesFollowInheritedAliasesAndSubpathImports(t *testing.T) {
 		}
 	}
 }
+
+func TestReferenceFilesFollowJSONImports(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "shared/policy.json", `{"allow":["admin"]}`+"\n")
+	writeFile(t, root, "app/schema.json", `{"type":"object"}`+"\n")
+	writeFile(t, root, "app/main.js", "const policy = require('../shared/policy.json')\nimport schema from './schema.json' with { type: 'json' }\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/main.js"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	for _, want := range []string{"shared/policy.json=imports", "app/schema.json=imports"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("references = %s, want %s", got, want)
+		}
+	}
+}
+
+// An exports map hides subpaths it does not export, while an exported build
+// output still maps back to the package's source.
+func TestReferenceFilesRespectPackageExportsEncapsulation(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "lib/package.json", `{"name":"@app/lib","exports":{".":"./dist/index.js"}}`)
+	writeFile(t, root, "lib/src/index.ts", "export const lib = 1\n")
+	writeFile(t, root, "lib/internal/secret.ts", "export const secret = 1\n")
+	writeFile(t, root, "app/main.ts", "import { lib } from '@app/lib'\nimport { secret } from '@app/lib/internal/secret'\n")
+	refs, err := ReferenceFiles(root, []store.ReviewSlice{{ID: "app", OwnedFiles: []store.ReviewSliceFile{{Path: "app/main.ts"}}}})
+	if err != nil {
+		t.Fatalf("ReferenceFiles() error = %v", err)
+	}
+	got := referenceSummary(refs["app"])
+	if !strings.Contains(got, "lib/src/index.ts=imports") {
+		t.Fatalf("references = %s, want the exported entry's source", got)
+	}
+	if strings.Contains(got, "lib/internal/secret.ts") {
+		t.Fatalf("references = %s, want no unexported subpath", got)
+	}
+}

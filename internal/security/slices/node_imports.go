@@ -134,10 +134,16 @@ func resolveNodeImport(fromDir, spec string, require bool, known map[string]stru
 		if pkg.name == "" || (spec != pkg.name && !strings.HasPrefix(spec, pkg.name+"/")) {
 			continue
 		}
-		if target := pkg.exportTarget("."+strings.TrimPrefix(spec, pkg.name), conditions); target != "" {
+		if pkg.exports != nil {
+			target := pkg.exportTarget("."+strings.TrimPrefix(spec, pkg.name), conditions)
+			// Node rejects a subpath the exports map does not export.
+			if target == "" {
+				return ""
+			}
 			if found := resolveNodeBase(target, known); found != "" {
 				return found
 			}
+			// An exported build output, such as dist, falls back to source below.
 		}
 		if spec == pkg.name && pkg.main != "" {
 			if found := resolveNodeBase(pkg.main, known); found != "" {
@@ -294,6 +300,13 @@ func readNodeExports(raw json.RawMessage) map[string]json.RawMessage {
 
 func resolveNodeBase(base string, known map[string]struct{}) string {
 	if base == "" || base == ".." || strings.HasPrefix(base, "../") {
+		return ""
+	}
+	// A JSON import, such as a policy or schema, names its file.
+	if path.Ext(base) == extJSON {
+		if _, ok := known[base]; ok {
+			return base
+		}
 		return ""
 	}
 	candidates := []string{base}
