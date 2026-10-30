@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strings"
 	"time"
 	"unicode"
@@ -102,17 +103,18 @@ func enqueueGatewayMessageTx(ctx context.Context, tx *sql.Tx, request store.Gate
 		BindingName: event.BindingName, EventID: event.ID, TaskName: event.TaskName, SessionName: event.SessionName,
 		Kind: gatewayDeliveryKindMessage, State: store.GatewayDeliveryPending,
 		AccountID: event.AccountID, ContextID: event.ContextID, ThreadID: event.ThreadID, ReplyTarget: replyTarget,
-		Text: request.Text, MaxAttempts: request.MaxAttempts, NextAttemptAt: request.Now.UTC(), ExpiresAt: request.ExpiresAt.UTC(),
+		Text: request.Text, Metadata: maps.Clone(request.Metadata), MaxAttempts: request.MaxAttempts, NextAttemptAt: request.Now.UTC(), ExpiresAt: request.ExpiresAt.UTC(),
 		TraceParent: event.TraceParent, TraceState: event.TraceState, CreatedAt: request.Now.UTC(), UpdatedAt: request.Now.UTC(),
 	}
 	if err := protocol.ValidateDeliveryRequest(&protocol.DeliveryRequest{
 		ProtocolVersion: event.ProtocolVersion, DeliveryID: id, IdempotencyID: id, OriginatingEvent: event.ID,
-		Kind: delivery.Kind, AccountID: delivery.AccountID, ContextID: delivery.ContextID, ReplyTarget: delivery.ReplyTarget, Text: delivery.Text,
+		Kind: delivery.Kind, AccountID: delivery.AccountID, ContextID: delivery.ContextID, ThreadID: delivery.ThreadID,
+		ReplyTarget: delivery.ReplyTarget, Text: delivery.Text, Metadata: delivery.Metadata,
 	}); err != nil {
 		return nil, false, store.ValidationErrorf("gateway message delivery is invalid: %s", err)
 	}
 	if existing, err := getGatewayDeliveryQuery(ctx, tx, request.Namespace, id); err == nil {
-		if existing.Kind != gatewayDeliveryKindMessage || existing.EventID != event.ID || existing.Text != request.Text {
+		if existing.Kind != gatewayDeliveryKindMessage || existing.EventID != event.ID || existing.Text != request.Text || !maps.Equal(existing.Metadata, delivery.Metadata) {
 			return nil, false, store.ErrDuplicateMismatch
 		}
 		// A replay is a receipt lookup, even after closure or exhaustion; it

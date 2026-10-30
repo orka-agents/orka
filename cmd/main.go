@@ -2132,9 +2132,12 @@ func main() {
 			}
 			var gatewayReplySender tools.GatewayReplySender
 			if request.Call.ToolName == "reply_in_conversation" {
-				// The broker has already checked this call against the frozen descriptor policy.
-				gatewayReplySender = api.NewBrokeredGatewayReplySender(mgr.GetAPIReader(), gatewayService,
-					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, dataGuard)
+				// The authenticated supervisor carries its frozen descriptor policy;
+				// external runtime requests also match a controller-owned snapshot.
+				// Bind drafts to the exact descriptor, not just the tool name.
+				descriptor, _ := request.Authorization.ToolPolicy.Descriptor(request.Call.ToolName)
+				gatewayReplySender = api.NewBrokeredGatewayReplySenderForDescriptor(mgr.GetAPIReader(), gatewayService,
+					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, dataGuard, descriptor)
 			}
 			return &tools.ToolContext{
 				Client: mgr.GetClient(), PolicyReader: mgr.GetAPIReader(), KubeClient: kubeClient, Namespace: request.Namespace,

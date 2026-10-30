@@ -82,6 +82,32 @@ func claimMessageDelivery(t *testing.T, s *Store, now time.Time, wantID string) 
 	return got
 }
 
+func TestGatewayMessageMeetingMetadataImmutableReplay(t *testing.T) {
+	s := setupTestStore(t)
+	now := time.Now().UTC()
+	event := admitMessageTask(t, s, now)
+	request := messageEnqueue(event, now, "meeting")
+	request.MaxMessages = 1
+	request.Metadata = map[string]string{"meeting.version": "1", "meeting.subject": "Planning", "meeting.durationMinutes": "30", "meeting.attendees": "everyone", "meeting.agenda.0": "Next steps"}
+	first := enqueueMessage(t, s, request)
+	got, err := s.GetGatewayDelivery(t.Context(), event.Namespace, first.ID)
+	if err != nil || !reflect.DeepEqual(got.Metadata, request.Metadata) {
+		t.Fatalf("metadata not persisted: %+v %v", got, err)
+	}
+	replay, created, err := s.EnqueueGatewayMessage(t.Context(), request)
+	if err != nil || created || replay.ID != first.ID {
+		t.Fatalf("replay = %+v %v %v", replay, created, err)
+	}
+	request.Metadata["meeting.agenda.0"] = "Changed"
+	if _, _, err := s.EnqueueGatewayMessage(t.Context(), request); !errors.Is(err, store.ErrDuplicateMismatch) {
+		t.Fatalf("changed metadata replay = %v", err)
+	}
+	request.Metadata = nil
+	if _, _, err := s.EnqueueGatewayMessage(t.Context(), request); !errors.Is(err, store.ErrDuplicateMismatch) {
+		t.Fatalf("removed metadata replay = %v", err)
+	}
+}
+
 func TestGatewayMessageAdmissionIsNonterminalAndDeduplicated(t *testing.T) {
 	s := setupTestStore(t)
 	ctx := context.Background()

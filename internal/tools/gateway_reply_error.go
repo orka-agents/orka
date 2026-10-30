@@ -20,12 +20,14 @@ func NewGatewayReplyRejection(code string, cause error) *GatewayReplyRejection {
 	switch code {
 	case "interim_delivery_unsupported":
 		message = "gateway adapter does not support interim delivery"
+	case "meeting_drafts_unsupported":
+		message = "gateway adapter does not support meeting drafts"
 	case "limit_reached":
 		message = "gateway reply lifetime message limit reached"
 	case "conflict":
 		message = "gateway reply request conflicts with an existing request or inactive conversation"
 	case "invalid_request", "too_large":
-		message = "gateway reply requires only nonempty content of at most 16384 UTF-8 bytes"
+		message = "gateway reply requires nonempty content of at most 16384 UTF-8 bytes and a valid optional meeting draft"
 	case "forbidden", "unauthorized":
 		message = "gateway reply is not authorized for this task"
 	case "unavailable":

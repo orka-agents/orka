@@ -766,6 +766,11 @@ func validateRequiredGatewayCapabilities(required, observed gatewayv1alpha1.Gate
 			return fmt.Errorf("adapter does not advertise required %s capability", check.name)
 		}
 	}
+	for _, extension := range required.Extensions {
+		if !slices.Contains(observed.Extensions, extension) {
+			return fmt.Errorf("adapter does not advertise required extension")
+		}
+	}
 	return nil
 }
 
@@ -807,6 +812,7 @@ func observedGatewayCapabilities(response *protocol.CapabilitiesResponse) *gatew
 			Threads: response.Capabilities.Threads, SenderIdentity: response.Capabilities.SenderIdentity,
 			ExplicitSessions: response.Capabilities.ExplicitSessions, IdempotentDelivery: response.Capabilities.IdempotentDelivery,
 			InterimDelivery: response.Capabilities.InterimDelivery,
+			Extensions:      protocol.SanitizeExtensions(response.Capabilities.Extensions),
 		},
 	}
 }

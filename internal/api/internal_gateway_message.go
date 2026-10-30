@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,15 +15,17 @@ import (
 
 // Allow fully JSON-escaped content and request identity, but not unbounded
 // whitespace or unknown fields. The decoded content still has its own 16 KiB cap.
-const maxGatewayMessageRequestBytes = 6*(protocol.MaxInterimTextBytes+protocol.MaxIdentityBytes) + 1024
+const maxGatewayMessageRequestBytes = 6*(protocol.MaxInterimTextBytes+protocol.MaxIdentityBytes) + protocol.MaxMeetingDraftJSONBytes + 1024
 
 // The transaction helper preserves this exact *fiber.Error. Its identity—not
 // arbitrary error text—carries the controller-owned capability failure code.
 var errGatewayInterimDeliveryUnsupported = fiber.NewError(fiber.StatusConflict, gatewayruntime.ErrInterimDeliveryUnsupported.Error())
+var errGatewayMeetingDraftsUnsupported = fiber.NewError(fiber.StatusConflict, gatewayruntime.ErrMeetingDraftsUnsupported.Error())
 
 type gatewayMessageRequest struct {
-	Content   string `json:"content"`
-	RequestID string `json:"requestID"`
+	Content      string                 `json:"content"`
+	RequestID    string                 `json:"requestID"`
+	MeetingDraft *protocol.MeetingDraft `json:"meetingDraft,omitempty"`
 }
 
 // SubmitGatewayMessage handles POST /internal/v1/tasks/:namespace/:taskName/gateway-messages.
@@ -63,7 +64,11 @@ func (h *InternalHandlers) submitGatewayMessage(c fiber.Ctx) (*gatewayruntime.Ta
 			return err
 		}
 		var err error
-		prepared, err = h.gatewayService.PrepareTaskMessage(ctx, namespace, taskName, string(authorizedTask.UID), req.RequestID, req.Content)
+		if req.MeetingDraft != nil {
+			prepared, err = h.gatewayService.PrepareTaskMeetingDraft(ctx, namespace, taskName, string(authorizedTask.UID), req.RequestID, req.Content, *req.MeetingDraft)
+		} else {
+			prepared, err = h.gatewayService.PrepareTaskMessage(ctx, namespace, taskName, string(authorizedTask.UID), req.RequestID, req.Content)
+		}
 		return gatewayMessageTransactionError(err)
 	}, func(ctx context.Context) error {
 		var err error
@@ -160,19 +165,27 @@ func readGatewayMessageRequest(c fiber.Ctx) (*gatewayMessageRequest, error) {
 	if !protocol.ValidJSONUnicode(data) {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "gateway message body must be valid UTF-8")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var req gatewayMessageRequest
-	if err := decoder.Decode(&req); err != nil {
+	fields, err := protocol.DecodeClosedObject(data, "content", "requestID", "meetingDraft")
+	if err != nil {
 		return nil, fiber.NewError(fiber.StatusBadRequest, "invalid gateway message JSON")
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return nil, fiber.NewError(fiber.StatusBadRequest, "expected one gateway message JSON object")
+	var req gatewayMessageRequest
+	if json.Unmarshal(fields["content"], &req.Content) != nil || json.Unmarshal(fields["requestID"], &req.RequestID) != nil {
+		return nil, fiber.NewError(fiber.StatusBadRequest, "invalid gateway message JSON")
+	}
+	if raw, ok := fields["meetingDraft"]; ok {
+		req.MeetingDraft = new(protocol.MeetingDraft)
+		if json.Unmarshal(raw, req.MeetingDraft) != nil {
+			return nil, fiber.NewError(fiber.StatusBadRequest, "invalid meeting draft")
+		}
 	}
 	return &req, nil
 }
 
 func gatewayMessageTransactionError(err error) error {
+	if errors.Is(err, gatewayruntime.ErrMeetingDraftsUnsupported) {
+		return errGatewayMeetingDraftsUnsupported
+	}
 	if errors.Is(err, gatewayruntime.ErrInterimDeliveryUnsupported) {
 		return errGatewayInterimDeliveryUnsupported
 	}
@@ -212,6 +225,9 @@ func sendGatewayMessageError(c fiber.Ctx, err error) error {
 	}
 	if errors.Is(err, errGatewayInterimDeliveryUnsupported) {
 		code, message = "interim_delivery_unsupported", errGatewayInterimDeliveryUnsupported.Message
+	}
+	if errors.Is(err, errGatewayMeetingDraftsUnsupported) {
+		code, message = "meeting_drafts_unsupported", errGatewayMeetingDraftsUnsupported.Message
 	}
 	return c.Status(status).JSON(fiber.Map{"error": fiber.Map{apiFieldCode: code, "message": message}})
 }

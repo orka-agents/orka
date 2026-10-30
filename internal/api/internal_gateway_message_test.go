@@ -243,7 +243,7 @@ func TestInternalGatewayMessageStrictBoundedRequest(t *testing.T) {
 		{"lone surrogate", `{"content":"\ud800","requestID":"step"}`, 400},
 		{"raw invalid UTF8", "{\"content\":\"\xff\",\"requestID\":\"step\"}", 400},
 		{"raw content cap", `{"content":"` + strings.Repeat("x", 16385) + `","requestID":"step"}`, 413},
-		{"body cap", strings.Repeat(" ", 101000), 413},
+		{"body cap", strings.Repeat(" ", 134000), 413},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newGatewayMessageAPIFixture(t)
