@@ -1019,7 +1019,7 @@ func TestGetRepositoryMonitorImplementationPatchPreview(t *testing.T) {
 		PatchArtifactID:  "orka-issue-42-summary.json",
 	}))
 	artifact := []byte(`{"schemaVersion":"orka.patch.v1","patchArtifactID":"orka-issue-42.diff","changedFiles":["internal/x.go"]}`)
-	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), "demo", "impl-task", "orka-issue-42-summary.json", "application/json", artifact))
+	require.NoError(t, handlers.artifactStore.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "demo", TaskName: "impl-task"}, Filename: "orka-issue-42-summary.json", ContentType: "application/json", Data: artifact}))
 
 	req := httptest.NewRequest(http.MethodGet, "/monitors/implementation-jobs/impl-preview/patch-preview?namespace=demo", nil)
 	resp, err := app.Test(req)

@@ -220,7 +220,7 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 		t.Fatal(err)
 	}
 
-	epochs := NewControllerEpochManager(controlStore, "session-composite-controller")
+	epochs := NewControllerEpochManager(controlStore, "session-composite-controller").WithMirror(sqliteStore)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

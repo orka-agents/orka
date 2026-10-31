@@ -169,12 +169,12 @@ func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace
 }
 
 func (s *Store) deleteTaskData(ctx context.Context, namespace, taskName, statement string, args ...any) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx.Tx, namespace, taskName); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
