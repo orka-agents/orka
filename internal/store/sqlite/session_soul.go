@@ -41,8 +41,18 @@ const sessionSoulHistorySQL = `WITH history AS (
 // independent Session identity store or changing the persisted SQLite schema.
 func (s *Store) ReadSessionSoul(ctx context.Context, namespace, name, taskName, taskUID string) (store.SessionSoulState, error) {
 	var state store.SessionSoulState
+	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		state, err = readSessionSoul(ctx, q, namespace, name, taskName, taskUID)
+		return err
+	})
+	return state, err
+}
+
+func readSessionSoul(ctx context.Context, q taskDataExecutor, namespace, name, taskName, taskUID string) (store.SessionSoulState, error) {
+	var state store.SessionSoulState
 	var ownerName, ownerUID string
-	err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT session_type, active_task, active_task_uid, message_count
+	err := q.QueryRowContext(ctx, `SELECT session_type, active_task, active_task_uid, message_count
 		FROM sessions WHERE namespace = ? AND name = ?`, namespace, name).
 		Scan(&state.SessionType, &ownerName, &ownerUID, &state.MessageCount)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -59,7 +69,7 @@ func (s *Store) ReadSessionSoul(ctx context.Context, namespace, name, taskName, 
 	// attested failed turns, while still fencing any unrelated earlier history.
 	gateway := state.SessionType == store.SessionTypeGateway
 	var digest sql.NullString
-	err = s.taskDataExecutor(ctx).QueryRowContext(ctx, sessionSoulHistorySQL+`, revision AS (
+	err = q.QueryRowContext(ctx, sessionSoulHistorySQL+`, revision AS (
 		SELECT json_extract(metadata_json, '$."orka.ai/soul-configuration-digest"') AS digest
 		FROM soul_history WHERE (NOT ? OR role = 'assistant' OR source_type = ?)
 		ORDER BY sort_order, id LIMIT 1

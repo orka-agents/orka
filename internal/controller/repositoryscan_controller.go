@@ -1545,7 +1545,7 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
 	var lastErr error
 	for range 5 {
-		data, _, err := r.ArtifactStore.GetArtifact(ctx, namespace, taskName, filename)
+		data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: taskName}, Filename: filename})
 		if err == nil {
 			return data, nil
 		}
@@ -1567,7 +1567,7 @@ func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context,
 		return nil, "", nil
 	}
 
-	data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices)
+	data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: security.ArtifactSlices})
 	switch {
 	case err == nil:
 		if len(strings.TrimSpace(string(data))) == 0 {
@@ -4145,7 +4145,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	}
 
 	diffName, summaryName := patchArtifactNames(findingID)
-	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -4153,7 +4153,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	default:
 		return patchVerificationResult{}, "", err
 	}
-	summaryData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, summaryName)
+	summaryData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: summaryName})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -4498,7 +4498,7 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	if r.ArtifactStore != nil && proposal.Status != scanRunPhaseSucceeded && proposal.Status != patchProposalStatusPROpened {
-		artifacts, err := r.ArtifactStore.ListArtifacts(ctx, task.Namespace, task.Name)
+		artifacts, err := r.ArtifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 		if err == nil {
 			for _, artifact := range artifacts {
 				if strings.HasSuffix(artifact.Filename, ".diff") && strings.HasPrefix(artifact.Filename, "security-patch-") {
