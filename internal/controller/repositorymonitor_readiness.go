@@ -348,17 +348,28 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
+	// The old inventory can still contain the departed PR. Use a fresh list.
+	peers, err := r.listRepositoryMonitorReadinessPeers(ctx, monitor, token)
+	if err != nil {
+		return err
+	}
+	return r.reconcileRepositoryMonitorDepartedHeadWithPeers(ctx, monitor, departingNumber, sha, endpoint, token, peers)
+}
+
+func (r *RepositoryMonitorReconciler) listRepositoryMonitorReadinessPeers(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, token string) ([]repositoryMonitorPullRequest, error) {
 	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// The old inventory can still contain the departed PR. Use a fresh list and
-	// exclude the exact PR whose detail response established it left scope.
-	peers, err := r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
-	if err != nil {
-		return err
-	}
-	peers = slices.DeleteFunc(peers, func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
+	return r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
+}
+
+// reconcileRepositoryMonitorDepartedHeadWithPeers excludes the exact PR whose
+// detail response established it left scope, and refreshes any in-scope peer
+// still on the head before publishing for it.
+func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHeadWithPeers(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string, peers []repositoryMonitorPullRequest) error {
+	peers = slices.DeleteFunc(slices.Clone(peers), func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
+	var err error
 	for _, peer := range peers {
 		if peer.HeadSHA != sha || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
