@@ -38,7 +38,22 @@ type repositoryMonitorCIResult struct {
 	reason string
 	// failed names the failing check runs or status contexts when reason is
 	// repositoryMonitorCINotGreen.
-	failed []string
+	failed []repositoryMonitorCIFailure
+}
+
+// repositoryMonitorCIFailureSourceStatus marks a failing commit status context.
+const repositoryMonitorCIFailureSourceStatus = "commit_status"
+
+// repositoryMonitorCIFailure is one failing check run or status context.
+// source tells a check run (with its app) from a status context, since the
+// two can share a name.
+type repositoryMonitorCIFailure struct {
+	name   string
+	source string
+}
+
+func (f repositoryMonitorCIFailure) key() string {
+	return f.source + "|" + strings.ToLower(strings.TrimSpace(f.name))
 }
 
 type repositoryMonitorCommitStatus struct {
