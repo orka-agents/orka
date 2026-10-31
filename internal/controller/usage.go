@@ -87,7 +87,8 @@ type taskTokenUsageReader interface {
 // sessionTokenUsage returns a Job-backed Task's final usage to add to the
 // Session whose transcript it appended; the caller adds it while releasing
 // the Session lock. Agent Tasks run as ACP Session turns, whose finalization
-// adds the turn's usage in the same transaction, so they report none here.
+// adds the usage the storage client attributes to the turn's prompt attempt,
+// so they report none here.
 // Chat Sessions count only their chat turns: Tasks a chat creates have no
 // spec.sessionRef, so chat tokens are never double counted.
 func (r *TaskReconciler) sessionTokenUsage(ctx context.Context, task *corev1alpha1.Task) (int64, int64, error) {

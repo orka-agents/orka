@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Messages serves inter-agent messages.
+service Messages {
+  option (go_interface) = "MessageStore";
+
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  // GetMessages marks the returned messages read when mark_read is set, so it
+  // is a write.
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteTaskMessages(DeleteTaskMessagesRequest) returns (DeleteTaskMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteParentMessages(DeleteParentMessagesRequest) returns (DeleteParentMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+}
+
+message Message {
+  int64 id = 1;
+  string namespace = 2;
+  string from_task = 3;
+  string to_task = 4;
+  string parent_task = 5;
+  string content = 6;
+  bool read = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message SendMessageRequest {
+  Message msg = 1;
+}
+
+message SendMessageResponse {}
+
+message GetMessagesRequest {
+  string namespace = 1;
+  string task_name = 2;
+  string parent_task = 3;
+  bool mark_read = 4;
+}
+
+message GetMessagesResponse {
+  repeated Message messages = 1;
+}
+
+message DeleteTaskMessagesRequest {
+  string namespace = 1;
+  string task_name = 2;
+}
+
+message DeleteTaskMessagesResponse {}
+
+message DeleteParentMessagesRequest {
+  string namespace = 1;
+  string parent_task = 2;
+}
+
+message DeleteParentMessagesResponse {}
