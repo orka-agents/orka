@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -95,5 +97,31 @@ func TestRepositoryMonitorReviewPublishUpdatesSameHeadVerdictChange(t *testing.T
 				t.Fatalf("unchanged verdict updated the review again: updates=%d", publishServer.PutCount)
 			}
 		})
+	}
+}
+
+func TestRepositoryMonitorShownReviewReadsEveryPage(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("shown-review-pages")
+	start := time.Now().Add(-time.Hour)
+	record := func(id, reviewID, reason string, at time.Time) *store.ReviewPublishRecord {
+		return &store.ReviewPublishRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 9, HeadSHA: "head9", ReviewRecordID: reviewID, Phase: repositoryMonitorPublishPhaseSkipped, SkipReason: reason, CreatedAt: at, UpdatedAt: at}
+	}
+	// The update happens first, then more than a page of same-verdict skips.
+	records := make([]*store.ReviewPublishRecord, 0, 151)
+	records = append(records, record("pub-update", "review-update", repositoryMonitorPublishSkipUpdatedPublishedReview, start.Add(time.Second)))
+	for i := range 150 {
+		records = append(records, record(fmt.Sprintf("pub-dup-%03d", i), fmt.Sprintf("review-dup-%03d", i), repositoryMonitorPublishSkipDuplicateSameHead, start.Add(time.Duration(i+2)*time.Second)))
+	}
+	for _, r := range records {
+		if err := db.CreateReviewPublishRecord(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	published := &store.ReviewPublishRecord{ReviewRecordID: "review-original", HeadSHA: "head9", CreatedAt: start}
+	shown, err := (&RepositoryMonitorReconciler{Store: db}).repositoryMonitorShownReviewRecordID(ctx, monitor, &store.MonitorItem{Number: 9}, published)
+	if err != nil || shown != "review-update" {
+		t.Fatalf("shown review = %q err=%v, want the update past the first page", shown, err)
 	}
 }

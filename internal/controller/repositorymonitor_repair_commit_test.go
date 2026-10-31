@@ -96,6 +96,32 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 		t.Fatal("a descriptive repair message must not look like a credential")
 	}
 
+	// Priorities are model output: an unknown one is dropped, and many long
+	// multi-byte titles still fit the publisher's byte limit.
+	untrusted := make([]repositoryMonitorReviewFinding, 0, 2+repositoryMonitorRepairCommitFindingLimit)
+	untrusted = append(untrusted, repositoryMonitorReviewFinding{Priority: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\nSigned-off-by: x", Title: "Odd priority"}, repositoryMonitorReviewFinding{Priority: " p2 ", Title: "Lower-case priority"})
+	for range repositoryMonitorRepairCommitFindingLimit {
+		untrusted = append(untrusted, repositoryMonitorReviewFinding{Priority: "P1", Title: strings.Repeat("\U0001F600", 120)})
+	}
+	untrustedJSON, err := json.Marshal(untrusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "review-76", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 76, HeadSHA: "head76", Verdict: repositoryMonitorReviewVerdictNeedsChanges, FindingsJSON: string(untrustedJSON)}); err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, repositoryMonitorPullRequest{Number: 76, HeadSHA: "head76"}, &store.MonitorItem{LastReviewID: "review-76"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bounded, "\n- Odd priority\n") || !strings.Contains(bounded, "\n- [P2] Lower-case priority\n") || !strings.Contains(bounded, " more\n\nOrka-Task: ") {
+		t.Fatalf("untrusted message =\n%s", bounded)
+	}
+	repairTask := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{Workspace: &corev1alpha1.WorkspaceConfig{CommitMessage: bounded}}}
+	if len(bounded) > maxTaskPublicationCommitMessageBytes || validateTaskPullRequestText(repairTask) != nil {
+		t.Fatalf("message of %d bytes fails publication validation: %v", len(bounded), validateTaskPullRequestText(repairTask))
+	}
+
 	// A review of an older head describes nothing this repair fixes.
 	pr.HeadSHA = "newer"
 	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {
