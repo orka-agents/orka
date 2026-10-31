@@ -663,3 +663,163 @@ func TestRepositoryMonitorReadinessNamesHeldCIForAnUnreviewedHead(t *testing.T) 
 		}
 	}
 }
+
+func TestRepositoryMonitorQueuedPolicyRepairRechecksItsGrantBeforeRunning(t *testing.T) {
+	failingHead := func() *repositoryMonitorRepairLabelsGitHub {
+		return (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("maintainer", "orka:fix-ci")
+	}
+	tests := []struct {
+		name     string
+		change   func(github *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest)
+		wantSkip string
+	}{
+		{name: "an unchanged grant creates the repair Task"},
+		{
+			name:     "a removed repair label withdraws the repair",
+			change:   func(_ *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest) { pr.Labels = []string{"orka:review"} },
+			wantSkip: repositoryMonitorRepairSkipScopeWithdrawn,
+		},
+		{
+			name: "a label reapplied by a triage account withdraws the repair",
+			change: func(github *repositoryMonitorRepairLabelsGitHub, _ *repositoryMonitorPullRequest) {
+				github.unlabeled("maintainer", "orka:fix-ci").labeled("triager", "orka:fix-ci")
+			},
+			wantSkip: repositoryMonitorRepairSkipLabelActorNotPermitted,
+		},
+		{
+			name: "a failure now shared with the base withdraws the CI repair",
+			change: func(github *repositoryMonitorRepairLabelsGitHub, _ *repositoryMonitorPullRequest) {
+				github.checks["base31"]["tests"] = "failure"
+			},
+			wantSkip: repositoryMonitorRepairSkipNoIntroducedCIFailure,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			github := failingHead()
+			github.roles = map[string]string{"maintainer": "write", "triager": "triage"}
+			server := httptest.NewServer(github)
+			t.Cleanup(server.Close)
+			scheme := runtime.NewScheme()
+			if err := corev1alpha1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			monitor, secret := repositoryMonitorInventoryTestObjects("repair-recheck")
+			labelSpec := repositoryMonitorRepairLabelsTestSpec()
+			monitor.Spec.Targets.PullRequests.IncludeLabels = labelSpec.Targets.PullRequests.IncludeLabels
+			monitor.Spec.Repair.IncludeLabels = labelSpec.Repair.IncludeLabels
+			monitor.Spec.Repair.CIOnlyLabels = labelSpec.Repair.CIOnlyLabels
+			monitor.Spec.Repair.Enabled = true
+			monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+			configureRepositoryMonitorTestWriteCredentials(monitor)
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
+				WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+			monitorStore := setupControllerSQLiteStore(t)
+			reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+			pr := repositoryMonitorPullRequest{
+				Number: 31, State: "open", BaseBranch: "main", BaseSHA: "base31", HeadBranch: "feature", HeadRepo: "orka-agents/orka",
+				HeadSHA: "head31", MergeableState: "clean", Labels: []string{"orka:review", "orka:fix-ci"},
+			}
+			item := repositoryMonitorItemFromPullRequest(monitor, pr, nil)
+			poll := &store.MonitorRun{ID: "poll", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "workflow", StartedAt: time.Now()}
+			if handled, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, poll, "orka-agents", "orka", pr, item); err != nil || !handled {
+				t.Fatalf("tryRepositoryMonitorAutomaticRepair() = %t, %v, want a queued repair", handled, err)
+			}
+			commands, _, err := monitorStore.ListCommandEvents(ctx, store.CommandEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Limit: 10})
+			if err != nil || len(commands) != 1 || commands[0].Intent != repositoryMonitorCommandIntentFixCI {
+				t.Fatalf("commands = %#v err=%v, want one fix_ci command", commands, err)
+			}
+			if tt.change != nil {
+				tt.change(github, &pr)
+			}
+			run := &store.MonitorRun{ID: "command-run", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "command", CommandEventID: commands[0].ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, StartedAt: time.Now()}
+			if handled, _, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item); err != nil || !handled {
+				t.Fatalf("tryProcessPullRequestCommandRun() = %t, %v", handled, err)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := cl.List(ctx, &tasks); err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantSkip == "" {
+				if len(tasks.Items) != 1 {
+					t.Fatalf("tasks = %d, want the repair Task", len(tasks.Items))
+				}
+				return
+			}
+			if len(tasks.Items) != 0 || item.SkipReason != tt.wantSkip || item.RepairState != "" {
+				t.Fatalf("tasks = %d, item repair state %q skip %q, want no Task and skip %q", len(tasks.Items), item.RepairState, item.SkipReason, tt.wantSkip)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorPolicyRepairRecheckLeavesExplicitCommandsAlone(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{Spec: repositoryMonitorRepairLabelsTestSpec()}
+	pr := repositoryMonitorPullRequest{Number: 31, State: "open", BaseBranch: "main", HeadSHA: "head31", Labels: []string{"orka:review"}}
+	command := &store.CommandEvent{Source: "api", Intent: repositoryMonitorCommandIntentFixCI}
+	// No repair label and no GitHub server: an explicit command needs neither.
+	reason, err := (&RepositoryMonitorReconciler{}).repositoryMonitorPolicyRepairWithdrawnReason(context.Background(), monitor, command, "orka-agents", "orka", pr)
+	if err != nil || reason != "" {
+		t.Fatalf("reason = %q err=%v, want explicit commands unaffected", reason, err)
+	}
+}
+
+func TestRepositoryMonitorCIRepairPromptQualifiesChecksSharingAName(t *testing.T) {
+	github := &repositoryMonitorRepairLabelsGitHub{
+		checks:   map[string]map[string]string{"head32": {"tests": "failure"}, "base32": {"tests": "failure"}},
+		statuses: map[string]map[string]string{"head32": {"tests": "failure"}},
+	}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt-shared")
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
+	pr := repositoryMonitorPullRequest{Number: 32, BaseSHA: "base32", HeadSHA: "head32"}
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, input, _ := strings.Cut(prompt, "Input:\n")
+	var payload struct {
+		FailingChecks     []string `json:"failingChecks"`
+		BaseFailingChecks []string `json:"baseFailingChecks"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(payload.FailingChecks) != "[tests (commit status)]" || fmt.Sprint(payload.BaseFailingChecks) != "[tests (check run from GitHub App 0)]" {
+		t.Fatalf("CI repair input = %+v, want the shared name qualified by source", payload)
+	}
+}
+
+func TestRepositoryMonitorReadinessRepairEligibilityIgnoresInheritedCIFailures(t *testing.T) {
+	github := &repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head33": {"tests": "failure"}, "base33": {"tests": "failure"}}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ready-inherited")
+	monitor.Spec.Repair.Enabled = true
+	monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: setupControllerSQLiteStore(t), GitHubAPIBaseURL: server.URL}
+	pr := repositoryMonitorPullRequest{Number: 33, State: "open", BaseBranch: "main", BaseSHA: "base33", HeadSHA: "head33", HeadRepo: "orka-agents/orka", MergeableState: "clean"}
+	eligible, err := reconciler.repositoryMonitorNeedsChangesRepairEligible(context.Background(), monitor, pr, &store.MonitorItem{})
+	if err != nil || eligible {
+		t.Fatalf("eligible = %t err=%v, want no repair for a failure the base shares", eligible, err)
+	}
+	github.checks["base33"]["tests"] = "success"
+	eligible, err = reconciler.repositoryMonitorNeedsChangesRepairEligible(context.Background(), monitor, pr, &store.MonitorItem{})
+	if err != nil || !eligible {
+		t.Fatalf("eligible = %t err=%v, want a repair for a failure the pull request introduced", eligible, err)
+	}
+}

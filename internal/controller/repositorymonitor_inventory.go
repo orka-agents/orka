@@ -879,6 +879,14 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 	if len(monitor.Spec.Targets.PullRequests.IncludeLabels) == 0 {
 		return nil
 	}
+	// A full run already holds the fresh open inventory, so every excluded PR
+	// in the batch reconciles its shared head against it; a targeted run lists
+	// peers at most once, and only when a readiness status needs reconciling.
+	var peers []repositoryMonitorPullRequest
+	if run == nil || run.TargetNumber == 0 {
+		peers = pullRequests
+	}
+	reconciledHeads := map[string]struct{}{}
 	for _, pr := range pullRequests {
 		if repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 			continue
@@ -903,8 +911,11 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 		}
 		// A targeted run never reaches missing-item cleanup, so revoke the
 		// readiness status here; shared heads keep their peers' outcome.
-		if err := r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA); err != nil {
-			return err
+		if _, done := reconciledHeads[item.HeadSHA]; !done {
+			if peers, err = r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA, peers); err != nil {
+				return err
+			}
+			reconciledHeads[item.HeadSHA] = struct{}{}
 		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
@@ -925,16 +936,22 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 }
 
 // revokeRepositoryMonitorExcludedReadiness reconciles the readiness status of
-// a head whose pull request left the monitor's scope.
-func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorExcludedReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) error {
+// a head whose pull request left the monitor's scope against peers, listing
+// them first when the caller has none, and returns the peers it used.
+func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorExcludedReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string, peers []repositoryMonitorPullRequest) ([]repositoryMonitorPullRequest, error) {
 	if strings.TrimSpace(headSHA) == "" || !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) {
-		return nil
+		return peers, nil
 	}
 	endpoint, token, err := r.repositoryMonitorReadinessEndpoint(ctx, monitor)
 	if err != nil {
-		return err
+		return peers, err
 	}
-	return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, number, headSHA, endpoint, token)
+	if peers == nil {
+		if peers, err = r.listRepositoryMonitorReadinessPeers(ctx, monitor, token); err != nil {
+			return nil, err
+		}
+	}
+	return peers, r.reconcileRepositoryMonitorDepartedHeadWithPeers(ctx, monitor, number, headSHA, endpoint, token, peers)
 }
 
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
