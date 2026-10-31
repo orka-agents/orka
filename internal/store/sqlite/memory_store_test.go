@@ -241,8 +241,37 @@ func TestApplyMemoryProposal(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != memory.ID {
 		t.Fatalf("expected exactly one applied memory, got %+v", listed)
 	}
-	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); err == nil {
-		t.Fatalf("ArchiveMemoryProposal applied proposal succeeded, want error")
+	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("ArchiveMemoryProposal applied proposal error = %v, want validation", err)
+	}
+}
+
+// TestProposalNamingAMemoryCountsAsApplied covers retained rows that name an
+// applied memory without the applied status. A new proposal cannot carry an
+// apply outcome, so the rows are seeded directly.
+func TestProposalNamingAMemoryCountsAsApplied(t *testing.T) {
+	for _, status := range []string{proposalStatusPending, proposalStatusAccepted} {
+		t.Run(status, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			proposal := &store.MemoryProposal{Namespace: "ns-named", Type: "memory", Title: "Named", Content: "content"}
+			if err := s.CreateMemoryProposal(ctx, proposal); err != nil {
+				t.Fatalf("CreateMemoryProposal: %v", err)
+			}
+			if _, err := s.db.ExecContext(ctx, `UPDATE memory_proposals SET status = ?, applied_memory_id = ? WHERE namespace = ? AND id = ?`,
+				status, " ", proposal.Namespace, proposal.ID); err != nil {
+				t.Fatalf("seed applied memory: %v", err)
+			}
+			if status == proposalStatusPending {
+				err := s.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: proposal.Namespace, ID: proposal.ID, Status: "accepted"})
+				if !errors.Is(err, store.ErrValidation) {
+					t.Fatalf("ReviewMemoryProposal error = %v, want validation", err)
+				}
+			}
+			if err := s.ArchiveMemoryProposal(ctx, proposal.Namespace, proposal.ID); !errors.Is(err, store.ErrValidation) {
+				t.Fatalf("ArchiveMemoryProposal error = %v, want validation", err)
+			}
+		})
 	}
 }
 
