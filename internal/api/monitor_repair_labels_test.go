@@ -32,11 +32,19 @@ func TestRepositoryMonitorRepairLabelsAPI(t *testing.T) {
 	monitor.Spec.Repair.CIOnlyLabels = []string{"orka:fix-ci"}
 	repo := githubWebhookRepository{FullName: "orka-agents/orka"}
 	for _, label := range []string{"Orka:Fix", "orka:fix-ci"} {
-		if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{label}}) {
+		if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{label}}, "") {
 			t.Fatalf("pull request event with repair label %q was rejected", label)
 		}
 	}
-	if repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{"bug"}}) {
+	if repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", Labels: []string{"bug"}}, "") {
 		t.Fatal("pull request event without a review or repair label was accepted")
+	}
+	// Removing the last repair label reaches the controller so it retires the PR.
+	if !repositoryMonitorAcceptsPullRequestEvent(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main"}, "orka:fix-ci") {
+		t.Fatal("removal of a repair label was rejected")
+	}
+	monitor.Spec.Triggers.GitHub.Labels.Enabled = true
+	if !repositoryMonitorAcceptsLabelCommand(monitor, repo, githubLabelTarget{IsPR: true, BaseBranch: "main", State: "open", Labels: []string{"orka:fix"}}, commandIntentFixCI) {
+		t.Fatal("label command on a pull request with a repair label was rejected")
 	}
 }
