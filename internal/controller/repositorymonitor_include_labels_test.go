@@ -443,6 +443,7 @@ func TestRepositoryMonitorExcludedPullRequestsReuseTheRunInventory(t *testing.T)
 	}
 }
 
+//nolint:gocyclo // One fake GitHub serves the inventory, CI, and readiness status calls the retirement pass makes.
 func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testing.T) {
 	ctx := t.Context()
 	db := setupControllerSQLiteStore(t)
