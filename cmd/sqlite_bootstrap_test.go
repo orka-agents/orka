@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +42,7 @@ func TestControllerSQLiteBootstrapSecretLifecycle(t *testing.T) {
 	first, err := s.DatasetInfo()
 	require.NoError(t, err)
 	require.False(t, first.CanBootstrapSnapshotKey)
-	require.NoError(t, s.SaveResult(ctx, "ns", "task", []byte("retained result")))
+	require.NoError(t, storageclienttest.NewEmbedded(t, s).SaveResult(ctx, "ns", "task", []byte("retained result")))
 	require.NoError(t, s.Close())
 	s, again, err := openControllerSQLiteStore(path, loader)
 	require.NoError(t, err)
@@ -113,7 +115,7 @@ func TestControllerSQLiteBootstrapRejectsSchemaBeforeKeyLoader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "newer.db")
 	db, err := sqlite.NewDB(path)
 	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version=2`)
+	_, err = db.Exec(`PRAGMA user_version=3`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	called := false
@@ -154,4 +156,16 @@ func TestControllerSQLiteBootstrapResumesAfterKeyWriteLostResponse(t *testing.T)
 	require.NoError(t, err)
 	defer func() { _ = s.Close() }()
 	require.True(t, bytes.Equal(expected, actual), "retry replaced the committed key")
+}
+
+// The production store refuses every contract write that does not come
+// through the storage client with a write envelope.
+func TestControllerSQLiteStoreRequiresWriteEnvelopes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	s, _, err := openControllerSQLiteStore(path, func(sqlite.DatasetInfo) ([]byte, error) {
+		return bytes.Repeat([]byte{7}, 32), nil
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+	require.ErrorIs(t, s.SaveResult(context.Background(), "tenant", "task", []byte("result")), store.ErrValidation)
 }

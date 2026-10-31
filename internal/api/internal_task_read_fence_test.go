@@ -174,7 +174,7 @@ func TestInternalReadsSerializeAuthorizationWithTaskReuse(t *testing.T) {
 				if err := h.k8sClient.Create(ctx, current); err != nil {
 					return err
 				}
-				if err := cleanup.DeleteSession(ctx, "default", "my-session"); err != nil {
+				if err := cleanup.DeleteSession(ctx, "default", "my-session", time.Now().UTC()); err != nil {
 					return err
 				}
 				return seed(ctx, cleanup, "replacement Task history")

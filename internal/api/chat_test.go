@@ -94,14 +94,14 @@ type blockingDeleteSessionStore struct {
 	allowDelete   chan struct{}
 }
 
-func (s *blockingDeleteSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (s *blockingDeleteSessionStore) DeleteSession(ctx context.Context, namespace, name string, now time.Time) error {
 	close(s.deleteStarted)
 	select {
 	case <-s.allowDelete:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return s.SessionStore.DeleteSession(ctx, namespace, name)
+	return s.SessionStore.DeleteSession(ctx, namespace, name, now)
 }
 
 func (m *chatMockProvider) Complete(_ context.Context, req *llm.CompletionRequest) (*llm.CompletionResponse, error) {
@@ -147,9 +147,7 @@ type observingChatTurnCommitter struct {
 	) error
 }
 
-func (*observingChatTurnCommitter) AcquireChatTurn(
-	context.Context, *store.SessionRecord, string, time.Time,
-) (bool, error) {
+func (*observingChatTurnCommitter) AcquireChatTurn(context.Context, store.AcquireChatTurnRequest) (bool, error) {
 	return false, nil
 }
 
@@ -157,15 +155,9 @@ func (*observingChatTurnCommitter) ReleaseChatTurn(context.Context, string, stri
 	return nil
 }
 
-func (c *observingChatTurnCommitter) CommitSessionTurn(
-	ctx context.Context,
-	session *store.SessionRecord,
-	turnID string,
-	expectedMessageCount int,
-	messages []store.SessionMessage,
-	inputTokens, outputTokens int,
-) error {
-	return c.commit(ctx, session, turnID, expectedMessageCount, messages, inputTokens, outputTokens)
+func (c *observingChatTurnCommitter) CommitSessionTurn(ctx context.Context, request store.CommitSessionTurnRequest) error {
+	return c.commit(ctx, request.Session, request.TurnID, request.ExpectedMessageCount, request.Messages,
+		request.InputTokens, request.OutputTokens)
 }
 
 func newTestScheme() *runtime.Scheme {
@@ -896,12 +888,12 @@ func TestAcquireChatSessionFencesDeletionUntilRelease(t *testing.T) {
 	require.NotEmpty(t, active.turnID)
 	_, err = ss.GetSession(ctx, "default", "locked-chat")
 	require.NoError(t, err)
-	if err := ss.DeleteSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrConflict) {
+	if err := ss.DeleteSession(ctx, "default", "locked-chat", time.Now().UTC()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("DeleteSession(locked chat) error = %v, want ErrConflict", err)
 	}
 	active.finish()
 	active.finish() // idempotent close for overlapping handler/stream cleanup paths.
-	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat"))
+	require.NoError(t, ss.DeleteSession(ctx, "default", "locked-chat", time.Now().UTC()))
 	if _, err := ss.GetSession(ctx, "default", "locked-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession() error = %v, want ErrNotFound", err)
 	}
@@ -920,7 +912,7 @@ func TestBeginActiveChatRejectsConcurrentRequestAndRemovesNewEmptySession(t *tes
 	if _, err := ss.GetSession(ctx, "default", "concurrent-chat"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetSession(empty failed chat) error = %v, want ErrNotFound", err)
 	}
-	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat"))
+	require.NoError(t, ss.DeleteSession(ctx, "default", "concurrent-chat", time.Now().UTC()))
 }
 
 func TestChatCancellationGateBlocksReplacementUntilDeletionCompletes(t *testing.T) {
@@ -2157,9 +2149,9 @@ func TestHandleChatRejectsConcurrentSessionTurnBeforeProviderInvocation(t *testi
 	committer, ok := ss.(store.SessionTurnCommitter)
 	require.True(t, ok)
 	now := time.Now().UTC()
-	_, err := committer.AcquireChatTurn(context.Background(), &store.SessionRecord{
+	_, err := committer.AcquireChatTurn(context.Background(), store.AcquireChatTurnRequest{Session: &store.SessionRecord{
 		Namespace: testDefaultNamespace, Name: "busy-chat", SessionType: "chat", CreatedAt: now, UpdatedAt: now,
-	}, "held-turn", now.Add(time.Minute))
+	}, TurnID: "held-turn", Now: time.Now().UTC(), ExpiresAt: now.Add(time.Minute)})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = committer.ReleaseChatTurn(context.Background(), testDefaultNamespace, "busy-chat", "held-turn", false)
@@ -2374,7 +2366,7 @@ type cancelableChatTurnStore struct {
 	once    sync.Once
 }
 
-func (s *cancelableChatTurnStore) AcquireChatTurn(ctx context.Context, _ *store.SessionRecord, _ string, _ time.Time) (bool, error) {
+func (s *cancelableChatTurnStore) AcquireChatTurn(ctx context.Context, _ store.AcquireChatTurnRequest) (bool, error) {
 	s.once.Do(func() { close(s.started) })
 	<-ctx.Done()
 	return false, ctx.Err()

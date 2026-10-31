@@ -1,18 +1,8 @@
-package store
+package v1
 
-import "context"
-
-// SessionSoulDigestMetadata is controller-authored prompt revision metadata, not
-// model instruction text. It follows the existing canonical transcript lifecycle.
-const SessionSoulDigestMetadata = "orka.ai/soul-configuration-digest"
-
-// SessionSoulUnboundMetadata marks a controller-authored Gateway AI error that
-// failed before soul binding or execution. Only the literal "true" on a canonical
-// error without digest metadata is unbound; absence preserves legacy identity.
-const SessionSoulUnboundMetadata = "orka.ai/soul-unbound"
-
-// SessionSoulAnchorSource identifies digest-only context retained for the Session lifetime.
-const SessionSoulAnchorSource = "soul-context"
+import (
+	"context"
+)
 
 // SessionSoulState describes a pinned Task revision or the first canonical
 // message revision (first assistant message for gateway-owned conversations).
@@ -38,6 +28,19 @@ type SessionSoulReader interface {
 // SessionSoulWriter durably pins ordinary AI Session identity under its exact
 // Task lock before execution. It writes only digest metadata, never persona text.
 // An empty digest pins absence of a soul so an empty turn cannot permit later opt-in.
+// The owner must hold the Session's lock at owner.Now (see [SessionOwnerWrite]).
 type SessionSoulWriter interface {
-	EnsureSessionSoulWithLock(context.Context, string, string, string, string, string) error
+	EnsureSessionSoulWithLock(ctx context.Context, owner SessionOwnerWrite, digest string) error
 }
+
+// SessionSoulDigestMetadata is controller-authored prompt revision metadata, not
+// model instruction text. It follows the existing canonical transcript lifecycle.
+const SessionSoulDigestMetadata = "orka.ai/soul-configuration-digest"
+
+// SessionSoulUnboundMetadata marks a controller-authored Gateway AI error that
+// failed before soul binding or execution. Only the literal "true" on a canonical
+// error without digest metadata is unbound; absence preserves legacy identity.
+const SessionSoulUnboundMetadata = "orka.ai/soul-unbound"
+
+// SessionSoulAnchorSource identifies digest-only context retained for the Session lifetime.
+const SessionSoulAnchorSource = "soul-context"
