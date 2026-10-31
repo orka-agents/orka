@@ -1243,11 +1243,9 @@ func (s *State) appendMappedEventWithPlan(
 ) (*store.ExecutionEvent, bool, error) {
 	// Usage attribution comes from the controller's frozen profile, not the
 	// runtime's free-text model field or the cross-turn redacted public event.
-	// Set it at the append boundary so mapped content cannot override it.
-	if mapped.Internal == nil {
-		mapped.Internal = make(map[string]any)
-	}
-	mapped.Internal["harnessV2UsageModel"] = s.journal.MapContext.normalized().Model
+	// Set it at the append boundary so mapped content cannot override it, and
+	// only for the appends: reconciliation reads do not carry it.
+	appendCtx := store.WithUsageAttribution(ctx, store.UsageAttribution{Model: s.journal.MapContext.normalized().Model})
 	key := identity.Key()
 	if isMappedToolTerminalEvent(*mapped) {
 		// Real runtime terminal updates and synthesized recovery closures race
@@ -1272,13 +1270,13 @@ func (s *State) appendMappedEventWithPlan(
 			if !ok {
 				return nil, false, fmt.Errorf("execution event store does not support atomic plan projection")
 			}
-			return atomicStore.AppendExecutionEventWithPlanIfAbsent(ctx, mapped, dedupeKey, plan)
+			return atomicStore.AppendExecutionEventWithPlanIfAbsent(appendCtx, mapped, dedupeKey, plan)
 		}
 		deduplicatingStore, ok := s.journal.EventStore.(store.DeduplicatingExecutionEventStore)
 		if !ok {
 			return nil, false, fmt.Errorf("execution event store does not support atomic deduplication")
 		}
-		return deduplicatingStore.AppendExecutionEventIfAbsent(ctx, mapped, dedupeKey)
+		return deduplicatingStore.AppendExecutionEventIfAbsent(appendCtx, mapped, dedupeKey)
 	}
 	appended, isNew, err := appendIfAbsent()
 	if err == nil {
