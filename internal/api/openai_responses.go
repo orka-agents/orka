@@ -195,7 +195,7 @@ func (h *OpenAICompatHandler) responsesToolContext(c fiber.Ctx, namespace string
 		// Linked accounts are wired as on the other compatibility endpoints,
 		// so a GitHub call under a person's link meets the same rules here.
 		LinkedAccounts: h.config.LinkedAccounts, ConnectorsEnabled: h.config.ConnectorsEnabled,
-		DashboardEnabled: h.config.DashboardEnabled,
+		DashboardEnabled: h.config.DashboardEnabled, ContainerTaskRuntimeClasses: h.config.ContainerTaskRuntimeClasses,
 	})
 }
 

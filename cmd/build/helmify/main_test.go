@@ -176,6 +176,24 @@ func TestStaticChartDashboardFlag(t *testing.T) {
 	}
 }
 
+func TestStaticChartContainerTaskRuntimeClassesFlag(t *testing.T) {
+	const flag = "--container-task-runtime-classes"
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Contains(rendered, flag) {
+		t.Fatalf("container Tasks must not accept runtime classes by default:\n%s", rendered)
+	}
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set", "workers.containerTasks.runtimeClasses={gvisor,kata-qemu}")
+	if strings.Count(rendered, `- "`+flag+`=gvisor,kata-qemu"`+"\n") != 1 {
+		t.Fatalf("an allowlist must render exactly one %s argument:\n%s", flag, rendered)
+	}
+	// helm upgrade --reuse-values keeps older values without this map.
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml", "--set", "workers.containerTasks=null")
+	if strings.Contains(rendered, flag) {
+		t.Fatalf("a release without workers.containerTasks must not accept runtime classes:\n%s", rendered)
+	}
+}
+
 func TestStaticChartConnectorsFlags(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
 	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {
