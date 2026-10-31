@@ -177,8 +177,14 @@ compile and test their own work. They are given the same rules above in their sy
 prompt, so they usually get it right — but if you see an agent looping on
 `go: command not found`, this page is what it failed to apply.
 
-The tool can also set literal `env` values, `resources`, a `retryPolicy`, and an
+The tool can also set `env` values, `resources`, a `retryPolicy`, and an
 `execution.runtimeClassName` from the operator's allowlist. Its
 [parameter reference](../reference/built-in-tools.md#create_container_task) lists the limits.
+
+The tool can name Secrets too, through `secretRef` and `env[].valueFrom.secretKeyRef`. Each
+Secret is authorized for the caller before the Task exists, but authorization does not
+deliver it: the [caution above](#other-fields) still applies. Without the operator's
+`ORKA_AGENT_DIRECT_SECRET_MOUNTS` opt-in, a `secretRef` is not mounted and an env
+`secretKeyRef` fails the Task before its Pod starts.
 
 See [Multi-agent coordination](multi-agent-coordination.md).

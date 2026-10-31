@@ -74,7 +74,7 @@ how to use them together.
 |------|-------------|------------|
 | `delegate_task` | Delegate a subtask to another agent | `agent`, `prompt` (required); `taskNamespace`, `agentNamespace`, `priority`, `timeout`, `workspace`, `maxTurns`, `allowBash`, `prior_task`, `feedback`, `auto_retry`, `max_retries` |
 | `wait_for_tasks` | Wait for delegated tasks to complete | `tasks` (required), `timeout` (default 10m) |
-| `create_container_task` | Create a child container task | `image`, `command`/`args`; `env`, `resources`, `retryPolicy`, `execution`, `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule`. See [below](#create_container_task). |
+| `create_container_task` | Create a child container task | `image`, `command`/`args`; `env`, `secretRef`, `resources`, `retryPolicy`, `execution`, `workspace`, `prior_task`, `namespace`, `timeout`, `priority`, `schedule`. See [below](#create_container_task). |
 | `cancel_task` | Cancel a running child task | `task_name` (required); `namespace`, `reason` |
 | `send_message` | Send a message to a sibling task | `to_task` (required, or `*` to broadcast), `content` (required) |
 | `check_messages` | Check for messages from sibling tasks | `mark_read` (boolean, default true) |
@@ -162,9 +162,11 @@ See [Container tasks](../guides/container-tasks.md) for the filesystem and image
 | Parameter | Description |
 | --- | --- |
 | `image`, `command`, `args` | The container to run. Omit `image` for the default worker image. |
-| `env` | Up to 64 literal `{name, value}` pairs; values up to 32 KiB. Names starting with `ORKA_` or `OTEL_EXPORTER_OTLP`, and `OTEL_RESOURCE_ATTRIBUTES`, are reserved and refused. `valueFrom` is not accepted. Values are stored in the Task spec, so never pass credentials here. |
+| `env` | Up to 64 entries, each `{name, value}` or `{name, valueFrom: {secretKeyRef: {name, key}}}`; literal values up to 32 KiB. Names starting with `ORKA_` or `OTEL_EXPORTER_OTLP`, and `OTEL_RESOURCE_ATTRIBUTES`, are reserved and refused. No other `valueFrom` source is accepted. Literal values are stored in the Task spec, so pass credentials only through `secretKeyRef`. |
+| `secretRef` | `{name}` of a Secret in the Task's namespace, delivered as files under `/secrets/task`. `secretRef.namespace` is refused. |
 | `resources` | `requests` and `limits` maps of Kubernetes quantities, such as `{"requests":{"cpu":"500m","memory":"1Gi"},"limits":{"cpu":"2","memory":"2Gi"}}`. Quantities must parse, be non-negative, and keep each request at or below its limit. Namespace `ResourceQuota` and `LimitRange` remain the caps. Omitted, the Pod gets requests `100m`/`512Mi` and limits `1`/`2Gi`. |
 | `retryPolicy` | `maxRetries` (0–5), `backoffMultiplier` (1–10, default 2), and `initialDelay` (a duration up to `5m`, default `10s`). Retry only idempotent commands: a run with side effects whose outcome is unknown should be checked by a follow-up Task, not retried. The delay before each attempt is recorded in the Task's status, so it survives reconciles and controller restarts. |
+| Secret references | Every Secret named by `secretRef` or `secretKeyRef` is authorized before the Task is created. ServiceAccount callers of the chat and compatibility APIs need `get` on that Secret; callers with a transaction token, and coordinator Agents when transaction credential authorization is enforced, need a credential-read scope. A context that requires authorization but has no authorizer is refused. The Secret still reaches the Pod only when an operator enables direct Secret mounts; see [Container tasks](../guides/container-tasks.md#other-fields). |
 | `execution.runtimeClassName` | A RuntimeClass such as `gvisor`. Accepted only when it is in the operator's `--container-task-runtime-classes` allowlist; with an empty allowlist the field is refused. Node selectors, tolerations, and affinity stay operator-only. |
 | `workspace`, `prior_task` | The repository to check out, or a prior Task whose workspace and diff to reuse. |
 | `namespace`, `timeout`, `priority`, `schedule` | As on the other Task-creating tools. |

@@ -60,29 +60,37 @@ func (t *CreateContainerTaskTool) Parameters() json.RawMessage {
 		}, priorTaskField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Optional prior task whose structured diff should be applied before running the container command. If workspace is omitted, Orka copies the workspace from this prior task when available."}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, timeoutField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: timeoutDescription}, priorityField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaDescriptionField: "Priority 0-1000", jsonSchemaMinimumField: 0, jsonSchemaMaximumField: 1000}, scheduleField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: cronScheduleDescription},
 		envField: map[string]any{
 			jsonSchemaTypeField:        jsonSchemaTypeArray,
-			jsonSchemaDescriptionField: "Literal env vars, readable by anyone who can read the Task: never credentials. ORKA_* and OTEL_EXPORTER_OTLP* names are reserved.",
+			jsonSchemaDescriptionField: "value is visible in the Task: pass credentials only via valueFrom.secretKeyRef. ORKA_* and OTEL_EXPORTER_OTLP* are reserved.",
 			jsonSchemaMaxItemsField:    maxContainerTaskEnvVars,
 			itemsField: map[string]any{
 				jsonSchemaTypeField: jsonSchemaTypeObject,
 				jsonSchemaPropertiesField: map[string]any{
 					nameField:  map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaMaxLengthField: maxContainerTaskEnvNameBytes},
 					valueField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaMaxLengthField: maxContainerTaskEnvValueBytes},
+					valueFromField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
+						secretKeyRefField: containerTaskSecretNameSchema(keyField),
+					}},
 				},
 				jsonSchemaRequiredField:        []string{nameField},
 				jsonSchemaAdditionalProperties: false,
 			},
 		},
-		resourcesField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `Requests/limits, e.g. {requests:{cpu:"500m",memory:"1Gi"},limits:{cpu:"2",memory:"2Gi"}}. Default limits: 1 CPU, 2Gi.`, jsonSchemaPropertiesField: map[string]any{
+		secretRefField: func() map[string]any {
+			schema := containerTaskSecretNameSchema()
+			schema[jsonSchemaDescriptionField] = "Secret mounted as files under /secrets/task"
+			return schema
+		}(),
+		resourcesField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: `e.g. {requests:{cpu:"500m",memory:"1Gi"},limits:{cpu:"2",memory:"2Gi"}}; default limits 1 CPU/2Gi`, jsonSchemaPropertiesField: map[string]any{
 			resourceRequestsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaAdditionalProperties: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 			resourceLimitsField:   map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaAdditionalProperties: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}},
 		}},
-		retryPolicyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Retries with backoff, only for idempotent commands", jsonSchemaPropertiesField: map[string]any{
+		retryPolicyField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaDescriptionField: "Only for idempotent commands", jsonSchemaPropertiesField: map[string]any{
 			maxRetriesField:        map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 0, jsonSchemaMaximumField: maxContainerTaskRetries},
 			backoffMultiplierField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeNumber, jsonSchemaMinimumField: minContainerTaskBackoffMultiplier, jsonSchemaMaximumField: maxContainerTaskBackoffMultiplier},
 			initialDelayField:      map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Go duration, at most 5m"},
 		}},
 		executionField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
-			runtimeClassNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Isolation RuntimeClass such as gvisor, only if the operator allows it"},
+			runtimeClassNameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "e.g. gvisor; operator allowlist only"},
 		}},
 	},
 	})
@@ -115,7 +123,7 @@ func (t *CreateContainerTaskTool) Execute(ctx context.Context, args json.RawMess
 		return r, nil
 	}
 	task := buildContainerTask(a)
-	if r, ok := applyContainerTaskSpecArgs(tc, a, task); !ok {
+	if r, ok := applyContainerTaskSpecArgs(ctx, tc, namespace, a, task); !ok {
 		return r, nil
 	}
 	if err := applyContainerPriorTaskWorkspace(ctx, tc.Client, namespace, task); err != nil {
@@ -189,7 +197,7 @@ func (t *CreateContainerTaskTool) executeCoordination(ctx context.Context, args 
 		return r, nil
 	}
 	task := buildContainerTask(a)
-	if r, ok := applyContainerTaskSpecArgs(GetToolContext(ctx), a, task); !ok {
+	if r, ok := applyContainerTaskSpecArgs(ctx, GetToolContext(ctx), namespace, a, task); !ok {
 		return r, nil
 	}
 	if err := applyContainerPriorTaskWorkspace(ctx, t.k8sClient, namespace, task); err != nil {
@@ -458,6 +466,9 @@ func buildContainerTask(a map[string]any) *corev1alpha1.Task {
 const (
 	envField                       = "env"
 	valueField                     = "value"
+	valueFromField                 = "valueFrom"
+	secretKeyRefField              = "secretKeyRef"
+	keyField                       = "key"
 	resourcesField                 = "resources"
 	resourceRequestsField          = "requests"
 	resourceLimitsField            = "limits"
@@ -484,15 +495,40 @@ const (
 	maxContainerTaskInitialDelay      = 5 * time.Minute
 )
 
+// containerTaskSecretNameSchema is a closed {name} object, plus any other
+// required string fields such as a Secret key.
+func containerTaskSecretNameSchema(fields ...string) map[string]any {
+	properties := map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}}
+	required := make([]string, 0, 1+len(fields))
+	required = append(required, nameField)
+	for _, field := range fields {
+		properties[field] = map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}
+		required = append(required, field)
+	}
+	return map[string]any{
+		jsonSchemaTypeField:            jsonSchemaTypeObject,
+		jsonSchemaPropertiesField:      properties,
+		jsonSchemaRequiredField:        required,
+		jsonSchemaAdditionalProperties: false,
+	}
+}
+
 // applyContainerTaskSpecArgs copies the container settings a coordinator may
 // choose onto the Task. The schema advertises these limits; this enforces them,
-// so nothing is created from a value the schema would have refused.
-func applyContainerTaskSpecArgs(tc *ToolContext, a map[string]any, task *corev1alpha1.Task) (string, bool) {
+// so nothing is created from a value the schema would have refused. Every
+// Secret the Task would reference is authorized for the caller first.
+func applyContainerTaskSpecArgs(ctx context.Context, tc *ToolContext, namespace string, a map[string]any, task *corev1alpha1.Task) (string, bool) {
 	env, errResult, ok := parseContainerTaskEnvArg(a)
 	if !ok {
 		return errResult, false
 	}
 	task.Spec.Env = env
+
+	secretRef, errResult, ok := parseContainerTaskSecretRefArg(a)
+	if !ok {
+		return errResult, false
+	}
+	task.Spec.SecretRef = secretRef
 
 	resources, errResult, ok := parseContainerTaskResourcesArg(a)
 	if !ok {
@@ -515,7 +551,113 @@ func applyContainerTaskSpecArgs(tc *ToolContext, a map[string]any, task *corev1a
 		return errResult, false
 	}
 	task.Spec.Execution = execution
+	return authorizeContainerTaskSecrets(ctx, tc, namespace, task)
+}
+
+// authorizeContainerTaskSecrets checks every Secret the Task names against the
+// caller before anything is created. Delivery still requires the operator's
+// direct Secret mount opt-in; this decides only whether the caller may ask.
+func authorizeContainerTaskSecrets(ctx context.Context, tc *ToolContext, namespace string, task *corev1alpha1.Task) (string, bool) {
+	var names []string
+	if task.Spec.SecretRef != nil {
+		names = append(names, task.Spec.SecretRef.Name)
+	}
+	for _, envVar := range task.Spec.Env {
+		if envVar.ValueFrom != nil && envVar.ValueFrom.SecretKeyRef != nil {
+			names = append(names, envVar.ValueFrom.SecretKeyRef.Name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		if tc == nil || tc.AuthorizeSecretRead == nil {
+			if tc != nil && tc.RequireSecretReadAuthorization {
+				result, _ := ChatToolErrorResult("authorization_failed", fmt.Sprintf("Secret %s/%s requires a secret read authorizer", namespace, name), "Retry from a context that can authorize Secret access")
+				return result, false
+			}
+			continue
+		}
+		if authzErr := tc.AuthorizeSecretRead(ctx, namespace, name); authzErr != nil {
+			result, _ := ChatToolErrorResult(authzErr.Type, fmt.Sprintf("not authorized to reference Secret %s/%s: %s", namespace, name, authzErr.Message), authzErr.Suggestion)
+			return result, false
+		}
+	}
 	return "", true
+}
+
+func parseContainerTaskSecretRefArg(a map[string]any) (*corev1alpha1.SecretReference, string, bool) {
+	raw, ok := a[secretRefField]
+	if !ok || raw == nil {
+		return nil, "", true
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil, containerTaskArgError("secretRef must be an object", `Pass secretRef as {"name":"my-secret"}`), false
+	}
+	for key := range values {
+		switch key {
+		case nameField:
+		case namespaceField:
+			return nil, containerTaskArgError("secretRef.namespace is not supported: the Secret must be in the Task's namespace", "Omit secretRef.namespace"), false
+		default:
+			return nil, containerTaskArgError(fmt.Sprintf("secretRef has unsupported field %q", key), "secretRef takes only name"), false
+		}
+	}
+	name, errResult, ok := containerTaskSecretName(values, "secretRef")
+	if !ok {
+		return nil, errResult, false
+	}
+	return &corev1alpha1.SecretReference{Name: name}, "", true
+}
+
+// containerTaskSecretName reads a required Secret name at field.
+func containerTaskSecretName(values map[string]any, field string) (string, string, bool) {
+	name, _ := values[nameField].(string)
+	if name == "" {
+		return "", containerTaskArgError(field+".name is required", "Name a Secret in the Task's namespace"), false
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return "", containerTaskArgError(fmt.Sprintf("%s.name %q is not a valid Secret name: %s", field, name, strings.Join(errs, "; ")), "Use the Secret's exact name"), false
+	}
+	return name, "", true
+}
+
+// parseContainerTaskEnvValueFrom accepts only a Secret key. Other sources read
+// Pod metadata the worker already has, or objects the tool cannot authorize.
+func parseContainerTaskEnvValueFrom(raw any, field string) (*corev1.EnvVarSource, string, bool) {
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil, containerTaskArgError(field+" must be an object", `Pass {"secretKeyRef":{"name":"my-secret","key":"token"}}`), false
+	}
+	for key := range values {
+		if key != secretKeyRefField {
+			return nil, containerTaskArgError(fmt.Sprintf("%s.%s is not supported: only %s.secretKeyRef is accepted", field, key, field), "Use a literal value or a Secret key"), false
+		}
+	}
+	ref, ok := values[secretKeyRefField].(map[string]any)
+	if !ok {
+		return nil, containerTaskArgError(field+".secretKeyRef is required", `Pass {"secretKeyRef":{"name":"my-secret","key":"token"}}`), false
+	}
+	refField := field + ".secretKeyRef"
+	for key := range ref {
+		if key != nameField && key != keyField {
+			return nil, containerTaskArgError(fmt.Sprintf("%s has unsupported field %q", refField, key), "secretKeyRef takes only name and key"), false
+		}
+	}
+	name, errResult, ok := containerTaskSecretName(ref, refField)
+	if !ok {
+		return nil, errResult, false
+	}
+	key, _ := ref[keyField].(string)
+	if key == "" {
+		return nil, containerTaskArgError(refField+".key is required", "Name the key inside the Secret"), false
+	}
+	if errs := validation.IsConfigMapKey(key); len(errs) > 0 {
+		return nil, containerTaskArgError(fmt.Sprintf("%s.key %q is not a valid Secret key: %s", refField, key, strings.Join(errs, "; ")), "Use the key's exact name"), false
+	}
+	return &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: name},
+		Key:                  key,
+	}}, "", true
 }
 
 func containerTaskArgError(message, suggestion string) string {
@@ -547,13 +689,8 @@ func parseContainerTaskEnvArg(a map[string]any) ([]corev1.EnvVar, string, bool) 
 			return nil, r, false
 		}
 		for key := range entry {
-			switch key {
-			case nameField, valueField:
-			case "valueFrom":
-				r := containerTaskArgError(fmt.Sprintf("env[%d].valueFrom is not supported: create_container_task accepts only literal env values", i), "Pass a literal value. Secrets cannot be passed through env by this tool.")
-				return nil, r, false
-			default:
-				r := containerTaskArgError(fmt.Sprintf("env[%d] has unsupported field %q", i, key), "Each env entry takes only name and value")
+			if key != nameField && key != valueField && key != valueFromField {
+				r := containerTaskArgError(fmt.Sprintf("env[%d] has unsupported field %q", i, key), "Each env entry takes name and either value or valueFrom")
 				return nil, r, false
 			}
 		}
@@ -582,6 +719,18 @@ func parseContainerTaskEnvArg(a map[string]any) ([]corev1.EnvVar, string, bool) 
 		if total += len(name); total > maxContainerTaskEnvTotalBytes {
 			r := containerTaskArgError(fmt.Sprintf("env is more than %d bytes in total", maxContainerTaskEnvTotalBytes), "Pass less through env: read large inputs from a file in the image or workspace")
 			return nil, r, false
+		}
+		if source, ok := entry[valueFromField]; ok && source != nil {
+			if _, hasValue := entry[valueField]; hasValue {
+				r := containerTaskArgError(fmt.Sprintf("env[%d] sets both value and valueFrom", i), "Set either a literal value or valueFrom.secretKeyRef")
+				return nil, r, false
+			}
+			valueFrom, errResult, ok := parseContainerTaskEnvValueFrom(source, fmt.Sprintf("env[%d].valueFrom", i))
+			if !ok {
+				return nil, errResult, false
+			}
+			env = append(env, corev1.EnvVar{Name: name, ValueFrom: valueFrom})
+			continue
 		}
 		value := chatGetStringArg(entry, valueField)
 		if len(value) > maxContainerTaskEnvValueBytes {
