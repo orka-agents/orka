@@ -278,7 +278,7 @@ func newTaskScopedCreateConflictFixtureForRuntime(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-"+name)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)

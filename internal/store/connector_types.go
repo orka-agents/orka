@@ -11,6 +11,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // ConnectorFieldNamespace names the namespace binding field in validation messages.
@@ -19,7 +21,7 @@ const ConnectorFieldNamespace = "namespace"
 // ErrConnectorCustodyTombstoned is returned when material is written for a
 // Connection UID that was already disconnected. Deletion is permanent per UID
 // so a late consent completion can never recreate custody.
-var ErrConnectorCustodyTombstoned = errors.New("connector custody for this connection was deleted")
+var ErrConnectorCustodyTombstoned = storagev1.ErrConnectorCustodyTombstoned
 
 // ErrConnectorCompletionCommitted reports a completion another commit already
 // finished; the caller resumes it instead of committing again.
@@ -28,11 +30,11 @@ var ErrConnectorCompletionCommitted = errors.New("connector completion was alrea
 // ErrConnectorConsentSuperseded reports a completion from a consent older
 // than one that was already parked or committed for the same Connection; an
 // older consent's tokens never replace a newer grant.
-var ErrConnectorConsentSuperseded = errors.New("a newer consent for this connection superseded this one")
+var ErrConnectorConsentSuperseded = storagev1.ErrConnectorConsentSuperseded
 
 // ErrConnectorRetiredLimit reports a Connection that already retains the
 // maximum number of superseded grants; disconnecting revokes them all.
-var ErrConnectorRetiredLimit = errors.New("this connection retains too many superseded grants; disconnect and link again")
+var ErrConnectorRetiredLimit = storagev1.ErrConnectorRetiredLimit
 
 // ConnectorCredentialRef binds sealed token material to exactly one
 // Connection. Every field participates in the AEAD additional data, so a row
@@ -63,7 +65,8 @@ func (r ConnectorCredentialRef) Validate() error {
 }
 
 // ConnectorCredential is the plaintext token material for one Connection. It
-// exists only in controller memory; the store seals it at rest.
+// exists only in controller memory; the storage client seals it before a
+// provider stores it.
 type ConnectorCredential struct {
 	AccessToken  string
 	RefreshToken string
@@ -80,24 +83,26 @@ type ConnectorCredential struct {
 	// revocation endpoint, without the token endpoint) the material can be
 	// revoked against; see connectors.ProviderRevocationDigest.
 	RevocationDigest string
-	// GrantSequence identifies the consent that produced this material. The
-	// store assigns it when a grant is committed (never on a refresh, which
+	// GrantSequence identifies the consent that produced this material.
+	// Custody assigns it when a grant is committed (never on a refresh, which
 	// carries the current grant forward), it rises monotonically for the
 	// Connection's lifetime even across a shred, and the Connection status
 	// mirrors it, so authority frozen under one grant can be refused against
 	// custody that a later consent replaced.
 	GrantSequence int64
-	// UpdatedAt is set by the store on read.
+	// UpdatedAt is set by custody on read.
 	UpdatedAt time.Time
-	// Version is the custody row version, set by the store on read. Refresh
+	// Version is the custody record version, set by custody on read. Refresh
 	// writes are fenced against it so a concurrent re-consent is never
 	// overwritten by material derived from an older refresh token.
 	Version int64
 }
 
-// ConnectorCredentialStore seals per-Connection token material with one data
-// key per Connection, itself wrapped by the controller key. Deleting a row
-// deletes its wrapped key, which makes the ciphertext unrecoverable.
+// ConnectorCredentialStore is the plaintext view of connector custody that
+// the storage client serves. It seals each record's token material under its
+// own data key, itself sealed under the snapshot key, before a provider
+// stores it. Deleting a record deletes its sealed data key, which makes the
+// ciphertext unrecoverable.
 type ConnectorCredentialStore interface {
 	// PutConnectorCredential replaces the material for ref, minting a fresh
 	// data key so previous ciphertext can no longer be opened.
@@ -158,8 +163,8 @@ type ConnectorConsent struct {
 	// set.
 	Scopes    []string
 	ExpiresAt time.Time
-	// Sequence orders the Connection's consents: the store assigns it when
-	// the consent starts, and completions carry it so commits follow consent
+	// Sequence orders the Connection's consents: custody assigns it when the
+	// consent starts, and completions carry it so commits follow consent
 	// order rather than callback arrival.
 	Sequence int64
 }
@@ -183,10 +188,10 @@ type ConnectorCompletion struct {
 	// identity plus tool destinations) the consent was granted against,
 	// sealed with the tokens; completion refuses a provider that changed it.
 	ConsentAuthorityDigest string
-	// Committed is sealed into the parked payload atomically with the custody
-	// write, so a retry after a failed status update resumes that commit
-	// instead of writing the parked tokens again over a newer commit, and no
-	// plaintext column can flip it.
+	// Committed is sealed into the parked payload, which is replaced
+	// atomically with the custody write, so a retry after a failed status
+	// update resumes that commit instead of writing the parked tokens again
+	// over a newer commit, and no plain field can flip it.
 	Committed bool
 	// ConsentSequence is the Sequence of the consent this completion came
 	// from; a completion whose consent is older than one already parked or
@@ -211,9 +216,9 @@ type ConnectorConsentStore interface {
 	// CommitConnectorCompletion seals credential into custody for ref and
 	// marks the completion committed in one transaction. It fails with
 	// ErrConnectorCustodyTombstoned after a disconnect and ErrNotFound when
-	// the completion no longer exists.
-	// The committed material, with the grant sequence the store assigned,
-	// is returned.
+	// the completion no longer exists or expired.
+	// The committed material, with the grant sequence custody assigned, is
+	// returned.
 	CommitConnectorCompletion(ctx context.Context, nonce string, ref ConnectorCredentialRef, credential ConnectorCredential) (ConnectorCredential, error)
 	// PeekConnectorCompletion returns the parked material for nonce without
 	// removing it, so a commit that fails after the credential write can be

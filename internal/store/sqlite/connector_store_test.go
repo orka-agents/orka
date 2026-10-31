@@ -18,10 +18,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-func newConnectorTestStore(t *testing.T) *Store {
+// connectorTestStore is a SQLite store behind an activated storage client:
+// the client seals and opens custody, and the tests inspect the store's
+// files and rows directly.
+type connectorTestStore struct {
+	*storageclient.Client
+	store *Store
+}
+
+func newConnectorTestStore(t *testing.T) *connectorTestStore {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "connectors.db")
 	db, err := NewDB(dbPath)
@@ -30,14 +40,7 @@ func newConnectorTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	s := NewStore(db, dbPath)
-	cipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
-	return s
+	return &connectorTestStore{Client: activateTestKey(t, s), store: s}
 }
 
 func testCredentialRef() store.ConnectorCredentialRef {
@@ -71,7 +74,7 @@ func TestConnectorCredentialRoundTrip(t *testing.T) {
 
 	// The row never holds plaintext.
 	var ciphertext, dek []byte
-	if err := s.db.QueryRow(`SELECT ciphertext, dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&ciphertext, &dek); err != nil {
+	if err := s.store.db.QueryRow(`SELECT ciphertext, dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&ciphertext, &dek); err != nil {
 		t.Fatal(err)
 	}
 	for _, secret := range []string{"gho_access", "ghr_refresh"} {
@@ -98,12 +101,12 @@ func TestConnectorCredentialRoundTrip(t *testing.T) {
 
 	// Replacing the material rotates the wrapped data key.
 	var dekBefore []byte
-	_ = s.db.QueryRow(`SELECT dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekBefore)
+	_ = s.store.db.QueryRow(`SELECT dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekBefore)
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_second"}); err != nil {
 		t.Fatal(err)
 	}
 	var dekAfter []byte
-	_ = s.db.QueryRow(`SELECT dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekAfter)
+	_ = s.store.db.QueryRow(`SELECT dek_ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekAfter)
 	if bytes.Equal(dekBefore, dekAfter) {
 		t.Fatal("replacing the credential must mint a fresh data key")
 	}
@@ -131,15 +134,16 @@ func TestConnectorCredentialFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	s := NewStore(db, dbPath)
-	if err := s.PutConnectorCredential(ctx, testCredentialRef(), store.ConnectorCredential{AccessToken: "x"}); !errors.Is(err, errConnectorCipherRequired) {
-		t.Fatalf("Put without cipher err = %v", err)
+	// A client whose snapshot key is not active seals and opens nothing.
+	inactive := orkaClient(t, NewStore(db, dbPath))
+	if err := inactive.PutConnectorCredential(ctx, testCredentialRef(), store.ConnectorCredential{AccessToken: "x"}); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
+		t.Fatalf("Put without key err = %v", err)
 	}
-	if _, err := s.GetConnectorCredential(ctx, testCredentialRef()); !errors.Is(err, errConnectorCipherRequired) {
-		t.Fatalf("Get without cipher err = %v", err)
+	if _, err := inactive.GetConnectorCredential(ctx, testCredentialRef()); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
+		t.Fatalf("Get without key err = %v", err)
 	}
-	if err := s.CreateConnectorConsent(ctx, store.ConnectorConsent{}); !errors.Is(err, errConnectorCipherRequired) {
-		t.Fatalf("CreateConsent without cipher err = %v", err)
+	if err := inactive.CreateConnectorConsent(ctx, store.ConnectorConsent{}); !errors.Is(err, storageclient.ErrSnapshotKeyNotActive) {
+		t.Fatalf("CreateConsent without key err = %v", err)
 	}
 
 	withCipher := newConnectorTestStore(t)
@@ -154,6 +158,8 @@ func TestConnectorCredentialFailsClosed(t *testing.T) {
 	}
 }
 
+// TestConnectorCredentialKeyRotationBlocksOpen copies sealed custody into a
+// dataset whose client holds another key: the data key does not unwrap.
 func TestConnectorCredentialKeyRotationBlocksOpen(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
@@ -161,13 +167,19 @@ func TestConnectorCredentialKeyRotationBlocksOpen(t *testing.T) {
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho"}); err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x43}, AgentExecutionSnapshotKeyBytes))
+	sealed, err := s.store.GetSealedConnectorCredential(ctx, ref.ConnectionUID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := NewStore(s.db, "rotated")
-	other.snapshotCipher = rotated
-	if _, err := other.GetConnectorCredential(ctx, ref); err == nil {
+	other := setupDiskStore(t)
+	rotated, err := activateSnapshotKey(t, other, bytes.Repeat([]byte{0x43}, storageclient.SnapshotKeyBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.PutSealedConnectorCredential(ctx, storagev1.PutSealedConnectorCredentialRequest{Credential: *sealed, Now: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rotated.GetConnectorCredential(ctx, ref); err == nil {
 		t.Fatal("a different controller key must not unwrap the data key")
 	}
 }
@@ -184,7 +196,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 		t.Fatalf("CreateConnectorConsent: %v", err)
 	}
 	var sealed []byte
-	if err := s.db.QueryRow(`SELECT verifier_ciphertext FROM connector_consents WHERE nonce = ?`, consent.Nonce).Scan(&sealed); err != nil {
+	if err := s.store.db.QueryRow(`SELECT verifier_ciphertext FROM connector_consents WHERE nonce = ?`, consent.Nonce).Scan(&sealed); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(sealed, []byte("verifier-secret")) {
@@ -228,7 +240,7 @@ func TestConnectorConsentSingleUseAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	var staleCount int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM connector_consents WHERE nonce = ?`, stale.Nonce).Scan(&staleCount)
+	_ = s.store.db.QueryRow(`SELECT COUNT(*) FROM connector_consents WHERE nonce = ?`, stale.Nonce).Scan(&staleCount)
 	if staleCount != 0 {
 		t.Fatal("expired consents must be purged on create")
 	}
@@ -266,7 +278,7 @@ func TestConnectorCompletionRoundTrip(t *testing.T) {
 		t.Fatalf("CreateConnectorCompletion: %v", err)
 	}
 	var payload []byte
-	if err := s.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
+	if err := s.store.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(payload, []byte("gho_parked")) {
@@ -411,7 +423,7 @@ func TestConnectorCompletionAuthenticatesPlaintextColumns(t *testing.T) {
 	if err := s.CreateConnectorCompletion(ctx, completion); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
+	if _, err := s.store.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err == nil {
@@ -435,7 +447,7 @@ func TestConnectorConsentAuthenticatesPlaintextColumns(t *testing.T) {
 	if err := s.CreateConnectorConsent(ctx, consent); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`UPDATE connector_consents SET authority_digest = 'authority-2' WHERE nonce = ?`, consent.Nonce); err != nil {
+	if _, err := s.store.db.Exec(`UPDATE connector_consents SET authority_digest = 'authority-2' WHERE nonce = ?`, consent.Nonce); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.ConsumeConnectorConsent(ctx, consent.Nonce); err == nil {
@@ -472,7 +484,7 @@ func TestConnectorCompletionCommitMarksRowAtomically(t *testing.T) {
 	// The committed marker lives inside the sealed body: the row has no
 	// plaintext column to flip, and the re-sealed payload still opens only
 	// against its fence columns.
-	if _, err := s.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
+	if _, err := s.store.db.Exec(`UPDATE connector_completions SET mode = 'readWrite' WHERE nonce = ?`, completion.Nonce); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.PeekConnectorCompletion(ctx, completion.Nonce); err == nil {
@@ -686,7 +698,7 @@ func TestConnectorReplaceRetiresUnexpiredPreviousCredential(t *testing.T) {
 	}
 	// Retired material is pruned once it expires, so the table is bounded by
 	// the provider's token lifetime rather than by refresh count.
-	if _, err := s.db.ExecContext(ctx, `UPDATE connector_retired_credentials SET revocable_until = ? WHERE connection_uid = ?`, past, ref.ConnectionUID); err != nil {
+	if _, err := s.store.db.ExecContext(ctx, `UPDATE connector_retired_credentials SET revocable_until = ? WHERE connection_uid = ?`, past, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
 	held, err = s.GetConnectorCredential(ctx, ref)
@@ -799,7 +811,7 @@ func TestConnectorCustodyAssignsMonotonicGrants(t *testing.T) {
 	}
 	// A row that goes away without a disconnect (a shred) does not reset
 	// the counter: the next grant is still later than every earlier one.
-	if _, err := s.db.Exec(`DELETE FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID); err != nil {
+	if _, err := s.store.db.Exec(`DELETE FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_3"}); err != nil {
@@ -887,26 +899,26 @@ func TestConnectorCommitIsFencedInsideTheTransaction(t *testing.T) {
 		t.Fatalf("custody after a repeated commit = %+v err = %v, want one grant", held, err)
 	}
 	old := time.Now().Add(-2 * connectorTombstoneRetention).UTC()
-	if _, err := s.db.Exec(`INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES ('uid-old', ?)`, old); err != nil {
+	if _, err := s.store.db.Exec(`INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES ('uid-old', ?)`, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO connector_credential_grants (connection_uid, grant_sequence) VALUES ('uid-old', 7)`); err != nil {
+	if _, err := s.store.db.Exec(`INSERT INTO connector_credential_grants (connection_uid, grant_sequence) VALUES ('uid-old', 7)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO connector_credential_versions (connection_uid, last_version) VALUES ('uid-old', 9)`); err != nil {
+	if _, err := s.store.db.Exec(`INSERT INTO connector_credential_versions (connection_uid, last_version) VALUES ('uid-old', 9)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.TombstoneConnectorCustody(ctx, "uid-recent"); err != nil {
 		t.Fatal(err)
 	}
 	var tombstones, grants, versions int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = 'uid-old'`).Scan(&tombstones); err != nil {
+	if err := s.store.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_tombstones WHERE connection_uid = 'uid-old'`).Scan(&tombstones); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_grants WHERE connection_uid = 'uid-old'`).Scan(&grants); err != nil {
+	if err := s.store.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_grants WHERE connection_uid = 'uid-old'`).Scan(&grants); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_versions WHERE connection_uid = 'uid-old'`).Scan(&versions); err != nil {
+	if err := s.store.db.QueryRow(`SELECT COUNT(*) FROM connector_credential_versions WHERE connection_uid = 'uid-old'`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
 	if tombstones != 0 || grants != 0 || versions != 0 {
@@ -929,18 +941,11 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
 		t.Fatal(err)
 	}
-	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "connector custody") {
+	other := bytes.Repeat([]byte{0x24}, storageclient.SnapshotKeyBytes)
+	if err := orkaClient(t, s.store).ActivateSnapshotKey(ctx, other); err == nil || !strings.Contains(err.Error(), "connector custody") {
 		t.Fatalf("rotation over linked custody err = %v, want refusal", err)
 	}
-	same, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x42}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(same); err != nil {
+	if err := orkaClient(t, s.store).ActivateSnapshotKey(ctx, testSnapshotKey); err != nil {
 		t.Fatalf("the current key must activate: %v", err)
 	}
 	// Pending rows are sealed under the key too.
@@ -950,7 +955,7 @@ func TestConnectorKeyActivationAuthenticatesCustody(t *testing.T) {
 	if err := s.CreateConnectorConsent(ctx, testConnectorConsent()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err == nil || !strings.Contains(err.Error(), "consent") {
+	if err := orkaClient(t, s.store).ActivateSnapshotKey(ctx, other); err == nil || !strings.Contains(err.Error(), "consent") {
 		t.Fatalf("rotation over a pending consent err = %v, want refusal", err)
 	}
 }
@@ -969,7 +974,7 @@ func TestConnectorCommitJudgesExpiryAndRevocationIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := store.ConnectorCredentialRef{ConnectionUID: expired.ConnectionUID, Namespace: expired.Namespace, Name: expired.Name, SubjectDigest: expired.SubjectDigest, Provider: expired.Provider}
-	if _, err := s.db.Exec(`UPDATE connector_completions SET expires_at = ? WHERE nonce = ?`, time.Now().Add(-time.Minute).UTC(), expired.Nonce); err != nil {
+	if _, err := s.store.db.Exec(`UPDATE connector_completions SET expires_at = ? WHERE nonce = ?`, time.Now().Add(-time.Minute).UTC(), expired.Nonce); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CommitConnectorCompletion(ctx, expired.Nonce, ref, expired.Credential); !errors.Is(err, store.ErrNotFound) {
@@ -1012,7 +1017,7 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var dekCiphertext, ciphertext []byte
-	if err := s.db.QueryRow(`SELECT dek_ciphertext, ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekCiphertext, &ciphertext); err != nil {
+	if err := s.store.db.QueryRow(`SELECT dek_ciphertext, ciphertext FROM connector_credentials WHERE connection_uid = ?`, ref.ConnectionUID).Scan(&dekCiphertext, &ciphertext); err != nil {
 		t.Fatal(err)
 	}
 	// A parked completion is sealed under the controller key itself, so its
@@ -1022,7 +1027,7 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var payload []byte
-	if err := s.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
+	if err := s.store.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteConnectorCredential(ctx, ref.ConnectionUID); err != nil {
@@ -1031,7 +1036,7 @@ func TestConnectorDeletionLeavesNoCiphertextInFiles(t *testing.T) {
 	if err := s.DeleteConnectorConsentsForConnection(ctx, ref.ConnectionUID); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
+	for _, path := range []string{s.store.dbPath, s.store.dbPath + "-wal"} {
 		data, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
@@ -1052,11 +1057,11 @@ func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
 	ctx := context.Background()
 	completion := testConnectorCompletion()
 	ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
-	s.pendingWALTruncate.Store(true)
+	s.store.pendingWALTruncate.Store(true)
 	if err := s.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "gho_1"}); err != nil {
 		t.Fatal(err)
 	}
-	if s.pendingWALTruncate.Load() {
+	if s.store.pendingWALTruncate.Load() {
 		t.Fatal("the next custody operation must finish a pending truncation")
 	}
 	held, err := s.GetConnectorCredential(ctx, ref)
@@ -1066,11 +1071,11 @@ func TestConnectorPendingLogTruncationIsFinishedLater(t *testing.T) {
 	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, held.Version); err != nil {
 		t.Fatal(err)
 	}
-	s.pendingWALTruncate.Store(true)
+	s.store.pendingWALTruncate.Store(true)
 	if err := s.ShredConnectorCredential(ctx, ref.ConnectionUID, held.Version); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("shred of an absent row err = %v, want ErrNotFound", err)
 	}
-	if s.pendingWALTruncate.Load() {
+	if s.store.pendingWALTruncate.Load() {
 		t.Fatal("a shred retry must finish the pending truncation even when the row is already gone")
 	}
 }
@@ -1107,15 +1112,15 @@ func TestConnectorRetireConnectorCredential(t *testing.T) {
 // and one consumed. Its sealed payload must leave the write-ahead log too.
 func TestConnectorCompletionDropsLeaveNoLogCopy(t *testing.T) {
 	ctx := context.Background()
-	for name, drop := range map[string]func(*Store, store.ConnectorCompletion) error{
-		"expired at commit": func(s *Store, completion store.ConnectorCompletion) error {
+	for name, drop := range map[string]func(*connectorTestStore, store.ConnectorCompletion) error{
+		"expired at commit": func(s *connectorTestStore, completion store.ConnectorCompletion) error {
 			ref := store.ConnectorCredentialRef{ConnectionUID: completion.ConnectionUID, Namespace: completion.Namespace, Name: completion.Name, SubjectDigest: completion.SubjectDigest, Provider: completion.Provider}
 			if _, err := s.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential); !errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("expired commit err = %v, want ErrNotFound", err)
 			}
 			return nil
 		},
-		"consumed": func(s *Store, completion store.ConnectorCompletion) error {
+		"consumed": func(s *connectorTestStore, completion store.ConnectorCompletion) error {
 			_, err := s.ConsumeConnectorCompletion(ctx, completion.Nonce)
 			return err
 		},
@@ -1130,13 +1135,13 @@ func TestConnectorCompletionDropsLeaveNoLogCopy(t *testing.T) {
 				t.Fatal(err)
 			}
 			var payload []byte
-			if err := s.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
+			if err := s.store.db.QueryRow(`SELECT payload FROM connector_completions WHERE nonce = ?`, completion.Nonce).Scan(&payload); err != nil {
 				t.Fatal(err)
 			}
 			if err := drop(s, completion); err != nil {
 				t.Fatal(err)
 			}
-			for _, path := range []string{s.dbPath, s.dbPath + "-wal"} {
+			for _, path := range []string{s.store.dbPath, s.store.dbPath + "-wal"} {
 				data, err := os.ReadFile(path)
 				if err != nil && !os.IsNotExist(err) {
 					t.Fatal(err)
@@ -1301,11 +1306,8 @@ func TestConnectorKeyActivationSkipsExpiredConsents(t *testing.T) {
 	if err := s.CreateConnectorConsent(ctx, expired); err != nil {
 		t.Fatal(err)
 	}
-	other, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(other); err != nil {
+	other := bytes.Repeat([]byte{0x24}, storageclient.SnapshotKeyBytes)
+	if err := orkaClient(t, s.store).ActivateSnapshotKey(ctx, other); err != nil {
 		t.Fatalf("an expired consent must not block key activation: %v", err)
 	}
 }

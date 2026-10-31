@@ -49,7 +49,7 @@ func TestSessionTurnFinalizationTaskOwnership(t *testing.T) {
 						var finalized *store.SessionTurn
 						var err error
 						if persistenceOnly {
-							finalized, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+							finalized, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 								Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
 								ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
 								TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
@@ -125,7 +125,7 @@ func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
 			for range 2 {
 				var err error
 				if persistenceOnly {
-					_, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+					_, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 						Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
 						ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
 						TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
