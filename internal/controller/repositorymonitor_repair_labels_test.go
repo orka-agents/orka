@@ -269,6 +269,13 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			wantSkip:    repositoryMonitorRepairSkipLabelActorNotPermitted,
 		},
 		{
+			name:        "a label removed after the snapshot revokes its labeller",
+			labels:      []string{"orka:fix-ci"},
+			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("maintainer", "orka:fix-ci").unlabeled("maintainer", "orka:fix-ci"),
+			wantHandled: true,
+			wantSkip:    repositoryMonitorRepairSkipLabelActorNotPermitted,
+		},
+		{
 			name:        "label added by a non-collaborator is refused",
 			labels:      []string{"orka:fix-ci"},
 			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("github-actions[bot]", "orka:fix-ci"),
@@ -427,5 +434,18 @@ func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *tes
 	}
 	if !strings.Contains(prompt, "Fix only the checks in failingChecks") {
 		t.Fatalf("prompt does not limit the repair to failingChecks: %s", prompt)
+	}
+}
+
+func TestRepositoryMonitorReadinessRepairEligibilityFollowsRepairLabels(t *testing.T) {
+	monitor := &corev1alpha1.RepositoryMonitor{Spec: repositoryMonitorRepairLabelsTestSpec()}
+	monitor.Spec.Repair.Enabled = true
+	for _, labels := range [][]string{{"orka:review"}, {"orka:review", "orka:fix-ci"}} {
+		pr := repositoryMonitorPullRequest{Number: 31, State: "open", BaseBranch: "main", HeadSHA: "head31", Labels: labels}
+		// No repair is selected, so eligibility is decided before any lookup.
+		eligible, err := (&RepositoryMonitorReconciler{}).repositoryMonitorNeedsChangesRepairEligible(context.Background(), monitor, pr, &store.MonitorItem{})
+		if err != nil || eligible {
+			t.Fatalf("labels %v: eligible = %t err=%v, want no automatic repair of findings", labels, eligible, err)
+		}
 	}
 }
