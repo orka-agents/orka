@@ -271,10 +271,7 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 	if latest["head1"].State != repositoryMonitorStatusFailure || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v, want the unlabelled head revoked and the other untouched", latest, writes)
 	}
-	settled, err := db.GetWorkAction(ctx, monitor.Namespace, action.ID)
-	if err != nil || settled.Status != "cancelled" {
-		t.Fatalf("work action = %+v err=%v, want cancelled when its pull request left scope", settled, err)
-	}
+	assertRepositoryMonitorWorkActionStatus(t, db, monitor.Namespace, action.ID, "cancelled")
 	runInventory("include-ready-3")
 	if latest["head1"].State != repositoryMonitorStatusFailure || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v after a full poll", latest, writes)
@@ -360,5 +357,13 @@ func TestRepositoryMonitorPublicationRetrySkipsRetiredItems(t *testing.T) {
 	published, err := (&RepositoryMonitorReconciler{Store: db}).publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
 	if err != nil || published {
 		t.Fatalf("publishPendingRepositoryMonitorReviewRecords() = %t, %v; want a retired item skipped", published, err)
+	}
+}
+
+func assertRepositoryMonitorWorkActionStatus(t *testing.T, db store.RepositoryMonitorStore, namespace, id, want string) {
+	t.Helper()
+	action, err := db.GetWorkAction(context.Background(), namespace, id)
+	if err != nil || action.Status != want {
+		t.Fatalf("work action %s = %+v err=%v, want %s", id, action, err, want)
 	}
 }
