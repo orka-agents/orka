@@ -616,3 +616,50 @@ func TestRepositoryMonitorReadinessRepairEligibilityFollowsRepairLabels(t *testi
 		}
 	}
 }
+
+func TestRepositoryMonitorReadinessNamesHeldCIForAnUnreviewedHead(t *testing.T) {
+	ctx := context.Background()
+	held := 1
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"license/cla","status":"completed","conclusion":"success"}]}`))
+		case strings.HasSuffix(req.URL.Path, "/status"):
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
+		case req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = fmt.Fprintf(w, `{"total_count":%d,"workflow_runs":[]}`, held)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+	}))
+	defer server.Close()
+	monitor, secret := repositoryMonitorInventoryTestObjects("held-ci-readiness")
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: setupControllerSQLiteStore(t), GitHubAPIBaseURL: server.URL}
+	pr := repositoryMonitorPullRequest{Number: 1, State: "open", BaseBranch: "main", HeadSHA: "head1", MergeableState: "clean"}
+	item := &store.MonitorItem{Number: 1, HeadSHA: "head1"}
+	for _, tc := range []struct {
+		name           string
+		requireGreenCI bool
+		held           int
+		want           string
+	}{
+		{name: "held runs gate the review", requireGreenCI: true, held: 1, want: repositoryMonitorReadinessCIAwaitingApproval},
+		{name: "nothing held", requireGreenCI: true, held: 0, want: "Waiting for a clean review of this commit."},
+		{name: "review not gated on CI", held: 1, want: "Waiting for a clean review of this commit."},
+	} {
+		monitor.Spec.Review.RequireGreenCI, held = tc.requireGreenCI, tc.held
+		state, description, err := r.repositoryMonitorReadyOutcome(ctx, monitor, pr, item)
+		if err != nil || state != repositoryMonitorStatusPending || description != tc.want {
+			t.Fatalf("%s: readiness = %s %q err=%v, want pending %q", tc.name, state, description, err, tc.want)
+		}
+	}
+}

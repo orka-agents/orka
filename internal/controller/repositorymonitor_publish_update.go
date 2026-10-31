@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -26,26 +27,38 @@ const repositoryMonitorUpdatedReviewNote = "_Updated after a later review of thi
 // verdict, so GitHub shows the current verdict while keeping one Orka review
 // per head. It reports false when the published review needs no change.
 func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, published *store.ReviewPublishRecord, token, owner, repository string) (bool, error) {
-	shownID, err := r.repositoryMonitorShownReviewRecordID(ctx, monitor, item, published)
-	if err != nil || shownID == record.ID {
+	shownID, shownAt, err := r.repositoryMonitorShownReviewRecordID(ctx, monitor, item, published)
+	if err != nil {
 		return false, err
 	}
-	shown, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, shownID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	// An update GitHub may have applied without Orka recording it leaves the
+	// shown summary unknown, so rewrite it rather than trust the records.
+	ambiguous, err := r.repositoryMonitorReviewUpdateUnrecorded(ctx, monitor, item, published.HeadSHA, shownAt)
+	if err != nil {
 		return false, err
 	}
-	if shown != nil && strings.TrimSpace(shown.Verdict) == strings.TrimSpace(record.Verdict) {
-		return false, nil
+	if !ambiguous {
+		if shownID == record.ID {
+			return false, nil
+		}
+		shown, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, shownID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		if shown != nil && strings.TrimSpace(shown.Verdict) == strings.TrimSpace(record.Verdict) {
+			return false, nil
+		}
 	}
 	reviewID, err := strconv.ParseInt(strings.TrimSpace(published.GitHubReviewID), 10, 64)
 	if err != nil || reviewID <= 0 {
 		return false, nil
 	}
-	body, _, err := r.renderRepositoryMonitorGitHubReview(ctx, monitor, item, task, record, published.ID, token, owner, repository)
+	// Only the summary changes; inline comments stay from the first review.
+	findings, err := repositoryMonitorReviewFindingsFromRecord(record)
 	if err != nil {
 		return false, err
 	}
-	body = repositoryMonitorUpdatedReviewNote + body
+	body := repositoryMonitorUpdatedReviewNote + renderRepositoryMonitorReviewBody(monitor, item, task, record, published.ID, findings)
 	if len([]byte(body)) > repositoryMonitorReviewBodyMaxBytes {
 		return false, nil
 	}
@@ -95,9 +108,10 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 }
 
 // repositoryMonitorShownReviewRecordID returns the review whose summary the
-// published review for published's head currently shows: the newest update,
-// or the review first published.
-func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, published *store.ReviewPublishRecord) (string, error) {
+// published review for published's head currently shows, per Orka's records:
+// the newest recorded update, or the review first published, and when it
+// was recorded.
+func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, published *store.ReviewPublishRecord) (string, time.Time, error) {
 	shown, at := published.ReviewRecordID, published.CreatedAt
 	// Same-head skips accumulate with every later review, so read every page.
 	cursor := ""
@@ -113,7 +127,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx c
 			Cursor:      cursor,
 		})
 		if err != nil {
-			return "", err
+			return "", time.Time{}, err
 		}
 		for _, candidate := range records {
 			if candidate.SkipReason == repositoryMonitorPublishSkipUpdatedPublishedReview && candidate.CreatedAt.After(at) {
@@ -121,7 +135,34 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx c
 			}
 		}
 		if next == "" {
-			return shown, nil
+			return shown, at, nil
+		}
+		cursor = next
+	}
+}
+
+// repositoryMonitorReviewUpdateUnrecorded reports whether a summary update
+// for headSHA was attempted after the shown review was recorded. Its terminal
+// record is written only after GitHub answers, so such an attempt either
+// failed with an unknown outcome or succeeded without being recorded; either
+// way GitHub may show a summary Orka's records do not.
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewUpdateUnrecorded(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string, shownAt time.Time) (bool, error) {
+	cursor := ""
+	for {
+		mutations, next, err := r.Store.ListGitHubMutationRecords(ctx, store.GitHubMutationRecordFilter{
+			Namespace: monitor.Namespace, MonitorName: monitor.Name, Operation: repositoryMonitorOperationUpdateReview,
+			TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: headSHA, Limit: 100, Cursor: cursor,
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, mutation := range mutations {
+			if mutation.CreatedAt.After(shownAt) {
+				return true, nil
+			}
+		}
+		if next == "" {
+			return false, nil
 		}
 		cursor = next
 	}

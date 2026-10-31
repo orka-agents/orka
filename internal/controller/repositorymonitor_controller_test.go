@@ -4009,6 +4009,8 @@ type repositoryMonitorPublishTestServerConfig struct {
 	FilesBody   string
 	PostStatus  int
 	PostBody    string
+	// PutBody answers review summary updates; it defaults to PostBody.
+	PutBody string
 }
 
 type repositoryMonitorPublishTestServer struct {
@@ -4043,6 +4045,9 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 	}
 	if cfg.PostBody == "" {
 		cfg.PostBody = `{"id":123,"html_url":"https://github.com/orka-agents/orka/pull/1#pullrequestreview-123"}`
+	}
+	if cfg.PutBody == "" {
+		cfg.PutBody = cfg.PostBody
 	}
 	testServer := &repositoryMonitorPublishTestServer{}
 	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4080,7 +4085,7 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 				t.Fatalf("decode review update: %v", err)
 			}
 			testServer.PutBody = update.Body
-			_, _ = w.Write([]byte(cfg.PostBody))
+			_, _ = w.Write([]byte(cfg.PutBody))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())
 		}
