@@ -675,8 +675,10 @@ func TestRepositoryMonitorQueuedPolicyRepairRechecksItsGrantBeforeRunning(t *tes
 	}{
 		{name: "an unchanged grant creates the repair Task"},
 		{
-			name:     "a removed repair label withdraws the repair",
-			change:   func(_ *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest) { pr.Labels = []string{"orka:review"} },
+			name: "a removed repair label withdraws the repair",
+			change: func(_ *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest) {
+				pr.Labels = []string{"orka:review"}
+			},
 			wantSkip: repositoryMonitorRepairSkipScopeWithdrawn,
 		},
 		{
