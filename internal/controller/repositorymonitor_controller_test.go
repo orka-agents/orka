@@ -7193,6 +7193,8 @@ func TestRepositoryMonitorRequireGreenCIGatesReviewQueue(t *testing.T) {
 			_, _ = w.Write([]byte(`{"number":90,"title":"Wait for CI","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-ci","sha":"head90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/check-runs":
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/status":
+			_, _ = w.Write([]byte(`{"total_count":0,"statuses":[]}`))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
 		}

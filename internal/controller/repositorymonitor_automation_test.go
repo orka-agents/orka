@@ -449,8 +449,15 @@ func TestRepositoryMonitorInventoryHonorsReadinessRefresh(t *testing.T) {
 func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
-	monitor, _ := repositoryMonitorInventoryTestObjects("repair-evidence")
-	r := &RepositoryMonitorReconciler{Store: db}
+	monitor, secret := repositoryMonitorInventoryTestObjects("repair-evidence")
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// CI lookups for the fix_ci prompt fail here, so it carries no check list.
+	unavailable := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(unavailable.Close)
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db, GitHubAPIBaseURL: unavailable.URL}
 	item := &store.MonitorItem{LastReviewID: "review-evidence", LastVerdict: repositoryMonitorReviewVerdictNeedsChanges}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head"}
 	review := &store.ReviewRecord{ID: item.LastReviewID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 31, HeadSHA: "head", Summary: "Initialize the retry result", FindingsJSON: `[{"file":"scripts/smoke.sh","line":42,"body":"The result variable is unset after success"}]`, ValidationEvidence: "shell test failed"}
