@@ -78,6 +78,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
+		App        struct {
+			ID int64 `json:"id"`
+		} `json:"app"`
 	}
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
@@ -88,6 +91,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 				Name       string `json:"name"`
 				Status     string `json:"status"`
 				Conclusion string `json:"conclusion"`
+				App        struct {
+					ID int64 `json:"id"`
+				} `json:"app"`
 			} `json:"check_runs"`
 		}
 		if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
@@ -107,7 +113,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	if len(checks) < total {
 		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
-	var pending, failed []string
+	var pending []string
+	var failed []repositoryMonitorCIFailure
 	considered := 0
 	for _, check := range checks {
 		considered++
@@ -116,18 +123,21 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 			continue
 		}
 		if !repositoryMonitorCheckRunConclusionPassing(check.Conclusion) {
-			failed = append(failed, fmt.Sprintf("%s:%s/%s", check.Name, check.Status, check.Conclusion))
+			failed = append(failed, repositoryMonitorCIFailure{name: check.Name, source: fmt.Sprintf("check_run:%d", check.App.ID)})
 		}
 	}
-	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
-	}
-	if len(pending) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
-	}
+	// Check runs and commit statuses come from different CI systems. Read both
+	// so a failing or pending check run never hides a failing status context.
 	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
+	}
+	failed = append(failed, status.failed...)
+	if len(failed) > 0 {
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
+	}
+	if len(pending) > 0 {
+		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
 	}
 	if status.reason == "ci_checks_missing" && considered > 0 {
 		return repositoryMonitorCIResult{passed: true}, nil
@@ -149,7 +159,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 	if err != nil {
 		return repositoryMonitorCIResult{}, err
 	}
-	considered, pending := 0, false
+	considered, pending, incomplete := 0, false, false
+	var failed []repositoryMonitorCIFailure
 	// Combined status is paginated and contains only the latest status for each
 	// context. Recompute after excluding audited IDs; its aggregate includes us.
 	for page := 1; ; page++ {
@@ -171,15 +182,19 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 			case repositoryMonitorStatusPending:
 				pending = true
 			default:
-				return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen}, nil
+				failed = append(failed, repositoryMonitorCIFailure{name: status.Context, source: repositoryMonitorCIFailureSourceStatus})
 			}
 		}
 		if len(response.Statuses) < 100 {
-			if page*100-100+len(response.Statuses) < response.TotalCount {
-				return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
-			}
+			incomplete = page*100-100+len(response.Statuses) < response.TotalCount
 			break
 		}
+	}
+	if len(failed) > 0 {
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
+	}
+	if incomplete {
+		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
 	}
 	if pending {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil

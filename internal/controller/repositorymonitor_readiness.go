@@ -36,6 +36,24 @@ func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) 
 type repositoryMonitorCIResult struct {
 	passed bool
 	reason string
+	// failed names the failing check runs or status contexts when reason is
+	// repositoryMonitorCINotGreen.
+	failed []repositoryMonitorCIFailure
+}
+
+// repositoryMonitorCIFailureSourceStatus marks a failing commit status context.
+const repositoryMonitorCIFailureSourceStatus = "commit_status"
+
+// repositoryMonitorCIFailure is one failing check run or status context.
+// source tells a check run (with its app) from a status context, since the
+// two can share a name.
+type repositoryMonitorCIFailure struct {
+	name   string
+	source string
+}
+
+func (f repositoryMonitorCIFailure) key() string {
+	return f.source + "|" + strings.ToLower(strings.TrimSpace(f.name))
 }
 
 type repositoryMonitorCommitStatus struct {
@@ -149,6 +167,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
+	// Only a full repair fixes findings; a review-only or CI-only pull request
+	// keeps its findings until a person changes it.
+	if full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr); !full {
+		return false, nil
+	}
 	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return false, err
@@ -183,10 +206,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
-// repositoryMonitorPullRequestInScope reports whether pr is an open, included
-// pull request on the monitor's base branch.
+// repositoryMonitorPullRequestInScope reports whether pr is an open, reviewed
+// pull request on the monitor's base branch. CI-only pull requests get no
+// readiness status because no review vouches for them.
 func repositoryMonitorPullRequestInScope(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) bool {
-	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestIncluded(monitor.Spec, pr)
+	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestReviewed(monitor.Spec, pr)
 }
 
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across

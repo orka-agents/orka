@@ -52,11 +52,12 @@ const (
 	repositoryMonitorVerdictSkipped      = "skipped"
 	repositoryMonitorSkipReasonMissing   = "not_open_or_base_branch_changed"
 	// repositoryMonitorSkipReasonNotIncluded retires a pull request that lost
-	// every spec.targets.pullRequests.includeLabels label.
+	// every label that put it in the inventory.
 	repositoryMonitorSkipReasonNotIncluded = "not_included"
 	repositoryMonitorSkipReasonReviewed    = "already_reviewed"
 	repositoryMonitorSkipReasonPending     = "review_pending"
 	repositoryMonitorSkipReasonOverLimit   = "over_limit"
+	repositoryMonitorSkipReasonCIOnly      = "ci_only"
 	repositoryMonitorReviewTaskTimeout     = 2 * time.Hour
 
 	repositoryMonitorReviewTaskStateMissing   = "missing"
@@ -943,8 +944,8 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fmt.Errorf("at least one repository monitor target must be enabled")
 	}
-	if len(spec.Targets.PullRequests.IncludeLabels) > 0 && repositoryMonitorIssueImplementationEnabled(spec) {
-		return fmt.Errorf("spec.targets.pullRequests.includeLabels cannot be combined with issue implementation, whose pull requests would not carry the label")
+	if field := repositoryMonitorPullRequestLabelScopeField(spec); field != "" && repositoryMonitorIssueImplementationEnabled(spec) {
+		return fmt.Errorf("%s cannot be combined with issue implementation, whose pull requests would not carry the label", field)
 	}
 	return nil
 }
@@ -972,10 +973,47 @@ func repositoryMonitorMaxPullRequestsPerRun(spec corev1alpha1.RepositoryMonitorS
 	return int(*spec.Targets.PullRequests.MaxPerRun)
 }
 
-// repositoryMonitorPullRequestIncluded reports whether pr carries one of the
-// monitor's pull request include labels. An empty list includes every PR.
+// repositoryMonitorPullRequestIncluded reports whether pr belongs in the
+// monitor's inventory: it is reviewed or carries a CI-only repair label. An
+// empty pull request include list includes every PR.
 func repositoryMonitorPullRequestIncluded(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
-	return len(spec.Targets.PullRequests.IncludeLabels) == 0 || repositoryMonitorMatchingLabel(spec.Targets.PullRequests.IncludeLabels, pr.Labels) != ""
+	return repositoryMonitorPullRequestReviewed(spec, pr) || repositoryMonitorMatchingLabel(spec.Repair.CIOnlyLabels, pr.Labels) != ""
+}
+
+// repositoryMonitorPullRequestReviewed reports whether pr is reviewed and so
+// can receive a published review and readiness status. Repair labels select a
+// pull request for review alongside the pull request include labels.
+func repositoryMonitorPullRequestReviewed(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
+	return len(spec.Targets.PullRequests.IncludeLabels) == 0 ||
+		repositoryMonitorMatchingLabel(spec.Targets.PullRequests.IncludeLabels, pr.Labels) != "" ||
+		repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != ""
+}
+
+// repositoryMonitorPullRequestRepairScope reports which automatic repairs pr
+// allows. full permits branch updates, finding fixes, and CI fixes; ciOnly
+// permits CI fixes alone. labelled is set when a label granted the repair, so
+// the account that added it must be checked before any work starts. A
+// full-repair label wins, then a CI-only label; without repair include
+// labels, other reviewed pull requests keep full repair.
+func repositoryMonitorPullRequestRepairScope(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) (full, ciOnly, labelled bool) {
+	if repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != "" {
+		return true, false, true
+	}
+	if repositoryMonitorMatchingLabel(spec.Repair.CIOnlyLabels, pr.Labels) != "" {
+		return false, true, true
+	}
+	if len(spec.Repair.IncludeLabels) > 0 {
+		return false, false, false
+	}
+	return repositoryMonitorPullRequestReviewed(spec, pr), false, false
+}
+
+// repositoryMonitorRepairLabels returns the labels that can grant pr a repair.
+func repositoryMonitorRepairLabels(spec corev1alpha1.RepositoryMonitorSpec, full bool) []string {
+	if full {
+		return spec.Repair.IncludeLabels
+	}
+	return spec.Repair.CIOnlyLabels
 }
 
 func filterRepositoryMonitorIncludedPullRequests(spec corev1alpha1.RepositoryMonitorSpec, pullRequests []repositoryMonitorPullRequest) []repositoryMonitorPullRequest {
@@ -989,6 +1027,21 @@ func filterRepositoryMonitorIncludedPullRequests(spec corev1alpha1.RepositoryMon
 		}
 	}
 	return filtered
+}
+
+// repositoryMonitorPullRequestLabelScopeField names the first configured
+// pull request label list that scopes review or repair.
+func repositoryMonitorPullRequestLabelScopeField(spec corev1alpha1.RepositoryMonitorSpec) string {
+	switch {
+	case len(spec.Targets.PullRequests.IncludeLabels) > 0:
+		return "spec.targets.pullRequests.includeLabels"
+	case len(spec.Repair.IncludeLabels) > 0:
+		return "spec.repair.includeLabels"
+	case len(spec.Repair.CIOnlyLabels) > 0:
+		return "spec.repair.ciOnlyLabels"
+	default:
+		return ""
+	}
 }
 
 // repositoryMonitorIssueImplementationEnabled mirrors the issue part of
@@ -1049,6 +1102,9 @@ func repositoryMonitorPullRequestSkipReason(spec corev1alpha1.RepositoryMonitorS
 	}
 	if blockedLabel := repositoryMonitorBlockedLabel(spec, pr.Labels); blockedLabel != "" {
 		return "blocked_label"
+	}
+	if !repositoryMonitorPullRequestReviewed(spec, pr) {
+		return repositoryMonitorSkipReasonCIOnly
 	}
 	if existing != nil && existing.HeadSHA != "" && existing.HeadSHA == pr.HeadSHA && existing.LastReviewID != "" {
 		if existing.LastVerdict == repositoryMonitorRunPhaseQueued {
