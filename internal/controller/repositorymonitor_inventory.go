@@ -187,6 +187,14 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			if run.CommandEventID != "" && run.TargetNumber == pr.Number && pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 				return selected, createdTasks, skipped + 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, "target_not_included")
 			}
+			// The fresh read can see an include label removed after the
+			// retirement pass read the list; retire the pull request now so
+			// its running work cannot push before the next poll.
+			if pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+				if _, err := r.retireExcludedRepositoryMonitorPullRequest(ctx, monitor, run, pr, nil, map[string]struct{}{}); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			skipped++
 			continue
 		}
@@ -1175,13 +1183,16 @@ func repositoryMonitorPullRequestSkipReason(spec corev1alpha1.RepositoryMonitorS
 	if blockedLabel := repositoryMonitorBlockedLabel(spec, pr.Labels); blockedLabel != "" {
 		return "blocked_label"
 	}
-	if !repositoryMonitorPullRequestReviewed(spec, pr) {
-		return repositoryMonitorSkipReasonCIOnly
-	}
+	// A review already running keeps its queued bookkeeping until ingestion
+	// settles it, even if the pull request has since become CI-only;
+	// publishing still skips a CI-only pull request.
 	if existing != nil && existing.HeadSHA != "" && existing.HeadSHA == pr.HeadSHA && existing.LastReviewID != "" {
 		if existing.LastVerdict == repositoryMonitorRunPhaseQueued {
 			return repositoryMonitorSkipReasonPending
 		}
+	}
+	if !repositoryMonitorPullRequestReviewed(spec, pr) {
+		return repositoryMonitorSkipReasonCIOnly
 	}
 	if existing != nil && existing.LastReviewedHeadSHA != "" && existing.LastReviewedHeadSHA == pr.HeadSHA {
 		return repositoryMonitorSkipReasonReviewed

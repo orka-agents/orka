@@ -249,11 +249,15 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			reason = repositoryMonitorSkipReasonCIOnly
 		}
 		if reason != "" {
-			item.LastVerdict = repositoryMonitorVerdictSkipped
-			item.SkipReason = reason
 			if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", "pr_review", repositoryMonitorWorkActionStatusBlocked, "review_blocked", "", reason); err != nil {
 				return true, 0, err
 			}
+			// A review already running stays queued until ingestion settles it.
+			if item.LastVerdict == repositoryMonitorRunPhaseQueued && item.LastReviewID != "" {
+				return true, 0, nil
+			}
+			item.LastVerdict = repositoryMonitorVerdictSkipped
+			item.SkipReason = reason
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
 		}
 		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, repositoryMonitorCommandIntentReview); err != nil || cancelled {
