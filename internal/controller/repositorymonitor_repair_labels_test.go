@@ -221,6 +221,16 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			wantIntent:  repositoryMonitorCommandIntentFixCI,
 		},
 		{
+			name:   "a status failing only on the head is not hidden by a check run of the same name",
+			labels: []string{"orka:fix-ci"},
+			github: (&repositoryMonitorRepairLabelsGitHub{
+				checks:   map[string]map[string]string{"head31": {"tests": "success"}, "base31": {"tests": "failure"}},
+				statuses: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}},
+			}).labeled("maintainer", "orka:fix-ci"),
+			wantHandled: true,
+			wantIntent:  repositoryMonitorCommandIntentFixCI,
+		},
+		{
 			name:   "CI already failing on the base commit is left alone",
 			labels: []string{"orka:fix"},
 			github: (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"Tests": "failure"}, "base31": {"tests": "failure"}}}).labeled("maintainer", "orka:fix"),
