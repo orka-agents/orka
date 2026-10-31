@@ -367,3 +367,76 @@ func assertRepositoryMonitorWorkActionStatus(t *testing.T, db store.RepositoryMo
 		t.Fatalf("work action %s = %+v err=%v, want %s", id, action, err, want)
 	}
 }
+
+func TestRepositoryMonitorExcludedPullRequestsReuseTheRunInventory(t *testing.T) {
+	ctx := t.Context()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("include-batch")
+	monitor.Spec.Review.Publish.Enabled = true
+	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	listCalls := 0
+	latest := map[string]repositoryMonitorCommitStatus{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := req.URL.Path
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
+			listCalls++
+			prs := []any{}
+			for _, number := range []int64{1, 2, 3} {
+				prs = append(prs, map[string]any{"number": number, "state": "open", "head": map[string]string{"sha": fmt.Sprintf("head%d", number)}, "base": map[string]string{"ref": "main"}, "labels": []map[string]string{}})
+			}
+			_ = json.NewEncoder(w).Encode(prs)
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/status"):
+			sha := strings.TrimSuffix(path[strings.Index(path, "/commits/")+len("/commits/"):], "/status")
+			statuses := []repositoryMonitorCommitStatus{}
+			if status, ok := latest[sha]; ok {
+				statuses = append(statuses, status)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(statuses), "statuses": statuses})
+		case req.Method == http.MethodPost && strings.Contains(path, "/statuses/"):
+			var status repositoryMonitorCommitStatus
+			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
+				t.Error(err)
+			}
+			status.ID = 100
+			latest[path[strings.LastIndex(path, "/")+1:]] = status
+			_ = json.NewEncoder(w).Encode(status)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	for _, number := range []int64{1, 2, 3} {
+		head := fmt.Sprintf("head%d", number)
+		if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: fmt.Sprint(number), Number: number, State: "open", BaseBranch: "main", HeadSHA: head}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := &store.MonitorRun{ID: "include-batch-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind}
+	if _, _, _, err := r.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka"); err != nil {
+		t.Fatal(err)
+	}
+	if listCalls != 1 {
+		t.Fatalf("pull request list calls = %d, want the run inventory reused for every excluded PR", listCalls)
+	}
+	for _, number := range []int64{1, 2, 3} {
+		item, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, fmt.Sprint(number))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.State != repositoryMonitorItemStateOutOfScope || item.SkipReason != repositoryMonitorSkipReasonNotIncluded {
+			t.Fatalf("item %d = %s/%s, want retired as not included", number, item.State, item.SkipReason)
+		}
+	}
+}
