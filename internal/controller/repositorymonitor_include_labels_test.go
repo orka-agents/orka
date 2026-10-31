@@ -392,7 +392,7 @@ func TestRepositoryMonitorExcludedPullRequestsReuseTheRunInventory(t *testing.T)
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
 			listCalls++
-			prs := []any{}
+			prs := make([]any, 0, 3)
 			for _, number := range []int64{1, 2, 3} {
 				prs = append(prs, map[string]any{"number": number, "state": "open", "head": map[string]string{"sha": fmt.Sprintf("head%d", number)}, "base": map[string]string{"ref": "main"}, "labels": []map[string]string{}})
 			}
