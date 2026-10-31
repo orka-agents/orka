@@ -41,6 +41,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
 const (
@@ -1542,10 +1543,11 @@ func (r *RepositoryScanReconciler) persistThreatModelIfChanged(
 	return nil
 }
 
-func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, namespace, taskName, filename string) ([]byte, error) {
+func (r *RepositoryScanReconciler) getArtifactWithRetry(ctx context.Context, task *corev1alpha1.Task, filename string) ([]byte, error) {
+	owner := store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}
 	var lastErr error
 	for range 5 {
-		data, _, err := r.ArtifactStore.GetArtifact(ctx, namespace, taskName, filename)
+		data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: owner, Filename: filename})
 		if err == nil {
 			return data, nil
 		}
@@ -1567,7 +1569,7 @@ func (r *RepositoryScanReconciler) loadReviewSlicesArtifact(ctx context.Context,
 		return nil, "", nil
 	}
 
-	data, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices)
+	data, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: security.ArtifactSlices})
 	switch {
 	case err == nil:
 		if len(strings.TrimSpace(string(data))) == 0 {
@@ -1594,7 +1596,7 @@ func (r *RepositoryScanReconciler) loadMapperReviewContext(
 		return "", "", repositoryScanArtifactStoreNotConfigured, nil
 	}
 	artifactName := security.ReviewContextArtifactName(sliceID)
-	data, err := r.getArtifactWithRetry(ctx, task.Namespace, task.Name, artifactName)
+	data, err := r.getArtifactWithRetry(ctx, task, artifactName)
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -1643,7 +1645,7 @@ func (r *RepositoryScanReconciler) pipelineTaskSummary(ctx context.Context, task
 		return conciseTaskMessage(task.Status.Message, fallback)
 	}
 	if r.ResultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-		if result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
+		if result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}); err == nil {
 			return conciseTaskMessage(string(result), fallback)
 		}
 	}
@@ -1674,7 +1676,7 @@ func (r *RepositoryScanReconciler) loadAgentTaskResult(ctx context.Context, task
 	if task == nil || task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return nil, "terminal task result is not available", nil
 	}
-	result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 	switch {
 	case err == nil:
 		return result, "", nil
@@ -3429,7 +3431,7 @@ func (r *RepositoryScanReconciler) validateReviewTaskResult(
 	if task == nil || task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return nil, nil, "terminal task result is not available", true, nil
 	}
-	result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -3923,7 +3925,7 @@ func (r *RepositoryScanReconciler) ingestScanTask(ctx context.Context, scan *cor
 	identity := scanTaskIngestionIdentity(scan, task)
 	ingestion, err := r.SecurityStore.GetScanTaskIngestion(ctx, identity)
 	if err == nil {
-		return r.finishScanTaskIngestion(ctx, scan, ingestion)
+		return r.finishScanTaskIngestion(ctx, scan, task, ingestion)
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return err
@@ -4145,7 +4147,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	}
 
 	diffName, summaryName := patchArtifactNames(findingID)
-	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, diffName)
+	diffData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -4153,7 +4155,7 @@ func (r *RepositoryScanReconciler) verifyPatchTaskArtifacts(ctx context.Context,
 	default:
 		return patchVerificationResult{}, "", err
 	}
-	summaryData, _, err := r.ArtifactStore.GetArtifact(ctx, task.Namespace, task.Name, summaryName)
+	summaryData, _, err := r.ArtifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: summaryName})
 	switch {
 	case err == nil:
 	case errors.Is(err, store.ErrNotFound):
@@ -4498,7 +4500,7 @@ func (r *RepositoryScanReconciler) ingestPatchTask(ctx context.Context, scan *co
 	}
 
 	if r.ArtifactStore != nil && proposal.Status != scanRunPhaseSucceeded && proposal.Status != patchProposalStatusPROpened {
-		artifacts, err := r.ArtifactStore.ListArtifacts(ctx, task.Namespace, task.Name)
+		artifacts, err := r.ArtifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 		if err == nil {
 			for _, artifact := range artifacts {
 				if strings.HasSuffix(artifact.Filename, ".diff") && strings.HasPrefix(artifact.Filename, "security-patch-") {

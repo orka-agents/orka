@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -594,7 +595,7 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 			task := configureRecoveryJournalIdentity(t, fixture)
 			const result = "exact recovered result"
 			if test.storeResult {
-				if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+				if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(result)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -627,7 +628,7 @@ func TestACPDispatcherRecoversCompletedJournalTerminalOnlyWithExactResult(t *tes
 				updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 				t.Fatalf("completed recovery Task status = %#v", updated.Status)
 			}
-			persisted, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
+			persisted, err := fixture.controlStore.GetResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 			if err != nil || string(persisted) != result {
 				t.Fatalf("recovered result = %q, err=%v", persisted, err)
 			}
@@ -639,7 +640,7 @@ func TestACPDispatcherRetriesResultReferenceForSucceededAttempt(t *testing.T) {
 	fixture := newACPRecoveryFixture(t, store.PromptExecutionSucceeded)
 	defer fixture.close(t)
 
-	if err := fixture.controlStore.SaveResult(fixture.ctx, "default", "task", []byte("recovered result")); err != nil {
+	if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: "default", TaskName: "task", TaskUID: "33333333-3333-3333-3333-333333333333"}, []byte("recovered result")); err != nil {
 		t.Fatal(err)
 	}
 	rawClient, ok := fixture.kubeClient.(client.WithWatch)
@@ -720,7 +721,7 @@ func TestACPDispatcherRecoveryPreservesCompletionTimeThroughOutboxProjection(t *
 	}
 
 	const result = "recovered result must preserve historical completion time"
-	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte(result)); err != nil {
+	if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(result)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -797,7 +798,7 @@ func TestACPDispatcherRecoversSettlingResultReceipt(t *testing.T) {
 			}
 			if test.hasStoredResult {
 				if err := fixture.controlStore.SaveResult(
-					fixture.ctx, task.Namespace, task.Name, []byte(test.storedResult),
+					fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(test.storedResult),
 				); err != nil {
 					t.Fatal(err)
 				}
@@ -821,7 +822,7 @@ func TestACPDispatcherRecoversSettlingResultReceipt(t *testing.T) {
 				updated.Status.ResultRef == nil || !updated.Status.ResultRef.Available {
 				t.Fatalf("recovered result status = %#v", updated.Status)
 			}
-			persistedResult, err := fixture.controlStore.GetResult(fixture.ctx, task.Namespace, task.Name)
+			persistedResult, err := fixture.controlStore.GetResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 			if err != nil || string(persistedResult) != receiptResult {
 				t.Fatalf("recovered task result = %q, err=%v", persistedResult, err)
 			}
@@ -898,7 +899,7 @@ func TestACPDispatcherRestoredTaskPreservesJournaledCompletion(t *testing.T) {
 			task := configureRecoveryJournalIdentity(t, fixture)
 			appendRecoveryPromptTerminal(t, fixture, task, harnessv2.EventCompleted, false)
 			if err := fixture.controlStore.SaveResult(
-				fixture.ctx, task.Namespace, task.Name, []byte("exact recovered result"),
+				fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("exact recovered result"),
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -1635,7 +1636,7 @@ func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1))
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1), persistence)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {
@@ -2947,7 +2948,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old")
+	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old", sqliteStore)
 	oldFence, err := oldEpochs.CurrentFence(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -3059,7 +3060,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new")
+	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new", sqliteStore)
 	defer stopNewEpoch()
 	newContinuity := newACPRecoveryContinuity(t, restartedStore, sqliteStore, control.SessionUID)
 	dispatcher := &ACPDispatcher{
@@ -3451,9 +3452,14 @@ func newACPRecoveryContinuity(t *testing.T, controls store.DurableControlStore, 
 	return continuity
 }
 
-func startACPRecoveryEpochManager(t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string) (*ControllerEpochManager, func()) {
+func startACPRecoveryEpochManager(
+	t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string, datasets ...EpochDataset,
+) (*ControllerEpochManager, func()) {
 	t.Helper()
 	manager := NewControllerEpochManager(epochStore, holder)
+	for _, dataset := range datasets {
+		manager.WithStorage(storagev1.StateContract, dataset)
+	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(epochCtx) }()

@@ -26,6 +26,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -271,7 +272,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// provide ResultStore through ToolContext; worker calls fall back to the
 			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
+				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, store.ResultKey{Namespace: ns, TaskName: taskName, TaskUID: string(taskmeta.DataUID(&task))})
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
@@ -459,15 +460,15 @@ func brokeredDelegationReceiptAuthorizes(
 		receipt.ParentTaskUID == string(parent.UID), nil
 }
 
-func fetchTaskResultForNamespace(ctx context.Context, namespace, taskName string) (string, error) {
+func fetchTaskResultForNamespace(ctx context.Context, key store.ResultKey) (string, error) {
 	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.ResultStore != nil {
-		result, err := toolCtx.ResultStore.GetResult(ctx, namespace, taskName)
+		result, err := toolCtx.ResultStore.GetResult(ctx, key)
 		if err != nil {
 			return "", err
 		}
 		return string(result), nil
 	}
-	return fetchTaskResult(ctx, taskName)
+	return fetchTaskResult(ctx, key.TaskName)
 }
 
 func boundWaitTaskData(data map[string]any) map[string]any {

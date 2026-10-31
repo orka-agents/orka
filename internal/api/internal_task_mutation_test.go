@@ -44,12 +44,12 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 	}{
 		{"result", "/internal/v1/results/default/task-a", "result", func(h *InternalHandlers) fiber.Handler { return h.SubmitResult },
 			func(s *sqlite.Store) error {
-				_, err := s.GetResult(context.Background(), "default", "task-a")
+				_, err := s.GetResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "task-a", TaskUID: "task-uid"})
 				return err
 			}},
 		{"artifact", "/internal/v1/artifacts/default/task-a/output.txt", "artifact", func(h *InternalHandlers) fiber.Handler { return h.UploadArtifact },
 			func(s *sqlite.Store) error {
-				_, _, err := s.GetArtifact(context.Background(), "default", "task-a", "output.txt")
+				_, _, err := s.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "task-a", TaskUID: "task-uid"}, Filename: "output.txt"})
 				return err
 			}},
 		{"plan", "/internal/v1/plans/default/task-a", `{"summary":"plan"}`, func(h *InternalHandlers) fiber.Handler { return h.SubmitPlan },

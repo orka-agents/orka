@@ -13,6 +13,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/workers/common"
 	corev1 "k8s.io/api/core/v1"
@@ -191,7 +192,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonMissingResult, "review task completed without a stored result")
 	}
 
-	rawResult, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	rawResult, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonMissingResult, "review task result was not found")
@@ -682,7 +683,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorValidationEvidence(ctx co
 		parts = append(parts, message)
 	}
 	if r.ResultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-		if raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name); err == nil {
+		if raw, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}); err == nil {
 			if output := strings.TrimSpace(string(raw)); output != "" {
 				parts = append(parts, output)
 			}

@@ -117,7 +117,7 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 							nil, nil, nil, test.directText)
 						publicationID = publication.ID
 					}
-					if err := controls.SaveResult(ctx, task.Namespace, task.Name, []byte(assistantResult)); err != nil {
+					if err := controls.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte(assistantResult)); err != nil {
 						t.Fatal(err)
 					}
 					kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()

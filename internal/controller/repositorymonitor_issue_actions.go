@@ -31,6 +31,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/workerenv"
 	"github.com/orka-agents/orka/workers/common"
 )
@@ -835,7 +836,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 
 	var raw []byte
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
-		result, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+		result, err := r.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				raw = fmt.Appendf(nil, `{"issueNumber":%d,"snapshotDigest":%q,"summary":"missing task result","verdict":"failed"}`, item.Number, item.SnapshotDigest)
@@ -860,7 +861,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTask(
 			return false, err
 		}
 		if !bytes.Equal(sanitized, raw) {
-			if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, sanitized); err != nil {
+			if err := r.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, sanitized); err != nil {
 				return false, fmt.Errorf("replace sensitive implementation result: %w", err)
 			}
 		}
@@ -898,7 +899,7 @@ func (r *RepositoryMonitorReconciler) sanitizeRepositoryMonitorStoredImplementat
 	record.PayloadJSON = safeRecord.PayloadJSON
 	record.PayloadDigest = safeRecord.PayloadDigest
 	if r.ResultStore != nil {
-		if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, safePayload); err != nil {
+		if err := r.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, safePayload); err != nil {
 			return nil, fmt.Errorf("replace sensitive stored implementation result: %w", err)
 		}
 	}
@@ -1631,7 +1632,12 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			"maxChangedFiles":   task.Spec.Workspace.MaxChangedFiles,
 			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
-		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: patchArtifact, ContentType: artifactContentTypeJSON, Data: deliverySummary}); err != nil {
+			// A store that has not accepted the write yet is retried, not
+			// recorded as a blocked implementation.
+			if store.IsTemporaryStorageError(err) {
+				return "", "", "", err
+			}
 			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
 		}
 		copyRecord := *record
@@ -1650,6 +1656,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			job.Branch = branch
 			job.PRNumber = int64(prNumber)
 			job.PatchArtifactID = patchArtifact
+			job.TaskUID = string(taskmeta.DataUID(task))
 			now := time.Now()
 			job.CompletedAt = &now
 			if phase == repositoryMonitorIssuePhasePROpened {
@@ -1712,6 +1719,7 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 	if err := r.updateImplementationJobForTask(ctx, monitor, task.Name, func(job *store.ImplementationJob) {
 		job.Phase = repositoryMonitorIssuePhasePatchReady
 		job.PatchArtifactID = patchArtifact
+		job.TaskUID = string(taskmeta.DataUID(task))
 		job.ValidationState = repositoryMonitorCIStatePassed
 	}); err != nil {
 		return "", "", "", err
@@ -2179,7 +2187,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		return repositoryMonitorPatchSensitiveContentReason, nil
 	}
 	diffName := repositoryMonitorIssuePatchDiffArtifact(item.Number, record.ID)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sr.Diff)); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sr.Diff)}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_diff_artifact_save_failed", nil
 	}
 	planID := ""
@@ -2203,7 +2214,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		"changedFiles":     sr.Files,
 	}
 	data, _ := json.Marshal(summary)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), "application/json", data); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, Filename: repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), ContentType: artifactContentTypeJSON, Data: data}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_summary_artifact_save_failed", nil
 	}
 	return "", nil

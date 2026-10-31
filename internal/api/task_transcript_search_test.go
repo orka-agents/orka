@@ -160,7 +160,7 @@ func TestBrokeredTranscriptSearchReauthorizesAfterNamespaceCleanup(t *testing.T)
 					storeCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 					defer cancel()
 					// This write proves Kubernetes authorization holds no SQLite connection.
-					if err := data.SaveResult(storeCtx, task.Namespace, "unrelated", []byte("progress")); err != nil {
+					if err := data.SaveResult(storeCtx, store.ResultKey{Namespace: task.Namespace, TaskName: "unrelated", TaskUID: "unrelated-uid"}, []byte("progress")); err != nil {
 						return err
 					}
 					peer := &corev1alpha1.Task{}

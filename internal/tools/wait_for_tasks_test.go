@@ -1345,8 +1345,8 @@ func newFakeWaitResultStore(values map[string]string) *fakeWaitResultStore {
 	return &fakeWaitResultStore{values: values}
 }
 
-func (s *fakeWaitResultStore) GetResult(_ context.Context, _, taskName string) ([]byte, error) {
-	value, ok := s.values[taskName]
+func (s *fakeWaitResultStore) GetResult(_ context.Context, key store.ResultKey) ([]byte, error) {
+	value, ok := s.values[key.TaskName]
 	if !ok {
 		return nil, fmt.Errorf("result not found")
 	}

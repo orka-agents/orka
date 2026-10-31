@@ -49,7 +49,7 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-fix-31", MonitorNamespace: "default", MonitorName: "pr-fix", Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, TargetSHA: "head31", Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
@@ -176,7 +176,7 @@ func TestRepositoryMonitorPauseHoldsPlanHandoffAndResumes(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).
 		Build()
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, ArtifactStore: monitorStore, GitHubAPIBaseURL: server.URL}
 
@@ -212,7 +212,7 @@ func TestRepositoryMonitorPauseHoldsPlanHandoffAndResumes(t *testing.T) {
 	}
 
 	planResult := fmt.Sprintf(`{"schemaVersion":"orka.issuePlan.v1","repo":"orka-agents/orka","issueNumber":44,"snapshotDigest":%q,"status":"ready","summary":"Small plan","acceptanceCriteria":[],"steps":["edit"],"validationCommands":[],"allowedFiles":["README.md"],"risk":"low","categories":[],"requiresHumanApproval":false}`, item.SnapshotDigest)
-	if err := monitorStore.SaveResult(ctx, "default", planTaskName, []byte(planResult)); err != nil {
+	if err := monitorStore.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: planTaskName, TaskUID: planTaskName + "-uid"}, []byte(planResult)); err != nil {
 		t.Fatalf("SaveResult(plan) error = %v", err)
 	}
 	item.LabelsJSON = `["orka:pause"]`
@@ -292,7 +292,7 @@ func TestRepositoryMonitorRepairDoesNotStarveLaterPullRequests(t *testing.T) {
 			monitor.Spec.Repair.Enabled = true
 			monitor.Spec.Repair.MaxRepairsPerPR = &limit
 			monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			if phase == repositoryMonitorRepairPhaseQueued {
 				task := &corev1alpha1.Task{}
 				task.Name, task.Namespace = "active-repair", monitor.Namespace
@@ -356,7 +356,7 @@ func TestRepositoryMonitorInventoryHonorsReadinessRefresh(t *testing.T) {
 			if err := corev1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 			const oldPR = `{"number":31,"title":"Fix me","state":"open","draft":false,"mergeable_state":"clean","base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-fix","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`
 			var current map[string]any
 			if err := json.Unmarshal([]byte(oldPR), &current); err != nil {

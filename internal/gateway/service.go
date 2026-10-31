@@ -46,6 +46,7 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	orkalabels "github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 )
 
@@ -709,6 +710,11 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
+		}
+		// A replaced controller's write is fenced, which also matches
+		// ErrConflict; it says nothing about Session ownership.
+		if errors.Is(err, store.ErrFenced) {
+			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
@@ -1384,7 +1390,7 @@ func (s *Service) projectTerminal(
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 		resultReady := false
 		if s.ResultStore != nil {
-			result, err := s.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+			result, err := s.ResultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 			if err == nil {
 				resultReady = true
 				text = boundedText(string(result))

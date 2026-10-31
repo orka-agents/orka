@@ -1,6 +1,8 @@
-package store
+package v1
 
-import "time"
+import (
+	"time"
+)
 
 // RepositoryMonitorRecord stores normalized RepositoryMonitor metadata.
 type RepositoryMonitorRecord struct {
@@ -162,20 +164,23 @@ type WorkActionFilter struct {
 
 // ImplementationJob tracks issue coding attempts and patch validation state.
 type ImplementationJob struct {
-	ID                string     `json:"id"`
-	MonitorNamespace  string     `json:"monitorNamespace"`
-	MonitorName       string     `json:"monitorName"`
-	Repo              string     `json:"repo,omitempty"`
-	IssueNumber       int64      `json:"issueNumber,omitempty"`
-	PlanID            string     `json:"planID,omitempty"`
-	SnapshotDigest    string     `json:"snapshotDigest,omitempty"`
-	Phase             string     `json:"phase,omitempty"`
-	Attempt           int        `json:"attempt"`
-	Branch            string     `json:"branch,omitempty"`
-	PatchArtifactID   string     `json:"patchArtifactID,omitempty"`
-	PRNumber          int64      `json:"prNumber,omitempty"`
-	ValidationState   string     `json:"validationState,omitempty"`
-	TaskName          string     `json:"taskName,omitempty"`
+	ID               string `json:"id"`
+	MonitorNamespace string `json:"monitorNamespace"`
+	MonitorName      string `json:"monitorName"`
+	Repo             string `json:"repo,omitempty"`
+	IssueNumber      int64  `json:"issueNumber,omitempty"`
+	PlanID           string `json:"planID,omitempty"`
+	SnapshotDigest   string `json:"snapshotDigest,omitempty"`
+	Phase            string `json:"phase,omitempty"`
+	Attempt          int    `json:"attempt"`
+	Branch           string `json:"branch,omitempty"`
+	PatchArtifactID  string `json:"patchArtifactID,omitempty"`
+	PRNumber         int64  `json:"prNumber,omitempty"`
+	ValidationState  string `json:"validationState,omitempty"`
+	TaskName         string `json:"taskName,omitempty"`
+	// TaskUID is the UID of the Task named TaskName that stored the job's
+	// patch artifact. It is empty for a job recorded before it was kept.
+	TaskUID           string     `json:"taskUID,omitempty"`
 	MutationTaskName  string     `json:"mutationTaskName,omitempty"`
 	CommandEventID    string     `json:"commandEventID,omitempty"`
 	WorkActionID      string     `json:"workActionID,omitempty"`

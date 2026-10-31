@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -39,8 +40,10 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = s.Close() }()
 			after := applicationRows(t, s.db)
-			for table, rows := range before {
-				require.Equal(t, rows, after[table], table)
+			for table, rows := range upgradedApplicationRows(t, before) {
+				if _, ok := before[table]; ok {
+					require.Equal(t, rows, after[table], table)
+				}
 			}
 			info, err := s.DatasetInfo()
 			require.NoError(t, err)
@@ -68,7 +71,7 @@ func TestDatasetEverySupportedUpgradePreservesRecords(t *testing.T) {
 				require.NoError(t, err)
 				require.NotEmpty(t, got.Snapshot.Data)
 			}
-			require.NoError(t, s.SaveResult(t.Context(), "ns", "after-upgrade", []byte("new result")))
+			require.NoError(t, s.SaveResult(t.Context(), testResultKey("ns", "after-upgrade"), []byte("new result")))
 			require.NoError(t, s.Close())
 			s, err = OpenLockedStore(path)
 			require.NoError(t, err)
@@ -134,25 +137,29 @@ func TestDatasetFreshCreationFailureRollsBack(t *testing.T) {
 }
 
 func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
+	// Version 1 is an earlier release's marker, which only the exact version-1
+	// layout may carry; version 2 is this release's and version 3 is newer.
 	for _, revision := range []string{"0e567418", "1f18614c", "57583975", "abd2c040", "fdb64ecd"} {
-		t.Run(revision, func(t *testing.T) {
-			path, db := historicalSchemaDB(t, revision)
-			seedMigrationRecords(t, db, path)
-			before := applicationRows(t, db)
-			beforeSchema := storedSchemaSQL(t, db)
-			_, err := db.Exec(`PRAGMA user_version=2`)
-			require.NoError(t, err)
-			require.NoError(t, db.Close())
-			s, err := OpenLockedStore(path)
-			require.ErrorContains(t, err, "unsupported SQLite schema version")
-			require.Nil(t, s)
-			require.Empty(t, migrationBackups(t, path))
-			raw := rawMigrationDB(t, path)
-			require.Equal(t, before, applicationRows(t, raw))
-			require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
-			version, err := readSchemaVersion(raw)
-			require.NoError(t, err)
-			require.Equal(t, 2, version)
-		})
+		for _, marker := range []int{1, SchemaVersion, SchemaVersion + 1} {
+			t.Run(fmt.Sprintf("%s/version-%d", revision, marker), func(t *testing.T) {
+				path, db := historicalSchemaDB(t, revision)
+				seedMigrationRecords(t, db, path)
+				before := applicationRows(t, db)
+				beforeSchema := storedSchemaSQL(t, db)
+				_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version=%d`, marker))
+				require.NoError(t, err)
+				require.NoError(t, db.Close())
+				s, err := OpenLockedStore(path)
+				require.ErrorContains(t, err, "unsupported SQLite schema")
+				require.Nil(t, s)
+				require.Empty(t, migrationBackups(t, path))
+				raw := rawMigrationDB(t, path)
+				require.Equal(t, before, applicationRows(t, raw))
+				require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
+				version, err := readSchemaVersion(raw)
+				require.NoError(t, err)
+				require.Equal(t, marker, version)
+			})
+		}
 	}
 }

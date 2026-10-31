@@ -27,16 +27,16 @@ type countingSessionResultStore struct {
 	reads int
 }
 
-func (s *countingSessionResultStore) SaveResult(context.Context, string, string, []byte) error {
+func (s *countingSessionResultStore) SaveResult(context.Context, store.ResultKey, []byte) error {
 	return nil
 }
 
-func (s *countingSessionResultStore) GetResult(context.Context, string, string) ([]byte, error) {
+func (s *countingSessionResultStore) GetResult(context.Context, store.ResultKey) ([]byte, error) {
 	s.reads++
 	return []byte("generic finalization must not project this result"), nil
 }
 
-func (s *countingSessionResultStore) DeleteResult(context.Context, string, string) error {
+func (s *countingSessionResultStore) DeleteResult(context.Context, store.ResultKey) error {
 	return nil
 }
 
@@ -83,6 +83,7 @@ func TestSessionManager_IsLocked_SessionNotFound(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -115,6 +116,7 @@ func TestSessionManager_IsLocked_NotLocked(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -148,6 +150,7 @@ func TestSessionManager_IsLocked_LockedByOther(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -181,6 +184,7 @@ func TestSessionManager_IsLocked_LockedBySelf(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -218,6 +222,7 @@ func TestSessionManager_AcquireLock_CreateSession(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -248,6 +253,7 @@ func TestSessionManager_AcquireLock_SessionNotFound_NoCreate(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -279,6 +285,7 @@ func TestSessionManager_AcquireLock_AlreadyLockedByOther(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -313,6 +320,7 @@ func TestSessionManager_ReleaseLock_SessionNotFound(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -343,6 +351,7 @@ func TestSessionManager_ReleaseLock_NotOwner(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -386,6 +395,7 @@ func TestSessionManager_LoadTranscript_SessionNotFound(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -422,6 +432,7 @@ func TestSessionManager_LoadTranscript_WithMessages(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -461,6 +472,7 @@ func TestSessionManager_LoadTranscript_MaxMessages(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -581,6 +593,7 @@ func TestSessionManager_AppendMessages_MissingSessionNoops(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -610,7 +623,7 @@ func TestSessionManager_AppendMessages_WithPromptAndResult(t *testing.T) {
 	}))
 
 	// Save result
-	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("Here is the answer")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: defaultNS, TaskName: testTask, TaskUID: "completed-task-uid"}, []byte("Here is the answer")))
 
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -663,9 +676,9 @@ func TestSessionManager_AppendMessages_PromptIncludedSkipsDuplicateUserMessage(t
 	require.NoError(t, ss.AppendMessages(ctx, "default", "prompt-included-session", []store.SessionMessage{{
 		Role: sessionRoleUser, Content: "canonical transcript prompt", Timestamp: time.Now(),
 	}}))
-	require.NoError(t, ss.SaveResult(ctx, defaultNS, testTask, []byte("assistant result")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: defaultNS, TaskName: testTask, TaskUID: testTask + "-uid"}, []byte("assistant result")))
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, UID: types.UID(testTask + "-uid"), Namespace: "default"},
 		Spec: corev1alpha1.TaskSpec{
 			Prompt: "must not be appended again",
 			SessionRef: &corev1alpha1.SessionReference{
@@ -702,6 +715,7 @@ func TestSessionManager_AppendMessages_NilResultStore(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -749,6 +763,7 @@ func TestSessionManager_AppendMessages_NoPromptNoResult(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testTask,
+			UID:       types.UID(testTask + "-uid"),
 			Namespace: "default",
 		},
 		Spec: corev1alpha1.TaskSpec{
@@ -807,7 +822,7 @@ func TestSessionManagerNativeAIGatewayFinalization(t *testing.T) {
 	claimed, err := ss.ClaimNextGatewayEvent(ctx, event.Namespace, "dispatcher", now, time.Minute)
 	require.NoError(t, err)
 	require.Equal(t, event.ID, claimed.ID)
-	require.NoError(t, ss.SaveResult(ctx, "default", "native-task", []byte("native answer")))
+	require.NoError(t, ss.SaveResult(ctx, store.ResultKey{Namespace: "default", TaskName: "native-task", TaskUID: "native-task-uid"}, []byte("native answer")))
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "native-task", Namespace: "default", UID: "native-task-uid"},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, SessionRef: &corev1alpha1.SessionReference{

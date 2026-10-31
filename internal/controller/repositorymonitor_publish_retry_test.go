@@ -76,7 +76,7 @@ func TestRepositoryMonitorReviewPublishRecoversAfterTokenRefresh(t *testing.T) {
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).
 				WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-				WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).Build()
+				WithObjects(repositoryMonitorControllerObjects(monitor, task, secret)...).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 
 			fixture := newRepositoryMonitorPublishRetryFixture(t, tt.failureStage, tt.status, tt.acceptedReview)
 			server := fixture.Server

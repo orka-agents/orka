@@ -550,7 +550,7 @@ func finishExternalPolicyTask(t *testing.T, f *externalACPDispatchFixture, task 
 		t.Fatalf("original Task terminal status = %#v", current.Status)
 	}
 	if !failed {
-		stored, err := f.persistence.GetResult(f.ctx, task.Namespace, task.Name)
+		stored, err := f.persistence.GetResult(f.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 		if err != nil || string(stored) != result {
 			t.Fatalf("original Task result = %q, err=%v", stored, err)
 		}

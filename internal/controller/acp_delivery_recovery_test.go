@@ -36,7 +36,7 @@ func TestACPDispatcherCurrentEpochRecoveryReusesTerminalProjection(t *testing.T)
 				t.Fatal(err)
 			}
 			stale := task.DeepCopy()
-			if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte("completed")); err != nil {
+			if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("completed")); err != nil {
 				t.Fatal(err)
 			}
 			delivery := corev1alpha1.TaskDeliveryStatus{
@@ -264,7 +264,7 @@ func preparePublicationConflictRecovery(t *testing.T, fixture *recoveryFixture, 
 	if err := fixture.kubeClient.Status().Update(fixture.ctx, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.controlStore.SaveResult(fixture.ctx, task.Namespace, task.Name, []byte("completed code change")); err != nil {
+	if err := fixture.controlStore.SaveResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("completed code change")); err != nil {
 		t.Fatal(err)
 	}
 	return task

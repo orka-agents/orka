@@ -14,6 +14,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
 var errScanRunLiveIdentityChanged = fmt.Errorf("%w: repository scan identity changed during ingestion", store.ErrConflict)
@@ -103,7 +104,7 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 		"applied", applied, "reviewed", run.ReviewedSliceCount,
 		"accepted", run.AcceptedFindings, "dropped", run.DroppedFindings)
 	if applied {
-		if err := r.finishScanTaskIngestion(ctx, scan, ingestion); err != nil {
+		if err := r.finishScanTaskIngestion(ctx, scan, task, ingestion); err != nil {
 			return err
 		}
 	}
@@ -112,13 +113,15 @@ func (r *RepositoryScanReconciler) applyScanTaskIngestion(
 
 // SQLite results commit before Kubernetes validation Tasks or diagnostic
 // artifacts are published. A pending receipt retries only that follow-up work.
-func (r *RepositoryScanReconciler) finishScanTaskIngestion(ctx context.Context, scan *corev1alpha1.RepositoryScan, ingestion *store.ScanTaskIngestion) error {
+// task is the Task incarnation the receipt records. Its diagnostic artifacts
+// belong to the Task's data UID, which differs from the recorded incarnation
+// UID for a restored Task settled on its source execution.
+func (r *RepositoryScanReconciler) finishScanTaskIngestion(ctx context.Context, scan *corev1alpha1.RepositoryScan, task *corev1alpha1.Task, ingestion *store.ScanTaskIngestion) error {
 	if ingestion.Completed {
 		return nil
 	}
 	if ingestion.DroppedFindingsJSON != "" && r.ArtifactStore != nil {
-		if err := r.ArtifactStore.SaveArtifact(ctx, ingestion.Namespace, ingestion.TaskName,
-			security.ArtifactDroppedFindings, "application/json", []byte(ingestion.DroppedFindingsJSON)); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: ingestion.Namespace, TaskName: ingestion.TaskName, TaskUID: string(taskmeta.DataUID(task))}, Filename: security.ArtifactDroppedFindings, ContentType: artifactContentTypeJSON, Data: []byte(ingestion.DroppedFindingsJSON)}); err != nil {
 			return err
 		}
 	}

@@ -28,7 +28,7 @@ func TestInternalAuthorizationDoesNotHoldStoreConnection(t *testing.T) {
 				checked = true
 				storeCtx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
 				defer cancel()
-				storeErr = dataStore.SaveResult(storeCtx, "default", "unrelated-task", []byte("unrelated result"))
+				storeErr = dataStore.SaveResult(storeCtx, store.ResultKey{Namespace: "default", TaskName: "unrelated-task", TaskUID: "unrelated-task-uid"}, []byte("unrelated result"))
 				if storeErr != nil {
 					return storeErr
 				}

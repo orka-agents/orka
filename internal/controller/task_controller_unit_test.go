@@ -48,6 +48,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -55,6 +56,7 @@ import (
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -2383,13 +2385,13 @@ func TestHandleScheduledTask_WithTimeZone(t *testing.T) {
 func TestCollectResult_ResultAlreadyExists(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t1", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t1", UID: "t1-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	r := newUnitReconciler(scheme, task)
 
 	// Pre-save a result
-	_ = r.ResultStore.SaveResult(context.Background(), "default", "t1", []byte("result data"))
+	_ = r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "t1", TaskUID: "t1-uid"}, []byte("result data"))
 
 	err := r.collectResult(context.Background(), task)
 	if err != nil {
@@ -2403,7 +2405,7 @@ func TestCollectResult_ResultAlreadyExists(t *testing.T) {
 func TestCollectResult_NoResultNoKubeClient(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t2", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t2", UID: "t2-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2419,7 +2421,7 @@ func TestCollectResult_NoResultNoKubeClient(t *testing.T) {
 func TestCollectResult_ContainerWithoutJobDoesNotReadPodLogs(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "prejob-failure", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "prejob-failure", UID: "prejob-failure-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{JobName: ""},
 	}
@@ -2458,7 +2460,7 @@ func TestCollectResult_RejectedJobDoesNotReadPodLogs(t *testing.T) {
 func TestCollectResult_AITaskNoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t3", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t3", UID: "t3-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -2744,7 +2746,7 @@ func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	_ = r.ResultStore.SaveResult(context.Background(), "default", "del-result", []byte("data"))
+	_ = r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "del-result", TaskUID: "del-result-uid"}, []byte("data"))
 	// handleDeletion calls r.Update to remove finalizer — this works when DeletionTimestamp
 	// is not set on the local copy (the fake client rejects changes to DeletionTimestamp).
 	_, err := r.handleDeletion(context.Background(), task)
@@ -2752,7 +2754,7 @@ func TestHandleDeletion_WithPersistedResultWithoutResultRef(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Result should have been cleaned up
-	_, getErr := r.ResultStore.GetResult(context.Background(), "default", "del-result")
+	_, getErr := r.ResultStore.GetResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "del-result", TaskUID: "del-result-uid"})
 	if getErr == nil {
 		t.Error("expected result to be deleted")
 	}
@@ -2846,6 +2848,7 @@ func TestHandleDeletionKeepsFinalizerWhenPlanCleanupFails(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "del-plan-fail",
+			UID:        "del-plan-fail-uid",
 			Namespace:  "default",
 			Finalizers: []string{labels.TaskFinalizer},
 		},
@@ -4118,6 +4121,10 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{
@@ -4803,7 +4810,7 @@ func TestHandleScheduled_RefreshesRuntimeRefPolicyFromAPIReader(t *testing.T) {
 			currentRuntime := scheduledTestAgentRuntime(contract, tt.allowedTools)
 
 			r := newUnitReconciler(scheme, task, agent.DeepCopy(), staleRuntime)
-			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, currentRuntime).Build()
+			r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent, currentRuntime).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 
 			if _, err := r.handleScheduled(context.Background(), task); err != nil {
 				t.Fatalf("handleScheduled() error = %v", err)
@@ -4858,7 +4865,7 @@ func TestHandleScheduled_RuntimeRefPolicyFailureHasNoSideEffects(t *testing.T) {
 		}},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).Build()
+	r.APIReader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(agent).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 
 	_, err := r.handleScheduled(context.Background(), task)
 	if err == nil || !strings.Contains(err.Error(), "refreshing scheduled child AgentRuntime policy") {
@@ -5901,7 +5908,7 @@ func TestHandlePending_NamespaceTaskLimitCountsFinalizing(t *testing.T) {
 func TestCollectResult_ContainerTask_NoKubeClient_NoPods(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "t-collect", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "t-collect", UID: "t-collect-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
 		Status:     corev1alpha1.TaskStatus{JobName: "job-collect"},
 	}
@@ -6198,7 +6205,7 @@ func TestHandleRunning_ChildTaskWithResult(t *testing.T) {
 	}
 	r := newUnitReconciler(scheme, task, job, child)
 	// Save child result
-	_ = r.ResultStore.SaveResult(context.Background(), "default", "child-with-result", []byte("child output"))
+	_ = r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "child-with-result", TaskUID: "child-with-result-uid"}, []byte("child output"))
 	_, err := r.handleRunning(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -6437,11 +6444,11 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 func TestCollectResult_ResultSavedByWorker(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "collect-saved", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "collect-saved", UID: "collect-saved-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	r := newUnitReconciler(scheme, task)
-	_ = r.ResultStore.SaveResult(context.Background(), "default", "collect-saved", []byte("worker result"))
+	_ = r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "collect-saved", TaskUID: "collect-saved-uid"}, []byte("worker result"))
 	err := r.collectResult(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -6454,7 +6461,7 @@ func TestCollectResult_ResultSavedByWorker(t *testing.T) {
 func TestCollectResult_AITask_NoResult(t *testing.T) {
 	scheme := newTestScheme()
 	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "collect-ai-none", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "collect-ai-none", UID: "collect-ai-none-uid", Namespace: "default"},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
 	}
 	r := newUnitReconciler(scheme, task)
@@ -7097,7 +7104,7 @@ func TestHandleRunning_ChildResultTruncated(t *testing.T) {
 	for i := range largeResult {
 		largeResult[i] = 'x'
 	}
-	_ = r.ResultStore.SaveResult(context.Background(), "default", "child-trunc", largeResult)
+	_ = r.ResultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "child-trunc", TaskUID: "child-trunc-uid"}, largeResult)
 	_, err := r.handleRunning(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -8108,7 +8115,7 @@ func TestEnsureTrustedServiceReadBindingsRejectsRoleBindingCollision(t *testing.
 
 func TestEnsureTrustedServiceReadBindingsUsesAPIReaderForCrossNamespaceRBAC(t *testing.T) {
 	scheme := newTestScheme()
-	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	cachedRBACRead := false
 	restrictedCache := interceptor.NewClient(base, interceptor.Funcs{
 		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -8304,7 +8311,7 @@ func TestTaskReconcileNotFoundCleansTrustedServiceGrant(t *testing.T) {
 
 func TestTrustedServiceReadStartupCleanupSerializesFreshGrantReconciliation(t *testing.T) {
 	scheme := newTestScheme()
-	base := fake.NewClientBuilder().WithScheme(scheme).Build()
+	base := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(assignTestUIDsOnCreate()).Build()
 	taskSnapshotDone := make(chan struct{})
 	cleanupAtBindings := make(chan struct{})
 	releaseCleanup := make(chan struct{})
@@ -8771,11 +8778,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", persistence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

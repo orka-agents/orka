@@ -373,7 +373,7 @@ func captureArchivedSessionEvidence(t *testing.T, fixture *externalACPDispatchFi
 				t.Fatalf("deleted ordinary Session evidence was recreated: %v", err)
 			}
 		}
-		result, err := fixture.persistence.GetResult(fixture.ctx, task.Namespace, task.Name)
+		result, err := fixture.persistence.GetResult(fixture.ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)})
 		if err != nil {
 			t.Fatal(err)
 		}

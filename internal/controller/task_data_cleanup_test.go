@@ -23,14 +23,14 @@ type failingTaskDataCleanup struct {
 	err       error
 }
 
-func (s *failingTaskDataCleanup) DeleteResult(context.Context, string, string) error {
+func (s *failingTaskDataCleanup) DeleteResult(context.Context, store.ResultKey) error {
 	if s.operation == "result" {
 		return s.err
 	}
 	return nil
 }
 
-func (s *failingTaskDataCleanup) DeleteArtifacts(context.Context, string, string) error {
+func (s *failingTaskDataCleanup) DeleteArtifacts(context.Context, store.ArtifactOwner) error {
 	if s.operation == "artifact" {
 		return s.err
 	}

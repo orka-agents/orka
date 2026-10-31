@@ -15,6 +15,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 )
 
 // SessionManager manages sessions for conversation continuity.
@@ -238,7 +239,7 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 
 	// Try to get the response from the result store
 	if resultStore != nil && task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-		data, err := resultStore.GetResult(ctx, task.Namespace, task.Name)
+		data, err := resultStore.GetResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))})
 		if err == nil {
 			response = string(data)
 		}

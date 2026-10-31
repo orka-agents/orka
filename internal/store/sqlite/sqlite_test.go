@@ -35,11 +35,11 @@ func TestResultStore(t *testing.T) {
 
 	t.Run("save and get result", func(t *testing.T) {
 		data := []byte("hello world")
-		if err := s.SaveResult(ctx, "ns1", "task1", data); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns1", "task1"), data); err != nil {
 			t.Fatalf("SaveResult: %v", err)
 		}
 
-		got, err := s.GetResult(ctx, "ns1", "task1")
+		got, err := s.GetResult(ctx, testResultKey("ns1", "task1"))
 		if err != nil {
 			t.Fatalf("GetResult: %v", err)
 		}
@@ -49,7 +49,7 @@ func TestResultStore(t *testing.T) {
 	})
 
 	t.Run("get nonexistent result returns ErrNotFound", func(t *testing.T) {
-		_, err := s.GetResult(ctx, "ns1", "nonexistent")
+		_, err := s.GetResult(ctx, testResultKey("ns1", "nonexistent"))
 		if err != store.ErrNotFound {
 			t.Errorf("got %v, want ErrNotFound", err)
 		}
@@ -57,7 +57,7 @@ func TestResultStore(t *testing.T) {
 
 	t.Run("prompt result receipt is immutable and deleted with result", func(t *testing.T) {
 		receipt := store.PromptResultReceipt{
-			AttemptID: "prompt-attempt-1", Namespace: resultTestNamespace, TaskName: "task-receipt",
+			AttemptID: "prompt-attempt-1", Namespace: resultTestNamespace, TaskName: "task-receipt", TaskUID: "task-receipt-uid",
 			OperationID: "settling-1", OperationDigest: "sha256:" + strings.Repeat("a", 64),
 			Data: []byte("durable result"),
 		}
@@ -81,10 +81,10 @@ func TestResultStore(t *testing.T) {
 		if err := s.SavePromptResultReceipt(ctx, mismatch); !errors.Is(err, store.ErrDuplicateMismatch) {
 			t.Fatalf("mismatched prompt result receipt error = %v, want ErrDuplicateMismatch", err)
 		}
-		if err := s.SaveResult(ctx, receipt.Namespace, receipt.TaskName, receipt.Data); err != nil {
+		if err := s.SaveResult(ctx, testResultKey(receipt.Namespace, receipt.TaskName), receipt.Data); err != nil {
 			t.Fatalf("SaveResult: %v", err)
 		}
-		if err := s.DeleteResult(ctx, receipt.Namespace, receipt.TaskName); err != nil {
+		if err := s.DeleteResult(ctx, testResultKey(receipt.Namespace, receipt.TaskName)); err != nil {
 			t.Fatalf("DeleteResult: %v", err)
 		}
 		if _, err := s.GetPromptResultReceipt(ctx, receipt.AttemptID); !errors.Is(err, store.ErrNotFound) {
@@ -93,14 +93,14 @@ func TestResultStore(t *testing.T) {
 	})
 
 	t.Run("save overwrites existing result", func(t *testing.T) {
-		if err := s.SaveResult(ctx, "ns1", "task-overwrite", []byte("v1")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns1", "task-overwrite"), []byte("v1")); err != nil {
 			t.Fatalf("SaveResult v1: %v", err)
 		}
-		if err := s.SaveResult(ctx, "ns1", "task-overwrite", []byte("v2")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns1", "task-overwrite"), []byte("v2")); err != nil {
 			t.Fatalf("SaveResult v2: %v", err)
 		}
 
-		got, err := s.GetResult(ctx, "ns1", "task-overwrite")
+		got, err := s.GetResult(ctx, testResultKey("ns1", "task-overwrite"))
 		if err != nil {
 			t.Fatalf("GetResult: %v", err)
 		}
@@ -110,38 +110,38 @@ func TestResultStore(t *testing.T) {
 	})
 
 	t.Run("delete result", func(t *testing.T) {
-		if err := s.SaveResult(ctx, "ns1", "task-del", []byte("data")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns1", "task-del"), []byte("data")); err != nil {
 			t.Fatalf("SaveResult: %v", err)
 		}
-		if err := s.DeleteResult(ctx, "ns1", "task-del"); err != nil {
+		if err := s.DeleteResult(ctx, testResultKey("ns1", "task-del")); err != nil {
 			t.Fatalf("DeleteResult: %v", err)
 		}
 
-		_, err := s.GetResult(ctx, "ns1", "task-del")
+		_, err := s.GetResult(ctx, testResultKey("ns1", "task-del"))
 		if err != store.ErrNotFound {
 			t.Errorf("got %v, want ErrNotFound after delete", err)
 		}
 	})
 
 	t.Run("delete nonexistent result is no-op", func(t *testing.T) {
-		if err := s.DeleteResult(ctx, "ns1", "never-existed"); err != nil {
+		if err := s.DeleteResult(ctx, testResultKey("ns1", "never-existed")); err != nil {
 			t.Errorf("DeleteResult nonexistent: %v", err)
 		}
 	})
 
 	t.Run("namespace isolation", func(t *testing.T) {
-		if err := s.SaveResult(ctx, "ns-a", "task1", []byte("a-data")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns-a", "task1"), []byte("a-data")); err != nil {
 			t.Fatalf("SaveResult ns-a: %v", err)
 		}
-		if err := s.SaveResult(ctx, "ns-b", "task1", []byte("b-data")); err != nil {
+		if err := s.SaveResult(ctx, testResultKey("ns-b", "task1"), []byte("b-data")); err != nil {
 			t.Fatalf("SaveResult ns-b: %v", err)
 		}
 
-		got, _ := s.GetResult(ctx, "ns-a", "task1")
+		got, _ := s.GetResult(ctx, testResultKey("ns-a", "task1"))
 		if string(got) != "a-data" {
 			t.Errorf("ns-a got %q, want %q", got, "a-data")
 		}
-		got, _ = s.GetResult(ctx, "ns-b", "task1")
+		got, _ = s.GetResult(ctx, testResultKey("ns-b", "task1"))
 		if string(got) != "b-data" {
 			t.Errorf("ns-b got %q, want %q", got, "b-data")
 		}
@@ -624,7 +624,7 @@ func TestConcurrentAccess(t *testing.T) {
 	errs := make(chan error, n)
 	for i := range n {
 		go func(i int) {
-			errs <- s.SaveResult(ctx, "ns1", fmt.Sprintf("task-%d", i), fmt.Appendf(nil, "data-%d", i))
+			errs <- s.SaveResult(ctx, testResultKey("ns1", fmt.Sprintf("task-%d", i)), fmt.Appendf(nil, "data-%d", i))
 		}(i)
 	}
 
@@ -636,7 +636,7 @@ func TestConcurrentAccess(t *testing.T) {
 
 	// Verify all results were saved
 	for i := range n {
-		got, err := s.GetResult(ctx, "ns1", fmt.Sprintf("task-%d", i))
+		got, err := s.GetResult(ctx, testResultKey("ns1", fmt.Sprintf("task-%d", i)))
 		if err != nil {
 			t.Errorf("GetResult task-%d: %v", i, err)
 			continue
@@ -960,13 +960,13 @@ func TestClosedDBErrors(t *testing.T) {
 	ctx := context.Background()
 
 	// All operations on a closed DB should return errors
-	if _, err := s.GetResult(ctx, "ns", "t"); err == nil {
+	if _, err := s.GetResult(ctx, testResultKey("ns", "t")); err == nil {
 		t.Error("expected error from GetResult on closed DB")
 	}
-	if err := s.SaveResult(ctx, "ns", "t", []byte("d")); err == nil {
+	if err := s.SaveResult(ctx, testResultKey("ns", "t"), []byte("d")); err == nil {
 		t.Error("expected error from SaveResult on closed DB")
 	}
-	if err := s.DeleteResult(ctx, "ns", "t"); err == nil {
+	if err := s.DeleteResult(ctx, testResultKey("ns", "t")); err == nil {
 		t.Error("expected error from DeleteResult on closed DB")
 	}
 	if _, err := s.GetSession(ctx, "ns", "s"); err == nil {
@@ -1152,11 +1152,11 @@ func TestContextCancellation(t *testing.T) {
 	cancel() // Cancel immediately
 
 	// Operations on cancelled context should return errors
-	if err := s.SaveResult(ctx, "ns1", "task1", []byte("data")); err == nil {
+	if err := s.SaveResult(ctx, testResultKey("ns1", "task1"), []byte("data")); err == nil {
 		t.Error("expected error on cancelled context for SaveResult")
 	}
 
-	if _, err := s.GetResult(ctx, "ns1", "task1"); err == nil {
+	if _, err := s.GetResult(ctx, testResultKey("ns1", "task1")); err == nil {
 		t.Error("expected error on cancelled context for GetResult")
 	}
 
@@ -1218,10 +1218,10 @@ func TestSpecialCharacters(t *testing.T) {
 		}
 		for _, key := range keys {
 			data := []byte("data-for-" + key)
-			if err := s.SaveResult(ctx, "ns1", key, data); err != nil {
+			if err := s.SaveResult(ctx, testResultKey("ns1", key), data); err != nil {
 				t.Fatalf("SaveResult(%q): %v", key, err)
 			}
-			got, err := s.GetResult(ctx, "ns1", key)
+			got, err := s.GetResult(ctx, testResultKey("ns1", key))
 			if err != nil {
 				t.Fatalf("GetResult(%q): %v", key, err)
 			}

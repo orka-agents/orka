@@ -38,6 +38,7 @@ import (
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -2167,7 +2168,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			ctx, task, attemptID, fence, "terminal usage persistence failed",
 		)
 	}
-	if err := d.persistTaskResult(ctx, task, []byte(resultText)); err != nil {
+	if err := d.persistTaskResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}, []byte(resultText)); err != nil {
 		return err
 	}
 	if _, _, err := journalState.AppendPromptLifecycleIfNew(ctx, *terminal); err != nil {
@@ -4421,7 +4422,7 @@ func (d *ACPDispatcher) transitionAttemptToSettlingWithResult(
 	}
 	operationID := acpSettlingOperation + "-" + strconv.FormatInt(expectedVersion, 10)
 	if err := receipts.SavePromptResultReceipt(ctx, store.PromptResultReceipt{
-		AttemptID: id, Namespace: task.Namespace, TaskName: task.Name,
+		AttemptID: id, Namespace: task.Namespace, TaskName: task.Name, TaskUID: attempt.Key.TaskUID,
 		OperationID: operationID, OperationDigest: digest, Data: result,
 	}); err != nil {
 		return err
@@ -5664,8 +5665,17 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 	})
 }
 
-func (d *ACPDispatcher) persistTaskResult(ctx context.Context, task *corev1alpha1.Task, result []byte) error {
-	return d.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result)
+// persistTaskResult stores a Task's result under the Task UID that keys its
+// execution's durable records (see taskmeta.DataUID and attemptResultKey).
+func (d *ACPDispatcher) persistTaskResult(ctx context.Context, key store.ResultKey, result []byte) error {
+	return d.ResultStore.SaveResult(ctx, key, result)
+}
+
+// attemptResultKey is the key of the result a prompt attempt produced. The
+// result belongs to the Task UID the attempt was created for, which a
+// restored Task keeps from its source execution.
+func attemptResultKey(task *corev1alpha1.Task, attempt *store.PromptAttempt) store.ResultKey {
+	return store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: attempt.Key.TaskUID}
 }
 
 func (d *ACPDispatcher) publishTaskResultReference(ctx context.Context, task *corev1alpha1.Task) error {

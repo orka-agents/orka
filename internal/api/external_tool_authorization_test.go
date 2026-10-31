@@ -803,7 +803,7 @@ type externalToolCountingResults struct {
 	reads int
 }
 
-func (r *externalToolCountingResults) GetResult(context.Context, string, string) ([]byte, error) {
+func (r *externalToolCountingResults) GetResult(context.Context, store.ResultKey) ([]byte, error) {
 	r.reads++
 	return []byte("task output"), nil
 }

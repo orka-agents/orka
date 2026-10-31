@@ -37,6 +37,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
+	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 )
@@ -824,7 +825,7 @@ func (h *Handlers) GetTaskLogs(c fiber.Ctx) error {
 
 	// For completed tasks with results available, serve from ResultStore
 	if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-		data, err := h.resultStore.GetResult(ctx, namespace, id)
+		data, err := h.resultStore.GetResult(ctx, store.ResultKey{Namespace: namespace, TaskName: id, TaskUID: string(taskmeta.DataUID(task))})
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return fiber.NewError(fiber.StatusNotFound, "logs not found in result store")
@@ -962,7 +963,7 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
 	}
 
-	data, err := h.resultStore.GetResult(ctx, namespace, id)
+	data, err := h.resultStore.GetResult(ctx, store.ResultKey{Namespace: namespace, TaskName: id, TaskUID: string(taskmeta.DataUID(task))})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
@@ -2047,7 +2048,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2056,7 +2057,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"artifacts": []any{}})
 	}
 
-	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	artifacts, err := h.artifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(taskmeta.DataUID(task))})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
 	}
@@ -2077,7 +2078,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2086,7 +2087,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
 	}
 
-	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	data, contentType, err := h.artifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(taskmeta.DataUID(task))}, Filename: filename})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "artifact not found")

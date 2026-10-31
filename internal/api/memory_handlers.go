@@ -613,6 +613,9 @@ func rejectClientRecordedIdentity(body []byte, field string) error {
 }
 
 func memoryStoreError(action, resource string, err error) error {
+	if temporary := temporaryStorageHTTPError(err); temporary != nil {
+		return temporary
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		return fiber.NewError(fiber.StatusNotFound, fmt.Sprintf("%s not found", resource))
 	}
