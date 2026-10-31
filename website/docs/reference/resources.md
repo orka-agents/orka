@@ -134,6 +134,7 @@ workspace:
 | `prBaseBranch` | string | empty | Pull-request base branch. |
 | `prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
 | `prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
+| `commitMessage` | string | `orka: apply agent task <name>` | Message of the commit that publishes the Task's changes, up to 4,000 bytes, ending in exactly one newline. Whitespace-only text, carriage returns, NUL, and secret-like text are rejected. Repository monitor repairs set it to the repair intent, the review findings being fixed, and an `Orka-Task` trailer. |
 | `createPR` | boolean | `false` | Reconcile a pull request only after verified branch publication. Requires `intent: write`. |
 
 The four credential references are distinct roles: `readCredentialRef` is source-read only,
@@ -921,7 +922,7 @@ spec:
 | `review.publish.postNeedsChanges` | bool | No | Post `needs_changes` reviews when true. Defaults to `true`. |
 | `review.publish.postNeedsHuman` | bool | No | Post `needs_human` reviews when true. Defaults to `true`. |
 | `review.publish.postSecuritySensitive` | bool | No | Allow public publishing of `security_sensitive` results. Defaults to `false`; sensitive findings are skipped by default. |
-| `review.publish.sameHeadPolicy` | string | No | Duplicate policy for the same monitor, PR, and head SHA. V1 only supports `skip`. |
+| `review.publish.sameHeadPolicy` | string | No | What a later review of an already-published PR head does. `skip` (default) leaves the published review as it is. `update` rewrites the published review's summary when the later review reaches a different verdict; its inline comments stay as first published. Orka publishes at most one review per head either way. |
 | `review.publish.inline.enabled` | bool | No | Enables inline GitHub review comments when `mode` is `summary_with_inline_findings`. |
 | `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
 | `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |

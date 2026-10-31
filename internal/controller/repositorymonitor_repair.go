@@ -1019,6 +1019,10 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		return 0, err
 	}
 	taskName := repositoryMonitorRepairTaskName(monitor, pr, command)
+	commitMessage, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, command.Intent, taskName, pr, item)
+	if err != nil {
+		return 0, err
+	}
 	job := &store.RepairJob{
 		ID:               "repair-" + repositoryMonitorShortHash(command.ID),
 		MonitorNamespace: monitor.Namespace,
@@ -1066,6 +1070,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		PRBaseBranch:                 pr.BaseBranch,
 		PushBranch:                   pr.HeadBranch,
 		ExpectedRemoteSHA:            pr.HeadSHA,
+		CommitMessage:                commitMessage,
 	}
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1158,6 +1163,61 @@ func repositoryMonitorRepairWorkflowActionKind(intent string) string {
 
 func repositoryMonitorRepairTaskName(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, command *store.CommandEvent) string {
 	return repositoryMonitorBoundedDNSName(fmt.Sprintf("monrepair-%s-%d-%s", monitor.Name, pr.Number, command.ID), 63)
+}
+
+// repositoryMonitorRepairCommitFindingLimit bounds the findings a repair
+// commit message lists.
+const repositoryMonitorRepairCommitFindingLimit = 10
+
+// repositoryMonitorRepairCommitMessage tells maintainers what a repair commit
+// fixes. Finding titles are model output about untrusted code, so each is
+// sanitized onto its own list line, where it cannot form a trailer.
+func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, taskName string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
+	subject := fmt.Sprintf("fix: address review findings on #%d", pr.Number)
+	switch intent {
+	case repositoryMonitorCommandIntentFixCI:
+		subject = fmt.Sprintf("fix: repair failing CI on #%d", pr.Number)
+	case repositoryMonitorCommandIntentUpdateBranch:
+		subject = fmt.Sprintf("chore: update #%d with %s", pr.Number, pr.BaseBranch)
+	}
+	header, trailer := subject+"\n", "\nOrka-Task: "+taskName+"\n"
+	const listHeader = "\nReview findings:\n"
+	// The publisher limits the whole message in bytes; leave room for the
+	// subject, trailer, list header, and a closing "and N more" line.
+	used := len(header) + len(trailer) + len(listHeader) + len("- and 999 more\n")
+	var lines []string
+	if intent == repositoryMonitorCommandIntentFix && item != nil && item.LastReviewID != "" && r.Store != nil {
+		review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return "", err
+		}
+		var findings []repositoryMonitorReviewFinding
+		if review != nil && review.MonitorName == monitor.Name && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA &&
+			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
+			for i, finding := range findings {
+				title := strings.Join(strings.Fields(sanitizeRepositoryMonitorReviewText(finding.Title, 120)), " ")
+				if title == "" {
+					continue
+				}
+				// Priority is model output too: only a known priority is shown.
+				if _, ok := repositoryMonitorPriorityRank(finding.Priority); ok {
+					title = "[" + strings.ToUpper(strings.TrimSpace(finding.Priority)) + "] " + title
+				}
+				line := "- " + title
+				if len(lines) == repositoryMonitorRepairCommitFindingLimit || used+len(line)+1 > maxTaskPublicationCommitMessageBytes {
+					lines = append(lines, fmt.Sprintf("- and %d more", len(findings)-i))
+					break
+				}
+				used += len(line) + 1
+				lines = append(lines, line)
+			}
+		}
+	}
+	message := header
+	if len(lines) > 0 {
+		message += listHeader + strings.Join(lines, "\n") + "\n"
+	}
+	return message + trailer, nil
 }
 
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {

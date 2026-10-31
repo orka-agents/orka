@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/publisher"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/security"
 )
+
+// maxTaskPublicationCommitMessageBytes is the publisher's commit message limit.
+const maxTaskPublicationCommitMessageBytes = 4096
 
 // Validate the selected text before reserving SCM effects. Inspect the full
 // prompt line before truncation so a truncated credential cannot escape detection.
@@ -18,6 +22,14 @@ func validateTaskPullRequestText(task *corev1alpha1.Task) error {
 		return nil
 	}
 	workspace := task.Spec.Workspace
+	if message := workspace.CommitMessage; message != "" {
+		if !utf8.ValidString(message) || strings.ContainsAny(message, "\x00\r") || len(taskPublicationCommitMessage(task)) > maxTaskPublicationCommitMessageBytes {
+			return fmt.Errorf("commitMessage must be UTF-8 without NUL or carriage returns and at most %d bytes", maxTaskPublicationCommitMessageBytes)
+		}
+		if security.LooksLikeSecret(message) {
+			return fmt.Errorf("commitMessage must not contain credentials or tokens")
+		}
+	}
 	title := workspace.PRTitle
 	if workspace.CreatePR && title == "" {
 		line, _, _ := strings.Cut(strings.TrimSpace(task.Spec.Prompt), "\n")

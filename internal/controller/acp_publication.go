@@ -845,13 +845,25 @@ func legacyBranchClaimRequestDigest(
 	})
 }
 
+// taskPublicationCommitMessage returns the commit message for task's
+// publication: the Task-authored message, ending in exactly one newline as the
+// publisher requires, or the default title.
+func taskPublicationCommitMessage(task *corev1alpha1.Task) string {
+	if task.Spec.Workspace != nil {
+		if message := strings.TrimRight(task.Spec.Workspace.CommitMessage, "\n"); strings.TrimSpace(message) != "" {
+			return message + "\n"
+		}
+	}
+	return "orka: apply agent task " + task.Name + "\n"
+}
+
 func (d *ACPDispatcher) ensurePublication(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, sessionUID string, source publisher.Repository, sourceRef string, target publisher.Repository, targetRef string, claim store.BranchClaim, delta harnessv2.WorkspaceDeltaDescriptor) (*store.Publication, error) {
 	id := publicationID(task)
 	commitAt := task.CreationTimestamp.Time.UTC().Truncate(time.Second)
 	if commitAt.IsZero() {
 		commitAt = time.Now().UTC().Truncate(time.Second)
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	requestDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": id, attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,
@@ -898,7 +910,7 @@ func publicationMatchesCreation(
 			return false
 		}
 	}
-	message := "orka: apply agent task " + task.Name + "\n"
+	message := taskPublicationCommitMessage(task)
 	expectedDigest, err := acpDomainDigest("publication", map[string]any{
 		"id": publicationIDForTask(task), attemptIDField: attemptID, "source": source, "sourceRef": sourceRef, "target": target,
 		"targetRef": targetRef, "branchClaim": claim.ID, "branchClaimGeneration": claim.Generation,

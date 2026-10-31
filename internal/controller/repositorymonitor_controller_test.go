@@ -3730,6 +3730,9 @@ func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, nu
 			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			return
+		}
 		if r.URL.Path == wantPath+"/files" {
 			_, _ = w.Write([]byte(`[]`))
 			return
@@ -3760,8 +3763,32 @@ func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.
 // request and pull request files endpoints the review-context builder calls,
 // derived from the same inventory body. It returns true when it handled the
 // request.
+// repositoryMonitorTestServesNoHeldWorkflowRuns answers the workflow-run
+// approval lookup: no run for the commit waits for a maintainer.
+func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/actions/runs" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+	return true
+}
+
+// repositoryMonitorTestWithoutHeldWorkflowRuns serves no held workflow runs
+// and passes every other request to next.
+func repositoryMonitorTestWithoutHeldWorkflowRuns(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			next(w, r)
+		}
+	}
+}
+
 func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
 	t.Helper()
+	if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+		return true
+	}
 	const prefix = "/repos/orka-agents/orka/pulls/"
 	const comparePrefix = "/repos/orka-agents/orka/compare/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {
@@ -3988,6 +4015,10 @@ type repositoryMonitorPublishTestServer struct {
 	*httptest.Server
 	PostCount    int
 	PostedReview repositoryMonitorPullRequestReviewRequest
+	// PutPath and PutBody record the last review summary update.
+	PutCount int
+	PutPath  string
+	PutBody  string
 }
 
 func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
@@ -4038,6 +4069,17 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 				t.Fatalf("decode posted review: %v", err)
 			}
 			w.WriteHeader(cfg.PostStatus)
+			_, _ = w.Write([]byte(cfg.PostBody))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/pulls/1/reviews/"):
+			testServer.PutCount++
+			testServer.PutPath = r.URL.Path
+			var update struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatalf("decode review update: %v", err)
+			}
+			testServer.PutBody = update.Body
 			_, _ = w.Write([]byte(cfg.PostBody))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())

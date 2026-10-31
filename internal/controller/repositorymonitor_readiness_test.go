@@ -34,7 +34,7 @@ func TestRepositoryMonitorReadinessStatusLifecycle(t *testing.T) {
 			writes := []repositoryMonitorCommitStatus{}
 			latest := map[string]repositoryMonitorCommitStatus{}
 			failAudit := false
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			server := httptest.NewServer(repositoryMonitorTestWithoutHeldWorkflowRuns(func(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
 				case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/1"):
@@ -180,6 +180,9 @@ func TestRepositoryMonitorCIExcludesOnlyPersistedOwnedStatusIDs(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
 			return
 		}
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, req) {
+			return
+		}
 		statuses := []repositoryMonitorCommitStatus{{ID: 10, Context: "orka/peer-0/ready", State: "pending"}, {ID: 11, Context: "orka/peer-1/ready", State: "pending"}}
 		if foreign {
 			statuses = append(statuses, repositoryMonitorCommitStatus{ID: 12, Context: "orka/peer-0/ready", State: "failure"})
@@ -308,6 +311,8 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 				t.Error("conflicted PR received a successful readiness status")
 			}
 			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected", 500)
@@ -406,6 +411,8 @@ func TestRepositoryMonitorInventoryReusesReadinessPullRequestList(t *testing.T) 
 			writes++
 			status.ID = int64(writes)
 			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected", 500)
@@ -470,6 +477,8 @@ func TestRepositoryMonitorReadinessAggregatesSharedHeads(t *testing.T) {
 			writes++
 			latest.ID = int64(100 + writes)
 			_ = json.NewEncoder(w).Encode(latest)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected", 500)
