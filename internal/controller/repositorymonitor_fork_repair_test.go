@@ -204,13 +204,18 @@ func TestRepositoryMonitorReadinessRefreshTracksMaintainerEdits(t *testing.T) {
 	for _, canModify := range []bool{true, false} {
 		server := newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t, 31, repositoryMonitorForkPullRequestBody(canModify), "Bearer forge-token")
 		reconciler := &RepositoryMonitorReconciler{}
-		pr, err := reconciler.refreshRepositoryMonitorReadinessPullRequest(context.Background(), repositoryMonitorPullRequest{Number: 31, MaintainerCanModify: !canModify}, server.URL+"/repos/orka-agents/orka", "forge-token")
+		// The stale snapshot names the fork before a rename.
+		stale := repositoryMonitorPullRequest{Number: 31, MaintainerCanModify: !canModify, HeadBranch: "old", HeadRepo: "contributor/old-orka", HeadRepoURL: "https://github.com/contributor/old-orka.git"}
+		pr, err := reconciler.refreshRepositoryMonitorReadinessPullRequest(context.Background(), stale, server.URL+"/repos/orka-agents/orka", "forge-token")
 		server.Close()
 		if err != nil {
 			t.Fatalf("refreshRepositoryMonitorReadinessPullRequest() error = %v", err)
 		}
 		if pr.MaintainerCanModify != canModify {
 			t.Fatalf("refreshed MaintainerCanModify = %t, want %t", pr.MaintainerCanModify, canModify)
+		}
+		if pr.HeadBranch != "main" || pr.HeadRepo != "contributor/orka" || pr.HeadRepoURL != "https://github.com/contributor/orka.git" {
+			t.Fatalf("refreshed head = %q %q %q, want the head identity from the same response as the permission", pr.HeadBranch, pr.HeadRepo, pr.HeadRepoURL)
 		}
 	}
 }
