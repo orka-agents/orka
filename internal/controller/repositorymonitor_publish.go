@@ -241,7 +241,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate {
 			updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, published, token, owner, repository)
 			if err != nil {
-				return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "update_review"})
+				return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: repositoryMonitorOperationUpdateReview})
 			}
 			if updated {
 				return nil
@@ -286,7 +286,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate && existingPublish.ReviewRecordID != record.ID {
 				updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, existingPublish, token, owner, repository)
 				if err != nil {
-					return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "update_review"})
+					return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: repositoryMonitorOperationUpdateReview})
 				}
 				if updated {
 					return nil
