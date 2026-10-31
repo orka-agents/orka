@@ -9,7 +9,9 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -119,6 +121,12 @@ type AuthConfig struct {
 	// listener cannot be replayed against an audience-bound listener.
 	TokenReviewAudiences []string
 
+	// TaskCallbackAudience additionally accepts ServiceAccount tokens bound to
+	// this audience. Only worker callback routes set it: a token minted for
+	// it is rejected by the Kubernetes API server and by every other route,
+	// which review tokens against the default audiences.
+	TaskCallbackAudience string
+
 	// ReportTokenReviewUnavailable opts TokenReview-only listeners into returning
 	// 503 when the backend request or status reports a failure, without authenticating the caller.
 	// Explicit authentication denials still return 401. The default preserves historical
@@ -199,6 +207,11 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 }
 
 func authenticateToken(ctx context.Context, c client.Client, token string, cfg AuthConfig) (*UserInfo, error) {
+	if cfg.TaskCallbackAudience != "" && jwtAudienceIncludes(token, cfg.TaskCallbackAudience) {
+		// The unverified claim only selects which audience to review; the
+		// TokenReview verifies the token against exactly that audience.
+		return validateToken(ctx, c, token, cfg.TaskCallbackAudience)
+	}
 	if !cfg.OIDC.Enabled() {
 		return validateToken(ctx, c, token, cfg.TokenReviewAudiences...)
 	}
@@ -304,6 +317,32 @@ func validateToken(ctx context.Context, c client.Client, token string, audiences
 	}
 
 	return userInfo, nil
+}
+
+// jwtAudienceIncludes reads a JWT's unverified aud claim, which is either a
+// string or a list of strings. Anything that does not parse as a JWT is not
+// treated as carrying the audience.
+func jwtAudienceIncludes(token, audience string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Audience json.RawMessage `json:"aud"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || len(claims.Audience) == 0 {
+		return false
+	}
+	var single string
+	if json.Unmarshal(claims.Audience, &single) == nil {
+		return single == audience
+	}
+	var list []string
+	return json.Unmarshal(claims.Audience, &list) == nil && slices.Contains(list, audience)
 }
 
 func normalizedTokenReviewAudiences(audiences []string) []string {

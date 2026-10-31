@@ -408,8 +408,9 @@ metadata:
 rules:
 # Minimal Task metadata for Orka-managed general-worker tasks, which submit
 # results/artifacts through the controller HTTP API using the worker ServiceAccount
-# token. Custom-image container tasks do not mount this token and have their
-# result collected from pod logs instead.
+# token. Custom-image container tasks do not mount this token: they post with an
+# Orka-audience token that grants no Kubernetes API access, or have their result
+# collected from pod logs.
 - apiGroups:
   - core.orka.ai
   resources:
