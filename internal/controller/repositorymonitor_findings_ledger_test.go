@@ -903,3 +903,19 @@ func TestRepositoryMonitorReviewBodyFitsManyFindings(t *testing.T) {
 		t.Fatalf("body does not shorten findings past the budget:\n%s", body[len(body)-2000:])
 	}
 }
+
+func TestRepositoryMonitorRepeatInsideChangesBringsAFindingIntoThem(t *testing.T) {
+	outside := ledgerFinding("f-outside", "P2", "a.go", 40, "Missing error check")
+	outside.OutsideChanges = true
+	plan := repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: &store.ReviewRecord{ID: "review-old", HeadSHA: "old"}, Ledger: []repositoryMonitorReviewFinding{outside}}
+	changed := repositoryMonitorChangedLines{"a.go": {{1, 5}}}
+	review := &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictPassed, Findings: []repositoryMonitorReviewFinding{{Priority: "P2", File: "a.go", Line: 3, Title: "Missing error check"}}}
+	ledger := repositoryMonitorMergeFindingLedger(plan, review, "new", "review-new", changed)
+	if len(ledger) != 1 || ledger[0].ID != "f-outside" || ledger[0].OutsideChanges {
+		t.Fatalf("ledger = %+v, want the open finding kept and brought inside the changes", ledger)
+	}
+	review.Findings[0].Line = 30
+	if ledger := repositoryMonitorMergeFindingLedger(plan, review, "new", "review-new", changed); len(ledger) != 1 || !ledger[0].OutsideChanges {
+		t.Fatalf("ledger = %+v, want a repeat outside the changes to leave coverage alone", ledger)
+	}
+}

@@ -257,7 +257,16 @@ func repositoryMonitorMergeFindingLedger(plan repositoryMonitorReviewPlan, revie
 	for i, finding := range review.Findings {
 		finding.ID, finding.Status, finding.FirstHead, finding.FirstReview, finding.ResolvedHead, finding.OutsideChanges = "", "", "", "", "", false
 		finding.SecuritySensitive = sensitive
-		if repositoryMonitorFindingRepeats(finding, open) {
+		if id, repeats := repositoryMonitorRepeatedFindingID(finding, open); repeats {
+			// A repeat reported inside the reviewed changes brings the open
+			// finding into them, where it may now block.
+			if changed == nil || changed.covers(finding.File, finding.Line) {
+				for j := range ledger {
+					if ledger[j].ID == id {
+						ledger[j].OutsideChanges = false
+					}
+				}
+			}
 			continue
 		}
 		finding.ID = repositoryMonitorFindingID(recordID, i, finding)
@@ -299,18 +308,25 @@ func repositoryMonitorFindingID(recordID string, index int, finding repositoryMo
 // severe than the open one is never a repeat, so a new blocker is not dropped
 // in favor of an earlier minor finding.
 func repositoryMonitorFindingRepeats(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) bool {
+	_, repeats := repositoryMonitorRepeatedFindingID(finding, open)
+	return repeats
+}
+
+// repositoryMonitorRepeatedFindingID returns the ID of the open finding that
+// finding restates, by the rule repositoryMonitorFindingRepeats describes.
+func repositoryMonitorRepeatedFindingID(finding repositoryMonitorReviewFinding, open []repositoryMonitorReviewFinding) (string, bool) {
 	file := strings.TrimSpace(finding.File)
 	title := repositoryMonitorNormalizedFindingText(finding.Title)
 	if file == "" || title == "" {
-		return false
+		return "", false
 	}
 	for _, other := range open {
 		if file == strings.TrimSpace(other.File) && title == repositoryMonitorNormalizedFindingText(other.Title) &&
 			repositoryMonitorFindingRank(finding) >= repositoryMonitorFindingRank(other) {
-			return true
+			return other.ID, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // repositoryMonitorFindingRank orders findings by priority, P0 first; an
