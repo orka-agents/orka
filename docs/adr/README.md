@@ -128,7 +128,7 @@ How monitors review and repair pull requests.
 
 | # | Decision | Status |
 | --- | --- | --- |
-| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Proposed |
+| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
 
 ## Writing a new one
 

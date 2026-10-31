@@ -4,7 +4,7 @@ Date: 2026-10-22
 
 ## Status
 
-Proposed. Not implemented. Builds on the clean-room publication path and the
+Accepted. Not implemented yet. Builds on the clean-room publication path and the
 repository monitor validation image; it changes neither for Tasks outside
 repository monitor repairs.
 
@@ -75,7 +75,12 @@ produces a different delta, that delta is validated again.
 
 A failing validation does not push. The controller continues the repair session
 with the failure evidence, up to `spec.repair.maxValidationRetries` times (the
-field exists today and defaults to 2). When the retries run out, the repair job
+field exists today and defaults to 2). It stays one budget per repair job:
+today it counts review-validation failures after a repair is pushed, and
+pre-push validation failures count against the same limit rather than a new
+field. With the gate in place, failures after the push should become rare, so
+the two uses converge on "how often may this repair fail validation". When the
+retries run out, the repair job
 fails with `repair_validation_failed`, nothing is pushed, and the pull request's
 readiness status says why. A validation Task that cannot run, such as an image
 pull failure, fails closed the same way, recorded as `unavailable`.
