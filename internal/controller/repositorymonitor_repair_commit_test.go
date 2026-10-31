@@ -122,6 +122,21 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 		t.Fatalf("message of %d bytes fails publication validation: %v", len(bounded), validateTaskPullRequestText(repairTask))
 	}
 
+	// A security-sensitive review's findings stay out of the public commit
+	// unless the monitor posts security-sensitive reviews.
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "review-77", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 77, HeadSHA: "head77", Verdict: repositoryMonitorReviewVerdictNeedsChanges, SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: string(findingsJSON)}); err != nil {
+		t.Fatal(err)
+	}
+	sensitivePR, sensitiveItem := repositoryMonitorPullRequest{Number: 77, HeadSHA: "head77"}, &store.MonitorItem{LastReviewID: "review-77"}
+	if sensitive, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, sensitivePR, sensitiveItem); err != nil || strings.Contains(sensitive, "Review findings") {
+		t.Fatalf("security-sensitive message = %q err=%v, want no findings listed", sensitive, err)
+	}
+	monitor.Spec.Review.Publish.PostSecuritySensitive = true
+	if public, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, sensitivePR, sensitiveItem); err != nil || !strings.Contains(public, "- [P1] Correct the fixture's expected line") {
+		t.Fatalf("security-sensitive message with posting enabled = %q err=%v, want findings listed", public, err)
+	}
+	monitor.Spec.Review.Publish.PostSecuritySensitive = false
+
 	// A review of an older head describes nothing this repair fixes.
 	pr.HeadSHA = "newer"
 	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {

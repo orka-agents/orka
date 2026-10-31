@@ -1227,7 +1227,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 			return "", err
 		}
 		var findings []repositoryMonitorReviewFinding
+		// A pushed commit is public, so a security-sensitive review's
+		// findings stay out of it unless the monitor posts such reviews.
 		if review != nil && review.MonitorName == monitor.Name && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA &&
+			(monitor.Spec.Review.Publish.PostSecuritySensitive || !repositoryMonitorReviewRecordSecuritySensitive(review)) &&
 			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
 			findings = repositoryMonitorOpenFindings(findings)
 			for i, finding := range findings {
@@ -1254,6 +1257,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 		message += listHeader + strings.Join(lines, "\n") + "\n"
 	}
 	return message + trailer, nil
+}
+
+// repositoryMonitorReviewRecordSecuritySensitive reports whether a review's
+// result is security-sensitive, by its security status or its verdict.
+func repositoryMonitorReviewRecordSecuritySensitive(record *store.ReviewRecord) bool {
+	return strings.EqualFold(strings.TrimSpace(record.SecurityStatus), repositoryMonitorReviewVerdictSecuritySensitive) ||
+		strings.EqualFold(strings.TrimSpace(record.Verdict), repositoryMonitorReviewVerdictSecuritySensitive)
 }
 
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
