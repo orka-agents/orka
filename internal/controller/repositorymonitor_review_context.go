@@ -28,11 +28,14 @@ import (
 // changed file in the Git-metadata-free checkout. Identities take precedence
 // over patches inside the byte budget.
 const (
-	repositoryMonitorReviewContextSchemaVersion    = "orka.prReview.context.v1"
-	repositoryMonitorReviewContextMaxFiles         = 100
-	repositoryMonitorReviewContextMaxFileEntries   = 2000
-	repositoryMonitorReviewContextMaxBytes         = 700 << 10
-	repositoryMonitorReviewContextMaxPatchBytes    = 64 << 10
+	repositoryMonitorReviewContextSchemaVersion  = "orka.prReview.context.v1"
+	repositoryMonitorReviewContextMaxFiles       = 100
+	repositoryMonitorReviewContextMaxFileEntries = 2000
+	repositoryMonitorReviewContextMaxBytes       = 700 << 10
+	repositoryMonitorReviewContextMaxPatchBytes  = 64 << 10
+	// repositoryMonitorReviewDeltaMaxBytes bounds a follow-up review's delta,
+	// which shares repositoryMonitorReviewContextMaxBytes with the full context.
+	repositoryMonitorReviewDeltaMaxBytes           = 192 << 10
 	repositoryMonitorReviewContextMaxPathBytes     = 512
 	repositoryMonitorReviewContextMaxStatusBytes   = 32
 	repositoryMonitorReviewContextPatchTruncated   = "truncated"
@@ -46,6 +49,10 @@ const (
 	repositoryMonitorReviewContextPatchCapped      = "capped"
 	repositoryMonitorReviewContextBeginMarker      = "--- BEGIN orka.prReview.context.v1 ---"
 	repositoryMonitorReviewContextEndMarker        = "--- END orka.prReview.context.v1 ---"
+	// The follow-up delta is a second orka.prReview.context.v1 payload with its
+	// own framing, so the pull request context block still parses on its own.
+	repositoryMonitorReviewDeltaBeginMarker = "--- BEGIN orka.prReview.followUpDelta ---"
+	repositoryMonitorReviewDeltaEndMarker   = "--- END orka.prReview.followUpDelta ---"
 
 	repositoryMonitorReviewContextErrorGitHubStatus   = "github_api_status_"
 	repositoryMonitorReviewContextErrorTimeout        = "timeout"
@@ -216,6 +223,12 @@ func repositoryMonitorReviewContextErrorClass(err error) string {
 // truncated.files therefore means the change set is not fully represented,
 // which the prompt turns into a mandatory non-passing verdict.
 func repositoryMonitorReviewContextFromFiles(owner, repository string, pr repositoryMonitorPullRequest, files []repositoryMonitorPullRequestFileResponse) repositoryMonitorReviewContext {
+	return repositoryMonitorReviewContextFromFilesWithin(owner, repository, pr, files, repositoryMonitorReviewContextMaxBytes)
+}
+
+// repositoryMonitorReviewContextFromFilesWithin builds the context within
+// maxBytes of encoded payload.
+func repositoryMonitorReviewContextFromFilesWithin(owner, repository string, pr repositoryMonitorPullRequest, files []repositoryMonitorPullRequestFileResponse, maxBytes int) repositoryMonitorReviewContext {
 	reviewContext := newRepositoryMonitorReviewContext(owner, repository, pr)
 	reviewContext.ChangedFileCount = len(files)
 	if len(files) > repositoryMonitorReviewContextMaxFileEntries {
@@ -238,7 +251,7 @@ func repositoryMonitorReviewContextFromFiles(owner, repository string, pr reposi
 		}
 		entry := repositoryMonitorReviewContextIdentityEntry(file, i >= repositoryMonitorReviewContextMaxFiles)
 		entrySize := repositoryMonitorReviewContextEntrySize(entry, len(entries))
-		if used+entrySize > repositoryMonitorReviewContextMaxBytes {
+		if used+entrySize > maxBytes {
 			reviewContext.Truncated.Files = true
 			reviewContext.Truncated.Bytes = true
 			break
@@ -252,7 +265,7 @@ func repositoryMonitorReviewContextFromFiles(owner, repository string, pr reposi
 			continue
 		}
 		delta := repositoryMonitorReviewContextEntrySize(withPatch, i) - repositoryMonitorReviewContextEntrySize(entries[i], i)
-		if used+delta > repositoryMonitorReviewContextMaxBytes {
+		if used+delta > maxBytes {
 			reviewContext.Truncated.Bytes = true
 			break
 		}
@@ -260,7 +273,14 @@ func repositoryMonitorReviewContextFromFiles(owner, repository string, pr reposi
 		used += delta
 	}
 	reviewContext.Files = entries
-	reviewContext = repositoryMonitorReviewContextTrimToBudget(reviewContext)
+	return repositoryMonitorReviewContextWithin(reviewContext, maxBytes)
+}
+
+// repositoryMonitorReviewContextWithin trims reviewContext to maxBytes of
+// encoded payload and marks the change set incomplete when a trimmed patch
+// hides what changed.
+func repositoryMonitorReviewContextWithin(reviewContext repositoryMonitorReviewContext, maxBytes int) repositoryMonitorReviewContext {
+	reviewContext = repositoryMonitorReviewContextTrimToBudget(reviewContext, maxBytes)
 	return repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext)
 }
 
@@ -298,8 +318,8 @@ func repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext repos
 // repositoryMonitorReviewContextTrimToBudget verifies the final encoding,
 // because the per-entry accounting is an estimate, and trims conservatively:
 // the last remaining patch goes first, then the last identity entry.
-func repositoryMonitorReviewContextTrimToBudget(reviewContext repositoryMonitorReviewContext) repositoryMonitorReviewContext {
-	for repositoryMonitorReviewContextEncodedSize(reviewContext) > repositoryMonitorReviewContextMaxBytes && len(reviewContext.Files) > 0 {
+func repositoryMonitorReviewContextTrimToBudget(reviewContext repositoryMonitorReviewContext, maxBytes int) repositoryMonitorReviewContext {
+	for repositoryMonitorReviewContextEncodedSize(reviewContext) > maxBytes && len(reviewContext.Files) > 0 {
 		reviewContext.Truncated.Bytes = true
 		if i := repositoryMonitorReviewContextLastPatchIndex(reviewContext.Files); i >= 0 {
 			reviewContext.Files[i] = repositoryMonitorReviewContextDropPatch(reviewContext.Files[i])
@@ -637,6 +657,35 @@ func renderRepositoryMonitorReviewContext(reviewContext repositoryMonitorReviewC
 	return repositoryMonitorReviewContextBeginMarker + "\n" + string(encoded) + "\n" + repositoryMonitorReviewContextEndMarker
 }
 
+// renderRepositoryMonitorReviewDelta renders the follow-up delta with its own
+// markers.
+func renderRepositoryMonitorReviewDelta(delta repositoryMonitorReviewContext) string {
+	rendered := renderRepositoryMonitorReviewContext(delta)
+	rendered = strings.TrimPrefix(rendered, repositoryMonitorReviewContextBeginMarker)
+	rendered = strings.TrimSuffix(rendered, repositoryMonitorReviewContextEndMarker)
+	return repositoryMonitorReviewDeltaBeginMarker + rendered + repositoryMonitorReviewDeltaEndMarker
+}
+
+// repositoryMonitorReviewPromptDelta parses the follow-up delta block of a
+// rendered review prompt.
+func repositoryMonitorReviewPromptDelta(prompt string) (repositoryMonitorReviewContext, bool) {
+	beginLine := "\n" + repositoryMonitorReviewDeltaBeginMarker + "\n"
+	endLine := "\n" + repositoryMonitorReviewDeltaEndMarker
+	_, block, found := strings.Cut(prompt, beginLine)
+	if !found {
+		return repositoryMonitorReviewContext{}, false
+	}
+	block, _, found = strings.Cut(block, endLine)
+	if !found {
+		return repositoryMonitorReviewContext{}, false
+	}
+	var parsed repositoryMonitorReviewContext
+	if err := json.Unmarshal([]byte(block), &parsed); err != nil {
+		return repositoryMonitorReviewContext{}, false
+	}
+	return parsed, true
+}
+
 // repositoryMonitorReviewPromptContextBounds locates the rendered context
 // block: the first line-anchored begin marker and the LAST line-anchored end
 // marker after it. Untrusted payload text is JSON-encoded, so it can never
@@ -724,7 +773,11 @@ func repositoryMonitorReviewVerdictGateReason(prompt, verdict string) string {
 		return "the diff context was unavailable (" + reviewContext.ContextUnavailable + ")"
 	case reviewContext.Truncated.Files:
 		return "the change set was not completely represented in the diff context"
-	default:
-		return ""
 	}
+	// A follow-up review must also have seen every change since the last
+	// review; a small final diff can hide a large truncated delta.
+	if delta, ok := repositoryMonitorReviewPromptDelta(prompt); ok && (delta.ContextUnavailable != "" || delta.Truncated.Files) {
+		return "the changes since the last review were not completely represented"
+	}
+	return ""
 }

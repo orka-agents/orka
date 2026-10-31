@@ -1,0 +1,157 @@
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+)
+
+// repositoryMonitorFindingThreadsGitHub fakes the GitHub API calls that mark
+// fixed findings' threads and records the comments and threads it changed.
+type repositoryMonitorFindingThreadsGitHub struct {
+	t           *testing.T
+	mu          sync.Mutex
+	currentHead string
+	patched     []string
+	resolved    []string
+}
+
+func (g *repositoryMonitorFindingThreadsGitHub) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	body, _ := io.ReadAll(req.Body)
+	switch {
+	case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/pulls/1":
+		_, _ = w.Write([]byte(`{"number":1,"state":"open","draft":false,"base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"` + g.currentHead + `","repo":{"full_name":"orka-agents/orka"}},"labels":[]}`))
+	case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/pulls/1/reviews/123/comments":
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": 501, "body": "**P1: Bug**\n\n<!-- orka:repo-monitor-inline review=r1 finding=f-aaaa -->"},
+			{"id": 502, "body": "**P1: Other**\n\n<!-- orka:repo-monitor-inline review=r1 finding=f-bbbb -->"},
+			{"id": 503, "body": "A human reply"},
+		})
+	case req.Method == http.MethodPost && req.URL.Path == "/graphql" && strings.Contains(string(body), "reviewThreads"):
+		_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+			{"id":"T501","isResolved":false,"comments":{"nodes":[{"databaseId":501}]}},
+			{"id":"T502","isResolved":false,"comments":{"nodes":[{"databaseId":502}]}}
+		],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`))
+	case req.Method == http.MethodPost && req.URL.Path == "/graphql" && strings.Contains(string(body), "resolveReviewThread"):
+		var request struct {
+			Variables map[string]string `json:"variables"`
+		}
+		_ = json.Unmarshal(body, &request)
+		g.resolved = append(g.resolved, request.Variables["thread"])
+		_, _ = w.Write([]byte(`{"data":{"resolveReviewThread":{"thread":{"id":"x","isResolved":true}}}}`))
+	case req.Method == http.MethodPatch && strings.HasPrefix(req.URL.Path, "/repos/orka-agents/orka/pulls/comments/"):
+		var update map[string]string
+		_ = json.Unmarshal(body, &update)
+		g.patched = append(g.patched, strings.TrimPrefix(req.URL.Path, "/repos/orka-agents/orka/pulls/comments/")+":"+update["body"])
+		_, _ = w.Write([]byte(`{}`))
+	default:
+		// Reviews Orka did not publish, such as one carrying a copied
+		// marker, are never read.
+		g.t.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+		http.NotFound(w, req)
+	}
+}
+
+func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
+	ctx := context.Background()
+	github := &repositoryMonitorFindingThreadsGitHub{t: t, currentHead: "moved99"}
+	server := httptest.NewServer(github)
+	defer server.Close()
+
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("threads")
+	monitor.Spec.Review.Publish.Enabled = true
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
+	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "old", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "123"}); err != nil {
+		t.Fatal(err)
+	}
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{
+		{ID: "f-aaaa", Title: "Bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "newhead1"},
+		{ID: "f-bbbb", Title: "Other", Status: repositoryMonitorFindingStatusOpen},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+	item := &store.MonitorItem{Number: 1}
+	// The head moved after the review, so the fix may no longer hold.
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 0 || len(github.resolved) != 0 {
+		t.Fatalf("marked threads for a head that moved: patched=%q resolved=%q", github.patched, github.resolved)
+	}
+	github.currentHead = "newhead1"
+	// A result that was not accepted never declares a finding fixed.
+	skipped := *record
+	skipped.ID, skipped.Verdict = "review-skipped", repositoryMonitorVerdictSkipped
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &skipped); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 0 || len(github.resolved) != 0 {
+		t.Fatalf("marked threads for a skipped review: patched=%q resolved=%q", github.patched, github.resolved)
+	}
+	for range 2 {
+		if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(github.patched) != 1 || !strings.HasPrefix(github.patched[0], "501:✅ Addressed in `newhead1`.\n\n**P1: Bug**") {
+		t.Fatalf("patched comments = %q, want only the fixed finding's comment, once", github.patched)
+	}
+	if len(github.resolved) != 1 || github.resolved[0] != "T501" {
+		t.Fatalf("resolved threads = %q, want T501 once", github.resolved)
+	}
+	// A later review of the same head does not resolve the thread again, so a
+	// thread a maintainer reopened stays open.
+	rereview := *record
+	rereview.ID = "review-rereview"
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &rereview); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 1 || len(github.resolved) != 1 {
+		t.Fatalf("a same-head re-review marked again: patched=%q resolved=%q", github.patched, github.resolved)
+	}
+
+	// A security-sensitive review, or a fix of a restricted finding, never
+	// links the finding to its fix.
+	restrictedJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{
+		{ID: "f-aaaa", Title: "Bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "newhead1", SecuritySensitive: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, restricted := range []*store.ReviewRecord{
+		{ID: "review-sensitive", HeadSHA: "newhead1", SecurityStatus: repositoryMonitorReviewVerdictSecuritySensitive, FindingsJSON: findingsJSON},
+		{ID: "review-restricted", HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: restrictedJSON},
+	} {
+		if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, restricted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(github.patched) != 1 || len(github.resolved) != 1 {
+		t.Fatalf("marked a restricted finding: patched=%q resolved=%q", github.patched, github.resolved)
+	}
+}

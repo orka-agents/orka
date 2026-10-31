@@ -17,6 +17,9 @@ const repositoryMonitorControllerPolicySource = "controller_policy"
 
 const repositoryMonitorWorkflowPollInterval = 30 * time.Second
 
+// repositoryMonitorRunTriggerWorkflow marks runs the controller queues itself.
+const repositoryMonitorRunTriggerWorkflow = "workflow"
+
 // repositoryMonitorEventRepairRefused records why an automatic repair did not start.
 const repositoryMonitorEventRepairRefused = "repair_refused"
 
@@ -113,6 +116,11 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 // automatic repair fixes CI first. ciFirst allows only a CI fix, for a head
 // whose review waits for green CI.
 func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst, ciFirst bool) (string, error) {
+	// An exhaustive review of this head must finish its passes before any
+	// repair moves the head.
+	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
+		return "", err
+	}
 	if full && !ciFirst && pr.MergeableState == repositoryMonitorMergeableStateDirty {
 		return repositoryMonitorCommandIntentUpdateBranch, nil
 	}
@@ -205,7 +213,23 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 		cursor = next
 	}
 	id := "workflow-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, now.Unix()/30))
-	if err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}); err != nil && !errors.Is(err, store.ErrConflict) {
+	if err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}); err != nil && !errors.Is(err, store.ErrConflict) {
+		return err
+	}
+	return nil
+}
+
+// queueRepositoryMonitorExhaustivePass queues a run for the next exhaustive
+// pass on record's head when no workflow poll would: a review-only monitor
+// otherwise waits for an unrelated event or schedule. The run ID is derived
+// from the record, so a repeated ingestion queues it once.
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorExhaustivePass(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) error {
+	if repositoryMonitorSuspended(monitor) || repositoryMonitorManagedWorkflow(monitor) {
+		return nil
+	}
+	id := "exhaustive-" + repositoryMonitorShortHash(monitor.Namespace+"/"+monitor.Name+"|"+record.ID)
+	run := &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: record.Number, TargetSHA: record.HeadSHA, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now()}
+	if err := r.Store.CreateMonitorRun(ctx, run); err != nil && !errors.Is(err, store.ErrConflict) {
 		return err
 	}
 	return nil

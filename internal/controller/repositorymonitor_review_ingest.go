@@ -72,6 +72,9 @@ type repositoryMonitorReviewResult struct {
 	Security         repositoryMonitorReviewSecurity   `json:"security"`
 	Tests            repositoryMonitorReviewTestStatus `json:"tests"`
 	SuggestedComment string                            `json:"suggestedComment"`
+	// PreviousFindings reports, in a follow-up review, whether each open
+	// finding Orka listed in the prompt is fixed at this head.
+	PreviousFindings []repositoryMonitorReviewPreviousFinding `json:"previousFindings"`
 }
 
 type repositoryMonitorReviewFinding struct {
@@ -82,6 +85,33 @@ type repositoryMonitorReviewFinding struct {
 	Title          string `json:"title"`
 	Body           string `json:"body"`
 	Recommendation string `json:"recommendation"`
+
+	// The fields below form Orka's record of findings for a pull request.
+	// Orka sets them when it ingests a review and ignores any value the
+	// reviewer supplies.
+	ID string `json:"id,omitempty"`
+	// Status is empty or open while the finding is open.
+	Status string `json:"status,omitempty"`
+	// FirstHead is the head the finding was first reported at, and
+	// FirstReview the review record that reported it.
+	FirstHead   string `json:"firstHead,omitempty"`
+	FirstReview string `json:"firstReview,omitempty"`
+	// ResolvedHead is the head a follow-up review found the finding fixed at.
+	ResolvedHead string `json:"resolvedHead,omitempty"`
+	// OutsideChanges marks a follow-up finding outside the changes the
+	// follow-up review covered.
+	OutsideChanges bool `json:"outsideChanges,omitempty"`
+	// SecuritySensitive marks a finding reported by a security-sensitive
+	// review. It keeps every later review that carries it open
+	// security-sensitive, so its details stay unpublished.
+	SecuritySensitive bool `json:"securitySensitive,omitempty"`
+}
+
+// repositoryMonitorReviewPreviousFinding is a follow-up review's status for
+// one finding Orka listed as open.
+type repositoryMonitorReviewPreviousFinding struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
 }
 
 type repositoryMonitorReviewSecurity struct {
@@ -218,12 +248,32 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return false, nil
 	}
 
-	findingsJSON, err := repositoryMonitorReviewFindingsJSON(review.Findings)
+	plan, err := r.repositoryMonitorReviewPlanForTask(ctx, monitor, item, task)
 	if err != nil {
 		return false, err
 	}
-	verdict := strings.TrimSpace(review.Verdict)
+	reviewedHead := strings.TrimSpace(review.HeadSHA)
+	ledger := repositoryMonitorMergeFindingLedger(plan, review, reviewedHead, recordID, repositoryMonitorReviewChangedLines(plan, task.Spec.Prompt))
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON(ledger)
+	if err != nil {
+		return false, err
+	}
+	reviewerVerdict := strings.TrimSpace(review.Verdict)
+	verdict := repositoryMonitorDerivedReviewVerdict(monitor.Spec, reviewerVerdict, ledger)
+	// A review shown an open security-sensitive finding may describe it in
+	// its own prose even after fixing it, so it stays unpublished.
+	securityStatus := strings.TrimSpace(review.Security.Status)
+	if repositoryMonitorLedgerSecuritySensitive(ledger) || repositoryMonitorLedgerSecuritySensitive(plan.Ledger) {
+		securityStatus = repositoryMonitorReviewVerdictSecuritySensitive
+	}
 	summary := strings.TrimSpace(review.Summary)
+	repairable := review.Repairable
+	if verdict != reviewerVerdict {
+		// The reviewer judged passed against findings Orka still counts as
+		// blocking; those are concrete code defects, so they are repairable.
+		repairable = repairable || verdict == repositoryMonitorReviewVerdictNeedsChanges
+		summary = strings.TrimSpace(repositoryMonitorDerivedVerdictNote(monitor.Spec, verdict) + " " + summary)
+	}
 	if verdict == repositoryMonitorReviewVerdictPassed && validation.Required && validation.Status != repositoryMonitorValidationStatusPassed {
 		verdict = repositoryMonitorReviewVerdictNeedsHuman
 		if validation.Status == repositoryMonitorValidationStatusFailed {
@@ -261,8 +311,8 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		TaskNamespace:           task.Namespace,
 		Verdict:                 verdict,
 		Confidence:              strings.TrimSpace(review.Confidence),
-		Repairable:              review.Repairable,
-		SecurityStatus:          strings.TrimSpace(review.Security.Status),
+		Repairable:              repairable,
+		SecurityStatus:          securityStatus,
 		FindingsJSON:            findingsJSON,
 		Summary:                 summary,
 		SuggestedComment:        strings.TrimSpace(review.SuggestedComment),
@@ -308,6 +358,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
@@ -933,6 +984,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
@@ -966,6 +1018,7 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx con
 	if err := r.publishRepositoryMonitorReview(ctx, monitor, item, task, record); err != nil {
 		return false, err
 	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
 	return true, nil
 }
 
@@ -981,6 +1034,19 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 		marksFresh := repositoryMonitorReviewRecordMarksHeadFresh(record)
 		if validationRetry.associated && repositoryMonitorValidationRetryableAfterRepair(record.ValidationStatus) {
 			marksFresh = validationRetry.exhausted
+		}
+		if marksFresh {
+			// An exhaustive review is not done until its last pass.
+			pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record)
+			if err != nil {
+				return err
+			}
+			if pending {
+				if err := r.queueRepositoryMonitorExhaustivePass(ctx, monitor, record); err != nil {
+					return err
+				}
+			}
+			marksFresh = !pending
 		}
 		if reason == "" && marksFresh && repositoryMonitorReviewRecordMatchesValidationPolicy(monitor, record) {
 			item.LastReviewedHeadSHA = record.HeadSHA
