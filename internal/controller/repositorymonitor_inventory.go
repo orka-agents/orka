@@ -82,6 +82,9 @@ type repositoryMonitorPullRequest struct {
 	// ChangedFiles is GitHub's authoritative changed-file total. It is only
 	// present on a single pull request read; list responses leave it zero.
 	ChangedFiles int
+	// MaintainerCanModify reports whether a fork's author allows maintainer
+	// pushes to the head branch. Like ChangedFiles, list responses omit it.
+	MaintainerCanModify bool
 }
 
 //nolint:gocyclo // Pull request inventory combines selection, CI gating, and audit decisions.
@@ -1260,7 +1263,9 @@ type repositoryMonitorPullRequestResponse struct {
 	Merged         bool   `json:"merged"`
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	ChangedFiles   int    `json:"changed_files"`
-	User           struct {
+	// MaintainerCanModify is present only on single pull request reads.
+	MaintainerCanModify bool `json:"maintainer_can_modify"`
+	User                struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Base struct {
@@ -1298,22 +1303,23 @@ func repositoryMonitorPullRequestFromGitHub(pr repositoryMonitorPullRequestRespo
 		labelNames = append(labelNames, label.Name)
 	}
 	return repositoryMonitorPullRequest{
-		Number:         pr.Number,
-		Title:          pr.Title,
-		Author:         pr.User.Login,
-		State:          pr.State,
-		Labels:         labelNames,
-		BaseBranch:     pr.Base.Ref,
-		HeadBranch:     pr.Head.Ref,
-		HeadRepo:       pr.Head.Repo.FullName,
-		HeadRepoURL:    pr.Head.Repo.CloneURL,
-		BaseSHA:        pr.Base.SHA,
-		HeadSHA:        pr.Head.SHA,
-		Draft:          pr.Draft,
-		MergeableState: pr.MergeableState,
-		Merged:         pr.Merged,
-		MergeCommitSHA: pr.MergeCommitSHA,
-		ChangedFiles:   pr.ChangedFiles,
+		Number:              pr.Number,
+		Title:               pr.Title,
+		Author:              pr.User.Login,
+		State:               pr.State,
+		Labels:              labelNames,
+		BaseBranch:          pr.Base.Ref,
+		HeadBranch:          pr.Head.Ref,
+		HeadRepo:            pr.Head.Repo.FullName,
+		HeadRepoURL:         pr.Head.Repo.CloneURL,
+		BaseSHA:             pr.Base.SHA,
+		HeadSHA:             pr.Head.SHA,
+		Draft:               pr.Draft,
+		MergeableState:      pr.MergeableState,
+		Merged:              pr.Merged,
+		MergeCommitSHA:      pr.MergeCommitSHA,
+		ChangedFiles:        pr.ChangedFiles,
+		MaintainerCanModify: pr.MaintainerCanModify,
 	}
 }
 
