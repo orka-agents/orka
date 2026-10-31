@@ -36,6 +36,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 type externalACPDispatchFixture struct {
@@ -392,7 +393,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(ctx)
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -429,7 +430,7 @@ func newExternalACPDispatchFixtureWithOptions(
 	}
 	dispatcher := &ACPDispatcher{
 		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: persistence,
-		EventStore: persistence, PlanStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
+		EventStore: persistence, Snapshots: persistence, Epochs: epochs, Sessions: continuity,
 		PromptLeases: &ACPMCPPromptLeaseRegistry{},
 	}
 	return &externalACPDispatchFixture{

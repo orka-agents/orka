@@ -439,6 +439,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
 | `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |
+| `--store-sqlite-synchronous` | `normal` | SQLite synchronous mode. `normal` syncs the write-ahead log at checkpoints, so the latest commits can be lost if the node or its disk fails (durability class `local-buffered`); `full` syncs every commit (`local-fsync`). The chart sets it from `store.sqliteSynchronous`. |
 | `--ai-worker-service-account-name` | `orka-ai-worker` | ServiceAccount name for AI worker Jobs and dynamically ensured worker RBAC |
 | `--vendor-worker-service-account-name` | `orka-vendor-worker` | ServiceAccount name for vendor/agent worker Jobs and dynamically ensured worker RBAC |
 | `--container-worker-service-account-name` | `orka-container-worker` | ServiceAccount name for container worker Jobs and dynamically ensured worker RBAC |

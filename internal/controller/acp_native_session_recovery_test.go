@@ -71,7 +71,7 @@ func newNativeRecoveryDispatcher(t *testing.T, fixture *taskScopedCreateConflict
 	require.NoError(t, err)
 	return &ACPDispatcher{
 		Client: fixture.kubeClient, APIReader: fixture.kubeClient, Store: controls,
-		ResultStore: persistence, EventStore: persistence, PlanStore: persistence,
+		ResultStore: persistence, EventStore: persistence,
 		Snapshots: persistence, Sessions: continuity, Epochs: fixture.dispatcher.Epochs,
 	}
 }
