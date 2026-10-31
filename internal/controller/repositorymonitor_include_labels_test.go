@@ -544,9 +544,9 @@ func TestRepositoryMonitorRefreshedPullRequestWithoutIncludeLabelIsRetired(t *te
 		t.Fatal(err)
 	}
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
-	pr := func(labels ...string) map[string]any {
-		prLabels := []map[string]string{}
-		for _, label := range labels {
+	pr := func(names ...string) map[string]any {
+		prLabels := make([]map[string]string, 0, len(names))
+		for _, label := range names {
 			prLabels = append(prLabels, map[string]string{"name": label})
 		}
 		return map[string]any{"number": 1, "state": "open", "head": map[string]string{"sha": "head1"}, "base": map[string]string{"ref": "main"}, "labels": prLabels}
