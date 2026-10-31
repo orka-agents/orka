@@ -442,3 +442,92 @@ func TestRepositoryMonitorExcludedPullRequestsReuseTheRunInventory(t *testing.T)
 		}
 	}
 }
+
+func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testing.T) {
+	ctx := t.Context()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("include-isolate")
+	monitor.Spec.Review.Publish.Enabled = true
+	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	labelled, failHead1 := true, false
+	latest := map[string]repositoryMonitorCommitStatus{}
+	prJSON := func(number int64) map[string]any {
+		prLabels := []map[string]string{}
+		if labelled {
+			prLabels = append(prLabels, map[string]string{"name": "orka:review"})
+		}
+		return map[string]any{"number": number, "state": "open", "head": map[string]string{"sha": fmt.Sprintf("head%d", number)}, "base": map[string]string{"ref": "main"}, "labels": prLabels}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := req.URL.Path
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
+			_ = json.NewEncoder(w).Encode([]any{prJSON(1), prJSON(2)})
+		case req.Method == http.MethodGet && strings.Contains(path, "/pulls/"):
+			number, _ := strconv.ParseInt(path[strings.LastIndex(path, "/")+1:], 10, 64)
+			_ = json.NewEncoder(w).Encode(prJSON(number))
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":99,"name":"tests","status":"completed","conclusion":"success"}]}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/status"):
+			sha := strings.TrimSuffix(path[strings.Index(path, "/commits/")+len("/commits/"):], "/status")
+			statuses := []repositoryMonitorCommitStatus{}
+			if status, ok := latest[sha]; ok {
+				statuses = append(statuses, status)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(statuses), "statuses": statuses})
+		case req.Method == http.MethodPost && strings.Contains(path, "/statuses/"):
+			sha := path[strings.LastIndex(path, "/")+1:]
+			if failHead1 && sha == "head1" {
+				http.Error(w, "unavailable", http.StatusBadGateway)
+				return
+			}
+			var status repositoryMonitorCommitStatus
+			if err := json.NewDecoder(req.Body).Decode(&status); err != nil {
+				t.Error(err)
+			}
+			status.ID = int64(100 + len(latest))
+			latest[sha] = status
+			_ = json.NewEncoder(w).Encode(status)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	for _, number := range []int64{1, 2} {
+		head := fmt.Sprintf("head%d", number)
+		review := seedRepositoryMonitorAutomergeReview(t, ctx, db, monitor.Name, number, head)
+		if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: fmt.Sprint(number), Number: number, State: "open", BaseBranch: "main", HeadSHA: head, LastReviewID: review, LastReviewedHeadSHA: head, LastVerdict: repositoryMonitorReviewVerdictPassed}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(id string) error {
+		_, _, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka")
+		return err
+	}
+	if err := run("isolate-1"); err != nil || latest["head1"].State != repositoryMonitorStatusSuccess || latest["head2"].State != repositoryMonitorStatusSuccess {
+		t.Fatalf("statuses = %+v err=%v, want both heads published", latest, err)
+	}
+	labelled, failHead1 = false, true
+	if err := run("isolate-2"); err == nil || !strings.Contains(err.Error(), "#1") {
+		t.Fatalf("run error = %v, want the failed retirement of #1 reported", err)
+	}
+	first, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil || first.State == repositoryMonitorItemStateOutOfScope {
+		t.Fatalf("item 1 = %+v err=%v, want it left for retry", first, err)
+	}
+	second, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "2")
+	if err != nil || second.State != repositoryMonitorItemStateOutOfScope || latest["head2"].State != repositoryMonitorStatusFailure {
+		t.Fatalf("item 2 = %+v status %+v err=%v, want it retired despite #1 failing", second, latest["head2"], err)
+	}
+}
