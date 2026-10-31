@@ -104,10 +104,10 @@ patch → pull-request remediation flow.
 
 | Phase | What happens |
 |-------|--------------|
-| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. |
+| **Initial scan** | Clones the repo, generates `security-threat-model.md`, runs a deterministic mapper that writes `security-slices.json`, reviews selected stored slices, and stores a run summary. A threat model is generated even when no findings are emitted. Full-repository scans also review cross-component slices; see [Cross-component review](#cross-component-review). |
 | **Threat model review** | The repository detail page shows the generated threat model in an editor. Saving an edit (or a regenerated model) replaces the current threat model and influences ranking on later scans. Prior threat models are not retained as history. |
 | **Incremental scans** | Run on the configured schedule and process commits after the last completed run. Slice metadata drives changed-file-based selection. Manual re-scan stays available and intentionally reruns even if the same range was scanned before; scheduled/incremental active runs use an idempotency key to avoid duplicate in-flight work. |
-| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges included in the review context manifest. Valid candidates then pass a deterministic false-positive filter before the max-finding cap. Invalid, filtered, or capped output is recorded as dropped diagnostics instead of becoming a finding. |
+| **Evidence ingestion** | v2 findings are stored only when their evidence cites safe repo-relative paths and line ranges from the review context manifest: an included excerpt, or a reference file within its recorded line count. A citation outside both is removed, and a finding without any remaining citation is dropped. Valid candidates then pass a deterministic false-positive filter before the max-finding cap. Invalid, filtered, or capped output is recorded as dropped diagnostics instead of becoming a finding. |
 | **Patch generation** | From a finding, Orka creates a dedicated write-intent patch task. The agent edits the workspace and returns an identity-bound `orka.security.patch.v1` result envelope (summary, changed files, tests run, risk); it never writes artifact files into the workspace. The clean-room Workspace/Publisher commits the delta and opens the pull request, and the controller derives the reviewable diff from that published commit (read with `forgeCredentialRef`) and stores the diff and summary artifacts. The proposal is marked ready only when the envelope's changed files exactly match the published commit. |
 | **PR receipt** | The pull request already exists at this point — the clean-room publisher opened it during patch generation as part of the same governed, verified publication. The pull-request endpoint is idempotent: it records and returns the verified PR receipt (number and URL) from the proposal rather than opening a second PR, and the controller re-titles the publisher's generic PR with the finding (`fix(security): …`). |
 
@@ -158,13 +158,60 @@ of findings kept and dropped.
 | Mode | Behavior |
 |------|----------|
 | `off` | No validation tasks; schema, evidence, and deterministic false-positive filters still run. |
-| `light` | Default. Validates a small number of likely high-impact/high-confidence findings when safe and practical. |
+| `light` | Default. Validates, mainly from source, every kept finding of at least medium severity or confidence, up to 25 per run. |
 | `full` | More aggressive validation/reproduction for kept findings, including builds where useful. |
 
 Scanning never requires a buildable repository; validation may build when useful. Automatic
 validation can be tuned with `validationMaxFindingsPerRun`, `validationMinSeverity`, and
-`validationMinConfidence`; failed validations are excluded from recommended patch candidates,
-while validated findings rank above unvalidated findings of the same severity.
+`validationMinConfidence` (light defaults: 25, `medium`, `medium`). A `failed` validation means
+the validator refuted the finding, and such findings are excluded from recommended patch
+candidates. A validation that produced no verdict, for example because its result could not be
+decoded, is recorded as `error` and leaves the finding eligible. A validated finding takes the
+severity and confidence its validator assigns, which the validator calibrates against the code.
+Validated findings rank above unvalidated findings of the same severity. Missing runtime reproduction alone does not fail a
+finding that its source supports.
+
+## Cross-component review
+
+Package-sized slices cannot see a vulnerability whose attacker-controlled source, failing
+control, and sensitive operation live in different components. Full-repository scans
+(initial and manual runs without a base commit) add three things:
+
+- **Reference files.** Each review may read files beyond its excerpts in its workspace and cite
+  them. A Go package slice can cite the in-repository packages it imports and those that import
+  it, and TypeScript or JavaScript files can cite the files they import (relative imports, workspace
+  packages through their `exports`, `main`, or index files, and tsconfig `paths` aliases) and those
+  that import them; every slice can cite its own files past the
+  excerpt.
+- **Threat-model investigations.** The threat model stage returns up to eight cross-component
+  security questions. They are saved in the threat model under **Cross-component
+  investigations**, where you can edit them, and each becomes its own review slice that can
+  cite any indexed repository file.
+- **Independent audit.** One extra slice reviews the repository's trust boundaries without
+  per-component slicing.
+
+When a review reports a broken control that the run has already kept, that is, both findings
+cite an overlapping `root_control` location (or, when neither marks one, an overlapping `sink`), the
+repeat is stored as a duplicate of the first finding and does not count toward
+`maxFindingsPerRun`.
+
+Review slices run as concurrent Tasks, up to the smaller of the controller's ACP dispatch
+limit (`controller.acpRuntime.dispatch.maxConcurrentTasks`) and the RuntimePool's
+`maxRunningPrompts`; both default to 4. A run keeps at most four review Tasks outstanding per
+prompt it can run at once (16 by default; four until a review is queued to its RuntimePool),
+and all scans together keep at most four per dispatch place. More start as earlier reviews
+finish, so queued slices do not spend their Task deadline waiting for a runtime.
+
+A review slice is retried once when its prompt fails or returns an invalid result. If the
+retry prompt also fails, for example because the model provider stopped the response, the
+slice is marked `failed` and the run continues; the run summary reports how many slices
+could not be reviewed, and the run fails only when none could. A result that still fails
+validation after the retry fails the run.
+
+Each review also records coverage: `scan.reviewedFiles` lists the files it read and
+`scan.resolvedQuestions` lists the questions it checked and ruled out. Both appear in the
+review Task's result. Finding evidence can carry a role (`entrypoint`, `source`,
+`propagation`, `root_control`, `sink`, or `context`), shown on the finding detail page.
 
 ## Custom scan policy ConfigMaps
 
@@ -233,8 +280,9 @@ paths and exclude common noise. The controller also applies a deterministic filt
 findings are stored. Default dropped classes include docs-only issues, test-only issues,
 generic missing rate limits, generic DoS/resource exhaustion, dependency-version reports,
 client-side-only auth complaints, React XSS without unsafe HTML sinks, shell injection with
-no untrusted input path, non-sensitive logging, and generic prompt injection without a
-privileged Orka effect.
+no untrusted input path, non-sensitive logging, demo, example, or vendored `third_party`
+content that production does not load, and generic prompt injection without a privileged
+Orka effect. The mapper also skips `third_party` directories.
 
 Dropped diagnostics are visible from the API, CLI, and repository detail page. Each dropped
 item has a layer (`validation`, `filter`, or `cap`), reason, and sanitized compact sample.

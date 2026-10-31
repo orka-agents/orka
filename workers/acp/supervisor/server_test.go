@@ -933,6 +933,60 @@ func TestSupervisorUsesCodexFinalAnswerAsTerminalResult(t *testing.T) {
 	}
 }
 
+// codex-acp 2.x withholds message phases from non-AIR clients, so a Codex
+// session falls back to its last named message.
+func TestSupervisorUsesLastCodexMessageWithoutPhases(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "codex", provider: providerKindCodex, want: `{"schemaVersion":1,"ok":true}`},
+		{name: "other runtime", provider: providerKindCopilot, want: "I'll inspect the repository.\n" + "Warning: slow\n\n" + `{"schemaVersion":1,"ok":true}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, cfg, _ := newTestServer(t, "immediate")
+			server.cfg.Capabilities.Limits.MaxTerminalResultBytes = 4096
+			fence := cfg.Fence
+			fence.RuntimeSessionUID = "message-session-uid"
+			fence.RuntimeSessionGeneration = 1
+			prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+			state := &sessionState{
+				descriptor: harnessv2.RuntimeSessionDescriptor{
+					RuntimeSessionUID: fence.RuntimeSessionUID,
+					Generation:        fence.RuntimeSessionGeneration,
+				},
+				profile: harnessv2.RuntimeProfile{ProviderKind: test.provider},
+			}
+			now := time.Now().UTC()
+			events := []acp.PromptEvent{
+				testAssistantMessagePromptEventWithPhase(t, 1, now, "commentary-message", "", "I'll inspect the repository.\n"),
+				// Adapter notices carry no messageId; a later message supersedes them.
+				testAssistantMessagePromptEventWithPhase(t, 2, now, "", "", "Warning: slow\n\n"),
+				testAssistantMessagePromptEventWithPhase(t, 3, now, "final-message", "", `{"schemaVersion":1,`),
+				testAssistantMessagePromptEventWithPhase(t, 4, now, "final-message", "", `"ok":true}`),
+			}
+			for _, event := range events {
+				if _, err := server.mapRuntimeEvent(state, prompt, event); err != nil {
+					t.Fatalf("map assistant event: %v", err)
+				}
+			}
+			terminal, _, err := server.terminalEvent(state, prompt, acp.PromptResult{
+				Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn,
+				Accepted: true, SettledAt: now.Add(time.Millisecond),
+			})
+			if err != nil {
+				t.Fatalf("build terminal result: %v", err)
+			}
+			if terminal.Completed == nil || len(terminal.Completed.Result.Content) != 1 ||
+				terminal.Completed.Result.Content[0].Text != test.want {
+				t.Fatalf("terminal result = %#v, want %q", terminal.Completed, test.want)
+			}
+		})
+	}
+}
+
 func TestSupervisorDrainIsIdempotent(t *testing.T) {
 	server, cfg, _ := newTestServer(t, "immediate")
 	request := harnessv2.DrainRequest{Protocol: harnessv2.ProtocolVersion, Metadata: harnessv2.MutationMetadata{

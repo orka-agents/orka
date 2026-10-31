@@ -23,7 +23,7 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 	if nativeSessionMaxBytes == 0 {
 		nativeSessionMaxBytes = harnessv2.DefaultMaxNativeSessionBytes
 	}
-	return []corev1.EnvVar{
+	return append([]corev1.EnvVar{
 		{Name: "ORKA_ACP_LISTEN_ADDRESS", Value: ":8080"},
 		{Name: "ORKA_ACP_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 		{Name: "ORKA_ACP_POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
@@ -58,5 +58,24 @@ func (r *RuntimePoolReconciler) runtimePoolEnvironment(pool *corev1alpha1.Runtim
 		{Name: "ORKA_ACP_TRUST_NAMESPACE", Value: pool.Spec.TrustDomain.Namespace},
 		{Name: "ORKA_ACP_SESSION_BASE_DIR", Value: "/sessions"},
 		{Name: "ORKA_NATIVE_SESSION_MAX_BYTES", Value: strconv.Itoa(nativeSessionMaxBytes)},
+	}, runtimePoolCapacityEnvironment(pool)...)
+}
+
+// runtimePoolCapacityEnvironment hands a non-default pool capacity to the
+// supervisor, which otherwise caps each runtime instance at its built-in
+// limits. Workspace-backed pools are single-session and keep the supervisor's
+// own single-session enforcement.
+func runtimePoolCapacityEnvironment(pool *corev1alpha1.RuntimePool) []corev1.EnvVar {
+	if pool.Spec.ExecutionWorkspace != nil {
+		return nil
+	}
+	maxSessions, maxPrompts, err := runtimePoolCapacity(pool)
+	if err != nil || (maxSessions == corev1alpha1.DefaultRuntimePoolMaxResidentSessions &&
+		maxPrompts == corev1alpha1.DefaultRuntimePoolMaxRunningPrompts) {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: "ORKA_ACP_MAX_RESIDENT_SESSIONS", Value: strconv.Itoa(int(maxSessions))},
+		{Name: "ORKA_ACP_MAX_CONCURRENT_PROMPTS", Value: strconv.Itoa(int(maxPrompts))},
 	}
 }

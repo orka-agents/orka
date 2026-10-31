@@ -100,6 +100,7 @@ const findingEvidenceRefSchema = z.object({
   endLine: z.number().optional(),
   symbol: z.string().optional(),
   quote: z.string().optional(),
+  role: z.string().optional(),
 })
 
 export const securityFindingSchema = z.object({

@@ -732,3 +732,21 @@ func TestValidateACPWorkspacePreflightRejectsUnsafeChangePolicies(t *testing.T) 
 		t.Fatalf("valid change policy error = %v", err)
 	}
 }
+
+func TestACPRuntimePoolCapacityUsesConfiguredLimits(t *testing.T) {
+	reconciler := &TaskReconciler{}
+	if got := reconciler.acpRuntimePoolCapacity(); got.MaxRunningPrompts != corev1alpha1.DefaultRuntimePoolMaxRunningPrompts ||
+		got.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions {
+		t.Fatalf("default capacity = %+v", got)
+	}
+	reconciler.ACPRuntimePoolCapacity = corev1alpha1.RuntimePoolCapacitySpec{MaxRunningPrompts: 12}
+	got := reconciler.acpRuntimePoolCapacity()
+	if got.MaxRunningPrompts != 12 || got.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions {
+		t.Fatalf("configured capacity = %+v, want 12 prompts and default sessions", got)
+	}
+	// The returned spec is a copy; pools must not share the reconciler's value.
+	got.MaxRunningPrompts = 1
+	if reconciler.ACPRuntimePoolCapacity.MaxRunningPrompts != 12 {
+		t.Fatal("capacity result aliases reconciler configuration")
+	}
+}

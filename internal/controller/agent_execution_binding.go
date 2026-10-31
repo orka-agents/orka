@@ -41,7 +41,10 @@ import (
 // side effect. The snapshot store and revisioned backend control are mandatory:
 // a controller that cannot prove either one never queues executor demand.
 
-const agentExecutionBindingConflictReason = "BindingConflict"
+const (
+	agentExecutionBindingConflictReason = "BindingConflict"
+	agentExecutionSettingsReason        = "ExecutionSettings"
+)
 
 var errExternalAgentRuntimeMCPToolDescriptorsNotConformed = errors.New("external AgentRuntime MCP tool descriptors do not match current conformance")
 
@@ -69,6 +72,10 @@ type agentExecutionCandidate struct {
 	binding             corev1alpha1.AgentExecutionBinding
 	snapshotBody        []byte
 	workspaceSessionUID string
+	// model and reasoningEffort are the effective built-in session settings,
+	// reported when the binding is first written.
+	model           string
+	reasoningEffort string
 }
 
 // agentExecutionSnapshotBody is the canonical non-secret executable input
@@ -500,6 +507,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 
 	return &agentExecutionCandidate{
 		binding: binding, snapshotBody: encoded, workspaceSessionUID: workspaceSessionUID,
+		model: configuration.Model, reasoningEffort: configuration.ReasoningEffort,
 	}, nil
 }
 
@@ -1495,7 +1503,11 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			}
 		}
 	}
+	firstBinding := task.Status.AgentExecutionBinding == nil
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
+	if err == nil && firstBinding {
+		r.recordAgentExecutionSettings(task, candidate)
+	}
 	if err != nil {
 		conflict := &errAgentExecutionBindingConflict{}
 		if errors.As(err, &conflict) {
@@ -1629,4 +1641,18 @@ func brokeredCustomCandidates(names []string, providerKind string, registry *too
 		kept = append(kept, name)
 	}
 	return kept
+}
+
+// recordAgentExecutionSettings reports the model and reasoning effort a
+// built-in runtime Task runs with. The binding stores only digests of them.
+func (r *TaskReconciler) recordAgentExecutionSettings(task *corev1alpha1.Task, candidate *agentExecutionCandidate) {
+	if r.Recorder == nil || candidate == nil || candidate.binding.RuntimeType == "" {
+		return
+	}
+	effort := candidate.reasoningEffort
+	if effort == "" {
+		effort = "runtime default"
+	}
+	r.Recorder.Eventf(task, corev1.EventTypeNormal, agentExecutionSettingsReason,
+		"Runtime %s, model %s, reasoning effort %s", candidate.binding.RuntimeType, candidate.model, effort)
 }

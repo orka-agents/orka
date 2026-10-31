@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -25,6 +26,10 @@ const (
 type MapperOptions struct {
 	RepositoryScan string
 	SubPath        string
+	// Investigations become cross-component review slices.
+	Investigations []security.SecurityInvestigation
+	// BaselineAudit adds one independent repository-wide review slice.
+	BaselineAudit bool
 }
 
 const (
@@ -41,7 +46,9 @@ const (
 	extZsh              = ".zsh"
 	extYAML             = ".yaml"
 	extYML              = ".yml"
+	extJSON             = ".json"
 	packageJSONFile     = "package.json"
+	goModFile           = "go.mod"
 	pyprojectFile       = "pyproject.toml"
 	requirementsTxtFile = "requirements.txt"
 
@@ -65,6 +72,10 @@ func MapRepository(root string, opts MapperOptions) ([]store.ReviewSlice, error)
 	addWorkflowAndScriptSlices(builder, files)
 	addConfigSlices(builder, files)
 	addGenericFallbackSlices(builder, files)
+	addInvestigationSlices(builder, files, opts.Investigations)
+	if opts.BaselineAudit {
+		addBaselineAuditSlice(builder, files)
+	}
 	return builder.slices(), nil
 }
 
@@ -123,9 +134,13 @@ func shouldSkipDir(rel string, entry fs.DirEntry) bool {
 	}
 	name := path.Base(rel)
 	switch name {
-	case ".git", ".hg", ".svn", "node_modules", "vendor", "dist", "build", "coverage", ".next",
-		"target", "bin", ".cache", ".turbo", ".venv", "venv", "__pycache__", ".pytest_cache":
+	case ".git", ".hg", ".svn", "node_modules", "vendor", "third_party", ".cache", ".turbo", ".venv", "venv",
+		"__pycache__", ".pytest_cache", "dist", "coverage", ".next":
 		return true
+	case "build", "target", "bin":
+		// These are build output at the repository root, but nested ones,
+		// such as pkg/target or cmd/build, are usually source.
+		return !strings.Contains(rel, "/")
 	default:
 		return false
 	}
@@ -179,11 +194,11 @@ func isReviewableFile(rel string) bool {
 	}
 	switch strings.ToLower(path.Ext(rel)) {
 	case extGo, extTS, extTSX, extJS, extJSX, extMJS, extCJS, extPython, extShell, extBash, extZsh,
-		extYAML, extYML, ".json", ".toml", ".cfg":
+		extYAML, extYML, extJSON, ".toml", ".cfg":
 		return true
 	}
 	switch name {
-	case "Dockerfile", "Containerfile", "Makefile", "Taskfile.yml", "Taskfile.yaml", "go.mod", "go.sum",
+	case "Dockerfile", "Containerfile", "Makefile", "Taskfile.yml", "Taskfile.yaml", goModFile, "go.sum",
 		packageJSONFile, pyprojectFile, "setup.py", "setup.cfg", requirementsTxtFile:
 		return true
 	default:
@@ -222,6 +237,10 @@ func (b *sliceBuilder) add(slice store.ReviewSlice) {
 		slice.Status = "pending"
 	}
 	normalizeSliceFiles(&slice)
+	// A package's tests are its context; no fallback slice reviews them.
+	for _, test := range slice.Tests {
+		b.claimed[test.Path] = struct{}{}
+	}
 	for _, bounded := range boundedReviewSlices(slice) {
 		if bounded.ID == "" {
 			bounded.ID = sliceID(b.repositoryScan, bounded.Source, bounded.Title)
@@ -417,7 +436,19 @@ func addNodeSlices(builder *sliceBuilder, root string, files []repoFile) {
 		nodeFiles := nodeFilesForDir(file.Dir, files)
 		owned := make([]store.ReviewSliceFile, 0, len(nodeFiles)+1)
 		owned = append(owned, fileRef(file, "package manifest"))
+		testCommand := ""
+		for _, test := range tests {
+			if strings.HasSuffix(test.Command, "npm run test") {
+				testCommand = test.Command
+			}
+		}
 		for _, candidate := range nodeFiles {
+			// Tests are context, as for Go packages: they get excerpts only
+			// after the package's own source.
+			if isTestFile(candidate) {
+				tests = append(tests, store.ReviewSliceTest{Path: candidate.Path, Command: testCommand})
+				continue
+			}
 			owned = append(owned, fileRef(candidate, "node/typescript source"))
 		}
 		titleDir := file.Dir
@@ -470,9 +501,6 @@ func nodeFilesForDir(dir string, files []repoFile) []repoFile {
 		if strings.HasPrefix(file.Path, dir+"/") {
 			out = append(out, file)
 		}
-	}
-	if len(out) > 24 {
-		out = out[:24]
 	}
 	return out
 }
@@ -638,9 +666,6 @@ func addGenericFallbackSlices(builder *sliceBuilder, files []repoFile) {
 	for top, topFiles := range byTop {
 		if len(topFiles) == 0 {
 			continue
-		}
-		if len(topFiles) > 24 {
-			topFiles = topFiles[:24]
 		}
 		owned := make([]store.ReviewSliceFile, 0, len(topFiles))
 		for _, file := range topFiles {

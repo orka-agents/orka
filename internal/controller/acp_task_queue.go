@@ -1408,10 +1408,7 @@ func (r *TaskReconciler) ensureACPRuntimePoolWithPolicy(
 			return nil, false, fmt.Errorf("new workspace RuntimePools require exact frozen workspace requirements")
 		}
 
-		capacity := &corev1alpha1.RuntimePoolCapacitySpec{
-			MaxResidentSessions: corev1alpha1.DefaultRuntimePoolMaxResidentSessions,
-			MaxRunningPrompts:   corev1alpha1.DefaultRuntimePoolMaxRunningPrompts,
-		}
+		capacity := r.acpRuntimePoolCapacity()
 		labels := map[string]string{
 			acpRuntimePoolLabel: booleanTrueValue, acpRuntimeTrustLabel: namespace,
 			acpRuntimeProfileLabel: strings.TrimPrefix(string(plan.Digest), "sha256:")[:16],
@@ -1897,4 +1894,17 @@ func taskExecutionStateTerminal(state corev1alpha1.TaskExecutionState) bool {
 func taskManagedByACP(task *corev1alpha1.Task) bool {
 	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAgent && task.Status.Execution != nil &&
 		(strings.TrimSpace(task.Status.Execution.RuntimePoolName) != "" || strings.TrimSpace(task.Status.Execution.AgentRuntimeName) != "")
+}
+
+// acpRuntimePoolCapacity returns the configured concurrency for a new
+// non-workspace RuntimePool, filling unset limits with the API defaults.
+func (r *TaskReconciler) acpRuntimePoolCapacity() *corev1alpha1.RuntimePoolCapacitySpec {
+	capacity := r.ACPRuntimePoolCapacity
+	if capacity.MaxResidentSessions <= 0 {
+		capacity.MaxResidentSessions = corev1alpha1.DefaultRuntimePoolMaxResidentSessions
+	}
+	if capacity.MaxRunningPrompts <= 0 {
+		capacity.MaxRunningPrompts = corev1alpha1.DefaultRuntimePoolMaxRunningPrompts
+	}
+	return &capacity
 }

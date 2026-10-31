@@ -269,7 +269,10 @@ function FindingDetailContent({ findingId, finding }: { findingId: string; findi
                         : evidence.label || evidence.name || 'Evidence'}
                     </div>
                   )}
-                  <div className="text-muted-foreground">{evidence.kind}</div>
+                  <div className="text-muted-foreground">
+                    {evidence.kind}
+                    {evidence.role && <Badge variant="outline" className="ml-2">{evidence.role.replace('_', ' ')}</Badge>}
+                  </div>
                   {evidence.symbol && <div className="text-xs text-muted-foreground">Symbol: {evidence.symbol}</div>}
                   {evidence.taskName && <div className="text-xs text-muted-foreground">Task: {evidence.taskName}</div>}
                   {evidence.quote && <div className="mt-2 whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono text-xs">{evidence.quote}</div>}

@@ -107,6 +107,9 @@ spec:
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
 
             - --acp-runtime-namespace={{ .Values.controller.acpRuntime.namespace }}
+            - --acp-runtime-pool-max-running-prompts={{ dig "pool" "maxRunningPrompts" 4 .Values.controller.acpRuntime }}
+            - --acp-runtime-pool-max-resident-sessions={{ dig "pool" "maxResidentSessions" 10 .Values.controller.acpRuntime }}
+            - --acp-dispatch-max-concurrent-tasks={{ dig "dispatch" "maxConcurrentTasks" 4 .Values.controller.acpRuntime }}
 
             {{- if .Values.controller.acpRuntime.upgradeDrain.enabled }}
             - --acp-upgrade-drain-bind-address=127.0.0.1:{{ .Values.controller.acpRuntime.upgradeDrain.port }}

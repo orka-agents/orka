@@ -131,3 +131,28 @@ func TestRuntimePoolNativeSessionLimitChangesTemplateRevision(t *testing.T) {
 		t.Fatal("unchanged native policy triggered a new rollout")
 	}
 }
+
+func TestRuntimePoolEnvironmentCarriesNonDefaultCapacity(t *testing.T) {
+	capacityEnvironment := func(capacity *corev1alpha1.RuntimePoolCapacitySpec) map[string]string {
+		pool := runtimePoolTestObject(1)
+		pool.Spec.Capacity = capacity
+		out := map[string]string{}
+		for _, item := range runtimePoolCapacityEnvironment(pool) {
+			out[item.Name] = item.Value
+		}
+		return out
+	}
+	if got := capacityEnvironment(nil); len(got) != 0 {
+		t.Fatalf("default capacity environment = %v, want none", got)
+	}
+	got := capacityEnvironment(&corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 10, MaxRunningPrompts: 8})
+	if got["ORKA_ACP_MAX_RESIDENT_SESSIONS"] != "10" || got["ORKA_ACP_MAX_CONCURRENT_PROMPTS"] != "8" {
+		t.Fatalf("capacity environment = %v, want 10/8", got)
+	}
+	workspace := runtimePoolTestObject(1)
+	workspace.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: 1, MaxRunningPrompts: 1}
+	workspace.Spec.ExecutionWorkspace = &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{}
+	if got := runtimePoolCapacityEnvironment(workspace); len(got) != 0 {
+		t.Fatalf("workspace capacity environment = %v, want none", got)
+	}
+}

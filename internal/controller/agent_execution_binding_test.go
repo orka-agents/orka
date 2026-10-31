@@ -194,6 +194,16 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		}
 	}
 
+	recorder := reconciler.Recorder.(*record.FakeRecorder)
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, agentExecutionSettingsReason) || !strings.Contains(event, "model "+acpTestModel) {
+			t.Fatalf("binding event = %q, want the effective model", event)
+		}
+	default:
+		t.Fatal("first binding did not report its execution settings")
+	}
+
 	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
@@ -205,6 +215,11 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("verify pass reported settings again: %q", event)
+	default:
 	}
 }
 

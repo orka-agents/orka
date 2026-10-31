@@ -280,8 +280,15 @@ type promptState struct {
 	finalAnswer         strings.Builder
 	finalAnswerSeen     bool
 	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	lastMessage         strings.Builder
+	lastMessageID       string
+	lastMessageOverflow bool
+	// untagged holds text Codex sent without a message ID since the last
+	// named chunk, such as a /review result.
+	untagged         strings.Builder
+	untaggedOverflow bool
+	settlement       *harnessv2.PromptSettlement
+	settlementDigest string
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.

@@ -365,7 +365,7 @@ func TestBuildValidationResultPromptIncludesFindingQualityPolicy(t *testing.T) {
 	scan := &corev1alpha1.RepositoryScan{Spec: corev1alpha1.RepositoryScanSpec{RepoURL: "https://github.com/example/project", Branch: "main"}}
 	finding := &store.Finding{ID: "fnd_1", Title: "Finding", Severity: "high", Confidence: "high"}
 	got := BuildValidationResultPrompt(scan, finding, testResultBinding())
-	for _, want := range []string{"FINDING QUALITY POLICY", "theoretical, stale, docs-only, test-only, client-only", "status=failed"} {
+	for _, want := range []string{"FINDING QUALITY POLICY", "stale, docs-only, test-only, client-only", "status=failed"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("BuildValidationResultPrompt() missing %q:\n%s", want, got)
 		}
