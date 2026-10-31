@@ -773,7 +773,11 @@ func repositoryMonitorReviewVerdictGateReason(prompt, verdict string) string {
 		return "the diff context was unavailable (" + reviewContext.ContextUnavailable + ")"
 	case reviewContext.Truncated.Files:
 		return "the change set was not completely represented in the diff context"
-	default:
-		return ""
 	}
+	// A follow-up review must also have seen every change since the last
+	// review; a small final diff can hide a large truncated delta.
+	if delta, ok := repositoryMonitorReviewPromptDelta(prompt); ok && (delta.ContextUnavailable != "" || delta.Truncated.Files) {
+		return "the changes since the last review were not completely represented"
+	}
+	return ""
 }

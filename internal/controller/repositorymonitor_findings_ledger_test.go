@@ -743,3 +743,44 @@ func assertRepositoryMonitorExhaustivePassAwaited(t *testing.T, r *RepositoryMon
 		t.Fatalf("head pass pending = %t err=%v, want true", pending, err)
 	}
 }
+
+func TestRepositoryMonitorFollowUpAcceptsFixesOnlyForShownFindings(t *testing.T) {
+	ledger := make([]repositoryMonitorReviewFinding, 0, 100)
+	for i := range 100 {
+		finding := ledgerFinding(fmt.Sprintf("f-%04x", i), "P1", "a.go", int64(i+1), fmt.Sprintf("Bug %d", i))
+		finding.Body = strings.Repeat("x", 2000)
+		ledger = append(ledger, finding)
+	}
+	shown, omitted := repositoryMonitorListOpenFindings(ledger)
+	if omitted == 0 || len(shown) == 0 {
+		t.Fatalf("shown=%d omitted=%d, want the list cut for size", len(shown), omitted)
+	}
+	listedID, omittedID := shown[0].ID, ledger[len(ledger)-1].ID
+	review := &repositoryMonitorReviewResult{Verdict: repositoryMonitorReviewVerdictPassed, PreviousFindings: []repositoryMonitorReviewPreviousFinding{
+		{ID: listedID, Status: repositoryMonitorFindingStatusFixed},
+		{ID: omittedID, Status: repositoryMonitorFindingStatusFixed},
+	}}
+	merged := repositoryMonitorMergeFindingLedger(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: &store.ReviewRecord{ID: "base"}, Ledger: ledger}, review, "newer", "record", nil)
+	status := map[string]string{}
+	for _, finding := range merged {
+		status[finding.ID] = finding.Status
+	}
+	if status[listedID] != repositoryMonitorFindingStatusFixed || status[omittedID] != repositoryMonitorFindingStatusOpen {
+		t.Fatalf("listed %s=%q, omitted %s=%q; want only the shown finding fixed", listedID, status[listedID], omittedID, status[omittedID])
+	}
+}
+
+func TestRepositoryMonitorFollowUpGateRequiresACompleteDelta(t *testing.T) {
+	monitor := repositoryMonitorInventoryTestMonitor()
+	pr := repositoryMonitorPullRequest{Number: 7, BaseSHA: "base", HeadSHA: "newer"}
+	reviewContext := newRepositoryMonitorReviewContext("orka-agents", "orka", pr)
+	// The delta lists a modified file without its patch, so it is incomplete
+	// even though the pull request context is complete.
+	prompt := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{
+		Mode: repositoryMonitorReviewModeIncremental, Base: &store.ReviewRecord{ID: "accepted", HeadSHA: "reviewed"},
+		Delta: []repositoryMonitorPullRequestFileResponse{{Filename: "big.go", Status: "modified", Additions: 5000, Deletions: 5000}},
+	})
+	if reason := repositoryMonitorReviewVerdictGateReason(prompt, repositoryMonitorReviewVerdictPassed); reason == "" {
+		t.Fatal("a passed follow-up review with an incomplete delta was accepted")
+	}
+}
