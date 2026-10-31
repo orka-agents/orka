@@ -94,7 +94,7 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", FindingsJSON: findingsJSON}
+	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
 	item := &store.MonitorItem{Number: 1}
 	// The head moved after the review, so the fix may no longer hold.
 	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
@@ -104,6 +104,15 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 		t.Fatalf("marked threads for a head that moved: patched=%q resolved=%q", github.patched, github.resolved)
 	}
 	github.currentHead = "newhead1"
+	// A result that was not accepted never declares a finding fixed.
+	skipped := *record
+	skipped.ID, skipped.Verdict = "review-skipped", repositoryMonitorVerdictSkipped
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &skipped); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 0 || len(github.resolved) != 0 {
+		t.Fatalf("marked threads for a skipped review: patched=%q resolved=%q", github.patched, github.resolved)
+	}
 	for range 2 {
 		if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
 			t.Fatal(err)
@@ -114,6 +123,16 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	}
 	if len(github.resolved) != 1 || github.resolved[0] != "T501" {
 		t.Fatalf("resolved threads = %q, want T501 once", github.resolved)
+	}
+	// A later review of the same head does not resolve the thread again, so a
+	// thread a maintainer reopened stays open.
+	rereview := *record
+	rereview.ID = "review-rereview"
+	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, &rereview); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 1 || len(github.resolved) != 1 {
+		t.Fatalf("a same-head re-review marked again: patched=%q resolved=%q", github.patched, github.resolved)
 	}
 
 	// A security-sensitive review, or a fix of a restricted finding, never

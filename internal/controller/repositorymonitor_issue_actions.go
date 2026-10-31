@@ -1365,7 +1365,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ct
 	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
 	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
-		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
 		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrConflict) {

@@ -43,7 +43,9 @@ type repositoryMonitorReviewComment struct {
 // security-sensitive review or finding is never marked unless the monitor
 // posts security-sensitive reviews.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreads(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) error {
-	if r.Store == nil || !monitor.Spec.Review.Publish.Enabled || record == nil {
+	// Only an accepted review updates the record of findings; a skipped or
+	// failed result must not declare anything fixed on GitHub either.
+	if r.Store == nil || !monitor.Spec.Review.Publish.Enabled || record == nil || !repositoryMonitorReviewVerdictMarksHeadFresh(record.Verdict) {
 		return nil
 	}
 	fixed, err := r.repositoryMonitorUnmarkedFixedFindings(ctx, monitor, record)
@@ -136,11 +138,21 @@ type repositoryMonitorFindingComment struct {
 // repositoryMonitorFixedFindingComments returns the inline comments, on
 // reviews Orka published for the pull request, of the fixed findings.
 func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, owner, repository, token string, number int64, fixed map[string]bool) ([]repositoryMonitorFindingComment, error) {
-	publishes, _, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
-		Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: number, Phase: repositoryMonitorPublishPhaseSucceeded, Limit: 100,
-	})
-	if err != nil {
-		return nil, err
+	// A finding fixed long after it was reported sits on an old publication,
+	// so read every page.
+	var publishes []store.ReviewPublishRecord
+	for cursor := ""; ; {
+		page, next, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
+			Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: number, Phase: repositoryMonitorPublishPhaseSucceeded, Limit: 100, Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		publishes = append(publishes, page...)
+		if next == "" {
+			break
+		}
+		cursor = next
 	}
 	var targets []repositoryMonitorFindingComment
 	for _, publish := range publishes {
@@ -368,7 +380,10 @@ func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreadsBe
 }
 
 // repositoryMonitorFindingAddressedMutationID names the GitHub mutation that
-// marks one finding addressed by one review.
+// marks one finding addressed at one head. It is keyed by the head, not the
+// review, so a re-review of the same head does not resolve a thread again
+// that a maintainer reopened.
 func repositoryMonitorFindingAddressedMutationID(record *store.ReviewRecord, findingID string) string {
-	return "ghmut-" + repositoryMonitorShortHash(record.ID+"|"+findingID+"|addressed")
+	key := strings.Join([]string{record.MonitorNamespace, record.MonitorName, strconv.FormatInt(record.Number, 10), findingID, record.HeadSHA, "addressed"}, "|")
+	return "ghmut-" + repositoryMonitorShortHash(key)
 }

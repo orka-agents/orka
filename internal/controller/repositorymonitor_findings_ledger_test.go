@@ -219,7 +219,7 @@ func TestRepositoryMonitorFollowUpReviewPrompt(t *testing.T) {
 	}
 	incremental := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{
 		Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: ledger,
-		Delta: []repositoryMonitorPullRequestFileResponse{{Filename: "a.go", Status: "modified", Patch: "@@ -1 +1 @@\n-a\n+b"}},
+		Delta: []repositoryMonitorPullRequestFileResponse{{Filename: "a.go", Status: "modified", Additions: 1, Deletions: 1, Patch: "@@ -1 +1 @@\n-a\n+b"}},
 	})
 	for _, want := range []string{"Orka last reviewed this pull request at commit reviewed", `"id": "f-open"`, `"baseSHA": "reviewed"`, `"path": "a.go"`, `"previousFindings": [{"id": "f-...", "status": "fixed|open"}],`} {
 		if !strings.Contains(incremental, want) {
@@ -228,6 +228,16 @@ func TestRepositoryMonitorFollowUpReviewPrompt(t *testing.T) {
 	}
 	if strings.Contains(incremental, "f-done") {
 		t.Fatal("incremental prompt lists a fixed finding")
+	}
+	// The pull request context and the delta parse independently, so a passed
+	// follow-up review is not gated as lacking context, and coverage comes from
+	// the delta the reviewer was shown.
+	if reason := repositoryMonitorReviewVerdictGateReason(incremental, repositoryMonitorReviewVerdictPassed); reason != "" {
+		t.Fatalf("passed follow-up review gated: %s", reason)
+	}
+	covered := repositoryMonitorReviewChangedLines(repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base}, incremental)
+	if !covered.covers("a.go", 1) || covered.covers("a.go", 2) || covered.covers("b.go", 1) {
+		t.Fatalf("follow-up coverage = %v, want line 1 of a.go only", covered)
 	}
 	sameHead := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: ledger})
 	if !strings.Contains(sameHead, "Orka already reviewed this exact head") || !strings.Contains(sameHead, `"id": "f-open"`) {
@@ -434,6 +444,7 @@ func TestRepositoryMonitorExhaustiveReviewPasses(t *testing.T) {
 	if item.LastReviewedHeadSHA != "" {
 		t.Fatalf("head counted as reviewed while a pass is due: %+v", item)
 	}
+	assertRepositoryMonitorExhaustivePassAwaited(t, r, monitor, db)
 	if fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, &store.MonitorItem{Number: 1, LastReviewedHeadSHA: "sha1"}, "sha1"); err != nil || fresh {
 		t.Fatalf("fresh = %t err=%v while a pass is due", fresh, err)
 	}
@@ -678,5 +689,57 @@ func TestRepositoryMonitorSensitiveReviewRestrictsFindingsItFixes(t *testing.T) 
 	body := renderRepositoryMonitorReviewBody(monitor, &store.MonitorItem{Number: 1}, &corev1alpha1.Task{}, &store.ReviewRecord{ID: "review-same", HeadSHA: "new", Verdict: repositoryMonitorReviewVerdictPassed}, "publish-1", same)
 	if strings.Contains(body, "Leaky log line") {
 		t.Fatalf("published body names a finding a security-sensitive review fixed:\n%s", body)
+	}
+}
+
+func TestRepositoryMonitorFollowUpReviewPromptBoundsFindingsAndContext(t *testing.T) {
+	monitor := repositoryMonitorInventoryTestMonitor()
+	pr := repositoryMonitorPullRequest{Number: 7, BaseSHA: "base", HeadSHA: "newer"}
+	const credential = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	ledger := make([]repositoryMonitorReviewFinding, 0, 200)
+	for i := range 200 {
+		ledger = append(ledger, ledgerFinding(fmt.Sprintf("f-%04x", i), "P2", "a.go", int64(i+1), "Bug "+credential))
+		ledger[i].Body = strings.Repeat("x", 4000)
+	}
+	// Both the pull request and the delta are larger than their budgets.
+	files := make([]repositoryMonitorPullRequestFileResponse, 0, 90)
+	for i := range 90 {
+		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: fmt.Sprintf("f%02d.go", i), Status: "added", Additions: 2000, Patch: "@@ -0,0 +1,2000 @@\n" + strings.Repeat("+line of code\n", 2000)})
+	}
+	reviewContext := repositoryMonitorReviewContextFromFiles("orka-agents", "orka", pr, files)
+	prompt := buildRepositoryMonitorReviewPrompt(monitor, "orka-agents", "orka", pr, reviewContext, repositoryMonitorReviewPlan{
+		Mode: repositoryMonitorReviewModeIncremental, Base: &store.ReviewRecord{ID: "accepted", HeadSHA: "reviewed"}, Ledger: ledger, Delta: files,
+	})
+	if strings.Contains(prompt, credential) {
+		t.Fatal("follow-up prompt carries a credential from a finding")
+	}
+	if !strings.Contains(prompt, "more open findings were omitted for size") {
+		t.Fatal("follow-up prompt does not say that open findings were omitted")
+	}
+	// The contexts and findings share one budget; the rest is fixed text.
+	if limit := repositoryMonitorReviewContextMaxBytes + 16<<10; len(prompt) > limit {
+		t.Fatalf("follow-up prompt is %d bytes, want at most %d", len(prompt), limit)
+	}
+	if _, ok := repositoryMonitorReviewPromptContext(prompt); !ok {
+		t.Fatal("trimmed pull request context does not parse")
+	}
+	if _, ok := repositoryMonitorReviewPromptDelta(prompt); !ok {
+		t.Fatal("bounded delta does not parse")
+	}
+}
+
+// assertRepositoryMonitorExhaustivePassAwaited checks that a pending pass on
+// pull request 1's head sha1 is queued and holds repairs back.
+func assertRepositoryMonitorExhaustivePassAwaited(t *testing.T, r *RepositoryMonitorReconciler, monitor *corev1alpha1.RepositoryMonitor, db store.RepositoryMonitorStore) {
+	t.Helper()
+	ctx := context.Background()
+	// A review-only monitor has no workflow poll, so the next pass is queued.
+	continuations, _, err := db.ListMonitorRuns(ctx, store.MonitorRunFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, Phase: repositoryMonitorRunPhaseQueued})
+	if err != nil || len(continuations) != 1 || continuations[0].TargetNumber != 1 || continuations[0].TargetSHA != "sha1" {
+		t.Fatalf("queued runs = %+v err=%v, want one run for the next pass", continuations, err)
+	}
+	// No repair may move the head before the passes finish.
+	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, repositoryMonitorPullRequest{Number: 1, HeadSHA: "sha1"}); err != nil || !pending {
+		t.Fatalf("head pass pending = %t err=%v, want true", pending, err)
 	}
 }

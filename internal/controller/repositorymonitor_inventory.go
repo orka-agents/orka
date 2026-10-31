@@ -726,10 +726,15 @@ func buildRepositoryMonitorReviewPrompt(monitor *corev1alpha1.RepositoryMonitor,
 	if plan.Mode == repositoryMonitorReviewModeIncremental && plan.Base != nil {
 		since := pr
 		since.BaseSHA = plan.Base.HeadSHA
-		delta := repositoryMonitorReviewContextBindChangedFileCount(repositoryMonitorReviewContextFromFiles(owner, repository, since, plan.Delta), len(plan.Delta), 0)
-		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, renderRepositoryMonitorReviewContext(delta))
+		delta := repositoryMonitorReviewContextBindChangedFileCount(repositoryMonitorReviewContextFromFilesWithin(owner, repository, since, plan.Delta, repositoryMonitorReviewDeltaMaxBytes), len(plan.Delta), 0)
+		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, renderRepositoryMonitorReviewDelta(delta))
 	} else if plan.Mode == repositoryMonitorReviewModeSameHead && plan.Base != nil {
 		followUp = "\n" + renderRepositoryMonitorFollowUpInstructions(plan, "")
+	}
+	// The pull request context, the delta, and the open findings share one
+	// budget, so a follow-up prompt is no larger than a full review's.
+	if followUp != "" {
+		reviewContext = repositoryMonitorReviewContextWithin(reviewContext, max(0, repositoryMonitorReviewContextMaxBytes-len(followUp)))
 	}
 	if followUp != "" {
 		previousFindingsShape = "\n  \"previousFindings\": [{\"id\": \"f-...\", \"status\": \"fixed|open\"}],"

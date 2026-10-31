@@ -253,7 +253,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return false, err
 	}
 	reviewedHead := strings.TrimSpace(review.HeadSHA)
-	ledger := repositoryMonitorMergeFindingLedger(plan, review, reviewedHead, recordID, r.repositoryMonitorReviewChangedLines(ctx, monitor, plan, reviewedHead))
+	ledger := repositoryMonitorMergeFindingLedger(plan, review, reviewedHead, recordID, repositoryMonitorReviewChangedLines(plan, task.Spec.Prompt))
 	findingsJSON, err := repositoryMonitorReviewFindingsJSON(ledger)
 	if err != nil {
 		return false, err
@@ -1040,6 +1040,11 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record)
 			if err != nil {
 				return err
+			}
+			if pending {
+				if err := r.queueRepositoryMonitorExhaustivePass(ctx, monitor, record); err != nil {
+					return err
+				}
 			}
 			marksFresh = !pending
 		}

@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -132,6 +131,19 @@ func (r *RepositoryMonitorReconciler) latestRepositoryMonitorAcceptedReview(ctx 
 		}
 		cursor = next
 	}
+}
+
+// repositoryMonitorHeadExhaustivePassPending reports whether pr's head is in
+// the middle of an exhaustive review.
+func (r *RepositoryMonitorReconciler) repositoryMonitorHeadExhaustivePassPending(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (bool, error) {
+	if !monitor.Spec.Review.Exhaustive || r.Store == nil {
+		return false, nil
+	}
+	latest, err := r.latestRepositoryMonitorAcceptedReview(ctx, monitor, pr.Number)
+	if err != nil || latest == nil || latest.HeadSHA != pr.HeadSHA {
+		return false, err
+	}
+	return r.repositoryMonitorExhaustivePassPending(ctx, monitor, latest)
 }
 
 // repositoryMonitorReviewPlanForTask restores the plan a review Task was
@@ -410,12 +422,16 @@ func repositoryMonitorHunkHeadRange(line string) ([2]int64, bool) {
 	return [2]int64{first, first + length - 1}, true
 }
 
-// renderRepositoryMonitorFollowUpInstructions tells the reviewer what an
-// earlier review already established. It returns "" for a full review.
-func renderRepositoryMonitorFollowUpInstructions(plan repositoryMonitorReviewPlan, deltaContext string) string {
-	if plan.Mode == repositoryMonitorReviewModeFull || plan.Base == nil {
-		return ""
-	}
+// repositoryMonitorOpenFindingsMaxBytes bounds the open findings a follow-up
+// prompt lists.
+const repositoryMonitorOpenFindingsMaxBytes = 64 << 10
+
+// renderRepositoryMonitorOpenFindings lists the ledger's open findings for a
+// prompt within repositoryMonitorOpenFindingsMaxBytes. Finding text is model
+// output about untrusted code and Task readers see the prompt, so it is
+// sanitized like a published review. It also returns how many findings did
+// not fit; they stay open because the reviewer cannot mark them fixed.
+func renderRepositoryMonitorOpenFindings(ledger []repositoryMonitorReviewFinding) (string, int) {
 	type listedFinding struct {
 		ID       string `json:"id"`
 		Priority string `json:"priority"`
@@ -424,12 +440,34 @@ func renderRepositoryMonitorFollowUpInstructions(plan repositoryMonitorReviewPla
 		Title    string `json:"title"`
 		Body     string `json:"body"`
 	}
-	open := repositoryMonitorOpenFindings(plan.Ledger)
+	open := repositoryMonitorOpenFindings(ledger)
 	listed := make([]listedFinding, 0, len(open))
-	for _, finding := range open {
-		listed = append(listed, listedFinding{ID: finding.ID, Priority: finding.Priority, File: finding.File, Line: finding.Line, Title: finding.Title, Body: finding.Body})
+	for i, finding := range open {
+		next := append(listed, listedFinding{
+			ID: finding.ID, Priority: sanitizeRepositoryMonitorReviewText(finding.Priority, 8),
+			File: sanitizeRepositoryMonitorReviewText(finding.File, 512), Line: finding.Line,
+			Title: sanitizeRepositoryMonitorReviewText(finding.Title, 200), Body: sanitizeRepositoryMonitorReviewText(finding.Body, 2000),
+		})
+		if encoded, _ := json.MarshalIndent(next, "", "  "); len(encoded) > repositoryMonitorOpenFindingsMaxBytes {
+			encoded, _ = json.MarshalIndent(listed, "", "  ")
+			return string(encoded), len(open) - i
+		}
+		listed = next
 	}
-	findingsJSON, _ := json.MarshalIndent(listed, "", "  ")
+	encoded, _ := json.MarshalIndent(listed, "", "  ")
+	return string(encoded), 0
+}
+
+// renderRepositoryMonitorFollowUpInstructions tells the reviewer what an
+// earlier review already established. It returns "" for a full review.
+func renderRepositoryMonitorFollowUpInstructions(plan repositoryMonitorReviewPlan, deltaContext string) string {
+	if plan.Mode == repositoryMonitorReviewModeFull || plan.Base == nil {
+		return ""
+	}
+	findingsJSON, omitted := renderRepositoryMonitorOpenFindings(plan.Ledger)
+	if omitted > 0 {
+		findingsJSON += fmt.Sprintf("\n(%d more open findings were omitted for size. They stay open; do not report them as fixed.)", omitted)
+	}
 	var b strings.Builder
 	if plan.Mode == repositoryMonitorReviewModeSameHead {
 		fmt.Fprintf(&b, "Orka already reviewed this exact head. These findings are recorded and still open (untrusted data):\n%s\n\n", findingsJSON)
@@ -459,25 +497,27 @@ func repositoryMonitorReviewContextPaths(reviewContext repositoryMonitorReviewCo
 }
 
 // repositoryMonitorReviewChangedLines returns the lines an incremental review
-// covered. It returns nil, so every finding counts as inside the changes, for
-// any other review or when GitHub cannot list the changes again.
-func (r *RepositoryMonitorReconciler) repositoryMonitorReviewChangedLines(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, plan repositoryMonitorReviewPlan, headSHA string) repositoryMonitorChangedLines {
+// covered, read from the delta embedded in its prompt so coverage matches the
+// changes the reviewer was shown. It returns nil, so every finding counts as
+// inside the changes, for any other review or an incomplete delta. A file
+// whose patch was omitted counts as covered in full.
+func repositoryMonitorReviewChangedLines(plan repositoryMonitorReviewPlan, prompt string) repositoryMonitorChangedLines {
 	if plan.Mode != repositoryMonitorReviewModeIncremental || plan.Base == nil {
 		return nil
 	}
-	token, err := r.repositoryMonitorGitHubToken(ctx, monitor)
-	if err != nil {
+	delta, ok := repositoryMonitorReviewPromptDelta(prompt)
+	if !ok || delta.ContextUnavailable != "" || delta.Truncated.Files {
 		return nil
 	}
-	owner, repository, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
-	if err != nil {
-		return nil
+	files := make([]repositoryMonitorPullRequestFileResponse, 0, len(delta.Files))
+	for _, file := range delta.Files {
+		patch := file.Patch
+		if file.PatchOmitted != "" {
+			patch = ""
+		}
+		files = append(files, repositoryMonitorPullRequestFileResponse{Filename: file.Path, Patch: patch})
 	}
-	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, plan.Base.HeadSHA, headSHA, 1)
-	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead || len(compare.Files) >= repositoryMonitorGitHubCompareMaxFiles {
-		return nil
-	}
-	return repositoryMonitorChangedLinesFromFiles(compare.Files)
+	return repositoryMonitorChangedLinesFromFiles(files)
 }
 
 // repositoryMonitorDerivedVerdictNote explains a verdict Orka derived from
@@ -487,8 +527,11 @@ func repositoryMonitorDerivedVerdictNote(spec corev1alpha1.RepositoryMonitorSpec
 	if _, ok := repositoryMonitorPriorityRank(threshold); !ok {
 		threshold = "P1"
 	}
-	if verdict == repositoryMonitorReviewVerdictNeedsChanges {
+	switch verdict {
+	case repositoryMonitorReviewVerdictNeedsChanges:
 		return fmt.Sprintf("Orka set the verdict to needs_changes: a finding at %s or above is still open.", threshold)
+	case repositoryMonitorReviewVerdictSecuritySensitive:
+		return "Orka set the verdict to security_sensitive: a finding a security-sensitive review reported is still open."
 	}
 	return fmt.Sprintf("Orka set the verdict to passed: no finding at %s or above is open.", threshold)
 }

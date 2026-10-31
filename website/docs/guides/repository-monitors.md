@@ -288,7 +288,7 @@ Valid review verdicts are:
 - `security_sensitive`
 - `skipped`
 
-Orka decides between `passed` and `needs_changes` itself, from the open findings: any open finding at `spec.review.blockingPriority` (default `P1`) or above means `needs_changes`, whatever the reviewer's own verdict. When the two differ, the summary says so. The reviewer's `needs_human`, `security_sensitive`, and `skipped` verdicts stand.
+Orka decides between `passed` and `needs_changes` itself, from the open findings: any open finding at `spec.review.blockingPriority` (default `P1`) or above means `needs_changes`, whatever the reviewer's own verdict. When the two differ, the summary says so. The reviewer's `needs_human`, `security_sensitive`, and `skipped` verdicts stand. The threshold is applied when a review is recorded, so changing `blockingPriority` affects reviews from then on; push a commit or send a `review` command to re-evaluate a pull request that was already reviewed.
 
 ### Follow-up reviews
 
@@ -303,7 +303,7 @@ The published review lists the open findings (marking those open since an earlie
 
 With `spec.review.exhaustive: true`, a full review repeats on the same head until a pass finds nothing new, at most three passes, so follow-up reviews start from every finding instead of uncovering them one round at a time. Each pass sees the findings already recorded and reports only additional ones. Until the last pass, the head does not count as reviewed: readiness and repairs wait, and only the last pass is published, with every finding. Follow-up reviews run once.
 
-With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
+With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. `staleReviewTTL` still applies to the reviewed head, so an unchanged head is reviewed again once its review is older than the TTL; leave the TTL unset for strictly one review per pull request. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
 
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
