@@ -62,9 +62,23 @@ func groupMessageBlocks(messages []Message) []messageBlock {
 	return blocks
 }
 
+// cutsPerBudget sets how far apart the places truncation may cut are: a
+// quarter of the budget. Closer cuts keep more history; each move of the cut
+// changes the prompt after the first message, so the provider's prompt cache
+// misses once. With messages small next to a quarter, truncation keeps about
+// three quarters of the budget at least and moves the cut once per quarter
+// budget of new conversation.
+const cutsPerBudget = 4
+
 // TruncateMessages keeps the first message and the newest messages that fit
 // within the token budget. Tool-call/tool-result groups are kept or dropped
 // atomically so the LLM never sees orphaned tool results.
+//
+// The cut falls where a block starts a new quarter of the budget, counted from
+// the start of the conversation, so a conversation that grows keeps its cut,
+// and with it the prompt prefix a provider caches, until the newer messages
+// outgrow it. Callers should truncate the whole conversation each step, not
+// the result of an earlier truncation, so the quarters stay where they are.
 func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	if len(messages) == 0 {
 		return messages
@@ -89,6 +103,16 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 	// Group remaining messages into atomic blocks
 	blocks := groupMessageBlocks(messages[1:])
 
+	if cut, ok := stableCut(blocks, remaining, tokenBudget); ok {
+		result := []Message{first, {Role: "system", Content: extractDroppedSummary(blocks[:cut])}}
+		for _, b := range blocks[cut:] {
+			result = append(result, b.messages...)
+		}
+		return result
+	}
+
+	// No quarter boundary fits, as when the newest block alone is most of the
+	// budget: keep the newest blocks that fit.
 	// From the tail, collect blocks that fit
 	var kept []messageBlock
 	for _, block := range slices.Backward(blocks) {
@@ -135,6 +159,30 @@ func TruncateMessages(messages []Message, tokenBudget int) []Message {
 		result = append(result, b.messages...)
 	}
 	return result
+}
+
+// stableCut is the first quarter boundary at which the blocks after it and the
+// note for the blocks before it fit in remaining tokens. A boundary is a block
+// that starts a later quarter of the budget than the block before it. At least
+// one block is kept.
+func stableCut(blocks []messageBlock, remaining, tokenBudget int) (int, bool) {
+	quarter := max(tokenBudget/cutsPerBudget, 1)
+	total := 0
+	for _, b := range blocks {
+		total += b.tokens
+	}
+	before := 0
+	for i := 1; i < len(blocks); i++ {
+		prev := before
+		before += blocks[i-1].tokens
+		if before/quarter == prev/quarter || total-before > remaining {
+			continue
+		}
+		if total-before+estimateTokens(extractDroppedSummary(blocks[:i])) <= remaining {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // maxContextPerTool is the maximum number of context items (files, URLs, queries) shown per tool.

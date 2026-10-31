@@ -1008,12 +1008,14 @@ func (ch *ChatHandler) runToolLoop(
 			})
 		}
 
-		if ch.config.MaxSessionSize > 0 {
-			messages = llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
+		// Truncate a view of the whole conversation each step, never the
+		// history itself, so the cut stays where it was and the prompt
+		// prefix stays cacheable.
+		sent := ch.sessionView(messages)
+		resp, shortened, retried, err := ch.callLLMWithRetry(iterCtx, provider, sent, systemPrompt, model, tools, maxTokens, temperature)
+		if retried {
+			messages = shortened // the provider refused the context as too long
 		}
-
-		resp, updatedMsgs, err := ch.callLLMWithRetry(iterCtx, provider, messages, systemPrompt, model, tools, maxTokens, temperature)
-		messages = updatedMsgs
 		if err != nil {
 			usage.Duration = time.Since(start).Round(time.Millisecond).String()
 			iterSpan.RecordError(err)
@@ -1023,7 +1025,7 @@ func (ch *ChatHandler) runToolLoop(
 		}
 		iterSpan.SetAttributes(attribute.Int("chat.tool_call_count", len(resp.ToolCalls)))
 		usage.LLMCalls++
-		usage.InputTokens += resp.InputTokens
+		usage.InputTokens += resp.PromptTokens()
 		usage.OutputTokens += resp.OutputTokens
 
 		if len(resp.ToolCalls) == 0 {
@@ -1092,18 +1094,19 @@ func (ch *ChatHandler) handleIterationLimit(
 	turnMessages = append(turnMessages, terminationPrompt)
 
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           ch.sessionView(messages),
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil {
 		usage.Duration = time.Since(start).Round(time.Millisecond).String()
 		return "", true, fmt.Errorf("final LLM completion after iteration limit failed: %w", err)
 	}
 	usage.LLMCalls++
-	usage.InputTokens += resp.InputTokens
+	usage.InputTokens += resp.PromptTokens()
 	usage.OutputTokens += resp.OutputTokens
 
 	finalMessages := append(turnMessages, llm.Message{Role: chatRoleAssistant, Content: resp.Content})
@@ -1123,8 +1126,18 @@ func (ch *ChatHandler) handleIterationLimit(
 	return resp.Content, true, nil
 }
 
+// sessionView is the conversation as the provider gets it: truncated to the
+// session size budget, if one is set.
+func (ch *ChatHandler) sessionView(messages []llm.Message) []llm.Message {
+	if ch.config.MaxSessionSize > 0 {
+		return llm.TruncateMessages(messages, ch.config.MaxSessionSize/4)
+	}
+	return messages
+}
+
 // callLLMWithRetry calls the LLM provider and retries once with truncated messages
-// if the context is too long.
+// if the context is too long. It returns the messages it sent last and whether
+// that retry shortened them.
 func (ch *ChatHandler) callLLMWithRetry(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1133,14 +1146,15 @@ func (ch *ChatHandler) callLLMWithRetry(
 	tools []llm.Tool,
 	maxTokens int,
 	temperature float64,
-) (*llm.CompletionResponse, []llm.Message, error) {
+) (*llm.CompletionResponse, []llm.Message, bool, error) {
 	resp, err := provider.Complete(ctx, &llm.CompletionRequest{
-		Model:        model,
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		Tools:        tools,
-		MaxTokens:    maxTokens,
-		Temperature:  temperature,
+		Model:              model,
+		SystemPrompt:       systemPrompt,
+		SystemPromptStable: chatPromptStable(systemPrompt),
+		Messages:           messages,
+		Tools:              tools,
+		MaxTokens:          maxTokens,
+		Temperature:        temperature,
 	})
 	if err != nil && llm.IsContextTooLongErr(err) {
 		tokenEstimate := 0
@@ -1149,15 +1163,17 @@ func (ch *ChatHandler) callLLMWithRetry(
 		}
 		messages = llm.TruncateMessages(messages, tokenEstimate/2)
 		resp, err = provider.Complete(ctx, &llm.CompletionRequest{
-			Model:        model,
-			SystemPrompt: systemPrompt,
-			Messages:     messages,
-			Tools:        tools,
-			MaxTokens:    maxTokens,
-			Temperature:  temperature,
+			Model:              model,
+			SystemPrompt:       systemPrompt,
+			SystemPromptStable: chatPromptStable(systemPrompt),
+			Messages:           messages,
+			Tools:              tools,
+			MaxTokens:          maxTokens,
+			Temperature:        temperature,
 		})
+		return resp, messages, true, err
 	}
-	return resp, messages, err
+	return resp, messages, false, err
 }
 
 // executeToolCalls iterates over tool calls from the LLM response, emits SSE events,
