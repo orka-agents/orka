@@ -940,20 +940,20 @@ func repositoryMonitorPullRequestReviewed(spec corev1alpha1.RepositoryMonitorSpe
 // repositoryMonitorPullRequestRepairScope reports which automatic repairs pr
 // allows. full permits branch updates, finding fixes, and CI fixes; ciOnly
 // permits CI fixes alone. labelled is set when a label granted the repair, so
-// the account that added it must be checked before any work starts.
+// the account that added it must be checked before any work starts. A
+// full-repair label wins, then a CI-only label; without repair include
+// labels, other reviewed pull requests keep full repair.
 func repositoryMonitorPullRequestRepairScope(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) (full, ciOnly, labelled bool) {
-	if len(spec.Repair.IncludeLabels) > 0 {
-		full = repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != ""
-	} else {
-		full = repositoryMonitorPullRequestReviewed(spec, pr)
-	}
-	if full {
-		return true, false, len(spec.Repair.IncludeLabels) > 0
+	if repositoryMonitorMatchingLabel(spec.Repair.IncludeLabels, pr.Labels) != "" {
+		return true, false, true
 	}
 	if repositoryMonitorMatchingLabel(spec.Repair.CIOnlyLabels, pr.Labels) != "" {
 		return false, true, true
 	}
-	return false, false, false
+	if len(spec.Repair.IncludeLabels) > 0 {
+		return false, false, false
+	}
+	return repositoryMonitorPullRequestReviewed(spec, pr), false, false
 }
 
 // repositoryMonitorRepairLabels returns the labels that can grant pr a repair.
