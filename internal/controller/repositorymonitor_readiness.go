@@ -39,6 +39,9 @@ type repositoryMonitorCIResult struct {
 	// failed names the failing check runs or status contexts when reason is
 	// repositoryMonitorCINotGreen.
 	failed []repositoryMonitorCIFailure
+	// incomplete marks a failing result read from partial check runs or
+	// statuses: the commit is not green, but failed may not list every failure.
+	incomplete bool
 }
 
 // repositoryMonitorCIFailureSourceStatus marks a failing commit status context.
@@ -400,6 +403,16 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
+	// A head that never got a readiness status shows nothing stale, and an
+	// in-scope peer publishes its own status when it is processed; skip the
+	// inventory listing, which CI-only pull requests would repeat every poll.
+	if r.Store != nil {
+		if _, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, sha)); errors.Is(err, store.ErrNotFound) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
 	// The old inventory can still contain the departed PR. Use a fresh list.
 	peers, err := r.listRepositoryMonitorReadinessPeers(ctx, monitor, token)
 	if err != nil {

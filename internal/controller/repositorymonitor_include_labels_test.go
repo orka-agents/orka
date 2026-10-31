@@ -535,3 +535,57 @@ func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testin
 		t.Fatalf("item 2 = %+v status %+v err=%v, want it retired despite #1 failing", second, latest["head2"], err)
 	}
 }
+
+func TestRepositoryMonitorRefreshedPullRequestWithoutIncludeLabelIsRetired(t *testing.T) {
+	ctx := t.Context()
+	db := setupControllerSQLiteStore(t)
+	monitor, secret := repositoryMonitorInventoryTestObjects("include-refresh")
+	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+	monitor.Spec.Repair.Enabled = true
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
+	pr := func(labels ...string) map[string]any {
+		prLabels := []map[string]string{}
+		for _, label := range labels {
+			prLabels = append(prLabels, map[string]string{"name": label})
+		}
+		return map[string]any{"number": 1, "state": "open", "head": map[string]string{"sha": "head1"}, "base": map[string]string{"ref": "main"}, "labels": prLabels}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls"):
+			// The list still shows the label the detail read no longer has.
+			_ = json.NewEncoder(w).Encode([]any{pr("orka:review")})
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/1"):
+			_ = json.NewEncoder(w).Encode(pr())
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+	r.GitHubAPIBaseURL = server.URL
+	if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: "open", BaseBranch: "main", HeadSHA: "head1"}); err != nil {
+		t.Fatal(err)
+	}
+	action := &store.WorkAction{ID: "wa-include-refresh-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: "head1", Intent: "fix", DesiredAction: "pr_repair", Status: "running"}
+	if err := db.CreateWorkAction(ctx, action); err != nil {
+		t.Fatal(err)
+	}
+	run := &store.MonitorRun{ID: "include-refresh-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind}
+	if _, _, _, err := r.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka"); err != nil {
+		t.Fatal(err)
+	}
+	item, err := db.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, "1")
+	if err != nil || item.State != repositoryMonitorItemStateOutOfScope || item.SkipReason != repositoryMonitorSkipReasonNotIncluded {
+		t.Fatalf("item = %+v err=%v, want it retired as not included", item, err)
+	}
+	assertRepositoryMonitorWorkActionStatus(t, db, monitor.Namespace, action.ID, "cancelled")
+}
