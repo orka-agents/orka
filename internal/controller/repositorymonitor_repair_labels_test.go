@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,10 @@ type repositoryMonitorRepairLabelsGitHub struct {
 	statuses map[string]map[string]string // commit SHA -> status context -> state
 	events   []map[string]any
 	roles    map[string]string
+	// partial reports one more check run than it returns for these commits.
+	partial map[string]bool
+	// checkReads counts check-run reads per commit SHA.
+	checkReads map[string]int
 }
 
 func (g *repositoryMonitorRepairLabelsGitHub) labeled(actor, label string) *repositoryMonitorRepairLabelsGitHub {
@@ -124,11 +129,21 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 	switch {
 	case strings.HasSuffix(path, "/check-runs"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/commits/"), "/check-runs")
-		runs := make([]map[string]any, 0, len(g.checks[sha]))
-		for name, conclusion := range g.checks[sha] {
-			runs = append(runs, map[string]any{"id": len(runs) + 1, "name": name, "status": "completed", "conclusion": conclusion})
+		if g.checkReads == nil {
+			g.checkReads = map[string]int{}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "check_runs": runs})
+		g.checkReads[sha]++
+		runs := make([]map[string]any, 0, len(g.checks[sha]))
+		total := len(g.checks[sha])
+		if page := req.URL.Query().Get("page"); page == "" || page == "1" {
+			for name, conclusion := range g.checks[sha] {
+				runs = append(runs, map[string]any{"id": len(runs) + 1, "name": name, "status": "completed", "conclusion": conclusion})
+			}
+		}
+		if g.partial[sha] {
+			total++
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": total, "check_runs": runs})
 	case strings.HasSuffix(path, "/status"):
 		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/commits/"), "/status")
 		statuses := make([]map[string]any, 0, len(g.statuses[sha]))
@@ -467,9 +482,26 @@ func TestRepositoryMonitorQueuedPolicyRepairRechecksItsGrantBeforeRunning(t *tes
 	tests := []struct {
 		name     string
 		change   func(github *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest)
+		jobOnly  bool // a RepairJob survives an earlier failed Task create
 		wantSkip string
+		wantErr  bool
 	}{
 		{name: "an unchanged grant creates the repair Task"},
+		{
+			name: "a removed label withdraws a repair whose Task create failed",
+			change: func(_ *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest) {
+				pr.Labels = []string{"orka:review"}
+			},
+			jobOnly:  true,
+			wantSkip: repositoryMonitorRepairSkipScopeWithdrawn,
+		},
+		{
+			name: "partial base CI results defer the CI repair",
+			change: func(github *repositoryMonitorRepairLabelsGitHub, _ *repositoryMonitorPullRequest) {
+				github.partial = map[string]bool{"base31": true}
+			},
+			wantErr: true,
+		},
 		{
 			name: "a removed repair label withdraws the repair",
 			change: func(_ *repositoryMonitorRepairLabelsGitHub, pr *repositoryMonitorPullRequest) {
@@ -535,13 +567,26 @@ func TestRepositoryMonitorQueuedPolicyRepairRechecksItsGrantBeforeRunning(t *tes
 			if tt.change != nil {
 				tt.change(github, &pr)
 			}
-			run := &store.MonitorRun{ID: "command-run", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "command", CommandEventID: commands[0].ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, StartedAt: time.Now()}
-			if handled, _, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item); err != nil || !handled {
-				t.Fatalf("tryProcessPullRequestCommandRun() = %t, %v", handled, err)
+			if tt.jobOnly {
+				job := &store.RepairJob{ID: "repair-" + repositoryMonitorShortHash(commands[0].ID), MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Repo: "orka-agents/orka", PRNumber: 31, Intent: commands[0].Intent, Source: commands[0].Source, HeadSHA: "head31", Phase: repositoryMonitorRepairPhaseQueued, TaskName: repositoryMonitorRepairTaskName(monitor, pr, &commands[0]), LastError: repositoryMonitorRepairTaskCreateError}
+				if err := monitorStore.CreateRepairJob(ctx, job); err != nil {
+					t.Fatal(err)
+				}
 			}
+			run := &store.MonitorRun{ID: "command-run", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "command", CommandEventID: commands[0].ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, StartedAt: time.Now()}
+			handled, _, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item)
 			var tasks corev1alpha1.TaskList
 			if err := cl.List(ctx, &tasks); err != nil {
 				t.Fatal(err)
+			}
+			if tt.wantErr {
+				if !errors.Is(err, errRepositoryMonitorCIIncomplete) || len(tasks.Items) != 0 {
+					t.Fatalf("err = %v, tasks = %d, want the repair deferred without a Task", err, len(tasks.Items))
+				}
+				return
+			}
+			if err != nil || !handled {
+				t.Fatalf("tryProcessPullRequestCommandRun() = %t, %v", handled, err)
 			}
 			if tt.wantSkip == "" {
 				if len(tasks.Items) != 1 {
@@ -619,5 +664,36 @@ func TestRepositoryMonitorReadinessRepairEligibilityIgnoresInheritedCIFailures(t
 	eligible, err = reconciler.repositoryMonitorNeedsChangesRepairEligible(context.Background(), monitor, pr, &store.MonitorItem{})
 	if err != nil || !eligible {
 		t.Fatalf("eligible = %t err=%v, want a repair for a failure the pull request introduced", eligible, err)
+	}
+}
+
+func TestRepositoryMonitorCIFailuresWaitForCompleteResultsAndShareBaseLookups(t *testing.T) {
+	github := &repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{
+		"head41": {"tests": "failure"}, "head42": {"tests": "failure"}, "base4": {"tests": "failure"},
+	}}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-failures-base")
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
+	ctx := withRepositoryMonitorBaseCICache(context.Background())
+	for _, head := range []string{"head41", "head42"} {
+		failures, err := reconciler.repositoryMonitorPullRequestCIFailures(ctx, monitor, repositoryMonitorPullRequest{BaseSHA: "base4", HeadSHA: head})
+		if err != nil || failures.broke || failures.incomplete || len(failures.inherited) != 1 {
+			t.Fatalf("%s failures = %+v err=%v, want the failure inherited", head, failures, err)
+		}
+	}
+	if github.checkReads["base4"] != 1 {
+		t.Fatalf("base check reads = %d, want one per inventory run", github.checkReads["base4"])
+	}
+	// A partial base result could hide the inherited failure.
+	github.partial = map[string]bool{"base5": true}
+	github.checks["base5"] = map[string]string{}
+	failures, err := reconciler.repositoryMonitorPullRequestCIFailures(context.Background(), monitor, repositoryMonitorPullRequest{BaseSHA: "base5", HeadSHA: "head41"})
+	if err != nil || failures.broke || !failures.incomplete {
+		t.Fatalf("failures = %+v err=%v, want classification deferred on partial base results", failures, err)
 	}
 }

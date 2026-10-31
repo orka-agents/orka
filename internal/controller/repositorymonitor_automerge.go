@@ -29,6 +29,9 @@ const (
 	repositoryMonitorAutomergeStateStarted    = "started"
 	repositoryMonitorAutomergeStatePending    = repositoryMonitorReviewTaskStatePending
 	repositoryMonitorAutomergeReasonCIPending = "ci_pending"
+	// repositoryMonitorCIChecksIncomplete means GitHub returned fewer checks
+	// or statuses than it counted.
+	repositoryMonitorCIChecksIncomplete = "ci_checks_incomplete"
 )
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorValidationAllowsAutomerge(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
@@ -111,7 +114,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 		return r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
 	}
 	if len(checks) < total {
-		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
 	var pending []string
 	var failed []repositoryMonitorCIFailure
@@ -194,7 +197,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
 	}
 	if incomplete {
-		return repositoryMonitorCIResult{reason: "ci_checks_incomplete"}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
 	if pending {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
