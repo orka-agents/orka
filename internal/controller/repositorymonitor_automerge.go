@@ -119,15 +119,18 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 			failed = append(failed, check.Name)
 		}
 	}
+	// Check runs and commit statuses come from different CI systems. Read both
+	// so a failing or pending check run never hides a failing status context.
+	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
+	if err != nil {
+		return repositoryMonitorCIResult{}, err
+	}
+	failed = append(failed, status.failed...)
 	if len(failed) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
 	}
 	if len(pending) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
-	}
-	status, err := r.repositoryMonitorCheckCommitStatus(ctx, baseURL, owner, repo, token, sha)
-	if err != nil {
-		return repositoryMonitorCIResult{}, err
 	}
 	if status.reason == "ci_checks_missing" && considered > 0 {
 		return repositoryMonitorCIResult{passed: true}, nil

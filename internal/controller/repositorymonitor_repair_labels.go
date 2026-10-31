@@ -25,27 +25,45 @@ const repositoryMonitorIssueEventPageLimit = 10
 // the base commit was already broken and is left alone; with no base result
 // to compare, every failure counts.
 func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestBrokeCI(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (bool, error) {
+	failures, err := r.repositoryMonitorPullRequestCIFailures(ctx, monitor, pr)
+	return failures.broke, err
+}
+
+// repositoryMonitorCIFailures splits the failing checks on a pull request
+// head into those the pull request introduced and those also failing on its
+// base commit.
+type repositoryMonitorCIFailures struct {
+	broke      bool
+	introduced []string
+	inherited  []string
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (repositoryMonitorCIFailures, error) {
 	head, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
 	if err != nil || head.reason != repositoryMonitorCINotGreen {
-		return false, err
+		return repositoryMonitorCIFailures{}, err
 	}
 	if strings.TrimSpace(pr.BaseSHA) == "" || len(head.failed) == 0 {
-		return true, nil
+		return repositoryMonitorCIFailures{broke: true, introduced: head.failed}, nil
 	}
 	base, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.BaseSHA)
 	if err != nil {
-		return false, err
+		return repositoryMonitorCIFailures{}, err
 	}
 	baseFailed := make(map[string]struct{}, len(base.failed))
 	for _, name := range base.failed {
 		baseFailed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
+	var failures repositoryMonitorCIFailures
 	for _, name := range head.failed {
-		if _, ok := baseFailed[strings.ToLower(strings.TrimSpace(name))]; !ok {
-			return true, nil
+		if _, ok := baseFailed[strings.ToLower(strings.TrimSpace(name))]; ok {
+			failures.inherited = append(failures.inherited, name)
+		} else {
+			failures.introduced = append(failures.introduced, name)
 		}
 	}
-	return false, nil
+	failures.broke = len(failures.introduced) > 0
+	return failures, nil
 }
 
 // repositoryMonitorRepairLabelActorPermitted reports whether an account that

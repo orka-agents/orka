@@ -40,11 +40,17 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	}
 	// A repair label runs a review-fix loop: each head is reviewed, its
 	// findings are fixed first, and CI is fixed once the review has nothing to fix.
-	reviewFirst := full && len(monitor.Spec.Repair.IncludeLabels) > 0
+	reviewFirst := full && labelled
+	ciFirst := false
 	if reviewFirst && item.LastReviewedHeadSHA != pr.HeadSHA {
-		return false, nil
+		// requireGreenCI holds the review until CI passes, so waiting for the
+		// review would never end; fix the CI the pull request broke first.
+		if !monitor.Spec.Review.RequireGreenCI {
+			return false, nil
+		}
+		ciFirst = true
 	}
-	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst)
+	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst, ciFirst)
 	if err != nil || intent == "" {
 		return false, err
 	}
@@ -97,15 +103,16 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 // repositoryMonitorAutomaticRepairIntent picks the repair for the pull
 // request's head, or "" for none. A full repair of a dirty head updates the
 // branch. Otherwise a repair label fixes the review's findings before CI, and
-// automatic repair fixes CI first.
-func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst bool) (string, error) {
-	if full && pr.MergeableState == repositoryMonitorMergeableStateDirty {
+// automatic repair fixes CI first. ciFirst allows only a CI fix, for a head
+// whose review waits for green CI.
+func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst, ciFirst bool) (string, error) {
+	if full && !ciFirst && pr.MergeableState == repositoryMonitorMergeableStateDirty {
 		return repositoryMonitorCommandIntentUpdateBranch, nil
 	}
 	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
 		return "", nil
 	}
-	if reviewFirst {
+	if reviewFirst && !ciFirst {
 		fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
 		if err != nil {
 			return "", err

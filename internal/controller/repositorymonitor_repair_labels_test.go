@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,13 @@ func TestRepositoryMonitorPullRequestRepairLabelScope(t *testing.T) {
 		{
 			name:   "ci-only label alongside full review scope",
 			mutate: func(spec *corev1alpha1.RepositoryMonitorSpec) { spec.Targets.PullRequests.IncludeLabels = nil },
+			labels: []string{"orka:fix-ci"}, wantIncluded: true, wantReviewed: true, wantCIOnly: true, wantLabelGranted: true,
+		},
+		{
+			name: "ci-only label narrows a pull request every review would repair",
+			mutate: func(spec *corev1alpha1.RepositoryMonitorSpec) {
+				spec.Targets.PullRequests.IncludeLabels, spec.Repair.IncludeLabels = nil, nil
+			},
 			labels: []string{"orka:fix-ci"}, wantIncluded: true, wantReviewed: true, wantCIOnly: true, wantLabelGranted: true,
 		},
 		{
@@ -91,12 +99,13 @@ func TestRepositoryMonitorRepairLabelsRejectIssueImplementation(t *testing.T) {
 	}
 }
 
-// repositoryMonitorRepairLabelsGitHub serves per-commit check runs, the
-// pull request's issue events, and collaborator roles.
+// repositoryMonitorRepairLabelsGitHub serves per-commit check runs and
+// commit statuses, the pull request's issue events, and collaborator roles.
 type repositoryMonitorRepairLabelsGitHub struct {
-	checks map[string]map[string]string // commit SHA -> check name -> conclusion
-	events []map[string]any
-	roles  map[string]string
+	checks   map[string]map[string]string // commit SHA -> check name -> conclusion
+	statuses map[string]map[string]string // commit SHA -> status context -> state
+	events   []map[string]any
+	roles    map[string]string
 }
 
 func (g *repositoryMonitorRepairLabelsGitHub) labeled(actor, label string) *repositoryMonitorRepairLabelsGitHub {
@@ -121,7 +130,12 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(runs), "check_runs": runs})
 	case strings.HasSuffix(path, "/status"):
-		_ = json.NewEncoder(w).Encode(map[string]any{"state": "success", "total_count": 0, "statuses": []any{}})
+		sha := strings.TrimSuffix(strings.TrimPrefix(path, "/repos/orka-agents/orka/commits/"), "/status")
+		statuses := make([]map[string]any, 0, len(g.statuses[sha]))
+		for name, state := range g.statuses[sha] {
+			statuses = append(statuses, map[string]any{"id": len(statuses) + 1, "context": name, "state": state})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(statuses), "statuses": statuses})
 	case path == "/repos/orka-agents/orka/issues/31/events":
 		if req.URL.Query().Get("page") != "1" {
 			_, _ = w.Write([]byte(`[]`))
@@ -154,6 +168,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 		github      *repositoryMonitorRepairLabelsGitHub
 		review      string // verdict of a stored review for the head, if any
 		item        func(*store.MonitorItem)
+		greenCI     bool // spec.review.requireGreenCI
 		wantHandled bool
 		wantIntent  string
 		wantSkip    string
@@ -177,6 +192,31 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			labels:      []string{"orka:fix"},
 			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure", "lint": "success"}, "base31": {"tests": "success", "lint": "success"}}}).labeled("maintainer", "orka:fix"),
 			item:        passedReview,
+			wantHandled: true,
+			wantIntent:  repositoryMonitorCommandIntentFixCI,
+		},
+		{
+			name:        "fix label fixes CI first when reviews wait for green CI",
+			labels:      []string{"orka:fix"},
+			github:      (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}}}).labeled("maintainer", "orka:fix"),
+			greenCI:     true,
+			wantHandled: true,
+			wantIntent:  repositoryMonitorCommandIntentFixCI,
+		},
+		{
+			name:      "fix label under green-CI reviews leaves an unreviewed conflict alone",
+			labels:    []string{"orka:fix"},
+			mergeable: repositoryMonitorMergeableStateDirty,
+			github:    (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"tests": "success"}}}).labeled("maintainer", "orka:fix"),
+			greenCI:   true,
+		},
+		{
+			name:   "a commit status the pull request broke counts beside a shared failing check run",
+			labels: []string{"orka:fix-ci"},
+			github: (&repositoryMonitorRepairLabelsGitHub{
+				checks:   map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "failure"}},
+				statuses: map[string]map[string]string{"head31": {"jenkins": "failure"}},
+			}).labeled("maintainer", "orka:fix-ci"),
 			wantHandled: true,
 			wantIntent:  repositoryMonitorCommandIntentFixCI,
 		},
@@ -255,6 +295,7 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			monitor.Spec.Repair.IncludeLabels = labelSpec.Repair.IncludeLabels
 			monitor.Spec.Repair.CIOnlyLabels = labelSpec.Repair.CIOnlyLabels
 			monitor.Spec.Repair.Enabled = true
+			monitor.Spec.Review.RequireGreenCI = tt.greenCI
 			monitor.Spec.Agents.Repairer = &corev1alpha1.AgentReference{Name: "repairer"}
 			configureRepositoryMonitorTestWriteCredentials(monitor)
 			cl := fake.NewClientBuilder().WithScheme(scheme).
@@ -347,5 +388,44 @@ func TestRepositoryMonitorInventorySkipsReviewForCIOnlyPullRequests(t *testing.T
 	ciOnly, err := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorPullRequestKind, "1")
 	if err != nil || ciOnly.State != repositoryMonitorItemStateOpen || ciOnly.SkipReason != repositoryMonitorSkipReasonCIOnly {
 		t.Fatalf("ci-only item = %#v err=%v, want an open item skipped as ci_only", ciOnly, err)
+	}
+}
+
+func TestRepositoryMonitorCIRepairPromptNamesTheChecksThePullRequestBroke(t *testing.T) {
+	github := &repositoryMonitorRepairLabelsGitHub{
+		checks:   map[string]map[string]string{"head31": {"tests": "failure", "lint": "failure"}, "base31": {"tests": "failure", "lint": "success"}},
+		statuses: map[string]map[string]string{"head31": {"jenkins": "failure"}},
+	}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-prompt")
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
+	pr := repositoryMonitorPullRequest{Number: 31, BaseSHA: "base31", HeadSHA: "head31"}
+	prompt, err := reconciler.buildRepositoryMonitorRepairPrompt(context.Background(), monitor, repositoryMonitorCommandIntentFixCI, "orka-agents/orka", pr, &store.MonitorItem{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, input, ok := strings.Cut(prompt, "Input:\n")
+	if !ok {
+		t.Fatalf("prompt has no input: %s", prompt)
+	}
+	var payload struct {
+		BaseSHA           string   `json:"baseSHA"`
+		FailingChecks     []string `json:"failingChecks"`
+		BaseFailingChecks []string `json:"baseFailingChecks"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(payload.FailingChecks)
+	if payload.BaseSHA != "base31" || fmt.Sprint(payload.FailingChecks) != "[jenkins lint]" || fmt.Sprint(payload.BaseFailingChecks) != "[tests]" {
+		t.Fatalf("CI repair input = %+v, want base31, [jenkins lint], [tests]", payload)
+	}
+	if !strings.Contains(prompt, "Fix only the checks in failingChecks") {
+		t.Fatalf("prompt does not limit the repair to failingChecks: %s", prompt)
 	}
 }
