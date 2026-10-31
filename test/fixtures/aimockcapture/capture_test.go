@@ -662,3 +662,47 @@ func TestNonUTF8BodyRejectedWithoutLossyCapture(t *testing.T) {
 		})
 	}
 }
+
+// A streaming client may stop reading once it has the final event, before the
+// upstream response ends. The response was fully relayed, so the capture is
+// complete.
+func TestClientCloseAfterFinalEventComplete(t *testing.T) {
+	const final = "event: response.completed\ndata: {}\n\n"
+	clientGone := make(chan struct{})
+	upstream := serveFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, final)
+		w.(http.Flusher).Flush()
+		// End the response only after the proxy has seen the client hang up.
+		select {
+		case <-clientGone:
+		case <-time.After(3 * time.Second):
+		}
+	}))
+	h := newFixture(t, upstream.URL)
+	var once sync.Once
+	proxy := serveFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stop := context.AfterFunc(r.Context(), func() { once.Do(func() { close(clientGone) }) })
+		defer stop()
+		h.ServeHTTP(w, r)
+	}))
+	response, err := proxy.Client().Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal("stream request failed")
+	}
+	data := make([]byte, len(final))
+	if _, err := io.ReadFull(response.Body, data); err != nil || string(data) != final {
+		t.Fatal("final stream event was not relayed")
+	}
+	_ = response.Body.Close()
+	proxy.Client().Transport.(*http.Transport).CloseIdleConnections()
+	select {
+	case <-clientGone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("proxy did not observe the client hanging up")
+	}
+	entry := awaitEntry(t, h, func(e Entry) bool { return e.Complete || e.Error != "" })
+	if !entry.Complete || entry.Error != "" {
+		t.Fatalf("fully relayed stream was recorded as incomplete: %q", entry.Error)
+	}
+}
