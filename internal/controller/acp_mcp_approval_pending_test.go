@@ -21,10 +21,20 @@ import (
 
 func seedMCPApprovalPending(t *testing.T, f *mcpApprovalRecoveryFixture, requested bool) (*acpMCPApprovalCall, *store.ExternalEffect) {
 	t.Helper()
+	return seedMCPApprovalPendingInSession(t, f, requested, "")
+}
+
+// seedMCPApprovalPendingInSession seeds the call as made from session when it
+// is not empty, so its approval events carry that Session association.
+func seedMCPApprovalPendingInSession(t *testing.T, f *mcpApprovalRecoveryFixture, requested bool, session string) (*acpMCPApprovalCall, *store.ExternalEffect) {
+	t.Helper()
 	descriptor, err := f.request.ValidateAt(time.Now().UTC())
 	require.NoError(t, err)
 	credentials, err := f.broker.Credentials.ResolveACPMCPBrokerCredentials(f.ctx, f.request)
 	require.NoError(t, err)
+	if session != "" {
+		credentials.Task.SessionName = session
+	}
 	call, _, err := f.broker.persistApprovalCall(f.ctx, f.request, descriptor, credentials.Task, "")
 	require.NoError(t, err)
 	effect, err := f.control.ReserveExternalEffect(f.ctx, store.ReserveExternalEffectRequest{

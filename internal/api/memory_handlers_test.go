@@ -18,6 +18,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -26,11 +27,11 @@ const memoryProposalTestUser = "system:serviceaccount:orka-system:jordan"
 
 // setupMemoryProposalApp serves review and apply as the given identity; nil
 // leaves the request without one.
-func setupMemoryProposalApp(t *testing.T, ui *UserInfo) (*fiber.App, *sqlite.Store) {
+func setupMemoryProposalApp(t *testing.T, ui *UserInfo) (*fiber.App, *storageclient.Client) {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 	app := fiber.New()
@@ -45,7 +46,7 @@ func setupMemoryProposalApp(t *testing.T, ui *UserInfo) (*fiber.App, *sqlite.Sto
 	return app, ss
 }
 
-func createTestMemoryProposal(t *testing.T, ss *sqlite.Store, status string) *store.MemoryProposal {
+func createTestMemoryProposal(t *testing.T, ss *storageclient.Client, status string) *store.MemoryProposal {
 	t.Helper()
 	proposal := &store.MemoryProposal{
 		Namespace: "default",

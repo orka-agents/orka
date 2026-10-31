@@ -14,7 +14,7 @@ type TaskMessageBudget struct {
 }
 
 // PreparedTaskMessageBudget is short-lived live authorization state. Read it
-// under the caller's authorized task-data transaction, just like message enqueue.
+// inside the caller's authorized task data access, just like message enqueue.
 type PreparedTaskMessageBudget struct {
 	service            *Service
 	query              store.GatewayMessageBudgetQuery

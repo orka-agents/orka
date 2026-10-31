@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -40,25 +41,25 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 		path    string
 		body    string
 		handler func(*InternalHandlers) fiber.Handler
-		read    func(*sqlite.Store) error
+		read    func(*storageclient.Client) error
 	}{
 		{"result", "/internal/v1/results/default/task-a", "result", func(h *InternalHandlers) fiber.Handler { return h.SubmitResult },
-			func(s *sqlite.Store) error {
+			func(s *storageclient.Client) error {
 				_, err := s.GetResult(context.Background(), "default", "task-a")
 				return err
 			}},
 		{"artifact", "/internal/v1/artifacts/default/task-a/output.txt", "artifact", func(h *InternalHandlers) fiber.Handler { return h.UploadArtifact },
-			func(s *sqlite.Store) error {
-				_, _, err := s.GetArtifact(context.Background(), "default", "task-a", "output.txt")
+			func(s *storageclient.Client) error {
+				_, _, err := s.GetArtifact(context.Background(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "default", TaskName: "task-a"}, Filename: "output.txt"})
 				return err
 			}},
 		{"plan", "/internal/v1/plans/default/task-a", `{"summary":"plan"}`, func(h *InternalHandlers) fiber.Handler { return h.SubmitPlan },
-			func(s *sqlite.Store) error {
+			func(s *storageclient.Client) error {
 				_, err := s.GetPlan(context.Background(), "default", "task-a")
 				return err
 			}},
 		{"event", "/internal/v1/events/default/task/task-a", `{"type":"WorkerStarted"}`, func(h *InternalHandlers) fiber.Handler { return h.SubmitExecutionEvent },
-			func(s *sqlite.Store) error {
+			func(s *storageclient.Client) error {
 				seq, err := s.GetLatestExecutionEventSeq(context.Background(), "default", "task", "task-a")
 				if err == nil && seq == 0 {
 					return store.ErrNotFound
@@ -75,7 +76,7 @@ func TestInternalWritesRevalidateAfterStreamedBody(t *testing.T) {
 				db, err := sqlite.NewDB(":memory:")
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = db.Close() })
-				dataStore := sqlite.NewStore(db, ":memory:")
+				dataStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 				h := NewInternalHandlers(dataStore, dataStore, dataStore, dataStore, dataStore, InternalHandlersConfig{
 					Client: kube, APIReader: kube, ExecutionEventStore: dataStore,
 				})

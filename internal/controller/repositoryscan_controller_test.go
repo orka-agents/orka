@@ -34,6 +34,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/storageclient"
 	storepkg "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/workers/common"
@@ -605,19 +606,19 @@ func reviewSlicePaths(slice storepkg.ReviewSlice) []string {
 	return paths
 }
 
-func saveMapperArtifactWithContexts(t *testing.T, store *sqlitestore.Store, task *corev1alpha1.Task, artifact security.ReviewSlicesArtifact) {
+func saveMapperArtifactWithContexts(t *testing.T, store *storageclient.Client, task *corev1alpha1.Task, artifact security.ReviewSlicesArtifact) {
 	t.Helper()
 	ctx := context.Background()
 	data, err := json.Marshal(artifact)
 	if err != nil {
 		t.Fatalf("json.Marshal(review slices) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactSlices, "application/json", data); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}, Filename: security.ArtifactSlices, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(slices) error = %v", err)
 	}
 	for _, slice := range artifact.Slices {
 		_, contextJSON, _ := testReviewContext(t, slice.ID, reviewSlicePaths(slice)...)
-		if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ReviewContextArtifactName(slice.ID), "application/json", []byte(contextJSON)); err != nil {
+		if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}, Filename: security.ReviewContextArtifactName(slice.ID), ContentType: "application/json", Data: []byte(contextJSON)}); err != nil {
 			t.Fatalf("SaveArtifact(review context %s) error = %v", slice.ID, err)
 		}
 	}
@@ -649,7 +650,7 @@ func reviewedSliceWithContext(t *testing.T, repositoryScan, runID, sliceID strin
 
 func saveFindingsTaskResult(
 	t *testing.T,
-	store *sqlitestore.Store,
+	store *storageclient.Client,
 	task *corev1alpha1.Task,
 	repositoryScan, scanID, policyDigest, contextDigest, sliceID string,
 	findings security.FindingsV2Artifact,
@@ -692,7 +693,7 @@ func saveFindingsTaskResult(
 
 type reviewResultRetryFixture struct {
 	ctx        context.Context
-	store      *sqlitestore.Store
+	store      *storageclient.Client
 	client     client.Client
 	reconciler *RepositoryScanReconciler
 	scan       *corev1alpha1.RepositoryScan
@@ -1168,7 +1169,7 @@ func TestIngestReviewTaskResultRetryEligibility(t *testing.T) {
 
 func saveValidationTaskResult(
 	t *testing.T,
-	store *sqlitestore.Store,
+	store *storageclient.Client,
 	task *corev1alpha1.Task,
 	repositoryScan, scanID, policyDigest string,
 	validation security.ValidationArtifact,
@@ -2914,7 +2915,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal(manifest) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ReviewContextArtifactName("slice_api"), "application/json", manifestData); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}, Filename: security.ReviewContextArtifactName("slice_api"), ContentType: "application/json", Data: manifestData}); err != nil {
 		t.Fatalf("SaveArtifact(manifest) error = %v", err)
 	}
 	findings := security.FindingsV2Artifact{
@@ -2942,7 +2943,7 @@ func TestIngestReviewTaskSkipsStaleSliceRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal(findings) error = %v", err)
 	}
-	if err := store.SaveArtifact(ctx, task.Namespace, task.Name, security.ArtifactFindingsV2, "application/json", findingsData); err != nil {
+	if err := store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name}, Filename: security.ArtifactFindingsV2, ContentType: "application/json", Data: findingsData}); err != nil {
 		t.Fatalf("SaveArtifact(findings v2) error = %v", err)
 	}
 
@@ -3636,7 +3637,7 @@ func TestCreateScanRunDoesNotAdoptUnreservedTask(t *testing.T) {
 }
 
 type patchIngestFixture struct {
-	store            *sqlitestore.Store
+	store            *storageclient.Client
 	publicationStore *patchPublicationStore
 	reconciler       *RepositoryScanReconciler
 	scan             *corev1alpha1.RepositoryScan
@@ -3834,7 +3835,7 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	ctx := context.Background()
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: diffName, ContentType: "text/x-diff", Data: []byte(diff)}); err != nil {
 		t.Fatalf("SaveArtifact(diff) error = %v", err)
 	}
 	summary := security.PatchSummaryArtifact{
@@ -3848,7 +3849,7 @@ func savePatchArtifacts(t *testing.T, fixture patchIngestFixture, diff string, c
 	if err != nil {
 		t.Fatalf("json.Marshal(summary) error = %v", err)
 	}
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: summaryName, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
 	}
 }
@@ -3858,14 +3859,14 @@ func savePatchArtifactsWithSummary(t *testing.T, fixture patchIngestFixture, dif
 	ctx := context.Background()
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName, "text/x-diff", []byte(diff)); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: diffName, ContentType: "text/x-diff", Data: []byte(diff)}); err != nil {
 		t.Fatalf("SaveArtifact(diff) error = %v", err)
 	}
 	data, err := json.Marshal(summary)
 	if err != nil {
 		t.Fatalf("json.Marshal(summary) error = %v", err)
 	}
-	if err := fixture.store.SaveArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName, "application/json", data); err != nil {
+	if err := fixture.store.SaveArtifact(ctx, storepkg.SaveArtifactRequest{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: summaryName, ContentType: "application/json", Data: data}); err != nil {
 		t.Fatalf("SaveArtifact(summary) error = %v", err)
 	}
 }
@@ -4016,7 +4017,7 @@ func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
 	assertPatchIngestState(t, fixture, patchProposalStatusPROpened, findingStatePROpen)
 
 	diffName := fmt.Sprintf("security-patch-%s.diff", fixture.finding.ID)
-	diffData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	diffData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: diffName})
 	if err != nil {
 		t.Fatalf("GetArtifact(diff) error = %v", err)
 	}
@@ -4024,7 +4025,7 @@ func TestIngestPatchTaskSanitizesPreexistingDiffArtifact(t *testing.T) {
 		t.Fatalf("stored diff artifact = %q, want the removed credential redacted", string(diffData))
 	}
 	summaryName := fmt.Sprintf("security-patch-%s.json", fixture.finding.ID)
-	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: summaryName})
 	if err != nil {
 		t.Fatalf("GetArtifact(summary) error = %v", err)
 	}
@@ -6267,7 +6268,10 @@ func TestRefreshScanRunStatusSetsBothTimestampsOnSuccess(t *testing.T) {
 	}
 }
 
-func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
+// setupControllerSQLiteStore returns an in-memory SQLite store behind the
+// storage client, as production wires it. Scan ingestion and other Orka-side
+// protocols are implemented by the client.
+func setupControllerSQLiteStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 
 	db, err := sqlitestore.NewDB(":memory:")
@@ -6277,7 +6281,11 @@ func setupControllerSQLiteStore(t *testing.T) *sqlitestore.Store {
 	t.Cleanup(func() {
 		_ = db.Close()
 	})
-	return sqlitestore.NewStore(db, ":memory:")
+	storage, err := storageclient.NewEmbedded(sqlitestore.NewStore(db, ":memory:"))
+	if err != nil {
+		t.Fatalf("storageclient.NewEmbedded() error = %v", err)
+	}
+	return storage
 }
 func TestShouldAutoValidateFindingHonorsModeAndThresholds(t *testing.T) {
 	reconciler := &RepositoryScanReconciler{}
@@ -6797,7 +6805,7 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		t.Fatalf("GitHub request authorization = %q, want the forge token", seenToken)
 	}
 	diffName, summaryName := patchArtifactNames(fixture.finding.ID)
-	diff, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName)
+	diff, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: diffName})
 	if err != nil {
 		t.Fatalf("GetArtifact(diff) error = %v", err)
 	}
@@ -6805,7 +6813,7 @@ func TestIngestPatchTaskDerivesArtifactsFromV2ResultAndPublishedCommit(t *testin
 		!strings.Contains(string(diff), "diff --git a/tests/test_app.py b/tests/test_app.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_app.py\n") {
 		t.Fatalf("derived diff = %q", diff)
 	}
-	summaryData, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, summaryName)
+	summaryData, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: summaryName})
 	if err != nil {
 		t.Fatalf("GetArtifact(summary) error = %v", err)
 	}
@@ -6873,7 +6881,7 @@ func TestIngestPatchTaskV2ResultFailsClosed(t *testing.T) {
 			}
 			assertPatchIngestState(t, fixture, scanRunPhaseFailed, findingStateOpen)
 			diffName, _ := patchArtifactNames(fixture.finding.ID)
-			if _, _, err := fixture.store.GetArtifact(ctx, fixture.proposal.Namespace, fixture.proposal.TaskName, diffName); err == nil {
+			if _, _, err := fixture.store.GetArtifact(ctx, storepkg.ArtifactKey{Owner: storepkg.ArtifactOwner{Namespace: fixture.proposal.Namespace, TaskName: fixture.proposal.TaskName}, Filename: diffName}); err == nil {
 				t.Fatal("a failed proposal must not persist a diff artifact")
 			}
 			proposals, _ := fixture.store.ListPatchProposals(ctx, fixture.proposal.Namespace, fixture.finding.ID)

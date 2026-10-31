@@ -56,7 +56,7 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 		session.Namespace, session.Name, session.Namespace, session.Name,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	inserted, err := result.RowsAffected()
 	if err != nil {
@@ -70,8 +70,32 @@ func (s *Store) CreateSession(ctx context.Context, session *store.SessionRecord)
 
 // GetSession loads a session with all its messages.
 func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	var session *store.SessionRecord
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		session, err = s.getSessionUnfenced(ctx, namespace, name)
+		return err
+	})
+	return session, err
+}
+
+func (s *Store) getSessionUnfenced(ctx context.Context, namespace, name string) (*store.SessionRecord, error) {
+	var session *store.SessionRecord
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		session, err = getSession(ctx, q, namespace, name)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// getSession reads a Session and its transcript through q, which must be one
+// snapshot so the message count matches the messages returned.
+func getSession(ctx context.Context, q taskDataExecutor, namespace, name string) (*store.SessionRecord, error) {
 	session := &store.SessionRecord{}
-	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT namespace, name, session_type, active_task, active_task_uid, message_count, input_tokens, output_tokens, cancelled, created_at, updated_at
 		 FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
@@ -87,7 +111,7 @@ func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.
 		return nil, err
 	}
 
-	messages, err := s.LoadTranscript(ctx, namespace, name, 0)
+	messages, err := loadTranscriptFrom(ctx, q, namespace, name, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +122,16 @@ func (s *Store) GetSession(ctx context.Context, namespace, name string) (*store.
 
 // GetSessionType returns the stored Session type without loading transcript messages.
 func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	var sessionType string
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		sessionType, err = s.getSessionTypeUnfenced(ctx, namespace, name)
+		return err
+	})
+	return sessionType, err
+}
+
+func (s *Store) getSessionTypeUnfenced(ctx context.Context, namespace, name string) (string, error) {
 	var sessionType string
 	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT session_type FROM sessions WHERE namespace = ? AND name = ?`,
@@ -398,12 +432,26 @@ func rejectLegacyNativeSession(ctx context.Context, q controlQueryRower, namespa
 }
 
 func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, taskUID string, expiresAt *time.Time) error {
-	if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+	// The checks and the update share one transaction, so a Session deleted
+	// between them is reported as not found rather than as locked, and the
+	// update never acts on a gateway ownership check that no longer holds.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		return acquireSessionLock(ctx, q, namespace, name, taskName, taskUID, expiresAt)
+	})
+}
+
+func acquireSessionLock(
+	ctx context.Context,
+	q taskDataExecutor,
+	namespace, name, taskName, taskUID string,
+	expiresAt *time.Time,
+) error {
+	if err := rejectLegacyNativeSession(ctx, q, namespace, name); err != nil {
 		return err
 	}
 	// Check if session exists
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name,
 	).Scan(&count)
@@ -414,7 +462,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return store.ErrNotFound
 	}
 	var ownerType string
-	if err := s.db.QueryRowContext(ctx, `SELECT owner_type FROM sessions WHERE namespace = ? AND name = ?`,
+	if err := q.QueryRowContext(ctx, `SELECT owner_type FROM sessions WHERE namespace = ? AND name = ?`,
 		namespace, name).Scan(&ownerType); err != nil {
 		return err
 	}
@@ -424,7 +472,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		}
 		var eventState store.GatewayEventState
 		var storedTaskUID string
-		err := s.db.QueryRowContext(ctx, `SELECT state, task_uid FROM gateway_events
+		err := q.QueryRowContext(ctx, `SELECT state, task_uid FROM gateway_events
 			WHERE namespace = ? AND session_name = ? AND task_name = ?
 			ORDER BY created_at DESC, id DESC LIMIT 1`,
 			namespace, name, taskName,
@@ -456,7 +504,7 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		expiresValue = *expiresAt
 	}
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx,
+	result, err := q.ExecContext(ctx,
 		`UPDATE sessions SET active_task = ?, active_task_uid = ?, active_task_expires_at = ?,
 		   chat_turn_id = '', chat_turn_expires_at = NULL
 		 WHERE namespace = ? AND name = ? AND (active_task = '' OR
@@ -478,10 +526,10 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 		return err
 	}
 	if rows == 0 {
-		if err := rejectLegacyNativeSession(ctx, s.db, namespace, name); err != nil {
+		if err := rejectLegacyNativeSession(ctx, q, namespace, name); err != nil {
 			return err
 		}
-		if pending, pendingErr := s.HasSessionCleanupIntent(ctx, namespace, name); pendingErr != nil {
+		if pending, pendingErr := sessionCleanupIntentExists(ctx, q, namespace, name); pendingErr != nil {
 			return pendingErr
 		} else if pending {
 			return fmt.Errorf("%w: session %s/%s is being deleted", store.ErrConflict, namespace, name)
@@ -923,7 +971,7 @@ func insertSessionMessagesTx(
 		if err != nil {
 			return 0, err
 		}
-		ts := msg.Timestamp
+		ts := msg.Timestamp.UTC()
 		if ts.IsZero() {
 			ts = time.Now().UTC()
 		}
@@ -987,13 +1035,23 @@ func verifySessionWriteLockTx(ctx context.Context, tx *sql.Tx, namespace, name, 
 		return err
 	}
 	if rows != 1 {
-		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+		return store.FencedErrorf("session %s/%s lock owner changed or expired", namespace, name)
 	}
 	return nil
 }
 
 // LoadTranscript retrieves messages in logical conversation order.
 func (s *Store) LoadTranscript(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
+	var messages []store.SessionMessage
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		messages, err = s.loadTranscriptUnfenced(ctx, namespace, name, maxMessages)
+		return err
+	})
+	return messages, err
+}
+
+func (s *Store) loadTranscriptUnfenced(ctx context.Context, namespace, name string, maxMessages int) ([]store.SessionMessage, error) {
 	return s.loadTranscript(ctx, namespace, name, 0, maxMessages)
 }
 
@@ -1003,20 +1061,50 @@ func (s *Store) LoadTranscriptThrough(
 	namespace, name, throughMessageID string,
 	maxMessages int,
 ) ([]store.SessionMessage, error) {
-	var throughOrder int64
-	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT sort_order FROM session_messages
-		WHERE namespace = ? AND session_name = ? AND message_id = ?`,
-		namespace, name, throughMessageID,
-	).Scan(&throughOrder); errors.Is(err, sql.ErrNoRows) {
-		return nil, store.ErrNotFound
-	} else if err != nil {
-		return nil, err
-	}
-	return s.loadTranscript(ctx, namespace, name, throughOrder, maxMessages)
+	var messages []store.SessionMessage
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		messages, err = s.loadTranscriptThroughUnfenced(ctx, namespace, name, throughMessageID, maxMessages)
+		return err
+	})
+	return messages, err
+}
+
+func (s *Store) loadTranscriptThroughUnfenced(
+	ctx context.Context,
+	namespace, name, throughMessageID string,
+	maxMessages int,
+) ([]store.SessionMessage, error) {
+	var messages []store.SessionMessage
+	err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var throughOrder int64
+		if err := q.QueryRowContext(ctx, `SELECT sort_order FROM session_messages
+			WHERE namespace = ? AND session_name = ? AND message_id = ?`,
+			namespace, name, throughMessageID,
+		).Scan(&throughOrder); errors.Is(err, sql.ErrNoRows) {
+			return store.ErrNotFound
+		} else if err != nil {
+			return err
+		}
+		var err error
+		messages, err = loadTranscriptFrom(ctx, q, namespace, name, throughOrder, maxMessages)
+		return err
+	})
+	return messages, err
 }
 
 func (s *Store) loadTranscript(
 	ctx context.Context,
+	namespace, name string,
+	throughOrder int64,
+	maxMessages int,
+) ([]store.SessionMessage, error) {
+	return loadTranscriptFrom(ctx, s.taskDataExecutor(ctx), namespace, name, throughOrder, maxMessages)
+}
+
+func loadTranscriptFrom(
+	ctx context.Context,
+	q taskDataExecutor,
 	namespace, name string,
 	throughOrder int64,
 	maxMessages int,
@@ -1039,7 +1127,7 @@ func (s *Store) loadTranscript(
 	} else {
 		query = `SELECT ` + baseColumns + ` FROM session_messages WHERE ` + where + ` ORDER BY sort_order, id`
 	}
-	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1210,7 +1298,7 @@ func (s *Store) UpdateTokenCountsWithLock(
 		return err
 	}
 	if rows != 1 {
-		return fmt.Errorf("%w: session %s/%s lock owner changed or expired", store.ErrConflict, namespace, name)
+		return store.FencedErrorf("session %s/%s lock owner changed or expired", namespace, name)
 	}
 	return nil
 }

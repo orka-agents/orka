@@ -108,7 +108,7 @@ func TestExternalAPILiveTokenReviewAuthorization(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	server := NewServer(admin, nil, ServerConfig{WatchNamespace: namespace, EnforceNamespaceIsolation: true, Clientset: clientset, MemoryStore: ss})
 	request := func(caller, method, path, body string) int {
 		t.Helper()

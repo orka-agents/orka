@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -30,7 +29,7 @@ func parseOffsetCursor(cursor string) (int, error) {
 	}
 	offset, err := strconv.Atoi(cursor)
 	if err != nil || offset < 0 {
-		return 0, fmt.Errorf("invalid cursor")
+		return 0, store.ValidationErrorf("invalid cursor")
 	}
 	return offset, nil
 }
@@ -133,45 +132,50 @@ func (s *Store) CreateScanRun(ctx context.Context, run *store.ScanRun) error {
 func (s *Store) UpdateScanRun(ctx context.Context, run *store.ScanRun) error {
 	run.StartedAt = utcTime(run.StartedAt)
 	run.CompletedAt = utcTimePtr(run.CompletedAt)
-	result, err := s.securityDB().ExecContext(ctx,
-		`UPDATE security_scan_runs
-		 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
-		     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
-		     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
-		     summary = ?, error_message = ?, completed_at = ?
-		 WHERE namespace = ? AND id = ? AND repository_scan = ?
-		   AND repository_scan_uid = ? AND repository_scan_generation = ?
-		   AND cancellation_version = 0
-		   AND (? NOT IN ('pending', 'running') OR (
-		     security_scan_runs.phase IN ('pending', 'running') AND NOT EXISTS (
-		       SELECT 1 FROM security_scan_runs other
-		       WHERE other.namespace = security_scan_runs.namespace
-		         AND other.repository_scan = security_scan_runs.repository_scan
-		         AND other.id <> security_scan_runs.id AND other.phase IN ('pending', 'running')
-		     ) AND NOT EXISTS (
-		       SELECT 1 FROM security_scan_runs newer
-		       WHERE newer.namespace = security_scan_runs.namespace
-		         AND newer.repository_scan = security_scan_runs.repository_scan
-		         AND newer.rowid > security_scan_runs.rowid
-		     )
-		   ))`,
-		run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
-		run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
-		run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
-		run.Summary, run.ErrorMessage, run.CompletedAt, run.Namespace, run.ID, run.RepositoryScan,
-		run.RepositoryScanUID, run.RepositoryScanGeneration, run.Phase,
-	)
-	if err != nil {
-		return err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil || updated == 1 {
-		return err
-	}
-	if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
-		return err
-	}
-	return fmt.Errorf("%w: scan run identity changed, cancellation was requested, or a newer run was admitted", store.ErrConflict)
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction, so a run created after the update is not reported as a
+	// conflict.
+	return s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx,
+			`UPDATE security_scan_runs
+			 SET task_name = ?, mode = ?, phase = ?, base_commit = ?, head_commit = ?, commit_count = ?,
+			     slice_count = ?, reviewed_slice_count = ?, skipped_slice_count = ?, accepted_findings = ?, dropped_findings = ?,
+			     scanner_policy_version = ?, policy_digest = ?, idempotency_key = ?,
+			     summary = ?, error_message = ?, completed_at = ?
+			 WHERE namespace = ? AND id = ? AND repository_scan = ?
+			   AND repository_scan_uid = ? AND repository_scan_generation = ?
+			   AND cancellation_version = 0
+			   AND (? NOT IN ('pending', 'running') OR (
+			     security_scan_runs.phase IN ('pending', 'running') AND NOT EXISTS (
+			       SELECT 1 FROM security_scan_runs other
+			       WHERE other.namespace = security_scan_runs.namespace
+			         AND other.repository_scan = security_scan_runs.repository_scan
+			         AND other.id <> security_scan_runs.id AND other.phase IN ('pending', 'running')
+			     ) AND NOT EXISTS (
+			       SELECT 1 FROM security_scan_runs newer
+			       WHERE newer.namespace = security_scan_runs.namespace
+			         AND newer.repository_scan = security_scan_runs.repository_scan
+			         AND newer.rowid > security_scan_runs.rowid
+			     )
+			   ))`,
+			run.TaskName, run.Mode, run.Phase, run.BaseCommit, run.HeadCommit, run.CommitCount,
+			run.SliceCount, run.ReviewedSliceCount, run.SkippedSliceCount, run.AcceptedFindings, run.DroppedFindings,
+			run.ScannerPolicyVersion, run.PolicyDigest, run.IdempotencyKey,
+			run.Summary, run.ErrorMessage, run.CompletedAt, run.Namespace, run.ID, run.RepositoryScan,
+			run.RepositoryScanUID, run.RepositoryScanGeneration, run.Phase,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil || updated == 1 {
+			return err
+		}
+		if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: scan run identity changed, cancellation was requested, or a newer run was admitted", store.ErrConflict)
+	})
 }
 
 // GetScanRun fetches a scan run by ID.
@@ -271,49 +275,63 @@ func (s *Store) listScanRuns(ctx context.Context, namespace, repositoryScan, pre
 // RequestScanRunCancellation freezes ordinary progress before Task deletion.
 // Each new request fences older cleanup attempts so they cannot erase a retry.
 func (s *Store) RequestScanRunCancellation(ctx context.Context, run *store.ScanRun, reason string) error {
-	err := s.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
-		SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
-		    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
-		    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
-		WHERE namespace = ? AND id = ? AND repository_scan = ?
-		  AND repository_scan_uid = ? AND repository_scan_generation = ?
-		RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
-		run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&run.CancellationVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
-			return err
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction.
+	version := run.CancellationVersion
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		err := tx.securityDB().QueryRowContext(ctx, `UPDATE security_scan_runs
+			SET cancellation_version = cancellation_version + 1, cancellation_pending = TRUE,
+			    error_message = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE error_message END,
+			    summary = CASE WHEN phase IN ('pending', 'running') AND cancellation_version = 0 THEN ? ELSE summary END
+			WHERE namespace = ? AND id = ? AND repository_scan = ?
+			  AND repository_scan_uid = ? AND repository_scan_generation = ?
+			RETURNING cancellation_version`, reason, reason, run.Namespace, run.ID, run.RepositoryScan,
+			run.RepositoryScanUID, run.RepositoryScanGeneration).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
 		}
-		return fmt.Errorf("%w: scan run identity changed before cancellation", store.ErrConflict)
+		return err
+	}); err != nil {
+		return err
 	}
-	if err == nil {
-		run.CancellationPending = true
-	}
-	return err
+	run.CancellationVersion = version
+	run.CancellationPending = true
+	return nil
 }
 
 // CompleteScanRunCancellation releases active reservations only after cleanup.
 // Late-Task cleanup preserves the result of an already terminal run.
 func (s *Store) CompleteScanRunCancellation(ctx context.Context, run *store.ScanRun) error {
-	result, err := s.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
-		SET cancellation_pending = FALSE,
-		    phase = CASE WHEN phase IN ('pending', 'running') THEN 'failed' ELSE phase END,
-		    completed_at = CASE WHEN phase IN ('pending', 'running') THEN ? ELSE completed_at END
-		WHERE namespace = ? AND id = ? AND repository_scan = ?
-		  AND repository_scan_uid = ? AND repository_scan_generation = ?
-		  AND cancellation_version = ? AND cancellation_version > 0`, time.Now().UTC(),
-		run.Namespace, run.ID, run.RepositoryScan, run.RepositoryScanUID, run.RepositoryScanGeneration, run.CancellationVersion)
-	if err != nil {
-		return err
-	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if updated != 1 {
-		if _, err := s.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+	// The update and the check that tells a missing run from a conflict share
+	// one transaction.
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx, `UPDATE security_scan_runs
+			SET cancellation_pending = FALSE,
+			    phase = CASE WHEN phase IN ('pending', 'running') THEN 'failed' ELSE phase END,
+			    completed_at = CASE WHEN phase IN ('pending', 'running') THEN ? ELSE completed_at END
+			WHERE namespace = ? AND id = ? AND repository_scan = ?
+			  AND repository_scan_uid = ? AND repository_scan_generation = ?
+			  AND cancellation_version = ? AND cancellation_version > 0`, time.Now().UTC(),
+			run.Namespace, run.ID, run.RepositoryScan, run.RepositoryScanUID, run.RepositoryScanGeneration, run.CancellationVersion)
+		if err != nil {
 			return err
 		}
-		return fmt.Errorf("%w: scan run cancellation changed during cleanup", store.ErrConflict)
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated != 1 {
+			if _, err := tx.GetScanRun(ctx, run.Namespace, run.ID); err != nil {
+				return err
+			}
+			return fmt.Errorf("%w: scan run cancellation changed during cleanup", store.ErrConflict)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	run.CancellationPending = false
 	return nil
@@ -369,7 +387,7 @@ func (s *Store) UpsertReviewSlice(ctx context.Context, slice *store.ReviewSlice)
 
 	slice.CreatedAt = utcTime(slice.CreatedAt)
 	slice.LastReviewedAt = utcTimePtr(slice.LastReviewedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if slice.CreatedAt.IsZero() {
 		slice.CreatedAt = now
 	}
@@ -534,7 +552,7 @@ func (s *Store) GetReviewSlice(ctx context.Context, namespace, repositoryScan, i
 
 // UpdateReviewSliceStatus updates slice status and review timestamp.
 func (s *Store) UpdateReviewSliceStatus(ctx context.Context, namespace, repositoryScan, id, lastScanRunID, status string) error {
-	now := time.Now().UTC()
+	now := s.securityNow()
 	res, err := s.securityDB().ExecContext(ctx,
 		`UPDATE security_review_slices
 		 SET status = ?, last_reviewed_at = CASE WHEN ? IN ('reviewed', 'completed') THEN ? ELSE last_reviewed_at END,
@@ -581,8 +599,6 @@ func (s *Store) GetLatestThreatModel(ctx context.Context, namespace, repositoryS
 // SaveThreatModel stores the current threat model, replacing any older copies for the repository.
 // When Version is zero, the revision number is incremented from the latest stored model.
 func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, nil)
 	})
@@ -592,8 +608,6 @@ func (s *Store) SaveThreatModel(ctx context.Context, model *store.ThreatModel) e
 // the latest stored version equals expectedVersion. Otherwise it returns
 // store.ErrConflict and leaves the stored model unchanged.
 func (s *Store) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
-	model.Content = security.SanitizeThreatModel(model.Content)
-
 	return s.withSecurityTransaction(ctx, func(tx *Store) error {
 		return tx.saveThreatModel(ctx, model, &expectedVersion)
 	})
@@ -620,7 +634,7 @@ func (s *Store) saveThreatModel(ctx context.Context, model *store.ThreatModel, e
 	}
 
 	model.CreatedAt = utcTime(model.CreatedAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if model.CreatedAt.IsZero() {
 		model.CreatedAt = now
 	}
@@ -692,7 +706,7 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 	finding.CreatedAt = utcTime(finding.CreatedAt)
 	decisionAtProvided := findingUserFinalState(finding.State) && !finding.DecisionAt.IsZero()
 	finding.DecisionAt = utcTime(finding.DecisionAt)
-	now := time.Now().UTC()
+	now := s.securityNow()
 	if finding.CreatedAt.IsZero() {
 		finding.CreatedAt = now
 	}
@@ -1135,7 +1149,7 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 	if findingUserFinalState(sourceState) && (!findingUserFinalState(canonicalState) || newerSourceDecision) {
 		if _, err := s.securityDB().ExecContext(ctx,
 			`UPDATE security_findings SET state = ?, decision_at = ?, updated_at = ? WHERE namespace = ? AND id = ?`,
-			sourceState, sourceDecision, time.Now().UTC(), namespace, canonicalID,
+			sourceState, sourceDecision, s.securityNow(), namespace, canonicalID,
 		); err != nil {
 			return err
 		}
@@ -1149,12 +1163,12 @@ func (s *Store) markFindingDuplicate(ctx context.Context, namespace, id, canonic
 		 WHERE finding.namespace = ? AND finding.repository_scan = ?
 	)
 	UPDATE security_findings
-	 SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP
+	 SET duplicate_of = ?, updated_at = ?
 	 WHERE namespace = ? AND repository_scan = ? AND id IN (SELECT id FROM descendants)`,
-		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, namespace, sourceRepo); err != nil {
+		namespace, sourceRepo, id, namespace, sourceRepo, canonicalID, s.securityNow(), namespace, sourceRepo); err != nil {
 		return err
 	}
-	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`, canonicalID, namespace, id); err != nil {
+	if _, err := s.securityDB().ExecContext(ctx, `UPDATE security_findings SET duplicate_of = ?, updated_at = ? WHERE namespace = ? AND id = ?`, canonicalID, s.securityNow(), namespace, id); err != nil {
 		return err
 	}
 	return nil
@@ -1179,7 +1193,7 @@ func (s *Store) CreatePatchProposal(ctx context.Context, proposal *store.PatchPr
 		proposal.ID, proposal.Namespace, proposal.RepositoryScan, proposal.FindingID, proposal.TaskName, proposal.Branch,
 		proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber, proposal.PRURL, proposal.CreatedAt, proposal.UpdatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // BindPatchProposalPublicationEvidence atomically finalizes a proposal with one
@@ -1387,55 +1401,76 @@ func (s *Store) UpdatePatchProposal(ctx context.Context, proposal *store.PatchPr
 		return store.ValidationErrorf("patch proposal publication evidence must be bound with BindPatchProposalPublicationEvidence")
 	}
 	now := time.Now().UTC()
-	result, err := s.securityDB().ExecContext(ctx,
-		`UPDATE security_patch_proposals
-		 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
-		 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
-		proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
-		proposal.PRURL, now, proposal.Namespace, proposal.ID,
-	)
-	if err != nil {
+	// The update and the read that classifies a refused update share one
+	// transaction, so they see the same proposal.
+	var current *store.PatchProposal
+	if err := s.withSecurityTransaction(ctx, func(tx *Store) error {
+		result, err := tx.securityDB().ExecContext(ctx,
+			`UPDATE security_patch_proposals
+			 SET task_name = ?, branch = ?, diff_artifact = ?, summary_artifact = ?, status = ?, reason = ?, pr_number = ?, pr_url = ?, updated_at = ?
+			 WHERE namespace = ? AND id = ? AND publication_evidence_json = ''`,
+			proposal.TaskName, proposal.Branch, proposal.DiffArtifact, proposal.SummaryArtifact, proposal.Status, proposal.Reason, proposal.PRNumber,
+			proposal.PRURL, now, proposal.Namespace, proposal.ID,
+		)
+		if err != nil {
+			return err
+		}
+		updated, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if updated == 1 {
+			return nil
+		}
+		existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, tx.securityDB(), proposal.Namespace, proposal.ID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(evidenceJSON) == "" {
+			return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
+		}
+		if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
+			existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
+			existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
+			existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
+			current = &existing
+			return nil
+		}
+		return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	}); err != nil {
 		return err
 	}
-	updated, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if updated == 1 {
-		proposal.UpdatedAt = now
+	if current != nil {
+		proposal.CreatedAt = current.CreatedAt
+		proposal.UpdatedAt = current.UpdatedAt
 		return nil
 	}
-
-	existing, evidenceJSON, err := getPatchProposalPublicationBinding(ctx, s.db, proposal.Namespace, proposal.ID)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(evidenceJSON) == "" {
-		return fmt.Errorf("%w: patch proposal %s/%s changed concurrently", store.ErrConflict, proposal.Namespace, proposal.ID)
-	}
-	if existing.TaskName == proposal.TaskName && existing.Branch == proposal.Branch &&
-		existing.DiffArtifact == proposal.DiffArtifact && existing.SummaryArtifact == proposal.SummaryArtifact &&
-		existing.Status == proposal.Status && existing.Reason == proposal.Reason &&
-		existing.PRURL == proposal.PRURL && reflect.DeepEqual(existing.PRNumber, proposal.PRNumber) {
-		proposal.CreatedAt = existing.CreatedAt
-		proposal.UpdatedAt = existing.UpdatedAt
-		return nil
-	}
-	return fmt.Errorf("%w: patch proposal %s/%s publication projections are immutable", store.ErrConflict, proposal.Namespace, proposal.ID)
+	proposal.UpdatedAt = now
+	return nil
 }
 
 // ListPatchProposals lists patch proposals for a finding, newest first.
 func (s *Store) ListPatchProposals(ctx context.Context, namespace, findingID string) ([]store.PatchProposal, error) {
+	var proposals []store.PatchProposal
+	err := s.securityReadSnapshot(ctx, func(q securityDB) error {
+		var err error
+		proposals, err = listPatchProposals(ctx, q, namespace, findingID)
+		return err
+	})
+	return proposals, err
+}
+
+func listPatchProposals(ctx context.Context, q securityDB, namespace, findingID string) ([]store.PatchProposal, error) {
 	canonicalID := findingID
 	var duplicateOf string
-	if err := s.securityDB().QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
+	if err := q.QueryRowContext(ctx, `SELECT duplicate_of FROM security_findings WHERE namespace = ? AND id = ?`, namespace, findingID).Scan(&duplicateOf); err == nil {
 		if strings.TrimSpace(duplicateOf) != "" {
 			canonicalID = duplicateOf
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	rows, err := s.securityDB().QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT id, namespace, repository_scan, finding_id, task_name, branch, diff_artifact, summary_artifact,
 		        status, reason, pr_number, pr_url, publication_evidence_json, created_at, updated_at
 		 FROM security_patch_proposals
@@ -1486,12 +1521,12 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 			dropped.SliceID,
 			dropped.Reason,
 			dropped.SampleJSON,
-			time.Now().UTC().Format(time.RFC3339Nano),
+			s.securityNow().Format(time.RFC3339Nano),
 		}, "|"))
 	}
 	dropped.CreatedAt = utcTime(dropped.CreatedAt)
 	if dropped.CreatedAt.IsZero() {
-		dropped.CreatedAt = time.Now().UTC()
+		dropped.CreatedAt = s.securityNow()
 	}
 	_, err := s.securityDB().ExecContext(ctx,
 		`INSERT OR IGNORE INTO security_dropped_findings
@@ -1500,7 +1535,7 @@ func (s *Store) CreateDroppedFinding(ctx context.Context, dropped *store.Dropped
 		dropped.ID, dropped.Namespace, dropped.RepositoryScan, dropped.ScanRunID, dropped.TaskName,
 		dropped.SliceID, dropped.Reason, dropped.Layer, dropped.SampleJSON, dropped.CreatedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // ListDroppedFindings lists rejected finding diagnostics.

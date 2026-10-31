@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -201,7 +202,7 @@ func TestApplyMemoryProposal(t *testing.T) {
 		t.Fatalf("ReviewMemoryProposal: %v", err)
 	}
 
-	memory, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{
+	memory, err := orkaClient(t, s).ApplyMemoryProposal(ctx, store.MemoryProposalApply{
 		Namespace: "ns-apply",
 		ID:        proposal.ID,
 		AppliedBy: "coordinator",
@@ -227,7 +228,7 @@ func TestApplyMemoryProposal(t *testing.T) {
 		t.Fatalf("proposal apply metadata not persisted: %+v", updated)
 	}
 
-	again, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns-apply", ID: proposal.ID, AppliedBy: "other"})
+	again, err := orkaClient(t, s).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: "ns-apply", ID: proposal.ID, AppliedBy: "other"})
 	if err != nil {
 		t.Fatalf("ApplyMemoryProposal second call: %v", err)
 	}
@@ -241,15 +242,37 @@ func TestApplyMemoryProposal(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != memory.ID {
 		t.Fatalf("expected exactly one applied memory, got %+v", listed)
 	}
-	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); err == nil {
-		t.Fatalf("ArchiveMemoryProposal applied proposal succeeded, want error")
+	if err := s.ArchiveMemoryProposal(ctx, "ns-apply", proposal.ID); !errors.Is(err, store.ErrValidation) {
+		t.Fatalf("ArchiveMemoryProposal applied proposal error = %v, want validation", err)
 	}
 }
 
-func TestTagsFromProposalDescriptionUsesFirstTagsLine(t *testing.T) {
-	got := tagsFromProposalDescription("Intro\nTags: Alpha, beta, alpha\nMore\nTags: ignored")
-	if strings.Join(got, ",") != "alpha,beta" {
-		t.Fatalf("tags = %q, want alpha,beta", strings.Join(got, ","))
+// TestProposalNamingAMemoryCountsAsApplied covers retained rows that name an
+// applied memory without the applied status. A new proposal cannot carry an
+// apply outcome, so the rows are seeded directly.
+func TestProposalNamingAMemoryCountsAsApplied(t *testing.T) {
+	for _, status := range []string{proposalStatusPending, proposalStatusAccepted} {
+		t.Run(status, func(t *testing.T) {
+			s := setupTestStore(t)
+			ctx := context.Background()
+			proposal := &store.MemoryProposal{Namespace: "ns-named", Type: "memory", Title: "Named", Content: "content"}
+			if err := s.CreateMemoryProposal(ctx, proposal); err != nil {
+				t.Fatalf("CreateMemoryProposal: %v", err)
+			}
+			if _, err := s.db.ExecContext(ctx, `UPDATE memory_proposals SET status = ?, applied_memory_id = ? WHERE namespace = ? AND id = ?`,
+				status, " ", proposal.Namespace, proposal.ID); err != nil {
+				t.Fatalf("seed applied memory: %v", err)
+			}
+			if status == proposalStatusPending {
+				err := s.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: proposal.Namespace, ID: proposal.ID, Status: "accepted"})
+				if !errors.Is(err, store.ErrValidation) {
+					t.Fatalf("ReviewMemoryProposal error = %v, want validation", err)
+				}
+			}
+			if err := s.ArchiveMemoryProposal(ctx, proposal.Namespace, proposal.ID); !errors.Is(err, store.ErrValidation) {
+				t.Fatalf("ArchiveMemoryProposal error = %v, want validation", err)
+			}
+		})
 	}
 }
 
@@ -345,9 +368,9 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	}
 	results := make(chan applyResult, 2)
 	var wg sync.WaitGroup
-	for name, s := range map[string]*Store{"first": s1, "second": s2} {
+	for name, client := range map[string]*storageclient.Client{"first": orkaClient(t, s1), "second": orkaClient(t, s2)} {
 		wg.Go(func() {
-			memory, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
+			memory, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
 			results <- applyResult{name: name, memory: memory, err: err}
 		})
 	}
@@ -435,7 +458,7 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T)
 	}
 	resultCh := make(chan applyResult, 1)
 	go func() {
-		memory, err := s1.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
+		memory, err := orkaClient(t, s1).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
 		resultCh <- applyResult{memory: memory, err: err}
 	}()
 	select {
@@ -528,7 +551,7 @@ func TestArchiveMemoryProposalDoesNotOverwriteConcurrentApply(t *testing.T) {
 		t.Fatalf("timed out waiting for archive to read accepted proposal")
 	}
 
-	memory, err := s2.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "winner"})
+	memory, err := orkaClient(t, s2).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "winner"})
 	if err != nil {
 		t.Fatalf("ApplyMemoryProposal: %v", err)
 	}
@@ -583,7 +606,7 @@ func TestApplyMemoryProposalValidation(t *testing.T) {
 	if err := s.CreateMemoryProposal(ctx, pending); err != nil {
 		t.Fatalf("CreateMemoryProposal pending: %v", err)
 	}
-	if _, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: pending.Namespace, ID: pending.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied") {
+	if _, err := orkaClient(t, s).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: pending.Namespace, ID: pending.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied") {
 		t.Fatalf("ApplyMemoryProposal pending error = %v, want cannot be applied", err)
 	}
 
@@ -599,7 +622,7 @@ func TestApplyMemoryProposalValidation(t *testing.T) {
 	if err := s.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: skill.Namespace, ID: skill.ID, Status: "accepted"}); err != nil {
 		t.Fatalf("ReviewMemoryProposal skill: %v", err)
 	}
-	if _, err := s.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: skill.Namespace, ID: skill.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied as memory") {
+	if _, err := orkaClient(t, s).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: skill.Namespace, ID: skill.ID}); err == nil || !strings.Contains(err.Error(), "cannot be applied as memory") {
 		t.Fatalf("ApplyMemoryProposal skill error = %v, want cannot be applied as memory", err)
 	}
 }

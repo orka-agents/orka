@@ -71,7 +71,7 @@ func TestExternalAPIReportedMutationsRequireAuthorization(t *testing.T) {
 			db, err := sqlite.NewDB(":memory:")
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			ss := sqlite.NewStore(db, ":memory:")
+			ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 			server := NewServer(kube, nil, ServerConfig{WatchNamespace: "default", EnforceNamespaceIsolation: true, Clientset: clientset, MemoryStore: ss})
 			request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 			request.Header.Set("Content-Type", "application/json")

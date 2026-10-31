@@ -29,6 +29,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -732,17 +733,17 @@ func TestGatewayIdentityLookupErrorsPropagate(t *testing.T) {
 	}
 }
 
-func newGatewayHandlerStore(t *testing.T) *sqlite.Store {
+func newGatewayHandlerStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, ":memory:")
+	return testStorageClient(sqlite.NewStore(db, ":memory:"))
 }
 
-func newGatewayHandlerDeliveryStore(t *testing.T) (*sqlite.Store, *store.GatewayDelivery) {
+func newGatewayHandlerDeliveryStore(t *testing.T) (*storageclient.Client, *store.GatewayDelivery) {
 	t.Helper()
 	storeFixture := newGatewayHandlerStore(t)
 	now := time.Now().UTC()

@@ -59,7 +59,7 @@ func setupScanProgressHandlers(t *testing.T, objs ...runtime.Object) (*fiber.App
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: sqlite.NewStore(db, ":memory:")})
+	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SecurityStore: testStorageClient(sqlite.NewStore(db, ":memory:"))})
 	app := fiber.New()
 	app.Get("/security/repositories/:name/scans/:scanID/progress", handlers.GetSecurityScanProgress)
 	return app, handlers
