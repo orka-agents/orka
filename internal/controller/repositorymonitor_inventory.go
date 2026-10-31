@@ -187,6 +187,14 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			if run.CommandEventID != "" && run.TargetNumber == pr.Number && pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 				return selected, createdTasks, skipped + 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, "target_not_included")
 			}
+			// The fresh read can see an include label removed after the
+			// retirement pass read the list; retire the pull request now so
+			// its running work cannot push before the next poll.
+			if pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+				if _, err := r.retireExcludedRepositoryMonitorPullRequest(ctx, monitor, run, pr, nil, map[string]struct{}{}); err != nil {
+					return selected, createdTasks, skipped, err
+				}
+			}
 			skipped++
 			continue
 		}
