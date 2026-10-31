@@ -468,6 +468,9 @@ func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testin
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, req) {
+			return
+		}
 		path := req.URL.Path
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
