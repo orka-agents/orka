@@ -136,13 +136,26 @@ func (m mockLLMInstance) evalRequestsSince(
 		return nil, err
 	}
 	// A Task can finish before the relay of its last response settles, so
-	// re-read briefly while a new request is still in flight.
-	for deadline := time.Now().Add(mockLLMCaptureSettleTimeout); mockLLMCaptureInFlight(before, state) &&
-		time.Now().Before(deadline); {
-		time.Sleep(mockLLMCaptureSettleInterval)
-		if state, err = m.captureJournal(); err != nil {
+	// re-read briefly while a new request is still in flight. The settle
+	// deadline bounds every re-read; the last complete read is then judged.
+	settle, cancel := context.WithTimeout(context.Background(), mockLLMCaptureSettleTimeout)
+	defer cancel()
+	for mockLLMCaptureInFlight(before, state) {
+		select {
+		case <-settle.Done():
+		case <-time.After(mockLLMCaptureSettleInterval):
+		}
+		if settle.Err() != nil {
+			break
+		}
+		next, err := m.captureJournalWithin(settle)
+		if err != nil {
+			if settle.Err() != nil {
+				break
+			}
 			return nil, err
 		}
+		state = next
 	}
 	journal, err := m.journal()
 	if err != nil {
