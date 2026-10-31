@@ -888,52 +888,62 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 		peers = pullRequests
 	}
 	reconciledHeads := map[string]struct{}{}
+	// One pull request's failure, such as a rejected status write, must not
+	// leave the others in scope; attempt each and report every failure.
+	var errs []error
 	for _, pr := range pullRequests {
 		if repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
 			continue
 		}
-		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
-		if errors.Is(err, store.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if item.State == repositoryMonitorItemStateOutOfScope {
-			continue
-		}
-		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
-			return err
-		}
-		// Settle the cancelled work like a stop does, so a returning label
-		// does not find an orphaned running action holding readiness pending.
-		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
-			return err
-		}
-		// A targeted run never reaches missing-item cleanup, so revoke the
-		// readiness status here; shared heads keep their peers' outcome.
-		if _, done := reconciledHeads[item.HeadSHA]; !done {
-			if peers, err = r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA, peers); err != nil {
-				return err
-			}
-			reconciledHeads[item.HeadSHA] = struct{}{}
-		}
-		item.State = repositoryMonitorItemStateOutOfScope
-		item.LastVerdict = repositoryMonitorVerdictSkipped
-		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
-			item.SkipReason = repositoryMonitorSkipReasonNotIncluded
-		}
-		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
-			return err
-		}
-		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d no longer has an include label", item.Number), map[string]any{
-			eventReasonField: repositoryMonitorSkipReasonNotIncluded,
-			stateField:       item.State,
-		}); err != nil {
-			return err
+		var err error
+		if peers, err = r.retireExcludedRepositoryMonitorPullRequest(ctx, monitor, run, pr, peers, reconciledHeads); err != nil {
+			errs = append(errs, fmt.Errorf("retire pull request #%d: %w", pr.Number, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// retireExcludedRepositoryMonitorPullRequest retires one excluded pull
+// request's open item and returns the readiness peers, listed at most once.
+func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pr repositoryMonitorPullRequest, peers []repositoryMonitorPullRequest, reconciledHeads map[string]struct{}) ([]repositoryMonitorPullRequest, error) {
+	item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
+	if errors.Is(err, store.ErrNotFound) {
+		return peers, nil
+	}
+	if err != nil {
+		return peers, err
+	}
+	if item.State == repositoryMonitorItemStateOutOfScope {
+		return peers, nil
+	}
+	if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
+		return peers, err
+	}
+	// Settle the cancelled work like a stop does, so a returning label
+	// does not find an orphaned running action holding readiness pending.
+	if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
+		return peers, err
+	}
+	// A targeted run never reaches missing-item cleanup, so revoke the
+	// readiness status here; shared heads keep their peers' outcome.
+	if _, done := reconciledHeads[item.HeadSHA]; !done {
+		if peers, err = r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA, peers); err != nil {
+			return peers, err
+		}
+		reconciledHeads[item.HeadSHA] = struct{}{}
+	}
+	item.State = repositoryMonitorItemStateOutOfScope
+	item.LastVerdict = repositoryMonitorVerdictSkipped
+	if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+		item.SkipReason = repositoryMonitorSkipReasonNotIncluded
+	}
+	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+		return peers, err
+	}
+	return peers, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d no longer has an include label", item.Number), map[string]any{
+		eventReasonField: repositoryMonitorSkipReasonNotIncluded,
+		stateField:       item.State,
+	})
 }
 
 // revokeRepositoryMonitorExcludedReadiness reconciles the readiness status of
