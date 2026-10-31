@@ -137,6 +137,27 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 	}
 	monitor.Spec.Review.Publish.PostSecuritySensitive = false
 
+	// A review of an older head describes nothing this repair fixes.
+	pr.HeadSHA = "newer"
+	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {
+		t.Fatalf("stale review message = %q err=%v", got, err)
+	}
+	for intent, subject := range map[string]string{
+		repositoryMonitorCommandIntentFixCI:        "fix: repair failing CI on #75",
+		repositoryMonitorCommandIntentUpdateBranch: "chore: update #75 with main",
+	} {
+		if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, intent, task, pr, item); err != nil || got != subject+"\n\nOrka-Task: "+task+"\n" {
+			t.Fatalf("%s message = %q err=%v", intent, got, err)
+		}
+	}
+}
+
+func TestRepositoryMonitorRepairCommitMessageOmitsRestrictedFindings(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("commit-message-restricted")
+	r := &RepositoryMonitorReconciler{Store: db}
+	const task = "monrepair-commit-message-78"
 	// A finding restricted as security-sensitive is not listed.
 	restrictedJSON, err := json.Marshal([]repositoryMonitorReviewFinding{
 		{Priority: "P1", Title: "Still open"},
@@ -151,19 +172,5 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 	restricted, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, repositoryMonitorPullRequest{Number: 78, HeadSHA: "head78"}, &store.MonitorItem{LastReviewID: "review-78"})
 	if err != nil || !strings.Contains(restricted, "- [P1] Still open\n") || strings.Contains(restricted, "Restricted detail") {
 		t.Fatalf("restricted message = %q err=%v, want only the unrestricted finding", restricted, err)
-	}
-
-	// A review of an older head describes nothing this repair fixes.
-	pr.HeadSHA = "newer"
-	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {
-		t.Fatalf("stale review message = %q err=%v", got, err)
-	}
-	for intent, subject := range map[string]string{
-		repositoryMonitorCommandIntentFixCI:        "fix: repair failing CI on #75",
-		repositoryMonitorCommandIntentUpdateBranch: "chore: update #75 with main",
-	} {
-		if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, intent, task, pr, item); err != nil || got != subject+"\n\nOrka-Task: "+task+"\n" {
-			t.Fatalf("%s message = %q err=%v", intent, got, err)
-		}
 	}
 }
