@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/security"
@@ -154,8 +155,18 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx 
 		}
 		cursor = next
 	}
+	// Each finding is marked once, on the first comment found for it, so the
+	// lookup stops once every fixed finding has one and skips publications
+	// that posted no inline comments.
 	var targets []repositoryMonitorFindingComment
+	found := map[string]bool{}
 	for _, publish := range publishes {
+		if len(found) == len(fixed) {
+			break
+		}
+		if publish.InlineCommentCount == 0 {
+			continue
+		}
 		reviewID, err := strconv.ParseInt(strings.TrimSpace(publish.GitHubReviewID), 10, 64)
 		if err != nil || reviewID <= 0 {
 			continue
@@ -165,7 +176,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorFixedFindingComments(ctx 
 			return nil, err
 		}
 		for _, comment := range comments {
-			if match := repositoryMonitorInlineFindingMarker.FindStringSubmatch(comment.Body); match != nil && fixed[match[1]] {
+			if match := repositoryMonitorInlineFindingMarker.FindStringSubmatch(comment.Body); match != nil && fixed[match[1]] && !found[match[1]] {
+				found[match[1]] = true
 				targets = append(targets, repositoryMonitorFindingComment{findingID: match[1], comment: comment})
 			}
 		}
@@ -372,11 +384,93 @@ func repositoryMonitorGitHubBaseURL(r *RepositoryMonitorReconciler) string {
 }
 
 // markRepositoryMonitorFixedFindingThreadsBestEffort keeps a GitHub failure
-// from blocking review ingestion; marking threads only tidies the PR.
+// from blocking review ingestion; marking threads only tidies the PR. A
+// failure is recorded so inventory polls retry it for a bounded time.
 func (r *RepositoryMonitorReconciler) markRepositoryMonitorFixedFindingThreadsBestEffort(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord) {
-	if err := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record); err != nil {
-		log.FromContext(ctx).Info("could not mark fixed finding threads", "pr", item.Number, "review", record.ID, "error", err.Error())
+	markErr := r.markRepositoryMonitorFixedFindingThreads(ctx, monitor, item, record)
+	if markErr != nil {
+		log.FromContext(ctx).Info("could not mark fixed finding threads", "pr", item.Number, "review", record.ID, "error", markErr.Error())
 	}
+	if err := r.recordRepositoryMonitorFindingThreadMarking(ctx, monitor, record, markErr); err != nil {
+		log.FromContext(ctx).Info("could not record fixed finding thread marking", "pr", item.Number, "review", record.ID, "error", err.Error())
+	}
+}
+
+const (
+	// repositoryMonitorFindingThreadRetryWindow bounds how long after a
+	// review inventory polls retry marking its fixed findings' threads.
+	repositoryMonitorFindingThreadRetryWindow = time.Hour
+	// repositoryMonitorFindingThreadRetryInterval spaces those retries.
+	repositoryMonitorFindingThreadRetryInterval = 5 * time.Minute
+	// repositoryMonitorOperationMarkFindingThreads records a failed attempt
+	// to mark a review's fixed findings, and its eventual success.
+	repositoryMonitorOperationMarkFindingThreads = "mark_finding_threads"
+)
+
+func repositoryMonitorFindingThreadMarkingID(record *store.ReviewRecord) string {
+	return "ghmut-" + repositoryMonitorShortHash(record.MonitorNamespace+"|"+record.MonitorName+"|"+record.ID+"|mark-finding-threads")
+}
+
+// recordRepositoryMonitorFindingThreadMarking records a failed marking
+// attempt for retry, and settles an earlier failure once marking succeeds.
+// A review that never failed gets no record.
+func (r *RepositoryMonitorReconciler) recordRepositoryMonitorFindingThreadMarking(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord, markErr error) error {
+	if r.Store == nil || record == nil {
+		return nil
+	}
+	id := repositoryMonitorFindingThreadMarkingID(record)
+	attempt, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if markErr == nil {
+		if err != nil || attempt.Status == repositoryMonitorRunPhaseSucceeded {
+			return nil
+		}
+		attempt.Status, attempt.Error = repositoryMonitorRunPhaseSucceeded, ""
+		return r.updateRepositoryMonitorGitHubMutation(ctx, monitor, attempt)
+	}
+	now := time.Now()
+	if err != nil {
+		return r.recordRepositoryMonitorGitHubMutation(ctx, monitor, &store.GitHubMutationRecord{
+			ID: id, Operation: repositoryMonitorOperationMarkFindingThreads, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: record.Number, TargetSHA: record.HeadSHA,
+			Reason: record.ID, Status: repositoryMonitorRunPhaseFailed, Error: markErr.Error(), PendingAt: &now,
+		})
+	}
+	attempt.Status, attempt.Error, attempt.PendingAt = repositoryMonitorRunPhaseFailed, markErr.Error(), &now
+	return r.updateRepositoryMonitorGitHubMutation(ctx, monitor, attempt)
+}
+
+// retryRepositoryMonitorFindingThreadMarking retries marking the fixed
+// findings of item's latest review after a failed attempt, at most every
+// retry interval and only within the retry window after the review, while
+// that review still covers the item's head.
+func (r *RepositoryMonitorReconciler) retryRepositoryMonitorFindingThreadMarking(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem) error {
+	if r.Store == nil || item == nil || strings.TrimSpace(item.LastReviewID) == "" || !monitor.Spec.Review.Publish.Enabled {
+		return nil
+	}
+	record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if record.HeadSHA != item.HeadSHA || time.Since(record.CreatedAt) > repositoryMonitorFindingThreadRetryWindow {
+		return nil
+	}
+	attempt, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorFindingThreadMarkingID(record))
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attempt.Status != repositoryMonitorRunPhaseFailed || attempt.PendingAt != nil && time.Since(*attempt.PendingAt) < repositoryMonitorFindingThreadRetryInterval {
+		return nil
+	}
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
+	return nil
 }
 
 // repositoryMonitorFindingAddressedMutationID names the GitHub mutation that

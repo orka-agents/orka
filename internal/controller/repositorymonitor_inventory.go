@@ -268,6 +268,9 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 					return selected, createdTasks, skipped, err
 				}
 				item.LastVerdict = verdict
+				if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil {
+					return selected, createdTasks, skipped, err
+				}
 			default:
 				item.LastVerdict = repositoryMonitorVerdictSkipped
 			}
@@ -284,7 +287,14 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 			continue
 		}
 
-		if monitor.Spec.Review.RequireGreenCI {
+		// The head's first exhaustive pass already waited for green CI, and
+		// the pass fence holds CI repair until the chain ends, so a further
+		// pass on the same head must not wait for CI again.
+		continuation, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr)
+		if err != nil {
+			return selected, createdTasks, skipped, err
+		}
+		if monitor.Spec.Review.RequireGreenCI && !continuation {
 			ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
 			if err != nil {
 				return selected, createdTasks, skipped, err

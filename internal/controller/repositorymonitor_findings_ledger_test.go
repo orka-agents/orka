@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -782,5 +784,66 @@ func TestRepositoryMonitorFollowUpGateRequiresACompleteDelta(t *testing.T) {
 	})
 	if reason := repositoryMonitorReviewVerdictGateReason(prompt, repositoryMonitorReviewVerdictPassed); reason == "" {
 		t.Fatal("a passed follow-up review with an incomplete delta was accepted")
+	}
+}
+
+func TestRepositoryMonitorExhaustivePassDoesNotWaitForGreenCIAgain(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("exhaustive-green-ci")
+	monitor.Spec.Review.Exhaustive = true
+	monitor.Spec.Review.RequireGreenCI = true
+	inventory := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
+		{"number":1,"state":"open","base":{"ref":"main","sha":"base"},"head":{"ref":"feature","sha":"sha1","repo":{"full_name":"orka-agents/orka"}}}
+	]`)
+	defer inventory.Close()
+	target, err := url.Parse(inventory.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	// CI turned red after the first pass passed its green-CI gate.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/check-runs"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"tests","status":"completed","conclusion":"failure"}]}`))
+		case strings.HasSuffix(req.URL.Path, "/status"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
+		default:
+			proxy.ServeHTTP(w, req)
+		}
+	}))
+	defer server.Close()
+	firstTask := repositoryMonitorReviewIngestTestTask("pass-1", monitor.Name, 1, "sha1")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(append(repositoryMonitorControllerObjects(monitor, secret), firstTask)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, ResultStore: db, GitHubAPIBaseURL: server.URL}
+	finding := ledgerFinding("f-pass-1", "P2", "a.go", 1, "Finding pass-1")
+	finding.FirstHead, finding.FirstReview = "sha1", "pass-1"
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{finding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &store.ReviewRecord{ID: "pass-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "sha1", TaskName: firstTask.Name, TaskNamespace: monitor.Namespace, Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+	if err := db.CreateReviewRecord(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "sha1", BaseBranch: "main"}
+	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, first, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertMonitorItem(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != 1 {
+		t.Fatalf("the due pass waited for green CI: created=%d err=%v", created, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -25,6 +26,8 @@ type repositoryMonitorFindingThreadsGitHub struct {
 	currentHead string
 	patched     []string
 	resolved    []string
+	// failPatches answers that many comment updates with a server error.
+	failPatches int
 }
 
 func (g *repositoryMonitorFindingThreadsGitHub) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -53,6 +56,9 @@ func (g *repositoryMonitorFindingThreadsGitHub) ServeHTTP(w http.ResponseWriter,
 		_ = json.Unmarshal(body, &request)
 		g.resolved = append(g.resolved, request.Variables["thread"])
 		_, _ = w.Write([]byte(`{"data":{"resolveReviewThread":{"thread":{"id":"x","isResolved":true}}}}`))
+	case req.Method == http.MethodPatch && strings.HasPrefix(req.URL.Path, "/repos/orka-agents/orka/pulls/comments/") && g.failPatches > 0:
+		g.failPatches--
+		http.Error(w, "unavailable", http.StatusBadGateway)
 	case req.Method == http.MethodPatch && strings.HasPrefix(req.URL.Path, "/repos/orka-agents/orka/pulls/comments/"):
 		var update map[string]string
 		_ = json.Unmarshal(body, &update)
@@ -84,7 +90,11 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	monitor.Spec.Review.Publish.Enabled = true
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
 	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
-	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "old", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "123"}); err != nil {
+	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "old", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "123", InlineCommentCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+	// A summary-only publication has no inline comments to read.
+	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-summary", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "older", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "124"}); err != nil {
 		t.Fatal(err)
 	}
 	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{
@@ -153,5 +163,71 @@ func TestRepositoryMonitorMarksFixedFindingThreads(t *testing.T) {
 	}
 	if len(github.patched) != 1 || len(github.resolved) != 1 {
 		t.Fatalf("marked a restricted finding: patched=%q resolved=%q", github.patched, github.resolved)
+	}
+}
+
+func TestRepositoryMonitorRetriesFailedFindingThreadMarking(t *testing.T) {
+	ctx := context.Background()
+	github := &repositoryMonitorFindingThreadsGitHub{t: t, currentHead: "newhead1", failPatches: 1}
+	server := httptest.NewServer(github)
+	defer server.Close()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("threads-retry")
+	monitor.Spec.Review.Publish.Enabled = true
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db, GitHubAPIBaseURL: server.URL}
+	if err := db.CreateReviewPublishRecord(ctx, &store.ReviewPublishRecord{ID: "pub-old", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 1, HeadSHA: "old", Phase: repositoryMonitorPublishPhaseSucceeded, GitHubReviewID: "123", InlineCommentCount: 2}); err != nil {
+		t.Fatal(err)
+	}
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{{ID: "f-aaaa", Title: "Bug", Status: repositoryMonitorFindingStatusFixed, ResolvedHead: "newhead1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := &store.ReviewRecord{ID: "review-new", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "newhead1", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+	if err := db.CreateReviewRecord(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	item := &store.MonitorItem{Number: 1, HeadSHA: "newhead1", LastReviewID: record.ID}
+	// Ingestion's attempt hits a GitHub failure.
+	r.markRepositoryMonitorFixedFindingThreadsBestEffort(ctx, monitor, item, record)
+	if len(github.patched) != 0 {
+		t.Fatalf("patched = %q, want the failed update not recorded as done", github.patched)
+	}
+	attemptID := repositoryMonitorFindingThreadMarkingID(record)
+	attempt, err := db.GetGitHubMutationRecord(ctx, monitor.Namespace, attemptID)
+	if err != nil || attempt.Status != repositoryMonitorRunPhaseFailed {
+		t.Fatalf("marking attempt = %+v err=%v, want a failed attempt recorded", attempt, err)
+	}
+	// A poll within the retry interval waits.
+	if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 0 {
+		t.Fatalf("retried within the interval: patched = %q", github.patched)
+	}
+	earlier := time.Now().Add(-repositoryMonitorFindingThreadRetryInterval - time.Second)
+	attempt.PendingAt = &earlier
+	if err := db.UpdateGitHubMutationRecord(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil {
+		t.Fatal(err)
+	}
+	if len(github.patched) != 1 || len(github.resolved) != 1 || github.resolved[0] != "T501" {
+		t.Fatalf("after retry: patched=%q resolved=%q, want the thread marked", github.patched, github.resolved)
+	}
+	if attempt, err = db.GetGitHubMutationRecord(ctx, monitor.Namespace, attemptID); err != nil || attempt.Status != repositoryMonitorRunPhaseSucceeded {
+		t.Fatalf("marking attempt = %+v err=%v, want it settled", attempt, err)
+	}
+	// A settled attempt is not retried again.
+	if err := r.retryRepositoryMonitorFindingThreadMarking(ctx, monitor, item); err != nil || len(github.patched) != 1 {
+		t.Fatalf("retried a settled attempt: patched=%q err=%v", github.patched, err)
 	}
 }
