@@ -895,6 +895,16 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
 			return err
 		}
+		// Settle the cancelled work like a stop does, so a returning label
+		// does not find an orphaned running action holding readiness pending.
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
+			return err
+		}
+		// A targeted run never reaches missing-item cleanup, so revoke the
+		// readiness status here; shared heads keep their peers' outcome.
+		if err := r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA); err != nil {
+			return err
+		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
 		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
@@ -911,6 +921,19 @@ func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequest
 		}
 	}
 	return nil
+}
+
+// revokeRepositoryMonitorExcludedReadiness reconciles the readiness status of
+// a head whose pull request left the monitor's scope.
+func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorExcludedReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" || !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) {
+		return nil
+	}
+	endpoint, token, err := r.repositoryMonitorReadinessEndpoint(ctx, monitor)
+	if err != nil {
+		return err
+	}
+	return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, number, headSHA, endpoint, token)
 }
 
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
