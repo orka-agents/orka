@@ -205,6 +205,7 @@ func appendUsageRow[T any](values *[]T, data string) error {
 	if err := json.Unmarshal([]byte(data), &value); err != nil {
 		return err
 	}
+	utcUsageTimes(&value)
 	*values = append(*values, value)
 	return nil
 }

@@ -1,9 +1,7 @@
-package store
+package v1
 
 import (
 	"testing"
-
-	"github.com/orka-agents/orka/internal/events"
 )
 
 func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {
@@ -11,7 +9,7 @@ func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {
 		Namespace:  " default ",
 		StreamID:   " task-1 ",
 		TaskName:   " task-1 ",
-		EventTypes: []string{" " + events.ExecutionEventTypeTaskCreated + " ", ""},
+		EventTypes: []string{" " + ExecutionEventTypeTaskCreated + " ", ""},
 		AfterSeq:   -10,
 	}.Normalized()
 	if filter.Namespace != "default" {
@@ -29,7 +27,7 @@ func TestExecutionEventFilterNormalizationDefaultsLimit(t *testing.T) {
 	if filter.AfterSeq != 0 {
 		t.Fatalf("AfterSeq = %d, want 0", filter.AfterSeq)
 	}
-	if len(filter.EventTypes) != 1 || filter.EventTypes[0] != events.ExecutionEventTypeTaskCreated {
+	if len(filter.EventTypes) != 1 || filter.EventTypes[0] != ExecutionEventTypeTaskCreated {
 		t.Fatalf("EventTypes = %#v", filter.EventTypes)
 	}
 

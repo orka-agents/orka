@@ -4,13 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/usage"
 )
 
 var _ store.SessionTurnPersistenceStore = (*Store)(nil)
@@ -141,7 +139,7 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 		}
 	}
 	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
-		normalized.Key, messageCountDelta, normalized.FinalizedAt); err != nil {
+		normalized.Key, messageCountDelta, normalized.InputTokens, normalized.OutputTokens, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
 	if err := s.commitNativeSessionFinalizationTx(ctx, tx, turn.ID, normalized.Namespace, normalized.SessionName, normalized.Key.SessionUID, normalized.NativeSession, normalized.NativeSessionCarried); err != nil {
@@ -191,18 +189,14 @@ func (s *Store) CommitSessionTurnFinalization(ctx context.Context, request store
 	return &turn, nil
 }
 
-func finalizeSessionTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, name string, key store.SessionTurnKey, messageCountDelta int, finalizedAt time.Time) error {
+func finalizeSessionTranscriptTx(
+	ctx context.Context, tx *sql.Tx, namespace, name string, key store.SessionTurnKey,
+	messageCountDelta int, inputTokens, outputTokens int64, finalizedAt time.Time,
+) error {
 	taskUID := key.TaskUID
-	// A turn is finalized exactly once, so the usage of its prompt attempt is
-	// added to the Session's cumulative counters once; an earlier attempt of
-	// the same Task was counted by its own turn. Totals beyond the exact
-	// reporting range stay out of the counters rather than block finalization.
-	inputTokens, outputTokens, err := taskTokenUsage(ctx, tx, namespace, taskUID, fmt.Sprintf("%d/%s", key.Attempt, key.PromptID))
-	if errors.Is(err, usage.ErrTotalsOutOfRange) {
-		inputTokens, outputTokens = 0, 0
-	} else if err != nil {
-		return err
-	}
+	// A turn is finalized exactly once, so the usage Orka attributed to its
+	// prompt attempt is added to the Session's cumulative counters once; an
+	// earlier attempt of the same Task was counted by its own turn.
 	result, err := tx.ExecContext(ctx,
 		`UPDATE sessions SET message_count = message_count + ?, input_tokens = input_tokens + ?,
 		     output_tokens = output_tokens + ?, updated_at = ?
@@ -331,6 +325,10 @@ func normalizeSessionTurnPersistenceFinalization(request store.CommitSessionTurn
 	}
 	if err := validateNativeFinalization(request.NativeSession, request.NativeSessionCarried, request.TerminalKind, request.SkipTranscriptAppend); err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
+	}
+	if request.InputTokens < 0 || request.OutputTokens < 0 ||
+		request.InputTokens > store.MaxUsageTokenCount || request.OutputTokens > store.MaxUsageTokenCount {
+		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, store.ValidationErrorf("session turn token usage is out of range")
 	}
 	if err := store.ValidateControlText("session turn terminal content", request.TerminalContent); err != nil {
 		return store.CommitSessionTurnFinalizationRequest{}, store.OutboxProjection{}, err
