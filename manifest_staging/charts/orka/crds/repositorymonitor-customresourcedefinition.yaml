@@ -558,6 +558,16 @@ spec:
                         description: IncludeDrafts allows draft pull requests to be
                           selected for review.
                         type: boolean
+                      includeLabels:
+                        description: |-
+                          IncludeLabels optionally restricts pull request inventory to pull requests
+                          with any of these labels. Other pull requests get no review, repair, or
+                          readiness status. It cannot be combined with issue implementation, whose
+                          pull requests would not carry the label.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
                       maxPerRun:
                         default: 20
                         description: MaxPerRun limits pull requests selected by one

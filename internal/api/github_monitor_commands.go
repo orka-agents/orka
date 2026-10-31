@@ -126,6 +126,10 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
 			return false
 		}
+		// Reject before the label is consumed; the controller re-checks.
+		if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 && repositoryMonitorWebhookMatchingLabel(include, target.Labels) == "" {
+			return false
+		}
 		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
 	}
 	if target.Kind != repositoryMonitorTargetKindIssue || !monitor.Spec.Targets.Issues.Enabled {

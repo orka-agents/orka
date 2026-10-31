@@ -51,10 +51,13 @@ const (
 	repositoryMonitorItemStateOutOfScope = "out_of_scope"
 	repositoryMonitorVerdictSkipped      = "skipped"
 	repositoryMonitorSkipReasonMissing   = "not_open_or_base_branch_changed"
-	repositoryMonitorSkipReasonReviewed  = "already_reviewed"
-	repositoryMonitorSkipReasonPending   = "review_pending"
-	repositoryMonitorSkipReasonOverLimit = "over_limit"
-	repositoryMonitorReviewTaskTimeout   = 2 * time.Hour
+	// repositoryMonitorSkipReasonNotIncluded retires a pull request that lost
+	// every spec.targets.pullRequests.includeLabels label.
+	repositoryMonitorSkipReasonNotIncluded = "not_included"
+	repositoryMonitorSkipReasonReviewed    = "already_reviewed"
+	repositoryMonitorSkipReasonPending     = "review_pending"
+	repositoryMonitorSkipReasonOverLimit   = "over_limit"
+	repositoryMonitorReviewTaskTimeout     = 2 * time.Hour
 
 	repositoryMonitorReviewTaskStateMissing   = "missing"
 	repositoryMonitorReviewTaskStatePending   = "pending"
@@ -118,10 +121,17 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		}
 		return 1, 0, 0, nil
 	}
-	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(pullRequests, baseBranch, run); reason != "" {
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(monitor.Spec, pullRequests, baseBranch, run); reason != "" {
 		return 0, 0, 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, reason)
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
+	// Excluded PRs leave the inventory before readiness, so they get no status.
+	// A PR that loses its label is retired and its outstanding work cancelled,
+	// since a repair Task could otherwise still push to it.
+	if err := r.retireExcludedRepositoryMonitorPullRequests(ctx, monitor, run, pullRequests); err != nil {
+		return 0, 0, 0, err
+	}
+	pullRequests = filterRepositoryMonitorIncludedPullRequests(monitor.Spec, pullRequests)
 	readinessInventory := pullRequests
 	pullRequests = filterRepositoryMonitorTargetPullRequests(pullRequests, run)
 	slices.SortFunc(pullRequests, func(a, b repositoryMonitorPullRequest) int {
@@ -169,7 +179,12 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		}
 		// Readiness may observe a newer head or a PR leaving this monitor's scope.
 		// Do not start work from the old inventory; the next poll will rebuild it.
-		if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != item.HeadSHA || pr.BaseBranch != baseBranch {
+		if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != item.HeadSHA || pr.BaseBranch != baseBranch || !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+			// A command whose target lost its include label since the first
+			// read is blocked, not left pending for an item that is now retired.
+			if run.CommandEventID != "" && run.TargetNumber == pr.Number && pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+				return selected, createdTasks, skipped + 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, "target_not_included")
+			}
 			skipped++
 			continue
 		}
@@ -344,7 +359,7 @@ func (r *RepositoryMonitorReconciler) processTargetedPullRequestControlCommand(c
 	return r.tryProcessPullRequestCommandRun(ctx, monitor, run, owner, repository, pr, item)
 }
 
-func repositoryMonitorTargetPullRequestCommandBlockReason(pullRequests []repositoryMonitorPullRequest, baseBranch string, run *store.MonitorRun) string {
+func repositoryMonitorTargetPullRequestCommandBlockReason(spec corev1alpha1.RepositoryMonitorSpec, pullRequests []repositoryMonitorPullRequest, baseBranch string, run *store.MonitorRun) string {
 	if run == nil || strings.TrimSpace(run.CommandEventID) == "" || run.TargetNumber == 0 || strings.TrimSpace(run.TargetKind) != repositoryMonitorPullRequestKind {
 		return ""
 	}
@@ -363,6 +378,9 @@ func repositoryMonitorTargetPullRequestCommandBlockReason(pullRequests []reposit
 		}
 		if !strings.EqualFold(strings.TrimSpace(pr.State), repositoryMonitorItemStateOpen) {
 			return "target_not_open"
+		}
+		if !repositoryMonitorPullRequestIncluded(spec, pr) {
+			return "target_not_included"
 		}
 		return ""
 	}
@@ -830,12 +848,16 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 				return err
 			}
 		}
-		if item.State == repositoryMonitorItemStateOutOfScope && item.SkipReason == repositoryMonitorSkipReasonMissing {
+		// Already retired, including as excluded or stopped by a command.
+		if item.State == repositoryMonitorItemStateOutOfScope {
 			continue
 		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
-		item.SkipReason = repositoryMonitorSkipReasonMissing
+		// An explicit stop survives retirement so a reopened PR stays stopped.
+		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			item.SkipReason = repositoryMonitorSkipReasonMissing
+		}
 		if err := r.Store.UpsertMonitorItem(ctx, &item); err != nil {
 			return err
 		}
@@ -849,12 +871,80 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 	return nil
 }
 
+// retireExcludedRepositoryMonitorPullRequests retires open items whose pull
+// request no longer carries an include label and cancels their unfinished
+// review and repair Tasks, so no work started in scope publishes after it.
+func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequests(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) error {
+	if len(monitor.Spec.Targets.PullRequests.IncludeLabels) == 0 {
+		return nil
+	}
+	for _, pr := range pullRequests {
+		if repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+			continue
+		}
+		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if item.State == repositoryMonitorItemStateOutOfScope {
+			continue
+		}
+		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
+			return err
+		}
+		// Settle the cancelled work like a stop does, so a returning label
+		// does not find an orphaned running action holding readiness pending.
+		if _, err := r.Store.CancelWorkActions(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded, ""); err != nil {
+			return err
+		}
+		// A targeted run never reaches missing-item cleanup, so revoke the
+		// readiness status here; shared heads keep their peers' outcome.
+		if err := r.revokeRepositoryMonitorExcludedReadiness(ctx, monitor, pr.Number, item.HeadSHA); err != nil {
+			return err
+		}
+		item.State = repositoryMonitorItemStateOutOfScope
+		item.LastVerdict = repositoryMonitorVerdictSkipped
+		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			item.SkipReason = repositoryMonitorSkipReasonNotIncluded
+		}
+		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+			return err
+		}
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d no longer has an include label", item.Number), map[string]any{
+			eventReasonField: repositoryMonitorSkipReasonNotIncluded,
+			stateField:       item.State,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// revokeRepositoryMonitorExcludedReadiness reconciles the readiness status of
+// a head whose pull request left the monitor's scope.
+func (r *RepositoryMonitorReconciler) revokeRepositoryMonitorExcludedReadiness(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) error {
+	if strings.TrimSpace(headSHA) == "" || !monitor.Spec.Review.Publish.Enabled || !repositoryMonitorManagedWorkflow(monitor) {
+		return nil
+	}
+	endpoint, token, err := r.repositoryMonitorReadinessEndpoint(ctx, monitor)
+	if err != nil {
+		return err
+	}
+	return r.reconcileRepositoryMonitorDepartedHead(ctx, monitor, number, headSHA, endpoint, token)
+}
+
 func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonitorSpec) error {
 	if spec.Targets.Commits.Enabled {
 		return fmt.Errorf("spec.targets.commits is not supported; only pull request and issue monitoring are supported")
 	}
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fmt.Errorf("at least one repository monitor target must be enabled")
+	}
+	if len(spec.Targets.PullRequests.IncludeLabels) > 0 && repositoryMonitorIssueImplementationEnabled(spec) {
+		return fmt.Errorf("spec.targets.pullRequests.includeLabels cannot be combined with issue implementation, whose pull requests would not carry the label")
 	}
 	return nil
 }
@@ -880,6 +970,31 @@ func repositoryMonitorMaxPullRequestsPerRun(spec corev1alpha1.RepositoryMonitorS
 		return 20
 	}
 	return int(*spec.Targets.PullRequests.MaxPerRun)
+}
+
+// repositoryMonitorPullRequestIncluded reports whether pr carries one of the
+// monitor's pull request include labels. An empty list includes every PR.
+func repositoryMonitorPullRequestIncluded(spec corev1alpha1.RepositoryMonitorSpec, pr repositoryMonitorPullRequest) bool {
+	return len(spec.Targets.PullRequests.IncludeLabels) == 0 || repositoryMonitorMatchingLabel(spec.Targets.PullRequests.IncludeLabels, pr.Labels) != ""
+}
+
+func filterRepositoryMonitorIncludedPullRequests(spec corev1alpha1.RepositoryMonitorSpec, pullRequests []repositoryMonitorPullRequest) []repositoryMonitorPullRequest {
+	if len(spec.Targets.PullRequests.IncludeLabels) == 0 {
+		return pullRequests
+	}
+	filtered := make([]repositoryMonitorPullRequest, 0, len(pullRequests))
+	for _, pr := range pullRequests {
+		if repositoryMonitorPullRequestIncluded(spec, pr) {
+			filtered = append(filtered, pr)
+		}
+	}
+	return filtered
+}
+
+// repositoryMonitorIssueImplementationEnabled mirrors the issue part of
+// repositoryMonitorManagedWorkflow.
+func repositoryMonitorIssueImplementationEnabled(spec corev1alpha1.RepositoryMonitorSpec) bool {
+	return spec.Targets.Issues.Enabled && spec.Agents.Implementer != nil && (spec.IssueWorkflow.Implementation.Enabled == nil || *spec.IssueWorkflow.Implementation.Enabled)
 }
 
 func filterRepositoryMonitorBasePullRequests(pullRequests []repositoryMonitorPullRequest, baseBranch string) []repositoryMonitorPullRequest {
