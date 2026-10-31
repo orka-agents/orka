@@ -259,10 +259,24 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 	if latest["head1"].State != repositoryMonitorStatusSuccess || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v, want success on the labelled head only", latest, writes)
 	}
+	// The label-removal webhook queues a targeted run, which never reaches
+	// missing-item cleanup; it must still revoke readiness and settle work.
+	action := &store.WorkAction{ID: "wa-include-ready-1", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: "head1", Intent: "review", DesiredAction: "pr_review", Status: "running"}
+	if err := db.CreateWorkAction(ctx, action); err != nil {
+		t.Fatal(err)
+	}
 	labelled = false
-	runInventory("include-ready-2")
+	targeted := &store.MonitorRun{ID: "include-ready-2", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "pull_request_event", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 1, TargetSHA: "head1"}
+	if _, _, _, err := r.processPullRequestInventoryRun(ctx, monitor, targeted, "orka-agents", "orka"); err != nil {
+		t.Fatal(err)
+	}
 	if latest["head1"].State != repositoryMonitorStatusFailure || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v, want the unlabelled head revoked and the other untouched", latest, writes)
+	}
+	assertRepositoryMonitorWorkActionStatus(t, db, monitor.Namespace, action.ID, "cancelled")
+	runInventory("include-ready-3")
+	if latest["head1"].State != repositoryMonitorStatusFailure || writes["head2"] != 0 {
+		t.Fatalf("statuses = %+v writes = %v after a full poll", latest, writes)
 	}
 }
 
@@ -345,5 +359,13 @@ func TestRepositoryMonitorPublicationRetrySkipsRetiredItems(t *testing.T) {
 	published, err := (&RepositoryMonitorReconciler{Store: db}).publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
 	if err != nil || published {
 		t.Fatalf("publishPendingRepositoryMonitorReviewRecords() = %t, %v; want a retired item skipped", published, err)
+	}
+}
+
+func assertRepositoryMonitorWorkActionStatus(t *testing.T, db store.RepositoryMonitorStore, namespace, id, want string) {
+	t.Helper()
+	action, err := db.GetWorkAction(context.Background(), namespace, id)
+	if err != nil || action.Status != want {
+		t.Fatalf("work action %s = %+v err=%v, want %s", id, action, err, want)
 	}
 }

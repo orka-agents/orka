@@ -101,7 +101,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx co
 	}
 	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
 		var apiErr *repositoryMonitorGitHubAPIError
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+		// A 403 is also how GitHub reports rate limiting, which says nothing
+		// about Actions access; only a permission refusal falls back.
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound ||
+			apiErr.StatusCode == http.StatusForbidden && !repositoryMonitorGitHubErrorLooksRateLimited(apiErr.Body)) {
 			return false, nil
 		}
 		return false, err
@@ -118,6 +121,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
+		App        struct {
+			ID int64 `json:"id"`
+		} `json:"app"`
 	}
 	for page := 1; ; page++ {
 		endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(sha), page)
@@ -128,6 +134,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 				Name       string `json:"name"`
 				Status     string `json:"status"`
 				Conclusion string `json:"conclusion"`
+				App        struct {
+					ID int64 `json:"id"`
+				} `json:"app"`
 			} `json:"check_runs"`
 		}
 		if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
@@ -147,7 +156,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 	if len(checks) < total {
 		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil
 	}
-	var pending, failed []string
+	var pending []string
+	var failed []repositoryMonitorCIFailure
 	considered := 0
 	for _, check := range checks {
 		considered++
@@ -156,7 +166,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckReportedCI(ctx conte
 			continue
 		}
 		if !repositoryMonitorCheckRunConclusionPassing(check.Conclusion) {
-			failed = append(failed, check.Name)
+			failed = append(failed, repositoryMonitorCIFailure{name: check.Name, source: fmt.Sprintf("check_run:%d", check.App.ID)})
 		}
 	}
 	// Check runs and commit statuses come from different CI systems. Read both
@@ -193,7 +203,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 		return repositoryMonitorCIResult{}, err
 	}
 	considered, pending, incomplete := 0, false, false
-	var failed []string
+	var failed []repositoryMonitorCIFailure
 	// Combined status is paginated and contains only the latest status for each
 	// context. Recompute after excluding audited IDs; its aggregate includes us.
 	for page := 1; ; page++ {
@@ -215,7 +225,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 			case repositoryMonitorStatusPending:
 				pending = true
 			default:
-				failed = append(failed, status.Context)
+				failed = append(failed, repositoryMonitorCIFailure{name: status.Context, source: repositoryMonitorCIFailureSourceStatus})
 			}
 		}
 		if len(response.Statuses) < 100 {

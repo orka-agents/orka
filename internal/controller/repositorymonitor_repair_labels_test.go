@@ -221,6 +221,16 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			wantIntent:  repositoryMonitorCommandIntentFixCI,
 		},
 		{
+			name:   "a status failing only on the head is not hidden by a check run of the same name",
+			labels: []string{"orka:fix-ci"},
+			github: (&repositoryMonitorRepairLabelsGitHub{
+				checks:   map[string]map[string]string{"head31": {"tests": "success"}, "base31": {"tests": "failure"}},
+				statuses: map[string]map[string]string{"head31": {"tests": "failure"}, "base31": {"tests": "success"}},
+			}).labeled("maintainer", "orka:fix-ci"),
+			wantHandled: true,
+			wantIntent:  repositoryMonitorCommandIntentFixCI,
+		},
+		{
 			name:   "CI already failing on the base commit is left alone",
 			labels: []string{"orka:fix"},
 			github: (&repositoryMonitorRepairLabelsGitHub{checks: map[string]map[string]string{"head31": {"Tests": "failure"}, "base31": {"tests": "failure"}}}).labeled("maintainer", "orka:fix"),
@@ -382,6 +392,16 @@ func TestRepositoryMonitorAutomaticRepairFollowsRepairLabels(t *testing.T) {
 			if item.SkipReason != tt.wantSkip {
 				t.Fatalf("item skip reason = %q, want %q", item.SkipReason, tt.wantSkip)
 			}
+			if tt.wantSkip != "" {
+				// The refusal is kept as one event even when it repeats.
+				if _, err := reconciler.tryRepositoryMonitorAutomaticRepair(ctx, monitor, run, "orka-agents", "orka", pr, item); err != nil {
+					t.Fatal(err)
+				}
+				events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, EventType: repositoryMonitorEventRepairRefused, Limit: 5})
+				if err != nil || len(events) != 1 || !strings.Contains(events[0].Summary, tt.wantSkip) {
+					t.Fatalf("refusal events = %+v err=%v, want one naming %s", events, err, tt.wantSkip)
+				}
+			}
 		})
 	}
 }
@@ -489,6 +509,7 @@ func TestRepositoryMonitorCheckCIReportsHeldWorkflowRuns(t *testing.T) {
 	ctx := context.Background()
 	actionsStatus := http.StatusOK
 	held := 1
+	actionsRateLimited := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -501,6 +522,10 @@ func TestRepositoryMonitorCheckCIReportsHeldWorkflowRuns(t *testing.T) {
 				t.Errorf("approval lookup query = %q", req.URL.RawQuery)
 			}
 			w.WriteHeader(actionsStatus)
+			if actionsRateLimited {
+				_, _ = w.Write([]byte(`{"message":"API rate limit exceeded for installation"}`))
+				return
+			}
 			_, _ = fmt.Fprintf(w, `{"total_count":%d,"workflow_runs":[]}`, held)
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
@@ -532,6 +557,11 @@ func TestRepositoryMonitorCheckCIReportsHeldWorkflowRuns(t *testing.T) {
 		if err != nil || got.passed != tc.want.passed || got.reason != tc.want.reason {
 			t.Fatalf("%s: CI = %+v err=%v, want %+v", tc.name, got, err, tc.want)
 		}
+	}
+	// A rate-limited lookup cannot establish that nothing is held.
+	actionsStatus, actionsRateLimited = http.StatusForbidden, true
+	if got, err := r.repositoryMonitorCheckCI(ctx, monitor, "head1"); err == nil {
+		t.Fatalf("rate-limited approval lookup: CI = %+v, want an error", got)
 	}
 }
 

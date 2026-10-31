@@ -15,6 +15,9 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// repositoryMonitorOperationUpdateReview names the GitHub review summary update.
+const repositoryMonitorOperationUpdateReview = "update_review"
+
 // repositoryMonitorUpdatedReviewNote opens a rewritten review summary.
 const repositoryMonitorUpdatedReviewNote = "_Updated after a later review of this commit. Inline comments are from the earlier review._\n\n"
 
@@ -49,7 +52,7 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 	mutationID := "ghmut-" + repositoryMonitorShortHash(record.ID+"-update-review")
 	mutation, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 	if errors.Is(err, store.ErrNotFound) {
-		mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "update_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: published.HeadSHA, Reason: repositoryMonitorPublishReviewReason, ExternalID: published.GitHubReviewID, Status: repositoryMonitorAutomergeStateStarted}
+		mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: repositoryMonitorOperationUpdateReview, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: published.HeadSHA, Reason: repositoryMonitorPublishReviewReason, ExternalID: published.GitHubReviewID, Status: repositoryMonitorAutomergeStateStarted}
 		if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 			return false, err
 		}

@@ -44,22 +44,26 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 		return repositoryMonitorCIFailures{}, err
 	}
 	if strings.TrimSpace(pr.BaseSHA) == "" || len(head.failed) == 0 {
-		return repositoryMonitorCIFailures{broke: true, introduced: head.failed}, nil
+		failures := repositoryMonitorCIFailures{broke: true}
+		for _, failure := range head.failed {
+			failures.introduced = append(failures.introduced, failure.name)
+		}
+		return failures, nil
 	}
 	base, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.BaseSHA)
 	if err != nil {
 		return repositoryMonitorCIFailures{}, err
 	}
 	baseFailed := make(map[string]struct{}, len(base.failed))
-	for _, name := range base.failed {
-		baseFailed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	for _, failure := range base.failed {
+		baseFailed[failure.key()] = struct{}{}
 	}
 	var failures repositoryMonitorCIFailures
-	for _, name := range head.failed {
-		if _, ok := baseFailed[strings.ToLower(strings.TrimSpace(name))]; ok {
-			failures.inherited = append(failures.inherited, name)
+	for _, failure := range head.failed {
+		if _, ok := baseFailed[failure.key()]; ok {
+			failures.inherited = append(failures.inherited, failure.name)
 		} else {
-			failures.introduced = append(failures.introduced, name)
+			failures.introduced = append(failures.introduced, failure.name)
 		}
 	}
 	failures.broke = len(failures.introduced) > 0
