@@ -137,7 +137,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCI(ctx context.Conte
 	}
 	failed = append(failed, status.failed...)
 	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed, incomplete: status.incomplete || status.reason == repositoryMonitorCIChecksIncomplete}, nil
 	}
 	if len(pending) > 0 {
 		return repositoryMonitorCIResult{reason: repositoryMonitorAutomergeReasonCIPending}, nil
@@ -194,7 +194,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCheckCommitStatus(ctx con
 		}
 	}
 	if len(failed) > 0 {
-		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed}, nil
+		return repositoryMonitorCIResult{reason: repositoryMonitorCINotGreen, failed: failed, incomplete: incomplete}, nil
 	}
 	if incomplete {
 		return repositoryMonitorCIResult{reason: repositoryMonitorCIChecksIncomplete}, nil

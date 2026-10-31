@@ -144,7 +144,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	}
 	// A partial base result could hide a failure the head inherits, which
 	// would then count as introduced; wait for complete results.
-	if base.reason == repositoryMonitorCIChecksIncomplete {
+	if base.reason == repositoryMonitorCIChecksIncomplete || base.incomplete {
 		return repositoryMonitorCIFailures{incomplete: true}, nil
 	}
 	baseFailed := make(map[string]struct{}, len(base.failed))

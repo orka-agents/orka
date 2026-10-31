@@ -109,6 +109,8 @@ type repositoryMonitorRepairLabelsGitHub struct {
 	roles    map[string]string
 	// partial reports one more check run than it returns for these commits.
 	partial map[string]bool
+	// partialStatuses reports one more commit status than it returns.
+	partialStatuses map[string]bool
 	// checkReads counts check-run reads per commit SHA.
 	checkReads map[string]int
 }
@@ -150,7 +152,11 @@ func (g *repositoryMonitorRepairLabelsGitHub) ServeHTTP(w http.ResponseWriter, r
 		for name, state := range g.statuses[sha] {
 			statuses = append(statuses, map[string]any{"id": len(statuses) + 1, "context": name, "state": state})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": len(statuses), "statuses": statuses})
+		total := len(statuses)
+		if g.partialStatuses[sha] {
+			total++
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": total, "statuses": statuses})
 	case path == "/repos/orka-agents/orka/issues/31/events":
 		if req.URL.Query().Get("page") != "1" {
 			_, _ = w.Write([]byte(`[]`))
@@ -695,5 +701,63 @@ func TestRepositoryMonitorCIFailuresWaitForCompleteResultsAndShareBaseLookups(t 
 	failures, err := reconciler.repositoryMonitorPullRequestCIFailures(context.Background(), monitor, repositoryMonitorPullRequest{BaseSHA: "base5", HeadSHA: "head41"})
 	if err != nil || failures.broke || !failures.incomplete {
 		t.Fatalf("failures = %+v err=%v, want classification deferred on partial base results", failures, err)
+	}
+}
+
+func TestRepositoryMonitorCIFailuresDeferOnPartialFailingBaseStatuses(t *testing.T) {
+	// The base's status page lists a failing lint but omits a failing tests
+	// status, so tests failing on the head must not count as introduced.
+	github := &repositoryMonitorRepairLabelsGitHub{
+		statuses:        map[string]map[string]string{"head43": {"tests": "failure"}, "base43": {"lint": "failure"}},
+		partialStatuses: map[string]bool{"base43": true},
+	}
+	server := httptest.NewServer(github)
+	t.Cleanup(server.Close)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor, secret := repositoryMonitorInventoryTestObjects("ci-partial-status")
+	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), GitHubAPIBaseURL: server.URL}
+	base, err := reconciler.repositoryMonitorCheckCI(context.Background(), monitor, "base43")
+	if err != nil || base.reason != repositoryMonitorCINotGreen || !base.incomplete {
+		t.Fatalf("base CI = %+v err=%v, want not green and marked incomplete", base, err)
+	}
+	failures, err := reconciler.repositoryMonitorPullRequestCIFailures(context.Background(), monitor, repositoryMonitorPullRequest{BaseSHA: "base43", HeadSHA: "head43"})
+	if err != nil || failures.broke || !failures.incomplete {
+		t.Fatalf("failures = %+v err=%v, want classification deferred", failures, err)
+	}
+}
+
+func TestRepositoryMonitorIncompleteCIRetriesTheCommandRun(t *testing.T) {
+	state := repositoryMonitorRunFailureState(fmt.Errorf("dispatch: %w", errRepositoryMonitorCIIncomplete))
+	if state != repositoryMonitorRunRetryScheduled || !repositoryMonitorFailedCommandRunRetryable("["+state+"] dispatch") {
+		t.Fatalf("failure state = %q, want a retryable state so the repair waits", state)
+	}
+}
+
+func TestRepositoryMonitorPendingReviewSurvivesBecomingCIOnly(t *testing.T) {
+	spec := repositoryMonitorRepairLabelsTestSpec()
+	pr := repositoryMonitorPullRequest{Number: 44, State: "open", BaseBranch: "main", HeadSHA: "head44", Labels: []string{"orka:fix-ci"}}
+	pending := &store.MonitorItem{HeadSHA: "head44", LastReviewID: "review-task-44", LastVerdict: repositoryMonitorRunPhaseQueued}
+	if got := repositoryMonitorPullRequestSkipReason(spec, pr, pending, false, 0, 10, nil); got != repositoryMonitorSkipReasonPending {
+		t.Fatalf("skip reason = %q, want the running review kept pending", got)
+	}
+	if got := repositoryMonitorPullRequestSkipReason(spec, pr, &store.MonitorItem{HeadSHA: "head44"}, false, 0, 10, nil); got != repositoryMonitorSkipReasonCIOnly {
+		t.Fatalf("skip reason = %q, want ci_only without a running review", got)
+	}
+}
+
+func TestRepositoryMonitorDepartedHeadWithoutReadinessSkipsTheInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	monitor, _ := repositoryMonitorInventoryTestObjects("departed-unpublished")
+	monitor.Spec.Review.Publish.Enabled = true
+	reconciler := &RepositoryMonitorReconciler{Store: setupControllerSQLiteStore(t), GitHubAPIBaseURL: server.URL}
+	if err := reconciler.reconcileRepositoryMonitorDepartedHead(context.Background(), monitor, 45, "head45", server.URL+"/repos/orka-agents/orka", "token"); err != nil {
+		t.Fatalf("departed head without a readiness status: %v", err)
 	}
 }
