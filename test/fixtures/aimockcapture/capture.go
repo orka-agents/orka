@@ -94,6 +94,10 @@ type relay struct {
 	handler *Handler
 	index   int
 	id      string
+	// client is the downstream request context. Once the client is gone, the
+	// relay may still reach the upstream response's end, but any further
+	// response bytes were not received.
+	client context.Context
 
 	mu      sync.Mutex
 	eof     bool
@@ -182,6 +186,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, message, status)
 		return
 	}
+	state.client = r.Context()
 	ctx, stop := afterClientGone(r.Context(), clientGoneGrace)
 	defer stop()
 	r = r.WithContext(context.WithValue(ctx, requestKey{}, state))
@@ -194,9 +199,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	returned = true
 }
 
-// afterClientGone returns a context canceled grace after parent is. A fully
-// relayed response that ends within the grace is recorded complete, and a
-// stalled upstream still sees the cancellation.
+// afterClientGone returns a context canceled grace after parent is. A response
+// that ends within the grace, with no bytes left to send, is recorded
+// complete; a stalled upstream still sees the cancellation.
 func afterClientGone(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	stop := context.AfterFunc(parent, func() { time.AfterFunc(grace, cancel) })
@@ -401,6 +406,9 @@ func (w *responseWriter) WriteHeader(status int) {
 }
 
 func (w *responseWriter) Write(p []byte) (int, error) {
+	if w.state.client.Err() != nil {
+		w.state.fail("downstream response failed")
+	}
 	n, err := w.ResponseWriter.Write(p)
 	if err != nil || n != len(p) {
 		w.state.fail("downstream response failed")
