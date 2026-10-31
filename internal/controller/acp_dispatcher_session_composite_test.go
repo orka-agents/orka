@@ -14,6 +14,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -220,7 +221,7 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 		t.Fatal(err)
 	}
 
-	epochs := NewControllerEpochManager(controlStore, "session-composite-controller")
+	epochs := NewControllerEpochManager(controlStore, "session-composite-controller").WithStorage(storagev1.StateContract, sqliteStore)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

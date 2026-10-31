@@ -655,7 +655,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
@@ -2769,7 +2769,7 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2824,7 +2824,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		// A result the store has not accepted yet, or may have saved, is
+		// collected again on the next attempt rather than dropped.
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 		// Continue anyway, result collection is best-effort
@@ -4823,6 +4825,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	// Collect result from this iteration (best-effort)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect iteration result")
+		if store.IsTemporaryStorageError(err) {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {
