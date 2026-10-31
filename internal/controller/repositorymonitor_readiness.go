@@ -155,6 +155,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
+	// Only a full repair fixes findings; a review-only or CI-only pull request
+	// keeps its findings until a person changes it.
+	if full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr); !full {
+		return false, nil
+	}
 	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return false, err

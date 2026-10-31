@@ -12,11 +12,14 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -70,20 +73,33 @@ func TestRepositoryMonitorInventoryScopesPullRequestsByIncludeLabels(t *testing.
 	}
 	server := newRepositoryMonitorPullRequestInventoryServerWithBody(t, `[
 		{"number":1,"title":"Labelled","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"labelled","sha":"sha1","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[{"name":"Orka:Review"}]},
-		{"number":2,"title":"Unlabelled","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"unlabelled","sha":"sha2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
+		{"number":2,"title":"Unlabelled","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"bob"},"base":{"ref":"main","sha":"base2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"unlabelled","sha":"sha2","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]},
+		{"number":3,"title":"Stopped","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"carol"},"base":{"ref":"main","sha":"base3","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"stopped","sha":"sha3","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}
 	]`)
 	t.Cleanup(server.Close)
 	monitor, secret := repositoryMonitorInventoryTestObjects("include-labels")
 	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+	// PR #2's repair was still running when its include label was removed.
+	repair := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "repair-2", Namespace: "default", Labels: map[string]string{
+		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+		labels.LabelGitHubNumber:      "2",
+	}}, Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning}}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
-		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}, &corev1alpha1.Task{}).
+		WithObjects(append(repositoryMonitorControllerObjects(monitor, secret), repair)...).
 		Build()
-	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, GitHubAPIBaseURL: server.URL}
-	// PR #2 was tracked before its include label was removed.
-	if err := monitorStore.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "2", Number: 2, State: repositoryMonitorItemStateOpen, HeadSHA: "sha2"}); err != nil {
-		t.Fatalf("UpsertMonitorItem() error = %v", err)
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	// PRs #2 and #3 were tracked before their include labels were removed;
+	// #3 had been stopped by a command.
+	for _, item := range []*store.MonitorItem{
+		{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "2", Number: 2, State: repositoryMonitorItemStateOpen, HeadSHA: "sha2"},
+		{MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "3", Number: 3, State: repositoryMonitorItemStateOpen, HeadSHA: "sha3", SkipReason: repositoryMonitorIssueSkipStoppedByCommand},
+	} {
+		if err := monitorStore.UpsertMonitorItem(ctx, item); err != nil {
+			t.Fatalf("UpsertMonitorItem() error = %v", err)
+		}
 	}
 	if err := monitorStore.CreateMonitorRun(ctx, &store.MonitorRun{ID: "run-include-labels", MonitorNamespace: "default", MonitorName: monitor.Name, Trigger: "manual", Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now().Add(-time.Minute)}); err != nil {
 		t.Fatalf("CreateMonitorRun() error = %v", err)
@@ -91,8 +107,12 @@ func TestRepositoryMonitorInventoryScopesPullRequestsByIncludeLabels(t *testing.
 	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}}); err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
+	var cancelled corev1alpha1.Task
+	if err := cl.Get(ctx, types.NamespacedName{Namespace: "default", Name: repair.Name}, &cancelled); err != nil || cancelled.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		t.Fatalf("repair task phase = %q err=%v, want cancelled once its pull request left scope", cancelled.Status.Phase, err)
+	}
 	var tasks corev1alpha1.TaskList
-	if err := cl.List(ctx, &tasks); err != nil {
+	if err := cl.List(ctx, &tasks, crclient.MatchingLabels{labels.LabelGitHubNumber: "1"}); err != nil {
 		t.Fatalf("List tasks error = %v", err)
 	}
 	if len(tasks.Items) != 1 || !strings.Contains(tasks.Items[0].Name, "-1-sha1-") {
@@ -107,8 +127,12 @@ func TestRepositoryMonitorInventoryScopesPullRequestsByIncludeLabels(t *testing.
 		t.Fatalf("labelled item = %#v err=%v, want queued review", labelled, err)
 	}
 	unlabelled, err := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorPullRequestKind, "2")
-	if err != nil || unlabelled.State != repositoryMonitorItemStateOutOfScope || unlabelled.SkipReason != repositoryMonitorSkipReasonMissing {
-		t.Fatalf("unlabelled item = %#v err=%v, want retired out of scope", unlabelled, err)
+	if err != nil || unlabelled.State != repositoryMonitorItemStateOutOfScope || unlabelled.SkipReason != repositoryMonitorSkipReasonNotIncluded {
+		t.Fatalf("unlabelled item = %#v err=%v, want retired as not_included", unlabelled, err)
+	}
+	stopped, err := monitorStore.GetMonitorItem(ctx, "default", monitor.Name, repositoryMonitorPullRequestKind, "3")
+	if err != nil || stopped.State != repositoryMonitorItemStateOutOfScope || stopped.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+		t.Fatalf("stopped item = %#v err=%v, want retired with its stop kept", stopped, err)
 	}
 }
 
@@ -166,16 +190,19 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
 	labelled := true
 	latest := map[string]repositoryMonitorCommitStatus{}
 	writes := map[string]int{}
 	prJSON := func(number int64) map[string]any {
-		labels := []map[string]string{}
+		prLabels := []map[string]string{}
 		if number == 1 && labelled {
-			labels = append(labels, map[string]string{"name": "orka:review"})
+			prLabels = append(prLabels, map[string]string{"name": "orka:review"})
 		}
-		return map[string]any{"number": number, "state": "open", "head": map[string]string{"sha": fmt.Sprintf("head%d", number)}, "base": map[string]string{"ref": "main"}, "labels": labels}
+		return map[string]any{"number": number, "state": "open", "head": map[string]string{"sha": fmt.Sprintf("head%d", number)}, "base": map[string]string{"ref": "main"}, "labels": prLabels}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -236,5 +263,87 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 	runInventory("include-ready-2")
 	if latest["head1"].State != repositoryMonitorStatusFailure || writes["head2"] != 0 {
 		t.Fatalf("statuses = %+v writes = %v, want the unlabelled head revoked and the other untouched", latest, writes)
+	}
+}
+
+func TestRepositoryMonitorCommandBlockedWhenIncludeLabelLeavesDuringRun(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	prBody := func(labelsJSON string) string {
+		return `{"number":31,"title":"Fix me","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-fix","sha":"head31","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":` + labelsJSON + `}`
+	}
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := req.URL.Path
+		switch {
+		case req.Method == http.MethodGet && path == "/repos/orka-agents/orka/pulls/31":
+			// The label is removed after the command's first read.
+			reads++
+			if reads == 1 {
+				_, _ = w.Write([]byte(prBody(`[{"name":"orka:review"}]`)))
+				return
+			}
+			_, _ = w.Write([]byte(prBody(`[]`)))
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
+			_, _ = w.Write([]byte(`[]`))
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/status"):
+			_, _ = w.Write([]byte(`{"total_count":0,"statuses":[]}`))
+		case req.Method == http.MethodGet && strings.HasSuffix(path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, path)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	monitor, secret := repositoryMonitorInventoryTestObjects("include-labels-race")
+	monitor.Spec.Review.Publish.Enabled = true
+	monitor.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: server.URL}
+	processedAt := time.Now()
+	command := &store.CommandEvent{ID: "cmd-include-race-31", MonitorNamespace: "default", MonitorName: monitor.Name, Repo: "orka-agents/orka", Kind: repositoryMonitorPullRequestKind, Number: 31, Intent: "review", Status: "accepted", CreatedAt: processedAt, ProcessedAt: &processedAt}
+	if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+		t.Fatal(err)
+	}
+	run := &store.MonitorRun{ID: "run-include-race-31", MonitorNamespace: "default", MonitorName: monitor.Name, Trigger: "api_command", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 31, CommandEventID: command.ID, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now()}
+	if err := monitorStore.CreateMonitorRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := reconciler.processPullRequestInventoryRun(ctx, monitor, run, "orka-agents", "orka"); err != nil {
+		t.Fatalf("processPullRequestInventoryRun() error = %v", err)
+	}
+	if reads < 2 {
+		t.Fatalf("pull request reads = %d, want the readiness refresh to observe the removal", reads)
+	}
+	events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: "default", MonitorName: monitor.Name, EventType: "command_target_blocked", Limit: 5})
+	if err != nil || len(events) != 1 || !strings.Contains(events[0].Summary, "target_not_included") {
+		t.Fatalf("blocked events = %#v err=%v, want target_not_included", events, err)
+	}
+}
+
+func TestRepositoryMonitorPublicationRetrySkipsRetiredItems(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	monitor, _ := repositoryMonitorInventoryTestObjects("include-retry")
+	monitor.Spec.Review.Publish.Enabled = true
+	review := seedRepositoryMonitorAutomergeReview(t, ctx, db, monitor.Name, 7, "head7")
+	if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "7", Number: 7, State: repositoryMonitorItemStateOutOfScope, SkipReason: repositoryMonitorSkipReasonNotIncluded, HeadSHA: "head7", LastReviewID: review, LastReviewedHeadSHA: "head7", LastVerdict: repositoryMonitorVerdictSkipped}); err != nil {
+		t.Fatal(err)
+	}
+	// No client or GitHub: a retired item must not reach the publish attempt.
+	published, err := (&RepositoryMonitorReconciler{Store: db}).publishPendingRepositoryMonitorReviewRecords(ctx, monitor)
+	if err != nil || published {
+		t.Fatalf("publishPendingRepositoryMonitorReviewRecords() = %t, %v; want a retired item skipped", published, err)
 	}
 }

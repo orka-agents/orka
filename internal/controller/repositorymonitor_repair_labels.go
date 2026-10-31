@@ -107,8 +107,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairLabelActorPermitted
 		}
 		for _, event := range events {
 			name := strings.ToLower(strings.TrimSpace(event.Label.Name))
-			if _, ok := present[name]; ok && event.Event == "labeled" {
+			if _, ok := present[name]; !ok {
+				continue
+			}
+			// A removal seen after the snapshot revokes the earlier labeller,
+			// so a label removed since the snapshot fails closed.
+			switch event.Event {
+			case "labeled":
 				actors[name] = strings.TrimSpace(event.Actor.Login)
+			case "unlabeled":
+				delete(actors, name)
 			}
 		}
 		if len(events) < repositoryMonitorGitHubPerPage {

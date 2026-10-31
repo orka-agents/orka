@@ -383,7 +383,9 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 		}
 		for i := range items {
 			item := items[i]
-			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued {
+			// A retired item gets no publication retries until inventory
+			// brings it back into scope.
+			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued || item.State == repositoryMonitorItemStateOutOfScope {
 				continue
 			}
 			record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
