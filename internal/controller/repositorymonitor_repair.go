@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1233,6 +1234,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 			(monitor.Spec.Review.Publish.PostSecuritySensitive || !repositoryMonitorReviewRecordSecuritySensitive(review)) &&
 			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
 			findings = repositoryMonitorOpenFindings(findings)
+			if !monitor.Spec.Review.Publish.PostSecuritySensitive {
+				findings = slices.DeleteFunc(findings, func(finding repositoryMonitorReviewFinding) bool { return finding.SecuritySensitive })
+			}
 			for i, finding := range findings {
 				title := strings.Join(strings.Fields(sanitizeRepositoryMonitorReviewText(finding.Title, 120)), " ")
 				if title == "" {

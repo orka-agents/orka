@@ -137,6 +137,22 @@ func TestRepositoryMonitorRepairCommitMessage(t *testing.T) {
 	}
 	monitor.Spec.Review.Publish.PostSecuritySensitive = false
 
+	// A finding restricted as security-sensitive is not listed.
+	restrictedJSON, err := json.Marshal([]repositoryMonitorReviewFinding{
+		{Priority: "P1", Title: "Still open"},
+		{Priority: "P1", Title: "Restricted detail", SecuritySensitive: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "review-78", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 78, HeadSHA: "head78", Verdict: repositoryMonitorReviewVerdictNeedsChanges, FindingsJSON: string(restrictedJSON)}); err != nil {
+		t.Fatal(err)
+	}
+	restricted, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, repositoryMonitorPullRequest{Number: 78, HeadSHA: "head78"}, &store.MonitorItem{LastReviewID: "review-78"})
+	if err != nil || !strings.Contains(restricted, "- [P1] Still open\n") || strings.Contains(restricted, "Restricted detail") {
+		t.Fatalf("restricted message = %q err=%v, want only the unrestricted finding", restricted, err)
+	}
+
 	// A review of an older head describes nothing this repair fixes.
 	pr.HeadSHA = "newer"
 	if got, err := r.repositoryMonitorRepairCommitMessage(ctx, monitor, repositoryMonitorCommandIntentFix, task, pr, item); err != nil || got != "fix: address review findings on #75\n\nOrka-Task: "+task+"\n" {
