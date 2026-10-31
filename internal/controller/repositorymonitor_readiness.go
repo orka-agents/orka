@@ -187,13 +187,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	if intent == repositoryMonitorCommandIntentUpdateBranch {
 		return true, nil
 	}
-	// Automatic selection prefers failed CI, even if review findings cannot
-	// be repaired. Both intents share the same repair policy and budget.
-	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+	// Automatic selection prefers CI the pull request broke, even if review
+	// findings cannot be repaired; failures inherited from the base are left
+	// alone. Both intents share the same repair policy and budget.
+	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
 	if err != nil {
 		return false, err
 	}
-	if ci.reason == repositoryMonitorCINotGreen {
+	if broke {
 		return true, nil
 	}
 	if item.LastReviewID == "" {

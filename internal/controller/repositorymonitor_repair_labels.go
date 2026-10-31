@@ -10,11 +10,20 @@ import (
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // repositoryMonitorRepairSkipLabelActorNotPermitted records that the account
 // that added a repair label lacks the permission label commands require.
 const repositoryMonitorRepairSkipLabelActorNotPermitted = "repair_label_actor_not_permitted"
+
+// repositoryMonitorRepairSkipScopeWithdrawn records that a queued policy
+// repair lost its repair scope, such as a removed repair label, before it ran.
+const repositoryMonitorRepairSkipScopeWithdrawn = "repair_scope_withdrawn"
+
+// repositoryMonitorRepairSkipNoIntroducedCIFailure records that a queued
+// policy CI repair found no failing check the pull request introduced.
+const repositoryMonitorRepairSkipNoIntroducedCIFailure = "no_introduced_ci_failure"
 
 // repositoryMonitorIssueEventPageLimit bounds the issue event scan. A pull
 // request with a longer history fails closed rather than trusting a partial log.
@@ -34,8 +43,37 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestBrokeCI(ctx co
 // base commit.
 type repositoryMonitorCIFailures struct {
 	broke      bool
-	introduced []string
-	inherited  []string
+	introduced []repositoryMonitorCIFailure
+	inherited  []repositoryMonitorCIFailure
+}
+
+// repositoryMonitorCIFailureNames names failures for a repair prompt. A name
+// that a failure in other also carries is qualified with its source, so a
+// check run and a status context sharing a name stay distinguishable.
+func repositoryMonitorCIFailureNames(failures, other []repositoryMonitorCIFailure) []string {
+	otherNames := make(map[string]struct{}, len(other))
+	for _, failure := range other {
+		otherNames[strings.ToLower(strings.TrimSpace(failure.name))] = struct{}{}
+	}
+	names := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		name := failure.name
+		if _, shared := otherNames[strings.ToLower(strings.TrimSpace(failure.name))]; shared {
+			name = fmt.Sprintf("%s (%s)", failure.name, repositoryMonitorCIFailureSourceLabel(failure.source))
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+func repositoryMonitorCIFailureSourceLabel(source string) string {
+	if app, ok := strings.CutPrefix(source, "check_run:"); ok {
+		return "check run from GitHub App " + app
+	}
+	if source == repositoryMonitorCIFailureSourceStatus {
+		return "commit status"
+	}
+	return source
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (repositoryMonitorCIFailures, error) {
@@ -45,9 +83,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	}
 	if strings.TrimSpace(pr.BaseSHA) == "" || len(head.failed) == 0 {
 		failures := repositoryMonitorCIFailures{broke: true}
-		for _, failure := range head.failed {
-			failures.introduced = append(failures.introduced, failure.name)
-		}
+		failures.introduced = append(failures.introduced, head.failed...)
 		return failures, nil
 	}
 	base, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.BaseSHA)
@@ -61,9 +97,9 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx
 	var failures repositoryMonitorCIFailures
 	for _, failure := range head.failed {
 		if _, ok := baseFailed[failure.key()]; ok {
-			failures.inherited = append(failures.inherited, failure.name)
+			failures.inherited = append(failures.inherited, failure)
 		} else {
-			failures.introduced = append(failures.introduced, failure.name)
+			failures.introduced = append(failures.introduced, failure)
 		}
 	}
 	failures.broke = len(failures.introduced) > 0
@@ -190,4 +226,40 @@ func repositoryMonitorPermissionListed(permissions []string, permission string) 
 	return slices.ContainsFunc(permissions, func(candidate string) bool {
 		return strings.EqualFold(strings.TrimSpace(candidate), permission)
 	})
+}
+
+// repositoryMonitorPolicyRepairWithdrawnReason rechecks a queued controller
+// policy repair before it creates a Task or updates the branch, since its
+// grant can change after acceptance: the repair scope must still cover the
+// intent, the account behind the current repair label must still be
+// permitted, and a CI fix must still have a failure the pull request
+// introduced. Explicit commands keep their own authorization.
+func (r *RepositoryMonitorReconciler) repositoryMonitorPolicyRepairWithdrawnReason(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, command *store.CommandEvent, owner, repo string, pr repositoryMonitorPullRequest) (string, error) {
+	if command == nil || command.Source != repositoryMonitorControllerPolicySource {
+		return "", nil
+	}
+	full, ciOnly, labelled := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
+	if !full && (!ciOnly || command.Intent != repositoryMonitorCommandIntentFixCI) {
+		return repositoryMonitorRepairSkipScopeWithdrawn, nil
+	}
+	if labelled {
+		permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
+		if err != nil {
+			return "", err
+		}
+		if !permitted {
+			return repositoryMonitorRepairSkipLabelActorNotPermitted, nil
+		}
+	}
+	if command.Intent == repositoryMonitorCommandIntentFixCI {
+		// A lookup error defers the command rather than repairing blind.
+		broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
+		if err != nil {
+			return "", err
+		}
+		if !broke {
+			return repositoryMonitorRepairSkipNoIntroducedCIFailure, nil
+		}
+	}
+	return "", nil
 }

@@ -315,6 +315,13 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
 				return true, 0, err
 			}
+			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
+			if err != nil {
+				return true, 0, err
+			}
+			if reason != "" {
+				return true, 0, r.blockRepositoryMonitorWithdrawnPolicyRepair(ctx, monitor, run, command, pr, item, reason)
+			}
 		}
 		return r.tryProcessPullRequestUpdateBranchCommand(ctx, monitor, run, command, owner, repository, pr, item)
 	case repositoryMonitorCommandIntentFix, repositoryMonitorCommandIntentFixCI:
@@ -331,6 +338,19 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
+		// Once its RepairJob exists the Task may already run; recheck only
+		// before then, so a retried dispatch never orphans a started repair.
+		if _, err := r.Store.GetRepairJob(ctx, monitor.Namespace, currentRepairJobID); errors.Is(err, store.ErrNotFound) {
+			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
+			if err != nil {
+				return true, 0, err
+			}
+			if reason != "" {
+				return true, 0, r.blockRepositoryMonitorWithdrawnPolicyRepair(ctx, monitor, run, command, pr, item, reason)
+			}
+		} else if err != nil {
+			return true, 0, err
+		}
 		reason, repairCountPR, repairCountHead, err := r.repositoryMonitorRepairPolicy(ctx, monitor, monitoredRepo, pr, currentRepairJobID, command.Intent)
 		if err != nil {
 			return true, 0, err
@@ -1149,6 +1169,20 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	return created, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_task_created", fmt.Sprintf("Pull request #%d %s repair task queued", pr.Number, command.Intent), map[string]any{eventTaskNameField: taskName, intentField: command.Intent})
 }
 
+// blockRepositoryMonitorWithdrawnPolicyRepair settles a queued policy repair
+// whose grant was withdrawn before it ran, without creating work.
+func (r *RepositoryMonitorReconciler) blockRepositoryMonitorWithdrawnPolicyRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, pr repositoryMonitorPullRequest, item *store.MonitorItem, reason string) error {
+	item.RepairState = ""
+	item.SkipReason = reason
+	if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "", repositoryMonitorRepairWorkflowActionKind(command.Intent), repositoryMonitorWorkActionStatusBlocked, "repair_withdrawn", "", reason); err != nil {
+		return err
+	}
+	if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+		return err
+	}
+	return r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, "repair_withdrawn", fmt.Sprintf("Pull request #%d %s repair withdrawn before it ran: %s", pr.Number, command.Intent, reason), map[string]any{intentField: command.Intent, eventReasonField: reason})
+}
+
 func repositoryMonitorRepairWorkflowActionKind(intent string) string {
 	if strings.TrimSpace(intent) == repositoryMonitorCommandIntentFix {
 		return "pr_repair"
@@ -1180,9 +1214,9 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx con
 		// on the base alone. The list is guidance; a failed lookup omits it.
 		if failures, err := r.repositoryMonitorPullRequestCIFailures(ctx, monitor, pr); err == nil && failures.broke && len(failures.introduced) > 0 {
 			payload["baseSHA"] = pr.BaseSHA
-			payload["failingChecks"] = boundRepositoryMonitorCheckNames(failures.introduced)
+			payload["failingChecks"] = boundRepositoryMonitorCheckNames(repositoryMonitorCIFailureNames(failures.introduced, failures.inherited))
 			if len(failures.inherited) > 0 {
-				payload["baseFailingChecks"] = boundRepositoryMonitorCheckNames(failures.inherited)
+				payload["baseFailingChecks"] = boundRepositoryMonitorCheckNames(repositoryMonitorCIFailureNames(failures.inherited, failures.introduced))
 				ciScope = " Fix only the checks in failingChecks; the checks in baseFailingChecks also fail on the base commit and are out of scope."
 			}
 		}
