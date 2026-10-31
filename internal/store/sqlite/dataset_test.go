@@ -25,7 +25,7 @@ func loadPriorSchemaFixture(t *testing.T) string {
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
 	require.NoError(t, s.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	require.NoError(t, s.SaveArtifact(t.Context(), "fixture", "task", "proof.txt", "text/plain", []byte("retained artifact")))
+	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
 	_, err := s.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
@@ -102,7 +102,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	credential, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
 	require.NoError(t, err)
 	require.True(t, credential.AccessToken == "fixture-token-not-a-credential", "connector plaintext changed")
-	data, contentType, err := s.GetArtifact(t.Context(), "fixture", "task", "proof.txt")
+	data, contentType, err := s.GetArtifact(t.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt"})
 	require.NoError(t, err)
 	require.Equal(t, "retained artifact", string(data))
 	require.Equal(t, "text/plain", contentType)

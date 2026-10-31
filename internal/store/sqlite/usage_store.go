@@ -36,6 +36,7 @@ func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkReque
 	if work.StartedAt.IsZero() {
 		work.StartedAt = time.Now().UTC()
 	}
+	utcUsageTimes(&work)
 	data, err := json.Marshal(work)
 	if err != nil {
 		return err
@@ -47,6 +48,7 @@ func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkReque
 }
 
 func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) error {
+	utcUsageTimes(&task)
 	task.Repository = strings.ToLower(task.Repository)
 	if task.Namespace == "" || task.TaskUID == "" || task.TaskName == "" {
 		return store.ValidationErrorf("usage task requires namespace, name and UID")
@@ -84,6 +86,9 @@ func (s *Store) RegisterUsageTask(ctx context.Context, task store.UsageTask) err
 		if task.WorkID != "" {
 			var work store.UsageWorkRequest
 			if err := readUsageJSON(ctx, db, &work, `SELECT data FROM usage_work_requests WHERE namespace = ? AND id = ?`, task.Namespace, task.WorkID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("%w: usage work %q in namespace %q", store.ErrNotFound, task.WorkID, task.Namespace)
+				}
 				return fmt.Errorf("load usage task work: %w", err)
 			}
 			if task.Repository != "" && !strings.EqualFold(task.Repository, work.Repository) {
@@ -205,7 +210,11 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 }
 
 func (s *Store) RecordUsage(ctx context.Context, observation store.UsageObservation) error {
-	return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
+	// The Task lookup, the deduplicating insert and the replay comparison share
+	// one transaction, so retention cannot remove the observation between them.
+	return s.usageTransaction(ctx, func(ctx context.Context) error {
+		return recordUsage(ctx, s.taskDataExecutor(ctx), observation)
+	})
 }
 
 func recordUsage(ctx context.Context, db taskDataExecutor, observation store.UsageObservation) error {
@@ -282,6 +291,7 @@ func recordUsage(ctx context.Context, db taskDataExecutor, observation store.Usa
 }
 
 func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink) error {
+	utcUsageTimes(&link)
 	link.Repository = strings.ToLower(link.Repository)
 	if link.Namespace == "" || link.WorkID == "" || link.Repository == "" || link.Number <= 0 || link.EvidenceID == "" {
 		return store.ValidationErrorf("usage PR link requires work, repository, PR and publication evidence")
@@ -324,6 +334,7 @@ func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink
 }
 
 func (s *Store) RecordUsagePullRequest(ctx context.Context, pr store.UsagePullRequest) error {
+	utcUsageTimes(&pr)
 	pr.Repository = strings.ToLower(pr.Repository)
 	if pr.Namespace == "" || pr.Repository == "" || pr.Number <= 0 || pr.ObservedAt.IsZero() {
 		return store.ValidationErrorf("usage PR observation requires a namespace, repository, number and timestamp")
@@ -468,7 +479,37 @@ func readUsageJSON(ctx context.Context, db taskDataExecutor, target any, query s
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&data); err != nil {
 		return err
 	}
-	return json.Unmarshal([]byte(data), target)
+	if err := json.Unmarshal([]byte(data), target); err != nil {
+		return err
+	}
+	utcUsageTimes(target)
+	return nil
+}
+
+// utcUsageTimes converts the times in a usage record to UTC. Usage records are
+// stored as JSON, which keeps the zone a time was written in, so they are
+// normalized before they are stored and again when they are read, which also
+// covers rows written before this rule.
+func utcUsageTimes(record any) {
+	switch r := record.(type) {
+	case *store.UsageWorkRequest:
+		r.StartedAt = r.StartedAt.UTC()
+	case *store.UsageTask:
+		r.StartedAt, r.PhaseObservedAt = r.StartedAt.UTC(), r.PhaseObservedAt.UTC()
+		// The history may share its backing array with the caller's record.
+		r.PhaseHistory = slices.Clone(r.PhaseHistory)
+		for i := range r.PhaseHistory {
+			r.PhaseHistory[i].ObservedAt = r.PhaseHistory[i].ObservedAt.UTC()
+			r.PhaseHistory[i].RecordedAt = r.PhaseHistory[i].RecordedAt.UTC()
+		}
+	case *store.UsageObservation:
+		r.ObservedAt = r.ObservedAt.UTC()
+	case *store.UsagePRLink:
+		r.LinkedAt = r.LinkedAt.UTC()
+	case *store.UsagePullRequest:
+		r.CreatedAt, r.MergedAt, r.ClosedAt = utcTimePtr(r.CreatedAt), utcTimePtr(r.MergedAt), utcTimePtr(r.ClosedAt)
+		r.ObservedAt = r.ObservedAt.UTC()
+	}
 }
 
 func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string, args ...any) ([]T, error) {
@@ -487,6 +528,7 @@ func readUsageRows[T any](ctx context.Context, db taskDataExecutor, query string
 		if err := json.Unmarshal([]byte(data), &value); err != nil {
 			return nil, err
 		}
+		utcUsageTimes(&value)
 		result = append(result, value)
 	}
 	return result, rows.Err()

@@ -570,6 +570,35 @@ store:
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
 
+# Storage bindings. Each storage contract is served by embedded SQLite
+# ("sqlite", at store.path) or by a storage adapter named in storage.adapters.
+# With both contracts on sqlite and no adapters, the chart renders no storage
+# configuration file and the controller keeps its defaults. Otherwise the chart
+# renders the <release>-storage ConfigMap, passes it with --storage-config and
+# restarts the controller when it changes. The store volume stays required.
+#
+# This controller serves both contracts only from sqlite: it refuses to start
+# with a contract bound to an adapter (reason AdapterTransportUnavailable) and
+# never falls back to SQLite.
+storage:
+  bindings:
+    state: sqlite        # state.v1: sessions, results, gateway and control records
+    artifacts: sqlite    # artifacts.v1: artifact bytes and metadata
+  # Storage adapters in the release namespace, keyed by name. Each adapter must
+  # be bound above, sets exactly one of serviceRef or url (https:// only), and
+  # authenticates with a bearer token of at least 32 visible ASCII characters.
+  # Secret references name Secrets in the release namespace; the controller
+  # reads them directly and never mounts them. For example:
+  #
+  #   postgres:
+  #     serviceRef: {name: orka-storage-postgres, port: 8443}
+  #     tls:
+  #       serverName: orka-storage-postgres.orka-system.svc   # optional
+  #       caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+  #     clientAuth:
+  #       bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+  adapters: {}
+
 # Client ServiceAccount for API access
 client:
   # Create a client service account
