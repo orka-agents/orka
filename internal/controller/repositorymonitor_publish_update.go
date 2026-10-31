@@ -95,25 +95,33 @@ func (r *RepositoryMonitorReconciler) updatePublishedRepositoryMonitorReview(ctx
 // published review for published's head currently shows: the newest update,
 // or the review first published.
 func (r *RepositoryMonitorReconciler) repositoryMonitorShownReviewRecordID(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, published *store.ReviewPublishRecord) (string, error) {
-	records, _, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
-		Namespace:   monitor.Namespace,
-		MonitorName: monitor.Name,
-		ItemKind:    repositoryMonitorPullRequestKind,
-		ItemNumber:  item.Number,
-		HeadSHA:     published.HeadSHA,
-		Phase:       repositoryMonitorPublishPhaseSkipped,
-		Limit:       100,
-	})
-	if err != nil {
-		return "", err
-	}
 	shown, at := published.ReviewRecordID, published.CreatedAt
-	for _, candidate := range records {
-		if candidate.SkipReason == repositoryMonitorPublishSkipUpdatedPublishedReview && candidate.CreatedAt.After(at) {
-			shown, at = candidate.ReviewRecordID, candidate.CreatedAt
+	// Same-head skips accumulate with every later review, so read every page.
+	cursor := ""
+	for {
+		records, next, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
+			Namespace:   monitor.Namespace,
+			MonitorName: monitor.Name,
+			ItemKind:    repositoryMonitorPullRequestKind,
+			ItemNumber:  item.Number,
+			HeadSHA:     published.HeadSHA,
+			Phase:       repositoryMonitorPublishPhaseSkipped,
+			Limit:       100,
+			Cursor:      cursor,
+		})
+		if err != nil {
+			return "", err
 		}
+		for _, candidate := range records {
+			if candidate.SkipReason == repositoryMonitorPublishSkipUpdatedPublishedReview && candidate.CreatedAt.After(at) {
+				shown, at = candidate.ReviewRecordID, candidate.CreatedAt
+			}
+		}
+		if next == "" {
+			return shown, nil
+		}
+		cursor = next
 	}
-	return shown, nil
 }
 
 func (r *RepositoryMonitorReconciler) updateRepositoryMonitorPullRequestReview(ctx context.Context, owner, repository, token string, number, reviewID int64, body string) (*repositoryMonitorPullRequestReviewResponse, error) {

@@ -51,11 +51,14 @@ const (
 	repositoryMonitorItemStateOutOfScope = "out_of_scope"
 	repositoryMonitorVerdictSkipped      = "skipped"
 	repositoryMonitorSkipReasonMissing   = "not_open_or_base_branch_changed"
-	repositoryMonitorSkipReasonReviewed  = "already_reviewed"
-	repositoryMonitorSkipReasonPending   = "review_pending"
-	repositoryMonitorSkipReasonOverLimit = "over_limit"
-	repositoryMonitorSkipReasonCIOnly    = "ci_only"
-	repositoryMonitorReviewTaskTimeout   = 2 * time.Hour
+	// repositoryMonitorSkipReasonNotIncluded retires a pull request that lost
+	// every label that put it in the inventory.
+	repositoryMonitorSkipReasonNotIncluded = "not_included"
+	repositoryMonitorSkipReasonReviewed    = "already_reviewed"
+	repositoryMonitorSkipReasonPending     = "review_pending"
+	repositoryMonitorSkipReasonOverLimit   = "over_limit"
+	repositoryMonitorSkipReasonCIOnly      = "ci_only"
+	repositoryMonitorReviewTaskTimeout     = 2 * time.Hour
 
 	repositoryMonitorReviewTaskStateMissing   = "missing"
 	repositoryMonitorReviewTaskStatePending   = "pending"
@@ -123,8 +126,12 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		return 0, 0, 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, reason)
 	}
 	pullRequests = filterRepositoryMonitorBasePullRequests(pullRequests, baseBranch)
-	// Excluded PRs leave the inventory before readiness, so they get no status,
-	// and a PR that loses its label is retired like one that closed.
+	// Excluded PRs leave the inventory before readiness, so they get no status.
+	// A PR that loses its label is retired and its outstanding work cancelled,
+	// since a repair Task could otherwise still push to it.
+	if err := r.retireExcludedRepositoryMonitorPullRequests(ctx, monitor, run, pullRequests); err != nil {
+		return 0, 0, 0, err
+	}
 	pullRequests = filterRepositoryMonitorIncludedPullRequests(monitor.Spec, pullRequests)
 	readinessInventory := pullRequests
 	pullRequests = filterRepositoryMonitorTargetPullRequests(pullRequests, run)
@@ -174,6 +181,11 @@ func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context
 		// Readiness may observe a newer head or a PR leaving this monitor's scope.
 		// Do not start work from the old inventory; the next poll will rebuild it.
 		if pr.State != repositoryMonitorItemStateOpen || pr.HeadSHA != item.HeadSHA || pr.BaseBranch != baseBranch || !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+			// A command whose target lost its include label since the first
+			// read is blocked, not left pending for an item that is now retired.
+			if run.CommandEventID != "" && run.TargetNumber == pr.Number && pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == baseBranch && !repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+				return selected, createdTasks, skipped + 1, r.blockRepositoryMonitorTargetCommand(ctx, monitor, run, "target_not_included")
+			}
 			skipped++
 			continue
 		}
@@ -871,17 +883,63 @@ func (r *RepositoryMonitorReconciler) retireMissingRepositoryMonitorPullRequests
 				return err
 			}
 		}
-		if item.State == repositoryMonitorItemStateOutOfScope && item.SkipReason == repositoryMonitorSkipReasonMissing {
+		// Already retired, including as excluded or stopped by a command.
+		if item.State == repositoryMonitorItemStateOutOfScope {
 			continue
 		}
 		item.State = repositoryMonitorItemStateOutOfScope
 		item.LastVerdict = repositoryMonitorVerdictSkipped
-		item.SkipReason = repositoryMonitorSkipReasonMissing
+		// An explicit stop survives retirement so a reopened PR stays stopped.
+		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			item.SkipReason = repositoryMonitorSkipReasonMissing
+		}
 		if err := r.Store.UpsertMonitorItem(ctx, &item); err != nil {
 			return err
 		}
 		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d is no longer in the open base-branch inventory", item.Number), map[string]any{
 			eventReasonField: repositoryMonitorSkipReasonMissing,
+			stateField:       item.State,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// retireExcludedRepositoryMonitorPullRequests retires open items whose pull
+// request no longer carries an include label and cancels their unfinished
+// review and repair Tasks, so no work started in scope publishes after it.
+func (r *RepositoryMonitorReconciler) retireExcludedRepositoryMonitorPullRequests(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pullRequests []repositoryMonitorPullRequest) error {
+	if len(monitor.Spec.Targets.PullRequests.IncludeLabels) == 0 {
+		return nil
+	}
+	for _, pr := range pullRequests {
+		if repositoryMonitorPullRequestIncluded(monitor.Spec, pr) {
+			continue
+		}
+		item, err := r.Store.GetMonitorItem(ctx, monitor.Namespace, monitor.Name, repositoryMonitorPullRequestKind, strconv.FormatInt(pr.Number, 10))
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if item.State == repositoryMonitorItemStateOutOfScope {
+			continue
+		}
+		if err := r.cancelRepositoryMonitorTargetTasks(ctx, monitor, repositoryMonitorPullRequestKind, pr.Number, repositoryMonitorSkipReasonNotIncluded); err != nil {
+			return err
+		}
+		item.State = repositoryMonitorItemStateOutOfScope
+		item.LastVerdict = repositoryMonitorVerdictSkipped
+		if item.SkipReason != repositoryMonitorIssueSkipStoppedByCommand {
+			item.SkipReason = repositoryMonitorSkipReasonNotIncluded
+		}
+		if err := r.Store.UpsertMonitorItem(ctx, item); err != nil {
+			return err
+		}
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, item.Number, item.HeadSHA, "item_retired", fmt.Sprintf("Pull request #%d no longer has an include label", item.Number), map[string]any{
+			eventReasonField: repositoryMonitorSkipReasonNotIncluded,
 			stateField:       item.State,
 		}); err != nil {
 			return err

@@ -1180,6 +1180,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 	case repositoryMonitorCommandIntentUpdateBranch:
 		subject = fmt.Sprintf("chore: update #%d with %s", pr.Number, pr.BaseBranch)
 	}
+	header, trailer := subject+"\n", "\nOrka-Task: "+taskName+"\n"
+	const listHeader = "\nReview findings:\n"
+	// The publisher limits the whole message in bytes; leave room for the
+	// subject, trailer, list header, and a closing "and N more" line.
+	used := len(header) + len(trailer) + len(listHeader) + len("- and 999 more\n")
 	var lines []string
 	if intent == repositoryMonitorCommandIntentFix && item != nil && item.LastReviewID != "" && r.Store != nil {
 		review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
@@ -1191,26 +1196,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
 			findings = repositoryMonitorOpenFindings(findings)
 			for i, finding := range findings {
-				if len(lines) == repositoryMonitorRepairCommitFindingLimit {
-					lines = append(lines, fmt.Sprintf("- and %d more", len(findings)-i))
-					break
-				}
 				title := strings.Join(strings.Fields(sanitizeRepositoryMonitorReviewText(finding.Title, 120)), " ")
 				if title == "" {
 					continue
 				}
-				if priority := strings.TrimSpace(finding.Priority); priority != "" {
-					title = "[" + priority + "] " + title
+				// Priority is model output too: only a known priority is shown.
+				if _, ok := repositoryMonitorPriorityRank(finding.Priority); ok {
+					title = "[" + strings.ToUpper(strings.TrimSpace(finding.Priority)) + "] " + title
 				}
-				lines = append(lines, "- "+title)
+				line := "- " + title
+				if len(lines) == repositoryMonitorRepairCommitFindingLimit || used+len(line)+1 > maxTaskPublicationCommitMessageBytes {
+					lines = append(lines, fmt.Sprintf("- and %d more", len(findings)-i))
+					break
+				}
+				used += len(line) + 1
+				lines = append(lines, line)
 			}
 		}
 	}
-	message := subject + "\n"
+	message := header
 	if len(lines) > 0 {
-		message += "\nReview findings:\n" + strings.Join(lines, "\n") + "\n"
+		message += listHeader + strings.Join(lines, "\n") + "\n"
 	}
-	return message + "\nOrka-Task: " + taskName + "\n", nil
+	return message + trailer, nil
 }
 
 func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, intent, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {

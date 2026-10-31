@@ -147,7 +147,7 @@ spec:
         - orka:review
 ```
 
-Only pull requests with at least one of these labels (case-insensitive) are reviewed, repaired, or given a readiness status. Orka reads the labels on every inventory run, so no webhook is needed. Removing the label retires the pull request from the monitor: a readiness status it already published turns to failure, and a review that finishes afterwards is not published. Commands that target an unlabelled pull request are blocked with `target_not_included`. This setting cannot be combined with issue implementation, because the pull requests Orka opens would not carry the label.
+Only pull requests with at least one of these labels (case-insensitive) are reviewed, repaired, or given a readiness status. Orka reads the labels on every inventory run, so no webhook is needed. Removing the label retires the pull request from the monitor: its unfinished review and repair Tasks are cancelled, a readiness status it already published turns to failure, and a stop it was under still applies if the label returns. Commands that target an unlabelled pull request are blocked with `target_not_included`, except `stop`, which always applies. Readiness is a commit status, so an unlabelled pull request whose head commit and base branch match a labelled one shows that pull request's readiness. This setting cannot be combined with issue implementation, because the pull requests Orka opens would not carry the label.
 
 ### Repair labelled pull requests
 
