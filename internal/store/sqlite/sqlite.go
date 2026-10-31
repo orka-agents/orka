@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,8 +40,21 @@ func NewDB(path string) (*sql.DB, error) {
 	return newDB(path, false)
 }
 
+// sqliteDSN makes the driver write and read every time.Time in UTC. SQL
+// compares stored times as text, so one zone keeps those comparisons correct
+// and satisfies the storage contract's UTC rule whatever zone a caller used.
+// Rows written earlier in another zone are read back in UTC, but their stored
+// text keeps its offset, so SQL comparisons with them can still be wrong.
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_timezone=UTC"
+}
+
 func newDB(path string, allowMigration bool) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -973,6 +988,11 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a reopen, the only way SQLite's serving database can restart, is
+	// visible as a new incarnation.
+	incarnation string
+
 	// snapshotCipher encrypts immutable agent execution snapshot bodies at
 	// rest. Snapshot persistence fails closed while it is nil.
 	snapshotCipher *AgentExecutionSnapshotCipher
@@ -994,6 +1014,7 @@ type Store struct {
 func NewStore(db *sql.DB, dbPath string) *Store {
 	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
 	return s
 }
 
@@ -1013,6 +1034,7 @@ func OpenLockedStore(path string) (*Store, error) {
 	}
 	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
 	store.pendingWALTruncate.Store(true)
+	store.incarnation = uuid.NewString()
 	return store, nil
 }
 
