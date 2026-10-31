@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
@@ -106,7 +107,7 @@ func TestResumeGatewaySessionCleanupAfterRuntimeFailure(t *testing.T) {
 	})
 	require.NoError(t, err)
 	nextFence := controlstore.ControllerEpochFence{Name: next.Name, Epoch: next.Epoch, HolderID: next.HolderID}
-	restarted, err := NewComposite(kubeClient, testControlNamespace, persistence,
+	restarted, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence),
 		WithSessionRuntimeCleanup(func(callCtx context.Context, intent controlstore.SessionCleanupIntent, actual controlstore.ControllerEpochFence) error {
 			calls++
 			require.Equal(t, nextFence, actual)
@@ -115,6 +116,7 @@ func TestResumeGatewaySessionCleanupAfterRuntimeFailure(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
+	syncTestEpochMirror(t, restarted, persistence)
 	require.NoError(t, restarted.ResumeSessionCleanups(ctx, nextFence))
 	require.Equal(t, 2, calls)
 	assertGatewaySessionCleanupComplete(t, ctx, restarted, kubeClient, persistence, db, f)
@@ -147,8 +149,9 @@ func TestResumeGatewaySessionCleanupAfterStorageRollback(t *testing.T) {
 	assertGatewaySessionCleanupUncommitted(t, ctx, s, persistence, f)
 
 	execSessionCleanupMutation(t, ctx, db, `DROP TRIGGER fail_gateway_cleanup`)
-	restarted, err := NewComposite(kubeClient, testControlNamespace, persistence, WithSessionRuntimeCleanup(cleanup))
+	restarted, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence), WithSessionRuntimeCleanup(cleanup))
 	require.NoError(t, err)
+	syncTestEpochMirror(t, restarted, persistence)
 	require.NoError(t, restarted.ResumeSessionCleanups(ctx, fence))
 	require.Equal(t, 2, calls)
 	assertGatewaySessionCleanupComplete(t, ctx, restarted, kubeClient, persistence, db, f)
@@ -228,8 +231,9 @@ func TestResumeGatewaySessionCleanupPreservesReplacement(t *testing.T) {
 				replacement.ResourceVersion = ""
 				require.NoError(t, kubeClient.Create(ctx, replacement))
 			}
-			restarted, err := NewComposite(kubeClient, testControlNamespace, persistence)
+			restarted, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence))
 			require.NoError(t, err)
+			syncTestEpochMirror(t, restarted, persistence)
 			require.ErrorIs(t, restarted.ResumeSessionCleanups(ctx, fence), controlstore.ErrConflict)
 			assertGatewaySessionCleanupUncommitted(t, ctx, restarted, persistence, f)
 			if kind == "transcript" {

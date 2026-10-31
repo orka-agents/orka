@@ -48,6 +48,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -4118,6 +4119,13 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage, err := storageclient.NewEmbedded(r.ExecutionEventStore.(*sqlite.Store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{
@@ -8771,11 +8779,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", sealedStore(t, persistence))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithMirror(persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

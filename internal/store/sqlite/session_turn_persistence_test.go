@@ -49,7 +49,7 @@ func TestSessionTurnFinalizationTaskOwnership(t *testing.T) {
 						var finalized *store.SessionTurn
 						var err error
 						if persistenceOnly {
-							finalized, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+							finalized, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 								Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
 								ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
 								TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
@@ -125,7 +125,7 @@ func TestSessionTurnFinalizationRecordsTaskTokenUsageOnce(t *testing.T) {
 			for range 2 {
 				var err error
 				if persistenceOnly {
-					_, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+					_, err = orkaClient(t, s).CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
 						Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence,
 						ExpectedTurnVersion: request.ExpectedTurnVersion, FinalizationDigest: request.FinalizationDigest,
 						TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
@@ -159,6 +159,9 @@ func sessionTurnFinalizationOwnershipFixture(t *testing.T, s *Store, persistence
 	key := store.SessionTurnKey{SessionUID: "session-uid", LeaseGeneration: 1, TaskUID: taskUID, Attempt: 1, PromptID: "prompt"}
 	turn := store.SessionTurn{Key: key, PromptAttemptID: "attempt", RequestDigest: controlTestDigest("turn"), UserPrompt: "user prompt"}
 	sessionVersion := int64(1)
+	if persistenceOnly {
+		mirrorTestFence(t, s, fence)
+	}
 	if !persistenceOnly {
 		fence = seedControlEpoch(t, s)
 		control, err := s.CreateSessionControl(ctx, &store.SessionControl{

@@ -1,12 +1,12 @@
 package kube
 
 import (
-	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
@@ -24,18 +24,17 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = db.Close() })
 			sqliteStore := sqlitestore.NewStore(db, "")
-			cipher, err := sqlitestore.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-			require.NoError(t, err)
-			require.NoError(t, sqliteStore.SetAgentExecutionSnapshotCipher(cipher))
+			persistence := storageclienttest.Client(t, sqliteStore)
 			snapshot := storetest.NativeSessionSnapshot(t, "retained native context")
 			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
-			_, err = sqliteStore.StageNativeSessionImport(ctx, controlstore.NativeSessionImport{Namespace: "tenant-a", SessionName: "session-finalize", OperationID: "native-import", RequestDigest: controlstore.NativeSessionImportDigest("tenant-a", "session-finalize", snapshot.DataDigest), Snapshot: snapshot})
+			_, err = persistence.StageNativeSessionImport(ctx, controlstore.NativeSessionImport{Namespace: "tenant-a", SessionName: "session-finalize", OperationID: "native-import", RequestDigest: controlstore.NativeSessionImportDigest("tenant-a", "session-finalize", snapshot.DataDigest), Snapshot: snapshot})
 			require.NoError(t, err)
 
-			kubeStore, err := NewComposite(rawClient, testControlNamespace, sqliteStore)
+			kubeStore, err := NewComposite(rawClient, testControlNamespace, persistence)
 			if err != nil {
 				t.Fatalf("NewComposite: %v", err)
 			}
+			syncTestEpochMirror(t, kubeStore, sqliteStore)
 			control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 				Namespace: "tenant-a", SessionName: "session-finalize", SessionUID: "session-finalize-uid",
 				RequestDigest: testDigest("session-finalize"),
@@ -87,7 +86,7 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 				TerminalContent: string(terminal), Projection: projection, FinalizedAt: testNow.Add(time.Hour),
 			}
 
-			before, err := sqliteStore.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			before, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
 			require.NoError(t, err)
 			finalize.NativeSession, finalize.NativeSessionCarried = before, true
 			fresh := finalize
@@ -106,7 +105,7 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 			control, err = kubeStore.GetSessionControl(ctx, control.Namespace, control.SessionName)
 			require.NoError(t, err)
 			require.Nil(t, control.Lease)
-			after, err := sqliteStore.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
+			after, err := persistence.GetNativeSession(ctx, control.Namespace, control.SessionName, control.SessionUID)
 			require.NoError(t, err)
 			require.Equal(t, before.Snapshot, after.Snapshot)
 			require.Equal(t, before.SourceOperationID, after.SourceOperationID)

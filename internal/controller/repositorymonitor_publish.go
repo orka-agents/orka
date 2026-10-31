@@ -545,7 +545,7 @@ func (r *RepositoryMonitorReconciler) finishRepositoryMonitorReviewPublish(ctx c
 }
 
 func isPublishRecordUniqueConflict(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
+	return err != nil && (errors.Is(err, store.ErrConflict) || strings.Contains(strings.ToLower(err.Error()), "unique"))
 }
 
 func validateRepositoryMonitorPublishRecordBinding(monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord) error {

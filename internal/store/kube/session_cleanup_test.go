@@ -10,6 +10,8 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -411,7 +413,7 @@ func TestReclaimSessionUsesLegacyTurnUIDAsIdentityProof(t *testing.T) {
 }
 
 type failOnceSessionCleanupPersistence struct {
-	*sqlitestore.Store
+	*storageclient.Client
 	err error
 }
 
@@ -421,7 +423,7 @@ func (p *failOnceSessionCleanupPersistence) CompleteSessionCleanup(ctx context.C
 		p.err = nil
 		return err
 	}
-	return p.Store.CompleteSessionCleanup(ctx, request)
+	return p.Client.CompleteSessionCleanup(ctx, request)
 }
 
 func newSessionCleanupTestStore(
@@ -436,15 +438,17 @@ func newSessionCleanupTestStore(
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	sqliteStore := sqlitestore.NewStore(db, "")
-	var persistence SQLitePersistence = sqliteStore
+	storage := storageclienttest.Client(t, sqliteStore)
+	var persistence SQLitePersistence = storage
 	if failing != nil {
-		failing.Store = sqliteStore
+		failing.Client = storage
 		persistence = failing
 	}
 	kubeStore, err := NewComposite(kubeClient, testControlNamespace, persistence)
 	if err != nil {
 		t.Fatalf("NewComposite(): %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, persistence)
 	return kubeStore, kubeClient, sqliteStore, db, fence
 }
 
