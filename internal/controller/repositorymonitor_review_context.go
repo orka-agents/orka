@@ -765,6 +765,12 @@ func repositoryMonitorReviewVerdictGateReason(prompt, verdict string) string {
 	if strings.TrimSpace(verdict) != repositoryMonitorReviewVerdictPassed {
 		return ""
 	}
+	return repositoryMonitorReviewContextGap(prompt)
+}
+
+// repositoryMonitorReviewContextGap explains why a review prompt did not
+// show the reviewer every change it covers, or returns "" when it did.
+func repositoryMonitorReviewContextGap(prompt string) string {
 	reviewContext, ok := repositoryMonitorReviewPromptContext(prompt)
 	switch {
 	case !ok:

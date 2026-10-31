@@ -69,10 +69,13 @@ const (
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
 
-	repositoryMonitorReviewBodyMaxBytes    = 60000
-	repositoryMonitorReviewInlineMaxRunes  = 4000
-	repositoryMonitorReviewTextMaxRunes    = 4000
-	repositoryMonitorReviewFindingMaxRunes = 1200
+	repositoryMonitorReviewBodyMaxBytes = 60000
+	// repositoryMonitorReviewFindingsBudgetBytes caps the body through its
+	// findings lists, leaving room for the tests section and marker.
+	repositoryMonitorReviewFindingsBudgetBytes = 40000
+	repositoryMonitorReviewInlineMaxRunes      = 4000
+	repositoryMonitorReviewTextMaxRunes        = 4000
+	repositoryMonitorReviewFindingMaxRunes     = 1200
 )
 
 type repositoryMonitorPullRequestReviewRequest struct {
@@ -752,37 +755,60 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 			open = append(open, finding)
 		}
 	}
+	// Many findings, as a final exhaustive pass can combine, could push the
+	// body past GitHub's limit; past the budget, findings shrink to their
+	// titles and then are only counted. The record keeps every finding.
+	// Room is reserved for every later finding's title, so detail goes to
+	// the first findings without crowding out the rest.
+	reserved := 0
+	for _, list := range [][]repositoryMonitorReviewFinding{open, fixed, outside} {
+		for _, finding := range list {
+			reserved += len(renderRepositoryMonitorFindingTitle(finding)) + len("- \n")
+		}
+	}
+	shortened, omitted := 0, 0
+	writeFinding := func(finding repositoryMonitorReviewFinding, full, short string) {
+		reserved -= len(renderRepositoryMonitorFindingTitle(finding)) + len("- \n")
+		switch {
+		case b.Len()+len("- \n")+len(full)+reserved <= repositoryMonitorReviewFindingsBudgetBytes:
+			b.WriteString("- " + full + "\n")
+		case b.Len()+len("- \n")+len(short) <= repositoryMonitorReviewFindingsBudgetBytes:
+			b.WriteString("- " + short + "\n")
+			shortened++
+		default:
+			omitted++
+		}
+	}
 	b.WriteString("### Findings\n\n")
 	if len(open) == 0 {
 		b.WriteString("No findings reported.\n\n")
 	} else {
 		for _, finding := range open {
-			b.WriteString("- ")
-			b.WriteString(renderRepositoryMonitorFindingSummary(finding))
+			since := ""
 			if finding.FirstHead != "" && finding.FirstHead != record.HeadSHA {
-				fmt.Fprintf(&b, " _(open since `%s`)_", shortRepositoryMonitorHead(finding.FirstHead))
+				since = fmt.Sprintf(" _(open since `%s`)_", shortRepositoryMonitorHead(finding.FirstHead))
 			}
-			b.WriteString("\n")
+			writeFinding(finding, renderRepositoryMonitorFindingSummary(finding)+since, renderRepositoryMonitorFindingTitle(finding)+since)
 		}
 		b.WriteString("\n")
 	}
 	if len(fixed) > 0 {
 		b.WriteString("### Fixed in this commit\n\n")
 		for _, finding := range fixed {
-			b.WriteString("- ")
-			b.WriteString(renderRepositoryMonitorFindingTitle(finding))
-			b.WriteString("\n")
+			title := renderRepositoryMonitorFindingTitle(finding)
+			writeFinding(finding, title, title)
 		}
 		b.WriteString("\n")
 	}
 	if len(outside) > 0 {
 		b.WriteString("### Outside the new changes (not blocking)\n\n")
 		for _, finding := range outside {
-			b.WriteString("- ")
-			b.WriteString(renderRepositoryMonitorFindingSummary(finding))
-			b.WriteString("\n")
+			writeFinding(finding, renderRepositoryMonitorFindingSummary(finding), renderRepositoryMonitorFindingTitle(finding))
 		}
 		b.WriteString("\n")
+	}
+	if shortened > 0 || omitted > 0 {
+		fmt.Fprintf(&b, "_To fit GitHub's size limit, %d findings are shown by title only and %d are omitted; Orka's review record keeps every finding._\n\n", shortened, omitted)
 	}
 	b.WriteString("### Tests\n\n")
 	validationStatus := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(record.ValidationStatus, repositoryMonitorValidationStatusNotRun), 80)

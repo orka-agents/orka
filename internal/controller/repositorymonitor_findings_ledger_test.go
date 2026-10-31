@@ -167,7 +167,23 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": compareStatus, "files": files})
 	}))
 	defer server.Close()
-	r := &RepositoryMonitorReconciler{Store: db, GitHubAPIBaseURL: server.URL}
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Store: db, GitHubAPIBaseURL: server.URL}
+	reviewPrompt := func(reviewContext repositoryMonitorReviewContext) string {
+		reviewContext.SchemaVersion, reviewContext.Repo, reviewContext.PRNumber, reviewContext.HeadSHA = repositoryMonitorReviewContextSchemaVersion, "orka-agents/orka", 7, "reviewed"
+		return "review\n" + renderRepositoryMonitorReviewContext(reviewContext) + "\n"
+	}
+	reviewTask := func(name, prompt string) {
+		t.Helper()
+		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: monitor.Namespace}, Spec: corev1alpha1.TaskSpec{Prompt: prompt}}
+		if err := cl.Create(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
 	pr := repositoryMonitorPullRequest{Number: 7, HeadSHA: "reviewed"}
 	plan := func(head string) repositoryMonitorReviewPlan {
 		t.Helper()
@@ -183,11 +199,16 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 	}
 	record := func(id, head, verdict string) {
 		t.Helper()
-		if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 7, HeadSHA: head, Verdict: verdict, FindingsJSON: "[]"}); err != nil {
+		if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 7, HeadSHA: head, TaskName: id + "-task", TaskNamespace: monitor.Namespace, Verdict: verdict, FindingsJSON: "[]"}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	record("accepted", "reviewed", repositoryMonitorReviewVerdictNeedsChanges)
+	// A base whose Task is gone cannot show it saw every change.
+	if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
+		t.Fatalf("plan on a base without its Task = %+v, want full", got)
+	}
+	reviewTask("accepted-task", reviewPrompt(repositoryMonitorReviewContext{}))
 	record("rejected", "newer", repositoryMonitorReviewVerdictFailed)
 	if got := plan("reviewed"); got.Mode != repositoryMonitorReviewModeSameHead || got.baseID() != "accepted" {
 		t.Fatalf("same-head plan = %+v", got)
@@ -207,6 +228,21 @@ func TestRepositoryMonitorPlanReview(t *testing.T) {
 	capped = false
 	if got := plan("unknown"); got.Mode != repositoryMonitorReviewModeFull {
 		t.Fatalf("compare failure plan = %+v, want full", got)
+	}
+	// A base review that saw only part of the pull request leaves the rest
+	// unreviewed, so a later head gets a full review instead of a delta.
+	for name, gap := range map[string]repositoryMonitorReviewContext{
+		"unavailable": {ContextUnavailable: repositoryMonitorReviewContextErrorTimeout},
+		"truncated":   {Truncated: repositoryMonitorReviewContextTruncation{Files: true}},
+	} {
+		record("partial-"+name, "reviewed", repositoryMonitorReviewVerdictNeedsHuman)
+		reviewTask("partial-"+name+"-task", reviewPrompt(gap))
+		if got := plan("newer"); got.Mode != repositoryMonitorReviewModeFull {
+			t.Fatalf("plan on a base with %s context = %+v, want full", name, got)
+		}
+		if got := plan("reviewed"); got.Mode != repositoryMonitorReviewModeSameHead {
+			t.Fatalf("same-head plan on a base with %s context = %+v, want same-head", name, got)
+		}
 	}
 }
 
@@ -443,8 +479,8 @@ func TestRepositoryMonitorExhaustiveReviewPasses(t *testing.T) {
 	if err := r.applyRepositoryMonitorReviewRecordToItem(ctx, monitor, item, first, ""); err != nil {
 		t.Fatal(err)
 	}
-	if item.LastReviewedHeadSHA != "" {
-		t.Fatalf("head counted as reviewed while a pass is due: %+v", item)
+	if item.LastReviewedHeadSHA != "" || item.AutomergeState != "" {
+		t.Fatalf("head counted as reviewed or merge-ready while a pass is due: %+v", item)
 	}
 	assertRepositoryMonitorExhaustivePassAwaited(t, r, monitor, db)
 	if fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, &store.MonitorItem{Number: 1, LastReviewedHeadSHA: "sha1"}, "sha1"); err != nil || fresh {
@@ -845,5 +881,25 @@ func TestRepositoryMonitorExhaustivePassDoesNotWaitForGreenCIAgain(t *testing.T)
 	}
 	if _, created, _, err := r.processPullRequestInventoryRun(ctx, monitor, &store.MonitorRun{ID: "poll", TargetKind: repositoryMonitorPullRequestKind}, "orka-agents", "orka"); err != nil || created != 1 {
 		t.Fatalf("the due pass waited for green CI: created=%d err=%v", created, err)
+	}
+}
+
+func TestRepositoryMonitorReviewBodyFitsManyFindings(t *testing.T) {
+	monitor := repositoryMonitorInventoryTestMonitor()
+	record := &store.ReviewRecord{ID: "review-many", HeadSHA: "head1", Verdict: repositoryMonitorReviewVerdictNeedsChanges, Summary: "Many findings."}
+	findings := make([]repositoryMonitorReviewFinding, 0, 60)
+	for i := range 60 {
+		finding := ledgerFinding(fmt.Sprintf("f-%02d", i), "P1", "a.go", int64(i+1), fmt.Sprintf("Finding %02d", i))
+		finding.FirstHead = "head1"
+		finding.Body = strings.Repeat("b", repositoryMonitorReviewFindingMaxRunes)
+		finding.Recommendation = strings.Repeat("r", repositoryMonitorReviewFindingMaxRunes)
+		findings = append(findings, finding)
+	}
+	body := renderRepositoryMonitorReviewBody(monitor, &store.MonitorItem{Number: 1}, nil, record, "publish-1", findings)
+	if len(body) > repositoryMonitorReviewBodyMaxBytes {
+		t.Fatalf("body is %d bytes, over the %d-byte limit", len(body), repositoryMonitorReviewBodyMaxBytes)
+	}
+	if !strings.Contains(body, "Finding 59") || !strings.Contains(body, "are shown by title only and 0 are omitted") || !strings.Contains(body, "Recommendation: r") {
+		t.Fatalf("body does not shorten findings past the budget:\n%s", body[len(body)-2000:])
 	}
 }

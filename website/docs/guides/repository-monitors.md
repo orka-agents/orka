@@ -294,7 +294,7 @@ Orka decides between `passed` and `needs_changes` itself, from the open findings
 
 Each accepted review stores the pull request's record of findings: every finding Orka has tracked, with a stable ID and a status of open or fixed. With `spec.review.trigger: push` (the default), every new head is reviewed:
 
-- **The first review** of a pull request, or of a head that rewrote history (a rebase or force-push), is a full review.
+- **The first review** of a pull request, or of a head that rewrote history (a rebase or force-push), is a full review. So is the review after one whose diff context was unavailable or truncated, since a follow-up review would never check the part it missed.
 - **A follow-up review** covers a head that builds on the last reviewed head. The reviewer sees the whole pull request, the changes since the last review (only the pull request's own files, so changes merged in from the base branch are not reviewed again), and the open findings. It reports whether each open finding is fixed, in a `previousFindings` list of `{"id", "status"}` entries, and reports only new defects the changes introduce or expose. A new finding that restates an open one (same file and a nearby line, or the same title) is dropped.
 - **Findings outside the new changes** count only at `P1` or above; lower ones are listed under "Outside the new changes (not blocking)".
 - **A re-review of an unchanged head**, such as a `review` command, can add findings but cannot mark any fixed, so the verdict does not flip without a code change.

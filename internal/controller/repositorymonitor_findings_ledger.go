@@ -12,6 +12,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -92,6 +93,11 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 	if base.HeadSHA == pr.HeadSHA {
 		return repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeSameHead, Base: base, Ledger: ledger}, nil
 	}
+	// A follow-up review checks only the changes since base, so base must
+	// have seen every change it covers; otherwise the gap is never reviewed.
+	if covered, err := r.repositoryMonitorReviewSawEveryChange(ctx, base); err != nil || !covered {
+		return full, err
+	}
 	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, base.HeadSHA, pr.HeadSHA, 1)
 	if err != nil || compare.Status != repositoryMonitorGitHubCompareAhead || len(compare.Files) >= repositoryMonitorGitHubCompareMaxFiles {
 		// A rebase, force-push, or unreachable base gets a full review, and
@@ -108,6 +114,25 @@ func (r *RepositoryMonitorReconciler) planRepositoryMonitorReview(ctx context.Co
 		}
 	}
 	return repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Base: base, Ledger: ledger, Delta: delta}, nil
+}
+
+// repositoryMonitorReviewSawEveryChange reports whether record's review Task
+// showed the reviewer the whole pull request and, for a follow-up review,
+// every change since its own base. A review whose Task is gone cannot show
+// that and is not built on.
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewSawEveryChange(ctx context.Context, record *store.ReviewRecord) (bool, error) {
+	if r.Client == nil || strings.TrimSpace(record.TaskName) == "" {
+		return false, nil
+	}
+	var task corev1alpha1.Task
+	key := types.NamespacedName{Namespace: firstNonEmptyString(record.TaskNamespace, record.MonitorNamespace), Name: record.TaskName}
+	if err := r.Get(ctx, key, &task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return repositoryMonitorReviewContextGap(task.Spec.Prompt) == "", nil
 }
 
 // latestRepositoryMonitorAcceptedReview returns the pull request's newest

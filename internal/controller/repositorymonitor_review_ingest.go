@@ -1054,7 +1054,9 @@ func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecordToItem(c
 			item.LastReviewedHeadSHA = ""
 		}
 	}
-	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA &&
+	// Only a head that counts as reviewed, with no exhaustive pass still
+	// due, can be merge-ready.
+	if reason == "" && record.Verdict == repositoryMonitorReviewVerdictPassed && record.HeadSHA == item.HeadSHA && item.LastReviewedHeadSHA == record.HeadSHA &&
 		repositoryMonitorReviewRecordAllowsAutomerge(monitor, record) && !repositoryMonitorAutomergeRepairStateBlocks(item.RepairState) {
 		item.AutomergeState = repositoryMonitorAutomergeStateMergeReady
 		if repositoryMonitorManagedWorkflow(monitor) && monitor.Spec.Review.Publish.Enabled {
