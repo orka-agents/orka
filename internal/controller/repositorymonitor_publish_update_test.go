@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -95,6 +96,25 @@ func TestRepositoryMonitorReviewPublishUpdatesSameHeadVerdictChange(t *testing.T
 			review("review-third", repositoryMonitorReviewVerdictPassed)
 			if publishServer.PutCount != 1 {
 				t.Fatalf("unchanged verdict updated the review again: updates=%d", publishServer.PutCount)
+			}
+
+			// GitHub accepted the original review but Orka never recorded it:
+			// marker recovery restores it, and a changed verdict still updates it.
+			original := records[0]
+			original.Phase = repositoryMonitorPublishPhaseFailed
+			if err := monitorStore.UpdateReviewPublishRecord(ctx, &original); err != nil {
+				t.Fatal(err)
+			}
+			reviews, err := json.Marshal([]map[string]any{{"id": 123, "commit_id": repositoryMonitorTestHeadSHA, "body": publishServer.PostedReview.Body, "html_url": "https://github.com/orka-agents/orka/pull/1#pullrequestreview-123", "user": map[string]any{"login": "orka-bot"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recovered := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA, ReviewsBody: string(reviews)})
+			t.Cleanup(recovered.Close)
+			reconciler.GitHubAPIBaseURL = recovered.URL
+			review("review-fourth", repositoryMonitorReviewVerdictNeedsChanges)
+			if recovered.PostCount != 0 || recovered.PutCount != 1 || !strings.Contains(recovered.PutBody, "ended with needs_changes") {
+				t.Fatalf("after marker recovery: posts=%d updates=%d body=%q, want the recovered review updated", recovered.PostCount, recovered.PutCount, recovered.PutBody)
 			}
 		})
 	}

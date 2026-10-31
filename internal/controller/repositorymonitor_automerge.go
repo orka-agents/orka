@@ -101,7 +101,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCIAwaitingApproval(ctx co
 	}
 	if err := r.fetchRepositoryMonitorAuthorizedJSON(ctx, endpoint, token, &response); err != nil {
 		var apiErr *repositoryMonitorGitHubAPIError
-		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+		// A 403 is also how GitHub reports rate limiting, which says nothing
+		// about Actions access; only a permission refusal falls back.
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound ||
+			apiErr.StatusCode == http.StatusForbidden && !repositoryMonitorGitHubErrorLooksRateLimited(apiErr.Body)) {
 			return false, nil
 		}
 		return false, err

@@ -281,6 +281,17 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			if err := r.Store.UpdateReviewPublishRecord(ctx, existingPublish); err != nil {
 				return err
 			}
+			// The recovered review is the head's publication, so the update
+			// policy applies to it as it would to a recorded one.
+			if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate && existingPublish.ReviewRecordID != record.ID {
+				updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, existingPublish, token, owner, repository)
+				if err != nil {
+					return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: "update_review"})
+				}
+				if updated {
+					return nil
+				}
+			}
 		} else if !errors.Is(getErr, store.ErrNotFound) {
 			return getErr
 		}
