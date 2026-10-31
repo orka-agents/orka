@@ -93,6 +93,7 @@ type repositoryMonitorPullRequest struct {
 
 //nolint:gocyclo // Pull request inventory combines selection, CI gating, and audit decisions.
 func (r *RepositoryMonitorReconciler) processPullRequestInventoryRun(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repository string) (int, int, int, error) {
+	ctx = withRepositoryMonitorBaseCICache(ctx)
 	if err := validateRepositoryMonitorRunTargetKind(run); err != nil {
 		return 0, 0, 0, err
 	}

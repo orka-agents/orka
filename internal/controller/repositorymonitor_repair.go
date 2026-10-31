@@ -338,9 +338,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)
-		// Once its RepairJob exists the Task may already run; recheck only
-		// before then, so a retried dispatch never orphans a started repair.
-		if _, err := r.Store.GetRepairJob(ctx, monitor.Namespace, currentRepairJobID); errors.Is(err, store.ErrNotFound) {
+		// Recheck until the repair Task exists, including retries after a
+		// failed create; once it exists the repair started and is recovered.
+		var existingTask corev1alpha1.Task
+		if err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: repositoryMonitorRepairTaskName(monitor, pr, command)}, &existingTask); apierrors.IsNotFound(err) {
 			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
 			if err != nil {
 				return true, 0, err
