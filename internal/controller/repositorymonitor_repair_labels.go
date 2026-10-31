@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -42,9 +43,54 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestBrokeCI(ctx co
 // head into those the pull request introduced and those also failing on its
 // base commit.
 type repositoryMonitorCIFailures struct {
-	broke      bool
+	broke bool
+	// incomplete means GitHub returned partial CI results for the head or
+	// its base, so the failures cannot be classified yet.
+	incomplete bool
 	introduced []repositoryMonitorCIFailure
 	inherited  []repositoryMonitorCIFailure
+}
+
+// errRepositoryMonitorCIIncomplete defers work that needs complete CI results.
+var errRepositoryMonitorCIIncomplete = errors.New("CI results for the pull request head or its base are incomplete")
+
+// repositoryMonitorBaseCICacheKey scopes base-commit CI results to one
+// inventory run.
+type repositoryMonitorBaseCICacheKey struct{}
+
+type repositoryMonitorBaseCICache struct {
+	mu      sync.Mutex
+	results map[string]repositoryMonitorCIResult
+}
+
+// withRepositoryMonitorBaseCICache lets every pull request in one inventory
+// run share the CI result of a base commit. Base results only classify head
+// failures as introduced or inherited; head results are never cached.
+func withRepositoryMonitorBaseCICache(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(repositoryMonitorBaseCICacheKey{}).(*repositoryMonitorBaseCICache); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, repositoryMonitorBaseCICacheKey{}, &repositoryMonitorBaseCICache{results: map[string]repositoryMonitorCIResult{}})
+}
+
+func (r *RepositoryMonitorReconciler) repositoryMonitorBaseCI(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, sha string) (repositoryMonitorCIResult, error) {
+	cache, _ := ctx.Value(repositoryMonitorBaseCICacheKey{}).(*repositoryMonitorBaseCICache)
+	key := strings.ToLower(strings.TrimSpace(monitor.Spec.RepoURL)) + "|" + sha
+	if cache != nil {
+		cache.mu.Lock()
+		result, ok := cache.results[key]
+		cache.mu.Unlock()
+		if ok {
+			return result, nil
+		}
+	}
+	result, err := r.repositoryMonitorCheckCI(ctx, monitor, sha)
+	if err == nil && cache != nil {
+		cache.mu.Lock()
+		cache.results[key] = result
+		cache.mu.Unlock()
+	}
+	return result, err
 }
 
 // repositoryMonitorCIFailureNames names failures for a repair prompt. A name
@@ -78,17 +124,28 @@ func repositoryMonitorCIFailureSourceLabel(source string) string {
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorPullRequestCIFailures(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) (repositoryMonitorCIFailures, error) {
 	head, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
-	if err != nil || head.reason != repositoryMonitorCINotGreen {
+	if err != nil {
 		return repositoryMonitorCIFailures{}, err
+	}
+	if head.reason == repositoryMonitorCIChecksIncomplete {
+		return repositoryMonitorCIFailures{incomplete: true}, nil
+	}
+	if head.reason != repositoryMonitorCINotGreen {
+		return repositoryMonitorCIFailures{}, nil
 	}
 	if strings.TrimSpace(pr.BaseSHA) == "" || len(head.failed) == 0 {
 		failures := repositoryMonitorCIFailures{broke: true}
 		failures.introduced = append(failures.introduced, head.failed...)
 		return failures, nil
 	}
-	base, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.BaseSHA)
+	base, err := r.repositoryMonitorBaseCI(ctx, monitor, pr.BaseSHA)
 	if err != nil {
 		return repositoryMonitorCIFailures{}, err
+	}
+	// A partial base result could hide a failure the head inherits, which
+	// would then count as introduced; wait for complete results.
+	if base.reason == repositoryMonitorCIChecksIncomplete {
+		return repositoryMonitorCIFailures{incomplete: true}, nil
 	}
 	baseFailed := make(map[string]struct{}, len(base.failed))
 	for _, failure := range base.failed {
@@ -252,12 +309,16 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorPolicyRepairWithdrawnReas
 		}
 	}
 	if command.Intent == repositoryMonitorCommandIntentFixCI {
-		// A lookup error defers the command rather than repairing blind.
-		broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
+		// A lookup error or partial results defer the command rather than
+		// repairing blind or dropping it.
+		failures, err := r.repositoryMonitorPullRequestCIFailures(ctx, monitor, pr)
 		if err != nil {
 			return "", err
 		}
-		if !broke {
+		if failures.incomplete {
+			return "", errRepositoryMonitorCIIncomplete
+		}
+		if !failures.broke {
 			return repositoryMonitorRepairSkipNoIntroducedCIFailure, nil
 		}
 	}
