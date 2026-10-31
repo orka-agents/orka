@@ -140,8 +140,75 @@ func TestRepositoryMonitorShownReviewReadsEveryPage(t *testing.T) {
 		}
 	}
 	published := &store.ReviewPublishRecord{ReviewRecordID: "review-original", HeadSHA: "head9", CreatedAt: start}
-	shown, err := (&RepositoryMonitorReconciler{Store: db}).repositoryMonitorShownReviewRecordID(ctx, monitor, &store.MonitorItem{Number: 9}, published)
+	shown, _, err := (&RepositoryMonitorReconciler{Store: db}).repositoryMonitorShownReviewRecordID(ctx, monitor, &store.MonitorItem{Number: 9}, published)
 	if err != nil || shown != "review-update" {
 		t.Fatalf("shown review = %q err=%v, want the update past the first page", shown, err)
+	}
+}
+
+func TestRepositoryMonitorReviewPublishRewritesAfterAnUnrecordedUpdate(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	publishServer := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA})
+	t.Cleanup(publishServer.Close)
+	// GitHub applies this server's updates, but their responses are lost.
+	lostResponses := newRepositoryMonitorPublishTestServer(t, repositoryMonitorPublishTestServerConfig{HeadSHA: repositoryMonitorTestHeadSHA, PutBody: "{"})
+	t.Cleanup(lostResponses.Close)
+	postPassed := true
+	monitor := repositoryMonitorReviewIngestTestMonitor("publish-update-lost")
+	suspend := true
+	monitor.Spec.Suspend = &suspend
+	monitor.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+	monitor.Spec.Review.Publish = corev1alpha1.RepositoryMonitorReviewPublishSpec{
+		Enabled: true, Mode: repositoryMonitorPublishModeSummaryOnly, Event: repositoryMonitorPublishEventComment,
+		PostPassed: &postPassed, SameHeadPolicy: repositoryMonitorPublishSameHeadPolicyUpdate,
+	}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "github-token", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&corev1alpha1.RepositoryMonitor{}).
+		WithObjects(repositoryMonitorControllerObjects(monitor, secret)...).Build()
+	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore, ResultStore: monitorStore, GitHubAPIBaseURL: publishServer.URL}
+	review := func(taskName, verdict string) error {
+		t.Helper()
+		if err := cl.Create(ctx, repositoryMonitorReviewIngestTestTask(taskName, monitor.Name, 1, repositoryMonitorTestHeadSHA)); err != nil {
+			t.Fatal(err)
+		}
+		seedRepositoryMonitorQueuedReview(t, ctx, monitorStore, monitor.Name, taskName, repositoryMonitorReviewResultEnvelopeWith(t, 1, repositoryMonitorTestHeadSHA, verdict, func(payload map[string]any) {
+			payload["summary"] = "Review of the head ended with " + verdict + "."
+			if verdict == repositoryMonitorReviewVerdictPassed {
+				payload["findings"] = []map[string]any{}
+			}
+		}))
+		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: monitor.Name}})
+		return err
+	}
+
+	if err := review("review-first", repositoryMonitorReviewVerdictNeedsChanges); err != nil || publishServer.PostCount != 1 {
+		t.Fatalf("first review: posts=%d err=%v, want one post", publishServer.PostCount, err)
+	}
+	reconciler.GitHubAPIBaseURL = lostResponses.URL
+	_ = review("review-second", repositoryMonitorReviewVerdictPassed)
+	if lostResponses.PutCount != 1 || !strings.Contains(lostResponses.PutBody, "ended with passed") {
+		t.Fatalf("second review: updates=%d body=%q, want the passed summary sent", lostResponses.PutCount, lostResponses.PutBody)
+	}
+	// GitHub now shows passed, while Orka's records still show the first
+	// review's needs_changes. A third needs_changes review must rewrite it.
+	reconciler.GitHubAPIBaseURL = publishServer.URL
+	if err := review("review-third", repositoryMonitorReviewVerdictNeedsChanges); err != nil {
+		t.Fatalf("third review: %v", err)
+	}
+	if publishServer.PutCount != 1 || !strings.Contains(publishServer.PutBody, "ended with needs_changes") {
+		t.Fatalf("third review: updates=%d body=%q, want GitHub's summary rewritten to needs_changes", publishServer.PutCount, publishServer.PutBody)
+	}
+	// Once recorded, the same verdict again leaves the review alone.
+	if err := review("review-fourth", repositoryMonitorReviewVerdictNeedsChanges); err != nil || publishServer.PutCount != 1 {
+		t.Fatalf("fourth review: updates=%d err=%v, want no further update", publishServer.PutCount, err)
 	}
 }

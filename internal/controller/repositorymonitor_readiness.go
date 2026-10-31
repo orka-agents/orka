@@ -100,6 +100,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorOwnedReadinessStatuses(ct
 	}
 }
 
+// repositoryMonitorReadinessCIAwaitingApproval describes a head whose CI
+// workflow runs GitHub holds for maintainer approval.
+const repositoryMonitorReadinessCIAwaitingApproval = "Waiting for a maintainer to approve the CI workflow runs for this commit."
+
 func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, string, error) {
 	if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" || item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
 		return repositoryMonitorStatusFailure, "Automation is paused or blocked by repository policy.", nil
@@ -140,6 +144,17 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		if item.LastReviewedHeadSHA == pr.HeadSHA && (item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive) {
 			return repositoryMonitorStatusFailure, "Review did not establish readiness.", nil
 		}
+		// requireGreenCI holds the review until CI runs, so held workflow
+		// runs are what an unreviewed head waits on.
+		if monitor.Spec.Review.RequireGreenCI && item.LastReviewedHeadSHA != pr.HeadSHA {
+			ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+			if err != nil {
+				return "", "", err
+			}
+			if ci.reason == repositoryMonitorCIAwaitingApproval {
+				return repositoryMonitorStatusPending, repositoryMonitorReadinessCIAwaitingApproval, nil
+			}
+		}
 		return repositoryMonitorStatusPending, "Waiting for a clean review of this commit.", nil
 	}
 	valid, err := r.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, pr.HeadSHA)
@@ -161,7 +176,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		return "", "", err
 	}
 	if ci.reason == repositoryMonitorCIAwaitingApproval {
-		return repositoryMonitorStatusPending, "Waiting for a maintainer to approve the CI workflow runs for this commit.", nil
+		return repositoryMonitorStatusPending, repositoryMonitorReadinessCIAwaitingApproval, nil
 	}
 	if !ci.passed {
 		return repositoryMonitorStatusPending, "Waiting for repository CI to pass.", nil
@@ -190,13 +205,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	if intent == repositoryMonitorCommandIntentUpdateBranch {
 		return true, nil
 	}
-	// Automatic selection prefers failed CI, even if review findings cannot
-	// be repaired. Both intents share the same repair policy and budget.
-	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+	// Automatic selection prefers CI the pull request broke, even if review
+	// findings cannot be repaired; failures inherited from the base are left
+	// alone. Both intents share the same repair policy and budget.
+	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
 	if err != nil {
 		return false, err
 	}
-	if ci.reason == repositoryMonitorCINotGreen {
+	if broke {
 		return true, nil
 	}
 	if item.LastReviewID == "" {
@@ -375,17 +391,28 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
+	// The old inventory can still contain the departed PR. Use a fresh list.
+	peers, err := r.listRepositoryMonitorReadinessPeers(ctx, monitor, token)
+	if err != nil {
+		return err
+	}
+	return r.reconcileRepositoryMonitorDepartedHeadWithPeers(ctx, monitor, departingNumber, sha, endpoint, token, peers)
+}
+
+func (r *RepositoryMonitorReconciler) listRepositoryMonitorReadinessPeers(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, token string) ([]repositoryMonitorPullRequest, error) {
 	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// The old inventory can still contain the departed PR. Use a fresh list and
-	// exclude the exact PR whose detail response established it left scope.
-	peers, err := r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
-	if err != nil {
-		return err
-	}
-	peers = slices.DeleteFunc(peers, func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
+	return r.listRepositoryMonitorPullRequests(ctx, owner, repo, token, effectiveRepositoryMonitorBranch(monitor))
+}
+
+// reconcileRepositoryMonitorDepartedHeadWithPeers excludes the exact PR whose
+// detail response established it left scope, and refreshes any in-scope peer
+// still on the head before publishing for it.
+func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHeadWithPeers(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string, peers []repositoryMonitorPullRequest) error {
+	peers = slices.DeleteFunc(slices.Clone(peers), func(peer repositoryMonitorPullRequest) bool { return peer.Number == departingNumber })
+	var err error
 	for _, peer := range peers {
 		if peer.HeadSHA != sha || !repositoryMonitorPullRequestInScope(monitor, peer) {
 			continue
