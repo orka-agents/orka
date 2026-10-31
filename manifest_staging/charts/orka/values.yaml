@@ -564,6 +564,12 @@ annotations: {}
 # SQLite store configuration
 store:
   path: /data/orka.db
+  # SQLite synchronous mode. "normal" (the default) syncs the write-ahead log
+  # at checkpoints: a commit survives a controller restart, but the latest
+  # commits can be lost if the node or its disk fails first. "full" syncs every
+  # commit, so commits also survive a node failure, at the cost of a sync per
+  # commit on the volume.
+  sqliteSynchronous: normal
   persistence:
     enabled: true        # ACP control records, gateway history, and Session state require durable RWO storage
     size: 1Gi

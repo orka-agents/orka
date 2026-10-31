@@ -61,6 +61,9 @@ func withInternalTaskDataTransaction(c fiber.Ctx, backing any, taskName string, 
 		if errors.Is(err, store.ErrTaskJobRevoked) {
 			return fiber.NewError(fiber.StatusForbidden, "task Job is no longer active")
 		}
+		if temporary := temporaryStorageHTTPError(err); temporary != nil {
+			return temporary
+		}
 		logf.FromContext(ctx).Error(err, "internal task data access failed", "namespace", c.Params("namespace"))
 		return fiber.NewError(fiber.StatusInternalServerError, "task data access failed")
 	}

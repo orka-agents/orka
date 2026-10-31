@@ -101,6 +101,58 @@ retention policy and proof that no original or restored Task can still consume
 the receipt. Keep Session cleanup completion tombstones as well; they prevent
 reuse of deleted Session identities.
 
+## Storage recovery holds
+
+Orka records, in the `ControllerEpoch` object's status, the controller epoch and
+the latest write watermark each storage dataset acknowledged. About once a
+minute the controller advances each dataset's watermark and records the new
+value. At every takeover, and whenever a dataset reports that its database
+restarted or switched, it compares the dataset with that record.
+
+If a dataset holds less than it acknowledged, it lost acknowledged writes or
+was restored from an older copy. A restored copy keeps its dataset identity, so
+the identity alone never lets work resume. Orka then places a storage recovery
+hold on the whole installation. It also holds when a storage contract is served
+by a different dataset than before, and when a dataset whose durability class is
+`async-replicated` restarts or fails over. While held:
+
+- every storage contract write and control-store change is refused as
+  temporarily unavailable, and so are memory proposal application and scan
+  result ingestion, so API calls that make them answer 503; no Task Job is
+  created, no agent prompt is dispatched and no Task reports success;
+- connector credentials and consents, agent execution snapshots, native
+  session imports and Session turn records are not part of the storage
+  contract yet and are still written while held;
+- reads and status reporting keep working;
+- the hold is recorded in the `ControllerEpoch` status, so a controller
+  restart keeps it.
+
+Inspect it with:
+
+```bash
+kubectl -n <control-namespace> get controllerepochs
+kubectl -n <control-namespace> get controllerepoch <name> -o jsonpath='{.status.storageRecovery}'
+```
+
+`status.storageRecovery` names the hold's `id`, its `reason`
+(`EpochRegressed`, `WatermarkRegressed`, `DatasetChanged` or `UnsafeSwitch`),
+the contract and dataset, and the acknowledged and stored values. The
+`StorageRecoveryRequired` condition is `True` while the hold is in place, and
+the `orka_storage_recovery_hold` metric is 1 with the hold's reason.
+
+Do not delete the hold from the status. Recover or accept the storage state
+first: restore the newest copy, or decide that the writes it lacks are gone.
+Then release that exact hold by its ID:
+
+```bash
+kubectl -n <control-namespace> annotate controllerepoch <name> \
+  storage.orka.ai/recovery-acknowledged=<hold-id> --overwrite
+```
+
+The controller then advances each dataset again, records what each one holds
+now as acknowledged, clears the hold, and resumes work. An annotation that
+names any other hold releases nothing.
+
 ## Security scan operations
 
 Repository security scanning runs **one scan at a time per repository** — a
@@ -124,3 +176,4 @@ new run is refused while another is `pending` or `running`. Two consequences:
 | Old-digest pool resurrects after deletion | Queued Tasks referencing the old profile | [RuntimePool recovery](#runtimepool-recovery) |
 | `409 already running` starting a scan | Wait a few seconds and retry | [Security scan operations](#security-scan-operations) |
 | Scan failed with "terminal task result was not found" | Was one of its Tasks deleted mid-run? | [Security scan operations](#security-scan-operations) |
+| Writes answer 503 and no Task starts; `StorageRecoveryRequired=True` on the `ControllerEpoch` | `status.storageRecovery` on the `ControllerEpoch` | [Storage recovery holds](#storage-recovery-holds) |

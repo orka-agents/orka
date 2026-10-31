@@ -350,6 +350,7 @@ spec:
             {{- end }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
+            - --store-sqlite-synchronous={{ .Values.store.sqliteSynchronous | default "normal" }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
             - --ai-worker-service-account-name={{ include "orka.aiWorkerServiceAccountName" . }}

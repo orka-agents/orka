@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/stretchr/testify/require"
@@ -94,7 +95,8 @@ func TestControllerSQLiteBootstrapBothKeyModes(t *testing.T) {
 				})
 				require.NoError(t, err)
 				require.True(t, bytes.Equal(body, snapshot.Body), "snapshot changed")
-				require.NoError(t, s.SaveResult(t.Context(), "ns", "new", []byte("after adoption")))
+				client := storageclienttest.NewEmbedded(t, s)
+				require.NoError(t, client.SaveResult(t.Context(), "ns", "new", []byte("after adoption")))
 				require.NoError(t, s.Close())
 			}
 			s, _, err := openControllerSQLiteStore(path, load)
