@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -124,6 +125,11 @@ func repositoryMonitorAcceptsLabelCommand(monitor *corev1alpha1.RepositoryMonito
 			return false
 		}
 		if target.Draft && !monitor.Spec.Targets.PullRequests.IncludeDrafts {
+			return false
+		}
+		// Reject before the label is consumed; the controller re-checks.
+		if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 &&
+			repositoryMonitorWebhookMatchingLabel(slices.Concat(include, monitor.Spec.Repair.IncludeLabels, monitor.Spec.Repair.CIOnlyLabels), target.Labels) == "" {
 			return false
 		}
 		return target.BaseBranch == "" || strings.TrimSpace(target.BaseBranch) == effectiveRepositoryMonitorBranch(monitor)
