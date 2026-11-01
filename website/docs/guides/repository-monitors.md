@@ -133,7 +133,7 @@ Apply it with:
 kubectl apply -f repository-monitor.yaml
 ```
 
-The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
+The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip` or `update`.
 
 ### Limit the monitor to labelled pull requests
 
@@ -208,6 +208,18 @@ To target one pull request, include `targetKind` and `targetNumber`:
 `targetSHA` can also be supplied to require an exact head SHA match.
 
 When `targetNumber` is set, the controller fetches that pull request directly from GitHub before applying the monitor's open-state, base-branch, draft, label, stale-review, and optional `targetSHA` checks. Targeted runs do not retire missing or out-of-scope items from the repository-wide inventory, so monitor status counts continue to summarize the stored PR queue rather than only the targeted PR.
+
+A run never re-reviews a head whose review is still current. To review the same head again, for example after you change the reviewer's rules, send a `review` command for that head:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/commands?namespace=orka-system" \
+  -d '{"kind": "pull_request", "number": 123, "intent": "review", "targetSHA": "<head sha>"}'
+```
+
+`fix`, `fix_ci`, and `update_branch` commands take the same body. Commands sent through the API are not limited by repair labels.
 
 ## Run from GitHub events
 
@@ -338,6 +350,8 @@ The controller starts bounded repairs automatically when enabled. Ad hoc PR comm
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.
 
+Repairers run in Orka's built-in runtime image, which has no language toolchains, so by default a repair cannot build or test its change before Orka publishes it. `spec.validation.image` checks only the next review of the pushed head. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing.
+
 ### Pull requests from forks
 
 By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.
@@ -354,11 +368,21 @@ Reserve this context for Orka. Orka excludes only status IDs persisted in its mu
 
 The status stays pending or failed while review, validation, or repair is incomplete. Statuses are commit-scoped: when multiple open PRs on the monitored base branch share a head SHA, all must be ready before that commit receives success. A paused or unreviewed peer blocks the shared status. A new head requires new evidence. Repair defaults to at most five attempts per PR and two per head; explicit lower limits are honored. Workflow polling observes CI and completed Tasks without requiring another command label.
 
+GitHub holds workflow runs for some pull requests from forks until a maintainer approves them, and a held run reports no check run. When a commit has a held run and no failed check, the readiness status reads "Waiting for a maintainer to approve the CI workflow runs for this commit." This includes commits Orka pushed while repairing a fork pull request. Detecting held runs needs Actions read access (classic tokens: `repo`); a credential without it keeps the previous behaviour.
+
 GitHub merges only when its per-PR auto-merge setting is enabled and all required conditions pass. When disabled, the PR remains open and merge-ready. Orka never calls the merge endpoint or changes the auto-merge setting. There is no sensitive label or additional merge-approval classifier.
 
 ## API and authorization
 
-Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
+Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. With ServiceAccount tokens, the API checks Kubernetes RBAC for each route. The Helm chart's `orka-client` ServiceAccount already has every monitor permission, so a short-lived token for it is enough:
+
+```bash
+TOKEN=$(kubectl -n orka-system create token orka-client --duration=30m)
+```
+
+For a narrower identity, bind the Kustomize bundle's `orka-api-editor-role`, or grant `create` on `repositorymonitors/commands` and `repositorymonitors/runs` plus `patch` on `repositorymonitors` to send commands, and `list` on `repositorymonitors/items` and `get`/`list` on `monitorcommands` to read the results. The [permission inventory](../reference/api-authorization.md#grant-access) lists every route.
+
+When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
 
 Context-token `tctx` constraints can also restrict monitor access by namespace, repository URL, branch, reviewer Agent, or allowed Agent set.
 
@@ -373,7 +397,7 @@ See [API Reference](../reference/api-reference.md#repository-monitors) for endpo
   never enter the Task spec. Codex reviewers are confined by the RuntimeSession boundary:
   the controller rejects elevation requests, the supervisor mediates file writes, and any
   turn that modifies the workspace fails read-intent validation.
-- Review publishing supports only neutral `COMMENT` reviews, with `sameHeadPolicy: skip`.
+- Review publishing supports only neutral `COMMENT` reviews, and at most one published review per pull request head. With `sameHeadPolicy: update`, a later review of the same head that reaches a different verdict rewrites that review's summary instead of being dropped.
 
 ## Prompt-orchestrated monitors
 

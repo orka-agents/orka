@@ -103,6 +103,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorOwnedReadinessStatuses(ct
 	}
 }
 
+// repositoryMonitorReadinessCIAwaitingApproval describes a head whose CI
+// workflow runs GitHub holds for maintainer approval.
+const repositoryMonitorReadinessCIAwaitingApproval = "Waiting for a maintainer to approve the CI workflow runs for this commit."
+
 func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, string, error) {
 	if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" || item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand {
 		return repositoryMonitorStatusFailure, "Automation is paused or blocked by repository policy.", nil
@@ -143,7 +147,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 		if item.LastReviewedHeadSHA == pr.HeadSHA && (item.LastVerdict == repositoryMonitorReviewVerdictFailed || item.LastVerdict == repositoryMonitorReviewVerdictNeedsHuman || item.LastVerdict == repositoryMonitorReviewVerdictSecuritySensitive) {
 			return repositoryMonitorStatusFailure, "Review did not establish readiness.", nil
 		}
-		return repositoryMonitorStatusPending, "Waiting for a clean review of this commit.", nil
+		description, err := r.repositoryMonitorAwaitingReviewDescription(ctx, monitor, pr, item)
+		if err != nil {
+			return "", "", err
+		}
+		return repositoryMonitorStatusPending, description, nil
 	}
 	valid, err := r.repositoryMonitorValidationAllowsAutomerge(ctx, monitor, item, pr.HeadSHA)
 	if err != nil {
@@ -163,10 +171,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 	if err != nil {
 		return "", "", err
 	}
+	if ci.reason == repositoryMonitorCIAwaitingApproval {
+		return repositoryMonitorStatusPending, repositoryMonitorReadinessCIAwaitingApproval, nil
+	}
 	if !ci.passed {
 		return repositoryMonitorStatusPending, "Waiting for repository CI to pass.", nil
 	}
 	return repositoryMonitorStatusSuccess, repositoryMonitorReadinessSuccess, nil
+}
+
+// repositoryMonitorAwaitingReviewDescription describes a head waiting for a
+// clean review. requireGreenCI holds the review until CI runs, so held
+// workflow runs are what an unreviewed head waits on.
+func (r *RepositoryMonitorReconciler) repositoryMonitorAwaitingReviewDescription(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (string, error) {
+	if monitor.Spec.Review.RequireGreenCI && item.LastReviewedHeadSHA != pr.HeadSHA {
+		ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+		if err != nil {
+			return "", err
+		}
+		if ci.reason == repositoryMonitorCIAwaitingApproval {
+			return repositoryMonitorReadinessCIAwaitingApproval, nil
+		}
+	}
+	return "Waiting for a clean review of this commit.", nil
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {

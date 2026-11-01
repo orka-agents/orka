@@ -232,6 +232,8 @@ func TestRepositoryMonitorIncludeLabelsScopeReadinessStatuses(t *testing.T) {
 			status.ID = int64(100 + writes[sha])
 			latest[sha] = status
 			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
@@ -441,6 +443,7 @@ func TestRepositoryMonitorExcludedPullRequestsReuseTheRunInventory(t *testing.T)
 	}
 }
 
+//nolint:gocyclo // One fake GitHub serves the inventory, CI, and readiness status calls the retirement pass makes.
 func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testing.T) {
 	ctx := t.Context()
 	db := setupControllerSQLiteStore(t)
@@ -466,6 +469,9 @@ func TestRepositoryMonitorExcludedPullRequestFailureDoesNotBlockOthers(t *testin
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, req) {
+			return
+		}
 		path := req.URL.Path
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):

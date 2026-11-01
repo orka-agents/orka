@@ -98,6 +98,9 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "repairer" || task.Spec.Workspace == nil || task.Spec.Workspace.PushBranch != "feature-fix" || task.Spec.Workspace.ExpectedRemoteSHA != "head31" {
 		t.Fatalf("repair task spec = %#v, want exact-head repair publication", task.Spec)
 	}
+	if want := "fix: repair failing CI on #31\n\nOrka-Task: " + task.Name + "\n"; task.Spec.Workspace.CommitMessage != want {
+		t.Fatalf("repair commit message = %q, want %q", task.Spec.Workspace.CommitMessage, want)
+	}
 	if task.Spec.SessionRef == nil || !task.Spec.SessionRef.Create || task.Spec.SessionRef.Append || task.Spec.SessionRef.Name != repositoryMonitorPublicationSessionName(monitor, "feature-fix") {
 		t.Fatalf("repair task session = %#v, want stable non-appending branch owner", task.Spec.SessionRef)
 	}
@@ -311,6 +314,14 @@ func TestRepositoryMonitorRepairDoesNotStarveLaterPullRequests(t *testing.T) {
 				}
 			}
 			if err := db.CreateRepairJob(ctx, &store.RepairJob{ID: "first-pr-repair", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, PRNumber: 1, HeadSHA: "head1", TaskName: "active-repair", Phase: phase, CreatedAt: time.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			// The first PR's head is already reviewed, so only its repair can
+			// compete for the run's single slot.
+			if err := db.CreateReviewRecord(ctx, &store.ReviewRecord{ID: "first-pr-review", MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 1, HeadSHA: "head1", Verdict: repositoryMonitorReviewVerdictPassed, ValidationStatus: repositoryMonitorValidationStatusNotRun}); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpsertMonitorItem(ctx, &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "1", Number: 1, State: repositoryMonitorItemStateOpen, HeadSHA: "head1", BaseBranch: "main", LastReviewID: "first-pr-review", LastReviewedHeadSHA: "head1", LastVerdict: repositoryMonitorReviewVerdictPassed}); err != nil {
 				t.Fatal(err)
 			}
 			body := `[

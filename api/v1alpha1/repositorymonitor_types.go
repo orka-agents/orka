@@ -394,9 +394,11 @@ type RepositoryMonitorReviewPublishSpec struct {
 	// +optional
 	PostSecuritySensitive bool `json:"postSecuritySensitive,omitempty"`
 
-	// SameHeadPolicy controls duplicate handling for one monitor, PR, and exact head SHA.
-	// V1 only supports skip.
-	// +kubebuilder:validation:Enum=skip
+	// SameHeadPolicy controls a later review of a pull request head that Orka
+	// already published a review for. skip leaves the published review as it
+	// is. update rewrites the published review's summary when the later review
+	// reaches a different verdict; its inline comments stay as first published.
+	// +kubebuilder:validation:Enum=skip;update
 	// +kubebuilder:default=skip
 	// +optional
 	SameHeadPolicy string `json:"sameHeadPolicy,omitempty"`
