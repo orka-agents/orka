@@ -747,13 +747,17 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_status
-		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending')
+		     WHEN excluded.validation_status = 'error'
+		       AND security_findings.validation_status IN ('failed', 'skipped')
+		       THEN security_findings.validation_status
+		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending', 'error')
 		       THEN excluded.validation_status
 		     WHEN CASE security_findings.validation_status
 		       WHEN 'validated' THEN 4
 		       WHEN 'failed' THEN 3
 		       WHEN 'skipped' THEN 3
 		       WHEN 'pending' THEN 2
+		       WHEN 'error' THEN 1
 		       WHEN 'unvalidated' THEN 1
 		       ELSE 0
 		     END >= CASE excluded.validation_status
@@ -761,6 +765,7 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 		       WHEN 'failed' THEN 3
 		       WHEN 'skipped' THEN 3
 		       WHEN 'pending' THEN 2
+		       WHEN 'error' THEN 1
 		       WHEN 'unvalidated' THEN 1
 		       ELSE 0
 		     END THEN security_findings.validation_status
@@ -840,13 +845,17 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 		     WHEN security_findings.validation_status = 'validated'
 		       AND excluded.validation_status != 'validated'
 		       THEN security_findings.validation_json
-		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending')
+		     WHEN excluded.validation_status = 'error'
+		       AND security_findings.validation_status IN ('failed', 'skipped')
+		       THEN security_findings.validation_json
+		     WHEN excluded.validation_status IN ('validated', 'failed', 'skipped', 'pending', 'error')
 		       THEN excluded.validation_json
 		     WHEN CASE security_findings.validation_status
 		       WHEN 'validated' THEN 4
 		       WHEN 'failed' THEN 3
 		       WHEN 'skipped' THEN 3
 		       WHEN 'pending' THEN 2
+		       WHEN 'error' THEN 1
 		       WHEN 'unvalidated' THEN 1
 		       ELSE 0
 		     END >= CASE excluded.validation_status
@@ -854,6 +863,7 @@ func (s *Store) upsertFinding(ctx context.Context, finding *store.Finding, obser
 		       WHEN 'failed' THEN 3
 		       WHEN 'skipped' THEN 3
 		       WHEN 'pending' THEN 2
+		       WHEN 'error' THEN 1
 		       WHEN 'unvalidated' THEN 1
 		       ELSE 0
 		     END THEN security_findings.validation_json
@@ -961,6 +971,10 @@ func (s *Store) ListFindings(ctx context.Context, filter store.FindingFilter) ([
 	if filter.RepositoryScan != "" {
 		query.WriteString(` AND repository_scan = ?`)
 		args = append(args, filter.RepositoryScan)
+	}
+	if filter.ScanRunID != "" {
+		query.WriteString(` AND scan_run_id = ?`)
+		args = append(args, filter.ScanRunID)
 	}
 	if filter.SliceID != "" {
 		query.WriteString(` AND slice_id = ?`)
