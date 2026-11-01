@@ -887,6 +887,7 @@ spec:
 | `targets.pullRequests.enabled` | bool | No | Enables pull request monitoring. Defaults to `true`; set `false` for an issue-only monitor. |
 | `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
 | `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
+| `targets.pullRequests.includeLabels` | list | No | Restrict review, repair, and readiness statuses to pull requests with any of these labels. Cannot be combined with issue implementation. |
 | `targets.issues.enabled` | bool | No | Enables issue inventory and the issue workflow. Defaults to `false`. |
 | `targets.issues.maxPerRun` | int32 | No | Maximum selected issues per run, `1` to `100`. |
 | `targets.issues.includeLabels` / `excludeLabels` | list | No | Restrict issue inventory to issues with any of these labels, or exclude issues with them. |

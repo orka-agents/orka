@@ -1948,6 +1948,15 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			wantReason:   repositoryMonitorPublishSkipBlockedLabel,
 		},
 		{
+			name:    "missing include label",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+			},
+			wantReason: repositoryMonitorPublishSkipNotIncluded,
+		},
+		{
 			name:    "duplicate same head",
 			verdict: repositoryMonitorReviewVerdictNeedsChanges,
 			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
@@ -3322,7 +3331,7 @@ func TestRepositoryMonitorPullRequestShortcutsIgnoreIssueCommands(t *testing.T) 
 	if handled, created, err := reconciler.processTargetedPullRequestControlCommand(ctx, monitor, issueRun, "orka-agents", "orka"); err != nil || handled || created != 0 {
 		t.Fatalf("issue run pull-request shortcut handled=%v created=%d err=%v", handled, created, err)
 	}
-	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(nil, "main", issueRun); reason != "" {
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(corev1alpha1.RepositoryMonitorSpec{}, nil, "main", issueRun); reason != "" {
 		t.Fatalf("issue run pull-request block reason = %q, want empty", reason)
 	}
 	malformedRun := *issueRun

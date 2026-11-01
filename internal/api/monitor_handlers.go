@@ -445,6 +445,11 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fiber.NewError(fiber.StatusBadRequest, "at least one repository monitor target must be enabled")
 	}
+	// Mirrors the controller's repositoryMonitorIssueImplementationEnabled.
+	implementation := spec.IssueWorkflow.Implementation.Enabled
+	if len(spec.Targets.PullRequests.IncludeLabels) > 0 && spec.Targets.Issues.Enabled && spec.Agents.Implementer != nil && (implementation == nil || *implementation) {
+		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.pullRequests.includeLabels cannot be combined with issue implementation, whose pull requests would not carry the label")
+	}
 	return nil
 }
 

@@ -148,5 +148,5 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 }
 
 func repositoryMonitorManagedWorkflow(monitor *corev1alpha1.RepositoryMonitor) bool {
-	return monitor.Spec.Review.Publish.Enabled || monitor.Spec.Repair.Enabled || (monitor.Spec.Targets.Issues.Enabled && monitor.Spec.Agents.Implementer != nil && (monitor.Spec.IssueWorkflow.Implementation.Enabled == nil || *monitor.Spec.IssueWorkflow.Implementation.Enabled))
+	return monitor.Spec.Review.Publish.Enabled || monitor.Spec.Repair.Enabled || repositoryMonitorIssueImplementationEnabled(monitor.Spec)
 }

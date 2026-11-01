@@ -270,7 +270,11 @@ func (h *Handlers) enqueueRepositoryMonitorPullRequestEventRuns(c fiber.Ctx, bod
 		if intent, isCommand := repositoryMonitorCommandIntentForLabel(monitor, target, payload.Label.Name); isCommand && repositoryMonitorAcceptsLabelCommand(monitor, payload.Repository, target, intent) {
 			continue
 		}
-		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target) {
+		removed := ""
+		if payload.Action == githubWebhookActionUnlabeled {
+			removed = payload.Label.Name
+		}
+		if !repositoryMonitorAcceptsPullRequestEvent(monitor, payload.Repository, target, removed) {
 			continue
 		}
 		result.Matched++
@@ -394,11 +398,16 @@ func repositoryMonitorExactPullRequestAction(action string) bool {
 	}
 }
 
-func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget) bool {
+// removedLabel is the label an unlabeled event removed. Removing an include
+// label is accepted so the run can retire the pull request.
+func repositoryMonitorAcceptsPullRequestEvent(monitor *corev1alpha1.RepositoryMonitor, repo githubWebhookRepository, target githubLabelTarget, removedLabel string) bool {
 	if monitor == nil || repositoryMonitorWebhookSuspended(monitor) || !monitor.Spec.Review.ExactEventEnabled || !repositoryMonitorPullRequestsEnabled(monitor.Spec) {
 		return false
 	}
 	if target.BaseBranch != "" && !strings.EqualFold(target.BaseBranch, effectiveRepositoryMonitorBranch(monitor)) {
+		return false
+	}
+	if include := monitor.Spec.Targets.PullRequests.IncludeLabels; len(include) > 0 && repositoryMonitorWebhookMatchingLabel(include, target.Labels) == "" && repositoryMonitorWebhookMatchingLabel(include, []string{removedLabel}) == "" {
 		return false
 	}
 	owner, repository, err := parseRepositoryMonitorGitHubURL(monitor.Spec.RepoURL)

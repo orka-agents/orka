@@ -145,6 +145,14 @@ type RepositoryMonitorPullRequestTarget struct {
 	// +kubebuilder:default=20
 	// +optional
 	MaxPerRun *int32 `json:"maxPerRun,omitempty"`
+
+	// IncludeLabels optionally restricts pull request inventory to pull requests
+	// with any of these labels. Other pull requests get no review, repair, or
+	// readiness status. It cannot be combined with issue implementation, whose
+	// pull requests would not carry the label.
+	// +listType=set
+	// +optional
+	IncludeLabels []string `json:"includeLabels,omitempty"`
 }
 
 // RepositoryMonitorIssueTarget configures issue monitoring.
