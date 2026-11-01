@@ -35,7 +35,7 @@ func workflowFinding(fingerprint, severity string) *storagev1.Finding {
 	return &storagev1.Finding{Namespace: workflowNamespace, RepositoryScan: workflowScan, ScanRunID: "run-1",
 		Fingerprint: fingerprint, Title: "Finding " + fingerprint, Summary: "summary", Severity: severity, Confidence: "high",
 		ValidationStatus: "unvalidated", State: "open", FilePath: "api/handler.go", Line: 12,
-		Evidence: []storagev1.FindingEvidenceRef{{Kind: "code", Path: "api/handler.go", StartLine: 10, EndLine: 14}}}
+		Evidence: []storagev1.FindingEvidenceRef{{Kind: "code", Path: "api/handler.go", StartLine: 10, EndLine: 14, Role: "sink"}}}
 }
 
 func workflowFindingIDs(findings []storagev1.Finding) []string {
@@ -285,6 +285,20 @@ func runSecurity(t *testing.T, newProvider StateFactory) {
 		got, err = p.GetFinding(ctx, workflowNamespace, "fp-pr")
 		require.NoError(t, err)
 		require.Equal(t, "open", got.State, "a current observation reopens a remediated finding")
+	})
+
+	t.Run("findings filter by scan run", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		require.NoError(t, p.UpsertFinding(ctx, workflowFinding("fp-first-run", "high")))
+		later := workflowFinding("fp-later-run", "high")
+		later.ScanRunID = "run-2"
+		require.NoError(t, p.UpsertFinding(ctx, later))
+		first, _, err := p.ListFindings(ctx, storagev1.FindingFilter{Namespace: workflowNamespace, ScanRunID: "run-1"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"fp-first-run"}, workflowFindingIDs(first))
+		second, _, err := p.ListFindings(ctx, storagev1.FindingFilter{Namespace: workflowNamespace, ScanRunID: "run-2"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"fp-later-run"}, workflowFindingIDs(second))
 	})
 
 	t.Run("duplicates and patch proposals", func(t *testing.T) {
