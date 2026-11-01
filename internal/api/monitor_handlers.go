@@ -128,6 +128,16 @@ func validateRepositoryMonitorSpec(spec corev1alpha1.RepositoryMonitorSpec) erro
 	if err := validateRepositoryMonitorSupportedTargets(spec); err != nil {
 		return err
 	}
+	switch strings.TrimSpace(spec.Review.Trigger) {
+	case "", "open", "push":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.trigger must be open or push")
+	}
+	switch strings.TrimSpace(spec.Review.BlockingPriority) {
+	case "", "P0", "P1", "P2", "P3":
+	default:
+		return fiber.NewError(fiber.StatusBadRequest, "spec.review.blockingPriority must be one of P0, P1, P2, or P3")
+	}
 	if err := validateRepositoryMonitorReviewPublishSpec(spec.Review.Publish); err != nil {
 		return err
 	}

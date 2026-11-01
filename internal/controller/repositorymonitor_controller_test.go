@@ -1482,7 +1482,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
 	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
 
-	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr); err != nil {
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr, repositoryMonitorReviewPlan{}); err != nil {
 		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
 	}
 }
@@ -3982,6 +3982,12 @@ func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, hea
 			"evidence": "",
 		},
 		"suggestedComment": "Please fix the failing path.",
+	}
+	// Orka derives a passed verdict only when no blocking finding is open,
+	// so a passed review reports no findings by default.
+	if verdict == repositoryMonitorReviewVerdictPassed {
+		payload["findings"] = []map[string]any{}
+		payload["summary"] = "Review found no issues."
 	}
 	if mutate != nil {
 		mutate(payload)

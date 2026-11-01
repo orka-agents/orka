@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1236,6 +1237,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairCommitMessage(ctx c
 		if review != nil && review.MonitorName == monitor.Name && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA &&
 			(monitor.Spec.Review.Publish.PostSecuritySensitive || !repositoryMonitorReviewRecordSecuritySensitive(review)) &&
 			json.Unmarshal([]byte(review.FindingsJSON), &findings) == nil {
+			findings = repositoryMonitorOpenFindings(findings)
+			if !monitor.Spec.Review.Publish.PostSecuritySensitive {
+				findings = slices.DeleteFunc(findings, func(finding repositoryMonitorReviewFinding) bool { return finding.SecuritySensitive })
+			}
 			for i, finding := range findings {
 				title := strings.Join(strings.Fields(sanitizeRepositoryMonitorReviewText(finding.Title, 120)), " ")
 				if title == "" {
@@ -1277,7 +1282,14 @@ func (r *RepositoryMonitorReconciler) buildRepositoryMonitorRepairPrompt(ctx con
 			return "", err
 		}
 		if review != nil && review.MonitorNamespace == monitor.Namespace && review.MonitorName == monitor.Name && review.Kind == repositoryMonitorPullRequestKind && review.Number == pr.Number && review.HeadSHA == pr.HeadSHA {
-			payload["reviewEvidence"] = sanitizeRepositoryMonitorReviewText(review.Summary+"\n"+review.FindingsJSON, repositoryMonitorValidationEvidenceLimit)
+			// Only open findings need fixing; fixed ones stay in the record.
+			openJSON := review.FindingsJSON
+			if findings, err := repositoryMonitorReviewFindingsFromRecord(review); err == nil {
+				if encoded, err := repositoryMonitorReviewFindingsJSON(repositoryMonitorOpenFindings(findings)); err == nil {
+					openJSON = encoded
+				}
+			}
+			payload["reviewEvidence"] = sanitizeRepositoryMonitorReviewText(review.Summary+"\n"+openJSON, repositoryMonitorValidationEvidenceLimit)
 			if review.ValidationEvidence != "" {
 				payload["validationEvidence"] = boundRepositoryMonitorValidationEvidence(review.ValidationEvidence)
 			}
