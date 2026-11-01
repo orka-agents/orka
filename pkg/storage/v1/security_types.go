@@ -84,6 +84,8 @@ type FindingEvidenceRef struct {
 	EndLine   int    `json:"endLine,omitempty"`
 	Symbol    string `json:"symbol,omitempty"`
 	Quote     string `json:"quote,omitempty"`
+	// Role places a file location on the attack path, such as source or sink.
+	Role string `json:"role,omitempty"`
 }
 
 // Finding represents a security finding associated with a repository scan.
@@ -186,6 +188,7 @@ type FindingCounts struct {
 type FindingFilter struct {
 	Namespace         string
 	RepositoryScan    string
+	ScanRunID         string
 	SliceID           string
 	Category          string
 	Severity          string
