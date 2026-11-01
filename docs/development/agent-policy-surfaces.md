@@ -313,8 +313,14 @@ agents don't normally reach them:
 **ACP RuntimePools.**
 
 - Runtime Pods have no Kubernetes RBAC.
-- Egress is default-deny, except to the provider auth proxy and the controller's MCP
-  broker. See the [security model](../../website/docs/concepts/security.md).
+- Egress is default-deny, except to three destinations:
+  - cluster DNS: `k8s-app: kube-dns` Pods in `kube-system`, on UDP and TCP port 53;
+  - the provider auth proxy;
+  - the controller's MCP broker.
+- These fixed rules come from `runtimePoolNetworkPolicies` in
+  `internal/controller/runtime_pool_controller.go`. For an external execution workspace,
+  the controller sends the same egress rules to the workspace provider, which applies
+  them. See the [security model](../../website/docs/concepts/security.md).
 
 **Runtime enforcement.** Where it's installed, runtime enforcement such as Gatekeeper
 Runtime can also block connections, file access or programs inside the container.
