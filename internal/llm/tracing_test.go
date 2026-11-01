@@ -219,6 +219,11 @@ func (p *telemetryProvider) Stream(context.Context, *CompletionRequest) (<-chan 
 			done.InputTokens = 13
 			done.OutputTokens = 8
 		}
+		if p.name == "stream-cached-usage" {
+			read, write := int64(100), int64(20)
+			done.InputTokens, done.OutputTokens = 5, 8
+			done.CachedInputTokens, done.CacheWriteInputTokens, done.InputExcludesCache = &read, &write, true
+		}
 		ch <- done
 	}
 	close(ch)
@@ -659,6 +664,45 @@ func TestTracingProviderStreamRecordsTokenUsage(t *testing.T) {
 	rm := mh.Collect(t)
 	if got := histogramPointCount(rm, genai.MetricClientTokenUsage); got != 2 {
 		t.Fatalf("token usage datapoints = %d, want 2", got)
+	}
+}
+
+// Anthropic's input count leaves out its cache reads and writes; telemetry
+// reports the whole prompt and the cache breakdown beside it.
+func TestTracingProviderReportsCachedPromptTokens(t *testing.T) {
+	read, write := int64(100), int64(20)
+	for _, mode := range []string{"complete", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			h := testutil.NewSpanHarness(t)
+			mh := testutil.NewMetricHarness(t)
+			tp := NewTracingProvider(&telemetryProvider{name: "stream-cached-usage", telemetryName: "anthropic", resp: &CompletionResponse{
+				Content: "ok", InputTokens: 5, OutputTokens: 8, CachedInputTokens: &read, CacheWriteInputTokens: &write, InputExcludesCache: true,
+			}})
+			req := &CompletionRequest{Model: "claude"}
+			if mode == "complete" {
+				if _, err := tp.Complete(context.Background(), req); err != nil {
+					t.Fatalf("Complete() error = %v", err)
+				}
+			} else {
+				ch, err := tp.Stream(context.Background(), req)
+				if err != nil {
+					t.Fatalf("Stream() error = %v", err)
+				}
+				for range ch {
+				}
+			}
+			spans := h.Recorder.Ended()
+			if len(spans) != 1 {
+				t.Fatalf("ended spans = %d, want 1", len(spans))
+			}
+			attrs := spanAttrs(spans[0])
+			assertIntAttr(t, attrs, genai.AttrUsageInputTokens, 125)
+			assertIntAttr(t, attrs, genai.AttrUsageCacheReadInputTokens, 100)
+			assertIntAttr(t, attrs, genai.AttrUsageCacheCreateInputTokens, 20)
+			if got := histogramPointCount(mh.Collect(t), genai.MetricClientTokenUsage); got != 2 {
+				t.Fatalf("token usage datapoints = %d, want 2", got)
+			}
+		})
 	}
 }
 
