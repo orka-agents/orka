@@ -291,7 +291,7 @@ func TestRepositoryMonitorReadinessRefreshQueuesConflictRepair(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/pulls/31"):
-			_, _ = w.Write([]byte(`{"number":31,"state":"open","mergeable_state":"dirty","head":{"sha":"head"},"base":{"ref":"main"}}`))
+			_, _ = w.Write([]byte(`{"number":31,"state":"open","mergeable_state":"dirty","head":{"ref":"feature","sha":"head","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"base":{"ref":"main"}}`))
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/check-runs"):
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":99,"name":"tests","status":"completed","conclusion":"success"}]}`))
 		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/status"):

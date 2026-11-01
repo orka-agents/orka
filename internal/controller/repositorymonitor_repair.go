@@ -19,6 +19,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -835,8 +836,8 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 	if intent != repositoryMonitorCommandIntentUpdateBranch && (monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "") {
 		return "missing_repairer_agent", 0, 0, nil
 	}
-	if !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), strings.TrimSpace(monitoredRepo)) {
-		return "fork_pr_repair_not_writable", 0, 0, nil
+	if _, reason := repositoryMonitorRepairRepository(monitor, monitoredRepo, pr); reason != "" {
+		return reason, 0, 0, nil
 	}
 	if r.Store == nil {
 		return "", 0, 0, nil
@@ -943,6 +944,29 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorRepairPolicy(ctx context.
 	return "", repairCountPR, repairCountHead, nil
 }
 
+// repositoryMonitorRepairRepository returns the owner/name repository that a
+// repair of pr pushes to, or the reason it cannot push. A fork head is
+// writable only when the monitor opts in and the author allows maintainer
+// edits. GitHub still authorizes the push itself.
+func repositoryMonitorRepairRepository(monitor *corev1alpha1.RepositoryMonitor, monitoredRepo string, pr repositoryMonitorPullRequest) (string, string) {
+	monitoredRepo = strings.TrimSpace(monitoredRepo)
+	headRepo := strings.TrimSpace(pr.HeadRepo)
+	if strings.EqualFold(headRepo, monitoredRepo) {
+		return monitoredRepo, ""
+	}
+	if monitor == nil || !monitor.Spec.Repair.AllowForkPullRequests {
+		return "", "fork_pr_repair_not_writable"
+	}
+	owner, repository, err := security.ParseGitHubRepositoryURL("https://github.com/" + headRepo)
+	if err != nil || !strings.EqualFold(owner+"/"+repository, headRepo) {
+		return "", "fork_pr_repair_not_writable"
+	}
+	if !pr.MaintainerCanModify {
+		return "", "fork_pr_maintainer_edits_disabled"
+	}
+	return owner + "/" + repository, ""
+}
+
 func (r *RepositoryMonitorReconciler) repositoryMonitorRepairJobConsumesBudget(ctx context.Context, namespace string, job *store.RepairJob) (bool, error) {
 	if job == nil {
 		return false, nil
@@ -972,6 +996,17 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		return 0, err
 	}
 	monitoredRepo := owner + "/" + repository
+	headRepo, reason := repositoryMonitorRepairRepository(monitor, monitoredRepo, pr)
+	if reason != "" {
+		return 0, fmt.Errorf("pull request #%d repair is not writable: %s", pr.Number, reason)
+	}
+	headOwner, headRepository, _ := strings.Cut(headRepo, "/")
+	sessionKey := pr.HeadBranch
+	if headRepo != monitoredRepo {
+		// Forks commonly reuse branch names such as main; a colon cannot
+		// appear in a ref, so fork keys never collide with monitored branches.
+		sessionKey = strings.ToLower(headRepo) + ":" + pr.HeadBranch
+	}
 	prompt, err := r.buildRepositoryMonitorRepairPrompt(ctx, monitor, command.Intent, monitoredRepo, pr, item)
 	if err != nil {
 		return 0, err
@@ -1013,11 +1048,11 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 	repairer := *monitor.Spec.Agents.Repairer
 	workspace := &corev1alpha1.WorkspaceConfig{
 		Intent:                       corev1alpha1.WorkspaceIntentWrite,
-		GitRepo:                      repositoryMonitorHTTPSCloneURL(owner, repository),
+		GitRepo:                      repositoryMonitorHTTPSCloneURL(headOwner, headRepository),
 		Branch:                       pr.HeadBranch,
 		Ref:                          pr.HeadSHA,
 		ReadCredentialRef:            workspaceCredentialReference(credentialRefs.read),
-		PublicationGitRepo:           repositoryMonitorHTTPSCloneURL(owner, repository),
+		PublicationGitRepo:           repositoryMonitorHTTPSCloneURL(headOwner, headRepository),
 		PublicationReadCredentialRef: workspaceCredentialReference(credentialRefs.publicationRead),
 		PublicationCredentialRef:     workspaceCredentialReference(credentialRefs.publication),
 		ForgeCredentialRef:           workspaceCredentialReference(credentialRefs.forge),
@@ -1057,7 +1092,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 			Priority:  &priority,
 			Workspace: workspace,
 			SessionRef: &corev1alpha1.SessionReference{
-				Name: repositoryMonitorPublicationSessionName(monitor, pr.HeadBranch), Create: true, Append: false,
+				Name: repositoryMonitorPublicationSessionName(monitor, sessionKey), Create: true, Append: false,
 			},
 		},
 	}

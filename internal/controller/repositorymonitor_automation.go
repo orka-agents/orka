@@ -20,7 +20,10 @@ const repositoryMonitorWorkflowPollInterval = 30 * time.Second
 // Repair.Enabled is the repository administrator's authorization for bounded
 // automatic repair. A controller policy action is never recorded as a human.
 func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
-	if !monitor.Spec.Repair.Enabled || run.CommandEventID != "" || pr.Draft || pr.HeadSHA == "" || !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), owner+"/"+repo) {
+	if !monitor.Spec.Repair.Enabled || run.CommandEventID != "" || pr.Draft || pr.HeadSHA == "" {
+		return false, nil
+	}
+	if _, reason := repositoryMonitorRepairRepository(monitor, owner+"/"+repo, pr); reason != "" {
 		return false, nil
 	}
 	if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" || item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand || item.LastVerdict == repositoryMonitorRunPhaseQueued {

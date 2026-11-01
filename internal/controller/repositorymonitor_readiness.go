@@ -230,6 +230,11 @@ func (r *RepositoryMonitorReconciler) refreshRepositoryMonitorReadinessPullReque
 	}
 	pr.State, pr.HeadSHA, pr.BaseBranch = current.State, current.Head.SHA, current.Base.Ref
 	pr.MergeableState, pr.Draft = current.MergeableState, current.Draft
+	// The maintainer-edit permission describes this head repository, so take
+	// the push target from the same response; a fork can be renamed or
+	// transferred without its head SHA changing.
+	pr.MaintainerCanModify = current.MaintainerCanModify
+	pr.HeadBranch, pr.HeadRepo, pr.HeadRepoURL = current.Head.Ref, current.Head.Repo.FullName, current.Head.Repo.CloneURL
 	pr.Labels = nil
 	for _, label := range current.Labels {
 		pr.Labels = append(pr.Labels, label.Name)

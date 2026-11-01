@@ -6026,7 +6026,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	run := &store.MonitorRun{ID: "run-repair-retry"}
 	command := &store.CommandEvent{ID: "cmd-repair-retry", Intent: "fix", Source: "api"}
-	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", BaseBranch: "main"}
+	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA, AutomergeState: repositoryMonitorAutomergeStateMergeReady}
 
 	if created, err := reconciler.createRepositoryMonitorRepairTask(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 {

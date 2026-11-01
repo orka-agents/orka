@@ -908,6 +908,7 @@ spec:
 | `repair.enabled` | bool | No | Enables automatic, bounded pull request repair. Requires `agents.repairer` and the publication credentials. |
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |
+| `repair.allowForkPullRequests` | bool | No | Also repair pull requests from forks whose authors allow edits from maintainers, pushing to the fork's head branch. Defaults to `false`. |
 | `review.requireGreenCI` | bool | No | Wait for green CI before selecting a pull request for review. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
