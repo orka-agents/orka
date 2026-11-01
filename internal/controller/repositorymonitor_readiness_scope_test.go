@@ -75,6 +75,8 @@ func TestRepositoryMonitorReadinessRevokesOutOfScopeHead(t *testing.T) {
 					writes++
 					latest.ID = int64(100 + writes)
 					_ = json.NewEncoder(w).Encode(latest)
+				case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+					_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 				default:
 					t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 					http.Error(w, "unexpected", 500)
