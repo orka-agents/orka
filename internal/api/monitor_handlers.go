@@ -445,10 +445,23 @@ func validateRepositoryMonitorSupportedTargets(spec corev1alpha1.RepositoryMonit
 	if !repositoryMonitorPullRequestsEnabled(spec) && !spec.Targets.Issues.Enabled {
 		return fiber.NewError(fiber.StatusBadRequest, "at least one repository monitor target must be enabled")
 	}
-	// Mirrors the controller's repositoryMonitorIssueImplementationEnabled.
+	// Mirrors the controller's repositoryMonitorIssueImplementationEnabled and
+	// repositoryMonitorPullRequestLabelScopeField.
 	implementation := spec.IssueWorkflow.Implementation.Enabled
-	if len(spec.Targets.PullRequests.IncludeLabels) > 0 && spec.Targets.Issues.Enabled && spec.Agents.Implementer != nil && (implementation == nil || *implementation) {
-		return fiber.NewError(fiber.StatusBadRequest, "spec.targets.pullRequests.includeLabels cannot be combined with issue implementation, whose pull requests would not carry the label")
+	if !spec.Targets.Issues.Enabled || spec.Agents.Implementer == nil || (implementation != nil && !*implementation) {
+		return nil
+	}
+	for _, scope := range []struct {
+		field  string
+		labels []string
+	}{
+		{"spec.targets.pullRequests.includeLabels", spec.Targets.PullRequests.IncludeLabels},
+		{"spec.repair.includeLabels", spec.Repair.IncludeLabels},
+		{"spec.repair.ciOnlyLabels", spec.Repair.CIOnlyLabels},
+	} {
+		if len(scope.labels) > 0 {
+			return fiber.NewError(fiber.StatusBadRequest, scope.field+" cannot be combined with issue implementation, whose pull requests would not carry the label")
+		}
 	}
 	return nil
 }

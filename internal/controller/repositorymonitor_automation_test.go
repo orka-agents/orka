@@ -35,8 +35,18 @@ func TestRepositoryMonitorAutomaticallyRepairsFailedCI(t *testing.T) {
 	original := server.Config.Handler
 	server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasSuffix(req.URL.Path, "/check-runs") {
+			// The base commit passes, so the failure is the pull request's own.
+			conclusion := "success"
+			if strings.Contains(req.URL.Path, "/commits/head31/") {
+				conclusion = "failure"
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":"failure"}]}`))
+			_, _ = fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"id":10,"name":"tests","status":"completed","conclusion":%q}]}`, conclusion)
+			return
+		}
+		if strings.HasSuffix(req.URL.Path, "/status") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"state":"success","total_count":0,"statuses":[]}`))
 			return
 		}
 		original.ServeHTTP(w, req)
@@ -428,8 +438,15 @@ func TestRepositoryMonitorInventoryHonorsReadinessRefresh(t *testing.T) {
 func TestRepositoryMonitorRepairPromptIncludesOnlyMatchingReviewEvidence(t *testing.T) {
 	ctx := context.Background()
 	db := setupControllerSQLiteStore(t)
-	monitor, _ := repositoryMonitorInventoryTestObjects("repair-evidence")
-	r := &RepositoryMonitorReconciler{Store: db}
+	monitor, secret := repositoryMonitorInventoryTestObjects("repair-evidence")
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	// CI lookups for the fix_ci prompt fail here, so it carries no check list.
+	unavailable := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(unavailable.Close)
+	r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db, GitHubAPIBaseURL: unavailable.URL}
 	item := &store.MonitorItem{LastReviewID: "review-evidence", LastVerdict: repositoryMonitorReviewVerdictNeedsChanges}
 	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head"}
 	review := &store.ReviewRecord{ID: item.LastReviewID, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 31, HeadSHA: "head", Summary: "Initialize the retry result", FindingsJSON: `[{"file":"scripts/smoke.sh","line":42,"body":"The result variable is unset after success"}]`, ValidationEvidence: "shell test failed"}

@@ -40,12 +40,16 @@ func TestRepositoryMonitorAutomaticRepairRecoversExhaustedPreTaskCommands(t *tes
 			}
 			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build(), Store: db}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/status") {
+					_, _ = w.Write([]byte(`{"total_count":0,"statuses":[]}`))
+					return
+				}
 				if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/check-runs") {
 					t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 					http.Error(w, "unexpected", http.StatusInternalServerError)
 					return
 				}
-				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"id":1,"name":"tests","status":"completed","conclusion":"failure"}]}`))
 			}))
 			defer server.Close()

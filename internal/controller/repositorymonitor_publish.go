@@ -222,8 +222,8 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, currentPR.Labels); blockedLabel != "" {
 		return skip(repositoryMonitorPublishSkipBlockedLabel, fmt.Sprintf("Pull request #%d review publishing skipped: blocked label %q is present", item.Number, blockedLabel), map[string]any{"label": blockedLabel})
 	}
-	if !repositoryMonitorPullRequestIncluded(monitor.Spec, *currentPR) {
-		return skip(repositoryMonitorPublishSkipNotIncluded, fmt.Sprintf("Pull request #%d review publishing skipped: no include label is present", item.Number), nil)
+	if !repositoryMonitorPullRequestReviewed(monitor.Spec, *currentPR) {
+		return skip(repositoryMonitorPublishSkipNotIncluded, fmt.Sprintf("Pull request #%d review publishing skipped: no review label is present", item.Number), nil)
 	}
 
 	exists, err := r.repositoryMonitorReviewPublishRecordExists(ctx, monitor, item, reviewedHead)

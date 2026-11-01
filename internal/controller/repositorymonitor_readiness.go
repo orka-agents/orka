@@ -36,6 +36,27 @@ func repositoryMonitorReadinessContext(monitor *corev1alpha1.RepositoryMonitor) 
 type repositoryMonitorCIResult struct {
 	passed bool
 	reason string
+	// failed names the failing check runs or status contexts when reason is
+	// repositoryMonitorCINotGreen.
+	failed []repositoryMonitorCIFailure
+	// incomplete marks a failing result read from partial check runs or
+	// statuses: the commit is not green, but failed may not list every failure.
+	incomplete bool
+}
+
+// repositoryMonitorCIFailureSourceStatus marks a failing commit status context.
+const repositoryMonitorCIFailureSourceStatus = "commit_status"
+
+// repositoryMonitorCIFailure is one failing check run or status context.
+// source tells a check run (with its app) from a status context, since the
+// two can share a name.
+type repositoryMonitorCIFailure struct {
+	name   string
+	source string
+}
+
+func (f repositoryMonitorCIFailure) key() string {
+	return f.source + "|" + strings.ToLower(strings.TrimSpace(f.name))
 }
 
 type repositoryMonitorCommitStatus struct {
@@ -149,6 +170,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReadyOutcome(ctx context.
 }
 
 func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligible(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
+	// Only a full repair fixes findings; a review-only or CI-only pull request
+	// keeps its findings until a person changes it.
+	if full, _, _ := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr); !full {
+		return false, nil
+	}
 	owner, repo, err := security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 	if err != nil {
 		return false, err
@@ -164,13 +190,14 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	if intent == repositoryMonitorCommandIntentUpdateBranch {
 		return true, nil
 	}
-	// Automatic selection prefers failed CI, even if review findings cannot
-	// be repaired. Both intents share the same repair policy and budget.
-	ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+	// Automatic selection prefers CI the pull request broke, even if review
+	// findings cannot be repaired; failures inherited from the base are left
+	// alone. Both intents share the same repair policy and budget.
+	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
 	if err != nil {
 		return false, err
 	}
-	if ci.reason == repositoryMonitorCINotGreen {
+	if broke {
 		return true, nil
 	}
 	if item.LastReviewID == "" {
@@ -183,10 +210,11 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorNeedsChangesRepairEligibl
 	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
-// repositoryMonitorPullRequestInScope reports whether pr is an open, included
-// pull request on the monitor's base branch.
+// repositoryMonitorPullRequestInScope reports whether pr is an open, reviewed
+// pull request on the monitor's base branch. CI-only pull requests get no
+// readiness status because no review vouches for them.
 func repositoryMonitorPullRequestInScope(monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest) bool {
-	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestIncluded(monitor.Spec, pr)
+	return pr.State == repositoryMonitorItemStateOpen && pr.BaseBranch == effectiveRepositoryMonitorBranch(monitor) && repositoryMonitorPullRequestReviewed(monitor.Spec, pr)
 }
 
 // GitHub statuses belong to commits, not PRs. Aggregate every outcome across
@@ -348,6 +376,16 @@ func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorReadiness(ctx co
 }
 
 func (r *RepositoryMonitorReconciler) reconcileRepositoryMonitorDepartedHead(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, departingNumber int64, sha, endpoint, token string) error {
+	// A head that never got a readiness status shows nothing stale, and an
+	// in-scope peer publishes its own status when it is processed; skip the
+	// inventory listing, which CI-only pull requests would repeat every poll.
+	if r.Store != nil {
+		if _, err := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, repositoryMonitorReadinessMutationID(monitor, sha)); errors.Is(err, store.ErrNotFound) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+	}
 	// The old inventory can still contain the departed PR. Use a fresh list.
 	peers, err := r.listRepositoryMonitorReadinessPeers(ctx, monitor, token)
 	if err != nil {

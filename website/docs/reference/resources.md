@@ -887,7 +887,7 @@ spec:
 | `targets.pullRequests.enabled` | bool | No | Enables pull request monitoring. Defaults to `true`; set `false` for an issue-only monitor. |
 | `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
 | `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
-| `targets.pullRequests.includeLabels` | list | No | Restrict review, repair, and readiness statuses to pull requests with any of these labels. Cannot be combined with issue implementation. |
+| `targets.pullRequests.includeLabels` | list | No | Restrict review, repair, and readiness statuses to pull requests with any of these labels. Pull requests with a `repair.includeLabels` or `repair.ciOnlyLabels` label are also included. Cannot be combined with issue implementation. |
 | `targets.issues.enabled` | bool | No | Enables issue inventory and the issue workflow. Defaults to `false`. |
 | `targets.issues.maxPerRun` | int32 | No | Maximum selected issues per run, `1` to `100`. |
 | `targets.issues.includeLabels` / `excludeLabels` | list | No | Restrict issue inventory to issues with any of these labels, or exclude issues with them. |
@@ -910,6 +910,8 @@ spec:
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |
 | `repair.allowForkPullRequests` | bool | No | Also repair pull requests from forks whose authors allow edits from maintainers, pushing to the fork's head branch. Defaults to `false`. |
+| `repair.includeLabels` | list | No | Limit automatic repair to pull requests with any of these labels. They are also reviewed, and each head is reviewed before it is repaired. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
+| `repair.ciOnlyLabels` | list | No | Repair only the CI that pull requests with any of these labels broke, without reviewing them. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
 | `review.requireGreenCI` | bool | No | Wait for green CI before selecting a pull request for review. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
