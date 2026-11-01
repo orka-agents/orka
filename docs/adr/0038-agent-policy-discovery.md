@@ -137,6 +137,9 @@ a pattern for pluggable providers in Orka, `pkg/storage`:
    - Orka builds summaries from fixed templates.
    - Provider and API server messages appear only as bounded excerpts in an
      `untrustedMessage` field.
+   - The one exception is `enforcedBy` (section 5), a name parsed from API server text.
+     Before it's emitted, it must pass validation as a Kubernetes object name: the DNS
+     subdomain character set, at most 253 characters.
 7. **Receipts and evidence are historical.** An enforcement receipt or a capture report is
    never proof that a control is active now.
 8. **Enforcement is out of reach.** Discovery never selects, narrows or relaxes an
@@ -529,6 +532,11 @@ classes, each with a closed set of codes:
     - the endpoint or an enforcement point refused the request;
     - the tool is read-only.
 
+    That evidence makes a retry safe. The cause decides whether a retry is likely to help:
+    - an availability or transport failure is `transient`, with `retry: later`;
+    - an unclassified failure of a read-only tool is `internal_error` / `tool_failed`.
+      Retrying it is safe, but Orka can't say it will help, so it gives no `retry`.
+
     A refusal of one request doesn't count if an earlier request in the same call already
     had an effect. For example, `delegate_task` creates the child Task before a later
     token step can fail, and its cleanup is best-effort.
@@ -580,13 +588,13 @@ Each happens before a request can be parsed, so neither can carry a classified r
 | Broker 503 before any tool runs: the broker is unavailable; approval storage is unavailable; or "MCP approval could not be recorded" (the approval request can't be stored before any approval exists) | `-32002` | `isError`: `transient` / `broker_unavailable`, `retry: later` |
 | Broker 503 after an approved call may have run: "MCP approval continuation is unavailable; the original call must not be repeated" | `-32002` | `isError`: `outcome_unknown` / `tool_outcome_unknown`, `retry: never` |
 | Broker 409: an approval call doesn't match its stored action, or an approval call's operation conflicts with a previous call (a reused call ID with a different payload) | `-32002` | Protocol error: `session_invalid`. No new tool run starts. |
-| Broker 200 `isError` results the broker already shapes: `code: invalid_arguments` (registry argument rejection) and `code: tool_execution_failed` (a custom tool's failure, or a read-only tool's request deadline) | `isError` with those codes | Map them into the shared vocabulary:<br>- `invalid_arguments`: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- `tool_execution_failed` on a consequential tool: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. A failure isn't evidence of no effect;<br>- `tool_execution_failed` on a read-only tool: `internal_error` / `tool_failed`, with no `retry`.<br><br>A replayed receipt carries the same mapping as the original result. |
+| Broker 200 `isError` results the broker already shapes: `code: invalid_arguments` (registry argument rejection) and `code: tool_execution_failed` (a custom tool's failure, or a read-only tool's request deadline) | `isError` with those codes | Map them into the shared vocabulary:<br>- `invalid_arguments`: `invalid_arguments` / `arguments_rejected`, `retry: with_changes`;<br>- `tool_execution_failed` on a consequential tool: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`. A failure isn't evidence of no effect;<br>- `tool_execution_failed` on a read-only tool: `internal_error` / `tool_failed`, with no `retry`. A read-only tool's request deadline currently arrives under the same code. A broker change gives it its own code, which maps to `transient`, `retry: later`.<br><br>A replayed receipt carries the same mapping as the original result. |
 | Broker 502: tool execution failed, or the tool returned an invalid result | `-32002` | `isError`, depending on the cause:<br>- consequential tool whose outcome is settled as unknown: `outcome_unknown` / `tool_outcome_unknown`, `retry: never`;<br>- tool that reported no effect: `no_effect` / `tool_failed_without_effect`, `retry: with_changes`;<br>- read-only tool: `internal_error` / `tool_failed`, with no `retry`. |
 | Broker: connection binding unavailable | `-32002` | `isError`: `transient` / `connection_binding_unavailable`, `retry: later` |
 | A discovery tool over its rate limit | Not yet possible | `isError`: `transient` / `rate_limited`, `retry: later` |
 | Approval outcomes | `isError` with a code | Codes stay the same; each gains `errorType` and `retry`:<br>- `approval_declined`: `approval`, `never`;<br>- `approval_expired`: `approval`, `after_approval`;<br>- `approval_cancelled`: `approval`, `never`;<br>- `approval_stale`: `approval`, `never`;<br>- `tool_outcome_unknown`: `outcome_unknown`, `never`;<br>- `tool_failed_without_effect`: `no_effect`, `with_changes`. |
 | A call waiting for approval (#841) | Not yet possible | `approval` / `approval_pending`, `retry: after_approval` |
-| Kubernetes errors in built-in tools | Where tools use the shared classifier, every 403 becomes `permission_denied` and anything unrecognized becomes `internal_error`. Some paths return raw errors instead. | Every Kubernetes error goes through one classifier:<br>- an RBAC 403, recognized from the authorizer's own message ("… cannot `<verb>` resource …"): stays `permission_denied`, `retry: never`;<br>- an admission denial: `policy_denied` / `admission_denied`, with the message in `untrustedMessage`. It's recognized at any status code in one of three ways:<br>&nbsp;&nbsp;- a webhook denial, by the message prefix `admission webhook "<name>" denied the request`. A webhook chooses its own code, and the API server returns 400 when it sets none;<br>&nbsp;&nbsp;- a ValidatingAdmissionPolicy denial, by `ValidatingAdmissionPolicy '<policy>' [with binding '<binding>'] denied request`. It appears after the `is forbidden: ` wrapper and again in `details.causes`. Its code comes from the policy's `reason`, and is 422 when none is set;<br>&nbsp;&nbsp;- a built-in plugin denial, by its own message. The recognized forms are:<br>&nbsp;&nbsp;&nbsp;&nbsp;- ResourceQuota's "exceeded quota";<br>&nbsp;&nbsp;&nbsp;&nbsp;- NamespaceLifecycle's "because it is being terminated".<br><br>LimitRange validates only Pods and PersistentVolumeClaims, and PodSecurity enforces only on Pods (it only warns on a Job). Built-in tools don't create Pods or PVCs directly. When a `code_exec` Job's Pod is rejected, the agent sees a Job that can't start, plus at most a create-time warning, not a refusal. That's a known gap.<br><br>A 403 with no positive admission evidence stays `permission_denied`. That includes Orka's own local authorization refusals, such as the compatibility API's "not authorized". A built-in denial in an unrecognized form also falls back to `permission_denied`, which is a known gap.<br><br>`enforcedBy` comes from the webhook or policy name in that text;<br>- a field-validation 422 that matches none of these: `invalid_arguments`, `retry: with_changes`.<br><br>Retry for `admission_denied` depends on the source:<br>- a webhook or a ValidatingAdmissionPolicy: `with_changes`;<br>- ResourceQuota ("exceeded quota"): `later`, since the quota can free up without any change;<br>- NamespaceLifecycle, for a terminating namespace: `never`.<br><br>Warnings go in `data.warnings`. |
+| Kubernetes errors in built-in tools | Where tools use the shared classifier, every 403 becomes `permission_denied` and anything unrecognized becomes `internal_error`. Some paths return raw errors instead. | Every Kubernetes error goes through one classifier:<br>- an RBAC 403, recognized from the authorizer's own message ("… cannot `<verb>` resource …"): stays `permission_denied`, `retry: never`;<br>- an admission denial: `policy_denied` / `admission_denied`, with the message in `untrustedMessage`. It's recognized at any status code in one of three ways:<br>&nbsp;&nbsp;- a webhook denial, by the message prefix `admission webhook "<name>" denied the request`. A webhook chooses its own code, and the API server returns 400 when it sets none;<br>&nbsp;&nbsp;- a ValidatingAdmissionPolicy denial, by `ValidatingAdmissionPolicy '<policy>' [with binding '<binding>'] denied request`. It appears after the `is forbidden: ` wrapper and again in `details.causes`. Its HTTP status comes from the policy's `reason`, and is 422 when none is set;<br>&nbsp;&nbsp;- a built-in plugin denial, by its own message. The recognized forms are:<br>&nbsp;&nbsp;&nbsp;&nbsp;- ResourceQuota's "exceeded quota";<br>&nbsp;&nbsp;&nbsp;&nbsp;- NamespaceLifecycle's "because it is being terminated".<br><br>LimitRange validates only Pods and PersistentVolumeClaims, and PodSecurity enforces only on Pods (it only warns on a Job). Built-in tools don't create Pods or PVCs directly. When a `code_exec` Job's Pod is rejected, the agent sees a Job that can't start, plus at most a create-time warning, not a refusal. That's a known gap.<br><br>A 403 with no positive admission evidence stays `permission_denied`. That includes Orka's own local authorization refusals, such as the compatibility API's "not authorized". A built-in denial in an unrecognized form also falls back to `permission_denied`, which is a known gap.<br><br>The refusal's `code` is always `admission_denied`; the HTTP status and the admission `reason` aren't codes in the vocabulary.<br><br>`enforcedBy` comes from the webhook or policy name in that text. It's display metadata, parsed from API server text and not authenticated. Clients must not treat it as policy identity, or use it to authorize anything;<br>- a field-validation 422 that matches none of these: `invalid_arguments`, `retry: with_changes`.<br><br>Retry for `admission_denied` depends on the source:<br>- a webhook or a ValidatingAdmissionPolicy: `with_changes`;<br>- ResourceQuota ("exceeded quota"): `later`, since the quota can free up without any change;<br>- NamespaceLifecycle, for a terminating namespace: `never`.<br><br>Warnings go in `data.warnings`. |
 | Task creation limit for the turn | `limit_reached` | Add `retry: never`. The limit doesn't reset within the turn, and the message says it resets on the next one. |
 | Child transaction-token subset check or exchange | An unclassified error | - Refused: `authorization_failed` / `transaction_scope_denied`, `retry: never`.<br>- Exchange service unavailable: `transient` / `token_exchange_unavailable`, `retry: later`. |
 | Outbound transaction-token exchange for a native worker's HTTP Tool call | An unclassified error ("Error executing tool: …") | Same split as for child Tasks: `transaction_scope_denied` when refused, `token_exchange_unavailable` when the service is down |
@@ -623,8 +631,17 @@ operational state the agent can't see today, and the review must clear each item
   - An operator can set `full` for each provider.
 - **Size:** each result has a size limit. A result over the limit is cut at a constraint
   boundary and marked `complete: false`.
-- **Rate and audit:** queries are rate-limited per prompt and audited. The audit records
-  domains, decisions and counts, never payloads.
+- **Rate and audit:** queries are rate-limited per prompt and audited.
+  - The audit records domains, decisions and counts.
+  - For Kubernetes Checks, it also records the kind, namespace and name of each derived
+    request (section 4).
+  - It never records payloads: tool arguments, proposed objects, or provider and API
+    server messages.
+  - For a Task, audit records live in the Task's execution event stream. They're deleted
+    with that stream, so they don't outlive the Task.
+  - Callers without a Task (chat and the compatibility API) get a retention rule when
+    Delivery step 7 brings discovery to them. Until then, discovery serves ACP sessions
+    only.
 
 ### 7. How agents use it
 
@@ -680,16 +697,18 @@ happens:
   from the agent.
 - **No equivalents.** Explain and Observe have no AuthZEN counterpart.
 
-AuthZEN decision points plug in through an adapter:
+AuthZEN decision points plug in through an adapter. The adapter is an AuthZEN client: it
+sends requests to a decision point and maps the responses into this contract. It never
+serves AuthZEN itself.
 
-| This contract | AuthZEN 1.0 |
+| This contract | AuthZEN 1.0, as the adapter sends or reads it |
 | --- | --- |
 | Subject, filled in by Orka | `subject`, set by the adapter from Orka's subject |
 | `domain` and `verb` | `action.name` |
 | `resource` | `resource` (`type`, `id`, `properties`) |
 | `allow`, `deny` | `decision: true`, `decision: false` |
-| `requires_approval`, `conditional` | `context` fields the adapter understands. An unrecognized `false` is `deny`. |
-| A decision point that fails to answer | `unknown` |
+| `requires_approval`, `conditional` | `context` fields the adapter understands. Any other `false`, without an `error` in `context`, is `deny`. |
+| `unknown` | A `decision: false` whose `context` carries `error` (AuthZEN 1.0 §7.2.1), or a 4xx or 5xx response. The adapter never treats either as `allow` or `deny`. |
 | Check with several actions | `evaluations`, with `execute_all` semantics |
 | Describe for one resource | Action search |
 | Explain, Observe | No equivalent |
