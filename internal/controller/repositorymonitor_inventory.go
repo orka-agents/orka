@@ -451,64 +451,36 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 	if err != nil {
 		return "", false, err
 	}
-	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
-	priority := repositoryMonitorReviewTaskPriority(run)
-	reviewer := *monitor.Spec.Agents.Reviewer
-	repoFullName := owner + "/" + repository
-	prNumber := strconv.FormatInt(pr.Number, 10)
 	workspaceRepo, readCredentialRef := repositoryMonitorReviewTaskGitSource(monitor, owner, repository, pr)
-	annotations := map[string]string{
-		labels.AnnotationRepositoryMonitorName:  monitor.Name,
-		labels.AnnotationMonitorRunID:           run.ID,
-		labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
-		labels.AnnotationMonitorItemNumber:      prNumber,
-		labels.AnnotationMonitorHeadSHA:         pr.HeadSHA,
-		labels.AnnotationGitHubRepository:       repoFullName,
-		labels.AnnotationAgentReadOnly:          booleanTrueValue,
-		labels.AnnotationWorkspaceInitContainer: booleanTrueValue,
+	task, err := buildRepositoryMonitorReviewTask(repositoryMonitorReviewTaskInput{
+		Monitor:           monitor,
+		Owner:             owner,
+		Repository:        repository,
+		PullRequest:       pr,
+		Context:           reviewContext,
+		Plan:              plan,
+		Priority:          repositoryMonitorReviewTaskPriority(run),
+		WorkspaceRepo:     workspaceRepo,
+		ReadCredentialRef: readCredentialRef,
+	})
+	if err != nil {
+		return "", false, err
 	}
+	repoFullName := owner + "/" + repository
+	task.Name = taskName
+	task.Labels = map[string]string{
+		labels.LabelManaged:           booleanTrueValue,
+		labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
+		labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
+		labels.LabelMonitorRun:        labels.SelectorValue(run.ID),
+		labels.LabelGitHubRepository:  labels.SelectorValue(repoFullName),
+		labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
+		labels.LabelGitHubNumber:      labels.SelectorValue(strconv.FormatInt(pr.Number, 10)),
+	}
+	task.Annotations[labels.AnnotationRepositoryMonitorName] = monitor.Name
+	task.Annotations[labels.AnnotationMonitorRunID] = run.ID
 	if strings.TrimSpace(run.CommandEventID) != "" {
-		annotations[repositoryMonitorIssueAnnotationCommandID] = run.CommandEventID
-	}
-	if image := strings.TrimSpace(monitor.Spec.Validation.Image); image != "" {
-		annotations[labels.AnnotationRepositoryValidationImage] = image
-	}
-	if plan.Mode != repositoryMonitorReviewModeFull {
-		annotations[repositoryMonitorAnnotationReviewMode] = plan.Mode
-		annotations[repositoryMonitorAnnotationReviewBase] = plan.baseID()
-	}
-
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      taskName,
-			Namespace: monitor.Namespace,
-			Labels: map[string]string{
-				labels.LabelManaged:           booleanTrueValue,
-				labels.LabelCreatedBy:         repositoryMonitorTaskCreatedBy,
-				labels.LabelRepositoryMonitor: labels.SelectorValue(monitor.Name),
-				labels.LabelMonitorRun:        labels.SelectorValue(run.ID),
-				labels.LabelGitHubRepository:  labels.SelectorValue(repoFullName),
-				labels.LabelGitHubTarget:      labels.SelectorValue(repositoryMonitorPullRequestKind),
-				labels.LabelGitHubNumber:      labels.SelectorValue(prNumber),
-			},
-			Annotations: annotations,
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &reviewer,
-			Prompt:   buildRepositoryMonitorReviewPrompt(monitor, owner, repository, pr, reviewContext, plan),
-			Timeout:  &timeout,
-			Priority: &priority,
-			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
-				AllowedTools: repositoryMonitorReviewAllowedTools(monitor),
-			},
-			Workspace: &corev1alpha1.WorkspaceConfig{
-				Intent:            corev1alpha1.WorkspaceIntentRead,
-				GitRepo:           workspaceRepo,
-				Ref:               pr.HeadSHA,
-				ReadCredentialRef: workspaceCredentialReference(readCredentialRef),
-			},
-		},
+		task.Annotations[repositoryMonitorIssueAnnotationCommandID] = run.CommandEventID
 	}
 	if err := controllerutil.SetControllerReference(monitor, task, r.Scheme); err != nil {
 		return "", false, err
@@ -522,7 +494,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 			return "", false, bindingErr
 		}
 	}
-	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, owner+"/"+repository, repositoryMonitorPullRequestKind, pr.Number)
+	usageWorkID, err := r.prepareMonitorUsageWork(ctx, monitor, repoFullName, repositoryMonitorPullRequestKind, pr.Number)
 	if err != nil {
 		return "", false, err
 	}
@@ -540,6 +512,81 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorReviewTask(ctx cont
 		return "", false, err
 	}
 	return taskName, true, r.retainMonitorUsageTask(ctx, task, usageWorkID, repositoryMonitorCommandIntentReview, pr.Number)
+}
+
+// repositoryMonitorReviewTaskInput holds every input that decides the
+// content of a pull request review Task. The monitor supplies the reviewer
+// Agent, the review and policy settings rendered into the prompt, the
+// validation image, and the allowed tools.
+type repositoryMonitorReviewTaskInput struct {
+	Monitor     *corev1alpha1.RepositoryMonitor
+	Owner       string
+	Repository  string
+	PullRequest repositoryMonitorPullRequest
+	Context     repositoryMonitorReviewContext
+	Plan        repositoryMonitorReviewPlan
+	Priority    int32
+	// WorkspaceRepo is the clone URL for the read-only checkout of the head.
+	WorkspaceRepo string
+	// ReadCredentialRef is the clone credential; nil clones anonymously.
+	ReadCredentialRef *corev1.LocalObjectReference
+}
+
+// buildRepositoryMonitorReviewTask renders a pull request review Task from
+// explicit inputs without reading or writing cluster or monitor state. It
+// sets the spec and the annotations that describe the reviewed subject, the
+// read-only agent mode, the validation image, and the review mode. The caller
+// owns the Task's name, labels, provenance annotations, owner references, and
+// creation.
+func buildRepositoryMonitorReviewTask(in repositoryMonitorReviewTaskInput) (*corev1alpha1.Task, error) {
+	monitor := in.Monitor
+	if monitor == nil {
+		return nil, fmt.Errorf("repository monitor is required")
+	}
+	if monitor.Spec.Agents.Reviewer == nil {
+		return nil, fmt.Errorf("repository monitor %s/%s has no reviewer agent", monitor.Namespace, monitor.Name)
+	}
+	pr := in.PullRequest
+	timeout := metav1.Duration{Duration: repositoryMonitorReviewTaskTimeout}
+	priority := in.Priority
+	reviewer := *monitor.Spec.Agents.Reviewer
+	annotations := map[string]string{
+		labels.AnnotationMonitorItemKind:        repositoryMonitorPullRequestKind,
+		labels.AnnotationMonitorItemNumber:      strconv.FormatInt(pr.Number, 10),
+		labels.AnnotationMonitorHeadSHA:         pr.HeadSHA,
+		labels.AnnotationGitHubRepository:       in.Owner + "/" + in.Repository,
+		labels.AnnotationAgentReadOnly:          booleanTrueValue,
+		labels.AnnotationWorkspaceInitContainer: booleanTrueValue,
+	}
+	if image := strings.TrimSpace(monitor.Spec.Validation.Image); image != "" {
+		annotations[labels.AnnotationRepositoryValidationImage] = image
+	}
+	if in.Plan.Mode != repositoryMonitorReviewModeFull {
+		annotations[repositoryMonitorAnnotationReviewMode] = in.Plan.Mode
+		annotations[repositoryMonitorAnnotationReviewBase] = in.Plan.baseID()
+	}
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   monitor.Namespace,
+			Annotations: annotations,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type:     corev1alpha1.TaskTypeAgent,
+			AgentRef: &reviewer,
+			Prompt:   buildRepositoryMonitorReviewPrompt(monitor, in.Owner, in.Repository, pr, in.Context, in.Plan),
+			Timeout:  &timeout,
+			Priority: &priority,
+			AgentRuntime: &corev1alpha1.AgentRuntimeSpec{
+				AllowedTools: repositoryMonitorReviewAllowedTools(monitor),
+			},
+			Workspace: &corev1alpha1.WorkspaceConfig{
+				Intent:            corev1alpha1.WorkspaceIntentRead,
+				GitRepo:           in.WorkspaceRepo,
+				Ref:               pr.HeadSHA,
+				ReadCredentialRef: workspaceCredentialReference(in.ReadCredentialRef),
+			},
+		},
+	}, nil
 }
 
 // validateRepositoryMonitorReviewTaskMatchesExpected decides whether an
