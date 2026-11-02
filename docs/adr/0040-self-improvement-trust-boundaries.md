@@ -259,6 +259,9 @@ status:
   - the resolved configuration digest of each arm: the prompt text after resolving any
     `configMapRef`, the model, the provider and the profile digest;
   - the runtime image digest both runs used;
+  - the monitor's UID and generation and the review prompt template digest that #976
+    snapshots, since the controller-built review prompt and validation settings shape
+    behavior outside the Agent;
   - the case-set, grader-set, criteria and protected-set digests.
 
   To keep the candidate's resolved configuration fixed, the controller always writes the
