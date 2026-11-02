@@ -90,3 +90,57 @@ func TestCompleteTaskRetriesASessionAppendTheStoreHasNotAccepted(t *testing.T) {
 	}
 	requireSession(false, 1)
 }
+
+// Appending a Task's turn again succeeds without duplicating it, and adds a
+// response that was not available when the turn was first appended.
+func TestSessionAppendOfATaskTurnCanBeRepeated(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "repeat-task", Namespace: "default", UID: "repeat-task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI, Prompt: "summarize the release",
+			SessionRef: &corev1alpha1.SessionReference{Name: "repeat-session", Append: true},
+		},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	backend := r.SessionManager.store.(*sqlite.Store)
+	if err := backend.CreateSession(ctx, &store.SessionRecord{
+		Namespace: "default", Name: "repeat-session", SessionType: "task",
+		ActiveTask: task.Name, ActiveTaskUID: string(task.UID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requireTranscript := func(roles ...string) {
+		t.Helper()
+		transcript, err := backend.LoadTranscript(ctx, "default", "repeat-session", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(transcript))
+		for _, message := range transcript {
+			got = append(got, message.Role)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(roles) {
+			t.Fatalf("transcript roles = %v, want %v", got, roles)
+		}
+	}
+
+	// The first append finds no result yet and stores only the prompt.
+	if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	requireTranscript("user")
+	if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
+		t.Fatalf("repeated append: %v", err)
+	}
+	requireTranscript("user")
+
+	if err := r.ResultStore.SaveResult(ctx, store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, []byte("release summary")); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
+		t.Fatalf("append once the result is available: %v", err)
+	}
+	requireTranscript("user", "assistant")
+}
