@@ -10,6 +10,13 @@
 // concurrent callers, exact nanosecond times and the provider description.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
+//
+// The suite attaches a write envelope to every write it sends without one, as
+// the contract requires of callers: the dataset Describe reports, the epoch
+// the dataset holds (a dataset that holds none is given the suite's first
+// epoch), a new operation ID, the request digest, the current time and the
+// next sequence. Cases that test envelopes send their own. A provider that
+// attaches its own envelopes runs the suite with ProviderAttachesEnvelopes.
 package storagetest
 
 import (
@@ -67,9 +74,12 @@ var stateFamilies = []stateFamily{
 	}},
 }
 
-// RunState runs every state.v1 case against providers from newProvider.
-func RunState(t *testing.T, newProvider StateFactory) {
+// RunState runs every state.v1 case against providers from newProvider. The
+// suite attaches a write envelope to every write it sends without one, unless
+// ProviderAttachesEnvelopes is given.
+func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
+	newProvider = stateFactory(newProvider, collectOptions(options))
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
 			family.run(t, newProvider)
@@ -77,9 +87,11 @@ func RunState(t *testing.T, newProvider StateFactory) {
 	}
 }
 
-// RunArtifacts runs every artifacts.v1 case against providers from newProvider.
-func RunArtifacts(t *testing.T, newProvider ArtifactFactory) {
+// RunArtifacts runs every artifacts.v1 case against providers from
+// newProvider, attaching envelopes as RunState does.
+func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
+	newProvider = artifactFactory(newProvider, collectOptions(options))
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
 	})

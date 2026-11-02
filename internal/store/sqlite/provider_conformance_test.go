@@ -10,7 +10,9 @@ import (
 )
 
 // openConformanceStore opens a fresh file-backed store through the production
-// open path: process lock, schema creation and dataset identity.
+// open path: process lock, schema creation and dataset identity. As in
+// production, it refuses every write without a write envelope; the suite
+// attaches one.
 func openConformanceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
@@ -18,6 +20,7 @@ func openConformanceStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("open SQLite provider: %v", err)
 	}
 	t.Cleanup(func() { _ = backend.Close() })
+	backend.RequireWriteEnvelopes()
 	return backend
 }
 

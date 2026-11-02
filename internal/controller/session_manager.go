@@ -273,12 +273,25 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	if len(messages) == 0 {
 		return nil
 	}
+	// Stable message IDs make appending the same Task's turn again a no-op,
+	// so completion can be retried after a write whose outcome is unknown.
+	if task.UID != "" {
+		for i := range messages {
+			messages[i].ID = taskSessionMessageID(string(task.UID), messages[i].Role)
+		}
+	}
 
 	fenced, ok := m.store.(store.FencedSessionWriteStore)
 	if !ok {
 		return fmt.Errorf("session store does not support fenced transcript writes")
 	}
 	return fenced.AppendMessagesWithLock(ctx, task.Namespace, task.Spec.SessionRef.Name, task.Name, string(task.UID), messages)
+}
+
+// taskSessionMessageID is the stable transcript message ID of one role of a
+// Task's turn.
+func taskSessionMessageID(taskUID, role string) string {
+	return "task:" + taskUID + ":" + role
 }
 
 // LoadTranscript loads the session transcript for a task.
