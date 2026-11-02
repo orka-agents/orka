@@ -5946,12 +5946,7 @@ func (d *ACPDispatcher) resolvePromptPermission(
 		return nil
 	}
 	decision := frozenMCPPermissionDecision(mcpConfiguration, provider, permission)
-	if _, allowed := frozenMCPPermissionAllowed(mcpConfiguration, provider, permission); !allowed {
-		capabilitygap.Record(capabilitygap.Signal{
-			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-			Runtime: provider, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
-		})
-	}
+	_, allowed := frozenMCPPermissionAllowed(mcpConfiguration, provider, permission)
 	request := harnessv2.ResolvePermissionRequest{
 		Protocol:  harnessv2.ProtocolVersion,
 		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
@@ -5965,8 +5960,9 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	retryCtx, cancel := context.WithDeadline(ctx, request.Metadata.ExpiresAt)
 	defer cancel()
 	var lastErr error
+	var resolved *harnessv2.PermissionResolutionResponse
 	err := wait.ExponentialBackoffWithContext(retryCtx, retry.DefaultBackoff, func(ctx context.Context) (bool, error) {
-		_, lastErr = runtimeClient.ResolvePermission(ctx, sessionID, request)
+		resolved, lastErr = runtimeClient.ResolvePermission(ctx, sessionID, request)
 		if retryableUnsentMutationCanRetry(lastErr) {
 			return false, nil
 		}
@@ -5974,6 +5970,14 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	})
 	if wait.Interrupted(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		return lastErr
+	}
+	// Count a denial once: only when the runtime applied it fresh, so a
+	// retried or replayed resolution of the same request adds nothing.
+	if err == nil && !allowed && resolved != nil && resolved.Classification.Class == harnessv2.RequestClassificationFresh {
+		capabilitygap.Record(capabilitygap.Signal{
+			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
+			Runtime: provider, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
+		})
 	}
 	return err
 }
