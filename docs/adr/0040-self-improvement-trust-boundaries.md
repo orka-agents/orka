@@ -123,7 +123,8 @@ repositories:
       - internal/api/*authoriz*
       - internal/admission/**
       - internal/outboundaccess/**
-      - internal/tools/memory_tools.go
+      - internal/tools/**                              # brokered tool registry and implementations
+      - cmd/**                                         # wiring of the registry, broker and flags
       - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
       - internal/controller/acp_mcp_policy*.go         # compiles the tool policy
       - internal/controller/acp_runtime_profile*.go    # pins the policy into the profile
