@@ -20,15 +20,16 @@ func newEmbeddedClient(t *testing.T) *storageclient.Client {
 
 // The shared provider suite also runs through the client, proving that each
 // contract family reaches the in-process provider unchanged and that every
-// write the suite makes without an envelope gets one the provider accepts.
+// write the suite sends without an envelope gets one, from the client, that
+// the provider accepts.
 func TestClientStateConformance(t *testing.T) {
 	storagetest.RunState(t, func(t *testing.T) storagev1.StateProvider {
 		return newEmbeddedClient(t)
-	})
+	}, storagetest.ProviderAttachesEnvelopes())
 }
 
 func TestClientArtifactConformance(t *testing.T) {
 	storagetest.RunArtifacts(t, func(t *testing.T) storagev1.ArtifactProvider {
 		return newEmbeddedClient(t)
-	})
+	}, storagetest.ProviderAttachesEnvelopes())
 }

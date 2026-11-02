@@ -10,6 +10,13 @@
 // concurrent callers, exact nanosecond times and the provider description.
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
+//
+// The suite attaches a write envelope to every write it sends without one, as
+// the contract requires of callers: the dataset Describe reports, the epoch
+// the dataset holds (a dataset that holds none is given the suite's first
+// epoch), a new operation ID, the request digest, the current time and the
+// next sequence. Cases that test envelopes send their own. A provider that
+// attaches its own envelopes runs the suite with ProviderAttachesEnvelopes.
 package storagetest
 
 import (
@@ -73,10 +80,13 @@ var stateFamilies = []stateFamily{
 }
 
 // RunState runs every state.v1 case against providers from newProvider, and
-// the optional cases that options enable.
+// the optional cases that options enable. The suite attaches a write
+// envelope to every write it sends without one, unless
+// ProviderAttachesEnvelopes is given.
 func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
 	selected := collectOptions(options)
+	newProvider = stateFactory(newProvider, selected)
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
 			family.run(t, newProvider)
@@ -86,10 +96,12 @@ func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 }
 
 // RunArtifacts runs every artifacts.v1 case against providers from
-// newProvider, and the optional cases that options enable.
+// newProvider, and the optional cases that options enable, attaching
+// envelopes as RunState does.
 func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
 	selected := collectOptions(options)
+	newProvider = artifactFactory(newProvider, selected)
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
 	})
@@ -103,23 +115,6 @@ func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) 
 		runInstallations(t, newProvider)
 	})
 	runOptionalFamilies(t, newProvider, artifactWriteCases, selected)
-}
-
-// Option enables optional cases of RunState and RunArtifacts that need a
-// harness only the provider's own tests can supply.
-type Option func(*suiteOptions)
-
-type suiteOptions struct {
-	maintenance *MaintenanceHarness
-	durability  *DurabilityHarness
-}
-
-func collectOptions(options []Option) suiteOptions {
-	var selected suiteOptions
-	for _, option := range options {
-		option(&selected)
-	}
-	return selected
 }
 
 // runOptionalFamilies runs the cases the options enable over every write
@@ -136,6 +131,48 @@ func runOptionalFamilies[P suiteProvider](t *testing.T, newProvider func(t *test
 			runDurability(t, newProvider, cases, *selected.durability)
 		})
 	}
+}
+
+// harnessProvider returns the provider a harness is given: the one the
+// factory returned, which the suite may have wrapped to attach envelopes.
+func harnessProvider(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if wrapped, ok := provider.(suiteWrapped); ok {
+		return wrapped.unwrapped()
+	}
+	return provider
+}
+
+// rewrapHarnessProvider wraps a provider a harness returned in place of
+// replaced, as the suite wrapped replaced.
+func rewrapHarnessProvider(replaced, returned storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if wrapped, ok := replaced.(suiteWrapped); ok {
+		return wrapped.rewrap(returned)
+	}
+	return returned
+}
+
+// suiteWrapped is a provider the suite wrapped to attach envelopes.
+type suiteWrapped interface {
+	unwrapped() storagev1.ProviderDescriber
+	rewrap(storagev1.ProviderDescriber) storagev1.ProviderDescriber
+}
+
+func (e envelopedState) unwrapped() storagev1.ProviderDescriber { return e.StateProvider }
+
+func (e envelopedState) rewrap(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if state, ok := provider.(storagev1.StateProvider); ok {
+		return wrapState(state)
+	}
+	return provider
+}
+
+func (e envelopedArtifacts) unwrapped() storagev1.ProviderDescriber { return e.ArtifactProvider }
+
+func (e envelopedArtifacts) rewrap(provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
+	if artifacts, ok := provider.(storagev1.ArtifactProvider); ok {
+		return wrapArtifacts(artifacts)
+	}
+	return provider
 }
 
 // suiteProvider is what the cases that every contract shares need from a

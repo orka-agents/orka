@@ -10,7 +10,8 @@ import (
 // MaintenanceHarness puts a provider's dataset into the migrating state and
 // back, as a schema migration does. A provider supplies it through
 // WithMaintenance when its tests can hold the dataset in that state; the
-// suite then checks the dataset-state step of every write.
+// suite then checks the dataset-state step of every write. Enter and Exit
+// are given the provider the factory returned.
 type MaintenanceHarness struct {
 	// Enter puts the dataset that provider serves into the migrating state,
 	// as a migration does once in-flight writes have finished.
@@ -52,7 +53,7 @@ func runMaintenance[P suiteProvider](t *testing.T, newProvider func(t *testing.T
 				RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
 			}
 
-			harness.Enter(t, provider)
+			harness.Enter(t, harnessProvider(provider))
 			requireDatasetState(t, provider, storagev1.DatasetMigrating)
 			refused := callWrite(ctx, t, provider, c, envelope, suiteFence)
 			require.ErrorIs(t, refused.err, storagev1.ErrNotReady, "a write while the dataset is migrating")
@@ -60,7 +61,7 @@ func runMaintenance[P suiteProvider](t *testing.T, newProvider func(t *testing.T
 			_, err := provider.ResolveOperation(ctx, resolve)
 			require.ErrorIs(t, err, storagev1.ErrNotReady, "resolution records nothing while the dataset is migrating")
 			requireReadServed(t, provider)
-			harness.Exit(t, provider)
+			harness.Exit(t, harnessProvider(provider))
 			requireDatasetState(t, provider, storagev1.DatasetReady)
 			require.Equal(t, baseline, c.observe(t, provider), "a write refused while the dataset was migrating changed state")
 
@@ -72,7 +73,7 @@ func runMaintenance[P suiteProvider](t *testing.T, newProvider func(t *testing.T
 			after := c.observe(t, provider)
 			migratingAfter := observeIfSet(t, provider, observeMigrating)
 
-			harness.Enter(t, provider)
+			harness.Enter(t, harnessProvider(provider))
 			requireSameOutcome(t, first, callWrite(ctx, t, provider, c, envelope, suiteFence))
 			observeWhileMigrating(t, provider, observeMigrating, migratingAfter, "a replay while the dataset is migrating changed state")
 			resolved, err := provider.ResolveOperation(ctx, resolve)
@@ -82,7 +83,7 @@ func runMaintenance[P suiteProvider](t *testing.T, newProvider func(t *testing.T
 			require.ErrorIs(t, callWrite(ctx, t, provider, c, fresh, suiteFence).err, storagev1.ErrNotReady)
 			observeWhileMigrating(t, provider, observeMigrating, migratingAfter, "a refused write changed state")
 			requireReadServed(t, provider)
-			harness.Exit(t, provider)
+			harness.Exit(t, harnessProvider(provider))
 			require.Equal(t, after, c.observe(t, provider),
 				"a replay or a refused write while the dataset was migrating changed state")
 		})

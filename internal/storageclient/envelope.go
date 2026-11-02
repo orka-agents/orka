@@ -18,6 +18,7 @@ import (
 )
 
 //go:generate go run ./internal/envelopegen/cmd/envelopegen storageclient envelope_gen.go
+//go:generate go run ./internal/envelopegen/cmd/envelopegen storagetest ../../pkg/storage/v1/storagetest/envelope_gen.go
 
 // FenceSource tells the storage client which dataset serves a contract and
 // the controller epoch fence its writes carry there. The controller epoch

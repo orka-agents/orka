@@ -11,7 +11,9 @@ import (
 )
 
 // openConformanceStore opens a fresh file-backed store through the production
-// open path: process lock, schema creation and dataset identity.
+// open path: process lock, schema creation and dataset identity. As in
+// production, it refuses every write without a write envelope; the suite
+// attaches one.
 func openConformanceStore(t *testing.T) *sqlite.Store {
 	t.Helper()
 	backend, err := sqlite.OpenLockedStore(filepath.Join(t.TempDir(), "orka.db"))
@@ -19,12 +21,13 @@ func openConformanceStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("open SQLite provider: %v", err)
 	}
 	t.Cleanup(func() { _ = backend.Close() })
+	backend.RequireWriteEnvelopes()
 	return backend
 }
 
 // conformanceHarnesses are the optional suite harnesses SQLite supplies. A
 // restart closes the store and opens its file again through the production
-// open path. SQLite migrates its schema only while it opens, under its
+// open path, refusing writes without an envelope as before. SQLite migrates its schema only while it opens, under its
 // process lock, so the maintenance harness holds the dataset in the migrating
 // state through a test hook. SQLite declares no automatic switch.
 func conformanceHarnesses() []storagetest.Option {
@@ -36,6 +39,9 @@ func conformanceHarnesses() []storagetest.Option {
 			Exit: func(t *testing.T, provider storagev1.ProviderDescriber) {
 				sqlite.SetDatasetStateForTest(provider.(*sqlite.Store), storagev1.DatasetReady)
 			},
+			// The suite sends GetMessages and IsLocked with an envelope, as
+			// every catalog write, and SQLite refuses them while migrating.
+			RefusesReadingWrites: true,
 		}),
 		storagetest.WithDurability(storagetest.DurabilityHarness{
 			Restart: func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber {
@@ -46,6 +52,7 @@ func conformanceHarnesses() []storagetest.Option {
 				reopened, err := sqlite.OpenLockedStore(path)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = reopened.Close() })
+				reopened.RequireWriteEnvelopes()
 				return reopened
 			},
 		}),
