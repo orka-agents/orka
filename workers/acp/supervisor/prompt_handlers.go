@@ -1632,6 +1632,20 @@ func workspaceDeltaSegmentMatches(pattern, segment string) bool {
 	return err == nil && matched
 }
 
+// workspaceDeltaPathViolation returns the rejection message for one changed
+// path, or "" when the path passes. The repository-control check runs first so
+// a protected file is always reported as a control-path denial, even when it is
+// also outside the allowlist.
+func workspaceDeltaPathViolation(workspaceRelativeRoot, changedPath string, limits harnessv2.WorkspaceDeltaLimits) string {
+	if limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath) {
+		return harnessv2.WorkspaceDeltaRepositoryControlPathMessage
+	}
+	if !workspaceDeltaPathAllowed(changedPath, limits.AllowedPaths) {
+		return harnessv2.WorkspaceDeltaDisallowedPathMessage
+	}
+	return ""
+}
+
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {
 	return workspaceDeltaRepositoryControlPath(path.Join(strings.TrimSpace(workspaceRelativeRoot), changedPath))
 }
@@ -1965,14 +1979,9 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, changedPath := range changedPaths {
-		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
-			s.poisonSession(state, harnessv2.WorkspaceDeltaDisallowedPathMessage)
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaDisallowedPathMessage, nil, false)
-			return
-		}
-		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
-			s.poisonSession(state, harnessv2.WorkspaceDeltaRepositoryControlPathMessage)
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaRepositoryControlPathMessage, nil, false)
+		if message := workspaceDeltaPathViolation(state.workspaceRelativeRoot, changedPath, request.Limits); message != "" {
+			s.poisonSession(state, message)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, message, nil, false)
 			return
 		}
 	}
