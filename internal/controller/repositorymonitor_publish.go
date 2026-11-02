@@ -33,23 +33,30 @@ const (
 
 	repositoryMonitorPublishEventComment = "COMMENT"
 
-	repositoryMonitorPublishModeSummaryOnly                     = "summary_only"
-	repositoryMonitorPublishModeSummaryWithInlineFindings       = "summary_with_inline_findings"
-	repositoryMonitorPublishSameHeadPolicySkip                  = "skip"
-	repositoryMonitorPublishDefaultInlineMinPriority            = "P2"
-	repositoryMonitorPublishDefaultInlineMaxComments      int32 = 10
+	repositoryMonitorPublishModeSummaryOnly               = "summary_only"
+	repositoryMonitorPublishModeSummaryWithInlineFindings = "summary_with_inline_findings"
+	repositoryMonitorPublishSameHeadPolicySkip            = "skip"
+	repositoryMonitorPublishSameHeadPolicyUpdate          = "update"
+	// repositoryMonitorPublishReviewReason is the audit reason of review writes.
+	repositoryMonitorPublishReviewReason                   = "publish_review"
+	repositoryMonitorPublishDefaultInlineMinPriority       = "P2"
+	repositoryMonitorPublishDefaultInlineMaxComments int32 = 10
 
-	repositoryMonitorPublishSkipDisabled                   = "publish_disabled"
-	repositoryMonitorPublishSkipMissingGitSecret           = "missing_git_secret"
-	repositoryMonitorPublishSkipInvalidReviewResult        = "invalid_review_result"
-	repositoryMonitorPublishSkipRepoMismatch               = "repo_mismatch"
-	repositoryMonitorPublishSkipPRNumberMismatch           = "pr_number_mismatch"
-	repositoryMonitorPublishSkipHeadSHAChanged             = "head_sha_changed"
-	repositoryMonitorPublishSkipPRClosed                   = "pr_closed"
-	repositoryMonitorPublishSkipBaseBranchMismatch         = "base_branch_mismatch"
-	repositoryMonitorPublishSkipDraftPR                    = "draft_pr"
-	repositoryMonitorPublishSkipBlockedLabel               = "blocked_label"
-	repositoryMonitorPublishSkipDuplicateSameHead          = "duplicate_same_head"
+	repositoryMonitorPublishSkipDisabled            = "publish_disabled"
+	repositoryMonitorPublishSkipMissingGitSecret    = "missing_git_secret"
+	repositoryMonitorPublishSkipInvalidReviewResult = "invalid_review_result"
+	repositoryMonitorPublishSkipRepoMismatch        = "repo_mismatch"
+	repositoryMonitorPublishSkipPRNumberMismatch    = "pr_number_mismatch"
+	repositoryMonitorPublishSkipHeadSHAChanged      = "head_sha_changed"
+	repositoryMonitorPublishSkipPRClosed            = "pr_closed"
+	repositoryMonitorPublishSkipBaseBranchMismatch  = "base_branch_mismatch"
+	repositoryMonitorPublishSkipDraftPR             = "draft_pr"
+	repositoryMonitorPublishSkipBlockedLabel        = "blocked_label"
+	repositoryMonitorPublishSkipNotIncluded         = "not_included"
+	repositoryMonitorPublishSkipDuplicateSameHead   = "duplicate_same_head"
+	// repositoryMonitorPublishSkipUpdatedPublishedReview marks a review that
+	// was applied by rewriting the review already published for its head.
+	repositoryMonitorPublishSkipUpdatedPublishedReview     = "updated_published_review"
 	repositoryMonitorPublishSkipSecuritySensitiveNotPublic = "security_sensitive_not_public"
 	repositoryMonitorPublishSkipBodyTooLarge               = "body_too_large"
 	repositoryMonitorPublishSkipInlineMappingFailed        = "inline_mapping_failed"
@@ -62,10 +69,13 @@ const (
 	repositoryMonitorPublishFailureGitHubPermanent        = "github_permanent_error"
 	repositoryMonitorPublishFailureGitHubAPI              = "github_api_error"
 
-	repositoryMonitorReviewBodyMaxBytes    = 60000
-	repositoryMonitorReviewInlineMaxRunes  = 4000
-	repositoryMonitorReviewTextMaxRunes    = 4000
-	repositoryMonitorReviewFindingMaxRunes = 1200
+	repositoryMonitorReviewBodyMaxBytes = 60000
+	// repositoryMonitorReviewFindingsBudgetBytes caps the body through its
+	// findings lists, leaving room for the tests section and marker.
+	repositoryMonitorReviewFindingsBudgetBytes = 40000
+	repositoryMonitorReviewInlineMaxRunes      = 4000
+	repositoryMonitorReviewTextMaxRunes        = 4000
+	repositoryMonitorReviewFindingMaxRunes     = 1200
 )
 
 type repositoryMonitorPullRequestReviewRequest struct {
@@ -133,8 +143,14 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if event := effectiveRepositoryMonitorPublishEvent(publish); event != repositoryMonitorPublishEventComment {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported publish event", item.Number), map[string]any{eventField: event})
 	}
-	if policy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish); policy != repositoryMonitorPublishSameHeadPolicySkip {
-		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": policy})
+	if pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record); err != nil {
+		return err
+	} else if pending {
+		return skip(repositoryMonitorPublishSkipExhaustivePassPending, fmt.Sprintf("Pull request #%d review publishing deferred: another exhaustive review pass is due", item.Number), nil)
+	}
+	sameHeadPolicy := effectiveRepositoryMonitorPublishSameHeadPolicy(publish)
+	if sameHeadPolicy != repositoryMonitorPublishSameHeadPolicySkip && sameHeadPolicy != repositoryMonitorPublishSameHeadPolicyUpdate {
+		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: unsupported same-head policy", item.Number), map[string]any{"sameHeadPolicy": sameHeadPolicy})
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
 		return skip(repositoryMonitorPublishSkipInvalidReviewResult, fmt.Sprintf("Pull request #%d review publishing skipped: review task did not succeed", item.Number), map[string]any{"taskPhase": task.Status.Phase})
@@ -221,12 +237,24 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, currentPR.Labels); blockedLabel != "" {
 		return skip(repositoryMonitorPublishSkipBlockedLabel, fmt.Sprintf("Pull request #%d review publishing skipped: blocked label %q is present", item.Number, blockedLabel), map[string]any{"label": blockedLabel})
 	}
+	if !repositoryMonitorPullRequestReviewed(monitor.Spec, *currentPR) {
+		return skip(repositoryMonitorPublishSkipNotIncluded, fmt.Sprintf("Pull request #%d review publishing skipped: no review label is present", item.Number), nil)
+	}
 
-	exists, err := r.repositoryMonitorReviewPublishRecordExists(ctx, monitor, item, reviewedHead)
+	published, err := r.repositoryMonitorSucceededReviewPublishRecord(ctx, monitor, item, reviewedHead)
 	if err != nil {
 		return err
 	}
-	if exists {
+	if published != nil {
+		if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate {
+			updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, published, token, owner, repository)
+			if err != nil {
+				return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: repositoryMonitorOperationUpdateReview})
+			}
+			if updated {
+				return nil
+			}
+		}
 		return skip(repositoryMonitorPublishSkipDuplicateSameHead, fmt.Sprintf("Pull request #%d review publishing skipped: same head was already published", item.Number), nil)
 	}
 	matchedReview, matchedPublishID, err := r.repositoryMonitorGitHubReviewMarkerMatch(ctx, monitor, item, owner, repository, token, reviewedHead)
@@ -237,7 +265,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 		mutationID := "ghmut-" + repositoryMonitorShortHash(matchedPublishID+"-submit-review")
 		mutation, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 		if errors.Is(mutationErr, store.ErrNotFound) {
-			mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", GitHubURL: matchedReview.HTMLURL, ExternalID: strconv.FormatInt(matchedReview.ID, 10), Status: repositoryMonitorRunPhaseSucceeded}
+			mutation = &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: repositoryMonitorPublishReviewReason, GitHubURL: matchedReview.HTMLURL, ExternalID: strconv.FormatInt(matchedReview.ID, 10), Status: repositoryMonitorRunPhaseSucceeded}
 			if err := r.recordRepositoryMonitorGitHubMutation(ctx, monitor, mutation); err != nil {
 				return err
 			}
@@ -260,6 +288,17 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 			existingPublish.UpdatedAt = time.Now()
 			if err := r.Store.UpdateReviewPublishRecord(ctx, existingPublish); err != nil {
 				return err
+			}
+			// The recovered review is the head's publication, so the update
+			// policy applies to it as it would to a recorded one.
+			if sameHeadPolicy == repositoryMonitorPublishSameHeadPolicyUpdate && existingPublish.ReviewRecordID != record.ID {
+				updated, err := r.updatePublishedRepositoryMonitorReview(ctx, monitor, item, task, record, existingPublish, token, owner, repository)
+				if err != nil {
+					return fail(repositoryMonitorGitHubPublishFailureReason(err), err.Error(), map[string]any{operationField: repositoryMonitorOperationUpdateReview})
+				}
+				if updated {
+					return nil
+				}
 			}
 		} else if !errors.Is(getErr, store.ErrNotFound) {
 			return getErr
@@ -301,7 +340,7 @@ func (r *RepositoryMonitorReconciler) publishRepositoryMonitorReview(ctx context
 	}
 
 	mutationID := "ghmut-" + repositoryMonitorShortHash(publishRecord.ID+"-submit-review")
-	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: "publish_review", Status: repositoryMonitorAutomergeStateStarted}
+	mutation := &store.GitHubMutationRecord{ID: mutationID, RunID: repositoryMonitorReviewRunID(task), Operation: "submit_review", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: item.Number, TargetSHA: reviewedHead, Reason: repositoryMonitorPublishReviewReason, Status: repositoryMonitorAutomergeStateStarted}
 	existing, mutationErr := r.Store.GetGitHubMutationRecord(ctx, monitor.Namespace, mutationID)
 	if mutationErr == nil {
 		mutation = existing
@@ -363,7 +402,9 @@ func (r *RepositoryMonitorReconciler) publishPendingRepositoryMonitorReviewRecor
 		}
 		for i := range items {
 			item := items[i]
-			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued {
+			// A retired item gets no publication retries until inventory
+			// brings it back into scope.
+			if strings.TrimSpace(item.LastReviewID) == "" || item.LastVerdict == repositoryMonitorRunPhaseQueued || item.State == repositoryMonitorItemStateOutOfScope {
 				continue
 			}
 			record, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
@@ -466,7 +507,8 @@ func repositoryMonitorPublishSkipReasonRecoverable(reason string) bool {
 		repositoryMonitorPublishSkipPRClosed,
 		repositoryMonitorPublishSkipBaseBranchMismatch,
 		repositoryMonitorPublishSkipDraftPR,
-		repositoryMonitorPublishSkipBlockedLabel:
+		repositoryMonitorPublishSkipBlockedLabel,
+		repositoryMonitorPublishSkipNotIncluded:
 		return true
 	default:
 		return false
@@ -641,7 +683,7 @@ func repositoryMonitorOwnerRepository(monitor *corev1alpha1.RepositoryMonitor) (
 	return security.ParseGitHubRepositoryURL(monitor.Spec.RepoURL)
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPublishRecordExists(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (bool, error) {
+func (r *RepositoryMonitorReconciler) repositoryMonitorSucceededReviewPublishRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, headSHA string) (*store.ReviewPublishRecord, error) {
 	records, _, err := r.Store.ListReviewPublishRecords(ctx, store.ReviewPublishRecordFilter{
 		Namespace:   monitor.Namespace,
 		MonitorName: monitor.Name,
@@ -651,10 +693,10 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewPublishRecordExists
 		Phase:       repositoryMonitorPublishPhaseSucceeded,
 		Limit:       1,
 	})
-	if err != nil {
-		return false, err
+	if err != nil || len(records) == 0 {
+		return nil, err
 	}
-	return len(records) > 0, nil
+	return &records[0], nil
 }
 
 func (r *RepositoryMonitorReconciler) renderRepositoryMonitorGitHubReview(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, record *store.ReviewRecord, publishID, token, owner, repository string) (string, []repositoryMonitorPullRequestReviewComment, error) {
@@ -668,7 +710,7 @@ func (r *RepositoryMonitorReconciler) renderRepositoryMonitorGitHubReview(ctx co
 		if err != nil {
 			return "", nil, err
 		}
-		comments = repositoryMonitorInlineCommentsForFindings(record, findings, commentable, monitor.Spec.Review.Publish)
+		comments = repositoryMonitorInlineCommentsForFindings(record, repositoryMonitorNewInlineFindings(record, findings), commentable, monitor.Spec.Review.Publish)
 	}
 	body := renderRepositoryMonitorReviewBody(monitor, item, task, record, publishID, findings)
 	return body, comments, nil
@@ -697,16 +739,76 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	}
 	b.WriteString(summary)
 	b.WriteString("\n\n")
+	var open, outside, fixed []repositoryMonitorReviewFinding
+	for _, finding := range findings {
+		if finding.SecuritySensitive && !monitor.Spec.Review.Publish.PostSecuritySensitive {
+			continue
+		}
+		switch {
+		case !repositoryMonitorFindingOpen(finding):
+			if finding.ResolvedHead == record.HeadSHA {
+				fixed = append(fixed, finding)
+			}
+		case finding.OutsideChanges && !repositoryMonitorFindingBlocks(monitor.Spec, finding):
+			outside = append(outside, finding)
+		default:
+			open = append(open, finding)
+		}
+	}
+	// Many findings, as a final exhaustive pass can combine, could push the
+	// body past GitHub's limit; past the budget, findings shrink to their
+	// titles and then are only counted. The record keeps every finding.
+	// Room is reserved for every later finding's title, so detail goes to
+	// the first findings without crowding out the rest.
+	reserved := 0
+	for _, list := range [][]repositoryMonitorReviewFinding{open, fixed, outside} {
+		for _, finding := range list {
+			reserved += len(renderRepositoryMonitorFindingTitle(finding)) + len("- \n")
+		}
+	}
+	shortened, omitted := 0, 0
+	writeFinding := func(finding repositoryMonitorReviewFinding, full, short string) {
+		reserved -= len(renderRepositoryMonitorFindingTitle(finding)) + len("- \n")
+		switch {
+		case b.Len()+len("- \n")+len(full)+reserved <= repositoryMonitorReviewFindingsBudgetBytes:
+			b.WriteString("- " + full + "\n")
+		case b.Len()+len("- \n")+len(short) <= repositoryMonitorReviewFindingsBudgetBytes:
+			b.WriteString("- " + short + "\n")
+			shortened++
+		default:
+			omitted++
+		}
+	}
 	b.WriteString("### Findings\n\n")
-	if len(findings) == 0 {
+	if len(open) == 0 {
 		b.WriteString("No findings reported.\n\n")
 	} else {
-		for _, finding := range findings {
-			b.WriteString("- ")
-			b.WriteString(renderRepositoryMonitorFindingSummary(finding))
-			b.WriteString("\n")
+		for _, finding := range open {
+			since := ""
+			if finding.FirstHead != "" && finding.FirstHead != record.HeadSHA {
+				since = fmt.Sprintf(" _(open since `%s`)_", shortRepositoryMonitorHead(finding.FirstHead))
+			}
+			writeFinding(finding, renderRepositoryMonitorFindingSummary(finding)+since, renderRepositoryMonitorFindingTitle(finding)+since)
 		}
 		b.WriteString("\n")
+	}
+	if len(fixed) > 0 {
+		b.WriteString("### Fixed in this commit\n\n")
+		for _, finding := range fixed {
+			title := renderRepositoryMonitorFindingTitle(finding)
+			writeFinding(finding, title, title)
+		}
+		b.WriteString("\n")
+	}
+	if len(outside) > 0 {
+		b.WriteString("### Outside the new changes (not blocking)\n\n")
+		for _, finding := range outside {
+			writeFinding(finding, renderRepositoryMonitorFindingSummary(finding), renderRepositoryMonitorFindingTitle(finding))
+		}
+		b.WriteString("\n")
+	}
+	if shortened > 0 || omitted > 0 {
+		fmt.Fprintf(&b, "_To fit GitHub's size limit, %d findings are shown by title only and %d are omitted; Orka's review record keeps every finding._\n\n", shortened, omitted)
 	}
 	b.WriteString("### Tests\n\n")
 	validationStatus := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(record.ValidationStatus, repositoryMonitorValidationStatusNotRun), 80)
@@ -727,6 +829,25 @@ func renderRepositoryMonitorReviewBody(monitor *corev1alpha1.RepositoryMonitor, 
 	b.WriteString("\n")
 	b.WriteString(repositoryMonitorReviewMarker(monitor, item.Number, record.HeadSHA, repositoryMonitorReviewRunID(task), record.ID, publishID))
 	return b.String()
+}
+
+// repositoryMonitorNewInlineFindings returns the open findings first
+// reported at record's head inside the reviewed changes. Earlier findings
+// already have their inline threads.
+func repositoryMonitorNewInlineFindings(record *store.ReviewRecord, findings []repositoryMonitorReviewFinding) []repositoryMonitorReviewFinding {
+	inline := make([]repositoryMonitorReviewFinding, 0, len(findings))
+	for _, finding := range findings {
+		if repositoryMonitorFindingOpen(finding) && !finding.OutsideChanges && (finding.FirstHead == "" || finding.FirstHead == record.HeadSHA) {
+			inline = append(inline, finding)
+		}
+	}
+	return inline
+}
+
+func renderRepositoryMonitorFindingTitle(finding repositoryMonitorReviewFinding) string {
+	priority := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(finding.Priority, "P?"), 16)
+	title := sanitizeRepositoryMonitorReviewText(firstNonEmptyString(finding.Title, "Untitled finding"), 240)
+	return fmt.Sprintf("%s: **%s**", priority, title)
 }
 
 func renderRepositoryMonitorFindingSummary(finding repositoryMonitorReviewFinding) string {
@@ -791,7 +912,11 @@ func renderRepositoryMonitorInlineFinding(record *store.ReviewRecord, finding re
 		b.WriteString(recommendation)
 		b.WriteString("\n\n")
 	}
-	fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
+	if finding.ID != "" {
+		fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s finding=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160), sanitizeRepositoryMonitorReviewText(finding.ID, 40))
+	} else {
+		fmt.Fprintf(&b, "<!-- orka:repo-monitor-inline review=%s -->", sanitizeRepositoryMonitorReviewText(record.ID, 160))
+	}
 	return boundedString(b.String(), repositoryMonitorReviewInlineMaxRunes)
 }
 
@@ -1052,6 +1177,18 @@ func (r *RepositoryMonitorReconciler) listRepositoryMonitorCompareFiles(ctx cont
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx context.Context, owner, repository, token, baseSHA, headSHA string, page int) ([]repositoryMonitorPullRequestFileResponse, error) {
+	compare, err := r.fetchRepositoryMonitorCompare(ctx, owner, repository, token, baseSHA, headSHA, page)
+	return compare.Files, err
+}
+
+// repositoryMonitorCompareResponse is GitHub's comparison of two commits.
+// Status is ahead when head builds on base.
+type repositoryMonitorCompareResponse struct {
+	Status string                                     `json:"status"`
+	Files  []repositoryMonitorPullRequestFileResponse `json:"files"`
+}
+
+func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompare(ctx context.Context, owner, repository, token, baseSHA, headSHA string, page int) (repositoryMonitorCompareResponse, error) {
 	baseURL := strings.TrimRight(r.GitHubAPIBaseURL, "/")
 	if baseURL == "" {
 		baseURL = repositoryMonitorDefaultGitHubAPIBaseURL
@@ -1059,28 +1196,26 @@ func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorCompareFilesPage(ctx
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/compare/%s...%s?per_page=%d&page=%d", baseURL, url.PathEscape(owner), url.PathEscape(repository), url.PathEscape(baseSHA), url.PathEscape(headSHA), repositoryMonitorGitHubPerPage, page)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		return repositoryMonitorCompareResponse{}, err
 	}
 	repositoryMonitorSetGitHubHeaders(req, token)
 	resp, err := repositoryMonitorHTTPClient(r).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub compare request failed: %w", err)
+		return repositoryMonitorCompareResponse{}, fmt.Errorf("GitHub compare request failed: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	respBody, err := readRepositoryMonitorGitHubResponse(resp.Body, repositoryMonitorGitHubResponseLimit)
 	if err != nil {
-		return nil, err
+		return repositoryMonitorCompareResponse{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &repositoryMonitorGitHubAPIError{Operation: "compare request", StatusCode: resp.StatusCode, Body: string(respBody)}
+		return repositoryMonitorCompareResponse{}, &repositoryMonitorGitHubAPIError{Operation: "compare request", StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
-	var response struct {
-		Files []repositoryMonitorPullRequestFileResponse `json:"files"`
-	}
+	var response repositoryMonitorCompareResponse
 	if err := json.Unmarshal(respBody, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse GitHub compare response: %w", err)
+		return repositoryMonitorCompareResponse{}, fmt.Errorf("failed to parse GitHub compare response: %w", err)
 	}
-	return response.Files, nil
+	return response, nil
 }
 
 func (r *RepositoryMonitorReconciler) fetchRepositoryMonitorPullRequestFilesPage(ctx context.Context, owner, repository, token string, number int64, page int) ([]repositoryMonitorPullRequestFileResponse, error) {
