@@ -128,6 +128,11 @@ repositories:
       - internal/controller/acp_dispatcher*.go         # dispatch-time checks
       - internal/controller/agent_execution_binding*.go # canary routing
       - internal/controller/evalrun*.go                # evaluator
+      - internal/controller/runtime_pool_controller*.go # token and network isolation
+      - internal/controller/repositorymonitor_issue_actions.go # implementation limits
+      - internal/controller/repositorymonitor_repair.go # repair limits
+      - internal/publisher/**                          # credential and publication boundary
+      - internal/store/**                              # trial, decision and promotion records
       - workers/acp/supervisor/**                      # deniedPaths check
       - api/v1alpha1/**                                # the fields that carry these rules
       - AGENTS.md
@@ -141,7 +146,9 @@ gate:                          # improvement thresholds, see #994
 
 Every file that implements an enforcement point in the table above belongs in the
 protected set for the Orka repository. #992 adds a test that fails when an enforcement
-point's file is missing from the shipped example, so the two lists cannot drift apart.
+point's file is missing from the shipped example, so the two lists cannot drift apart. The
+test reads the file paths straight from the table's "Enforcement point" column, so adding a
+row without protecting its file fails the build.
 
 The controller validates it and records its digest. A missing or invalid ConfigMap
 disables proposer flows; it never means "nothing is protected". Resources are protected
@@ -233,7 +240,10 @@ status:
 
 - **Incomparable** when the two runs differ in anything other than the candidate's
   promotable fields: case-set, grader-set or criteria digest, trials, monitor generation,
-  runtime image, or the subject. Subjects are compared after removing
+  runtime image, or the subject. For a new capability the case sets differ by design:
+  the check instead requires the candidate's cases to be exactly the baseline's case set
+  plus the criteria case set whose digest is frozen in `criteria`, and compares the two
+  runs only on the shared regression subset. Subjects are compared after removing
   `repositoryMonitorReview.agentRef`, the one field that is expected to differ; every
   other subject field must match. Fail closed.
 - **New capabilities** have nothing to improve on, so their experiment differs in two
@@ -328,9 +338,16 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   fail instead of merging into a configuration neither arm tested.
 - **New status field `Agent.status.rollout`**:
   `{candidate: {name, uid, generation, digest}, percent, decisionID}`. Only the
-  controller can write it. At binding (`agent_execution_binding.go`), a new Task that
-  names the stable Agent goes to the candidate when a hash of its UID modulo 100 is
-  below `percent`. The binding then records the candidate's UID and generation through
+  controller can write it. At binding (`agent_execution_binding.go`), the arm is chosen
+  once per Session: a Task that starts a new Session, or a standalone Task, goes to the
+  candidate when a hash of that Session's or Task's UID modulo 100 is below `percent`. A
+  Task that continues an existing Session always takes the arm its Session already has,
+  because Session configuration is frozen (`internal/store/kube/session_control.go`
+  rejects a different configuration digest). After an abort or rollback, continuing a
+  candidate-arm Session therefore fails with the existing `SessionConfigurationMismatch`
+  and needs a new Session. Tasks owned by an EvalRun are never routed: the evaluator
+  binds each trial directly to the Agent its EvalRun froze, so a canary cannot
+  contaminate a baseline or candidate run. The binding then records the candidate's UID and generation through
   the existing fields, and the controller-managed annotation `orka.ai/rollout-arm`
   records which arm the Task took. Before routing each new Task to the candidate,
   binding checks that `status.rollout.decisionID` is still the latest decision for its
@@ -339,10 +356,19 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   sets a `RolloutInvalid` condition, and keeps doing so until a promoter aborts or
   starts a new canary. A protected-set or criteria change, or a later rejection,
   therefore stops a canary even though no Agent changed.
-- **Promotion log** in the store. `promote` copies the candidate's promotable fields
-  into the stable Agent's spec, clears `status.rollout`, and appends a record with the
-  previous values and the resulting generation and digest. `rollback` needs no new
-  evidence, but it is a compare-and-swap: the live stable Agent's generation and
+- **Promotion log** in the store. `promote` runs in three durable steps so a crash
+  cannot lose the rollback record: (1) insert a `pending` record holding the decision,
+  the previous values with the prompt *resolved to text* (so rollback does not depend on
+  a ConfigMap that may change or disappear), and the target values; (2) update the stable
+  Agent with a `resourceVersion` precondition, writing the candidate's inline prompt;
+  (3) clear `status.rollout` and mark the record `complete` with the resulting generation
+  and digest. On restart the controller reconciles any `pending` record idempotently: if
+  the Agent already holds the target values it finishes step 3; if it still holds the
+  previous values it retries step 2; otherwise it marks the record `failed` and sets
+  `RolloutInvalid`. One consequence: after a promotion or rollback the stable Agent
+  always carries an inline prompt, even if it used `configMapRef` before. `rollback`
+  writes back the recorded resolved previous values. It needs no new evidence, but it
+  is a compare-and-swap: the live stable Agent's generation and
   promotable-field digest must equal what the latest promotion record wrote, and the
   update carries a `resourceVersion` precondition. If anyone edited the Agent after the
   promotion, rollback is refused rather than overwriting that edit. `abort` clears the
