@@ -141,6 +141,9 @@ type TaskReconciler struct {
 	// Agents that omitted contractVersion.
 	Mode             executionmode.Mode
 	ACPRuntimeImages ACPRuntimeImages
+	// ACPRuntimePoolCapacity sets the concurrency of new non-workspace
+	// RuntimePools; zero fields keep the API defaults.
+	ACPRuntimePoolCapacity corev1alpha1.RuntimePoolCapacitySpec
 	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
 	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
 	ACPToolboxPolicy            ACPToolboxPolicy

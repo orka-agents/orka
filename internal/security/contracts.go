@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,8 +30,12 @@ const (
 	EnvScannerPolicyVersion = "ORKA_SECURITY_SCANNER_POLICY_VERSION"
 	EnvPolicyDigest         = "ORKA_SECURITY_POLICY_DIGEST"
 	EnvPolicyProvenance     = "ORKA_SECURITY_POLICY_PROVENANCE"
+	// EnvInvestigations carries threat-model investigations to the mapper as
+	// JSON; EnvBaselineAudit asks it for the independent audit slice.
+	EnvInvestigations = "ORKA_SECURITY_INVESTIGATIONS"
+	EnvBaselineAudit  = "ORKA_SECURITY_BASELINE_AUDIT"
 
-	ScannerPolicyVersion = "2026-06-orka-fp-policy-v1"
+	ScannerPolicyVersion = "2026-10-orka-cross-component-v1"
 
 	SchemaVersionReviewSlices  = 1
 	SchemaVersionReviewContext = 1
@@ -60,9 +65,42 @@ type ReviewContextManifest struct {
 	ChangedLineRanges []ChangedLineRange          `json:"changedLineRanges,omitempty"`
 	IncludedFiles     []ReviewContextIncludedFile `json:"includedFiles"`
 	OmittedFiles      []ReviewContextOmittedFile  `json:"omittedFiles,omitempty"`
-	PromptBytes       int                         `json:"promptBytes"`
-	ApproximateTokens int                         `json:"approximateTokens"`
-	Prompt            string                      `json:"prompt,omitempty"`
+	// ReferenceFiles are repository files the reviewer may read from its
+	// workspace and cite beyond the included excerpts.
+	ReferenceFiles    []ReviewContextReferenceFile `json:"referenceFiles,omitempty"`
+	PromptBytes       int                          `json:"promptBytes"`
+	ApproximateTokens int                          `json:"approximateTokens"`
+	Prompt            string                       `json:"prompt,omitempty"`
+}
+
+// ReviewContextReferenceFile bounds citations to a file the mapper read:
+// evidence may cite any line from 1 through Lines.
+type ReviewContextReferenceFile struct {
+	Path     string `json:"path"`
+	Lines    int    `json:"lines"`
+	Relation string `json:"relation"`
+}
+
+// Reference file relations recorded by the mapper.
+const (
+	ReferenceRelationSlice      = "slice"
+	ReferenceRelationImports    = "imports"
+	ReferenceRelationImportedBy = "imported-by"
+	ReferenceRelationRepository = "repository"
+)
+
+// Slice kinds that are not bounded to one component.
+const (
+	SliceKindInvestigation = "investigation"
+	SliceKindBaseline      = "baseline"
+)
+
+// SecurityInvestigation is a cross-component security question from the
+// threat model. The mapper turns each one into its own review slice.
+type SecurityInvestigation struct {
+	Title    string   `json:"title"`
+	Question string   `json:"question"`
+	Paths    []string `json:"paths,omitempty"`
 }
 
 type ReviewContextIncludedFile struct {
@@ -108,6 +146,90 @@ type FindingsV2Scan struct {
 	Mode    string `json:"mode"`
 	SliceID string `json:"sliceId"`
 	Summary string `json:"summary"`
+	// ReviewedFiles and ResolvedQuestions record what the reviewer examined
+	// and ruled out, so a slice without findings still explains its result.
+	ReviewedFiles     []string                     `json:"reviewedFiles,omitempty"`
+	ResolvedQuestions []FindingsV2ResolvedQuestion `json:"resolvedQuestions,omitempty"`
+	Limitations       []string                     `json:"limitations,omitempty"`
+}
+
+// UnmarshalJSON reads the scan block leniently. Mode and sliceId are still
+// checked against the task identity, but descriptive keys a reviewer adds
+// must not discard the findings that accompany them.
+func (s *FindingsV2Scan) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Mode              string          `json:"mode"`
+		SliceID           string          `json:"sliceId"`
+		Summary           FlexibleText    `json:"summary"`
+		ReviewedFiles     json.RawMessage `json:"reviewedFiles"`
+		ResolvedQuestions json.RawMessage `json:"resolvedQuestions"`
+		Limitations       json.RawMessage `json:"limitations"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*s = FindingsV2Scan{Mode: raw.Mode, SliceID: raw.SliceID, Summary: string(raw.Summary)}
+	s.ReviewedFiles = lenientStringList(raw.ReviewedFiles)
+	s.Limitations = lenientStringList(raw.Limitations)
+	// A single question, object or string, counts as a one-item list.
+	var questions []json.RawMessage
+	if len(raw.ResolvedQuestions) > 0 && json.Unmarshal(raw.ResolvedQuestions, &questions) != nil {
+		questions = []json.RawMessage{raw.ResolvedQuestions}
+	}
+	for _, item := range questions {
+		var question struct {
+			Question   FlexibleText `json:"question"`
+			Resolution FlexibleText `json:"resolution"`
+			Answer     FlexibleText `json:"answer"`
+			Evidence   FlexibleText `json:"evidence"`
+		}
+		if json.Unmarshal(item, &question) != nil {
+			var text string
+			if json.Unmarshal(item, &text) == nil {
+				s.ResolvedQuestions = append(s.ResolvedQuestions, FindingsV2ResolvedQuestion{Question: text})
+			}
+			continue
+		}
+		resolution := strings.TrimSpace(string(question.Resolution))
+		if resolution == "" {
+			resolution = strings.TrimSpace(string(question.Answer))
+		}
+		if evidence := strings.TrimSpace(string(question.Evidence)); evidence != "" {
+			resolution = strings.TrimSpace(resolution + "\nEvidence: " + evidence)
+		}
+		s.ResolvedQuestions = append(s.ResolvedQuestions, FindingsV2ResolvedQuestion{
+			Question: string(question.Question), Resolution: resolution,
+		})
+	}
+	return nil
+}
+
+// lenientStringList accepts a string array, a single string, or any other
+// JSON, which is kept as one compact entry.
+func lenientStringList(data json.RawMessage) []string {
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	var list []FlexibleText
+	if json.Unmarshal(data, &list) == nil {
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			out = append(out, string(item))
+		}
+		return out
+	}
+	var single FlexibleText
+	if json.Unmarshal(data, &single) == nil && single != "" {
+		return []string{string(single)}
+	}
+	return nil
+}
+
+// FindingsV2ResolvedQuestion is a security question the reviewer checked and
+// answered without a finding, with the controlling evidence.
+type FindingsV2ResolvedQuestion struct {
+	Question   string `json:"question"`
+	Resolution string `json:"resolution"`
 }
 
 type FindingsV2Finding struct {
@@ -127,12 +249,71 @@ type FindingsV2Finding struct {
 	MinimumFixScope               string                  `json:"minimumFixScope"`
 }
 
+// UnmarshalJSON reads a finding leniently: unknown keys are ignored and
+// narrative fields returned as structured JSON are kept as text. Required
+// fields and evidence are still validated before the finding is accepted.
+func (f *FindingsV2Finding) UnmarshalJSON(data []byte) error {
+	type plain FindingsV2Finding
+	var raw struct {
+		plain
+		Triage                        FlexibleText `json:"triage"`
+		Summary                       FlexibleText `json:"summary"`
+		RootCause                     FlexibleText `json:"rootCause"`
+		Reproduction                  FlexibleText `json:"reproduction"`
+		Remediation                   FlexibleText `json:"remediation"`
+		SuggestedAction               FlexibleText `json:"suggestedAction"`
+		WhyTestsDoNotAlreadyCoverThis FlexibleText `json:"whyTestsDoNotAlreadyCoverThis"`
+		SuggestedRegressionTest       FlexibleText `json:"suggestedRegressionTest"`
+		MinimumFixScope               FlexibleText `json:"minimumFixScope"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*f = FindingsV2Finding(raw.plain)
+	f.Triage = string(raw.Triage)
+	f.Summary = string(raw.Summary)
+	f.RootCause = string(raw.RootCause)
+	f.Reproduction = string(raw.Reproduction)
+	f.Remediation = string(raw.Remediation)
+	f.SuggestedAction = string(raw.SuggestedAction)
+	f.WhyTestsDoNotAlreadyCoverThis = string(raw.WhyTestsDoNotAlreadyCoverThis)
+	f.SuggestedRegressionTest = string(raw.SuggestedRegressionTest)
+	f.MinimumFixScope = string(raw.MinimumFixScope)
+	return nil
+}
+
 type FindingsV2EvidenceRef struct {
 	Path      string  `json:"path"`
 	StartLine int     `json:"startLine"`
 	EndLine   int     `json:"endLine"`
 	Symbol    *string `json:"symbol"`
 	Quote     *string `json:"quote"`
+	// Role places the location on the attack path: entrypoint, source,
+	// propagation, root_control, sink, or context.
+	Role string `json:"role,omitempty"`
+}
+
+// UnmarshalJSON also accepts "file" for the path, which reviewers sometimes
+// write; the location is still verified against the review context.
+func (r *FindingsV2EvidenceRef) UnmarshalJSON(data []byte) error {
+	type plain FindingsV2EvidenceRef
+	var raw struct {
+		plain
+		File string `json:"file"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = FindingsV2EvidenceRef(raw.plain)
+	if strings.TrimSpace(r.Path) == "" {
+		r.Path = raw.File
+	}
+	return nil
+}
+
+// Evidence roles a finding location may carry.
+var findingEvidenceRoles = map[string]struct{}{
+	"entrypoint": {}, "source": {}, "propagation": {}, "root_control": {}, "sink": {}, "context": {},
 }
 
 type DroppedFindingArtifact struct {
@@ -223,6 +404,17 @@ func ParseReviewContextManifest(data []byte) (*ReviewContextManifest, error) {
 			if lineRange.StartLine <= 0 || lineRange.EndLine < lineRange.StartLine {
 				return nil, fmt.Errorf("included file %q has invalid line range", file.Path)
 			}
+		}
+	}
+	if len(manifest.ReferenceFiles) > MaxReviewContextReferenceFiles {
+		return nil, fmt.Errorf("review context lists more than %d reference files", MaxReviewContextReferenceFiles)
+	}
+	for _, file := range manifest.ReferenceFiles {
+		if !SafeRepoPath(file.Path) {
+			return nil, fmt.Errorf("reference file path %q is not repo-relative and safe", file.Path)
+		}
+		if file.Lines <= 0 {
+			return nil, fmt.Errorf("reference file %q has no lines", file.Path)
 		}
 	}
 	return &manifest, nil
