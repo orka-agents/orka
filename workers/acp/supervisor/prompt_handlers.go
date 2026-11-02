@@ -1966,13 +1966,13 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, changedPath := range changedPaths {
 		if !workspaceDeltaPathAllowed(changedPath, request.Limits.AllowedPaths) {
-			s.poisonSession(state, "workspace delta contains a disallowed path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a disallowed path", nil, false)
+			s.poisonSession(state, harnessv2.WorkspaceDeltaDisallowedPathMessage)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaDisallowedPathMessage, nil, false)
 			return
 		}
 		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
-			s.poisonSession(state, "workspace delta contains a protected repository-control path")
-			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, "workspace delta contains a protected repository-control path", nil, false)
+			s.poisonSession(state, harnessv2.WorkspaceDeltaRepositoryControlPathMessage)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaRepositoryControlPathMessage, nil, false)
 			return
 		}
 	}
