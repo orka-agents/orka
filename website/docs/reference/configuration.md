@@ -490,6 +490,14 @@ Long-lived, single-user agent hosts on Orka-owned Pods. Off by default. See
 | `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. Helm: `controller.agentHosts.agentImage`. |
 | `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `orka.ai/network-role=controller` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. The default matches the shipped controller Pods. |
 
+### Evals {#evals}
+
+Capability evals with the `EvalRun` resource. Off by default.
+
+| Flag | Environment variable | Default | Purpose |
+| --- | --- | --- | --- |
+| `--enable-evals` | `ORKA_ENABLE_EVALS` | `false` | Reserved for EvalRun reconciliation. The `EvalRun` CRD is installed, and the built-in `edit` and `admin` ClusterRoles can manage it, but this release does not reconcile EvalRuns. |
+
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 
 A separately deployed **workspace provider** realizes Orka's frozen public runtime

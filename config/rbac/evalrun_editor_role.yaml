@@ -1,0 +1,31 @@
+# Aggregates EvalRun management into the built-in "edit" and "admin"
+# ClusterRoles, but not "view". Creating an EvalRun is equivalent to creating
+# Tasks that run the referenced monitor's reviewer Agent in that namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+  name: evalrun-editor-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns/status
+  verbs:
+  - get

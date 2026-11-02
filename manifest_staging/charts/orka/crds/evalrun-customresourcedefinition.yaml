@@ -1,0 +1,435 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: evalruns.core.orka.ai
+spec:
+  group: core.orka.ai
+  names:
+    kind: EvalRun
+    listKind: EvalRunList
+    plural: evalruns
+    singular: evalrun
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.subject.type
+      name: Subject
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.counts.planned
+      name: Planned
+      type: integer
+    - jsonPath: .status.counts.completed
+      name: Completed
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          EvalRun runs a set of cases through an Orka agent path several times and
+          grades every trial with code.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              EvalRunSpec defines an eval run. It is immutable; create a new EvalRun to
+              run again.
+            properties:
+              cases:
+                description: Cases selects the cases to run.
+                properties:
+                  configMapRef:
+                    description: |-
+                      ConfigMapRef names the ConfigMap key holding the cases, one JSON object
+                      per line.
+                    properties:
+                      key:
+                        description: Key is the ConfigMap data key holding orka.eval.case.v1
+                          JSONL.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      name:
+                        description: Name is the ConfigMap name.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  ids:
+                    description: IDs selects a subset of the cases by id. Empty runs
+                      every case.
+                    items:
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                      type: string
+                    maxItems: 500
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
+                x-kubernetes-validations:
+                - message: cases.configMapRef is required
+                  rule: has(self.configMapRef)
+              graders:
+                description: Graders lists the code graders applied to every trial.
+                items:
+                  description: |-
+                    EvalGraderName names one code grader. Each value has one Grader
+                    implementation; an unknown value is rejected at admission.
+                  enum:
+                  - verdict
+                  - localization
+                  - contract
+                  - honesty
+                  type: string
+                maxItems: 16
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              maxConcurrentTrials:
+                default: 1
+                description: MaxConcurrentTrials bounds how many trials run at once.
+                format: int32
+                maximum: 20
+                minimum: 1
+                type: integer
+              maxInfraErrorPercent:
+                default: 10
+                description: |-
+                  MaxInfraErrorPercent is the share of trials that may end in an infra
+                  error before the run is Invalid. Infra errors are excluded from scores.
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
+              subject:
+                description: Subject selects what is evaluated.
+                properties:
+                  repositoryMonitorReview:
+                    description: RepositoryMonitorReview configures the repositoryMonitorReview
+                      subject.
+                    properties:
+                      monitorRef:
+                        description: MonitorRef names a RepositoryMonitor in the EvalRun's
+                          namespace.
+                        properties:
+                          name:
+                            description: Name is the object name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - monitorRef
+                    type: object
+                  type:
+                    description: Type names the subject.
+                    enum:
+                    - repositoryMonitorReview
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: subject.repositoryMonitorReview is required for, and only
+                    allowed with, type repositoryMonitorReview
+                  rule: has(self.repositoryMonitorReview) == (self.type == 'repositoryMonitorReview')
+              trialTimeout:
+                default: 20m
+                description: TrialTimeout bounds one trial, from Task creation to
+                  its result.
+                type: string
+                x-kubernetes-validations:
+                - message: trialTimeout must be from 1m to 2h
+                  rule: duration(self) >= duration('1m') && duration(self) <= duration('2h')
+              trials:
+                description: |-
+                  Trials is the number of trials per case (k in pass@k and pass^k).
+                  cases × trials is at most 500.
+                format: int32
+                maximum: 20
+                minimum: 1
+                type: integer
+              ttlSecondsAfterFinished:
+                description: |-
+                  TTLSecondsAfterFinished deletes the EvalRun and its trial records this
+                  long after it finishes. Unset keeps them.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - cases
+            - graders
+            - subject
+            - trials
+            type: object
+            x-kubernetes-validations:
+            - message: EvalRun spec is immutable; create a new EvalRun
+              rule: self == oldSelf
+            - message: cases × trials must be at most 500
+              rule: '!has(self.cases.ids) || size(self.cases.ids) * self.trials <=
+                500'
+          status:
+            description: |-
+              EvalRunStatus is the observed state of an EvalRun. Per-trial records live in
+              Orka's durable store, not here.
+            properties:
+              completionTime:
+                description: |-
+                  CompletionTime is when the run finished; ttlSecondsAfterFinished counts
+                  from it.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions represent the current state of the run.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              counts:
+                description: Counts counts trials.
+                properties:
+                  completed:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  failed:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  infraError:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  passed:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  planned:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                type: object
+              phase:
+                description: Phase is the run phase.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Invalid
+                - Failed
+                type: string
+              results:
+                description: Results aggregates every grader per case tag.
+                items:
+                  description: |-
+                    EvalGraderResult aggregates one grader over the cases with one tag. Values
+                    are integers only; clients derive pass@1 (passedTrials / trials), pass@k
+                    (casesAnyPassed / cases) and pass^k (casesAllPassed / cases).
+                  properties:
+                    cases:
+                      description: Cases is the number of cases with at least one
+                        graded trial.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    casesAllPassed:
+                      description: CasesAllPassed is the number of cases whose graded
+                        trials all passed.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    casesAnyPassed:
+                      description: CasesAnyPassed is the number of cases with at least
+                        one passed trial.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    grader:
+                      description: Grader is the grader name.
+                      enum:
+                      - verdict
+                      - localization
+                      - contract
+                      - honesty
+                      type: string
+                    passedTrials:
+                      description: PassedTrials is the number of graded trials that
+                        passed.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    tag:
+                      description: Tag is the case tag aggregated; empty aggregates
+                        every case.
+                      maxLength: 63
+                      type: string
+                    trials:
+                      description: |-
+                        Trials is the number of graded trials, excluding infra errors and
+                        trials the grader does not apply to.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                  required:
+                  - cases
+                  - casesAllPassed
+                  - casesAnyPassed
+                  - grader
+                  - passedTrials
+                  - trials
+                  type: object
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: atomic
+              snapshot:
+                description: Snapshot is frozen when the run starts.
+                properties:
+                  caseSetDigest:
+                    description: CaseSetDigest is the digest of the selected cases.
+                    maxLength: 128
+                    type: string
+                  model:
+                    description: Model is the model route the reviewer uses.
+                    maxLength: 256
+                    type: string
+                  monitorGeneration:
+                    description: MonitorGeneration is the RepositoryMonitor generation.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  promptTemplateDigest:
+                    description: PromptTemplateDigest is the digest of the review
+                      prompt template.
+                    maxLength: 128
+                    type: string
+                  reviewerAgent:
+                    description: ReviewerAgent is the reviewer Agent identity.
+                    properties:
+                      generation:
+                        description: Generation is the object generation.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: Name is the object name.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID is the object UID.
+                        type: string
+                    type: object
+                  runtimeImageDigest:
+                    description: RuntimeImageDigest is the reviewer runtime image
+                      digest.
+                    maxLength: 128
+                    type: string
+                type: object
+              startTime:
+                description: StartTime is when the snapshot was frozen.
+                format: date-time
+                type: string
+              suspectCases:
+                description: |-
+                  SuspectCases lists cases that passed no trial. They are presumed broken
+                  until a transcript shows otherwise.
+                items:
+                  maxLength: 63
+                  type: string
+                maxItems: 500
+                type: array
+                x-kubernetes-list-type: set
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

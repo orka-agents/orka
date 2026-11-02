@@ -731,4 +731,37 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "orka.containerWorkerServiceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+---
+# EvalRun management aggregates into the built-in edit and admin roles, not
+# view. Creating an EvalRun is equivalent to creating Tasks that run the
+# referenced monitor's reviewer Agent in that namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-evalrun-editor
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns"]
+    verbs: ["create", "delete", "deletecollection", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-evalrun-admin
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns"]
+    verbs: ["*"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns/status"]
+    verbs: ["get"]
 {{- end }}
