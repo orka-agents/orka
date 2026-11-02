@@ -1,0 +1,59 @@
+# Example self-improvement protected set for the Orka repository.
+#
+# Apply it in the controller namespace and start the controller with
+# --protected-set-configmap=orka-protected-set. Without a valid protected set,
+# Tasks marked orka.ai/improvement-role: proposer fail with
+# ProposerConstraintViolation instead of running. Change it only through the
+# reviewed deployment configuration.
+#
+# Every file that implements a proposer enforcement point is listed for this
+# repository; a test fails if a file named in the enforcement table of
+# docs/adr/0040-self-improvement-trust-boundaries.md is not covered here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orka-protected-set
+  namespace: orka-system
+data:
+  protectedSet.yaml: |
+    schemaVersion: orka.protectedSet.v1
+    paths:                         # always denied to proposers, in every repository
+      - .github/**
+      - config/rbac/**
+      - charts/**
+    repositories:
+      - repository: github.com/orka-agents/orka
+        paths:                     # added for this repository
+          - internal/evals/**      # graders and the gate
+          - test/evals/**
+          - internal/api/*authoriz*
+          - internal/admission/**
+          - internal/outboundaccess/**
+          - internal/tools/memory_tools.go
+          - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
+          - internal/controller/acp_dispatcher*.go         # dispatch-time checks
+          - internal/controller/acp_task_queue.go          # calls the dispatch-time check
+          - internal/controller/acp_publication*.go        # sends deniedPaths to the publisher
+          - internal/controller/agent_execution_binding*.go # canary routing
+          - internal/controller/evalrun*.go                # evaluator
+          - internal/controller/runtime_pool_controller*.go # token and network isolation
+          - internal/controller/repositorymonitor_issue_actions.go # implementation limits
+          - internal/controller/repositorymonitor_repair.go # repair limits
+          - internal/protectedset/**                       # protected-set schema and checks
+          - internal/workspacedelta/**                     # shared deniedPaths matcher
+          - internal/harness/v2/workspace.go               # carries deniedPaths to the runtime
+          - internal/acp/runtime_defaults.go               # native tool names a proposer may list
+          - internal/publisher/**                          # credential and publication boundary
+          - internal/store/**                              # trial, decision and promotion records
+          - workers/acp/supervisor/**                      # deniedPaths check
+          - api/v1alpha1/**                                # the fields that carry these rules
+          - cmd/main.go                                    # wires every enforcement point
+          - config/samples/orka_protected_set.yaml         # this declaration
+          - docs/adr/**                                    # the recorded trust boundaries
+          - AGENTS.md
+    caseSets:                      # case ConfigMaps by split
+      - {namespace: orka-evals, name: pr-review-train,   split: train}
+      - {namespace: orka-evals, name: pr-review-heldout, split: heldOut}
+    gate:                          # improvement thresholds, see #994
+      maxInfraErrorPercent: 10
+      maxCandidatesPerBaseline: 3

@@ -75,6 +75,7 @@ import (
 	_ "github.com/orka-agents/orka/internal/llm/openai"
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/protectedset"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -299,6 +300,7 @@ func main() {
 	var acpCopilotRuntimeImage string
 	var acpOpencodeRuntimeImage string
 	var acpRuntimeNamespace string
+	var protectedSetConfigMap string
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
 	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
@@ -542,6 +544,9 @@ func main() {
 		"OpenCode ACP runtime image with a tag or SHA256 digest. Tags resolve to digests at startup.")
 	flag.StringVar(&acpRuntimeNamespace, "acp-runtime-namespace", envutil.String("ORKA_ACP_RUNTIME_NAMESPACE", "orka-runtimes"),
 		"Physical namespace for managed ACP runtime Pods.")
+	flag.StringVar(&protectedSetConfigMap, "protected-set-configmap", os.Getenv("ORKA_PROTECTED_SET_CONFIGMAP"),
+		"Name of the ConfigMap in the controller namespace that declares the self-improvement protected set "+
+			"(key protectedSet.yaml, schema orka.protectedSet.v1). Empty, missing or invalid disables proposer Tasks.")
 	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
@@ -1680,6 +1685,9 @@ func main() {
 		WorkspaceProviderAPIEnabled:  workspaceProviderAPIEnabled,
 		WorkspaceSettlementProtected: taskProvenanceProtected,
 		ACPWorkspaceDispatchEnabled:  acpWorkspaceDispatchEnabled,
+		ProtectedSet: protectedset.Source{
+			Reader: mgr.GetAPIReader(), Namespace: controlNamespace, Name: strings.TrimSpace(protectedSetConfigMap),
+		},
 
 		AIWorkerServiceAccountName:        aiWorkerServiceAccountName,
 		VendorWorkerServiceAccountName:    vendorWorkerServiceAccountName,
@@ -1695,6 +1703,7 @@ func main() {
 		),
 		OutboundAccessTrust: outboundAccessTrust,
 	}
+	logProtectedSet(taskReconciler.ProtectedSet)
 	if err := taskReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
@@ -2563,6 +2572,25 @@ func envBool(name string) bool {
 		os.Exit(1)
 	}
 	return parsed
+}
+
+// logProtectedSet validates the configured protected set at startup and
+// records its digest. A missing or invalid set is not fatal: proposer Tasks
+// fail at dispatch until the set is valid, and every other Task is unaffected.
+func logProtectedSet(source protectedset.Source) {
+	if !source.Configured() {
+		setupLog.Info("no protected set configured; improvement proposer Tasks are disabled")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	set, err := source.Load(ctx)
+	if err != nil {
+		setupLog.Error(err, "protected set is unavailable; improvement proposer Tasks fail until it is valid",
+			"namespace", source.Namespace, "configMap", source.Name)
+		return
+	}
+	setupLog.Info("protected set loaded", "namespace", source.Namespace, "configMap", source.Name, "digest", set.Digest())
 }
 
 func acpControlNamespace(controllerNamespace string) (string, error) {

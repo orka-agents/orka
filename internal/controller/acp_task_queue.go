@@ -25,6 +25,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
+	"github.com/orka-agents/orka/internal/workspacedelta"
 )
 
 const (
@@ -107,6 +108,13 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	}
 	if err := validateACPWorkspacePreflight(frozenTask); err != nil {
 		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("InvalidWorkspace"), err.Error())
+	}
+	// A Task marked as an improvement proposer runs only while every proposer
+	// constraint still holds against the current protected set.
+	if violation, err := r.checkProposerConstraints(ctx, frozenTask, bound.mcpConfiguration); err != nil {
+		return ctrl.Result{}, err
+	} else if violation != "" {
+		return r.failACPPlanningTask(ctx, task, proposerConstraintViolationReason, violation)
 	}
 	reader := uncachedReader(r.APIReader, r.Client)
 	var pool *corev1alpha1.RuntimePool
@@ -1285,6 +1293,14 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 			return fmt.Errorf("allowedPaths contains an invalid pattern: %w", err)
 		}
 	}
+	if len(workspace.DeniedPaths) > 256 {
+		return fmt.Errorf("deniedPaths exceeds 256 patterns")
+	}
+	for _, pattern := range workspace.DeniedPaths {
+		if !workspacedelta.ValidPathPattern(pattern) {
+			return fmt.Errorf("deniedPaths contains an invalid pattern")
+		}
+	}
 	if intent != corev1alpha1.WorkspaceIntentWrite {
 		switch {
 		case strings.TrimSpace(workspace.PublicationGitRepo) != "":
@@ -1304,7 +1320,7 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 		case workspace.CreatePR:
 			return fmt.Errorf("createPR requires write workspace intent")
 		}
-		if strings.TrimSpace(workspace.ExpectedRemoteSHA) != "" || workspace.MaxChangedFiles != nil || len(workspace.AllowedPaths) > 0 || workspace.DenyRepositoryControlPaths || workspace.RejectBinaryFiles || workspace.RejectSecretLikeContent {
+		if strings.TrimSpace(workspace.ExpectedRemoteSHA) != "" || workspace.MaxChangedFiles != nil || len(workspace.AllowedPaths) > 0 || len(workspace.DeniedPaths) > 0 || workspace.DenyRepositoryControlPaths || workspace.RejectBinaryFiles || workspace.RejectSecretLikeContent {
 			return fmt.Errorf("publication expectations and change policies require write workspace intent")
 		}
 		return nil

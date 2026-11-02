@@ -183,6 +183,12 @@ func TestPreparePrefixesRelativeRootWithoutOverwritingRootCollision(t *testing.T
 		CommitMessage:   "Orka publication publication-subpath\n",
 		CommitTimestamp: time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC),
 	}
+	denied := request
+	denied.PublicationID, denied.OperationID = "publication-subpath-denied", "prepare-subpath-denied"
+	denied.DeniedPaths = []string{"services/app/new.txt"}
+	if _, err := newTestPublisher(t).Prepare(context.Background(), denied); !errors.Is(err, ErrUnsafeDelta) {
+		t.Fatalf("Prepare with a repository-rooted denied path error = %v, want ErrUnsafeDelta", err)
+	}
 	prepared, err := p.Prepare(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Prepare subpath publication: %v", err)
@@ -1233,5 +1239,43 @@ func TestLoadPreparedRejectsSymlinkedPublicationDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, publicationIdentityName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("symlink target identity error = %v, want no file", err)
+	}
+}
+
+func TestPrepareRejectsDeniedPathsInEveryDeltaKind(t *testing.T) {
+	fixture := newRepositoryFixture(t, true)
+	for name, patterns := range map[string][]string{
+		"changed file":   {"KEEP.txt"},
+		"deleted file":   {"delete.txt"},
+		"symlink":        {"lat*"},
+		"directory glob": {"docs/**", "*.txt"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := fixture.prepareRequest("publication-denied", "prepare-denied", RemoteRef{Absent: true})
+			request.DeniedPaths = patterns
+			_, err := newTestPublisher(t).Prepare(context.Background(), request)
+			if !errors.Is(err, ErrUnsafeDelta) || !strings.Contains(err.Error(), "denied path") {
+				t.Fatalf("Prepare with deniedPaths %v error = %v, want a denied-path ErrUnsafeDelta", patterns, err)
+			}
+		})
+	}
+
+	request := fixture.prepareRequest("publication-not-denied", "prepare-not-denied", RemoteRef{Absent: true})
+	unrestricted, err := newTestPublisher(t).Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare without deniedPaths: %v", err)
+	}
+	request.DeniedPaths = []string{"internal/**"}
+	restricted, err := newTestPublisher(t).Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare with non-matching deniedPaths: %v", err)
+	}
+	if restricted.CommitOID != unrestricted.CommitOID || restricted.RequestDigest == unrestricted.RequestDigest {
+		t.Fatalf("deniedPaths must bind the request digest without changing the commit: restricted=%#v unrestricted=%#v", restricted, unrestricted)
+	}
+
+	request.DeniedPaths = []string{"../escape"}
+	if _, err := newTestPublisher(t).Prepare(context.Background(), request); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Prepare with an invalid denied pattern error = %v, want ErrInvalidRequest", err)
 	}
 }

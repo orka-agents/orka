@@ -177,6 +177,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 			BranchClaimGeneration: publication.BranchClaimGeneration, BaselineOID: publication.SourceBaselineSHA,
 			RemoteBefore: publisherRemoteRef(publication.Baseline), DeltaArtifactDigest: publication.ArtifactDigest,
 			RelativeRoot:  strings.TrimSpace(recovery.workspace.SubPath),
+			DeniedPaths:   publicationDeniedPaths(recovery.workspace),
 			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}

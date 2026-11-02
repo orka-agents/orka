@@ -57,8 +57,13 @@ type PrepareRequest struct {
 	DeltaArtifact         []byte     `json:"-"`
 	DeltaArtifactDigest   string     `json:"deltaArtifactDigest"`
 	RelativeRoot          string     `json:"relativeRoot,omitempty"`
-	CommitMessage         string     `json:"commitMessage"`
-	CommitTimestamp       time.Time  `json:"commitTimestamp"`
+	// DeniedPaths are repository path patterns the delta must not touch. The
+	// publisher checks every repository-relative change, deletion and
+	// symlink against them before it prepares a commit, independently of the
+	// runtime that produced the delta.
+	DeniedPaths     []string  `json:"deniedPaths,omitempty"`
+	CommitMessage   string    `json:"commitMessage"`
+	CommitTimestamp time.Time `json:"commitTimestamp"`
 }
 
 // ReclaimRequest binds cache reclamation to one exact Publication incarnation.
