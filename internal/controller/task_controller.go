@@ -896,6 +896,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		}
 	}
 
+	// Only the ACP agent path enforces improvement-role constraints, so a
+	// marked Task never runs as a Job.
+	if role := taskImprovementRole(task.Annotations); role != "" {
+		return r.failTask(ctx, task, fmt.Sprintf("%s: a Task with improvement role %q must be an ACP agent Task", proposerConstraintViolationReason, role))
+	}
 	return r.createTaskJob(ctx, task, agent, provider)
 }
 

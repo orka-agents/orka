@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -418,5 +419,36 @@ func TestWorkspacePreflightValidatesDeniedPaths(t *testing.T) {
 	}}}
 	if err := validateACPWorkspacePreflight(invalid); err == nil || !strings.Contains(err.Error(), "deniedPaths contains an invalid pattern") {
 		t.Fatalf("invalid deniedPaths preflight error = %v", err)
+	}
+}
+
+// A marked Task that does not take the ACP agent path is failed instead of
+// running as a Job, so no execution path skips the proposer constraints.
+func TestHandlePendingFailsMarkedContainerTask(t *testing.T) {
+	ctx := context.Background()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "marked-container", Namespace: "default", UID: "marked-container-uid", Generation: 1,
+			Annotations: map[string]string{labels.AnnotationImprovementRole: labels.ImprovementRoleProposer},
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeContainer, Image: "docker.io/library/busybox:1.36", Command: []string{"true"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	r := newUnitReconciler(newTestScheme(), task)
+	if _, err := r.handlePending(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(current.Status.Message, string(proposerConstraintViolationReason)) {
+		t.Fatalf("marked container Task: phase=%s message=%q, want a proposer constraint failure", current.Status.Phase, current.Status.Message)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
+		t.Fatalf("marked container Task created Jobs: %d, err=%v", len(jobs.Items), err)
 	}
 }
