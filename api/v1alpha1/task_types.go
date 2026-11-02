@@ -960,6 +960,16 @@ type WorkspaceConfig struct {
 	// +optional
 	PRBody string `json:"prBody,omitempty"`
 
+	// CommitMessage is the message of the commit that publishes the Task's
+	// changes. When empty, the commit is titled "orka: apply agent task <name>".
+	// Trailing newlines are normalized. Secret-like text is rejected at runtime
+	// before publication.
+	// +kubebuilder:validation:MaxLength=4000
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.trim() != ''",message="commitMessage must not be whitespace-only"
+	// +kubebuilder:validation:XValidation:rule="!self.contains('\\r')",message="commitMessage must not contain carriage returns"
+	// +optional
+	CommitMessage string `json:"commitMessage,omitempty"`
+
 	// PushBranch is the publication branch. For write Tasks the controller derives
 	// a full-entropy Task- or Session-owned branch when this is omitted.
 	// +kubebuilder:validation:MaxLength=255
