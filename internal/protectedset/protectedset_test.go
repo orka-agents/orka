@@ -75,6 +75,7 @@ func TestSampleProtectsEveryCategory(t *testing.T) {
 		"dispatch-time checks":      "internal/controller/acp_dispatcher_proposer.go",
 		"dispatch call site":        "internal/controller/acp_task_queue.go",
 		"non-ACP execution gate":    "internal/controller/task_controller.go",
+		"improvement-role marker":   "internal/labels/labels.go",
 		"canary routing":            "internal/controller/agent_execution_binding.go",
 		"evaluator":                 "internal/controller/evalrun_controller.go",
 		"token and network":         "internal/controller/runtime_pool_controller.go",
