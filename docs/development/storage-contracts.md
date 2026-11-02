@@ -675,13 +675,16 @@ RPCs are tested through the client directly.
   tell empty bytes from absent ones, so decoded bytes are never nil: a
   provider receives an empty result, receipt or artifact as an empty slice,
   as it would in process.
-- **Batched reads.** A read whose result the contract does not bound by size
-  streams its list in batches: `GetSession` (the transcript),
-  `LoadTranscript`, `LoadTranscriptThrough`, `ListSessions`,
-  `ListSessionCleanupIntents` and `ListSessionCleanupTurns`. The provider still
-  returns the whole result at once, from one snapshot; the server library
-  splits the list only after the provider returned, so the stream holds
-  nothing open in the provider. The first message carries every other
+- **Batched responses.** A call whose result can be larger than one message
+  streams its list in batches: the reads the contract does not bound by size,
+  `GetSession` (the transcript), `LoadTranscript`, `LoadTranscriptThrough`,
+  `ListSessions`, `ListSessionCleanupIntents` and `ListSessionCleanupTurns`;
+  the event pages of `ListExecutionEvents` and `ListSessionExecutionEvents`,
+  which hold up to 1,000 events of up to about 200 KiB each; and
+  `ClaimOutboxProjectionRecords`, whose records carry payloads of up to 4 MiB.
+  The provider still returns the whole result at once, from one snapshot; the
+  server library splits the list only after the provider returned, so the
+  stream holds nothing open in the provider. The first message carries every other
   response field and the first batch; each later message carries only the
   next batch, never empty. A batch holds records of at most 1 MiB in total, or
   one larger record, and a record that does not fit the 16 MiB message limit
@@ -691,8 +694,12 @@ RPCs are tested through the client directly.
   record's tag and length prefix included, so even an empty record counts. The
   client refuses a list over its limits (256 MiB and 1,048,576 records by
   default) before reading it, and refuses a response that does not match its
-  declaration. Batched reads use the bulk connection and the `bulk` call
-  class.
+  declaration. A claim commits its leases before its response is sent, so for
+  a claim each of those refusals, like a stream that breaks, is an unknown
+  outcome rather than a refusal. A claim selects records by count, not by
+  size, so a claim larger than the client's limits cannot be returned; Orka
+  claims 32 records at a time, which stays within them. Batched responses use
+  the bulk connection and the `bulk` call class.
 - **Unknown fields.** The server refuses a request with a field it does not
   know anywhere in its message tree, including any message of a stream
   (`UNSUPPORTED_FIELD`), so an older server never ignores a newer
@@ -701,7 +708,7 @@ RPCs are tested through the client directly.
   at least the revision that introduced it.
 - **Server limits.** A server can cap the calls it runs at once per class
   (`health` for `Describe` and `HealthCheck`, `control` for other unary calls,
-  including `Ownership`, and `bulk` for streaming calls and batched reads) and
+  including `Ownership`, and `bulk` for streaming calls and batched responses) and
   how long each class may run. A call over its
   class's limit is refused with `OVERLOADED` before the provider runs, which
   the client returns as `ErrUnavailable`. The duration limit covers the whole

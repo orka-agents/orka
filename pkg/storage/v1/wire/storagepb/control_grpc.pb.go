@@ -49,7 +49,11 @@ const (
 // cleanup intents and receipts, the controller epoch mirror, the projection
 // outbox and Task Job authority. ListSessionCleanupIntents and
 // ListSessionCleanupTurns return lists the contract does not bound by size,
-// so their responses stream the list in batches from one provider result.
+// and a claim of outbox records with payloads of up to 4 MiB each can be
+// larger than one message, so these responses stream their list in batches
+// from one provider result. A claim commits its leases before its response is
+// sent, so a claim whose response does not arrive whole is an unknown
+// outcome.
 type ControlClient interface {
 	GetSessionTurnCleanupReceipt(ctx context.Context, in *GetSessionTurnCleanupReceiptRequest, opts ...grpc.CallOption) (*GetSessionTurnCleanupReceiptResponse, error)
 	GetSessionCleanupIntent(ctx context.Context, in *GetSessionCleanupIntentRequest, opts ...grpc.CallOption) (*GetSessionCleanupIntentResponse, error)
@@ -65,7 +69,7 @@ type ControlClient interface {
 	SyncControllerEpochMirror(ctx context.Context, in *SyncControllerEpochMirrorRequest, opts ...grpc.CallOption) (*SyncControllerEpochMirrorResponse, error)
 	EnqueueOutboxProjectionRecord(ctx context.Context, in *EnqueueOutboxProjectionRecordRequest, opts ...grpc.CallOption) (*EnqueueOutboxProjectionRecordResponse, error)
 	GetOutboxProjection(ctx context.Context, in *GetOutboxProjectionRequest, opts ...grpc.CallOption) (*GetOutboxProjectionResponse, error)
-	ClaimOutboxProjectionRecords(ctx context.Context, in *ClaimOutboxProjectionRecordsRequest, opts ...grpc.CallOption) (*ClaimOutboxProjectionRecordsResponse, error)
+	ClaimOutboxProjectionRecords(ctx context.Context, in *ClaimOutboxProjectionRecordsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClaimOutboxProjectionRecordsResponse], error)
 	CompleteOutboxProjectionRecord(ctx context.Context, in *CompleteOutboxProjectionRecordRequest, opts ...grpc.CallOption) (*CompleteOutboxProjectionRecordResponse, error)
 	CountUnsettledOutboxProjections(ctx context.Context, in *CountUnsettledOutboxProjectionsRequest, opts ...grpc.CallOption) (*CountUnsettledOutboxProjectionsResponse, error)
 	RevokeTaskJob(ctx context.Context, in *RevokeTaskJobRequest, opts ...grpc.CallOption) (*RevokeTaskJobResponse, error)
@@ -239,15 +243,24 @@ func (c *controlClient) GetOutboxProjection(ctx context.Context, in *GetOutboxPr
 	return out, nil
 }
 
-func (c *controlClient) ClaimOutboxProjectionRecords(ctx context.Context, in *ClaimOutboxProjectionRecordsRequest, opts ...grpc.CallOption) (*ClaimOutboxProjectionRecordsResponse, error) {
+func (c *controlClient) ClaimOutboxProjectionRecords(ctx context.Context, in *ClaimOutboxProjectionRecordsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClaimOutboxProjectionRecordsResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ClaimOutboxProjectionRecordsResponse)
-	err := c.cc.Invoke(ctx, Control_ClaimOutboxProjectionRecords_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Control_ServiceDesc.Streams[2], Control_ClaimOutboxProjectionRecords_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[ClaimOutboxProjectionRecordsRequest, ClaimOutboxProjectionRecordsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_ClaimOutboxProjectionRecordsClient = grpc.ServerStreamingClient[ClaimOutboxProjectionRecordsResponse]
 
 func (c *controlClient) CompleteOutboxProjectionRecord(ctx context.Context, in *CompleteOutboxProjectionRecordRequest, opts ...grpc.CallOption) (*CompleteOutboxProjectionRecordResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -307,7 +320,11 @@ func (c *controlClient) DeleteTaskJobRevocations(ctx context.Context, in *Delete
 // cleanup intents and receipts, the controller epoch mirror, the projection
 // outbox and Task Job authority. ListSessionCleanupIntents and
 // ListSessionCleanupTurns return lists the contract does not bound by size,
-// so their responses stream the list in batches from one provider result.
+// and a claim of outbox records with payloads of up to 4 MiB each can be
+// larger than one message, so these responses stream their list in batches
+// from one provider result. A claim commits its leases before its response is
+// sent, so a claim whose response does not arrive whole is an unknown
+// outcome.
 type ControlServer interface {
 	GetSessionTurnCleanupReceipt(context.Context, *GetSessionTurnCleanupReceiptRequest) (*GetSessionTurnCleanupReceiptResponse, error)
 	GetSessionCleanupIntent(context.Context, *GetSessionCleanupIntentRequest) (*GetSessionCleanupIntentResponse, error)
@@ -323,7 +340,7 @@ type ControlServer interface {
 	SyncControllerEpochMirror(context.Context, *SyncControllerEpochMirrorRequest) (*SyncControllerEpochMirrorResponse, error)
 	EnqueueOutboxProjectionRecord(context.Context, *EnqueueOutboxProjectionRecordRequest) (*EnqueueOutboxProjectionRecordResponse, error)
 	GetOutboxProjection(context.Context, *GetOutboxProjectionRequest) (*GetOutboxProjectionResponse, error)
-	ClaimOutboxProjectionRecords(context.Context, *ClaimOutboxProjectionRecordsRequest) (*ClaimOutboxProjectionRecordsResponse, error)
+	ClaimOutboxProjectionRecords(*ClaimOutboxProjectionRecordsRequest, grpc.ServerStreamingServer[ClaimOutboxProjectionRecordsResponse]) error
 	CompleteOutboxProjectionRecord(context.Context, *CompleteOutboxProjectionRecordRequest) (*CompleteOutboxProjectionRecordResponse, error)
 	CountUnsettledOutboxProjections(context.Context, *CountUnsettledOutboxProjectionsRequest) (*CountUnsettledOutboxProjectionsResponse, error)
 	RevokeTaskJob(context.Context, *RevokeTaskJobRequest) (*RevokeTaskJobResponse, error)
@@ -381,8 +398,8 @@ func (UnimplementedControlServer) EnqueueOutboxProjectionRecord(context.Context,
 func (UnimplementedControlServer) GetOutboxProjection(context.Context, *GetOutboxProjectionRequest) (*GetOutboxProjectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetOutboxProjection not implemented")
 }
-func (UnimplementedControlServer) ClaimOutboxProjectionRecords(context.Context, *ClaimOutboxProjectionRecordsRequest) (*ClaimOutboxProjectionRecordsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ClaimOutboxProjectionRecords not implemented")
+func (UnimplementedControlServer) ClaimOutboxProjectionRecords(*ClaimOutboxProjectionRecordsRequest, grpc.ServerStreamingServer[ClaimOutboxProjectionRecordsResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ClaimOutboxProjectionRecords not implemented")
 }
 func (UnimplementedControlServer) CompleteOutboxProjectionRecord(context.Context, *CompleteOutboxProjectionRecordRequest) (*CompleteOutboxProjectionRecordResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CompleteOutboxProjectionRecord not implemented")
@@ -658,23 +675,16 @@ func _Control_GetOutboxProjection_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Control_ClaimOutboxProjectionRecords_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ClaimOutboxProjectionRecordsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _Control_ClaimOutboxProjectionRecords_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ClaimOutboxProjectionRecordsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(ControlServer).ClaimOutboxProjectionRecords(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Control_ClaimOutboxProjectionRecords_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlServer).ClaimOutboxProjectionRecords(ctx, req.(*ClaimOutboxProjectionRecordsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(ControlServer).ClaimOutboxProjectionRecords(m, &grpc.GenericServerStream[ClaimOutboxProjectionRecordsRequest, ClaimOutboxProjectionRecordsResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Control_ClaimOutboxProjectionRecordsServer = grpc.ServerStreamingServer[ClaimOutboxProjectionRecordsResponse]
 
 func _Control_CompleteOutboxProjectionRecord_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CompleteOutboxProjectionRecordRequest)
@@ -822,10 +832,6 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Control_GetOutboxProjection_Handler,
 		},
 		{
-			MethodName: "ClaimOutboxProjectionRecords",
-			Handler:    _Control_ClaimOutboxProjectionRecords_Handler,
-		},
-		{
 			MethodName: "CompleteOutboxProjectionRecord",
 			Handler:    _Control_CompleteOutboxProjectionRecord_Handler,
 		},
@@ -855,6 +861,11 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "ListSessionCleanupTurns",
 			Handler:       _Control_ListSessionCleanupTurns_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ClaimOutboxProjectionRecords",
+			Handler:       _Control_ClaimOutboxProjectionRecords_Handler,
 			ServerStreams: true,
 		},
 	},

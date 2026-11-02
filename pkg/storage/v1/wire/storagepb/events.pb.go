@@ -1484,11 +1484,11 @@ const file_orka_storage_v1_events_proto_rawDesc = "" +
 	"\x04plan\x18\x03 \x01(\v2\x1a.orka.storage.v1.PlanStateR\x04plan\"\x89\x01\n" +
 	",AppendExecutionEventWithPlanIfAbsentResponse\x12=\n" +
 	"\tpersisted\x18\x01 \x01(\v2\x1f.orka.storage.v1.ExecutionEventR\tpersisted\x12\x1a\n" +
-	"\bappended\x18\x02 \x01(\bR\bappended2\xe5\t\n" +
+	"\bappended\x18\x02 \x01(\bR\bappended2\xfe\t\n" +
 	"\x06Events\x12}\n" +
-	"\x14AppendExecutionEvent\x12,.orka.storage.v1.AppendExecutionEventRequest\x1a-.orka.storage.v1.AppendExecutionEventResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12z\n" +
-	"\x13ListExecutionEvents\x12+.orka.storage.v1.ListExecutionEventsRequest\x1a,.orka.storage.v1.ListExecutionEventsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x8f\x01\n" +
-	"\x1aListSessionExecutionEvents\x122.orka.storage.v1.ListSessionExecutionEventsRequest\x1a3.orka.storage.v1.ListSessionExecutionEventsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x8f\x01\n" +
+	"\x14AppendExecutionEvent\x12,.orka.storage.v1.AppendExecutionEventRequest\x1a-.orka.storage.v1.AppendExecutionEventResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x86\x01\n" +
+	"\x13ListExecutionEvents\x12+.orka.storage.v1.ListExecutionEventsRequest\x1a,.orka.storage.v1.ListExecutionEventsResponse\"\x12\x98\xf4\x18\x01\xa0\xf4\x18\x01\xaa\xf4\x18\x06events0\x01\x12\x9b\x01\n" +
+	"\x1aListSessionExecutionEvents\x122.orka.storage.v1.ListSessionExecutionEventsRequest\x1a3.orka.storage.v1.ListSessionExecutionEventsResponse\"\x12\x98\xf4\x18\x01\xa0\xf4\x18\x01\xaa\xf4\x18\x06events0\x01\x12\x8f\x01\n" +
 	"\x1aGetLatestExecutionEventSeq\x122.orka.storage.v1.GetLatestExecutionEventSeqRequest\x1a3.orka.storage.v1.GetLatestExecutionEventSeqResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x92\x01\n" +
 	"\x1bGetLatestExecutionEventSeqs\x123.orka.storage.v1.GetLatestExecutionEventSeqsRequest\x1a4.orka.storage.v1.GetLatestExecutionEventSeqsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x80\x01\n" +
 	"\x15DeleteExecutionEvents\x12-.orka.storage.v1.DeleteExecutionEventsRequest\x1a..orka.storage.v1.DeleteExecutionEventsResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x95\x01\n" +

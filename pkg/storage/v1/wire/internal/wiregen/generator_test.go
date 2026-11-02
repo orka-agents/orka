@@ -413,15 +413,16 @@ func TestGenerationFailsOnInconsistentBatchedReads(t *testing.T) {
 		proto.SetExtension(methodProto(t, protos, "sessions.proto", "GetSession").GetOptions(), storagepb.E_Batched, "session")
 		// A batched path through a field the response does not have.
 		proto.SetExtension(methodProto(t, protos, "sessions.proto", "ListSessions").GetOptions(), storagepb.E_Batched, "items")
-		// A batched read declared as a write.
-		proto.SetExtension(methodProto(t, protos, "sessions.proto", "LoadTranscript").GetOptions(), storagepb.E_Kind,
+		// A blob download declared as a write; a batched response may be
+		// a write, as an outbox claim is, but a blob download may not.
+		proto.SetExtension(methodProto(t, protos, "results.proto", "GetResult").GetOptions(), storagepb.E_Kind,
 			storagepb.MethodKind_METHOD_KIND_WRITE)
 	})
 	expectProblem(t, testContractDir, files,
 		"orka.storage.v1.Sessions.SearchTranscript declares batched but does not stream only its response",
 		`orka.storage.v1.Sessions.GetSession batches "session", which must reach a repeated message field`,
 		`orka.storage.v1.Sessions.ListSessions batches "items", but ListSessionsResponse has no field "items"`,
-		"orka.storage.v1.Sessions.LoadTranscript streams its response, so it must be a read")
+		"orka.storage.v1.Results.GetResult streams its response blob, so it must be a read")
 }
 
 // An optional service names only interfaces neither contract part requires,
@@ -463,7 +464,8 @@ func TestModelMapsTheSessionControlEventAndOwnershipFamilies(t *testing.T) {
 	}
 	for name, path := range map[string]string{"GetSession": "session.messages", "ListSessions": "sessions",
 		"LoadTranscript": "messages", "LoadTranscriptThrough": "messages", "ListSessionCleanupIntents": "intents",
-		"ListSessionCleanupTurns": "turns"} {
+		"ListSessionCleanupTurns": "turns", "ListExecutionEvents": "events", "ListSessionExecutionEvents": "events",
+		"ClaimOutboxProjectionRecords": "projections"} {
 		if method := methods[name]; method == nil || method.stream != streamSnapshot || batchedName(method) != path || method.class != classBulk {
 			t.Errorf("%s is not a bulk batched read of %q", name, path)
 		}

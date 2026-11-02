@@ -27,7 +27,7 @@ const (
 	HeaderBlobSize   = "orka-storage-blob-size"
 	HeaderBlobSHA256 = "orka-storage-blob-sha256"
 	// HeaderSnapshotRecords and HeaderSnapshotBytes describe the whole list a
-	// batched read returns: its number of records, and their encoded size in
+	// batched response carries: its number of records, and their encoded size in
 	// the list in bytes, each record's field tag and length prefix included,
 	// both in decimal. The server sends them as response headers.
 	HeaderSnapshotRecords = "orka-storage-snapshot-records"
@@ -51,11 +51,11 @@ const MaxChunkBytes = 1 << 20
 const DefaultMaxBlobBytes = 64 << 20
 
 // DefaultMaxSnapshotBytes is the largest list a client accepts from one
-// batched read unless it is configured otherwise.
+// batched response unless it is configured otherwise.
 const DefaultMaxSnapshotBytes = 256 << 20
 
 // DefaultMaxSnapshotRecords is the most records a client accepts from one
-// batched read unless it is configured otherwise, so a list of many small
+// batched response unless it is configured otherwise, so a list of many small
 // records cannot hold the client's memory far beyond its byte limit.
 const DefaultMaxSnapshotRecords = 1 << 20
 
@@ -93,7 +93,7 @@ const (
 	// ClassControl is every other unary call.
 	ClassControl
 	// ClassBulk is every streaming call: one that carries a blob, and a
-	// batched read. A client sends bulk calls over their own connection when
+	// batched response. A client sends bulk calls over their own connection when
 	// it has one.
 	ClassBulk
 )
@@ -122,7 +122,7 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
-	// streamSnapshot is a server-streaming read whose response list crosses in
+	// streamSnapshot is a server-streaming RPC whose response list crosses in
 	// batches.
 	streamSnapshot
 )
@@ -141,7 +141,7 @@ type method struct {
 	contract string
 	// callClass is the RPC's call class.
 	callClass Class
-	// batched is, for a batched read, the path of field names from the
+	// batched is, for a batched response, the path of field names from the
 	// response message to the list that crosses in batches.
 	batched string
 }

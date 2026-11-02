@@ -62,11 +62,11 @@ type ClientConfig struct {
 	// Zero means DefaultMaxBlobBytes.
 	MaxBlobBytes int64
 	// MaxSnapshotBytes caps the list the client accepts from one batched
-	// read, such as a Session's transcript. Zero means
+	// response, such as a Session's transcript. Zero means
 	// DefaultMaxSnapshotBytes.
 	MaxSnapshotBytes int64
 	// MaxSnapshotRecords caps the number of records the client accepts from
-	// one batched read. Zero means DefaultMaxSnapshotRecords.
+	// one batched response. Zero means DefaultMaxSnapshotRecords.
 	MaxSnapshotRecords int64
 	// Limits are the provider's limits from its Describe. The client refuses
 	// an artifact larger than Limits.MaxArtifactBytes without sending it.
@@ -89,7 +89,7 @@ type Client struct {
 	serverRevision   int
 	maxBlobBytes     int64
 	maxSnapshotBytes int64
-	// maxSnapshotRecords caps the records of one batched read.
+	// maxSnapshotRecords caps the records of one batched response.
 	maxSnapshotRecords int64
 	limits             storagev1.ProviderLimits
 }

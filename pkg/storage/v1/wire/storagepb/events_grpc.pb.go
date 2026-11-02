@@ -34,12 +34,13 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // Events serves execution events, their deduplicated appends and the plan
-// projection an event carries. Event lists are bounded by their filter's
-// limit.
+// projection an event carries. A page of up to 1,000 events can be larger
+// than one message, so ListExecutionEvents and ListSessionExecutionEvents
+// stream their events in batches from one provider result.
 type EventsClient interface {
 	AppendExecutionEvent(ctx context.Context, in *AppendExecutionEventRequest, opts ...grpc.CallOption) (*AppendExecutionEventResponse, error)
-	ListExecutionEvents(ctx context.Context, in *ListExecutionEventsRequest, opts ...grpc.CallOption) (*ListExecutionEventsResponse, error)
-	ListSessionExecutionEvents(ctx context.Context, in *ListSessionExecutionEventsRequest, opts ...grpc.CallOption) (*ListSessionExecutionEventsResponse, error)
+	ListExecutionEvents(ctx context.Context, in *ListExecutionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListExecutionEventsResponse], error)
+	ListSessionExecutionEvents(ctx context.Context, in *ListSessionExecutionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListSessionExecutionEventsResponse], error)
 	GetLatestExecutionEventSeq(ctx context.Context, in *GetLatestExecutionEventSeqRequest, opts ...grpc.CallOption) (*GetLatestExecutionEventSeqResponse, error)
 	GetLatestExecutionEventSeqs(ctx context.Context, in *GetLatestExecutionEventSeqsRequest, opts ...grpc.CallOption) (*GetLatestExecutionEventSeqsResponse, error)
 	DeleteExecutionEvents(ctx context.Context, in *DeleteExecutionEventsRequest, opts ...grpc.CallOption) (*DeleteExecutionEventsResponse, error)
@@ -65,25 +66,43 @@ func (c *eventsClient) AppendExecutionEvent(ctx context.Context, in *AppendExecu
 	return out, nil
 }
 
-func (c *eventsClient) ListExecutionEvents(ctx context.Context, in *ListExecutionEventsRequest, opts ...grpc.CallOption) (*ListExecutionEventsResponse, error) {
+func (c *eventsClient) ListExecutionEvents(ctx context.Context, in *ListExecutionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListExecutionEventsResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListExecutionEventsResponse)
-	err := c.cc.Invoke(ctx, Events_ListExecutionEvents_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Events_ServiceDesc.Streams[0], Events_ListExecutionEvents_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[ListExecutionEventsRequest, ListExecutionEventsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
 
-func (c *eventsClient) ListSessionExecutionEvents(ctx context.Context, in *ListSessionExecutionEventsRequest, opts ...grpc.CallOption) (*ListSessionExecutionEventsResponse, error) {
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Events_ListExecutionEventsClient = grpc.ServerStreamingClient[ListExecutionEventsResponse]
+
+func (c *eventsClient) ListSessionExecutionEvents(ctx context.Context, in *ListSessionExecutionEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ListSessionExecutionEventsResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListSessionExecutionEventsResponse)
-	err := c.cc.Invoke(ctx, Events_ListSessionExecutionEvents_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Events_ServiceDesc.Streams[1], Events_ListSessionExecutionEvents_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[ListSessionExecutionEventsRequest, ListSessionExecutionEventsResponse]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Events_ListSessionExecutionEventsClient = grpc.ServerStreamingClient[ListSessionExecutionEventsResponse]
 
 func (c *eventsClient) GetLatestExecutionEventSeq(ctx context.Context, in *GetLatestExecutionEventSeqRequest, opts ...grpc.CallOption) (*GetLatestExecutionEventSeqResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -140,12 +159,13 @@ func (c *eventsClient) AppendExecutionEventWithPlanIfAbsent(ctx context.Context,
 // for forward compatibility.
 //
 // Events serves execution events, their deduplicated appends and the plan
-// projection an event carries. Event lists are bounded by their filter's
-// limit.
+// projection an event carries. A page of up to 1,000 events can be larger
+// than one message, so ListExecutionEvents and ListSessionExecutionEvents
+// stream their events in batches from one provider result.
 type EventsServer interface {
 	AppendExecutionEvent(context.Context, *AppendExecutionEventRequest) (*AppendExecutionEventResponse, error)
-	ListExecutionEvents(context.Context, *ListExecutionEventsRequest) (*ListExecutionEventsResponse, error)
-	ListSessionExecutionEvents(context.Context, *ListSessionExecutionEventsRequest) (*ListSessionExecutionEventsResponse, error)
+	ListExecutionEvents(*ListExecutionEventsRequest, grpc.ServerStreamingServer[ListExecutionEventsResponse]) error
+	ListSessionExecutionEvents(*ListSessionExecutionEventsRequest, grpc.ServerStreamingServer[ListSessionExecutionEventsResponse]) error
 	GetLatestExecutionEventSeq(context.Context, *GetLatestExecutionEventSeqRequest) (*GetLatestExecutionEventSeqResponse, error)
 	GetLatestExecutionEventSeqs(context.Context, *GetLatestExecutionEventSeqsRequest) (*GetLatestExecutionEventSeqsResponse, error)
 	DeleteExecutionEvents(context.Context, *DeleteExecutionEventsRequest) (*DeleteExecutionEventsResponse, error)
@@ -164,11 +184,11 @@ type UnimplementedEventsServer struct{}
 func (UnimplementedEventsServer) AppendExecutionEvent(context.Context, *AppendExecutionEventRequest) (*AppendExecutionEventResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method AppendExecutionEvent not implemented")
 }
-func (UnimplementedEventsServer) ListExecutionEvents(context.Context, *ListExecutionEventsRequest) (*ListExecutionEventsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListExecutionEvents not implemented")
+func (UnimplementedEventsServer) ListExecutionEvents(*ListExecutionEventsRequest, grpc.ServerStreamingServer[ListExecutionEventsResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ListExecutionEvents not implemented")
 }
-func (UnimplementedEventsServer) ListSessionExecutionEvents(context.Context, *ListSessionExecutionEventsRequest) (*ListSessionExecutionEventsResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListSessionExecutionEvents not implemented")
+func (UnimplementedEventsServer) ListSessionExecutionEvents(*ListSessionExecutionEventsRequest, grpc.ServerStreamingServer[ListSessionExecutionEventsResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method ListSessionExecutionEvents not implemented")
 }
 func (UnimplementedEventsServer) GetLatestExecutionEventSeq(context.Context, *GetLatestExecutionEventSeqRequest) (*GetLatestExecutionEventSeqResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetLatestExecutionEventSeq not implemented")
@@ -224,41 +244,27 @@ func _Events_AppendExecutionEvent_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Events_ListExecutionEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListExecutionEventsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _Events_ListExecutionEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ListExecutionEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(EventsServer).ListExecutionEvents(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Events_ListExecutionEvents_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(EventsServer).ListExecutionEvents(ctx, req.(*ListExecutionEventsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(EventsServer).ListExecutionEvents(m, &grpc.GenericServerStream[ListExecutionEventsRequest, ListExecutionEventsResponse]{ServerStream: stream})
 }
 
-func _Events_ListSessionExecutionEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ListSessionExecutionEventsRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Events_ListExecutionEventsServer = grpc.ServerStreamingServer[ListExecutionEventsResponse]
+
+func _Events_ListSessionExecutionEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ListSessionExecutionEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(EventsServer).ListSessionExecutionEvents(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Events_ListSessionExecutionEvents_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(EventsServer).ListSessionExecutionEvents(ctx, req.(*ListSessionExecutionEventsRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(EventsServer).ListSessionExecutionEvents(m, &grpc.GenericServerStream[ListSessionExecutionEventsRequest, ListSessionExecutionEventsResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Events_ListSessionExecutionEventsServer = grpc.ServerStreamingServer[ListSessionExecutionEventsResponse]
 
 func _Events_GetLatestExecutionEventSeq_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetLatestExecutionEventSeqRequest)
@@ -362,14 +368,6 @@ var Events_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Events_AppendExecutionEvent_Handler,
 		},
 		{
-			MethodName: "ListExecutionEvents",
-			Handler:    _Events_ListExecutionEvents_Handler,
-		},
-		{
-			MethodName: "ListSessionExecutionEvents",
-			Handler:    _Events_ListSessionExecutionEvents_Handler,
-		},
-		{
 			MethodName: "GetLatestExecutionEventSeq",
 			Handler:    _Events_GetLatestExecutionEventSeq_Handler,
 		},
@@ -390,6 +388,17 @@ var Events_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Events_AppendExecutionEventWithPlanIfAbsent_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "ListExecutionEvents",
+			Handler:       _Events_ListExecutionEvents_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ListSessionExecutionEvents",
+			Handler:       _Events_ListSessionExecutionEvents_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "orka/storage/v1/events.proto",
 }

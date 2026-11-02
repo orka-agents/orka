@@ -43,7 +43,7 @@ var errSnapshotFraming = errors.New("the batched response breaks the framing rul
 // response message down to its batched list.
 var batchedPaths sync.Map
 
-// batchedPathOf returns the fields from a batched read's response message
+// batchedPathOf returns the fields from a batched response message
 // down to the list it batches. The generator guarantees that path names
 // singular message fields ending in a repeated message field.
 func batchedPathOf(desc protoreflect.MessageDescriptor, path string) []protoreflect.FieldDescriptor {
@@ -188,7 +188,7 @@ func batchRecords(field protoreflect.FieldDescriptor, records []protoreflect.Mes
 	return batches, total
 }
 
-// sendSnapshot sends a batched read's response with its list in batches. The
+// sendSnapshot sends a batched response with its list in batches. The
 // whole response is checked and split before anything is sent, so a list
 // the server cannot send fails as a provider error and no part of it reaches
 // the client.
@@ -293,8 +293,10 @@ func reassembleRecords(first proto.Message, path []protoreflect.FieldDescriptor,
 	return nil
 }
 
-// snapshot sends a batched read on the bulk connection and reassembles its
-// list. A list larger than the client accepts is refused before it is read.
+// snapshot sends a call with a batched response on the bulk connection and
+// reassembles its list. A list larger than the client accepts is refused
+// before it is read: a read as too large, and a write, whose provider already
+// ran, as an unknown outcome.
 func (c *Client) snapshot(ctx context.Context, m *method, request, response proto.Message,
 	open func(context.Context, ...grpc.CallOption) (grpc.ClientStream, error)) error {
 	callCtx, evidence, err := c.prepare(ctx, m, request, c.bulkConn, MaxMessageBytes)
@@ -314,10 +316,16 @@ func (c *Client) snapshot(ctx context.Context, m *method, request, response prot
 		return decodeError(ctx, m, err, evidence)
 	}
 	declared, headerErr := parseSnapshotHeader(header)
-	if headerErr == nil && declared.bytes > c.maxSnapshotBytes {
-		return storagev1.TooLargeError{What: m.name + " response", Size: declared.bytes, Limit: c.maxSnapshotBytes}
-	}
-	if headerErr == nil && declared.records > c.maxSnapshotRecords {
+	if headerErr == nil && (declared.bytes > c.maxSnapshotBytes || declared.records > c.maxSnapshotRecords) {
+		if m.kind == KindWrite {
+			// The provider ran before the server sent the declaration, so
+			// the write may have committed.
+			return fmt.Errorf("%w: %s declares a response of %d records and %d bytes, over this client's limits of %d and %d",
+				storagev1.ErrOutcomeUnknown, m.name, declared.records, declared.bytes, c.maxSnapshotRecords, c.maxSnapshotBytes)
+		}
+		if declared.bytes > c.maxSnapshotBytes {
+			return storagev1.TooLargeError{What: m.name + " response", Size: declared.bytes, Limit: c.maxSnapshotBytes}
+		}
 		return storagev1.TooLargeError{What: m.name + " response records", Size: declared.records, Limit: c.maxSnapshotRecords}
 	}
 	if err := stream.RecvMsg(response); err != nil {

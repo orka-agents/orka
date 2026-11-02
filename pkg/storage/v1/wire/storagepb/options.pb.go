@@ -190,12 +190,13 @@ var (
 	//
 	// optional int32 rpc_since = 51012;
 	E_RpcSince = &file_orka_storage_v1_options_proto_extTypes[3]
-	// batched marks a server-streaming read whose response list crosses in
-	// batches. It names that repeated message field as a path of field names
-	// from the response message, separated by dots and reached through singular
-	// message fields, such as "session.messages". The provider still returns
-	// the whole result at once, from one snapshot; the server library splits the
-	// list into messages, and the client reassembles it.
+	// batched marks a server-streaming RPC whose response list crosses in
+	// batches: a read, or a write whose result can be larger than one message.
+	// It names that repeated message field as a path of field names from the
+	// response message, separated by dots and reached through singular message
+	// fields, such as "session.messages". The provider still returns the whole
+	// result at once; the server library splits the list into messages after the
+	// provider returned, and the client reassembles it.
 	//
 	// optional string batched = 51013;
 	E_Batched = &file_orka_storage_v1_options_proto_extTypes[4]

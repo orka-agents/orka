@@ -17,7 +17,7 @@ var (
 	methodSaveArtifact                         = method{name: "SaveArtifact", fullName: "/orka.storage.v1.Artifacts/SaveArtifact", kind: KindWrite, since: 1, stream: streamUpload, contract: storagev1.ArtifactsContract, callClass: ClassBulk}
 	methodBindSessionCleanupIdentity           = method{name: "BindSessionCleanupIdentity", fullName: "/orka.storage.v1.Control/BindSessionCleanupIdentity", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodCheckTaskJobAuthority                = method{name: "CheckTaskJobAuthority", fullName: "/orka.storage.v1.Control/CheckTaskJobAuthority", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
-	methodClaimOutboxProjectionRecords         = method{name: "ClaimOutboxProjectionRecords", fullName: "/orka.storage.v1.Control/ClaimOutboxProjectionRecords", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
+	methodClaimOutboxProjectionRecords         = method{name: "ClaimOutboxProjectionRecords", fullName: "/orka.storage.v1.Control/ClaimOutboxProjectionRecords", kind: KindWrite, since: 1, stream: streamSnapshot, contract: storagev1.StateContract, callClass: ClassBulk, batched: "projections"}
 	methodCompleteOutboxProjectionRecord       = method{name: "CompleteOutboxProjectionRecord", fullName: "/orka.storage.v1.Control/CompleteOutboxProjectionRecord", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodCompleteSessionCleanup               = method{name: "CompleteSessionCleanup", fullName: "/orka.storage.v1.Control/CompleteSessionCleanup", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodCountUnsettledOutboxProjections      = method{name: "CountUnsettledOutboxProjections", fullName: "/orka.storage.v1.Control/CountUnsettledOutboxProjections", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
@@ -43,8 +43,8 @@ var (
 	methodDeleteExecutionEvents                = method{name: "DeleteExecutionEvents", fullName: "/orka.storage.v1.Events/DeleteExecutionEvents", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodGetLatestExecutionEventSeq           = method{name: "GetLatestExecutionEventSeq", fullName: "/orka.storage.v1.Events/GetLatestExecutionEventSeq", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodGetLatestExecutionEventSeqs          = method{name: "GetLatestExecutionEventSeqs", fullName: "/orka.storage.v1.Events/GetLatestExecutionEventSeqs", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
-	methodListExecutionEvents                  = method{name: "ListExecutionEvents", fullName: "/orka.storage.v1.Events/ListExecutionEvents", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
-	methodListSessionExecutionEvents           = method{name: "ListSessionExecutionEvents", fullName: "/orka.storage.v1.Events/ListSessionExecutionEvents", kind: KindRead, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
+	methodListExecutionEvents                  = method{name: "ListExecutionEvents", fullName: "/orka.storage.v1.Events/ListExecutionEvents", kind: KindRead, since: 1, stream: streamSnapshot, contract: storagev1.StateContract, callClass: ClassBulk, batched: "events"}
+	methodListSessionExecutionEvents           = method{name: "ListSessionExecutionEvents", fullName: "/orka.storage.v1.Events/ListSessionExecutionEvents", kind: KindRead, since: 1, stream: streamSnapshot, contract: storagev1.StateContract, callClass: ClassBulk, batched: "events"}
 	methodDeleteParentMessages                 = method{name: "DeleteParentMessages", fullName: "/orka.storage.v1.Messages/DeleteParentMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodDeleteTaskMessages                   = method{name: "DeleteTaskMessages", fullName: "/orka.storage.v1.Messages/DeleteTaskMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
 	methodGetMessages                          = method{name: "GetMessages", fullName: "/orka.storage.v1.Messages/GetMessages", kind: KindWrite, since: 1, stream: streamNone, contract: storagev1.StateContract, callClass: ClassControl}
@@ -345,11 +345,9 @@ func (client *Client) ClaimOutboxProjectionRecords(ctx context.Context, request 
 		return nil, err
 	}
 	_ = err
-	var wireResponse *storagepb.ClaimOutboxProjectionRecordsResponse
-	if err := client.invoke(ctx, &methodClaimOutboxProjectionRecords, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
-		var callErr error
-		wireResponse, callErr = client.stubs.control.ClaimOutboxProjectionRecords(ctx, wireRequest, opts...)
-		return callErr
+	wireResponse := &storagepb.ClaimOutboxProjectionRecordsResponse{}
+	if err := client.snapshot(ctx, &methodClaimOutboxProjectionRecords, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.control.ClaimOutboxProjectionRecords(ctx, wireRequest, opts...)
 	}); err != nil {
 		return nil, err
 	}
@@ -954,11 +952,9 @@ func (client *Client) ListExecutionEvents(ctx context.Context, filter storagev1.
 		return nil, err
 	}
 	_ = err
-	var wireResponse *storagepb.ListExecutionEventsResponse
-	if err := client.invoke(ctx, &methodListExecutionEvents, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
-		var callErr error
-		wireResponse, callErr = client.stubs.events.ListExecutionEvents(ctx, wireRequest, opts...)
-		return callErr
+	wireResponse := &storagepb.ListExecutionEventsResponse{}
+	if err := client.snapshot(ctx, &methodListExecutionEvents, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.events.ListExecutionEvents(ctx, wireRequest, opts...)
 	}); err != nil {
 		return nil, err
 	}
@@ -984,11 +980,9 @@ func (client *Client) ListSessionExecutionEvents(ctx context.Context, filter sto
 		return nil, 0, err
 	}
 	_ = err
-	var wireResponse *storagepb.ListSessionExecutionEventsResponse
-	if err := client.invoke(ctx, &methodListSessionExecutionEvents, wireRequest, func(ctx context.Context, opts ...grpc.CallOption) error {
-		var callErr error
-		wireResponse, callErr = client.stubs.events.ListSessionExecutionEvents(ctx, wireRequest, opts...)
-		return callErr
+	wireResponse := &storagepb.ListSessionExecutionEventsResponse{}
+	if err := client.snapshot(ctx, &methodListSessionExecutionEvents, wireRequest, wireResponse, func(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return client.bulk.events.ListSessionExecutionEvents(ctx, wireRequest, opts...)
 	}); err != nil {
 		return nil, 0, err
 	}
@@ -2036,26 +2030,27 @@ func (service *controlService) CheckTaskJobAuthority(ctx context.Context, wireRe
 	return wireResponse, nil
 }
 
-func (service *controlService) ClaimOutboxProjectionRecords(ctx context.Context, wireRequest *storagepb.ClaimOutboxProjectionRecordsRequest) (*storagepb.ClaimOutboxProjectionRecordsResponse, error) {
+func (service *controlService) ClaimOutboxProjectionRecords(wireRequest *storagepb.ClaimOutboxProjectionRecordsRequest, stream grpc.ServerStreamingServer[storagepb.ClaimOutboxProjectionRecordsResponse]) error {
+	ctx := stream.Context()
 	var err error
 	var a0 storagev1.ClaimOutboxProjectionsRequest
 	if a0, err = fromWireClaimOutboxProjectionsRequest(wireRequest.Request); err != nil {
-		return nil, requestStatus(err)
+		return requestStatus(err)
 	}
 	var r0 []storagev1.OutboxProjection
 	r0, err = service.provider.ClaimOutboxProjectionRecords(ctx, a0)
 	if err != nil {
-		return nil, service.server.providerError(ctx, &methodClaimOutboxProjectionRecords, err)
+		return service.server.providerError(ctx, &methodClaimOutboxProjectionRecords, err)
 	}
 	wireResponse := &storagepb.ClaimOutboxProjectionRecordsResponse{}
 	for _, e49 := range r0 {
 		w50, err := toWireOutboxProjection(e49)
 		if err != nil {
-			return nil, service.server.encodeError(ctx, &methodClaimOutboxProjectionRecords, err)
+			return service.server.encodeError(ctx, &methodClaimOutboxProjectionRecords, err)
 		}
 		wireResponse.Projections = append(wireResponse.Projections, w50)
 	}
-	return wireResponse, nil
+	return service.server.sendSnapshot(stream, &methodClaimOutboxProjectionRecords, wireResponse)
 }
 
 func (service *controlService) CompleteOutboxProjectionRecord(ctx context.Context, wireRequest *storagepb.CompleteOutboxProjectionRecordRequest) (*storagepb.CompleteOutboxProjectionRecordResponse, error) {
@@ -2555,50 +2550,52 @@ func (service *eventsService) GetLatestExecutionEventSeqs(ctx context.Context, w
 	return wireResponse, nil
 }
 
-func (service *eventsService) ListExecutionEvents(ctx context.Context, wireRequest *storagepb.ListExecutionEventsRequest) (*storagepb.ListExecutionEventsResponse, error) {
+func (service *eventsService) ListExecutionEvents(wireRequest *storagepb.ListExecutionEventsRequest, stream grpc.ServerStreamingServer[storagepb.ListExecutionEventsResponse]) error {
+	ctx := stream.Context()
 	var err error
 	var a0 storagev1.ExecutionEventFilter
 	if a0, err = fromWireExecutionEventFilter(wireRequest.Filter); err != nil {
-		return nil, requestStatus(err)
+		return requestStatus(err)
 	}
 	var r0 []storagev1.ExecutionEvent
 	r0, err = service.provider.ListExecutionEvents(ctx, a0)
 	if err != nil {
-		return nil, service.server.providerError(ctx, &methodListExecutionEvents, err)
+		return service.server.providerError(ctx, &methodListExecutionEvents, err)
 	}
 	wireResponse := &storagepb.ListExecutionEventsResponse{}
 	for _, e61 := range r0 {
 		w62, err := toWireExecutionEvent(e61)
 		if err != nil {
-			return nil, service.server.encodeError(ctx, &methodListExecutionEvents, err)
+			return service.server.encodeError(ctx, &methodListExecutionEvents, err)
 		}
 		wireResponse.Events = append(wireResponse.Events, w62)
 	}
-	return wireResponse, nil
+	return service.server.sendSnapshot(stream, &methodListExecutionEvents, wireResponse)
 }
 
-func (service *eventsService) ListSessionExecutionEvents(ctx context.Context, wireRequest *storagepb.ListSessionExecutionEventsRequest) (*storagepb.ListSessionExecutionEventsResponse, error) {
+func (service *eventsService) ListSessionExecutionEvents(wireRequest *storagepb.ListSessionExecutionEventsRequest, stream grpc.ServerStreamingServer[storagepb.ListSessionExecutionEventsResponse]) error {
+	ctx := stream.Context()
 	var err error
 	var a0 storagev1.SessionExecutionEventFilter
 	if a0, err = fromWireSessionExecutionEventFilter(wireRequest.Filter); err != nil {
-		return nil, requestStatus(err)
+		return requestStatus(err)
 	}
 	var r0 []storagev1.SessionExecutionEvent
 	var r1 int64
 	r0, r1, err = service.provider.ListSessionExecutionEvents(ctx, a0)
 	if err != nil {
-		return nil, service.server.providerError(ctx, &methodListSessionExecutionEvents, err)
+		return service.server.providerError(ctx, &methodListSessionExecutionEvents, err)
 	}
 	wireResponse := &storagepb.ListSessionExecutionEventsResponse{}
 	for _, e63 := range r0 {
 		w64, err := toWireSessionExecutionEvent(e63)
 		if err != nil {
-			return nil, service.server.encodeError(ctx, &methodListSessionExecutionEvents, err)
+			return service.server.encodeError(ctx, &methodListSessionExecutionEvents, err)
 		}
 		wireResponse.Events = append(wireResponse.Events, w64)
 	}
 	wireResponse.LatestSeq = r1
-	return wireResponse, nil
+	return service.server.sendSnapshot(stream, &methodListSessionExecutionEvents, wireResponse)
 }
 
 // messagesService serves orka.storage.v1.Messages from a provider.

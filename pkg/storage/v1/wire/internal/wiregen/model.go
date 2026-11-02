@@ -52,8 +52,9 @@ const (
 	streamUpload
 	// streamDownload is a server-streaming RPC whose response carries a blob.
 	streamDownload
-	// streamSnapshot is a server-streaming read whose response list crosses
-	// in batches.
+	// streamSnapshot is a server-streaming RPC whose response list crosses in
+	// batches. It is a read, or a write such as a claim whose result can be
+	// larger than one message.
 	streamSnapshot
 )
 
@@ -348,8 +349,8 @@ func (b *builder) buildMethod(svc *service, rpc protoreflect.MethodDescriptor, g
 	if method.stream == streamUpload && method.kind != storagepb.MethodKind_METHOD_KIND_WRITE {
 		b.problemf("%s streams its request, so it must be a write", where)
 	}
-	if (method.stream == streamDownload || method.stream == streamSnapshot) && method.kind != storagepb.MethodKind_METHOD_KIND_READ {
-		b.problemf("%s streams its response, so it must be a read", where)
+	if method.stream == streamDownload && method.kind != storagepb.MethodKind_METHOD_KIND_READ {
+		b.problemf("%s streams its response blob, so it must be a read", where)
 	}
 	switch {
 	case svc.contract == contractBoth && !svc.optional:

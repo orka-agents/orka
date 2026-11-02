@@ -13,7 +13,11 @@ option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;s
 // cleanup intents and receipts, the controller epoch mirror, the projection
 // outbox and Task Job authority. ListSessionCleanupIntents and
 // ListSessionCleanupTurns return lists the contract does not bound by size,
-// so their responses stream the list in batches from one provider result.
+// and a claim of outbox records with payloads of up to 4 MiB each can be
+// larger than one message, so these responses stream their list in batches
+// from one provider result. A claim commits its leases before its response is
+// sent, so a claim whose response does not arrive whole is an unknown
+// outcome.
 service Control {
   option (go_interface) = "SessionCleanupPersistenceStore";
   option (go_interface) = "ControllerEpochMirror";
@@ -79,9 +83,10 @@ service Control {
     option (kind) = METHOD_KIND_READ;
     option (rpc_since) = 1;
   }
-  rpc ClaimOutboxProjectionRecords(ClaimOutboxProjectionRecordsRequest) returns (ClaimOutboxProjectionRecordsResponse) {
+  rpc ClaimOutboxProjectionRecords(ClaimOutboxProjectionRecordsRequest) returns (stream ClaimOutboxProjectionRecordsResponse) {
     option (kind) = METHOD_KIND_WRITE;
     option (rpc_since) = 1;
+    option (batched) = "projections";
   }
   rpc CompleteOutboxProjectionRecord(CompleteOutboxProjectionRecordRequest) returns (CompleteOutboxProjectionRecordResponse) {
     option (kind) = METHOD_KIND_WRITE;

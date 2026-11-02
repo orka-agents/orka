@@ -4211,7 +4211,7 @@ const file_orka_storage_v1_control_proto_rawDesc = "" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x1b\n" +
 	"\ttask_name\x18\x02 \x01(\tR\btaskName\x12\x19\n" +
 	"\btask_uid\x18\x03 \x01(\tR\ataskUid\"\"\n" +
-	" DeleteTaskJobRevocationsResponse2\xb8\x17\n" +
+	" DeleteTaskJobRevocationsResponse2\xc9\x17\n" +
 	"\aControl\x12\x95\x01\n" +
 	"\x1cGetSessionTurnCleanupReceipt\x124.orka.storage.v1.GetSessionTurnCleanupReceiptRequest\x1a5.orka.storage.v1.GetSessionTurnCleanupReceiptResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x86\x01\n" +
 	"\x17GetSessionCleanupIntent\x12/.orka.storage.v1.GetSessionCleanupIntentRequest\x1a0.orka.storage.v1.GetSessionCleanupIntentResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x99\x01\n" +
@@ -4226,8 +4226,8 @@ const file_orka_storage_v1_control_proto_rawDesc = "" +
 	"\x16CompleteSessionCleanup\x12..orka.storage.v1.CompleteSessionCleanupRequest\x1a/.orka.storage.v1.CompleteSessionCleanupResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x8c\x01\n" +
 	"\x19SyncControllerEpochMirror\x121.orka.storage.v1.SyncControllerEpochMirrorRequest\x1a2.orka.storage.v1.SyncControllerEpochMirrorResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x98\x01\n" +
 	"\x1dEnqueueOutboxProjectionRecord\x125.orka.storage.v1.EnqueueOutboxProjectionRecordRequest\x1a6.orka.storage.v1.EnqueueOutboxProjectionRecordResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12z\n" +
-	"\x13GetOutboxProjection\x12+.orka.storage.v1.GetOutboxProjectionRequest\x1a,.orka.storage.v1.GetOutboxProjectionResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\x95\x01\n" +
-	"\x1cClaimOutboxProjectionRecords\x124.orka.storage.v1.ClaimOutboxProjectionRecordsRequest\x1a5.orka.storage.v1.ClaimOutboxProjectionRecordsResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x9b\x01\n" +
+	"\x13GetOutboxProjection\x12+.orka.storage.v1.GetOutboxProjectionRequest\x1a,.orka.storage.v1.GetOutboxProjectionResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12\xa6\x01\n" +
+	"\x1cClaimOutboxProjectionRecords\x124.orka.storage.v1.ClaimOutboxProjectionRecordsRequest\x1a5.orka.storage.v1.ClaimOutboxProjectionRecordsResponse\"\x17\x98\xf4\x18\x02\xa0\xf4\x18\x01\xaa\xf4\x18\vprojections0\x01\x12\x9b\x01\n" +
 	"\x1eCompleteOutboxProjectionRecord\x126.orka.storage.v1.CompleteOutboxProjectionRecordRequest\x1a7.orka.storage.v1.CompleteOutboxProjectionRecordResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x9e\x01\n" +
 	"\x1fCountUnsettledOutboxProjections\x127.orka.storage.v1.CountUnsettledOutboxProjectionsRequest\x1a8.orka.storage.v1.CountUnsettledOutboxProjectionsResponse\"\b\x98\xf4\x18\x01\xa0\xf4\x18\x01\x12h\n" +
 	"\rRevokeTaskJob\x12%.orka.storage.v1.RevokeTaskJobRequest\x1a&.orka.storage.v1.RevokeTaskJobResponse\"\b\x98\xf4\x18\x02\xa0\xf4\x18\x01\x12\x80\x01\n" +

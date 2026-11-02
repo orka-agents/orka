@@ -11,8 +11,9 @@ import "orka/storage/v1/usage.proto";
 option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
 
 // Events serves execution events, their deduplicated appends and the plan
-// projection an event carries. Event lists are bounded by their filter's
-// limit.
+// projection an event carries. A page of up to 1,000 events can be larger
+// than one message, so ListExecutionEvents and ListSessionExecutionEvents
+// stream their events in batches from one provider result.
 service Events {
   option (go_interface) = "ExecutionEventStore";
   option (go_interface) = "DeduplicatingExecutionEventStore";
@@ -22,13 +23,15 @@ service Events {
     option (kind) = METHOD_KIND_WRITE;
     option (rpc_since) = 1;
   }
-  rpc ListExecutionEvents(ListExecutionEventsRequest) returns (ListExecutionEventsResponse) {
+  rpc ListExecutionEvents(ListExecutionEventsRequest) returns (stream ListExecutionEventsResponse) {
     option (kind) = METHOD_KIND_READ;
     option (rpc_since) = 1;
+    option (batched) = "events";
   }
-  rpc ListSessionExecutionEvents(ListSessionExecutionEventsRequest) returns (ListSessionExecutionEventsResponse) {
+  rpc ListSessionExecutionEvents(ListSessionExecutionEventsRequest) returns (stream ListSessionExecutionEventsResponse) {
     option (kind) = METHOD_KIND_READ;
     option (rpc_since) = 1;
+    option (batched) = "events";
   }
   rpc GetLatestExecutionEventSeq(GetLatestExecutionEventSeqRequest) returns (GetLatestExecutionEventSeqResponse) {
     option (kind) = METHOD_KIND_READ;

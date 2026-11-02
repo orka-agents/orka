@@ -1,6 +1,7 @@
 package wire_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -290,6 +291,63 @@ func TestBatchedReadsUseTheBulkConnection(t *testing.T) {
 	require.Empty(t, bulk.callsTo("GetSessionType"))
 }
 
+// A page of execution events and a claim of outbox records can each be far
+// larger than one message, so they cross in batches too. A claim is a write:
+// it carries its envelope, and a response over the client's limits after the
+// claim ran is an unknown outcome, never a refusal.
+func TestEventPagesAndClaimsCrossInBatches(t *testing.T) {
+	provider := newRecordingProvider()
+	client := wiretest.Serve(t, serveBoth(provider))
+
+	events := make([]storagev1.ExecutionEvent, 200)
+	for index := range events {
+		events[index] = storagev1.ExecutionEvent{ID: fmt.Sprintf("e-%d", index), Namespace: "n", Seq: int64(index + 1),
+			ContentText: strings.Repeat(string(rune('a'+index%26)), 100<<10)}
+	}
+	provider.set("ListExecutionEvents", []any{events}, nil)
+	listed, err := client.ListExecutionEvents(t.Context(), storagev1.ExecutionEventFilter{Namespace: "n", Limit: 1000})
+	require.NoError(t, err, "a 20 MiB page of valid events crosses the wire")
+	require.Equal(t, wire.NormalizeValue(events), wire.NormalizeValue(listed))
+
+	sessionEvents := make([]storagev1.SessionExecutionEvent, len(events))
+	for index := range events {
+		sessionEvents[index] = storagev1.SessionExecutionEvent{ExecutionEvent: events[index], SessionSeq: int64(index + 1), TaskSeq: 7}
+	}
+	provider.set("ListSessionExecutionEvents", []any{sessionEvents, int64(4242)}, nil)
+	page, latest, err := client.ListSessionExecutionEvents(t.Context(), storagev1.SessionExecutionEventFilter{Namespace: "n", SessionName: "s"})
+	require.NoError(t, err)
+	require.Equal(t, int64(4242), latest, "the fields beside the batched list come with the first message")
+	require.Equal(t, wire.NormalizeValue(sessionEvents), wire.NormalizeValue(page))
+
+	payload := json.RawMessage(`{"data":"` + strings.Repeat("p", 4<<20-16) + `"}`)
+	claimed := make([]storagev1.OutboxProjection, 6)
+	for index := range claimed {
+		claimed[index] = storagev1.OutboxProjection{ID: fmt.Sprintf("p-%d", index), Payload: payload, LeaseOwner: "w"}
+	}
+	provider.set("ClaimOutboxProjectionRecords", []any{claimed}, nil)
+	envelope := storagev1.WriteEnvelope{DatasetID: recordingDataset, Fence: storagev1.ControllerEpochFence{Name: "orka", Epoch: 2, HolderID: "h"},
+		OperationID: "claim", RequestDigest: storagev1.CanonicalBytesDigest([]byte("claim")), IssuedAt: time.Now(), Sequence: 1}
+	ctx := storagev1.WithWriteEnvelope(t.Context(), envelope)
+	got, err := client.ClaimOutboxProjectionRecords(ctx, storagev1.ClaimOutboxProjectionsRequest{WorkerID: "w", Limit: 32})
+	require.NoError(t, err, "a 24 MiB claim of valid records comes back")
+	require.Len(t, got, len(claimed))
+	for index := range claimed {
+		require.Equal(t, claimed[index].ID, got[index].ID)
+		require.JSONEq(t, string(payload), string(got[index].Payload))
+	}
+	calls := provider.callsTo("ClaimOutboxProjectionRecords")
+	require.Len(t, calls, 1)
+	require.True(t, calls[0].hasEnvelope, "a claim is a write and carries its envelope")
+
+	small := wire.NewClient(wiretest.Dial(t, serveBoth(provider)), wire.ClientConfig{Dataset: recordingDataset, MaxSnapshotBytes: 1 << 20})
+	_, err = small.ClaimOutboxProjectionRecords(ctx, storagev1.ClaimOutboxProjectionsRequest{WorkerID: "w", Limit: 32})
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown, "the claim ran before its oversized response was refused")
+	require.False(t, errors.Is(err, storagev1.ErrTooLarge), "a committed claim is not a refused request")
+	require.Len(t, provider.callsTo("ClaimOutboxProjectionRecords"), 2)
+	_, err = small.ListExecutionEvents(t.Context(), storagev1.ExecutionEventFilter{Namespace: "n"})
+	require.ErrorIs(t, err, storagev1.ErrTooLarge, "an oversized read is refused as too large")
+}
+
 // stateOnly hides every method of a provider beyond state.v1, such as the
 // optional Ownership interfaces.
 type stateOnly struct {
@@ -399,6 +457,6 @@ func TestNewServicesUseTheirCallClasses(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[string]wire.Class{
-		"ResolveOperation": wire.ClassControl, "GetSession": wire.ClassBulk, "ListExecutionEvents": wire.ClassControl,
+		"ResolveOperation": wire.ClassControl, "GetSession": wire.ClassBulk, "ListExecutionEvents": wire.ClassBulk,
 	}, classes)
 }
