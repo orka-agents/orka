@@ -946,7 +946,14 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 	return min(tailLines, maxTaskLogTailLines), nil
 }
 
-// GetTaskResult gets the result of a task
+// taskResultUIDArg is the query parameter that names the Task UID a result
+// is read for.
+const taskResultUIDArg = "uid"
+
+// GetTaskResult gets the result of a task. With the uid query parameter, it
+// answers not found unless the Task with that name has that UID, so a caller
+// that observed one Task never reads the result of a later Task that reused
+// its name.
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
@@ -957,6 +964,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	task, err := h.taskAccess().loadReadable(c, "getTaskResult", namespace, id)
 	if err != nil {
 		return err
+	}
+	if uid := c.Query(taskResultUIDArg, ""); uid != "" && uid != string(task.UID) {
+		return fiber.NewError(fiber.StatusNotFound, "task with this UID not found")
 	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {

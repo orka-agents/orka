@@ -355,6 +355,51 @@ func TestWaitForTasksTool_Execute_TruncatesLongStructuredSummary(t *testing.T) {
 	}
 }
 
+func TestWaitForTasksTool_Execute_FetchesTheResultOfTheObservedTask(t *testing.T) {
+	sr := common.StructuredResult{Version: 1, Summary: "observed Task's result"}
+	srJSON, _ := json.Marshal(sr)
+	var requestedUIDs []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedUIDs = append(requestedUIDs, r.URL.Query().Get("uid"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{resultField: string(srJSON)}) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
+	t.Setenv(envOrkaControllerURL, server.URL)
+
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "observed", Namespace: defaultNamespace, UID: types.UID("observed-uid")},
+		Status: corev1alpha1.TaskStatus{
+			Phase:     corev1alpha1.TaskPhaseSucceeded,
+			ResultRef: &corev1alpha1.ResultReference{Available: true},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newTestScheme()).
+		WithObjects(task).
+		WithStatusSubresource(&corev1alpha1.Task{}).
+		Build()
+
+	tool := NewWaitForTasksTool(fakeClient)
+	args, _ := json.Marshal(WaitForTasksArgs{Tasks: []string{"observed"}, Timeout: "5s"})
+	result, err := tool.Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	var waitResult WaitForTasksResult
+	if err := json.Unmarshal([]byte(result), &waitResult); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(requestedUIDs) != 1 || requestedUIDs[0] != "observed-uid" {
+		t.Fatalf("result requests named UIDs %q, want the observed Task's UID", requestedUIDs)
+	}
+	if got := waitResult.Results[0].Summary; got != sr.Summary {
+		t.Fatalf("summary = %q, want %q", got, sr.Summary)
+	}
+}
+
 func TestWaitForTasksTool_Execute_MissingNamespace(t *testing.T) {
 	t.Setenv(envOrkaTaskNamespace, "")
 	tool := NewWaitForTasksTool(nil)

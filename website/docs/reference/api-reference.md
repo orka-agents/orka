@@ -62,7 +62,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
-| `/api/v1/tasks/:id/result` | GET | Get task result |
+| `/api/v1/tasks/:id/result` | GET | Get task result (`uid` returns 404 unless the Task with that name has that UID) |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
 | `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |

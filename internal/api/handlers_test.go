@@ -2680,6 +2680,28 @@ func TestHandlers_GetTaskResult_Success(t *testing.T) {
 	}
 }
 
+func TestHandlers_GetTaskResult_AnswersOnlyForTheNamedUID(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-task", Namespace: "default"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{ResultRef: &corev1alpha1.ResultReference{Available: true}},
+	}
+	handlers, app := setupTestHandlersWithObjects(task)
+	require.NoError(t, handlers.resultStore.SaveResult(context.Background(), store.ResultKey{Namespace: "default", TaskName: "test-task", TaskUID: "test-task-uid"}, []byte("task result content")))
+	app.Get("/tasks/:id/result", handlers.GetTaskResult)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/tasks/test-task/result?uid=test-task-uid", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"result":"task result content"}`, string(body))
+
+	resp, err = app.Test(httptest.NewRequest(http.MethodGet, "/tasks/test-task/result?uid=earlier-task-uid", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode, "a caller that observed an earlier Task with this name gets nothing")
+}
+
 func TestHandlers_GetTaskResult_NoResult(t *testing.T) {
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{

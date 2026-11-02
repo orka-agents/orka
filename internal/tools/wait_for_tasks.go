@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -272,7 +273,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// provide ResultStore through ToolContext; worker calls fall back to the
 			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, store.ResultKey{Namespace: ns, TaskName: taskName, TaskUID: string(taskmeta.DataUID(&task))})
+				resultStr, fetchErr := fetchWaitedTaskResult(ctx, &task)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)
@@ -460,15 +461,18 @@ func brokeredDelegationReceiptAuthorizes(
 		receipt.ParentTaskUID == string(parent.UID), nil
 }
 
-func fetchTaskResultForNamespace(ctx context.Context, key store.ResultKey) (string, error) {
+// fetchWaitedTaskResult returns the result of the Task the wait observed,
+// never that of a later Task that reused its name.
+func fetchWaitedTaskResult(ctx context.Context, task *corev1alpha1.Task) (string, error) {
 	if toolCtx := GetToolContext(ctx); toolCtx != nil && toolCtx.ResultStore != nil {
+		key := store.ResultKey{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(taskmeta.DataUID(task))}
 		result, err := toolCtx.ResultStore.GetResult(ctx, key)
 		if err != nil {
 			return "", err
 		}
 		return string(result), nil
 	}
-	return fetchTaskResult(ctx, key.TaskName)
+	return fetchTaskResult(ctx, task.Name, string(task.UID))
 }
 
 func boundWaitTaskData(data map[string]any) map[string]any {
@@ -607,7 +611,9 @@ func getRetryInfo(task *corev1alpha1.Task) (retryCount, maxRetries int) {
 const saTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 // fetchTaskResult fetches a task result from the controller via HTTP GET.
-func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
+// With a Task UID, the controller answers not found unless the Task with that
+// name has that UID.
+func fetchTaskResult(ctx context.Context, taskName, taskUID string) (string, error) {
 	controllerURL := os.Getenv(envOrkaControllerURL)
 	if controllerURL == "" {
 		return "", fmt.Errorf("%s is not set", envOrkaControllerURL)
@@ -615,6 +621,9 @@ func fetchTaskResult(ctx context.Context, taskName string) (string, error) {
 
 	controllerURL = strings.TrimRight(controllerURL, "/")
 	url := fmt.Sprintf("%s/api/v1/tasks/%s/result", controllerURL, taskName)
+	if taskUID != "" {
+		url += "?" + neturl.Values{"uid": {taskUID}}.Encode()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
