@@ -41,7 +41,8 @@ const importBatchRecords = 3
 // run it for a provider that reports [storagev1.ExportCapability], and then
 // check through state.v1 that the copy continues message IDs, transcript
 // order and execution event sequences past values deleted before the
-// export. A provider can also run it with a seed of its own, for example one
+// export, and serves a security finding with its evidence and scan run
+// unchanged. A provider can also run it with a seed of its own, for example one
 // that reaches the sequences the shared seeds cannot observe through the
 // contract, such as usage accounting order.
 func RunExportImport(t *testing.T, newProvider ExportFactory, seed ExportSeed) {

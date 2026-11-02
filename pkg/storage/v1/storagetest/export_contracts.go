@@ -86,6 +86,7 @@ func seedStateExport(t *testing.T, provider storagev1.StateProvider) stateExport
 			seed.lastTaskSeq = appended.Seq
 		}
 	}
+	require.NoError(t, provider.UpsertFinding(ctx, workflowFinding("fp-export", "high")))
 	require.NoError(t, provider.DeleteExecutionEvents(ctx, exportSeedTenant, storagev1.ExecutionEventStreamTypeTask, "task-a"))
 	_, seed.lastSessionSeq, err = provider.ListSessionExecutionEvents(ctx, storagev1.SessionExecutionEventFilter{
 		Namespace: exportSeedTenant, SessionName: eventsSession,
@@ -142,6 +143,16 @@ func runStateExportImport(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, seed.lastSessionSeq+1, latest, "a session sequence continues past a deleted stream's events")
 		require.Len(t, listed, 1)
 		require.Equal(t, latest, listed[0].SessionSeq)
+
+		finding, err := target.GetFinding(ctx, workflowNamespace, "fp-export")
+		require.NoError(t, err)
+		require.Equal(t, workflowFinding("fp-export", "high").Evidence, finding.Evidence, "evidence keeps every field, including its role")
+		byRun, _, err := target.ListFindings(ctx, storagev1.FindingFilter{Namespace: workflowNamespace, ScanRunID: "run-1"})
+		require.NoError(t, err)
+		require.Equal(t, []string{"fp-export"}, workflowFindingIDs(byRun), "the scan run filter finds the imported finding")
+		otherRun, _, err := target.ListFindings(ctx, storagev1.FindingFilter{Namespace: workflowNamespace, ScanRunID: "run-2"})
+		require.NoError(t, err)
+		require.Empty(t, otherRun)
 	})
 
 	t.Run("an importing dataset refuses writes", func(t *testing.T) {

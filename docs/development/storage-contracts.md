@@ -682,8 +682,9 @@ migration Job with its verification, and rollback come later.
   and `RunArtifacts` run it for a provider that reports `export.v1`, with
   seeds whose highest message ID and session event sequences were deleted
   before the export, and check that the imported dataset continues message
-  IDs, transcript order and event sequences past them, refuses writes while
-  it imports and refuses writes to a marked contract part. Sequences the
+  IDs, transcript order and event sequences past them, serves a security
+  finding with its evidence and scan run unchanged, refuses writes while it
+  imports and refuses writes to a marked contract part. Sequences the
   contract does not expose, such as usage accounting order, are left to a
   provider's own tests. An in-memory reference provider in the suite's own
   tests runs the shared cases today.
