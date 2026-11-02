@@ -18,6 +18,7 @@ credentials, repository settings, and controller configuration in its README.
 | [`github-label-triggered-issue-loop/`](github-label-triggered-issue-loop) | The `orka:implement` workflow from issue through implementation, PR creation, and readiness for GitHub-native auto-merge | [Issue-to-PR automation](../website/docs/guides/issue-to-pr-automation.md) |
 | [`repository-monitor-issue-plan-only/`](repository-monitor-issue-plan-only) | Durable triage and planning records, with no code written | [Repository monitors](../website/docs/guides/repository-monitors.md) |
 | [`repository-monitor-pr-review-repair/`](repository-monitor-pr-review-repair) | Reviewing PRs, pushing repairs, and publishing readiness for GitHub-native auto-merge | [Repository monitors](../website/docs/guides/repository-monitors.md) |
+| [`scout/`](scout) | A weekly, read-only scout Task that reads a people-owned watchlist and writes a digest of proposed Orka improvements | [Scout](../website/docs/guides/scout.md) |
 
 Each subdirectory has its own README with the exact apply commands and the Secrets it
 needs.
