@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Transaction tokens | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/concepts/transaction-tokens"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Transaction tokens | Orka"><meta data-rh="true" name="description" content="Orka&#x27;s vendor-neutral OAuth Transaction Token profile for governing who asked for a piece of work."><meta data-rh="true" property="og:description" content="Orka&#x27;s vendor-neutral OAuth Transaction Token profile for governing who asked for a piece of work."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/concepts/transaction-tokens"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/concepts/transaction-tokens" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/concepts/transaction-tokens" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Transaction tokens","item":"https://orka-agents.github.io/orka/docs/concepts/transaction-tokens"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.f29ae107.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.4aa00aab.js" defer="defer"></script>
 <script src="/orka/assets/js/main.d6a6943c.js" defer="defer"></script>
 </head>
 <body>
@@ -43,15 +43,19 @@ are listed in <a class="" href="/orka/docs/configuration#external-api-context-to
 <p>When authorization is enabled, Orka defaults to operation-specific scopes such as <code>orka:tasks:create</code>, <code>orka:tasks:get</code>, <code>orka:tasks:list</code>, <code>orka:tasks:delete</code>, <code>orka:tools:read</code>, <code>orka:tools:use</code>, <code>orka:providers:use</code>, <code>orka:agents:read</code>, <code>orka:agents:write</code>, <code>orka:memory:read</code>, <code>orka:memory:write</code>, <code>orka:sessions:read</code>, <code>orka:sessions:write</code>, <code>orka:security:read</code>, <code>orka:security:write</code>, <code>orka:monitors:read</code>, <code>orka:monitors:write</code>, <code>orka:monitors:operate</code>, <code>orka:skills:read</code>, and <code>orka:skills:write</code>. Using credential-bearing Secrets or minting ServiceAccount tokens for outbound access requires <code>orka:secrets:credentials:read</code>. Every default can be replaced with its <code>--context-token-*-scopes</code> flag or matching environment/Helm value.</p>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="restricted-tool-grants">Restricted tool grants<a href="#restricted-tool-grants" class="hash-link" aria-label="Direct link to Restricted tool grants" title="Direct link to Restricted tool grants" translate="no">​</a></h2>
 <p>A <code>tctx.allowedTools</code> constraint must cover every tool a Task will expose, including the
-tools Orka adds automatically: memory tools on every <code>type: ai</code> Task, the coordination set
-for coordinator Agents, <code>request_approval</code> for autonomous coordinators, and the messaging
-tools for delegated children. <a class="" href="/orka/docs/built-in-tools#who-gets-which-tools">Built-in tools</a>
+tools Orka adds automatically: all four memory tools on every native AI Task during the
+warning release, the coordination set for coordinator Agents, <code>request_approval</code> for
+autonomous coordinators, and the messaging tools for delegated children. The next release
+will narrow automatic memory tools to coordination or explicit Agent/Task selections;
+see <a class="" href="/orka/docs/upgrading#memory-tool-opt-in">migration and release notes</a>.
+<a class="" href="/orka/docs/built-in-tools#who-gets-which-tools">Built-in tools</a>
 lists exactly which tools each Task receives. Task admission and delegated child validation
 both compute this effective tool set, and a token that omits a required tool is rejected.</p>
 <ul>
 <li class="">The annotation <code>orka.ai/disable-coordination-tool-injection: &quot;true&quot;</code> suppresses implicit
-coordination, approval, and child messaging tools. Memory tools stay, and explicitly
-selected tools still need grants.</li>
+coordination, approval, and child messaging tools. Memory tools remain enabled and
+require grants during the warning release, even with this annotation. The next release
+will also suppress automatic memory tools; explicit selections will still need grants.</li>
 <li class="">Agent Tasks using <code>runtimeRef</code> receive no implicit coordination or child messaging tools;
 the registered runtime tool policy is authoritative.</li>
 <li class="">Child grants must stay subsets of the parent grant.</li>

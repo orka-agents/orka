@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Agents, skills, and tools | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/guides/agents-skills-and-tools"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Agents, skills, and tools | Orka"><meta data-rh="true" name="description" content="Shape what an agent knows and can do: system prompts, skills, built-in and custom tools, approvals, and model fallbacks."><meta data-rh="true" property="og:description" content="Shape what an agent knows and can do: system prompts, skills, built-in and custom tools, approvals, and model fallbacks."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/guides/agents-skills-and-tools"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/agents-skills-and-tools" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/guides/agents-skills-and-tools" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Agents, skills, and tools","item":"https://orka-agents.github.io/orka/docs/guides/agents-skills-and-tools"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.f29ae107.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.4aa00aab.js" defer="defer"></script>
 <script src="/orka/assets/js/main.d6a6943c.js" defer="defer"></script>
 </head>
 <body>
@@ -57,8 +57,10 @@ need a coding-standards Skill.</li>
 <p>The first four options below are for native Agents, which list tools in <code>spec.tools</code>. Runtime
 Agents reject <code>spec.tools</code>; see <a href="#coding-agent-tools" class="">coding-agent tools</a>.</p>
 <p><strong>Built-in tools.</strong> List names such as <code>web_search</code>, <code>code_exec</code>, <code>web_fetch</code>, <code>file_read</code>, and
-<code>file_write</code> in the Agent&#x27;s <code>spec.tools</code>. Orka adds memory tools to every native Task, and
-coordination and GitHub tools to coordinators. <a class="" href="/orka/docs/built-in-tools">Built-in tools</a>
+<code>file_write</code> in the Agent&#x27;s <code>spec.tools</code>. During the warning release, Orka adds memory tools
+to every native AI Task; the next release will require explicit selection or coordination.
+See <a class="" href="/orka/docs/upgrading#memory-tool-opt-in">migration and release notes</a>.
+Orka adds coordination and GitHub tools to coordinators. <a class="" href="/orka/docs/built-in-tools">Built-in tools</a>
 has the full list and parameters.</p>
 <p><strong>Your own HTTP API.</strong> Describe it with a <a class="" href="/orka/docs/resources#tool">Tool</a> resource — a
 description and JSON Schema the model sees, plus the URL, method, and authentication Orka uses

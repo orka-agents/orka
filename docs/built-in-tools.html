@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Built-in tools | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/built-in-tools"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Built-in tools | Orka"><meta data-rh="true" name="description" content="Every tool Orka gives agents: which Tasks get it, how to turn it on, and its parameters."><meta data-rh="true" property="og:description" content="Every tool Orka gives agents: which Tasks get it, how to turn it on, and its parameters."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/built-in-tools"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/built-in-tools" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/built-in-tools" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Built-in tools","item":"https://orka-agents.github.io/orka/docs/built-in-tools"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.f29ae107.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.4aa00aab.js" defer="defer"></script>
 <script src="/orka/assets/js/main.d6a6943c.js" defer="defer"></script>
 </head>
 <body>
@@ -24,7 +24,9 @@ of them, which Tasks receive them, and their parameters. To give agents your own
 <a class="" href="/orka/docs/resources#tool"><code>Tool</code></a> resource.</li>
 <li class=""><strong>Tools Orka adds automatically.</strong>
 <ul>
-<li class="">Every <code>type: ai</code> Task gets the <a href="#memory-tools" class="">memory tools</a>.</li>
+<li class="">Every native <code>type: ai</code> Task gets the <a href="#memory-tools" class="">memory tools</a> for this warning
+release. The next release will require coordination or explicit selection; see
+<a class="" href="/orka/docs/upgrading#memory-tool-opt-in">migration and release notes</a>.</li>
 <li class="">An Agent with <code>coordination.enabled: true</code> gets the <a href="#coordination-tools" class="">coordination tools</a>,
 the <a href="#github-tools" class="">GitHub pull request tools</a>, <a href="#agent-management-tools" class="">agent management</a>,
 and <code>update_plan</code>. With <code>coordination.autonomous: true</code> it also gets <code>request_approval</code>.</li>
@@ -34,8 +36,9 @@ on a built-in coding-agent runtime.</li>
 </ul>
 </li>
 <li class=""><strong>Nothing else.</strong> The annotation <code>orka.ai/disable-coordination-tool-injection: &quot;true&quot;</code> on a
-Task turns off the automatic coordination, approval, and child-messaging tools. Memory tools
-stay, and tools you selected explicitly still apply.</li>
+Task turns off the automatic coordination, approval, and child-messaging tools.
+Memory tools remain available during this warning release, and explicitly selected tools
+still apply. The next release will also suppress automatic memory tools with this annotation.</li>
 </ol>
 <p>Coding-agent Tasks (<code>type: agent</code>) use their CLI&#x27;s own tools, such as <code>Read</code>, <code>Grep</code>, and
 <code>Bash</code>, controlled by the Agent&#x27;s <code>runtime.defaultAllowedTools</code> and the Task&#x27;s
@@ -49,8 +52,13 @@ automatically added tools as well as the selected ones. See
 endpoints also offer the first five to clients.</p>
 <table><thead><tr><th>Tool</th><th>Description</th><th>Parameters</th></tr></thead><tbody><tr><td><code>web_search</code></td><td>Search the web using a configured search API or DuckDuckGo</td><td><code>query</code> (required), <code>limit</code> (default 5)</td></tr><tr><td><code>code_exec</code></td><td>Execute code in a sandboxed environment</td><td><code>language</code> (python/javascript/bash), <code>code</code>, <code>timeout</code> (default 30s, clamped to 60s)</td></tr><tr><td><code>file_read</code></td><td>Read files from the workspace</td><td><code>path</code>, <code>offset</code>, <code>limit</code> (max 1MB)</td></tr><tr><td><code>web_fetch</code></td><td>Fetch and extract URL content</td><td><code>url</code> (required), <code>max_chars</code> (default 50000), <code>raw</code></td></tr><tr><td><code>file_write</code></td><td>Write or append files in workspace paths</td><td><code>path</code> (required), <code>content</code> (required), <code>mode</code> (<code>write</code>/<code>append</code>), <code>create_dirs</code></td></tr><tr><td><code>request_approval</code></td><td>Park the Task until a person approves or declines one exact custom-tool call. Added automatically for autonomous coordinators; see <a class="" href="/orka/docs/autonomous-tasks#human-approvals">human approval</a>.</td><td><code>action</code>, <code>targetTool</code> (a custom Tool name), <code>targetArguments</code> (the exact argument object) (required); <code>riskSummary</code>, <code>severity</code> (<code>warning</code>/<code>critical</code>)</td></tr></tbody></table>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="memory-tools">Memory tools<a href="#memory-tools" class="hash-link" aria-label="Direct link to Memory tools" title="Direct link to Memory tools" translate="no">​</a></h2>
-<p>Every <code>type: ai</code> Task receives these. <code>remember</code> and <code>propose_memory</code> create proposals for a
-person to review; they never change durable memory directly. See <a class="" href="/orka/docs/memory">Memory</a>.</p>
+<p>Every native <code>type: ai</code> Task receives these during the warning release, regardless of
+its selected tools or coordination settings. Calls relying on this compatibility access
+emit deprecation warnings. The next release will require explicit Agent/Task selection or
+coordination with automatic injection enabled; see
+<a class="" href="/orka/docs/upgrading#memory-tool-opt-in">migration and release notes</a>.
+<code>remember</code> and <code>propose_memory</code> create proposals for a person to review; they never change
+durable memory directly. See <a class="" href="/orka/docs/memory">Memory</a>.</p>
 <table><thead><tr><th>Tool</th><th>Description</th><th>Parameters</th></tr></thead><tbody><tr><td><code>recall_memory</code></td><td>Recall durable namespace-scoped memories</td><td><code>query</code>, <code>tags</code>, <code>task_name</code>, <code>agent_name</code>, <code>source</code>, <code>limit</code>, <code>include_disabled</code></td></tr><tr><td><code>remember</code></td><td>Submit a durable memory proposal for review</td><td><code>content</code> (required); <code>title</code>, <code>description</code>, <code>tags</code>, <code>agent_name</code></td></tr><tr><td><code>propose_memory</code></td><td>Submit a memory-adjacent governance proposal</td><td><code>title</code> (required); <code>type</code>, <code>skill_name</code>, <code>description</code>, <code>content</code>, <code>patch</code>, <code>agent_name</code></td></tr><tr><td><code>search_transcript</code></td><td>Search prior session transcripts</td><td><code>query</code> (required); <code>session_name</code>, <code>exclude_session_name</code>, <code>roles</code>, <code>limit</code>, <code>max_snippet_length</code></td></tr></tbody></table>
 <h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="coordination-tools">Coordination tools<a href="#coordination-tools" class="hash-link" aria-label="Direct link to Coordination tools" title="Direct link to Coordination tools" translate="no">​</a></h2>
 <p>Added for Agents with <code>coordination.enabled: true</code>. They are not returned by
