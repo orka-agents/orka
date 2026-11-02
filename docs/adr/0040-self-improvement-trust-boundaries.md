@@ -125,6 +125,8 @@ repositories:
       - internal/outboundaccess/**
       - internal/tools/memory_tools.go
       - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
+      - internal/controller/acp_mcp_policy*.go         # compiles the tool policy
+      - internal/controller/acp_runtime_profile*.go    # pins the policy into the profile
       - internal/controller/acp_dispatcher*.go         # dispatch-time checks
       - internal/controller/agent_execution_binding*.go # canary routing
       - internal/controller/evalrun*.go                # evaluator
@@ -219,9 +221,12 @@ spec:
     baselineRunRef: {name: pr-review-x-baseline}   # always set; see "New capabilities" below
     target: {grader: localization, tag: defect}    # improvement experiments only
     criteria:                                   # frozen copy of the thresholds or approved criteria
-      digest: sha256:...
       source: protectedSet | issue
-      thresholds:                               # new capabilities only: absolute bars per tag
+      digest: sha256:...                        # protectedSet: its `gate`; issue: the normalized criteria block
+      # new capabilities only, frozen by the maintainer who writes the criteria cases:
+      caseSetRef: {name: issue-1234-criteria}   # held-out ConfigMap with the cases and thresholds
+      caseSetDigest: sha256:...                 # digest over that ConfigMap's cases and thresholds
+      thresholds:                               # copied from the ConfigMap; schema-validated
       - {tag: criteria, grader: contract, minPassAt1Percent: 90, minPassHatKPercent: 80}
 ```
 
@@ -242,7 +247,7 @@ status:
   promotable fields: case-set, grader-set or criteria digest, trials, monitor generation,
   runtime image, or the subject. For a new capability the case sets differ by design:
   the check instead requires the candidate's cases to be exactly the baseline's case set
-  plus the criteria case set whose digest is frozen in `criteria`, and compares the two
+  plus the cases in `criteria.caseSetRef`, whose content matches `criteria.caseSetDigest`, and compares the two
   runs only on the shared regression subset. Subjects are compared after removing
   `repositoryMonitorReview.agentRef`, the one field that is expected to differ; every
   other subject field must match. Fail closed.
@@ -250,7 +255,10 @@ status:
   ways. The paired baseline run covers only the existing regression case sets, and the
   candidate run covers those plus the held-out criteria cases. The regression cases are
   gated against the baseline as below; the criteria cases are gated against the absolute
-  `criteria.thresholds`, which a maintainer freezes with the criteria. `target` is unset.
+  `criteria.thresholds`. The maintainer who writes the criteria cases also writes these
+  thresholds, per grader and tag, into the same held-out ConfigMap, and the controller
+  validates them against a schema when the candidate run starts. The protected set's
+  `gate` applies only to improvement experiments. `target` is unset.
 - **The bound tuple.** Everything an approval depends on, recorded at decision time and
   recomputed every time the approval is used:
   - the candidate Agent's UID, generation and promotable-field digest;
@@ -262,7 +270,8 @@ status:
   - the monitor's UID and generation and the review prompt template digest that #976
     snapshots, since the controller-built review prompt and validation settings shape
     behavior outside the Agent;
-  - the case-set, grader-set, criteria and protected-set digests.
+  - the case-set, grader-set, criteria text and protected-set digests, and for new
+    capabilities the criteria case-set digest, which covers the thresholds.
 
   To keep the candidate's resolved configuration fixed, the controller always writes the
   candidate's prompt inline, even for a model-only patch, so a mutable `configMapRef`
@@ -360,15 +369,18 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   starts a new canary. A protected-set or criteria change, or a later rejection,
   therefore stops a canary even though no Agent changed.
 - **Promotion log** in the store. `promote` runs in three durable steps so a crash
-  cannot lose the rollback record: (1) insert a `pending` record holding the decision,
+  cannot lose the rollback record: (1) insert a `pending` record holding the decision, the Agent's `resourceVersion`,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
   a ConfigMap that may change or disappear), and the target values; (2) update the stable
   Agent with a `resourceVersion` precondition, writing the candidate's inline prompt;
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
   and digest. On restart the controller reconciles any `pending` record idempotently: if
-  the Agent already holds the target values it finishes step 3; if it still holds the
-  previous values it retries step 2; otherwise it marks the record `failed` and sets
-  `RolloutInvalid`. One consequence: after a promotion or rollback the stable Agent
+  the Agent already holds the target values it finishes step 3. Otherwise it never
+  retries on the strength of the stored values alone: it re-runs every precondition of
+  the original request (the decision is still the latest and approving, the full bound
+  tuple matches, and the Agent's `resourceVersion` equals the one stored in the pending
+  record) and retries step 2 only if all pass. If any fails, it marks the record `failed`
+  without changing the Agent and sets `RolloutInvalid`. One consequence: after a promotion or rollback the stable Agent
   always carries an inline prompt, even if it used `configMapRef` before. `rollback`
   writes back the recorded resolved previous values. It needs no new evidence, but it
   is a compare-and-swap: the live stable Agent's generation and
@@ -400,8 +412,10 @@ the issue snapshot digest, and any later edit to the issue blocks it with
 - the controller records the criteria digest, the SHA-256 of the normalized block, in
   the command's action record and in a controller-managed annotation on the
   implementation Task;
-- a maintainer, never the builder, writes cases for the criteria into a held-out case
-  set. The candidate EvalRun sets `criteria.source: issue` with that digest and also
+- a maintainer, never the builder, writes cases and per-grader thresholds for the
+  criteria into a held-out ConfigMap; creating that ConfigMap is the moment they are
+  frozen. The candidate EvalRun sets `criteria.source: issue` with the criteria text
+  digest, `caseSetRef` and `caseSetDigest`, and also
   runs the existing regression case sets. If the issue's current block no longer
   matches the recorded digest, the result is `Incomparable`. This needs an EvalRun
   Subject that fits the capability; #976 lists monitor-fix and generic Task Subjects
