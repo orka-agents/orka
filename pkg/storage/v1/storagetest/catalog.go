@@ -31,6 +31,15 @@ type writeCase[P any] struct {
 	// that differs from the envelope's is checked too.
 	explicitFence bool
 	observe       func(t *testing.T, provider P) any
+	// observeWrites marks a case whose observe calls a method the catalog
+	// lists as a write, such as GetMessages or IsLocked. For a provider that
+	// refuses such a method while its dataset is migrating, the maintenance
+	// cases compare observeReads instead while the dataset is migrating.
+	observeWrites bool
+	// observeReads observes, through catalog reads alone, what it can of
+	// what observe does, for a case that sets observeWrites. It is nil when
+	// no catalog read serves those records.
+	observeReads func(t *testing.T, provider P) any
 	// afterCommit, when set, changes what the write changed, such as writing
 	// a deleted record again, after the first call commits. The receipt check
 	// then proves that a replay returns the original outcome without running

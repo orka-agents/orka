@@ -15,14 +15,23 @@ var writeCaseFuture = time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 var writeCaseCreated = time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
 func observeSession(name string) func(t *testing.T, p storagev1.StateProvider) any {
+	reads := observeSessionReads(name)
+	return func(t *testing.T, p storagev1.StateProvider) any {
+		t.Helper()
+		// IsLocked changes nothing while no lock has expired.
+		locked, lockErr := p.IsLocked(t.Context(), "tenant", name, "observer", "observer-uid")
+		return []any{reads(t, p), observed(t, locked, lockErr)}
+	}
+}
+
+// observeSessionReads observes a Session through catalog reads alone.
+func observeSessionReads(name string) func(t *testing.T, p storagev1.StateProvider) any {
 	return func(t *testing.T, p storagev1.StateProvider) any {
 		t.Helper()
 		session, err := p.GetSession(t.Context(), "tenant", name)
 		listed, listErr := p.ListSessions(t.Context(), "tenant")
 		require.NoError(t, listErr)
-		// IsLocked changes nothing while no lock has expired.
-		locked, lockErr := p.IsLocked(t.Context(), "tenant", name, "observer", "observer-uid")
-		return []any{observed(t, session, err), listed, observed(t, locked, lockErr)}
+		return []any{observed(t, session, err), listed}
 	}
 }
 
@@ -62,6 +71,7 @@ func observeLineage(t *testing.T, p storagev1.StateProvider) any {
 
 func init() {
 	session := observeSession("session")
+	sessionReads := observeSessionReads("session")
 	stateWriteCases = append(stateWriteCases,
 		writeCase[storagev1.StateProvider]{
 			method: "CreateSession",
@@ -71,46 +81,60 @@ func init() {
 					CreatedAt: writeCaseCreated, UpdatedAt: writeCaseCreated,
 				}}
 			},
-			observe: session,
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:      "DeleteSession",
-			setup:       createTaskSession,
-			args:        fixed("tenant", "session"),
-			observe:     session,
-			afterCommit: createTaskSession,
+			method:        "DeleteSession",
+			setup:         createTaskSession,
+			args:          fixed("tenant", "session"),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
+			afterCommit:   createTaskSession,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "AcquireLock",
-			setup:   createTaskSession,
-			args:    fixed("tenant", "session", "task-a", "uid-a"),
-			observe: session,
+			method:        "AcquireLock",
+			setup:         createTaskSession,
+			args:          fixed("tenant", "session", "task-a", "uid-a"),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "ReleaseLock",
-			setup:   lockedTenantSession,
-			args:    fixed("tenant", "session", "task-a", "uid-a"),
-			observe: session,
+			method:        "ReleaseLock",
+			setup:         lockedTenantSession,
+			args:          fixed("tenant", "session", "task-a", "uid-a"),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
 				require.NoError(t, p.AcquireLock(t.Context(), "tenant", "session", "task-a", "uid-a"))
 			},
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "IsLocked",
-			setup:   lockedTenantSession,
-			args:    fixed("tenant", "session", "task-b", "uid-b"),
-			observe: session,
+			method:        "IsLocked",
+			setup:         lockedTenantSession,
+			args:          fixed("tenant", "session", "task-b", "uid-b"),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "AcquireChatTurn",
-			args:    func(storagev1.ControllerEpochFence) []any { return []any{chatSession(), "turn-1", writeCaseFuture} },
-			observe: observeSession("chat"),
+			method:        "AcquireChatTurn",
+			args:          func(storagev1.ControllerEpochFence) []any { return []any{chatSession(), "turn-1", writeCaseFuture} },
+			observe:       observeSession("chat"),
+			observeWrites: true,
+			observeReads:  observeSessionReads("chat"),
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "ReleaseChatTurn",
-			setup:   reservedChat,
-			args:    fixed("tenant", "chat", "turn-1", true),
-			observe: observeSession("chat"),
+			method:        "ReleaseChatTurn",
+			setup:         reservedChat,
+			args:          fixed("tenant", "chat", "turn-1", true),
+			observe:       observeSession("chat"),
+			observeWrites: true,
+			observeReads:  observeSessionReads("chat"),
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "CommitSessionTurn",
@@ -121,7 +145,9 @@ func init() {
 					{ID: "chat-2", Role: "assistant", Content: "hi"},
 				}, 11, 13}
 			},
-			observe: observeSession("chat"),
+			observe:       observeSession("chat"),
+			observeWrites: true,
+			observeReads:  observeSessionReads("chat"),
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "AppendMessages",
@@ -129,7 +155,9 @@ func init() {
 			args: func(storagev1.ControllerEpochFence) []any {
 				return []any{"tenant", "session", []storagev1.SessionMessage{{ID: "m1", Role: "user", Content: "hello"}}}
 			},
-			observe: session,
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
 			method: "AppendMessagesWithLock",
@@ -137,25 +165,33 @@ func init() {
 			args: func(storagev1.ControllerEpochFence) []any {
 				return []any{"tenant", "session", "task-a", "uid-a", []storagev1.SessionMessage{{ID: "m1", Role: "user", Content: "hello"}}}
 			},
-			observe: session,
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "UpdateTokenCounts",
-			setup:   createTaskSession,
-			args:    fixed("tenant", "session", 3, 4),
-			observe: session,
+			method:        "UpdateTokenCounts",
+			setup:         createTaskSession,
+			args:          fixed("tenant", "session", 3, 4),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "UpdateTokenCountsWithLock",
-			setup:   lockedTenantSession,
-			args:    fixed("tenant", "session", "task-a", "uid-a", 3, 4),
-			observe: session,
+			method:        "UpdateTokenCountsWithLock",
+			setup:         lockedTenantSession,
+			args:          fixed("tenant", "session", "task-a", "uid-a", 3, 4),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
-			method:  "ReleaseLockWithTokenUsage",
-			setup:   lockedTenantSession,
-			args:    fixed("tenant", "session", "task-a", "uid-a", 3, 4),
-			observe: session,
+			method:        "ReleaseLockWithTokenUsage",
+			setup:         lockedTenantSession,
+			args:          fixed("tenant", "session", "task-a", "uid-a", 3, 4),
+			observe:       session,
+			observeWrites: true,
+			observeReads:  sessionReads,
 		},
 		writeCase[storagev1.StateProvider]{
 			method:  "EnsureSessionSoulWithLock",
