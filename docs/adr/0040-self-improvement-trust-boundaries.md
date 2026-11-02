@@ -77,7 +77,7 @@ was tested, and a promotion path for Agent configuration with a canary and rollb
 
 | Identity | Who | Can | Cannot |
 |---|---|---|---|
-| Proposer | An agent Task the controller creates and marks with the controller-managed annotation `orka.ai/improvement-role: proposer` | Read a pinned clone; return one structured candidate; publish to its own task branch when the flow allows it (#997); create memory proposals | Hold any Kubernetes or forge credential; read evaluation cases or evaluation transcripts; publish a change to the protected set; start Tasks, evaluations or promotions; post to the forge |
+| Proposer | An agent Task the controller creates and marks with the controller-managed annotation `orka.ai/improvement-role: proposer` | Read a pinned clone; return one structured candidate; publish to its own task branch when the flow allows it (#997); create memory proposals | Hold any Kubernetes or forge credential; read held-out cases, held-out trial rows or any evaluation transcript (it receives only the controller-rendered training-split summaries described under #994); publish a change to the protected set; start Tasks, evaluations or promotions; post to the forge |
 | Evaluator | The EvalRun controller and API server, running as the controller ServiceAccount | Create candidate Agents from a validated candidate; run trials; write trial and experiment records; compute the gate | Change a candidate after the run starts; record a decision; promote |
 | Promoter | A person, not a ServiceAccount, bound to the new `orka-eval-promoter` role | Approve or reject one experiment; start, widen, finish or abort a canary; roll back | Edit evidence; promote without an approved experiment that still matches |
 
@@ -87,7 +87,7 @@ Every rule has one enforcement point:
 |---|---|---|
 | No Kubernetes credential in a proposer | RuntimePool Pod spec, `runtime_pool_controller.go` | Exists |
 | No forge credential in a proposer | Clean-room credential refs, `task_types.go`, `internal/publisher` | Exists |
-| No network except the broker | RuntimePool NetworkPolicies | Exists |
+| No external network except the broker; only DNS, provider-proxy and controller API egress are allowed | RuntimePool NetworkPolicies | Exists |
 | Proposer cannot start Tasks, evaluations, validations or forge writes | Proposer allowlist (below) frozen into the profile, enforced by `ACPMCPBroker.ServeHTTP` | Allowlist is new, #992 |
 | Proposer annotation is set only by the controller | `controllerManagedTaskAnnotationKeys`, `internal/admission/task_provenance.go` | New key, #992 |
 | A proposer Task that lost its constraints does not run | Dispatch-time check where workspace limits are built, `acp_dispatcher.go` | New, #992 |
@@ -209,11 +209,13 @@ spec:
       agentRef: {name: reviewer-c-3f9a1c2b7d}   # new: use this Agent instead of the monitor's reviewer
   experiment:                                   # new
     hypothesis: "The reviewer misses defects in generated code paths."
-    baselineRunRef: {name: pr-review-x-baseline}   # omitted for a new capability
-    target: {grader: localization, tag: defect}    # what the hypothesis says will improve
+    baselineRunRef: {name: pr-review-x-baseline}   # always set; see "New capabilities" below
+    target: {grader: localization, tag: defect}    # improvement experiments only
     criteria:                                   # frozen copy of the thresholds or approved criteria
       digest: sha256:...
       source: protectedSet | issue
+      thresholds:                               # new capabilities only: absolute bars per tag
+      - {tag: criteria, grader: contract, minPassAt1Percent: 90, minPassHatKPercent: 80}
 ```
 
 The controller fills `status.experiment`:
@@ -230,8 +232,15 @@ status:
 ```
 
 - **Incomparable** when the two runs differ in anything other than the candidate's
-  promotable fields: case-set, grader-set or criteria digest, trials, subject, monitor
-  generation or runtime image. Fail closed.
+  promotable fields: case-set, grader-set or criteria digest, trials, monitor generation,
+  runtime image, or the subject. Subjects are compared after removing
+  `repositoryMonitorReview.agentRef`, the one field that is expected to differ; every
+  other subject field must match. Fail closed.
+- **New capabilities** have nothing to improve on, so their experiment differs in two
+  ways. The paired baseline run covers only the existing regression case sets, and the
+  candidate run covers those plus the held-out criteria cases. The regression cases are
+  gated against the baseline as below; the criteria cases are gated against the absolute
+  `criteria.thresholds`, which a maintainer freezes with the criteria. `target` is unset.
 - **The bound tuple.** Everything an approval depends on, recorded at decision time and
   recomputed every time the approval is used:
   - the candidate Agent's UID, generation and promotable-field digest;
@@ -287,9 +296,10 @@ Piloted on the PR reviewer's Agent configuration only.
    owner-referenced to the stable Agent. It then creates the paired baseline and
    candidate EvalRuns on the held-out split, with `criteria` copied from the protected
    set's `gate`.
-5. Gate: `Failed` if, for any grader and tag, candidate pass@1 or pass^k is below the
-   baseline; if pass@1 for `experiment.target` does not improve; or if infrastructure
-   errors exceed the threshold. A person then records a decision either way.
+5. Gate: `Failed` if, for any grader and tag shared with the baseline, candidate pass@1
+   or pass^k is below the baseline; if pass@1 for `experiment.target` does not improve
+   (improvement experiments) or any criteria tag misses its threshold (new
+   capabilities); or if infrastructure errors exceed the threshold. A person then records a decision either way.
 
 Cost: one proposer Task per call with the controller's timeout and turn limit, the
 per-baseline candidate cap, and #976's 500-trial cap per run. Orka has no per-Task
@@ -331,8 +341,12 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   therefore stops a canary even though no Agent changed.
 - **Promotion log** in the store. `promote` copies the candidate's promotable fields
   into the stable Agent's spec, clears `status.rollout`, and appends a record with the
-  previous values. `rollback` writes the last recorded previous values back and needs no
-  new evidence. `abort` clears the canary.
+  previous values and the resulting generation and digest. `rollback` needs no new
+  evidence, but it is a compare-and-swap: the live stable Agent's generation and
+  promotable-field digest must equal what the latest promotion record wrote, and the
+  update carries a `resourceVersion` precondition. If anyone edited the Agent after the
+  promotion, rollback is refused rather than overwriting that edit. `abort` clears the
+  canary.
 
 Running Tasks keep their binding, so they finish on whatever they started with. Runtime
 image changes stay on the release path, since images are per provider, not per Agent.
