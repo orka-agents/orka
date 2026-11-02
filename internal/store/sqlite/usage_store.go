@@ -306,6 +306,9 @@ func (s *Store) LinkUsagePullRequest(ctx context.Context, link store.UsagePRLink
 		db := s.taskDataExecutor(ctx)
 		var work store.UsageWorkRequest
 		if err := readUsageJSON(ctx, db, &work, `SELECT data FROM usage_work_requests WHERE namespace = ? AND id = ?`, link.Namespace, link.WorkID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: usage work %q in namespace %q", store.ErrNotFound, link.WorkID, link.Namespace)
+			}
 			return err
 		}
 		if work.Repository != link.Repository {
