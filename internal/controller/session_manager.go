@@ -274,9 +274,14 @@ func (m *SessionManager) AppendMessages(ctx context.Context, task *corev1alpha1.
 	}
 	// Stable message IDs make appending the same Task's turn again a no-op,
 	// so completion can be retried after a write whose outcome is unknown.
+	// The store keeps the time of the first append: a repeat leaves it unset,
+	// so it matches the stored message instead of conflicting with it, and a
+	// message the first append did not carry, such as a response read later,
+	// is still added.
 	if task.UID != "" {
 		for i := range messages {
 			messages[i].ID = taskSessionMessageID(string(task.UID), messages[i].Role)
+			messages[i].Timestamp = time.Time{}
 		}
 	}
 
