@@ -287,6 +287,9 @@ func TestBuildLLMTools_Empty(t *testing.T) {
 }
 
 func TestBuildLLMTools_MemoryFollowsEnabledList(t *testing.T) {
+	t.Setenv(workerenv.ControllerURL, "http://controller.example")
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TaskName, "task")
 	restore := replaceDefaultToolRegistryForTest(t)
 	defer restore()
 	registerMemoryTools()

@@ -751,8 +751,12 @@ func buildLLMTools(
 ) []llm.Tool {
 	var llmTools []llm.Tool
 	toolCtx := optionalToolContext(toolContexts)
+	memoryConfigured := memoryControllerConfigPresent()
 
 	for _, name := range enabledTools {
+		if !memoryConfigured && slices.Contains(aitools.MemoryToolNames(), name) {
+			continue
+		}
 		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
 			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
 			continue
