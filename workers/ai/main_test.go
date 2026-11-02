@@ -294,8 +294,8 @@ func TestBuildLLMTools_MemoryFollowsEnabledList(t *testing.T) {
 		name    string
 		enabled []string
 	}{
-		{name: "no opt-in"},
-		{name: "explicit", enabled: []string{"recall_memory"}},
+		{name: "empty controller-resolved list"},
+		{name: "single controller-resolved tool", enabled: []string{"recall_memory"}},
 		{name: "coordination", enabled: []string{"recall_memory", "remember", "propose_memory", "search_transcript"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

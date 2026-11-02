@@ -49,6 +49,6 @@ func TestResolveGatewayReplyRequiresDurableGrantAndPolicy(t *testing.T) {
 	}
 	task.Spec.AI.Tools = nil
 	got := ResolveWithGatewayReply(task, nil, true)
-	require.NotContains(t, got, "recall_memory")
+	require.Contains(t, got, "recall_memory")
 	require.Contains(t, got, "reply_in_conversation")
 }

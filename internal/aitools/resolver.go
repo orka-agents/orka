@@ -138,8 +138,7 @@ func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name str
 		}
 	}
 	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI &&
-		containsTool(memoryToolNames, name) &&
-		(memoryToolsImplicitlyEnabled(task, agent) || memoryToolSelected(task, agent, name))
+		containsTool(memoryToolNames, name)
 }
 
 func containsTool(tools []string, name string) bool {
@@ -154,6 +153,23 @@ func memoryToolsImplicitlyEnabled(task *corev1alpha1.Task, agent *corev1alpha1.A
 		return false
 	}
 	return agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Enabled
+}
+
+// DeprecatedMemoryToolNames returns memory tools enabled only by the warning
+// release's compatibility policy. The next release will require explicit
+// selection or coordination without the disable-injection annotation.
+func DeprecatedMemoryToolNames(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || !usesAIWorkerToolRegistry(task, agent) ||
+		memoryToolsImplicitlyEnabled(task, agent) {
+		return nil
+	}
+	var deprecated []string
+	for _, name := range memoryToolNames {
+		if !memoryToolSelected(task, agent, name) {
+			deprecated = append(deprecated, name)
+		}
+	}
+	return deprecated
 }
 
 func memoryToolSelected(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name string) bool {
@@ -206,7 +222,8 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 // Resolve returns the ordered, de-duplicated configured and implicit tool set
 // exposed for task. Container tasks do not expose AI tools. Agent tasks retain
 // configured/brokered tools and built-in agent children get messaging tools.
-// Memory tools are exposed when explicitly selected or when coordination is enabled.
+// Native AI Tasks retain their legacy memory tools for the warning release.
+// DeprecatedMemoryToolNames identifies calls that will require opt-in next release.
 // Consumers loading Tool CRs must also enforce ValidateRemoteMCPSelection;
 // this name-only resolver cannot distinguish remote backends from legacy Tools.
 func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
@@ -257,7 +274,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 		appendTools(childMessagingToolNames)
 	}
 
-	if memoryToolsImplicitlyEnabled(task, agent) {
+	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI && usesAIWorkerToolRegistry(task, agent) {
 		appendTools(memoryToolNames)
 	}
 

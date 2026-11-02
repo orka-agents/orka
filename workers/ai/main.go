@@ -1314,6 +1314,7 @@ func executeAgentLoopWithEvents(
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
 	allowedToolCalls := advertisedToolNames(llmTools)
+	deprecatedMemoryTools := workerenv.SplitCSV(os.Getenv(workerenv.AIDeprecatedMemoryTools))
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
 	}
@@ -1560,6 +1561,7 @@ func executeAgentLoopWithEvents(
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
+					warnDeprecatedMemoryTool(toolName, deprecatedMemoryTools)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 				}
 			}

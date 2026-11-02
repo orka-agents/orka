@@ -26,18 +26,18 @@ func TestResolve(t *testing.T) {
 		want  []string
 	}{
 		{
-			name: "configured tools are canonicalized",
+			name: "configured tools and compatibility memory are canonicalized",
 			task: aiToolTask(nil, nil, []string{"task_tool", " agent_tool ", ""}),
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{
 				{Name: " agent_tool ", Enabled: &enabled},
 				{Name: "disabled_tool", Enabled: &disabled},
 			}}},
-			want: []string{"agent_tool", "task_tool"},
+			want: []string{"agent_tool", "task_tool", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
-			name: "explicit memory tool is preserved without coordination",
+			name: "explicit memory tool keeps compatibility tools without coordination",
 			task: aiToolTask(nil, nil, []string{"recall_memory"}),
-			want: []string{"recall_memory"},
+			want: []string{"recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
 			name: "autonomous coordination adds approval",
@@ -50,12 +50,12 @@ func TestResolve(t *testing.T) {
 		{
 			name: "parent label adds messaging",
 			task: aiToolTask(map[string]string{labels.LabelParentTask: "parent"}, nil, nil),
-			want: []string{"send_message", "check_messages"},
+			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
 			name: "parent annotation adds messaging",
 			task: aiToolTask(nil, map[string]string{labels.AnnotationParentTaskName: "long-parent-name"}, nil),
-			want: []string{"send_message", "check_messages"},
+			want: []string{"send_message", "check_messages", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
 			name: "agent child ignores AI fields and keeps messaging",
@@ -106,7 +106,7 @@ func TestResolve(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "disable annotation suppresses implicit tools",
+			name: "disable annotation retains compatibility memory",
 			task: aiToolTask(
 				map[string]string{labels.LabelParentTask: "parent"},
 				map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
@@ -115,7 +115,7 @@ func TestResolve(t *testing.T) {
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{
 				Enabled: true, Autonomous: true,
 			}}},
-			want: []string{"explicit_tool"},
+			want: []string{"explicit_tool", "recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 	}
 
@@ -231,8 +231,8 @@ func TestIsImplicitTool(t *testing.T) {
 	if !IsImplicitTool(aiToolTask(nil, nil, []string{"recall_memory"}), nil, "recall_memory") {
 		t.Fatal("explicit memory tool was not classified as a platform tool")
 	}
-	if IsImplicitTool(aiToolTask(nil, nil, nil), nil, "recall_memory") {
-		t.Fatal("memory tool was implicitly exposed without coordination or explicit selection")
+	if !IsImplicitTool(aiToolTask(nil, nil, nil), nil, "recall_memory") {
+		t.Fatal("compatibility memory tool was not classified as a platform tool")
 	}
 	coordinatedAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}
 	if IsImplicitTool(aiToolTask(nil, nil, nil), coordinatedAgent, "custom_tool") {
