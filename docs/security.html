@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Security | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/security"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Security | Orka"><meta data-rh="true" name="description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><meta data-rh="true" property="og:description" content="Credential and network boundaries for ACP runtimes, native workers, and publication."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/security"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/security" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Security","item":"https://orka-agents.github.io/orka/docs/security"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.4aa00aab.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.79ce3cf7.js" defer="defer"></script>
 <script src="/orka/assets/js/main.d6a6943c.js" defer="defer"></script>
 </head>
 <body>
@@ -29,7 +29,7 @@ Publisher has no model credentials. The controller brokers credentials for speci
 The diagram below covers this path; native worker Pods have their own RBAC permissions.</p>
 <!-- -->
 <p>What the picture is telling you:</p>
-<table><thead><tr><th>Component</th><th>Can reach</th><th>Cannot reach</th></tr></thead><tbody><tr><td>ACP runtime Pod</td><td>the provider auth proxy, and the controller&#x27;s loopback MCP broker</td><td>the Kubernetes API, Git remotes, any other host — egress is default-deny</td></tr><tr><td>Workspace/Publisher</td><td>DNS, the controller API, the SCM egress proxy</td><td>LLM providers, the MCP broker, arbitrary internet hosts</td></tr><tr><td>Controller</td><td>everything above, plus the Kubernetes API</td><td>— it is the trusted core, so protect it accordingly</td></tr></tbody></table>
+<table><thead><tr><th>Component</th><th>Can reach</th><th>Cannot reach</th></tr></thead><tbody><tr><td>ACP runtime Pod</td><td>DNS, the provider auth proxy, the controller API (prompt MCP and artifact brokers)</td><td>the Kubernetes API, Git remotes, any other host — egress is default-deny</td></tr><tr><td>Workspace/Publisher</td><td>DNS, the controller API, the SCM egress proxy</td><td>LLM providers, arbitrary internet hosts — its identity has no MCP broker access</td></tr><tr><td>Controller</td><td>everything above, plus the Kubernetes API</td><td>— it is the trusted core, so protect it accordingly</td></tr></tbody></table>
 <p>The runtime Pod never holds a Git credential, and the Publisher never holds a model credential.
 That is deliberate: a prompt injection that fully captures the agent still cannot push code, and
 a compromised publisher still cannot exfiltrate through your model provider.</p>
@@ -51,7 +51,7 @@ auditing Kubernetes access.</p>
 <ul>
 <li class="">uses a digest-pinned immutable runtime image and profile digest;</li>
 <li class="">disables service-account token automount and has no Kubernetes RBAC;</li>
-<li class="">uses a read-only root filesystem and default-deny egress;</li>
+<li class="">uses a read-only root filesystem and default-deny egress that allows only cluster DNS (UDP and TCP 53 to <code>k8s-app=kube-dns</code> Pods in <code>kube-system</code>), the provider auth proxy (TCP to <code>--acp-provider-proxy-pod-labels</code> Pods in <code>--acp-provider-proxy-namespace</code>, on the <code>--acp-provider-proxy-base-url</code> port, or 80 for <code>http</code> and 443 for <code>https</code> when the URL has no port), and the controller API (TCP to <code>orka.ai/network-role=controller</code> Pods in the controller namespace, on <code>--api-port</code>);</li>
 <li class="">runs the supervisor as root with only the documented process/identity capabilities;</li>
 <li class="">launches ACP children with no capabilities, private <code>HOME</code>/<code>TMPDIR</code>/XDG/workspace paths, and distinct non-reused UIDs/GIDs;</li>
 <li class="">tracks, terminates, and reaps the full process tree; cleanup uncertainty poisons and recycles the pool;</li>
@@ -62,7 +62,7 @@ auditing Kubernetes access.</p>
 and resources come from the reviewed RuntimePool profile. For built-in runtimes,
 <code>spec.execution.workspace</code> can bind a dedicated RuntimePool through a sandbox provider when
 the operator enables the workspace provider API and <code>--acp-workspace-dispatch-enabled</code>,
-with required admission webhooks and an admitted external provider and class. External <code>runtimeRef</code> dispatch rejects execution workspaces. Other
+with required admission webhooks and an admitted external provider and class. That runtime gets the same egress rules. For Pod-backed providers, Core&#x27;s NetworkPolicies select the runtime Pod, and Core does not admit the runtime if another NetworkPolicy in its namespace widens them. Native-process providers such as <a class="" href="/orka/docs/substrate">Agent Substrate</a> receive the rules in the workload request and are responsible for enforcing them; Core does not verify that enforcement. External <code>runtimeRef</code> dispatch rejects execution workspaces. Other
 per-Task execution placement fields fail closed.</p>
 <h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="workspacepublisher">Workspace/Publisher<a href="#workspacepublisher" class="hash-link" aria-label="Direct link to Workspace/Publisher" title="Direct link to Workspace/Publisher" translate="no">​</a></h3>
 <p>The separate Workspace/Publisher identity has no provider-session or

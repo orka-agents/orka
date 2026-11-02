@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Architecture | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/architecture"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Architecture | Orka"><meta data-rh="true" name="description" content="The pieces Orka is made of, the two lifecycles a Task moves through, and the resources that tie them together."><meta data-rh="true" property="og:description" content="The pieces Orka is made of, the two lifecycles a Task moves through, and the resources that tie them together."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/architecture"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/architecture" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/architecture" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Architecture","item":"https://orka-agents.github.io/orka/docs/architecture"}]}</script><link rel="stylesheet" href="/orka/assets/css/styles.ecda331d.css">
-<script src="/orka/assets/js/runtime~main.4aa00aab.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.79ce3cf7.js" defer="defer"></script>
 <script src="/orka/assets/js/main.d6a6943c.js" defer="defer"></script>
 </head>
 <body>
@@ -26,7 +26,8 @@ Anthropic-compatible endpoints, gateways, and GitHub webhooks. The controller au
 them, creates or updates Tasks, and dispatches each Task to where it runs:</p>
 <table><thead><tr><th>Task type</th><th>Runs in</th><th>Reaches models through</th></tr></thead><tbody><tr><td><code>container</code></td><td>A per-Task Job from the general worker or your image</td><td>—</td></tr><tr><td><code>ai</code></td><td>A per-Task Job running Orka&#x27;s AI worker</td><td>The Agent&#x27;s Provider and its API key Secret</td></tr><tr><td><code>agent</code></td><td>A private RuntimeSession inside a RuntimePool Pod</td><td>The authenticated provider proxy and your model gateway</td></tr></tbody></table>
 <p>Coding-agent runtimes and the Workspace/Publisher use separate network and credential
-identities. A runtime Pod can reach only the provider proxy and its prompt-scoped tool broker;
+identities. A runtime Pod can reach only cluster DNS, the provider proxy, and the controller API
+that serves its prompt-scoped tool broker;
 it has no Git credentials and no route to your source control. The Publisher has the Git
 credentials it needs for one operation at a time, and no access to models or tools.
 <a class="" href="/orka/docs/security">Security</a> explains the boundaries.</p>
