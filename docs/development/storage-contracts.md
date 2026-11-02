@@ -648,8 +648,13 @@ cross-contract transactions" above.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
 `RunArtifacts` exercise each provider family through the public interfaces.
-The SQLite provider runs it directly, and the storage client runs it over
-SQLite.
+The suite attaches a write envelope to every write it sends without one,
+naming the dataset `Describe` reports and the epoch the dataset holds, so a
+provider that refuses writes without an envelope passes it; the cases that
+test envelopes send their own. The SQLite provider runs it directly, refusing
+writes without an envelope as in production, and the storage client runs it
+over SQLite with `ProviderAttachesEnvelopes`, so the client attaches the
+envelopes.
 
 SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
