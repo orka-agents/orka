@@ -926,6 +926,12 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		invalid = link
 		invalid.Repository = "org/other"
 		require.ErrorIs(t, p.LinkUsagePullRequest(ctx, invalid), storagev1.ErrConflict)
+		invalid = link
+		invalid.WorkID = "missing-work"
+		require.ErrorIs(t, p.LinkUsagePullRequest(ctx, invalid), storagev1.ErrNotFound, "a link needs its work")
+		invalid = link
+		invalid.Namespace = workflowOtherNamespace
+		require.ErrorIs(t, p.LinkUsagePullRequest(ctx, invalid), storagev1.ErrNotFound, "work belongs to one namespace")
 		require.NoError(t, p.LinkUsagePullRequest(ctx, link))
 		link.Origin = "created"
 		require.NoError(t, p.LinkUsagePullRequest(ctx, link))
