@@ -17,7 +17,8 @@ import (
 type DurabilityHarness struct {
 	// Restart stops the provider and starts it again over the same dataset,
 	// and returns the provider that now serves it, of the same kind as the
-	// one it was given. An embedded provider closes and reopens its dataset;
+	// one it was given: the provider the factory returned, or one a previous
+	// switch returned. An embedded provider closes and reopens its dataset;
 	// an adapter restarts its own process. Restart releases what it opens
 	// with t.Cleanup.
 	Restart func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
@@ -70,7 +71,8 @@ func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T)
 	for _, name := range names {
 		reopen := func(t *testing.T, provider P) P {
 			t.Helper()
-			reopened, ok := switches[name](t, provider).(P)
+			returned := switches[name](t, harnessProvider(provider))
+			reopened, ok := rewrapHarnessProvider(provider, returned).(P)
 			require.Truef(t, ok, "%s returned a provider of another kind", name)
 			return reopened
 		}

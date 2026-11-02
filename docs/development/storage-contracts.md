@@ -850,8 +850,12 @@ every write in the write catalog, that while the dataset is migrating the
 write is refused with `ErrNotReady` and changes nothing, a replay and reads
 are still served, `Describe` reports `migrating`, and `ResolveOperation`
 records nothing new; and that the refused operation commits once the dataset
-is ready. SQLite migrates only while it opens, so its harness holds the
-dataset in `migrating` through a test hook. The `installations` cases check,
+is ready. The suite observes some records through `GetMessages` and
+`IsLocked`, which the catalog lists as writes; a provider that refuses them
+while migrating sets `RefusesReadingWrites`, and those cases are then compared
+through their reads alone while migrating. SQLite migrates only while it
+opens, so its harness holds the dataset in `migrating` through a test hook,
+and sets `RefusesReadingWrites`. The `installations` cases check,
 for both contracts, that a second installation can neither advance nor write
 to a dataset bound to the first, and that the first keeps writing; the
 SQLite package also checks that a second `OpenLockedStore` on the same file
@@ -929,10 +933,16 @@ sharing is an embedded-store behavior, not a provider obligation; see "No
 cross-contract transactions" above.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
-`RunArtifacts` exercise each provider family through the public interfaces;
-the options `WithMaintenance` and `WithDurability` add the cases that need a
-harness only the provider's own tests can supply. The SQLite provider runs it
-directly with both options, and the storage client runs it over SQLite.
+`RunArtifacts` exercise each provider family through the public interfaces.
+The suite attaches a write envelope to every write it sends without one,
+naming the dataset `Describe` reports and the epoch the dataset holds, so a
+provider that refuses writes without an envelope passes it; the cases that
+test envelopes send their own. The options `WithMaintenance` and
+`WithDurability` add the cases that need a harness only the provider's own
+tests can supply; a harness is given the provider the factory returned. The
+SQLite provider runs it directly with both options, refusing writes without
+an envelope as in production, and the storage client runs it over SQLite with
+`ProviderAttachesEnvelopes`, so the client attaches the envelopes.
 
 SQLite also implements the duplicate SQL control-record methods described in
 the next section. They are not part of the provider contract or the client. A
