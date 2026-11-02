@@ -44,6 +44,7 @@ data:
           - internal/workspacedelta/**                     # shared deniedPaths matcher
           - internal/harness/v2/workspace.go               # carries deniedPaths to the runtime
           - internal/acp/runtime_defaults.go               # native tool names a proposer may list
+          - internal/labels/labels.go                      # the improvement-role annotation key
           - internal/publisher/**                          # credential and publication boundary
           - internal/store/**                              # trial, decision and promotion records
           - workers/acp/supervisor/**                      # deniedPaths check
