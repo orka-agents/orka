@@ -421,7 +421,7 @@ func TestCreateRepositoryMonitor_RejectsUnsupportedPublishConfig(t *testing.T) {
 		want    string
 	}{
 		{name: "unsupported event", publish: `{"event":"APPROVE"}`, want: "only supports COMMENT"},
-		{name: "unsupported same head policy", publish: `{"sameHeadPolicy":"replace"}`, want: "sameHeadPolicy only supports skip"},
+		{name: "unsupported same head policy", publish: `{"sameHeadPolicy":"replace"}`, want: "sameHeadPolicy must be skip or update"},
 		{name: "invalid min priority", publish: `{"inline":{"minPriority":"P4"}}`, want: "minPriority must be one of"},
 		{name: "negative max comments", publish: `{"inline":{"maxComments":-1}}`, want: "maxComments must be between 0 and 50"},
 		{name: "too many max comments", publish: `{"inline":{"maxComments":51}}`, want: "maxComments must be between 0 and 50"},

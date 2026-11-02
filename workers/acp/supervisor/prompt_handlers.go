@@ -2139,7 +2139,11 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			return nil, err
 		}
 		if text != "" {
-			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
+			messageID := ""
+			if state.profile.ProviderKind == providerKindCodex {
+				messageID = acpAssistantMessageID(event.Update)
+			}
+			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), messageID, s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
 		}
 		if !ok {
 			prompt.sequence--
@@ -2320,8 +2324,23 @@ func (s *Server) buildTerminalEventLocked(
 	return event
 }
 
-func (p *promptState) appendAssistantText(text, phase string, limit int) {
+func (p *promptState) appendAssistantText(text, phase, messageID string, limit int) {
 	appendBoundedPromptText(&p.assistant, &p.assistantOverflow, text, limit)
+	switch {
+	case messageID != "":
+		if messageID != p.lastMessageID {
+			p.lastMessage.Reset()
+			p.lastMessageOverflow = false
+			p.lastMessageID = messageID
+		}
+		appendBoundedPromptText(&p.lastMessage, &p.lastMessageOverflow, text, limit)
+		// A named message supersedes untagged text before it, and resuming
+		// the same message after a warning keeps its earlier chunks.
+		p.untagged.Reset()
+		p.untaggedOverflow = false
+	case p.lastMessageID != "":
+		appendBoundedPromptText(&p.untagged, &p.untaggedOverflow, text, limit)
+	}
 	if phase != acpAssistantPhaseFinalAnswer {
 		return
 	}
@@ -2329,9 +2348,18 @@ func (p *promptState) appendAssistantText(text, phase string, limit int) {
 	appendBoundedPromptText(&p.finalAnswer, &p.finalAnswerOverflow, text, limit)
 }
 
+// terminalResultText prefers the final answer, then untagged text that
+// followed the last named message (codex-acp sends a /review result that
+// way), then the last named message, then all assistant text.
 func (p *promptState) terminalResultText() (string, bool) {
 	if p.finalAnswerSeen {
 		return p.finalAnswer.String(), p.finalAnswerOverflow
+	}
+	if p.untagged.Len() > 0 || p.untaggedOverflow {
+		return p.untagged.String(), p.untaggedOverflow
+	}
+	if p.lastMessageID != "" {
+		return p.lastMessage.String(), p.lastMessageOverflow
 	}
 	return p.assistant.String(), p.assistantOverflow
 }
