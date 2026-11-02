@@ -1703,6 +1703,19 @@ spec:
                     description: Branch is the source branch to check out.
                     maxLength: 255
                     type: string
+                  commitMessage:
+                    description: |-
+                      CommitMessage is the message of the commit that publishes the Task's
+                      changes. When empty, the commit is titled "orka: apply agent task <name>".
+                      Trailing newlines are normalized. Secret-like text is rejected at runtime
+                      before publication.
+                    maxLength: 4000
+                    type: string
+                    x-kubernetes-validations:
+                    - message: commitMessage must not be whitespace-only
+                      rule: self == '' || self.trim() != ''
+                    - message: commitMessage must not contain carriage returns
+                      rule: '!self.contains(''\r'')'
                   createPR:
                     default: false
                     description: |-
