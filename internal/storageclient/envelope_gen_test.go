@@ -14,18 +14,24 @@ import (
 )
 
 // The decorators are generated from the provider interfaces and the method
-// catalog, so a write added to either cannot ship without an envelope.
+// catalog, so a write added to either cannot ship without an envelope, here
+// or in the shared provider suite.
 func TestEnvelopeDecoratorsAreGenerated(t *testing.T) {
-	want, err := envelopegen.Generate("storageclient")
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	got, err := os.ReadFile("envelope_gen.go")
-	if err != nil {
-		t.Fatalf("read envelope_gen.go: %v", err)
-	}
-	if !bytes.Equal(got, want) {
-		t.Fatal("envelope_gen.go is stale; run make generate")
+	for pkg, path := range map[string]string{
+		"storageclient": "envelope_gen.go",
+		"storagetest":   "../../pkg/storage/v1/storagetest/envelope_gen.go",
+	} {
+		want, err := envelopegen.Generate(pkg)
+		if err != nil {
+			t.Fatalf("generate %s: %v", pkg, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s is stale; run make generate", path)
+		}
 	}
 }
 
