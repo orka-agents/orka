@@ -86,7 +86,12 @@ const (
 	// Only controller identities may write it, and admission is not
 	// retroactive, so the source annotation alone proves nothing: a Task
 	// planted while admission was disabled carries no valid stamp.
-	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
+	AnnotationRequestedByStamp = "orka.ai/requested-by-stamp"
+	// AnnotationImprovementRole marks a Task the controller created for the
+	// self-improvement loop. Only controller identities may set or change it;
+	// ImprovementRoleProposer constrains the Task's tools, paths and
+	// namespace at dispatch and its brokered calls at the broker.
+	AnnotationImprovementRole               = "orka.ai/improvement-role"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
@@ -119,6 +124,10 @@ const (
 	AnnotationTraceState                    = "orka.ai/tracestate"
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
+
+// ImprovementRoleProposer is the AnnotationImprovementRole value for a
+// proposer Task.
+const ImprovementRoleProposer = "proposer"
 
 const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
 

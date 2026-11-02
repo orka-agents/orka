@@ -1003,6 +1003,17 @@ type WorkspaceConfig struct {
 	// +optional
 	DenyRepositoryControlPaths bool `json:"denyRepositoryControlPaths,omitempty"`
 
+	// DeniedPaths rejects publishable workspace changes to these repository
+	// path globs or directory prefixes ending in /**, using the AllowedPaths
+	// syntax, before publication even when AllowedPaths matches. Both the
+	// runtime and the publisher check it. It requires write workspace intent
+	// and is not supported for container Tasks.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=1024
+	// +listType=set
+	// +optional
+	DeniedPaths []string `json:"deniedPaths,omitempty"`
+
 	// RejectBinaryFiles rejects changed file content that is not valid text. It is
 	// not supported for container Tasks.
 	// +optional

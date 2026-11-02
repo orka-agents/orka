@@ -55,6 +55,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/protectedset"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -161,7 +162,11 @@ type TaskReconciler struct {
 	// ACPWorkspaceDispatchEnabled admits workspace-provider-backed ACP
 	// RuntimeSession dispatch. When false, workspace-backed agent Tasks fail
 	// closed before any workspace or RuntimePool demand exists.
-	ACPWorkspaceDispatchEnabled       bool
+	ACPWorkspaceDispatchEnabled bool
+	// ProtectedSet reads the operator-owned protected set. When it names no
+	// ConfigMap, or the ConfigMap is missing or invalid, Tasks marked as an
+	// improvement proposer fail instead of running.
+	ProtectedSet                      protectedset.Source
 	AIWorkerServiceAccountName        string
 	VendorWorkerServiceAccountName    string
 	ContainerWorkerServiceAccountName string

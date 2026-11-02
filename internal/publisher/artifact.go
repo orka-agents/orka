@@ -214,6 +214,26 @@ func (d parsedDelta) withRelativeRoot(relativeRoot string) (parsedDelta, error) 
 	return rooted, nil
 }
 
+// maxDeniedPathPatterns matches the Task deniedPaths list bound.
+const maxDeniedPathPatterns = 256
+
+// rejectDeniedPaths refuses a repository-rooted delta that changes, deletes
+// or links any path matching a denied pattern. The error does not echo the
+// agent-controlled path.
+func (d parsedDelta) rejectDeniedPaths(patterns []string) error {
+	if len(patterns) == 0 {
+		return nil
+	}
+	paths := append(changePaths(d.manifest.Entries), deletionPaths(d.deletions)...)
+	paths = append(paths, symlinkPaths(d.symlinks)...)
+	for _, changedPath := range paths {
+		if workspacedelta.PathDenied(patterns, changedPath) {
+			return operationError(ErrUnsafeDelta, "validate workspace delta paths", "workspace delta contains a denied path", nil)
+		}
+	}
+	return nil
+}
+
 func validateTarEntryName(name string) error {
 	if name == manifestArchivePath || name == deletionsArchivePath || name == symlinksArchivePath {
 		return nil

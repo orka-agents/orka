@@ -1620,3 +1620,22 @@ func TestPromptStateKeepsUntaggedTextAfterNamedMessages(t *testing.T) {
 		t.Fatalf("terminalResultText() = %q, want the whole resumed message", got)
 	}
 }
+
+func TestWorkspaceDeltaPathDeniedAppliesWorkspaceRelativeRoot(t *testing.T) {
+	denied := []string{"internal/admission/**", "AGENTS.md"}
+	if !workspaceDeltaPathDenied("", "internal/admission/task_provenance.go", denied) {
+		t.Fatal("a denied repository path was allowed")
+	}
+	if !workspaceDeltaPathDenied("internal", "admission/task_provenance.go", denied) {
+		t.Fatal("a workspace subpath change mapping to a denied repository path was allowed")
+	}
+	if !workspaceDeltaPathDenied("", "agents.md", denied) {
+		t.Fatal("a case variant of a denied path was allowed")
+	}
+	if workspaceDeltaPathDenied("website", "docs/intro.md", denied) {
+		t.Fatal("a path outside every denied pattern was denied")
+	}
+	if workspaceDeltaPathDenied("internal", "admission.go", nil) {
+		t.Fatal("an empty denied list denied a path")
+	}
+}

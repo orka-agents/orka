@@ -2528,6 +2528,7 @@ func acpWorkspaceDeltaLimits(task *corev1alpha1.Task) harnessv2.WorkspaceDeltaLi
 	}
 	limits.AllowedPaths = append([]string(nil), task.Spec.Workspace.AllowedPaths...)
 	limits.DenyRepositoryControlPaths = task.Spec.Workspace.DenyRepositoryControlPaths
+	limits.DeniedPaths = append([]string(nil), task.Spec.Workspace.DeniedPaths...)
 	limits.RejectBinaryFiles = task.Spec.Workspace.RejectBinaryFiles
 	limits.RejectSecretLikeContent = task.Spec.Workspace.RejectSecretLikeContent
 	return limits

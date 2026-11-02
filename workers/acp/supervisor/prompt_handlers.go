@@ -1569,67 +1569,18 @@ func workspaceDeltaChangedPaths(result workspacedelta.Result) []string {
 }
 
 func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
-	if len(patterns) == 0 {
+	return len(patterns) == 0 || workspacedelta.MatchAnyPathPattern(patterns, changedPath)
+}
+
+// workspaceDeltaPathDenied reports whether a changed path matches a Task
+// deniedPaths pattern. Denied patterns name repository paths, so the path is
+// checked both as the agent sees it and rooted at the workspace subpath.
+func workspaceDeltaPathDenied(workspaceRelativeRoot, changedPath string, patterns []string) bool {
+	if workspacedelta.PathDenied(patterns, changedPath) {
 		return true
 	}
-	for _, patternValue := range patterns {
-		patternValue = strings.TrimPrefix(strings.TrimSpace(patternValue), "./")
-		if strings.HasSuffix(patternValue, "/**") && strings.HasPrefix(changedPath, strings.TrimSuffix(patternValue, "**")) {
-			return true
-		}
-		if workspaceDeltaPatternMatches(patternValue, changedPath) {
-			return true
-		}
-		if strings.TrimSuffix(patternValue, "/") == strings.TrimSuffix(changedPath, "/") {
-			return true
-		}
-	}
-	return false
-}
-
-// workspaceDeltaPatternMatches applies gitignore-style glob semantics: a `**`
-// segment matches zero or more whole path segments, while every other segment
-// keeps path.Match single-segment semantics.
-func workspaceDeltaPatternMatches(patternValue, changedPath string) bool {
-	if !strings.Contains(patternValue, "**") {
-		matched, err := path.Match(patternValue, changedPath)
-		return err == nil && matched
-	}
-	return workspaceDeltaSegmentsMatch(strings.Split(patternValue, "/"), strings.Split(changedPath, "/"))
-}
-
-// workspaceDeltaSegmentsMatch uses the classic greedy wildcard algorithm at
-// segment granularity — backtracking only to the most recent `**` — so
-// matching stays O(pattern × path) even for agent-controlled paths against
-// patterns with many `**` segments.
-func workspaceDeltaSegmentsMatch(patternSegments, pathSegments []string) bool {
-	patternIndex, pathIndex := 0, 0
-	starPattern, starPath := -1, 0
-	for pathIndex < len(pathSegments) {
-		switch {
-		case patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**":
-			starPattern, starPath = patternIndex, pathIndex
-			patternIndex++
-		case patternIndex < len(patternSegments) && workspaceDeltaSegmentMatches(patternSegments[patternIndex], pathSegments[pathIndex]):
-			patternIndex++
-			pathIndex++
-		case starPattern >= 0:
-			starPath++
-			pathIndex = starPath
-			patternIndex = starPattern + 1
-		default:
-			return false
-		}
-	}
-	for patternIndex < len(patternSegments) && patternSegments[patternIndex] == "**" {
-		patternIndex++
-	}
-	return patternIndex == len(patternSegments)
-}
-
-func workspaceDeltaSegmentMatches(pattern, segment string) bool {
-	matched, err := path.Match(pattern, segment)
-	return err == nil && matched
+	root := strings.TrimSpace(workspaceRelativeRoot)
+	return root != "" && root != "." && workspacedelta.PathDenied(patterns, path.Join(root, changedPath))
 }
 
 func workspaceDeltaRepositoryControlPathForWorkspace(workspaceRelativeRoot, changedPath string) bool {
@@ -1973,6 +1924,11 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 		if request.Limits.DenyRepositoryControlPaths && workspaceDeltaRepositoryControlPathForWorkspace(state.workspaceRelativeRoot, changedPath) {
 			s.poisonSession(state, harnessv2.WorkspaceDeltaRepositoryControlPathMessage)
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaRepositoryControlPathMessage, nil, false)
+			return
+		}
+		if workspaceDeltaPathDenied(state.workspaceRelativeRoot, changedPath, request.Limits.DeniedPaths) {
+			s.poisonSession(state, harnessv2.WorkspaceDeltaDeniedPathMessage)
+			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, harnessv2.WorkspaceDeltaDeniedPathMessage, nil, false)
 			return
 		}
 	}

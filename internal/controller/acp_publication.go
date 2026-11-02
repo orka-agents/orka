@@ -232,6 +232,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 			BranchClaimGeneration: claim.Generation, BaselineOID: baseline.Revision,
 			RemoteBefore: publisherRemoteRef(claim.LastVerified), DeltaArtifactDigest: delta.Artifact.Digest,
 			RelativeRoot:  delta.RelativeRoot,
+			DeniedPaths:   publicationDeniedPaths(workspace),
 			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
@@ -1272,6 +1273,16 @@ func workspaceSourceRef(workspace *corev1alpha1.WorkspaceConfig) (string, error)
 		return "", fmt.Errorf("workspace source branch is invalid")
 	}
 	return "refs/heads/" + branch, nil
+}
+
+// publicationDeniedPaths returns the Task's denied path patterns for the
+// publisher to re-check against the delta it prepares, so a runtime that
+// skipped its own check cannot publish a denied path.
+func publicationDeniedPaths(workspace *corev1alpha1.WorkspaceConfig) []string {
+	if workspace == nil || len(workspace.DeniedPaths) == 0 {
+		return nil
+	}
+	return append([]string(nil), workspace.DeniedPaths...)
 }
 
 func publicationBranch(task *corev1alpha1.Task, session *acpTaskSession, workspace *corev1alpha1.WorkspaceConfig) string {
