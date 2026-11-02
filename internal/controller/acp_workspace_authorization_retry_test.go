@@ -42,7 +42,7 @@ func TestExternalACPProviderAuthorizationOutagesRetryTaskPlanning(t *testing.T) 
 				t.Fatalf("authorization outage became a permanent plan rejection: %#v", plan)
 			}
 			before := task.DeepCopy()
-			if _, err := r.rejectPlannedAgentExecution(t.Context(), task, plan); !errors.Is(err, plan.transientError) {
+			if _, err := r.rejectPlannedAgentExecution(t.Context(), task, nil, plan); !errors.Is(err, plan.transientError) {
 				t.Fatalf("planning error = %v, want retryable authorization failure", err)
 			}
 			if !reflect.DeepEqual(task, before) {

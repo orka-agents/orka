@@ -477,6 +477,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
+| `--capability-gap-signals-enabled` | `ORKA_CAPABILITY_GAP_SIGNALS_ENABLED` env or `false` | Count content-free capability-gap signals (unsupported requests, missing or denied tools) in `orka_capability_gap_signals_total` and serve a 7-day summary at `GET /api/v1/capability-gaps`; see [Capability-gap signals](../guides/observability.md#capability-gap-signals) |
 
 ### Agent hosts {#agent-hosts}
 
@@ -765,6 +766,7 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
 | `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
+| `orka_capability_gap_signals_total` | Counter | `category`, `reason`, `runtime`, `tool` | Requests Orka could not serve; recorded only with `--capability-gap-signals-enabled`. See [Capability-gap signals](../guides/observability.md#capability-gap-signals) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.
 

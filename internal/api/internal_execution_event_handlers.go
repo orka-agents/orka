@@ -17,6 +17,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -130,11 +131,44 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	}); err != nil {
 		return err
 	}
+	recordToolCallCapabilityGap(event, eventContent)
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{
 		ID:        appended.ID,
 		Seq:       appended.Seq,
 		CreatedAt: appended.CreatedAt,
+	})
+}
+
+// recordToolCallCapabilityGap counts a built-in AI worker tool call that was
+// rejected before it ran. It reads only the closed errorType value and the
+// tool name, which the recorder replaces with "unknown" unless it is in the
+// catalog; the summary, content text and arguments are never read.
+func recordToolCallCapabilityGap(event *store.ExecutionEvent, content map[string]json.RawMessage) {
+	if event == nil || event.Type != events.ExecutionEventTypeToolCallFailed ||
+		event.StreamType != events.ExecutionEventStreamTypeTask {
+		return
+	}
+	var errorType string
+	if json.Unmarshal(content[events.ToolCallErrorTypeContentKey], &errorType) != nil {
+		return
+	}
+	var reason capabilitygap.Reason
+	switch errorType {
+	case events.ToolCallErrorTypeNotEnabled:
+		reason = capabilitygap.ReasonToolNotEnabled
+	case events.ToolCallErrorTypeNotFound:
+		reason = capabilitygap.ReasonToolNotRegistered
+	default:
+		return
+	}
+	capabilitygap.Record(capabilitygap.Signal{
+		Category:  capabilitygap.CategoryMissingTool,
+		Reason:    reason,
+		Runtime:   capabilitygap.RuntimeNative,
+		Tool:      event.ToolName,
+		Namespace: event.Namespace,
+		Task:      event.StreamID,
 	})
 }
 

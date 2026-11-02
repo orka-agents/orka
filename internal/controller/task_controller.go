@@ -876,11 +876,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
-			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
+			return r.rejectPlannedAgentExecution(ctx, task, agent, rejectAgentExecutionPlan(err.Error()))
 		}
 		switch plan.path {
 		case agentExecutionPathRejected:
-			return r.rejectPlannedAgentExecution(ctx, task, plan)
+			return r.rejectPlannedAgentExecution(ctx, task, agent, plan)
 		case agentExecutionPathACP, agentExecutionPathExternal:
 			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
 				return result, err

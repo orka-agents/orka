@@ -22,6 +22,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -58,7 +59,7 @@ const (
 var errACPWorkspaceRecoveryPending = fmt.Errorf("execution workspace recovery is pending: %w", store.ErrNotReady)
 
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
-func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
+func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
 	if task == nil || task.Status.AgentExecutionBinding == nil {
 		return ctrl.Result{}, errors.New("immutable v2 execution binding is required before ACP queueing")
 	}
@@ -76,7 +77,14 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		// The single configuration gate for bound Tasks: ordinary planning
 		// AND bound-task recovery both flow through this chokepoint before
 		// any workspace or RuntimePool demand exists.
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
+		result, err := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
+		if err == nil {
+			capabilitygap.Record(capabilitygap.Signal{
+				Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonExecutionWorkspace,
+				Runtime: capabilityGapAgentRuntime(agent), Namespace: task.Namespace, Task: task.Name,
+			})
+		}
+		return result, err
 	}
 	if err := r.ACPAdmissionGate.Check(); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil

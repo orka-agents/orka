@@ -1500,9 +1500,13 @@ func executeAgentLoopWithEvents(
 			var execArgs json.RawMessage
 			approvalKey := ""
 			alreadyFired := false
+			// rejectedErrorType is a closed value the controller counts as a
+			// capability-gap signal; it never carries tool or model text.
+			rejectedErrorType := ""
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
+				rejectedErrorType = events.ToolCallErrorTypeNotEnabled
 				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
@@ -1567,16 +1571,28 @@ func executeAgentLoopWithEvents(
 					approvalGate.markFired(approvalKey)
 					warnDeprecatedMemoryTool(toolName, deprecatedMemoryTools)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
+					if _, notFound := errors.AsType[*tools.ToolNotFoundError](execErr); notFound {
+						rejectedErrorType = events.ToolCallErrorTypeNotFound
+					}
 				}
 			}
 
 			if execErr != nil {
-				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
+				failedOptions := []common.EventOption{
 					common.WithEventSeverity(events.ExecutionEventSeverityError),
 					common.WithEventToolName(toolName),
 					common.WithEventToolCallID(tc.ID),
 					common.WithEventSummary(execErr.Error()),
-				)
+				}
+				if rejectedErrorType != "" {
+					failedOptions = append(failedOptions, common.WithEventContent(eventContent(map[string]any{
+						logFieldToolName:                   toolName,
+						logFieldToolCallID:                 tc.ID,
+						events.ToolCallErrorTypeContentKey: rejectedErrorType,
+					})))
+				}
+				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
+					failedOptions...)
 				result = fmt.Sprintf("Error executing tool: %v", execErr)
 			} else {
 				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallCompleted, modelLoopEventTimeout,

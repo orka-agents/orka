@@ -404,6 +404,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/usage", s.handlers.GetUsageReport)
 	api.Get("/usage/work/:id", s.handlers.GetUsageWork)
 	api.Get("/usage/other/:category", s.handlers.GetUsageOther)
+	api.Get("/capability-gaps", s.handlers.GetCapabilityGaps)
 
 	api.Get("/providers", s.handlers.ListProviders)
 	api.Post("/providers", s.handlers.CreateProvider)

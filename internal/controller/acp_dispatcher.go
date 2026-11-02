@@ -32,6 +32,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
@@ -1061,7 +1062,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	profile = bound.plan.Profile
 	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
 		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, nativeErr)
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, profile.ProviderKind, nativeErr)
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
 	}
@@ -1114,7 +1115,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		endSessionTrace(err)
 		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, err)
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, profile.ProviderKind, err)
 		}
 		if errors.Is(err, errACPSessionNotFound) {
 			return d.rejectMissingTaskSession(ctx, task, attemptID, fence)
@@ -5945,6 +5946,12 @@ func (d *ACPDispatcher) resolvePromptPermission(
 		return nil
 	}
 	decision := frozenMCPPermissionDecision(mcpConfiguration, provider, permission)
+	if _, allowed := frozenMCPPermissionAllowed(mcpConfiguration, provider, permission); !allowed {
+		capabilitygap.Record(capabilitygap.Signal{
+			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
+			Runtime: provider, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
+		})
+	}
 	request := harnessv2.ResolvePermissionRequest{
 		Protocol:  harnessv2.ProtocolVersion,
 		Metadata:  mutationMetadata(fence, task, "permission-"+string(permission.RequestID), true, time.Now().UTC().Add(30*time.Second)),
@@ -5980,11 +5987,7 @@ func frozenMCPPermissionDecision(
 	if permission == nil {
 		return cancelled
 	}
-	toolPolicy := configuration.ToolPolicy
-	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
-	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
-		allowed = allowed || acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
-	}
+	descriptor, allowed := frozenMCPPermissionAllowed(configuration, provider, permission)
 	// A local permission callback may let the provider reach an allowed brokered
 	// tool. The broker still requires the controller's exact-call approval before
 	// executing it; this allow-once response grants no approval authority.
@@ -6001,6 +6004,24 @@ func frozenMCPPermissionDecision(
 		}
 	}
 	return cancelled
+}
+
+// frozenMCPPermissionAllowed reports whether the frozen tool policy allows the
+// requested tool at all, before any approval requirement.
+func frozenMCPPermissionAllowed(
+	configuration harnessv2.MCPPolicyConfiguration,
+	provider string,
+	permission *harnessv2.PermissionRequestedEvent,
+) (harnessv2.MCPToolDescriptor, bool) {
+	if permission == nil {
+		return harnessv2.MCPToolDescriptor{}, false
+	}
+	toolPolicy := configuration.ToolPolicy
+	descriptor, allowed := toolPolicy.Descriptor(permission.ToolName)
+	if toolPolicy.AllowedToolNames == nil && len(toolPolicy.DisallowedToolNames) == 0 && toolPolicy.AllowBash {
+		allowed = allowed || acp.IsBuiltInRuntimeNativeTool(provider, permission.ToolName)
+	}
+	return descriptor, allowed
 }
 
 func isACPRateLimitedClientError(err error) bool {
