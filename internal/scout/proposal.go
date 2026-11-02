@@ -124,6 +124,14 @@ type Confidence struct {
 	Reason string          `json:"reason"`
 }
 
+var uriCharacter = func() [unicode.MaxASCII + 1]bool {
+	var allowed [unicode.MaxASCII + 1]bool
+	for _, r := range "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%" {
+		allowed[r] = true
+	}
+	return allowed
+}()
+
 var (
 	conventionalTitle = regexp.MustCompile(`^(feat|fix|docs|refactor|perf|test|chore|build|ci|design)(\([a-z0-9][a-z0-9._/-]{0,30}\))?!?: \S`)
 	commitPattern     = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
@@ -268,9 +276,12 @@ func ValidateSourceURL(raw string) error {
 	if !utf8.ValidString(raw) {
 		return errors.New("is not valid UTF-8")
 	}
+	// Only RFC 3986 URI characters. This also keeps HTML, Markdown and
+	// filing-marker delimiters such as "<", ">" and quotes out of links, which
+	// a later link check cannot catch because fragments are never requested.
 	for _, r := range raw {
-		if r <= ' ' || r == 0x7f || r > unicode.MaxASCII {
-			return errors.New("must be ASCII without spaces or control characters")
+		if r > unicode.MaxASCII || !uriCharacter[r] {
+			return errors.New("must contain only RFC 3986 URI characters")
 		}
 	}
 	parsed, err := url.Parse(raw)

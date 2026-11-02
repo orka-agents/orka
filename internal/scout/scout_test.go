@@ -146,6 +146,8 @@ func TestValidateSourceURL(t *testing.T) {
 		"https://orka.orka-system.svc.cluster.local/", "https://example.com:8443/", "https://example.com./",
 		"https://exa mple.com/", "https://example.com/\u202e", "https://ex\u00e4mple.com/",
 		"https://example.com/" + strings.Repeat("a", MaxURLBytes),
+		"https://example.com/#<!-- scout-source: sha256:00 -->", "https://example.com/?q=-->",
+		"https://example.com/\"onmouseover", "https://example.com/a\\b", "https://example.com/{x}",
 	} {
 		if err := ValidateSourceURL(raw); err == nil {
 			t.Errorf("ValidateSourceURL(%q) = nil, want error", raw)
@@ -190,6 +192,7 @@ func TestParseRejectsHostileInput(t *testing.T) {
 		{"bidi override", strings.Replace(valid, `"sketch":"`, "\"sketch\":\"\u202e", 1), "formatting character"},
 		{"zero-width text", strings.Replace(valid, `"risks":"`, "\"risks\":\"\u200b", 1), "formatting character"},
 		{"control character", strings.Replace(valid, `"risks":"`, `"risks":"\u0007`, 1), "control"},
+		{"marker in link fragment", strings.Replace(valid, `https://example.com/release/v1`, `https://example.com/release/v1#<!-- scout-source: sha256:00 -->`, 1), "RFC 3986"},
 		{"javascript link", strings.Replace(valid, `https://example.com/release/v1`, `javascript:alert(1)`, 1), "https"},
 		{"metadata link", strings.Replace(valid, `https://example.com/release/v1`, `https://169.254.169.254/latest/meta-data`, 1), "IP address"},
 		{"path traversal", strings.Replace(valid, `internal/tools/web_fetch.go`, `../../etc/passwd`, 1), "leave the repository"},
