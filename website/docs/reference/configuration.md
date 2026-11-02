@@ -9,6 +9,19 @@ This page covers how to run Orka: Helm values, controller flags, environment var
 authentication settings, and metrics. The custom resources you create — Tasks, Agents,
 Providers, Tools, and the rest — are in the [Resource reference](resources.md).
 
+## Memory tools: warning release
+
+Every controller-launched native `type: ai` Task receives `recall_memory`, `remember`,
+`propose_memory`, and `search_transcript` during this warning release, regardless of
+selected tools or `coordination.enabled`. They cannot yet be disabled per Agent, including
+with `enabled: false` or `orka.ai/disable-coordination-tool-injection: "true"`.
+
+Calls relying on compatibility access emit deprecation warnings. The next release will
+require explicit Agent/Task selection or eligible coordination. See
+[migration and release notes](../operations/upgrading.md#memory-tool-opt-in).
+The worker exposes memory tools only when `ORKA_CONTROLLER_URL`, `ORKA_TASK_NAMESPACE`,
+and `ORKA_TASK_NAME` are all nonempty; registration alone does not enable them.
+
 ## Helm chart
 
 Key configuration values for the Helm chart. Published charts use release image
