@@ -124,6 +124,12 @@ repositories:
       - internal/admission/**
       - internal/outboundaccess/**
       - internal/tools/memory_tools.go
+      - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
+      - internal/controller/acp_dispatcher*.go         # dispatch-time checks
+      - internal/controller/agent_execution_binding*.go # canary routing
+      - internal/controller/evalrun*.go                # evaluator
+      - workers/acp/supervisor/**                      # deniedPaths check
+      - api/v1alpha1/**                                # the fields that carry these rules
       - AGENTS.md
 caseSets:                      # case ConfigMaps by split
   - {namespace: orka-evals, name: pr-review-train,   split: train}
@@ -132,6 +138,10 @@ gate:                          # improvement thresholds, see #994
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 3
 ```
+
+Every file that implements an enforcement point in the table above belongs in the
+protected set for the Orka repository. #992 adds a test that fails when an enforcement
+point's file is missing from the shipped example, so the two lists cannot drift apart.
 
 The controller validates it and records its digest. A missing or invalid ConfigMap
 disables proposer flows; it never means "nothing is protected". Resources are protected
@@ -177,8 +187,11 @@ At dispatch, a Task with the role annotation that lacks any of these, or whose
 
 **Branch protection.** Before enabling a proposer flow on a repository, the controller
 reads the branch rules for the default branch with its existing forge read credential
-and refuses unless a pull request with review is required. Bypass lists cannot be read
-that way; people audit them when enabling the flow.
+and refuses unless a pull request with review is required **and** stale approvals are
+dismissed when new commits are pushed. Independently of that setting, the controller
+treats a code candidate as approved only when an approving review's commit equals the
+current pull request head, so an approval never carries over to a later push. Bypass
+lists cannot be read that way; people audit them when enabling the flow.
 
 ### Evidence records (#993)
 
@@ -219,25 +232,39 @@ status:
 - **Incomparable** when the two runs differ in anything other than the candidate's
   promotable fields: case-set, grader-set or criteria digest, trials, subject, monitor
   generation or runtime image. Fail closed.
+- **The bound tuple.** Everything an approval depends on, recorded at decision time and
+  recomputed every time the approval is used:
+  - the candidate Agent's UID, generation and promotable-field digest;
+  - the stable Agent's UID, generation and promotable-field digest, as the paired
+    baseline run snapshotted them;
+  - the resolved configuration digest of each arm: the prompt text after resolving any
+    `configMapRef`, the model, the provider and the profile digest;
+  - the runtime image digest both runs used;
+  - the case-set, grader-set, criteria and protected-set digests.
+
+  To keep the candidate's resolved configuration fixed, the controller always writes the
+  candidate's prompt inline, even for a model-only patch, so a mutable `configMapRef`
+  cannot change what was tested.
 - **What is kept.** The trial records from #976, plus an append-only `eval_decisions`
-  table in the same store: id, candidate run, decision (`approved` or `rejected`),
-  actor, reason, time, and the bound tuple (candidate Agent UID and generation,
-  candidate digest, case-set digest, grader-set digest, criteria digest, protected-set
-  digest). Records of experiment runs survive EvalRun deletion and its TTL, so rejected
+  table in the same store: id, experiment (the candidate run), decision (`approved` or
+  `rejected`), actor, reason, time, and the bound tuple. Records of experiment runs survive EvalRun deletion and its TTL, so rejected
   experiments stay queryable. Later proposers see only the hypothesis, the aggregate
   results and the decision, never held-out trial rows.
 - **Who writes.** Only the EvalRun controller writes trial records and `status`. A
   decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
   SubjectAccessReview for the verb `decide` on `evalruns`. The handler refuses
   `system:serviceaccount:` usernames. It refuses an approval when the gate did not pass
-  or the tuple no longer matches the live candidate Agent; a rejection is always
-  accepted. A new ClusterRole, `orka-eval-promoter`, grants the `propose` and `decide`
+  or the recomputed tuple no longer matches; a rejection is always accepted. A new ClusterRole, `orka-eval-promoter`, grants the `propose` and `decide`
   verbs on `evalruns` and `promote` on `agents`, and is not aggregated to edit or
-  admin. A decision is never updated; a later decision supersedes it.
-- **What invalidates an approval.** Any change to an element of the bound tuple: a new
-  generation of the candidate Agent or different promotable fields, a different case
-  set, grader set, criteria or protected set. For code candidates, a new commit on the
-  pull request head, through the forge's own stale-review dismissal.
+  admin. A decision is never updated; a later decision supersedes it. **The effective
+  decision for an experiment is always its latest one.** An approval is usable only
+  while it is the latest decision for its experiment, so a later rejection revokes it
+  even though the earlier row remains.
+- **What invalidates an approval.** A later decision on the same experiment, or any
+  change to an element of the bound tuple: a new generation of either Agent, different
+  promotable fields or resolved configuration on either arm, a different runtime image,
+  case set, grader set, criteria or protected set. For code candidates, a new commit on
+  the pull request head, enforced by the exact-head check above.
 
 ### Proposer flow (#994)
 
@@ -245,7 +272,8 @@ Piloted on the PR reviewer's Agent configuration only.
 
 1. A person runs a baseline EvalRun on the training split.
 2. A promoter calls `POST /api/v1/evals/runs/:name/proposals` (SubjectAccessReview verb
-   `propose` on `evalruns`). The controller creates one read-only proposer Task in the
+   `propose` on `evalruns`; like every promoter route, it refuses
+   `system:serviceaccount:` usernames even if the role is bound to one). The controller creates one read-only proposer Task in the
    proposer namespace. Its prompt holds the failed training trials' case summaries and
    grader reasons, earlier experiment summaries, and the current promotable fields. It
    refuses after `gate.maxCandidatesPerBaseline` proposals for the same baseline.
@@ -281,16 +309,26 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   `{action: canary | promote | abort | rollback, decisionID, percent}`, authorized by a
   SubjectAccessReview for the verb `promote` on `agents`, granted by
   `orka-eval-promoter`. ServiceAccount usernames are refused. `canary` and `promote`
-  require an approved decision whose tuple still matches the candidate Agent.
+  require that `decisionID` is the latest decision for its experiment, that it approves,
+  and that its recomputed bound tuple still matches. The destination must be the
+  candidate's owner (`orka.ai/candidate-of` and the owner reference) and must still
+  match the baseline half of the tuple: if anyone edited the stable Agent after the
+  baseline run, the request is refused and a new experiment is needed. `promote` updates
+  the stable Agent with a `resourceVersion` precondition, so a concurrent edit makes it
+  fail instead of merging into a configuration neither arm tested.
 - **New status field `Agent.status.rollout`**:
   `{candidate: {name, uid, generation, digest}, percent, decisionID}`. Only the
   controller can write it. At binding (`agent_execution_binding.go`), a new Task that
   names the stable Agent goes to the candidate when a hash of its UID modulo 100 is
   below `percent`. The binding then records the candidate's UID and generation through
   the existing fields, and the controller-managed annotation `orka.ai/rollout-arm`
-  records which arm the Task took. If the candidate's generation no longer matches,
-  binding sends every new Task to the stable Agent and sets a `RolloutInvalid`
-  condition.
+  records which arm the Task took. Before routing each new Task to the candidate,
+  binding checks that `status.rollout.decisionID` is still the latest decision for its
+  experiment, that it approves, and that the full bound tuple still matches, including
+  the candidate's UID. If any check fails, binding sends the Task to the stable Agent,
+  sets a `RolloutInvalid` condition, and keeps doing so until a promoter aborts or
+  starts a new canary. A protected-set or criteria change, or a later rejection,
+  therefore stops a canary even though no Agent changed.
 - **Promotion log** in the store. `promote` copies the candidate's promotable fields
   into the stable Agent's spec, clears `status.rollout`, and appends a record with the
   previous values. `rollback` writes the last recorded previous values back and needs no
@@ -405,4 +443,6 @@ the protected set.
 - Who besides maintainers holds `orka-eval-promoter`?
 - Should a promoter be barred from deciding on an experiment they started?
 - Should Agents under a rollout reject direct spec edits by anyone but the controller?
+  Today such an edit is safe but disruptive: it invalidates the canary and any pending
+  promotion, which then need a new experiment.
 - Retention for experiment records, and whether to cap spend by tokens once Orka can.
