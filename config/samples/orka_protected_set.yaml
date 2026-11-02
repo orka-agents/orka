@@ -33,6 +33,7 @@ data:
           - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
           - internal/controller/acp_dispatcher*.go         # dispatch-time checks
           - internal/controller/acp_task_queue.go          # calls the dispatch-time check
+          - internal/controller/task_controller.go         # fails marked Tasks outside the ACP path
           - internal/controller/acp_publication*.go        # sends deniedPaths to the publisher
           - internal/controller/agent_execution_binding*.go # canary routing
           - internal/controller/evalrun*.go                # evaluator
