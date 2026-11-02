@@ -130,6 +130,15 @@ How monitors review and repair pull requests.
 | --- | --- | --- |
 | [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
 
+### Self-improvement
+
+How agents may propose changes to Orka while people decide what ships, and what keeps a
+proposer from changing what judges it.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0040](0040-self-improvement-trust-boundaries.md) | Separate proposer, evaluator and promoter identities for self-improvement | Proposed |
+
 ## Writing a new one
 
 Copy the shape of a recent record — [0028](0028-agent-sandbox-pvc-cold-resume.md) is a

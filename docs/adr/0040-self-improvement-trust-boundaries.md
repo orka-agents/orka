@@ -1,0 +1,408 @@
+# ADR 0040: Separate proposer, evaluator and promoter identities for self-improvement
+
+Date: 2026-11-01
+
+## Status
+
+Proposed. Defines the trust boundaries for the self-improvement loop in #985 and is the
+design source for #992 to #997. Builds on the EvalRun API proposed in #976, which is
+being built in parallel; where this record adds to EvalRun, the additions are optional
+fields on that resource, not a new one. Depends on #986 for repair path limits. Leaves
+the scout (#987 to #990) unchanged: it needs no new boundary.
+
+## Context
+
+The loop in #985 lets agents propose changes to Orka and prove them with evidence, while
+people decide what ships. If the agent that proposes a change can also grade or approve
+it, it will learn to game the grade. The roles must be separated by mechanisms Orka or
+the forge enforces, not by prompt instructions.
+
+What Orka already enforces, verified on `main` at 2fc0e83a1:
+
+- **No Kubernetes credential in the agent process.** RuntimePool Pods set
+  `AutomountServiceAccountToken: false` (`runtimePoolPodTemplate` in
+  `internal/controller/runtime_pool_controller.go`). Their NetworkPolicies deny all
+  traffic except DNS, the provider proxy and the controller (`runtimePoolNetworkPolicies`,
+  same file). Web access exists only through the brokered `web_search` and `web_fetch`.
+- **No forge credential in the agent process.** `readCredentialRef`,
+  `publicationCredentialRef`, `publicationReadCredentialRef` and `forgeCredentialRef`
+  are resolved only by the clean-room workspace and publication boundary
+  (`api/v1alpha1/task_types.go`, `internal/publisher/doc.go`). The publisher pushes one
+  Orka-owned commit with an exact compare-and-swap to a branch claimed by one Task or
+  Session (`api/v1alpha1/branch_claim_types.go`).
+- **Brokered tools are an allowlist frozen per prompt.** The Task's allowed tools are
+  digested into the runtime profile (`buildMCPPolicyConfigurationWithRegistry` in
+  `internal/controller/acp_mcp_policy.go`), and the broker rejects a call whose policy,
+  fence or operation capability does not match (`ACPMCPBroker.ServeHTTP` in
+  `internal/controller/acp_mcp_broker.go`). The production broker registry is fixed in
+  `cmd/main.go`: web tools, coordination tools (`delegate_task`, `wait_for_tasks`,
+  `run_validation`, messages, memory, `search_transcript`), `reply_in_conversation`, and,
+  with connectors on, GitHub tools that act as the requester's linked account.
+- **Publication path checks run outside the agent.** The ACP supervisor, which runs
+  under a different UID from the agent's processes, rejects a workspace delta that
+  leaves `allowedPaths` or, with `denyRepositoryControlPaths`, touches `.github/workflows/`, `config/rbac/` or chart
+  secrets (`workers/acp/supervisor/prompt_handlers.go`). The RepositoryMonitor
+  implementation result is checked again by the controller and rejected with
+  `patch_path_denied` (`internal/controller/repositorymonitor_issue_actions.go`). The
+  control-path list is hard-coded in both places. Repair Tasks set neither field (#986).
+- **Agent configuration is pinned per Task.** Every agent Task gets a write-once
+  `AgentExecutionBinding` with the Agent's UID and generation, an immutable snapshot
+  digest and the runtime profile digest
+  (`api/v1alpha1/agent_execution_binding_types.go`,
+  `internal/controller/agent_execution_binding.go`). The profile digest covers the
+  resolved Agent configuration, including the system prompt, the model and the tool
+  policy (`internal/controller/acp_runtime_profile.go`), and RuntimePools are keyed by
+  it. Editing an Agent therefore sends new Tasks to a new pool while running Tasks finish
+  on the old one, which drains before it is removed. Runtime images are digest-pinned per
+  provider by controller configuration, not per Agent.
+- **Issue commands are bound to a snapshot.** A RepositoryMonitor command records the
+  actor, their permission and the issue snapshot digest. If the issue changed since,
+  the command is blocked with `stale_command_snapshot`. Mutating commands need
+  `requireActorPermission`, `write` by default (`internal/store/monitor_types.go`,
+  `internal/controller/repositorymonitor_issue_actions.go`,
+  `api/v1alpha1/repositorymonitor_types.go`).
+- **Custom verbs authorize store-backed actions.** The API authorizes
+  `POST /api/v1/memory-proposals/:id/apply` with a SubjectAccessReview for the verb
+  `apply` on `memoryproposals` (`internal/api/external_authorization.go`).
+- **Controller-only Task metadata.** Admission rejects writes to controller-managed Task
+  annotations from anyone but the controller (`internal/admission/task_provenance.go`).
+
+What is missing: a protected set wider than the three hard-coded control paths, any way
+to keep evaluation cases from a proposer, evidence that ties a decision to exactly what
+was tested, and a promotion path for Agent configuration with a canary and rollback.
+
+## Decision
+
+### Three identities
+
+| Identity | Who | Can | Cannot |
+|---|---|---|---|
+| Proposer | An agent Task the controller creates and marks with the controller-managed annotation `orka.ai/improvement-role: proposer` | Read a pinned clone; return one structured candidate; publish to its own task branch when the flow allows it (#997); create memory proposals | Hold any Kubernetes or forge credential; read evaluation cases or evaluation transcripts; publish a change to the protected set; start Tasks, evaluations or promotions; post to the forge |
+| Evaluator | The EvalRun controller and API server, running as the controller ServiceAccount | Create candidate Agents from a validated candidate; run trials; write trial and experiment records; compute the gate | Change a candidate after the run starts; record a decision; promote |
+| Promoter | A person, not a ServiceAccount, bound to the new `orka-eval-promoter` role | Approve or reject one experiment; start, widen, finish or abort a canary; roll back | Edit evidence; promote without an approved experiment that still matches |
+
+Every rule has one enforcement point:
+
+| Rule | Enforcement point | State |
+|---|---|---|
+| No Kubernetes credential in a proposer | RuntimePool Pod spec, `runtime_pool_controller.go` | Exists |
+| No forge credential in a proposer | Clean-room credential refs, `task_types.go`, `internal/publisher` | Exists |
+| No network except the broker | RuntimePool NetworkPolicies | Exists |
+| Proposer cannot start Tasks, evaluations, validations or forge writes | Proposer allowlist (below) frozen into the profile, enforced by `ACPMCPBroker.ServeHTTP` | Allowlist is new, #992 |
+| Proposer annotation is set only by the controller | `controllerManagedTaskAnnotationKeys`, `internal/admission/task_provenance.go` | New key, #992 |
+| A proposer Task that lost its constraints does not run | Dispatch-time check where workspace limits are built, `acp_dispatcher.go` | New, #992 |
+| Proposer cannot publish protected paths | Supervisor delta check, and again before the Publication is created | New `deniedPaths`, #992 |
+| Proposer cannot push to the default or release branches | Controller-derived push branch under a fixed prefix, branch claims, plus forge branch protection | Prefix check new, #992 |
+| Proposer cannot read cases or trial transcripts | Separate namespace; no web, memory-recall or transcript tools; private fixture repository | New, #992 |
+| Only the evaluator writes trial and experiment records | Store writes only from the controller; no write route in the API | #976, #993 |
+| Decisions are human and append-only | `decide` verb SubjectAccessReview, ServiceAccount usernames refused, insert-only table | New, #993 |
+| Promotion needs a matching approved experiment | `promote` verb SubjectAccessReview and a digest check in the rollout endpoint | New, #995 |
+| Only the controller routes canary traffic | `Agent.status.rollout`; the editor role has only `get` on `agents/status` (`config/rbac/agent_editor_role.yaml`) | New, #995 |
+
+Kept human-only: changes to the protected set, new promotable fields or candidate kinds,
+and raising any cost cap. Each is a reviewed code or configuration change, and the paths
+that hold them are in the protected set.
+
+### Protected set (#992)
+
+**Declaration.** One ConfigMap in the controller namespace, named by the new controller
+flag `--protected-set-configmap`, owned by cluster operators and changed only through
+the reviewed deployment configuration. Format, with example values:
+
+```yaml
+schemaVersion: orka.protectedSet.v1
+paths:                         # always denied to proposers, in every repository
+  - .github/**
+  - config/rbac/**
+  - charts/**
+repositories:
+  - repository: github.com/orka-agents/orka
+    paths:                     # added for this repository
+      - internal/evals/**      # graders and the gate
+      - test/evals/**
+      - internal/api/*authoriz*
+      - internal/admission/**
+      - internal/outboundaccess/**
+      - internal/tools/memory_tools.go
+      - AGENTS.md
+caseSets:                      # case ConfigMaps by split
+  - {namespace: orka-evals, name: pr-review-train,   split: train}
+  - {namespace: orka-evals, name: pr-review-heldout, split: heldOut}
+gate:                          # improvement thresholds, see #994
+  maxInfraErrorPercent: 10
+  maxCandidatesPerBaseline: 3
+```
+
+The controller validates it and records its digest. A missing or invalid ConfigMap
+disables proposer flows; it never means "nothing is protected". Resources are protected
+by construction, since the proposer holds no Kubernetes credential: Agents, EvalRuns,
+case ConfigMaps, RBAC, Secrets, OutboundAccessPolicies and RuntimePools.
+
+**New Task field: `spec.workspace.deniedPaths`.** A list of globs with the same syntax
+as `allowedPaths`, rejected before publication even when `allowedPaths` matches. It is
+needed because `allowedPaths` cannot express "everything except". It is carried to the
+supervisor in the harness workspace limits (`internal/harness/v2/workspace.go`) and
+checked next to `denyRepositoryControlPaths` in
+`workers/acp/supervisor/prompt_handlers.go`. The controller checks the delta's changed
+paths again before it creates the Publication, so a compromised runtime Pod cannot
+publish a protected path on its own. A rejection uses `patch_path_denied`.
+
+**Proposer Tasks.** The controller creates them, sets the role annotation, and sets:
+
+- `denyRepositoryControlPaths: true` and `deniedPaths` from the protected set, for every
+  write-intent proposer;
+- an explicit allowed-tools list: native workspace tools and `propose_memory`, nothing
+  else brokered. No `delegate_task`, `run_validation`, web tools, `recall_memory`,
+  `search_transcript` or connector tools;
+- credential references only as the existing builders set them today. They stay with
+  the clean-room publication boundary and never reach the agent;
+- a push branch under the monitor's implementation prefix.
+
+At dispatch, a Task with the role annotation that lacks any of these, or whose
+`deniedPaths` no longer covers the current protected set, fails with
+`ProposerConstraintViolation` instead of running.
+
+**Held-out cases.** Three rules keep them unreadable:
+
+1. The controller refuses to create a proposer Task in a namespace that holds an EvalRun
+   or a case set listed in the protected set. Memory and transcript tools are scoped to
+   a namespace, so even a misconfigured tool list cannot reach evaluation transcripts.
+   For #997 this means the RepositoryMonitor that implements issues lives in a different
+   namespace from the one whose reviewer is evaluated.
+2. Held-out fixtures live in a private fixture repository. Only trial Tasks get a
+   `readCredentialRef` for it, resolved by the clean-room boundary. #976's public fixture
+   repository holds training cases only.
+3. The proposer prompt is built by the controller from training-split trial records.
+   Held-out records are never rendered into it.
+
+**Branch protection.** Before enabling a proposer flow on a repository, the controller
+reads the branch rules for the default branch with its existing forge read credential
+and refuses unless a pull request with review is required. Bypass lists cannot be read
+that way; people audit them when enabling the flow.
+
+### Evidence records (#993)
+
+An experiment is two EvalRuns, not a new resource: a baseline run and a candidate run
+over the same held-out cases, created together so they run under the same provider and
+infrastructure conditions. Two optional fields are added to the EvalRun spec from #976. Both are
+immutable, like the rest of the spec:
+
+```yaml
+spec:
+  subject:
+    type: repositoryMonitorReview
+    repositoryMonitorReview:
+      monitorRef: {name: orka-monitor}
+      agentRef: {name: reviewer-c-3f9a1c2b7d}   # new: use this Agent instead of the monitor's reviewer
+  experiment:                                   # new
+    hypothesis: "The reviewer misses defects in generated code paths."
+    baselineRunRef: {name: pr-review-x-baseline}   # omitted for a new capability
+    target: {grader: localization, tag: defect}    # what the hypothesis says will improve
+    criteria:                                   # frozen copy of the thresholds or approved criteria
+      digest: sha256:...
+      source: protectedSet | issue
+```
+
+The controller fills `status.experiment`:
+
+```yaml
+status:
+  snapshot:          # from #976, plus two digests
+    graderSetDigest: sha256:...      # each Go grader declares a version; digest over (name, version)
+    protectedSetDigest: sha256:...
+  experiment:
+    candidateDigest: sha256:...      # digest of the candidate's promotable fields
+    result: Passed | Failed | Incomparable
+    reasons: [...]
+```
+
+- **Incomparable** when the two runs differ in anything other than the candidate's
+  promotable fields: case-set, grader-set or criteria digest, trials, subject, monitor
+  generation or runtime image. Fail closed.
+- **What is kept.** The trial records from #976, plus an append-only `eval_decisions`
+  table in the same store: id, candidate run, decision (`approved` or `rejected`),
+  actor, reason, time, and the bound tuple (candidate Agent UID and generation,
+  candidate digest, case-set digest, grader-set digest, criteria digest, protected-set
+  digest). Records of experiment runs survive EvalRun deletion and its TTL, so rejected
+  experiments stay queryable. Later proposers see only the hypothesis, the aggregate
+  results and the decision, never held-out trial rows.
+- **Who writes.** Only the EvalRun controller writes trial records and `status`. A
+  decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
+  SubjectAccessReview for the verb `decide` on `evalruns`. The handler refuses
+  `system:serviceaccount:` usernames. It refuses an approval when the gate did not pass
+  or the tuple no longer matches the live candidate Agent; a rejection is always
+  accepted. A new ClusterRole, `orka-eval-promoter`, grants the `propose` and `decide`
+  verbs on `evalruns` and `promote` on `agents`, and is not aggregated to edit or
+  admin. A decision is never updated; a later decision supersedes it.
+- **What invalidates an approval.** Any change to an element of the bound tuple: a new
+  generation of the candidate Agent or different promotable fields, a different case
+  set, grader set, criteria or protected set. For code candidates, a new commit on the
+  pull request head, through the forge's own stale-review dismissal.
+
+### Proposer flow (#994)
+
+Piloted on the PR reviewer's Agent configuration only.
+
+1. A person runs a baseline EvalRun on the training split.
+2. A promoter calls `POST /api/v1/evals/runs/:name/proposals` (SubjectAccessReview verb
+   `propose` on `evalruns`). The controller creates one read-only proposer Task in the
+   proposer namespace. Its prompt holds the failed training trials' case summaries and
+   grader reasons, earlier experiment summaries, and the current promotable fields. It
+   refuses after `gate.maxCandidatesPerBaseline` proposals for the same baseline.
+3. The proposer returns `orka.improvement.candidate.v1`:
+   `{hypothesis, agentPatch: {systemPrompt?, model?}}`. The promotable fields in v1 are
+   `spec.systemPrompt` (inline) and `spec.model.name` under the same provider. The
+   controller validates the result as it validates `orka.prReview.v1`. A result that
+   touches anything else is dropped and recorded.
+4. The controller creates the candidate Agent: the stable Agent with the patch applied,
+   named `<agent>-c-<digest prefix>`, labelled `orka.ai/candidate-of`, and
+   owner-referenced to the stable Agent. It then creates the paired baseline and
+   candidate EvalRuns on the held-out split, with `criteria` copied from the protected
+   set's `gate`.
+5. Gate: `Failed` if, for any grader and tag, candidate pass@1 or pass^k is below the
+   baseline; if pass@1 for `experiment.target` does not improve; or if infrastructure
+   errors exceed the threshold. A person then records a decision either way.
+
+Cost: one proposer Task per call with the controller's timeout and turn limit, the
+per-baseline candidate cap, and #976's 500-trial cap per run. Orka has no per-Task
+token cap today; spend is recorded from `/api/v1/usage/work/:id`, not enforced.
+
+Code candidates, such as changes to the review prompt built in
+`buildRepositoryMonitorReviewPrompt`, are not promoted in-cluster. They go through #997
+and a normal pull request. Their evidence is an EvalRun run by #976's workflow against
+the pull request head, linked from the pull request.
+
+### Promotion with canary and rollback (#995)
+
+Agent generations, profile digests and draining pools already give pinning, isolation
+and drain-then-replace. Three pieces are missing, all added without a new resource:
+
+- **New endpoint** `POST /api/v1/agents/:name/rollout` with
+  `{action: canary | promote | abort | rollback, decisionID, percent}`, authorized by a
+  SubjectAccessReview for the verb `promote` on `agents`, granted by
+  `orka-eval-promoter`. ServiceAccount usernames are refused. `canary` and `promote`
+  require an approved decision whose tuple still matches the candidate Agent.
+- **New status field `Agent.status.rollout`**:
+  `{candidate: {name, uid, generation, digest}, percent, decisionID}`. Only the
+  controller can write it. At binding (`agent_execution_binding.go`), a new Task that
+  names the stable Agent goes to the candidate when a hash of its UID modulo 100 is
+  below `percent`. The binding then records the candidate's UID and generation through
+  the existing fields, and the controller-managed annotation `orka.ai/rollout-arm`
+  records which arm the Task took. If the candidate's generation no longer matches,
+  binding sends every new Task to the stable Agent and sets a `RolloutInvalid`
+  condition.
+- **Promotion log** in the store. `promote` copies the candidate's promotable fields
+  into the stable Agent's spec, clears `status.rollout`, and appends a record with the
+  previous values. `rollback` writes the last recorded previous values back and needs no
+  new evidence. `abort` clears the canary.
+
+Running Tasks keep their binding, so they finish on whatever they started with. Runtime
+image changes stay on the release path, since images are per provider, not per Agent.
+
+### Frozen acceptance criteria (#996)
+
+No new API. The criteria are a fenced block in the issue body:
+
+````markdown
+```orka-acceptance-criteria
+- ...
+```
+````
+
+Approval is the existing implement command label (`orka:implement` by default), applied
+by an actor with `requireActorPermission`. The command already records the actor and
+the issue snapshot digest, and any later edit to the issue blocks it with
+`stale_command_snapshot`. The new parts:
+
+- implementation of an issue with the scout's `capability` kind label requires a
+  criteria block, or it is blocked with `criteria_missing`;
+- the controller records the criteria digest, the SHA-256 of the normalized block, in
+  the command's action record and in a controller-managed annotation on the
+  implementation Task;
+- a maintainer, never the builder, writes cases for the criteria into a held-out case
+  set. The candidate EvalRun sets `criteria.source: issue` with that digest and also
+  runs the existing regression case sets. If the issue's current block no longer
+  matches the recorded digest, the result is `Incomparable`. This needs an EvalRun
+  Subject that fits the capability; #976 lists monitor-fix and generic Task Subjects
+  as follow-ups, and #996 builds the first one it needs;
+- proposals of kind `direction` are never built.
+
+### Handoff to the implementation workflow (#997)
+
+The implementation Task stays the one `createRepositoryMonitorIssueActionTask` builds,
+with three changes: it carries the proposer role and constraints above, its prompt
+includes the approved criteria block (never cases), and the pull request body includes
+the criteria digest and a link to the evidence. People merge as usual. Requiring a plan
+before implementation (`requirePlan`) stays on by default.
+
+### Scout (#987 to #990)
+
+No new boundary. The scout is a scheduled read-only Task (`orka.ai/agent-read-only`,
+read workspace intent) whose allowlist names only workspace read tools, `web_search` and
+`web_fetch`. Without a Kubernetes token, a network path or a forge credential, it can
+only return a digest. The filer (#988) is trusted code outside the agent. It validates
+`orka.scout.proposal.v1` and holds the only `issues: write` credential, a GitHub App
+installation token for one repository. The filer drops any proposal whose sketch touches
+the protected set.
+
+## Alternatives considered
+
+- **A new `ImprovementExperiment` resource.** It would duplicate EvalRun's snapshot,
+  trial store and invalidation rules. Two optional EvalRun fields and one table cover it.
+- **A new `AgentRollout` or versioned Agent resource.** Agent generations, binding
+  snapshots and profile-keyed pools already pin and isolate configurations. Only the
+  traffic share and the rollback target were missing.
+- **Protected paths as a file in each repository.** The proposer edits that repository;
+  the controller would have to read the file from a trusted ref and still need an
+  operator-owned default. A ConfigMap the proposer cannot reach is simpler.
+- **Enforcing the boundary with prompt instructions or reviewer judgment.** Not a
+  boundary: the proposer is the party being checked.
+- **Letting the proposer open its own pull requests through a connector tool.** That
+  would give the agent process a forge write path; the monitor already holds that
+  credential in the controller.
+- **Automatic promotion for low-risk configuration.** Out of scope for #985. A narrow
+  controller promoter can be considered later, and only through a new ADR.
+
+## Consequences
+
+- Proposer Tasks need a second namespace, a private fixture repository for held-out
+  cases, and the protected-set ConfigMap before any proposer flow turns on. All flows
+  are off by default behind controller flags.
+- The Task CRD gains `spec.workspace.deniedPaths`; the harness workspace limits gain the
+  same list, so supervisor and controller must be upgraded together.
+- EvalRun gains `subject.repositoryMonitorReview.agentRef` and `experiment`; Agent gains
+  `status.rollout`. The store gains `eval_decisions` and a promotion log, each needing a
+  SQLite migration step.
+- Experiment records do not expire. A retention policy is follow-up work.
+- People with plain edit on Agents can still change the stable Agent directly. That is
+  a human decision outside the promotion log, not a proposer path.
+- Spend is recorded but not capped by tokens until Orka has a per-Task token budget.
+- Only Agent configuration promotes in-cluster. Code changes, including the reviewer's
+  built-in prompt and runtime images, promote through pull requests and releases.
+
+## Implementation plan
+
+1. #986: repair Tasks get path limits. Prerequisite for every write-intent proposer.
+2. #976: EvalRun, trial store and grader versions (`graderSetDigest`), in parallel.
+3. #992: the protected-set ConfigMap and flag, `deniedPaths` in the CRD, harness limits,
+   supervisor and controller re-check, the role annotation in admission, the dispatch
+   check, the proposer allowlist, the namespace rule and the branch-rule check. Tests
+   cover each protected category and each read path for held-out cases.
+4. #993: the EvalRun `agentRef` and `experiment` fields, comparability and gate
+   computation, `eval_decisions`, the `decide` route, the `orka-eval-promoter` role and
+   retention of experiment records.
+5. #994: the `propose` route, the proposer Task builder, the candidate schema and
+   validation, candidate Agent creation, paired runs. Pilot on the PR reviewer.
+6. #995: `Agent.status.rollout`, binding-time routing, the rollout endpoint and the
+   promotion log.
+7. #996: the criteria block, `criteria_missing`, the criteria digest on the action
+   record and the Task.
+8. #997: the proposer constraints on implementation Tasks, criteria in the prompt, and
+   the evidence link in the pull request body.
+
+## Open questions
+
+- Who besides maintainers holds `orka-eval-promoter`?
+- Should a promoter be barred from deciding on an experiment they started?
+- Should Agents under a rollout reject direct spec edits by anyone but the controller?
+- Retention for experiment records, and whether to cap spend by tokens once Orka can.
