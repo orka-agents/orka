@@ -1805,10 +1805,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// Check timeout
+	// Check timeout. A Job that succeeded before the deadline is completed
+	// below instead: its completion may have been deferred past the timeout,
+	// for example by a storage write the store had not accepted yet.
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
-		if elapsed > task.Spec.Timeout.Duration {
+		deadline := task.Status.StartTime.Add(task.Spec.Timeout.Duration)
+		if elapsed > task.Spec.Timeout.Duration && !r.taskJobSucceededBy(ctx, task, deadline) {
 			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 				return result, err
 			}
@@ -2093,6 +2096,27 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 		}
 		t.Status.Message = message
 	})
+}
+
+// taskJobSucceededBy reports whether the Task's current Job succeeded no later
+// than deadline, so that a completion deferred past the Task timeout records
+// the Job's outcome rather than a timeout. A Job that finished after the
+// deadline, or whose completion time is unknown, does not qualify. Nor does
+// an autonomous Task: its timeout ends the loop even after a successful
+// iteration. Any lookup failure reports false and leaves the timeout to apply
+// as before.
+func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) bool {
+	if strings.TrimSpace(task.Status.JobName) == "" || r.isAutonomousTask(ctx, task) {
+		return false
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		return false
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return false
+	}
+	return job.Status.Succeeded > 0 && job.Status.CompletionTime != nil && !job.Status.CompletionTime.After(deadline)
 }
 
 // timedOutTaskMessage keeps the last published Pod waiting reason, such as an
