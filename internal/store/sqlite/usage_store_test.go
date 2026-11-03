@@ -7,8 +7,10 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/require"
 
@@ -909,6 +911,7 @@ func TestUsageTasksInSessions(t *testing.T) {
 	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	for uid, session := range map[string]string{
 		"plain": "ahp-one", "padded": " ahp-one\t", "longer": "ahp-one-2", "other": "ahp-two", "team": "team-session",
+		"unicode-padded": "\u0085ahp-one\u3000\u2029", "prefixed": "x-ahp-one",
 	} {
 		require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team", TaskUID: uid, TaskName: uid, SessionName: session,
 			Phase: "Succeeded", StartedAt: at}))
@@ -924,7 +927,15 @@ func TestUsageTasksInSessions(t *testing.T) {
 	for _, task := range tasks {
 		found = append(found, task.TaskUID)
 	}
-	require.ElementsMatch(t, []string{"plain", "padded"}, found)
+	require.ElementsMatch(t, []string{"plain", "padded", "unicode-padded"}, found)
+	// A row whose name merely holds a wanted one is not read: this one would
+	// not decode.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		"team", "superstring", "superstring", at.UnixNano(), `{"namespace":"team","taskUID":"superstring","sessionName":"ahp-one-3","startedAt":5}`)
+	require.NoError(t, err)
+	tasks, err = s.UsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
 	_, err = s.UsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 1)
 	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
 	// An earlier namespace of the same name stays out.
@@ -936,4 +947,13 @@ func TestUsageTasksInSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, "new-turn", tasks[0].TaskUID)
+}
+
+// SQL trims a session name of exactly what strings.TrimSpace does.
+func TestUsageSpaceIsEveryUnicodeSpace(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) != strings.ContainsRune(usageSpace, r) {
+			t.Fatalf("U+%04X: unicode.IsSpace = %v, in usageSpace = %v", r, unicode.IsSpace(r), !unicode.IsSpace(r))
+		}
+	}
 }
