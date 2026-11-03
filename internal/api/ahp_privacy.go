@@ -234,5 +234,6 @@ func ahpSessionHiddenBy(ui *UserInfo, session string, owners map[string]*corev1a
 // requester, such as a chat's or one recorded before requesters were, is
 // no person's.
 func ahpUsageHidden(ui *UserInfo, requester *store.UsageRequester) bool {
-	return requester == nil || requester.Issuer != ui.Issuer || requester.Subject != ui.Subject
+	return requester == nil || ui.Issuer == "" || ui.Subject == "" ||
+		requester.Issuer != ui.Issuer || requester.Subject != ui.Subject
 }

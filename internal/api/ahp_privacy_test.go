@@ -343,6 +343,8 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 		// A private fork of a turn with no session of its own.
 		{Namespace: namespace, TaskUID: "alice-sessionless-fork", AHPTurn: true, Requester: requester("alice")},
 		{Namespace: namespace, TaskUID: "unknown-sessionless-turn", AHPTurn: true},
+		// A requester recorded without an identity names no one.
+		{Namespace: namespace, TaskUID: "empty-requester", SessionName: "ahp-empty", Requester: &store.UsageRequester{}},
 		// Any Task may be named with the AHP prefix: a name alone is no turn's.
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name", TaskName: "ahp-report", Requester: requester("bob")},
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name-no-requester", TaskName: "ahp-report-2"},
@@ -370,6 +372,7 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	noOnes := map[string]bool{
 		"default/alice-legacy": true, "default/other-issuer": true, "default/legacy-in-bobs": true, "default/padded-legacy-in-bobs": true,
 		"default/unknown-sessionless-turn": true, "default/call-chat-in-bobs": true, "default/call-chat-in-gone": true,
+		"default/empty-requester": true,
 	}
 	with := func(keys ...string) map[string]bool {
 		hidden := maps.Clone(noOnes)
@@ -382,6 +385,10 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork"),
 		hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}))
 	require.Empty(t, hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"}))
+	// A person the API server signs in itself carries no issuer and subject,
+	// so no AHP usage is theirs.
+	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork"),
+		hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}))
 }
 
 // A session's usage counter spans its turns, and the report shows the first
