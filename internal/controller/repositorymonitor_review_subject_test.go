@@ -241,3 +241,24 @@ func TestRepositoryMonitorReviewExpectationForTaskPrefersTaskHead(t *testing.T) 
 		t.Fatalf("expectation without task head = %+v, want %+v", got, want)
 	}
 }
+
+func TestRepositoryMonitorReviewContextTrimToBudgetLeavesInputUnchanged(t *testing.T) {
+	files := []repositoryMonitorReviewContextFile{
+		{Path: "a.go", Status: "modified", Patch: strings.Repeat("a", 4096)},
+		{Path: "b.go", Status: "modified", Patch: strings.Repeat("b", 4096)},
+	}
+	input := repositoryMonitorReviewContext{SchemaVersion: "test", Files: files}
+	trimmed := repositoryMonitorReviewContextTrimToBudget(input, 512)
+	if !trimmed.Truncated.Bytes {
+		t.Fatal("expected the context to be trimmed")
+	}
+	for i, file := range files {
+		if file.Patch == "" || file.PatchOmitted != "" {
+			t.Fatalf("input file %d was mutated: %+v", i, file)
+		}
+	}
+	again := repositoryMonitorReviewContextTrimToBudget(input, 512)
+	if !reflect.DeepEqual(trimmed, again) {
+		t.Fatal("trimming the same input twice gave different results")
+	}
+}
