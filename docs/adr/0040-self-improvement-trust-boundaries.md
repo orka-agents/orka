@@ -90,9 +90,9 @@ Every rule has one enforcement point:
 | No external network except the broker; only DNS, provider-proxy and controller API egress are allowed | RuntimePool NetworkPolicies | Exists |
 | Proposer cannot start Tasks, evaluations, validations or forge writes | Proposer allowlist (below) frozen into the profile, enforced by `ACPMCPBroker.ServeHTTP` | Allowlist is new, #992 |
 | Proposer annotation is set only by the controller | `controllerManagedTaskAnnotationKeys`, `internal/admission/task_provenance.go` | New key, #992 |
-| A proposer Task that lost its constraints does not run | Dispatch-time check where workspace limits are built, `acp_dispatcher.go` | New, #992 |
-| Proposer cannot publish protected paths | Supervisor delta check, and again before the Publication is created | New `deniedPaths`, #992 |
-| Proposer cannot push to the default or release branches | Controller-derived push branch under a fixed prefix, branch claims, plus forge branch protection | Prefix check new, #992 |
+| A proposer Task that lost its constraints does not run | Dispatch-time check in `queueACPRuntimeTask` (`acp_task_queue.go`), the earliest point with the frozen tool policy; a second gate in `task_controller.go` fails marked Tasks that would run as Jobs | New, #992 |
+| Proposer cannot publish protected paths | Supervisor delta check, and again in the publisher's prepare step (`internal/publisher`) before any commit or bundle exists | New `deniedPaths`, #992 |
+| Proposer cannot push to the default or release branches | Controller-derived push branch under the fixed prefix `orka/`, branch claims, plus forge branch protection | Prefix check new, #992 |
 | Proposer cannot read cases or trial transcripts | Separate namespace; no web, memory-recall or transcript tools; private fixture repository | New, #992 |
 | Only the evaluator writes trial and experiment records | Store writes only from the controller; no write route in the API | #976, #993 |
 | Decisions are human and append-only | `decide` verb SubjectAccessReview, ServiceAccount usernames refused, insert-only table | New, #993 |
@@ -107,7 +107,11 @@ that hold them are in the protected set.
 
 **Declaration.** One ConfigMap in the controller namespace, named by the new controller
 flag `--protected-set-configmap`, owned by cluster operators and changed only through
-the reviewed deployment configuration. Format, with example values:
+the reviewed deployment configuration. The declaration lives under the data key
+`protectedSet.yaml`, and every section, including `gate`, is required: an incomplete
+declaration is invalid, and with no valid declaration no proposer Task runs. Patterns
+match case-insensitively, like the built-in repository-control paths. Format, with
+example values:
 
 ```yaml
 schemaVersion: orka.protectedSet.v1
@@ -129,6 +133,16 @@ repositories:
       - internal/controller/acp_mcp_policy*.go         # compiles the tool policy
       - internal/controller/acp_runtime_profile*.go    # pins the policy into the profile
       - internal/controller/acp_dispatcher*.go         # dispatch-time checks
+      - internal/controller/acp_task_queue.go          # where the dispatch check runs
+      - internal/controller/acp_publication*.go        # publication handoff
+      - internal/controller/task_controller.go         # Job-path gate
+      - internal/protectedset/**                       # protected-set parsing
+      - internal/workspacedelta/**                     # path matching
+      - internal/harness/v2/workspace.go               # limits carried to the supervisor
+      - internal/acp/runtime_defaults.go
+      - internal/labels/labels.go                      # the role annotation key
+      - config/samples/orka_protected_set.yaml         # this declaration
+      - docs/adr/**                                    # the table the drift test reads
       - internal/controller/agent_execution_binding*.go # canary routing
       - internal/controller/evalrun*.go                # evaluator
       - internal/controller/runtime_pool_controller*.go # token and network isolation
@@ -163,9 +177,10 @@ as `allowedPaths`, rejected before publication even when `allowedPaths` matches.
 needed because `allowedPaths` cannot express "everything except". It is carried to the
 supervisor in the harness workspace limits (`internal/harness/v2/workspace.go`) and
 checked next to `denyRepositoryControlPaths` in
-`workers/acp/supervisor/prompt_handlers.go`. The controller checks the delta's changed
-paths again before it creates the Publication, so a compromised runtime Pod cannot
-publish a protected path on its own. A rejection uses `patch_path_denied`.
+`workers/acp/supervisor/prompt_handlers.go`. The publisher checks the changed paths
+again in its prepare step, before any commit or bundle exists, so a compromised runtime
+Pod cannot publish a protected path on its own. (The controller never reads the delta
+artifact, so it cannot do this check before creating the Publication.) A rejection uses `patch_path_denied`.
 
 **Proposer Tasks.** The controller creates them, sets the role annotation, and sets:
 
@@ -176,7 +191,10 @@ publish a protected path on its own. A rejection uses `patch_path_denied`.
   `search_transcript` or connector tools;
 - credential references only as the existing builders set them today. They stay with
   the clean-room publication boundary and never reach the agent;
-- a push branch under the monitor's implementation prefix.
+- a push branch under the fixed prefix `orka/`. No monitor is known at dispatch, so a
+  monitor whose `branchPrefix` is outside `orka/` cannot run proposers until it changes;
+- no Session continuation and no fork of another Task, so no earlier transcript reaches
+  the proposer.
 
 At dispatch, a Task with the role annotation that lacks any of these, or whose
 `deniedPaths` no longer covers the current protected set, fails with
