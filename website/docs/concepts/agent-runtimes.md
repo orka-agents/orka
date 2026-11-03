@@ -140,6 +140,7 @@ stateDiagram-v2
     prompt_running --> validating: prompt settled
     validating --> idle: read Task, or no changes
     validating --> preparing_publication: write Task with changes
+    validating --> publication_prepared: delta frozen during validation
 
     preparing_publication --> publication_prepared
     publication_prepared --> finalizing: publication reconciled
@@ -150,6 +151,7 @@ stateDiagram-v2
     deleted --> [*]
 
     prompt_running --> cancelling: cancellation requested
+    cancelling --> validating: prompt completed first
     cancelling --> poisoned
     poisoned --> deleting
 ```
