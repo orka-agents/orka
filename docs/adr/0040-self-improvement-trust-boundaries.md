@@ -163,6 +163,8 @@ gate:                          # improvement thresholds, see #994
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 3
   maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
+  minTargetImprovementPoints: 5      # target pass@1 must rise by at least this many points
+  significance: 0.05                 # one-sided paired test, divided by maxCandidatesPerBaseline
 ```
 
 Every file that implements an enforcement point in the table above belongs in the
@@ -309,7 +311,9 @@ status:
   repeated experiments tune candidates to the held-out set. For the same reason a
   held-out case set has a usage budget, `gate.maxExperimentsPerHeldOutSet`, counted
   across all baselines; once spent, the controller refuses new experiments on that set
-  until an operator rotates in a new one (a new case-set digest).
+  until an operator rotates in a new one. The budget is keyed by a **case-content digest**
+  over the canonical cases alone, never thresholds or other metadata, so editing
+  thresholds or renaming the ConfigMap does not reset it; rotation means new case content.
 - **Who writes.** Only the EvalRun controller writes trial records and `status`. A
   decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
   SubjectAccessReview for the verb `decide` on `evalruns`. The handler refuses
@@ -349,8 +353,13 @@ Piloted on the PR reviewer's Agent configuration only.
    candidate EvalRuns on the held-out split, with `criteria` copied from the protected
    set's `gate`.
 5. Gate: `Failed` if, for any grader and tag shared with the baseline, candidate pass@1
-   or pass^k is below the baseline; if pass@1 for `experiment.target` does not improve
-   (improvement experiments) or any criteria tag misses its threshold (new
+   or pass^k is below the baseline; if the target does not improve with enough evidence
+   (improvement experiments: target pass@1 must rise by at least
+   `gate.minTargetImprovementPoints`, and a one-sided paired sign test over the target
+   cases, comparing each case's candidate and baseline pass counts, must be significant
+   at `gate.significance / gate.maxCandidatesPerBaseline`, so trying several candidates
+   against one baseline does not make a lucky one more likely to pass; too few cases to
+   reach significance fails with `insufficient_evidence`) or any criteria tag misses its threshold (new
    capabilities); or if infrastructure errors exceed the threshold. A person then records a decision either way.
 
 Cost: one proposer Task per call with the controller's timeout and turn limit, the
@@ -398,13 +407,18 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   sets a `RolloutInvalid` condition, and keeps doing so until a promoter aborts or
   starts a new canary. A protected-set or criteria change, or a later rejection,
   therefore stops a canary even though no Agent changed.
-- **Promotion log** in the store. `promote` runs in three durable steps so a crash
-  cannot lose the rollback record: (1) insert a `pending` record holding the decision, the Agent's `resourceVersion`,
+- **Promotion log** in the store. A record moves through `pending → applying →
+  complete`, or ends `failed` or `canceled`; every transition is a compare-and-swap on
+  the record's state, which fences concurrent rollout actions on the same Agent.
+  `promote` runs in three durable steps so a crash cannot lose the rollback record:
+  (1) insert a `pending` record holding the decision, the Agent's `resourceVersion`,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
-  a ConfigMap that may change or disappear), and the target values; (2) update the stable
-  Agent with a `resourceVersion` precondition, writing the candidate's inline prompt;
+  a ConfigMap that may change or disappear), and the target values; (2) move the record
+  `pending → applying`, then update the stable Agent with a `resourceVersion`
+  precondition, writing the candidate's inline prompt;
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
-  and digest. On restart the controller reconciles any `pending` record idempotently: if
+  and digest. On restart the controller reconciles any `pending` or `applying` record
+  idempotently: if
   the Agent already holds the target values it finishes step 3. Otherwise it never
   retries on the strength of the stored values alone: it re-runs every precondition of
   the original request (the decision is still the latest and approving, the full bound
@@ -418,8 +432,11 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   promotable-field digest must equal what the latest promotion record wrote, and the
   update carries a `resourceVersion` precondition. If anyone edited the Agent after the
   promotion, rollback is refused rather than overwriting that edit. `abort` clears the
-  canary and marks any `pending` promotion record for that rollout `canceled`, so a
-  restart can never resume a promotion the promoter aborted.
+  canary and moves a `pending` promotion record for that rollout to `canceled`, so a
+  restart can never resume a promotion the promoter aborted. `abort` cannot cancel a
+  record that is already `applying`: the CAS fails, abort waits for the record to reach
+  `complete` or `failed`, and reports which. If the promotion completed, the change is
+  live and recorded, and undoing it is a `rollback`, never a silent cancel.
 
 Running Tasks keep their binding, so they finish on whatever they started with. Runtime
 image changes stay on the release path, since images are per provider, not per Agent.
