@@ -2152,41 +2152,7 @@ func (s *Server) mapRuntimeEvents(state *sessionState, prompt *promptState, even
 			AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1, LiveUpdates: prompt.live,
 		}})}, nil
 	case acp.PromptEventUpdate:
-		var toolPolicy harnessv2.MCPToolPolicy
-		if state.mcpProxy != nil {
-			toolPolicy = state.mcpProxy.configuration.ToolPolicy
-		}
-		if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
-			return nil, err
-		}
-		update, text, ok, err := mapACPUpdateWithOptions(event.Update, acpUpdateOptions{
-			live: prompt.live, rawInputs: prompt.rawInputs, exact: prompt.redactor.replace,
-			workspaceRoot: state.paths.Workspace,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if text != "" {
-			messageID := ""
-			if state.profile.ProviderKind == providerKindCodex {
-				messageID = acpAssistantMessageID(event.Update)
-			}
-			prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), messageID, s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
-		}
-		if !ok {
-			// A notification that maps to nothing does not end a text stream:
-			// its held text may still complete a credential.
-			return nil, nil
-		}
-		if stream, streamed := prompt.textRedaction(update); streamed {
-			return s.textUpdateEventsLocked(state, prompt, update.Kind, stream.write(updateText(update)), event.Timestamp), nil
-		}
-		prompt.redactUpdate(update)
-		mapped := s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{Type: harnessv2.EventUpdate, Update: update})
-		if err := boundACPToolContentToEventLine(&mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
-			return nil, err
-		}
-		return []harnessv2.Event{mapped}, nil
+		return s.mapRuntimeUpdateLocked(state, prompt, event)
 	case acp.PromptEventPermissionRequested:
 		permission, err := mapPermission(event.Permission, event.Timestamp, defaultDuration(s.cfg.PermissionTimeout, acp.DefaultPermissionTimeout), state.profile.ProviderKind)
 		if err != nil {
@@ -2242,6 +2208,46 @@ func (s *Server) mapRuntimeEvents(state *sessionState, prompt *promptState, even
 	default:
 		return nil, fmt.Errorf("unsupported runtime prompt event %q", event.Type)
 	}
+}
+
+// mapRuntimeUpdateLocked maps one ACP session update for a running prompt.
+// The caller holds s.mu.
+func (s *Server) mapRuntimeUpdateLocked(state *sessionState, prompt *promptState, event acp.PromptEvent) ([]harnessv2.Event, error) {
+	var toolPolicy harnessv2.MCPToolPolicy
+	if state.mcpProxy != nil {
+		toolPolicy = state.mcpProxy.configuration.ToolPolicy
+	}
+	if err := prompt.rememberToolCallName(event.Update, state.profile.ProviderKind, toolPolicy); err != nil {
+		return nil, err
+	}
+	update, text, ok, err := mapACPUpdateWithOptions(event.Update, acpUpdateOptions{
+		live: prompt.live, rawInputs: prompt.rawInputs, exact: prompt.redactor.replace,
+		workspaceRoot: state.paths.Workspace,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if text != "" {
+		messageID := ""
+		if state.profile.ProviderKind == providerKindCodex {
+			messageID = acpAssistantMessageID(event.Update)
+		}
+		prompt.appendAssistantText(text, acpAssistantMessagePhase(event.Update), messageID, s.cfg.Capabilities.Limits.MaxTerminalResultBytes)
+	}
+	if !ok {
+		// A notification that maps to nothing does not end a text stream:
+		// its held text may still complete a credential.
+		return nil, nil
+	}
+	if stream, streamed := prompt.textRedaction(update); streamed {
+		return s.textUpdateEventsLocked(state, prompt, update.Kind, stream.write(updateText(update)), event.Timestamp), nil
+	}
+	prompt.redactUpdate(update)
+	mapped := s.identifiedLocked(state, prompt, event.Timestamp, harnessv2.Event{Type: harnessv2.EventUpdate, Update: update})
+	if err := boundACPToolContentToEventLine(&mapped, s.cfg.Capabilities.Limits.MaxEventLineBytes); err != nil {
+		return nil, err
+	}
+	return []harnessv2.Event{mapped}, nil
 }
 
 func (s *Server) terminalEvent(
