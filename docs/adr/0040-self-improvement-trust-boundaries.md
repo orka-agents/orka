@@ -95,8 +95,8 @@ Every rule has one enforcement point:
 | Proposer cannot push to the default or release branches | Controller-derived push branch under the fixed prefix `orka/`, branch claims, plus forge branch protection | Prefix check new, #992 |
 | Proposer cannot read cases or trial transcripts | Separate namespace; no web, memory-recall or transcript tools; private fixture repository | New, #992 |
 | Only the evaluator writes trial and experiment records | Store writes only from the controller; no write route in the API | #976, #993 |
-| Decisions are human and append-only | `decide` verb SubjectAccessReview, ServiceAccount usernames refused, insert-only table | New, #993 |
-| Promotion needs a matching approved experiment | `promote` verb SubjectAccessReview and a digest check in the rollout endpoint | New, #995 |
+| Decisions are human and append-only | `decide` verb SubjectAccessReview, ServiceAccount usernames refused, insert-only table; handlers in `internal/api/eval*.go`, routes in `internal/api/server.go` | New, #993 |
+| Promotion needs a matching approved experiment | `promote` verb SubjectAccessReview and a digest check in the rollout handler (`internal/api/agent_rollout*.go`, routed in `internal/api/server.go`) | New, #995 |
 | Only the controller routes canary traffic | `Agent.status.rollout`; the editor role has only `get` on `agents/status` (`config/rbac/agent_editor_role.yaml`) | New, #995 |
 
 Kept human-only: changes to the protected set, new promotable fields or candidate kinds,
@@ -125,6 +125,9 @@ repositories:
       - internal/evals/**      # graders and the gate
       - test/evals/**
       - internal/api/*authoriz*
+      - internal/api/server.go                         # route registration
+      - internal/api/eval*.go                          # proposal and decision handlers
+      - internal/api/agent_rollout*.go                 # rollout handler
       - internal/admission/**
       - internal/outboundaccess/**
       - internal/tools/**                              # brokered tool registry and implementations
@@ -159,6 +162,7 @@ caseSets:                      # case ConfigMaps by split
 gate:                          # improvement thresholds, see #994
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 3
+  maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
 ```
 
 Every file that implements an enforcement point in the table above belongs in the
@@ -263,8 +267,9 @@ status:
 ```
 
 - **Incomparable** when the two runs differ in anything other than the candidate's
-  promotable fields: case-set, grader-set or criteria digest, trials, monitor generation,
-  runtime image, or the subject. For a new capability the case sets differ by design:
+  promotable fields: case-set, grader-set or criteria digest, trial inputs (the trial
+  count and the assignment of case IDs to trial indexes; outcomes are excluded), monitor
+  UID and generation, review prompt template digest, runtime image, or the subject. For a new capability the case sets differ by design:
   the check instead requires the candidate's cases to be exactly the baseline's case set
   plus the cases in `criteria.caseSetRef`, whose content matches `criteria.caseSetDigest`, and compares the two
   runs only on the shared regression subset. Subjects are compared after removing
@@ -298,8 +303,13 @@ status:
 - **What is kept.** The trial records from #976, plus an append-only `eval_decisions`
   table in the same store: id, experiment (the candidate run), decision (`approved` or
   `rejected`), actor, reason, time, and the bound tuple. Records of experiment runs survive EvalRun deletion and its TTL, so rejected
-  experiments stay queryable. Later proposers see only the hypothesis, the aggregate
-  results and the decision, never held-out trial rows.
+  experiments stay queryable. Later proposers see only each earlier experiment's
+  hypothesis, its training-split results and whether it was approved or rejected. They
+  never see held-out trial rows or held-out aggregate numbers, which would otherwise let
+  repeated experiments tune candidates to the held-out set. For the same reason a
+  held-out case set has a usage budget, `gate.maxExperimentsPerHeldOutSet`, counted
+  across all baselines; once spent, the controller refuses new experiments on that set
+  until an operator rotates in a new one (a new case-set digest).
 - **Who writes.** Only the EvalRun controller writes trial records and `status`. A
   decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
   SubjectAccessReview for the verb `decide` on `evalruns`. The handler refuses
@@ -325,7 +335,8 @@ Piloted on the PR reviewer's Agent configuration only.
    `propose` on `evalruns`; like every promoter route, it refuses
    `system:serviceaccount:` usernames even if the role is bound to one). The controller creates one read-only proposer Task in the
    proposer namespace. Its prompt holds the failed training trials' case summaries and
-   grader reasons, earlier experiment summaries, and the current promotable fields. It
+   grader reasons, earlier experiment summaries (training-split results and decisions
+   only), and the current promotable fields. It
    refuses after `gate.maxCandidatesPerBaseline` proposals for the same baseline.
 3. The proposer returns `orka.improvement.candidate.v1`:
    `{hypothesis, agentPatch: {systemPrompt?, model?}}`. The promotable fields in v1 are
@@ -397,8 +408,9 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   the Agent already holds the target values it finishes step 3. Otherwise it never
   retries on the strength of the stored values alone: it re-runs every precondition of
   the original request (the decision is still the latest and approving, the full bound
-  tuple matches, and the Agent's `resourceVersion` equals the one stored in the pending
-  record) and retries step 2 only if all pass. If any fails, it marks the record `failed`
+  tuple matches, the Agent's `resourceVersion` equals the one stored in the pending
+  record, and the live `status.rollout` still names the same decision and candidate) and
+  retries step 2 only if all pass. If any fails, it marks the record `failed`
   without changing the Agent and sets `RolloutInvalid`. One consequence: after a promotion or rollback the stable Agent
   always carries an inline prompt, even if it used `configMapRef` before. `rollback`
   writes back the recorded resolved previous values. It needs no new evidence, but it
@@ -406,7 +418,8 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   promotable-field digest must equal what the latest promotion record wrote, and the
   update carries a `resourceVersion` precondition. If anyone edited the Agent after the
   promotion, rollback is refused rather than overwriting that edit. `abort` clears the
-  canary.
+  canary and marks any `pending` promotion record for that rollout `canceled`, so a
+  restart can never resume a promotion the promoter aborted.
 
 Running Tasks keep their binding, so they finish on whatever they started with. Runtime
 image changes stay on the release path, since images are per provider, not per Agent.
