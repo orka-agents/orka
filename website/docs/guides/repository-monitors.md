@@ -133,7 +133,54 @@ Apply it with:
 kubectl apply -f repository-monitor.yaml
 ```
 
-The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip`.
+The controller normalizes `provider`, `owner`, `repository`, `branch`, pull request enablement, `maxPerRun`, and `review.event` when omitted. `review.publish.enabled` defaults to `false`; when enabled, V1 rejects publish events other than `COMMENT` and same-head policies other than `skip` or `update`.
+
+### Limit the monitor to labelled pull requests
+
+By default a monitor covers every open pull request on its branch. To opt pull requests in one at a time, set `spec.targets.pullRequests.includeLabels`:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      includeLabels:
+        - orka:review
+```
+
+Only pull requests with at least one of these labels (case-insensitive) are reviewed, repaired, or given a readiness status. Orka reads the labels on every inventory run, so no webhook is needed. Removing the label retires the pull request from the monitor: its unfinished review and repair Tasks are cancelled, a readiness status it already published turns to failure, and a stop it was under still applies if the label returns. Commands that target an unlabelled pull request are blocked with `target_not_included`, except `stop`, which always applies. Readiness is a commit status, so an unlabelled pull request whose head commit and base branch match a labelled one shows that pull request's readiness. This setting cannot be combined with issue implementation, because the pull requests Orka opens would not carry the label.
+
+### Repair labelled pull requests
+
+With `spec.repair.enabled`, Orka repairs every pull request it reviews. Repair labels narrow that, so one label asks for a review and another for fixes:
+
+```yaml
+spec:
+  targets:
+    pullRequests:
+      includeLabels:
+        - orka:review
+  repair:
+    enabled: true
+    maxRepairsPerPR: 3
+    includeLabels:
+      - orka:fix
+    ciOnlyLabels:
+      - orka:fix-ci
+```
+
+| Label | Review | Fixes |
+| --- | --- | --- |
+| `orka:review` | Yes | None |
+| `orka:fix` | Yes | Review findings, CI the pull request broke, and merge conflicts |
+| `orka:fix-ci` | No | CI the pull request broke |
+
+A pull request with a `repair.includeLabels` label is reviewed even when `targets.pullRequests.includeLabels` does not list that label. Each head is reviewed before it is repaired, so the label runs a review-fix loop: findings from a `needs_changes` review are fixed first, CI is fixed once the review has nothing to fix, and every pushed fix is reviewed again. The loop stops when the review passes and no check the pull request broke is failing, or when the repair limits are reached.
+
+A `repair.ciOnlyLabels` pull request is not reviewed unless the monitor selects it for review anyway, for example because `targets.pullRequests.includeLabels` is empty or a review include label is also present. A pull request selected only for CI repair gets no published review or readiness status, and a `review` command on it is blocked with `ci_only`. The label limits repair to CI even when the monitor would otherwise repair that pull request in full; a `repair.includeLabels` label on the same pull request takes precedence.
+
+Before each new repair that a label grants, and again before a queued repair runs, Orka reads the pull request's event history to find who added the label and checks that account's repository permission against `spec.triggers.github.labels.requireActorPermission` (default `write`) and `spec.policy.allowedRepositoryPermissions`. GitHub lets accounts with the Triage role add labels, so this check stops them from getting code pushed. A label added by an account without the permission, or one Orka cannot resolve, marks the repair `repair_label_actor_not_permitted`. A queued repair whose label was removed before it ran is skipped as `repair_scope_withdrawn`, and a queued CI repair whose head no longer has a failure the pull request introduced is skipped as `no_introduced_ci_failure`. Repair commands sent through the API are not label-gated.
+
+Repair labels cannot be combined with issue implementation.
 
 If an existing monitor still uses `validation.mode` and `validation.commands`, migrate it before upgrading the controller. Apply the new CRD first, replace the legacy fields with a digest-pinned `validation.image`, and remove the old fields. The compatibility schema preserves a non-empty legacy command list long enough for the controller to report `LegacyValidationCommandsUnsupported`; it will not run the monitor with validation silently disabled.
 
@@ -161,6 +208,18 @@ To target one pull request, include `targetKind` and `targetNumber`:
 `targetSHA` can also be supplied to require an exact head SHA match.
 
 When `targetNumber` is set, the controller fetches that pull request directly from GitHub before applying the monitor's open-state, base-branch, draft, label, stale-review, and optional `targetSHA` checks. Targeted runs do not retire missing or out-of-scope items from the repository-wide inventory, so monitor status counts continue to summarize the stored PR queue rather than only the targeted PR.
+
+A run never re-reviews a head whose review is still current. To review the same head again, for example after you change the reviewer's rules, send a `review` command for that head:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://<orka-api-host>/api/v1/monitors/repositories/example-app/commands?namespace=orka-system" \
+  -d '{"kind": "pull_request", "number": 123, "intent": "review", "targetSHA": "<head sha>"}'
+```
+
+`fix`, `fix_ci`, and `update_branch` commands take the same body. Commands sent through the API are not limited by repair labels.
 
 ## Run from GitHub events
 
@@ -229,6 +288,23 @@ Valid review verdicts are:
 - `security_sensitive`
 - `skipped`
 
+Orka decides between `passed` and `needs_changes` itself, from the open findings: any open finding at `spec.review.blockingPriority` (default `P1`) or above means `needs_changes`, whatever the reviewer's own verdict. When the two differ, the summary says so. The reviewer's `needs_human`, `security_sensitive`, and `skipped` verdicts stand. The threshold is applied when a review is recorded, so changing `blockingPriority` affects reviews from then on; push a commit or send a `review` command to re-evaluate a pull request that was already reviewed.
+
+### Follow-up reviews
+
+Each accepted review stores the pull request's record of findings: every finding Orka has tracked, with a stable ID and a status of open or fixed. With `spec.review.trigger: push` (the default), every new head is reviewed:
+
+- **The first review** of a pull request, or of a head that rewrote history (a rebase or force-push), is a full review. So is the review after one whose diff context was unavailable or truncated, since a follow-up review would never check the part it missed.
+- **A follow-up review** covers a head that builds on the last reviewed head. The reviewer sees the whole pull request, the changes since the last review (only the pull request's own files, so changes merged in from the base branch are not reviewed again), and the open findings. It reports whether each open finding is fixed, in a `previousFindings` list of `{"id", "status"}` entries, and reports only new defects the changes introduce or expose. A new finding that restates an open one (same file and a nearby line, or the same title) is dropped.
+- **Findings outside the new changes** count only at `P1` or above; lower ones are listed under "Outside the new changes (not blocking)".
+- **A re-review of an unchanged head**, such as a `review` command, can add findings but cannot mark any fixed, so the verdict does not flip without a code change.
+
+The published review lists the open findings (marking those open since an earlier commit) and the findings fixed in this commit. Inline comments go only on findings first reported at this head, so earlier findings keep their original threads. When a follow-up review finds a finding fixed, Orka prefixes its inline comment with "✅ Addressed in `<commit>`" and resolves the comment's thread. It only touches comments on reviews it published, marks each finding once, and a GitHub failure here does not hold up the review; inventory polls retry a failed attempt every five minutes for an hour after the review while its head is current. Unless `review.publish.postSecuritySensitive` is set, it never marks a finding from a security-sensitive review, since the note would link the finding to its fix.
+
+With `spec.review.exhaustive: true`, a full review repeats on the same head until a pass finds nothing new, at most three passes, so follow-up reviews start from every finding instead of uncovering them one round at a time. Each pass sees the findings already recorded and reports only additional ones. Until the last pass, the head does not count as reviewed: readiness and repairs wait, and only the last pass is published, with every finding. With `review.requireGreenCI`, only the first pass waits for green CI, so CI that fails between passes does not stall the chain. Follow-up reviews run once.
+
+With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. `staleReviewTTL` still applies to the reviewed head, so an unchanged head is reviewed again once its review is older than the TTL; leave the TTL unset for strictly one review per pull request. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
+
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
 If a review task fails, is cancelled, returns malformed JSON, or returns a stale head SHA, the controller records a rejected review result and leaves an audit event explaining why. If GitHub publishing is enabled, the controller performs publish-time safety checks immediately after ingestion: it refetches the PR, requires the PR to remain open on the monitor base branch and exact reviewed head SHA, rejects draft or protected-label PRs, skips duplicate same-head publications using Orka publish records and hidden GitHub markers, neutralizes mentions in rendered text, and never posts `security_sensitive` results unless explicitly configured.
@@ -285,11 +361,19 @@ orka monitor actions get '<action-id>' --namespace orka-system
 The controller starts bounded repairs automatically when enabled. Ad hoc PR commands can request the same operations:
 
 - `review` API/CLI command queues an exact-head review run.
-- `fix` API/CLI command queues a repair task on the current same-repository PR head branch.
-- `fix_ci` API/CLI command queues a CI repair task using the same repair path.
+- `fix` API/CLI command queues a repair task on the current PR head branch. Fork PR heads require [`repair.allowForkPullRequests`](#pull-requests-from-forks).
+- `fix_ci` API/CLI command queues a CI repair task using the same repair path. Automatic CI repair only fixes checks the pull request broke: a check that also fails on the pull request's base commit is left alone.
 - `update_branch` API/CLI command queues a base-update repair task and allows empty push-branch updates.
 
 Repair Tasks are exact-head write Tasks: `workspace.ref` and `workspace.expectedRemoteSHA` bind the selected PR head, and publication targets that same branch. A repair succeeds only with a matching `VerifiedExact` delivery receipt. An `update-branch` no-change result is accepted only after the controller independently verifies that the exact PR head contains the requested base revision. Successful repairs clear stale review state so the next exact-head review can recompute readiness. By default, a PR with a passed exact-head review and no active repair is surfaced as merge-ready; GitHub owns the merge decision.
+
+Repairers run in Orka's built-in runtime image, which has no language toolchains, so by default a repair cannot build or test its change before Orka publishes it. `spec.validation.image` checks only the next review of the pushed head. Give the repairer Agent a [toolbox](./toolboxes.md) with the repository's build and test tools, available offline, so it can run them before finishing.
+
+### Pull requests from forks
+
+By default, repairs only push to branches in the monitored repository, and a PR from a fork is blocked with `fork_pr_repair_not_writable`. Set `spec.repair.allowForkPullRequests: true` to also repair fork PRs whose authors [allow edits from maintainers](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/allowing-changes-to-a-pull-request-branch-created-from-a-fork). The repair Task then clones the fork and publishes to the fork's head branch, with the same exact-head and `VerifiedExact` checks. If the author turns maintainer edits off, the repair is blocked with `fork_pr_maintainer_edits_disabled`.
+
+GitHub reports the maintainer-edit setting only when Orka reads a single pull request, which repair always does before it starts; pull request list responses omit it and never count as writable. GitHub still authorizes every push: the publication credentials must be able to read the fork and push to it, which GitHub allows only for accounts with push access to the monitored repository.
 
 ## GitHub merge readiness
 
@@ -301,11 +385,21 @@ Reserve this context for Orka. Orka excludes only status IDs persisted in its mu
 
 The status stays pending or failed while review, validation, or repair is incomplete. Statuses are commit-scoped: when multiple open PRs on the monitored base branch share a head SHA, all must be ready before that commit receives success. A paused or unreviewed peer blocks the shared status. A new head requires new evidence. Repair defaults to at most five attempts per PR and two per head; explicit lower limits are honored. Workflow polling observes CI and completed Tasks without requiring another command label.
 
+GitHub holds workflow runs for some pull requests from forks until a maintainer approves them, and a held run reports no check run. When a commit has a held run and no failed check, the readiness status reads "Waiting for a maintainer to approve the CI workflow runs for this commit." This includes commits Orka pushed while repairing a fork pull request. Detecting held runs needs Actions read access (classic tokens: `repo`); a credential without it keeps the previous behaviour.
+
 GitHub merges only when its per-PR auto-merge setting is enabled and all required conditions pass. When disabled, the PR remains open and merge-ready. Orka never calls the merge endpoint or changes the auto-merge setting. There is no sensitive label or additional merge-approval classifier.
 
 ## API and authorization
 
-Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
+Repository monitor endpoints live under `/api/v1/monitors/*` and require normal Orka API authentication. With ServiceAccount tokens, the API checks Kubernetes RBAC for each route. The Helm chart's `orka-client` ServiceAccount already has every monitor permission, so a short-lived token for it is enough:
+
+```bash
+TOKEN=$(kubectl -n orka-system create token orka-client --duration=30m)
+```
+
+For a narrower identity, bind the Kustomize bundle's `orka-api-editor-role`, or grant `create` on `repositorymonitors/commands` and `repositorymonitors/runs` plus `patch` on `repositorymonitors` to send commands, and `list` on `repositorymonitors/items` and `get`/`list` on `monitorcommands` to read the results. The [permission inventory](../reference/api-authorization.md#grant-access) lists every route.
+
+When context-token authorization is enabled, monitor reads require `orka:monitors:read`, monitor CRUD requires `orka:monitors:write`, and manual run creation requires `orka:monitors:operate`.
 
 Context-token `tctx` constraints can also restrict monitor access by namespace, repository URL, branch, reviewer Agent, or allowed Agent set.
 
@@ -320,7 +414,7 @@ See [API Reference](../reference/api-reference.md#repository-monitors) for endpo
   never enter the Task spec. Codex reviewers are confined by the RuntimeSession boundary:
   the controller rejects elevation requests, the supervisor mediates file writes, and any
   turn that modifies the workspace fails read-intent validation.
-- Review publishing supports only neutral `COMMENT` reviews, with `sameHeadPolicy: skip`.
+- Review publishing supports only neutral `COMMENT` reviews, and at most one published review per pull request head. With `sameHeadPolicy: update`, a later review of the same head that reaches a different verdict rewrites that review's summary instead of being dropped.
 
 ## Prompt-orchestrated monitors
 

@@ -246,6 +246,7 @@ func main() {
 	var nativeSessionMaxBytes int
 	var watchNamespace string
 	var generalWorkerImage string
+	var sessionLoaderImage string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
 	var containerWorkerServiceAccountName string
@@ -301,6 +302,7 @@ func main() {
 	var acpRuntimeNamespace string
 	var acpProviderProxyNamespace string
 	var acpProviderProxyBaseURL string
+	var acpRuntimePoolMaxRunningPrompts, acpRuntimePoolMaxResidentSessions, acpDispatchMaxConcurrentTasks int
 	var acpProviderProxyPodLabels string
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
@@ -441,6 +443,8 @@ func main() {
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
+	flag.StringVar(&sessionLoaderImage, "session-loader-image", controller.DefaultInitImage,
+		"SHA256-digest-pinned session transcript fetcher (requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep).")
 	flag.StringVar(&aiWorkerServiceAccountName, "ai-worker-service-account-name",
 		controller.AIWorkerServiceAccount, "ServiceAccount name for AI worker tasks.")
 	flag.StringVar(&vendorWorkerServiceAccountName, "vendor-worker-service-account-name",
@@ -545,6 +549,12 @@ func main() {
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
 		"Cluster-local base URL of the authenticated provider proxy boundary.")
+	flag.IntVar(&acpRuntimePoolMaxRunningPrompts, "acp-runtime-pool-max-running-prompts", int(corev1alpha1.DefaultRuntimePoolMaxRunningPrompts),
+		"Concurrent prompts each new built-in runtime RuntimePool runs (1-1000, at most --acp-runtime-pool-max-resident-sessions).")
+	flag.IntVar(&acpRuntimePoolMaxResidentSessions, "acp-runtime-pool-max-resident-sessions", int(corev1alpha1.DefaultRuntimePoolMaxResidentSessions),
+		"Resident RuntimeSessions each new built-in runtime RuntimePool keeps (1-1000).")
+	flag.IntVar(&acpDispatchMaxConcurrentTasks, "acp-dispatch-max-concurrent-tasks", controller.DefaultACPDispatchWorkers,
+		"Agent Tasks the controller runs through ACP runtimes at once across all RuntimePools (1-1000). A coordinator waiting on ACP child Tasks keeps its place.")
 	flag.StringVar(&acpProviderProxyPodLabels, "acp-provider-proxy-pod-labels", envutil.String("ORKA_ACP_PROVIDER_PROXY_POD_LABELS", "orka.ai/network-role=provider-auth-proxy"),
 		"Comma-separated exact Pod labels selected by RuntimePool provider-proxy egress policy.")
 	flag.StringVar(&acpProviderProxyTokenFile, "acp-provider-proxy-token-file", os.Getenv("ORKA_ACP_PROVIDER_PROXY_TOKEN_FILE"),
@@ -797,6 +807,11 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	sessionLoaderImage, loaderImageErr := normalizeSessionLoaderImage(sessionLoaderImage)
+	if loaderImageErr != nil {
+		fmt.Fprintln(os.Stderr, loaderImageErr)
+		os.Exit(1)
 	}
 	watchNamespace = strings.TrimSpace(watchNamespace)
 	if watchNamespace == "" {
@@ -1525,6 +1540,7 @@ func main() {
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
+	jobBuilder.InitImage = sessionLoaderImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
 	if contextTokenTTSConfig.Enabled() {
@@ -1547,6 +1563,7 @@ func main() {
 	setupLog.Info("worker images configured",
 		"ai", aiWorkerImage,
 		"general", generalWorkerImage,
+		"sessionLoader", sessionLoaderImage,
 	)
 	jobBuilder.ControllerURL = controllerURL
 	jobBuilder.EnableTelemetry = enableTracing
@@ -1620,7 +1637,22 @@ func main() {
 	}
 
 	// Setup Task controller with helper components.
+	if acpRuntimePoolMaxResidentSessions < 1 || acpRuntimePoolMaxResidentSessions > 1000 ||
+		acpRuntimePoolMaxRunningPrompts < 1 || acpRuntimePoolMaxRunningPrompts > acpRuntimePoolMaxResidentSessions {
+		setupLog.Error(nil, "invalid RuntimePool capacity: prompts must be between 1 and resident sessions, which must be between 1 and 1000",
+			"maxRunningPrompts", acpRuntimePoolMaxRunningPrompts, "maxResidentSessions", acpRuntimePoolMaxResidentSessions)
+		os.Exit(1)
+	}
+	if acpDispatchMaxConcurrentTasks < 1 || acpDispatchMaxConcurrentTasks > 1000 {
+		setupLog.Error(nil, "invalid --acp-dispatch-max-concurrent-tasks: must be between 1 and 1000",
+			"maxConcurrentTasks", acpDispatchMaxConcurrentTasks)
+		os.Exit(1)
+	}
 	taskReconciler := &controller.TaskReconciler{
+		ACPRuntimePoolCapacity: corev1alpha1.RuntimePoolCapacitySpec{
+			MaxRunningPrompts:   int32(acpRuntimePoolMaxRunningPrompts),
+			MaxResidentSessions: int32(acpRuntimePoolMaxResidentSessions),
+		},
 		Client:                       mgr.GetClient(),
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
@@ -1695,6 +1727,7 @@ func main() {
 		ArtifactReservations: artifactRetentionWiring.collector,
 		AdmissionGate:        acpAdmissionGate,
 		IdlePoolTTL:          acpIdlePoolTTL,
+		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
@@ -1985,12 +2018,13 @@ func main() {
 	}
 
 	if err := (&controller.RepositoryScanReconciler{
-		Client:        mgr.GetClient(),
-		APIReader:     mgr.GetAPIReader(),
-		Scheme:        mgr.GetScheme(),
-		SecurityStore: sqliteStore,
-		ArtifactStore: sqliteStore,
-		ResultStore:   sqliteStore,
+		Client:                        mgr.GetClient(),
+		APIReader:                     mgr.GetAPIReader(),
+		Scheme:                        mgr.GetScheme(),
+		SecurityStore:                 sqliteStore,
+		ArtifactStore:                 sqliteStore,
+		ResultStore:                   sqliteStore,
+		ACPDispatchMaxConcurrentTasks: acpDispatchMaxConcurrentTasks,
 		// Governed publications are recorded by the ACP dispatcher in the
 		// durable control store; verifying patch proposals must read the same
 		// store, not the SQLite payload store.

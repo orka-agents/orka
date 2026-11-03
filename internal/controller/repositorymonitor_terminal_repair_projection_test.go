@@ -84,6 +84,8 @@ func TestRepositoryMonitorInventoryPreservesPreTaskRepairFailure(t *testing.T) {
 			status.ID = statusID.Add(1)
 			statusWrites <- status
 			_ = json.NewEncoder(w).Encode(status)
+		case req.Method == http.MethodGet && req.URL.Path == "/repos/orka-agents/orka/actions/runs":
+			_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
 		default:
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 			http.Error(w, "unexpected", http.StatusInternalServerError)
