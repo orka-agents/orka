@@ -241,13 +241,14 @@ post() { # post <url> <content-type> <curl data option>...
   echo "POST $url: gave up after HTTP $status" >&2; return 1
 }
 
-# Upload an artifact. The last path segment is the artifact's name.
+# Upload an artifact. The last path segment is the artifact's name. Stop if it was not
+# stored, so the result never names an artifact that does not exist.
 post "$ORKA_CONTROLLER_URL/internal/v1/artifacts/$ORKA_TASK_NAMESPACE/$ORKA_TASK_NAME/home.png" \
-  image/png --data-binary @/tmp/home.png
+  image/png --data-binary @/tmp/home.png || exit 1
 
 # Post the result.
 post "$ORKA_RESULT_ENDPOINT" application/json \
-  --data '{"version":1,"outcome":"completed","summary":"Checked the home page","data":{"title":"Example Domain"},"artifacts":[{"filename":"home.png","contentType":"image/png"}]}'
+  --data '{"version":1,"outcome":"completed","summary":"Checked the home page","data":{"title":"Example Domain"},"artifacts":[{"filename":"home.png","contentType":"image/png"}]}' || exit 1
 ```
 
 | | Result | Artifact |
