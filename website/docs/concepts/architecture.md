@@ -30,7 +30,8 @@ them, creates or updates Tasks, and dispatches each Task to where it runs:
 | `agent` | A private RuntimeSession inside a RuntimePool Pod | The authenticated provider proxy and your model gateway |
 
 Coding-agent runtimes and the Workspace/Publisher use separate network and credential
-identities. A runtime Pod can reach only the provider proxy and its prompt-scoped tool broker;
+identities. A runtime Pod can reach only cluster DNS, the provider proxy, and the controller API
+that serves its prompt-scoped tool broker;
 it has no Git credentials and no route to your source control. The Publisher has the Git
 credentials it needs for one operation at a time, and no access to models or tools.
 [Security](security.md) explains the boundaries.
