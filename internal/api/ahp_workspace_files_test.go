@@ -77,6 +77,20 @@ func TestAHPMatchAny(t *testing.T) {
 	require.True(t, ahpMatchAny([]string{"**/*.go"}, "pkg/sub/a.go"))
 	require.False(t, ahpMatchAny([]string{"**/*.md"}, "pkg/sub/a.go"))
 	require.False(t, ahpMatchAny(nil, "a"))
+	// A ** segment matches any number of directories wherever it is.
+	for pattern, rel := range map[string]string{
+		"src/**/*.go": "src/a/b/c.go", "src/**/x.go": "src/x.go", "**/test/**": "a/test/b/c", "a/**/b/**/c": "a/x/b/y/z/c",
+	} {
+		require.True(t, ahpMatchAny([]string{pattern}, rel), "%s %s", pattern, rel)
+	}
+	for pattern, rel := range map[string]string{
+		"src/**/*.go": "lib/a/b.go", "src/**/*.md": "src/a/b.go", "a/**/b": "a/x/c",
+	} {
+		require.False(t, ahpMatchAny([]string{pattern}, rel), "%s %s", pattern, rel)
+	}
+	// Many ** segments against a deep path stay cheap.
+	deep := strings.Repeat("d/", 63) + "e"
+	require.False(t, ahpMatchAny([]string{strings.Repeat("**/", 80) + "f"}, deep))
 }
 
 func TestAHPResolveSessionConfig(t *testing.T) {

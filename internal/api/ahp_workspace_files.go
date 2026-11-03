@@ -316,32 +316,46 @@ func ahpWatchPatterns(raw *json.RawMessage) []string {
 	return wrapped.Items
 }
 
-// ahpMatchAny matches a relative path against glob patterns. A pattern
-// starting with **/ also matches at any depth, and a bare path matches the
-// path and anything under it.
+// ahpMatchAny matches a relative path against glob patterns. A ** segment
+// matches any number of directories, anywhere in the pattern, and a bare path
+// matches the path and anything under it.
 func ahpMatchAny(patterns []string, rel string) bool {
 	for _, pattern := range patterns {
 		pattern = strings.TrimPrefix(pattern, "./")
 		if pattern == rel || strings.HasPrefix(rel, strings.TrimSuffix(pattern, "/")+"/") {
 			return true
 		}
-		if ok, _ := path.Match(pattern, rel); ok {
+		if ahpGlobMatch(pattern, rel) {
 			return true
-		}
-		if tail, ok := strings.CutPrefix(pattern, "**/"); ok {
-			for suffix := rel; suffix != ""; {
-				if ok, _ := path.Match(tail, suffix); ok {
-					return true
-				}
-				_, next, found := strings.Cut(suffix, "/")
-				if !found {
-					break
-				}
-				suffix = next
-			}
 		}
 	}
 	return false
+}
+
+// ahpGlobMatch matches a path against a pattern one segment at a time, as
+// path.Match does within a segment, with a ** segment matching zero or more
+// whole segments. It looks at each pair of positions once, so a pattern of
+// many ** costs no more than one of a single **.
+func ahpGlobMatch(pattern, rel string) bool {
+	patterns, segments := strings.Split(pattern, "/"), strings.Split(rel, "/")
+	// rest[j] reports whether the patterns after the current one match
+	// segments[j:].
+	rest := make([]bool, len(segments)+1)
+	rest[len(segments)] = true
+	for _, pattern := range slices.Backward(patterns) {
+		current := make([]bool, len(segments)+1)
+		for j := len(segments); j >= 0; j-- {
+			switch {
+			case pattern == "**":
+				current[j] = rest[j] || (j < len(segments) && current[j+1])
+			case j < len(segments):
+				ok, _ := path.Match(pattern, segments[j])
+				current[j] = ok && rest[j+1]
+			}
+		}
+		rest = current
+	}
+	return rest[0]
 }
 
 const (
