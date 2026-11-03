@@ -1,6 +1,8 @@
 package v1alpha1
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -134,13 +136,104 @@ func TestEvalRunSpecAdmission(t *testing.T) {
 }
 
 func TestEvalRunSpecIsImmutable(t *testing.T) {
-	old := validEvalRunSpec()
-	if got := validateEvalRunSpec(t, validEvalRunSpec(), old); got != "" {
-		t.Fatalf("unchanged spec rejected: %s", got)
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   bool
+	}{
+		{name: "unchanged"},
+		{name: "same timeout spelled differently", mutate: func(s map[string]any) { s["trialTimeout"] = "20m0s" }},
+		{name: "subject", mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{"name": "other"}}
+		}, want: true},
+		{name: "cases", mutate: func(s map[string]any) { s["cases"].(map[string]any)["ids"] = []any{"a"} }, want: true},
+		{name: "trials", mutate: func(s map[string]any) { s["trials"] = int64(6) }, want: true},
+		{name: "graders", mutate: func(s map[string]any) { s["graders"] = []any{"verdict"} }, want: true},
+		{name: "maxConcurrentTrials", mutate: func(s map[string]any) { s["maxConcurrentTrials"] = int64(3) }, want: true},
+		{name: "trialTimeout", mutate: func(s map[string]any) { s["trialTimeout"] = "21m" }, want: true},
+		{name: "maxInfraErrorPercent", mutate: func(s map[string]any) { s["maxInfraErrorPercent"] = int64(11) }, want: true},
+		{name: "ttlSecondsAfterFinished", mutate: func(s map[string]any) { s["ttlSecondsAfterFinished"] = int64(1) }, want: true},
+		{name: "ttlSecondsAfterFinished removed", mutate: func(s map[string]any) { delete(s, "ttlSecondsAfterFinished") }, want: true},
+		{name: "trialTimeout removed", mutate: func(s map[string]any) { delete(s, "trialTimeout") }, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := validEvalRunSpec()
+			if test.mutate != nil {
+				test.mutate(changed)
+			}
+			got := validateEvalRunSpec(t, changed, validEvalRunSpec())
+			if rejected := strings.Contains(got, "EvalRun spec is immutable"); rejected != test.want {
+				t.Fatalf("errors = %q, want immutability rejection %v", got, test.want)
+			}
+		})
 	}
-	changed := validEvalRunSpec()
-	changed["trials"] = int64(6)
-	if got := validateEvalRunSpec(t, changed, old); !strings.Contains(got, "EvalRun spec is immutable") {
-		t.Fatalf("errors = %q, want immutability", got)
+}
+
+// TestEvalRunTypedRoundTripKeepsSpec proves a typed client can update an
+// EvalRun created from YAML: metav1.Duration writes "20m" back as "20m0s".
+func TestEvalRunTypedRoundTripKeepsSpec(t *testing.T) {
+	stored := validEvalRunSpec()
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var typed EvalRunSpec
+	if err := json.Unmarshal(raw, &typed); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&written); err != nil {
+		t.Fatal(err)
+	}
+	written = normalizeJSONNumbers(written).(map[string]any)
+	if written["trialTimeout"] != "20m0s" {
+		t.Fatalf("trialTimeout written as %v, want the canonical 20m0s", written["trialTimeout"])
+	}
+	if got := validateEvalRunSpec(t, written, stored); got != "" {
+		t.Fatalf("typed round trip rejected: %s", got)
+	}
+}
+
+func normalizeJSONNumbers(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, item := range v {
+			v[key] = normalizeJSONNumbers(item)
+		}
+	case []any:
+		for i, item := range v {
+			v[i] = normalizeJSONNumbers(item)
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return n
+		}
+	}
+	return value
+}
+
+// TestEvalRunImmutabilityCoversEverySpecField keeps the field-by-field
+// immutability rule in step with the spec schema.
+func TestEvalRunImmutabilityCoversEverySpecField(t *testing.T) {
+	spec := loadCRD(t, evalRunCRD).Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
+	var rule string
+	for _, validation := range spec.XValidations {
+		if validation.Message == "EvalRun spec is immutable; create a new EvalRun" {
+			rule = validation.Rule
+		}
+	}
+	if rule == "" {
+		t.Fatal("spec has no immutability rule")
+	}
+	for name := range spec.Properties {
+		if !strings.Contains(rule, "oldSelf."+name) {
+			t.Errorf("immutability rule does not compare spec.%s", name)
+		}
 	}
 }

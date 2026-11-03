@@ -23,12 +23,15 @@ import (
 
 // Case limits. A case file lives in one ConfigMap key, so it is at most 1 MiB.
 const (
-	MaxCaseFileBytes     = 1 << 20
-	MaxCaseLineBytes     = 512 << 10
-	MaxCases             = corev1alpha1.EvalRunMaxCaseTrials
-	MaxCaseIDLength      = 63
-	MaxCaseTags          = 16
-	MaxCaseTagLength     = 63
+	MaxCaseFileBytes = 1 << 20
+	MaxCaseLineBytes = 512 << 10
+	MaxCases         = corev1alpha1.EvalRunMaxCaseTrials
+	MaxCaseIDLength  = 63
+	MaxCaseTags      = 16
+	MaxCaseTagLength = 63
+	// MaxCaseSetTags caps the distinct tags of one case file so status can
+	// hold a result for every grader overall and per tag.
+	MaxCaseSetTags       = corev1alpha1.EvalRunMaxResults/corev1alpha1.EvalGraderCount - 1
 	MaxReviewFiles       = 100
 	MaxReviewTitleBytes  = 1024
 	MaxReviewBodyBytes   = 64 << 10
@@ -119,9 +122,10 @@ var (
 )
 
 // ParseCases parses and validates an orka.eval.case.v1 JSONL document: one
-// case object per line, blank lines ignored. Unknown or case-mismatched
-// fields, duplicate keys, trailing data, oversize input and duplicate ids are
-// rejected. Every case must carry input for subject.
+// case object per line, blank lines ignored. Unknown, missing or
+// case-mismatched fields, duplicate keys, trailing data, oversize input,
+// duplicate ids and more than MaxCaseSetTags distinct tags are rejected.
+// Every case must carry input for subject.
 func ParseCases(data []byte, subject corev1alpha1.EvalSubjectType) ([]Case, error) {
 	if len(data) > MaxCaseFileBytes {
 		return nil, fmt.Errorf("case file exceeds %d bytes", MaxCaseFileBytes)
@@ -132,6 +136,7 @@ func ParseCases(data []byte, subject corev1alpha1.EvalSubjectType) ([]Case, erro
 	reader := bufio.NewReaderSize(bytes.NewReader(data), 64<<10)
 	var cases []Case
 	seen := map[string]struct{}{}
+	tags := map[string]struct{}{}
 	for lineNumber := 1; ; lineNumber++ {
 		line, err := reader.ReadBytes('\n')
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -152,6 +157,12 @@ func ParseCases(data []byte, subject corev1alpha1.EvalSubjectType) ([]Case, erro
 				return nil, fmt.Errorf("line %d: duplicate case id %q", lineNumber, c.ID)
 			}
 			seen[c.ID] = struct{}{}
+			for _, tag := range c.Tags {
+				tags[tag] = struct{}{}
+			}
+			if len(tags) > MaxCaseSetTags {
+				return nil, fmt.Errorf("line %d: case file has more than %d distinct tags", lineNumber, MaxCaseSetTags)
+			}
 			cases = append(cases, c)
 		}
 		if errors.Is(err, io.EOF) {
@@ -189,11 +200,16 @@ func SelectCases(cases []Case, ids []string) ([]Case, error) {
 	return selected, nil
 }
 
-// ParseCase parses and validates one case object.
+// ParseCase parses and validates one case object. Every field without
+// omitempty is required.
 func ParseCase(raw []byte, subject corev1alpha1.EvalSubjectType) (Case, error) {
 	var c Case
 	if len(raw) > MaxCaseLineBytes {
 		return c, fmt.Errorf("case exceeds %d bytes", MaxCaseLineBytes)
+	}
+	// encoding/json would replace invalid bytes with U+FFFD.
+	if !utf8.Valid(raw) {
+		return c, errors.New("case is not valid UTF-8")
 	}
 	if err := checkExactKeys(raw, reflect.TypeFor[Case](), "case"); err != nil {
 		return c, err
@@ -351,7 +367,8 @@ func (r CaseReference) validate() error {
 // validateFixtureRepoURL accepts only an anonymous https URL of a GitHub
 // repository: no credentials, port, query, fragment or extra path.
 func validateFixtureRepoURL(raw string) error {
-	invalid := fmt.Errorf("repoURL %q must be https://github.com/<owner>/<repo>", raw)
+	// Never echo raw: a rejected URL may carry a credential.
+	invalid := errors.New("repoURL must be an anonymous https://github.com/<owner>/<repo> URL")
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil ||
 		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
@@ -398,9 +415,10 @@ func containsCredential(s string) bool {
 	return false
 }
 
-// checkExactKeys rejects duplicate keys and keys that do not exactly match a
-// JSON field of t. encoding/json would otherwise accept a case-folded key
-// ("Verdict") and let a later duplicate silently win.
+// checkExactKeys rejects duplicate keys, keys that do not exactly match a
+// JSON field of t, and missing fields that lack omitempty. encoding/json would
+// otherwise accept a case-folded key ("Verdict"), let a later duplicate
+// silently win, and read a missing count as zero.
 func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -428,7 +446,7 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 				return fmt.Errorf("%s has duplicate field %q", at, key)
 			}
 			seen[key] = struct{}{}
-			fieldType, ok := fields[key]
+			field, ok := fields[key]
 			if !ok {
 				return fmt.Errorf("%s has unknown field %q", at, key)
 			}
@@ -436,8 +454,13 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 			if err := decoder.Decode(&value); err != nil {
 				return err
 			}
-			if err := checkExactKeys(value, fieldType, at+"."+key); err != nil {
+			if err := checkExactKeys(value, field.typ, at+"."+key); err != nil {
 				return err
+			}
+		}
+		for name, field := range fields {
+			if _, present := seen[name]; field.required && !present {
+				return fmt.Errorf("%s is missing field %q", at, name)
 			}
 		}
 	case reflect.Slice:
@@ -454,14 +477,19 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 	return nil
 }
 
-func jsonFields(t reflect.Type) map[string]reflect.Type {
-	fields := make(map[string]reflect.Type, t.NumField())
+type jsonField struct {
+	typ      reflect.Type
+	required bool
+}
+
+func jsonFields(t reflect.Type) map[string]jsonField {
+	fields := make(map[string]jsonField, t.NumField())
 	for field := range t.Fields() {
-		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
 		if name == "" || name == "-" || !field.IsExported() {
 			continue
 		}
-		fields[name] = field.Type
+		fields[name] = jsonField{typ: field.Type, required: !strings.Contains(","+options+",", ",omitempty,")}
 	}
 	return fields
 }

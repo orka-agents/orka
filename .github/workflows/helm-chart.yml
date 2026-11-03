@@ -352,6 +352,7 @@ jobs:
           connections.core.orka.ai
           connectorproviders.core.orka.ai
           controllerepochs.core.orka.ai
+          evalruns.core.orka.ai
           executionworkspacecheckpoints.workspace.orka.ai
           executionworkspaceclasses.workspace.orka.ai
           executionworkspacepools.workspace.orka.ai
