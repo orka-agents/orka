@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/orka-agents/orka/internal/ahphost"
+	executionevents "github.com/orka-agents/orka/internal/events"
 )
 
 const (
@@ -198,10 +199,45 @@ func (b *ahpBackend) readWorkspaceFile(ctx context.Context, principal ahphost.Pr
 	if err != nil {
 		return ahptypes.ResourceReadResult{}, true, ahphost.ErrResourceNotFound
 	}
+	// A file is redacted for the person's git tokens as terminal output is:
+	// otherwise a shell could copy a token into one and read it from here.
+	data = ahpRedactWholeTokens(data, b.workspaces.tokensFor(principal.UserKey))
 	if utf8.Valid(data) {
 		return ahptypes.ResourceReadResult{Data: string(data), Encoding: ahptypes.ContentEncodingUtf8}, true, nil
 	}
 	return ahptypes.ResourceReadResult{Data: base64.StdEncoding.EncodeToString(data), Encoding: ahptypes.ContentEncodingBase64}, true, nil
+}
+
+// ahpRedactWholeTokens redacts tokens from data that ends where it is. A
+// token's start at the end, which output still arriving would hold back, is
+// redacted too when it is as long as a run redacted anywhere else: a file
+// that merely ends like a token's first few bytes stays as it is.
+func ahpRedactWholeTokens(data []byte, tokens []string) []byte {
+	if len(tokens) == 0 {
+		return data
+	}
+	data = ahpRedactTokens(nil, data, tokens)
+	if held := ahpTokenHeld(nil, data, tokens); held >= ahpMinRedactedToken {
+		data = append(data[:len(data)-held:len(data)-held], executionevents.ExecutionEventRedactedValue...)
+	}
+	return data
+}
+
+// ahpRedactGitChanges redacts tokens from both sides of each changed file.
+func ahpRedactGitChanges(changed map[string]ahpGitChange, tokens []string) {
+	if len(tokens) == 0 {
+		return
+	}
+	redact := func(side *string) *string {
+		if side == nil {
+			return nil
+		}
+		redacted := string(ahpRedactWholeTokens([]byte(*side), tokens))
+		return &redacted
+	}
+	for full, change := range changed {
+		changed[full] = ahpGitChange{Before: redact(change.Before), After: redact(change.After)}
+	}
 }
 
 // ListResource lists a directory in the user's workspace.

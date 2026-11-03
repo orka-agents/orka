@@ -201,3 +201,46 @@ func TestAHPStampsFollowAWatchedSymlink(t *testing.T) {
 	require.Contains(t, stamps, filepath.Join(link, "a.txt"), string(out))
 	require.Len(t, stamps, 1, "only the watched target's own file: %s", out)
 }
+
+// A file read from the workspace is redacted for the person's git tokens as
+// terminal output is, to its very end: a shell could otherwise copy a token
+// into a file and read it back here.
+func TestAHPRedactWholeTokens(t *testing.T) {
+	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
+	tokens := []string{"ghu_olderolderolderolder", token}
+	for name, tc := range map[string]struct{ data, want string }{
+		"no token":          {data: "package main\n", want: "package main\n"},
+		"whole token":       {data: "t=" + token + "\n", want: "t=[REDACTED]\n"},
+		"older token":       {data: "ghu_olderolderolderolder", want: "[REDACTED]"},
+		"secret alone":      {data: token[4:], want: "[REDACTED]"},
+		"cut short in file": {data: "x " + token[:20] + " y", want: "x [REDACTED] y"},
+		"cut short at end":  {data: "x " + token[:12], want: "x ghu_[REDACTED]"},
+		// Fewer bytes than are redacted anywhere else stay, at the end too.
+		"few bytes at end": {data: "x ghu_0123", want: "x ghu_0123"},
+		"ends like one":    {data: "ab0123", want: "ab0123"},
+	} {
+		require.Equal(t, tc.want, string(ahpRedactWholeTokens([]byte(tc.data), tokens)), name)
+	}
+	require.Equal(t, "x", string(ahpRedactWholeTokens([]byte("x"), nil)), "nothing to redact without tokens")
+	binary := append([]byte{0xff, 0xfe}, token...)
+	require.NotContains(t, string(ahpRedactWholeTokens(binary, tokens)), token[4:], "a binary file is redacted too")
+}
+
+// A branch's committed files, which the changeset shows, are redacted too.
+func TestAHPRedactGitChanges(t *testing.T) {
+	const token = "ghu_0123456789abcdefghijklmnopqrstuvwx"
+	before, after := "old\n", "t="+token+"\n"
+	changed := map[string]ahpGitChange{
+		"/workspace/a": {Before: &before, After: &after},
+		"/workspace/b": {After: &after},
+		"/workspace/c": {Before: &after},
+	}
+	ahpRedactGitChanges(changed, []string{token})
+	require.Equal(t, "old\n", *changed["/workspace/a"].Before)
+	require.Equal(t, "t=[REDACTED]\n", *changed["/workspace/a"].After)
+	require.Nil(t, changed["/workspace/b"].Before, "an added file keeps no before side")
+	require.Equal(t, "t=[REDACTED]\n", *changed["/workspace/b"].After)
+	require.Nil(t, changed["/workspace/c"].After, "a deleted file keeps no after side")
+	require.Equal(t, "t=[REDACTED]\n", *changed["/workspace/c"].Before)
+	require.Equal(t, "t="+token+"\n", after, "the branch's own text is not changed in place")
+}
