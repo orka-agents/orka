@@ -10,6 +10,7 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY internal/harness/v2/ internal/harness/v2/
+COPY internal/workspacedelta/ internal/workspacedelta/
 COPY cmd/orka-harness-v2-e2e-fixture/ cmd/orka-harness-v2-e2e-fixture/
 
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
