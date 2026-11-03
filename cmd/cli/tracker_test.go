@@ -263,6 +263,10 @@ func TestUpdateAgentFromProgressCancelledIsNotSuccess(t *testing.T) {
 	if tr.agents[0].success {
 		t.Error("cancelled agent was reported as successful after stream completion")
 	}
+	// Non-TTY output must show the terminal outcome exactly once.
+	if out := buf.String(); strings.Count(out, "✗ worker") != 1 || strings.Contains(out, "✓") {
+		t.Errorf("non-TTY output = %q, want one failure line and no success line", out)
+	}
 }
 
 func TestCompleteAgentByName(t *testing.T) {

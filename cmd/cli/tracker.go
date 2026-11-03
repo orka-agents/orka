@@ -296,6 +296,15 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 					a.done = true
 					a.success = false
 				}
+				if a.done && !t.isTTY {
+					// completeAgents and stop skip finished agents in non-TTY
+					// output, so print the terminal outcome now.
+					icon := "✓"
+					if !a.success {
+						icon = "✗"
+					}
+					fmt.Fprintf(t.w, "├─ %s %s  %s\n", icon, a.name, time.Since(a.startTime).Round(time.Second)) //nolint:errcheck
+				}
 				break
 			}
 		}
