@@ -290,7 +290,9 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 				case "Succeeded":
 					a.done = true
 					a.success = true
-				case "Failed":
+				case "Failed", "Cancelled":
+					// A cancelled task is terminal but not successful; leaving it
+					// pending would let stop/completeAgents report it as success.
 					a.done = true
 					a.success = false
 				}

@@ -241,6 +241,30 @@ func TestUpdateAgentFromProgressFailed(t *testing.T) {
 	}
 }
 
+func TestUpdateAgentFromProgressCancelledIsNotSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	result, _ := json.Marshal(map[string]any{"phase": "Cancelled", "name": "task-1"})
+	tr.updateAgentFromProgress(client.SSEEventData{Result: result})
+	if !tr.agents[0].done {
+		t.Error("expected done on Cancelled")
+	}
+	if tr.agents[0].success {
+		t.Error("expected no success on Cancelled")
+	}
+
+	// Stream completion must not later relabel the cancelled task as successful.
+	tr.completeAgents(client.SSEEventData{})
+	tr.stop()
+	if tr.agents[0].success {
+		t.Error("cancelled agent was reported as successful after stream completion")
+	}
+}
+
 func TestCompleteAgentByName(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
