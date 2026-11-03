@@ -526,6 +526,19 @@ func (b *ahpBackend) RootExtensions(ctx context.Context, principal ahphost.Princ
 	return map[string]json.RawMessage{ahpCopilotProjectManagementMeta: json.RawMessage(`{"available":true}`)}, config, nil
 }
 
+// backfillDefaultBranch records a project's default branch, if the project is
+// still stored and has none.
+func (b *ahpBackend) backfillDefaultBranch(ctx context.Context, userKey, id, branch string) {
+	unlock := b.lockUser(userKey)
+	defer unlock()
+	var current ahpProject
+	if b.getRecord(ctx, userKey, ahpRecordProject, id, &current) != nil || current.DefaultBranch != "" {
+		return
+	}
+	current.DefaultBranch = branch
+	_ = b.putRecord(ctx, userKey, ahpRecordProject, id, current)
+}
+
 func ahpRootConfig(projects []ahpProject) (map[string]json.RawMessage, error) {
 	raw, err := json.Marshal(map[string]any{"hostName": "orka", "projects": ahpProjectsWire(projects)})
 	if err != nil {
@@ -543,11 +556,14 @@ func (b *ahpBackend) HandleExtension(ctx context.Context, principal ahphost.Prin
 			return nil, err
 		}
 		for i := range projects {
-			// Fill in a default branch an earlier lookup could not find.
+			// Fill in a default branch an earlier lookup could not find. The
+			// lookup runs unlocked; the write, under the lock removal holds,
+			// changes only a project still stored, so a removal meanwhile
+			// stays removed.
 			if projects[i].DefaultBranch == "" {
 				if branch := b.defaultBranch(ctx, principal.Namespace, projects[i].URL); branch != "" {
 					projects[i].DefaultBranch = branch
-					_ = b.putRecord(ctx, principal.UserKey, ahpRecordProject, projects[i].ID, projects[i])
+					b.backfillDefaultBranch(ctx, principal.UserKey, projects[i].ID, branch)
 				}
 			}
 		}
@@ -1438,7 +1454,8 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 		sessions = []string{session}
 	}
 	var found store.AHPRecord
-	ok := false
+	// deleted reports that the newest change found removed the file.
+	ok, deleted := false, false
 	for _, candidate := range sessions {
 		hash := ahpHash(principal.UserKey, candidate)
 		nonce := ""
@@ -1447,8 +1464,8 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 		case strings.HasPrefix(uri, ahpContentScheme+hash[:24]+"/"):
 			nonce = strings.TrimPrefix(uri, ahpContentScheme+hash[:24]+"/")
 		case strings.HasPrefix(uri, "file:///"):
-			filePath, ok := ahpURIPath(uri)
-			if !ok {
+			filePath, valid := ahpURIPath(uri)
+			if !valid {
 				continue
 			}
 			fileRecord, err := b.store.GetAHPRecord(ctx, principal.UserKey, ahpRecordFile, hash+"/"+filePath)
@@ -1460,6 +1477,14 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 				continue
 			}
 			nonce, updated = file.After, fileRecord.UpdatedAt
+			// A removal is a change too: an older session's contents of a
+			// file a newer one deleted are not the file's.
+			if file.Deleted {
+				if !ok || updated.After(found.UpdatedAt) {
+					found, ok, deleted = store.AHPRecord{UpdatedAt: updated}, true, true
+				}
+				continue
+			}
 		}
 		if nonce == "" {
 			continue
@@ -1472,10 +1497,10 @@ func (b *ahpBackend) ReadResource(ctx context.Context, principal ahphost.Princip
 			content.UpdatedAt = updated
 		}
 		if !ok || content.UpdatedAt.After(found.UpdatedAt) {
-			found, ok = content, true
+			found, ok, deleted = content, true, false
 		}
 	}
-	if !ok {
+	if !ok || deleted {
 		return ahptypes.ResourceReadResult{}, ahphost.ErrResourceNotFound
 	}
 	return ahptypes.ResourceReadResult{Data: string(found.Value), Encoding: ahptypes.ContentEncodingUtf8}, nil

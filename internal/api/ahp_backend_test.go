@@ -783,6 +783,70 @@ func TestAHPBackendRemovesAProjectNoSessionUses(t *testing.T) {
 	}, nil), "a removed project takes no new sessions")
 }
 
+// Reading a file from the root, with no workspace running, serves the newest
+// change any session recorded for it: a newer session's deletion leaves it
+// not found, and a later write is read again.
+func TestAHPBackendRootReadHonorsANewerDeletion(t *testing.T) {
+	env := newAHPTestEnv(t)
+	ctx := ahpCtx(t)
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	put := func(kind, key string, value []byte, at time.Time) {
+		t.Helper()
+		require.NoError(t, env.backend.store.PutAHPRecord(ctx, store.AHPRecord{UserKey: alice.UserKey, Kind: kind, Key: key, Value: value, UpdatedAt: at}))
+	}
+	record := func(kind, key string, value any, at time.Time) {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		require.NoError(t, err)
+		put(kind, key, raw, at)
+	}
+	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	file := "/workspace/src/octo/widgets/a.go"
+	older, newer := ahpHash(alice.UserKey, "ahp-older"), ahpHash(alice.UserKey, "ahp-newer")
+	record(ahpRecordSession, "ahp-older", ahpSession{Session: "ahp-older"}, at)
+	record(ahpRecordSession, "ahp-newer", ahpSession{Session: "ahp-newer"}, at)
+	record(ahpRecordFile, older+"/"+file, ahpFileContent{Path: file, After: "n1"}, at)
+	put(ahpRecordContent, older+"/n1", []byte("old contents"), at)
+	read := func() (string, error) {
+		result, err := env.backend.ReadResource(ctx, alice, "", "", "file://"+file)
+		return result.Data, err
+	}
+	data, err := read()
+	require.NoError(t, err)
+	require.Equal(t, "old contents", data)
+
+	record(ahpRecordFile, newer+"/"+file, ahpFileContent{Path: file, Before: "n1", Deleted: true}, at.Add(time.Hour))
+	_, err = read()
+	require.ErrorIs(t, err, ahphost.ErrResourceNotFound, "a newer session deleted the file")
+
+	record(ahpRecordFile, older+"/"+file, ahpFileContent{Path: file, After: "n2"}, at.Add(2*time.Hour))
+	put(ahpRecordContent, older+"/n2", []byte("rewritten"), at.Add(2*time.Hour))
+	data, err = read()
+	require.NoError(t, err)
+	require.Equal(t, "rewritten", data, "a write after the deletion is the file's")
+}
+
+// Filling in a default branch changes only a project still stored: one
+// removed while its branch was looked up stays removed.
+func TestAHPBackendDefaultBranchBackfillKeepsARemovedProjectRemoved(t *testing.T) {
+	env := newAHPTestEnv(t)
+	ctx := ahpCtx(t)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	env.backend.backfillDefaultBranch(ctx, alice, "project-removed", "main")
+	var project ahpProject
+	require.ErrorIs(t, env.backend.getRecord(ctx, alice, ahpRecordProject, "project-removed", &project), store.ErrNotFound)
+
+	require.NoError(t, env.backend.putRecord(ctx, alice, ahpRecordProject, "project-kept", ahpProject{ID: "project-kept", URL: ahpTestRepo}))
+	env.backend.backfillDefaultBranch(ctx, alice, "project-kept", "main")
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordProject, "project-kept", &project))
+	require.Equal(t, "main", project.DefaultBranch)
+	require.Equal(t, ahpTestRepo, project.URL, "the rest of the stored project stays")
+	env.backend.backfillDefaultBranch(ctx, alice, "project-kept", "trunk")
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordProject, "project-kept", &project))
+	require.Equal(t, "main", project.DefaultBranch, "a branch already found stays")
+}
+
 // A project's checkout path leaves out the host, so the same owner and name on
 // another host is refused rather than opening the first one's checkout.
 func TestAHPBackendRefusesAProjectOnAnotherProjectsPath(t *testing.T) {
