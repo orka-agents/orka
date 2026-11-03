@@ -447,12 +447,19 @@ immutable images:
 --acp-opencode-runtime-image=<repository>@sha256:<digest>
 ```
 
-:::warning[The two provider-proxy flags must name the same namespace]
-`--acp-provider-proxy-base-url` is the address runtime Pods call.
-`--acp-provider-proxy-namespace` is what the generated NetworkPolicy allows them to reach.
-If they disagree, every provider call is dropped by default-deny egress with no useful error.
-The flag defaults to `vekil-system`, but the Helm chart overrides it to the release namespace
-(`orka-system` on a default install), which is where the chart puts `provider-auth-proxy`.
+:::warning[The provider-proxy flags must match the proxy Pods]
+`--acp-provider-proxy-base-url` is the address runtime Pods call. Its host must end in
+`.<namespace>.svc` or `.<namespace>.svc.cluster.local`, where the namespace is
+`--acp-provider-proxy-namespace`, as in `<service>.<namespace>.svc`. Otherwise the controller
+rejects the configuration and RuntimePools report `Degraded`. Pools without an execution workspace
+show the error in their status message; execution-workspace pools show
+`runtime configuration is not admitted`. The namespace flag is unset by default. With
+`providerProxy.enabled=true`, the Helm chart sets it to the release namespace, where the chart
+deploys `provider-auth-proxy`.
+The generated NetworkPolicy allows TCP to Pods matching `--acp-provider-proxy-pod-labels` in that
+namespace, on the base URL's port. If those labels miss the proxy Pods, or that port differs from
+the port the proxy Pods listen on, every provider call is dropped by default-deny egress with no
+useful error.
 :::
 
 Mutable image tags are rejected for built-in pools. For Kustomize deployment,
