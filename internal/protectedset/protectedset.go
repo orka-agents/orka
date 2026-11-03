@@ -38,7 +38,8 @@ const (
 	SplitHeldOut = "heldOut"
 
 	// maxPathsPerRepository matches the Task deniedPaths list bound, so the
-	// effective set for any repository always fits one Task.
+	// effective set for any repository, or any source and publication pair,
+	// always fits one Task.
 	maxPathsPerRepository = 256
 	maxDeclarationBytes   = 256 << 10
 )
@@ -139,6 +140,9 @@ func (s *Set) normalize() error {
 	if len(s.Paths) > maxPathsPerRepository {
 		return fmt.Errorf("protected set paths exceed %d entries", maxPathsPerRepository)
 	}
+	if err := s.checkRepositoryPairLimits(); err != nil {
+		return err
+	}
 	seenCaseSets := map[string]struct{}{}
 	for index := range s.CaseSets {
 		caseSet := &s.CaseSets[index]
@@ -164,6 +168,29 @@ func (s *Set) normalize() error {
 	}
 	if s.Gate.MaxCandidatesPerBaseline == nil || *s.Gate.MaxCandidatesPerBaseline < 1 {
 		return fmt.Errorf("protected set gate.maxCandidatesPerBaseline must be set and at least 1")
+	}
+	return nil
+}
+
+// checkRepositoryPairLimits rejects a declaration whose global paths plus the
+// paths of any two repositories exceed one Task's deniedPaths bound. A Task
+// whose source and publication repositories differ must cover both, so every
+// such pair has to fit one Task.
+func (s *Set) checkRepositoryPairLimits() error {
+	extras := make([]int, len(s.Repositories))
+	for index, repository := range s.Repositories {
+		extras[index] = len(unionPatterns(s.Paths, repository.Paths)) - len(s.Paths)
+	}
+	for i := range s.Repositories {
+		for j := i + 1; j < len(s.Repositories); j++ {
+			if len(s.Paths)+extras[i]+extras[j] <= maxPathsPerRepository {
+				continue
+			}
+			if len(unionPatterns(s.Paths, s.Repositories[i].Paths, s.Repositories[j].Paths)) > maxPathsPerRepository {
+				return fmt.Errorf("protected set for repositories %q and %q together exceeds %d paths",
+					s.Repositories[i].Repository, s.Repositories[j].Repository, maxPathsPerRepository)
+			}
+		}
 	}
 	return nil
 }

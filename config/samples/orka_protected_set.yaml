@@ -1,7 +1,8 @@
 # Example self-improvement protected set for the Orka repository.
 #
 # Apply it in the controller namespace and start the controller with
-# --protected-set-configmap=orka-protected-set. Without a valid protected set,
+# --protected-set-configmap=orka-protected-set and Task provenance admission
+# enabled (the controller refuses to start otherwise). Without a valid protected set,
 # Tasks marked orka.ai/improvement-role: proposer fail with
 # ProposerConstraintViolation instead of running. Change it only through the
 # reviewed deployment configuration.
@@ -27,10 +28,15 @@ data:
           - internal/evals/**      # graders and the gate
           - test/evals/**
           - internal/api/*authoriz*
+          - internal/api/server.go                         # route registration
+          - internal/api/eval*.go                          # proposal and decision handlers
+          - internal/api/agent_rollout*.go                 # rollout handler
           - internal/admission/**
           - internal/outboundaccess/**
-          - internal/tools/memory_tools.go
+          - internal/tools/**                              # brokered tool registry and implementations
           - internal/controller/acp_mcp_broker*.go         # proposer tool allowlist
+          - internal/controller/acp_mcp_policy*.go         # compiles the tool policy
+          - internal/controller/acp_runtime_profile*.go    # pins the policy into the profile
           - internal/controller/acp_dispatcher*.go         # dispatch-time checks
           - internal/controller/acp_task_queue.go          # calls the dispatch-time check
           - internal/controller/task_controller.go         # fails marked Tasks outside the ACP path
@@ -49,7 +55,10 @@ data:
           - internal/store/**                              # trial, decision and promotion records
           - workers/acp/supervisor/**                      # deniedPaths check
           - api/v1alpha1/**                                # the fields that carry these rules
-          - cmd/main.go                                    # wires every enforcement point
+          - cmd/**                                         # flag wiring and Helm chart sources (cmd/build/helmify/static)
+          - config/**                                      # deployment inputs: admission webhooks and policies, manager, network policies
+          - manifest_staging/**                            # generated install manifests and chart
+          - deploy/**                                      # released install manifests
           - config/samples/orka_protected_set.yaml         # this declaration
           - docs/adr/**                                    # the recorded trust boundaries
           - AGENTS.md

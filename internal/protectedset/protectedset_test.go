@@ -3,6 +3,7 @@ package protectedset
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -71,6 +72,17 @@ func TestSampleProtectsEveryCategory(t *testing.T) {
 		"admission":                 "internal/admission/task_provenance.go",
 		"outbound access":           "internal/outboundaccess/policy.go",
 		"memory tools":              "internal/tools/memory_tools.go",
+		"tool registry":             "internal/tools/registry.go",
+		"tool policy":               "internal/controller/acp_mcp_policy.go",
+		"runtime profile":           "internal/controller/acp_runtime_profile.go",
+		"controller wiring":         "cmd/main.go",
+		"API routes":                "internal/api/server.go",
+		"Helm chart sources":        "cmd/build/helmify/static/templates/rbac.yaml",
+		"admission webhooks":        "config/orka-admission-webhooks/validating_webhook.yaml",
+		"admission policies":        "config/policy/workspace_core_admission_policy.yaml",
+		"admission protections":     "config/admission/gateway_task_protection.yaml",
+		"generated manifests":       "manifest_staging/deploy/orka.yaml",
+		"released manifests":        "deploy/orka.yaml",
 		"proposer tool allowlist":   "internal/controller/acp_mcp_broker_proposer.go",
 		"dispatch-time checks":      "internal/controller/acp_dispatcher_proposer.go",
 		"dispatch call site":        "internal/controller/acp_task_queue.go",
@@ -122,6 +134,29 @@ func TestParseRejectsInvalidDeclarations(t *testing.T) {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: Parse() accepted an invalid declaration", name)
 		}
+	}
+}
+
+func TestParseRejectsRepositoryPairsOverTheTaskLimit(t *testing.T) {
+	repositoryPaths := func(prefix string, count int) string {
+		quoted := make([]string, count)
+		for index := range quoted {
+			quoted[index] = fmt.Sprintf("%q", fmt.Sprintf("%s%d/**", prefix, index))
+		}
+		return "[" + strings.Join(quoted, ", ") + "]"
+	}
+	document := func(perRepository int) string {
+		return validMinimalSetDoc + "repositories:\n" +
+			"  - {repository: github.com/a/one, paths: " + repositoryPaths("one", perRepository) + "}\n" +
+			"  - {repository: github.com/a/two, paths: " + repositoryPaths("two", perRepository) + "}\n"
+	}
+	// Each repository fits alone, but a Task from one to the other could not
+	// list both sets.
+	if _, err := Parse([]byte(document(200))); err == nil {
+		t.Fatal("Parse() accepted repositories whose combined set exceeds the Task limit")
+	}
+	if _, err := Parse([]byte(document(100))); err != nil {
+		t.Fatalf("Parse() rejected repositories whose combined set fits: %v", err)
 	}
 }
 
