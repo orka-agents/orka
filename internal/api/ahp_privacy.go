@@ -44,13 +44,7 @@ func ahpSessionName(name string) (string, bool) {
 // in itself, through its own OIDC or a webhook; they carry no Orka issuer and
 // subject, so they own no AHP turn and see none.
 func ahpPerson(ui *UserInfo) bool {
-	return ui != nil && !ahpServiceAccount(ui)
-}
-
-// ahpServiceAccount reports a TokenReview caller whose username names a
-// ServiceAccount, as validateToken parses it.
-func ahpServiceAccount(ui *UserInfo) bool {
-	return ui.AuthType == AuthTypeTokenReview && parseServiceAccountNamespace(ui.Username) != ""
+	return ui != nil && !verifiedServiceAccount(ui)
 }
 
 // ahpOwns reports whether the person sent the turn that created the Task. A
