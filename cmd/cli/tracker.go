@@ -27,6 +27,8 @@ const (
 	toolCheckTaskProgress = "check_task_progress"
 	toolWaitForTask       = "wait_for_task"
 	toolFetchTaskOutput   = "fetch_task_output"
+	toolDelegateTask      = "delegate_task"
+	toolCreateAgentTask   = "create_agent_task"
 	statusDone            = "done"
 )
 
@@ -36,11 +38,11 @@ type agentEntry struct {
 	taskName   string
 	toolCallID string
 	prompt     string
-	status    string
-	startTime time.Time
-	done      bool
-	success   bool
-	result    string
+	status     string
+	startTime  time.Time
+	done       bool
+	success    bool
+	result     string
 }
 
 // tracker manages the live subagent status panel.
@@ -147,7 +149,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 	switch evt.Event {
 	case "tool_call":
 		switch data.Name {
-		case "delegate_task", "create_agent_task":
+		case toolDelegateTask, toolCreateAgentTask:
 			t.addAgent(data)
 		case toolCheckTaskProgress, toolWaitForTask:
 			// Show that we're polling a task
@@ -161,7 +163,7 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		}
 	case "tool_result":
 		switch data.Name {
-		case "delegate_task", "create_agent_task":
+		case toolDelegateTask, toolCreateAgentTask:
 			t.recordCreatedTaskName(data)
 		case "wait_for_tasks", toolWaitForTask:
 			t.completeAgents(data)
