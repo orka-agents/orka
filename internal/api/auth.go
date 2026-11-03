@@ -141,6 +141,13 @@ func parseServiceAccountNamespace(username string) string {
 	return parts[0]
 }
 
+// verifiedServiceAccount reports a TokenReview caller whose username names a
+// ServiceAccount. TokenReview also authenticates people the API server signs
+// in itself, through its own OIDC or a webhook; they are not ServiceAccounts.
+func verifiedServiceAccount(ui *UserInfo) bool {
+	return ui != nil && ui.AuthType == AuthTypeTokenReview && parseServiceAccountNamespace(ui.Username) != ""
+}
+
 // NewAuthMiddleware creates a new authentication middleware.
 func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 	var cfg AuthConfig

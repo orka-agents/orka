@@ -1180,6 +1180,55 @@ func TestAHPBackendSwitchesModelsAcrossRuntimesAndBranches(t *testing.T) {
 	require.Contains(t, string(raw), "Switched to gpt-5.4-nano")
 }
 
+// A turn that published records so even when the store refuses the write that
+// records its reply: its end, which is retried until it lands, carries it too,
+// so a later model switch moves to a new branch.
+func TestAHPBackendRecordsAPublicationItsReplyWriteLost(t *testing.T) {
+	gitSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "git-token", Namespace: ahpTestNamespace}, Data: map[string][]byte{"token": []byte("not-a-real-token")}}
+	env := newAHPTestEnv(t, gitSecret)
+	env.backend.sessionRetry = time.Millisecond
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	_, chatSub, err := c.Subscribe(ctx, chat)
+	require.NoError(t, err)
+	alice := ahphost.UserKey("https://issuer.example", "alice")
+	_, err = c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "start", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &record))
+	first := env.waitForTask(record.OrkaSession + "-t1")
+
+	// The write that records the reply, and with it the publication while
+	// the turn is still active, is refused.
+	var refused atomic.Int32
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(r store.AHPRecord) bool {
+		var session ahpSession
+		if json.Unmarshal(r.Value, &session) != nil || !session.Published || session.ActiveTurn == "" {
+			return false
+		}
+		refused.Add(1)
+		return true
+	}}
+	env.backend.store = failing
+	failing.armed.Store(true)
+	first.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	first.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{Branch: record.Branch, State: corev1alpha1.TaskDeliveryStateVerifiedExact}
+	require.NoError(t, env.kube.Status().Update(ctx, first))
+	waitForActionType(t, chatSub, "chat/turnComplete")
+	require.Eventually(t, func() bool {
+		var current ahpSession
+		return env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &current) == nil && current.ActiveTurn == ""
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Positive(t, refused.Load(), "the reply's write was refused")
+	updated := ahpSession{}
+	require.NoError(t, env.backend.getRecord(ctx, alice, ahpRecordSession, ahpTestSession, &updated))
+	require.True(t, updated.Published, "the turn's end records that it published")
+}
+
 func TestAHPBackendRunsMessagesSentDuringATurn(t *testing.T) {
 	env := newAHPTestEnv(t)
 	c := env.connect("alice")
@@ -1984,6 +2033,65 @@ func testAHPRecoveredAnswer(t *testing.T, streamed, answer, want string) {
 	require.Equal(t, want, ahpTurnText(turns[0].ResponseParts))
 	require.NoError(t, env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record))
 	require.Equal(t, answer, record.History[len(record.History)-1].Reply)
+}
+
+// A waiting message whose start could not be shown goes back on the queue,
+// even when the store refuses that at first, and is tried again: nothing else
+// would start it until another turn ends.
+func TestAHPBackendRetriesDrainingAfterAStartItCouldNotShow(t *testing.T) {
+	env := newAHPTestEnv(t)
+	env.backend.sessionRetry = time.Millisecond
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{Issuer: "https://issuer.example", Subject: "alice", Namespace: ahpTestNamespace,
+		UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	key := ahpPendingKey(alice.UserKey, ahpTestSession, "waiting")
+	env.backend.mu.Lock()
+	env.backend.pendingAuth = map[string]ahpPendingSender{key: {principal: alice, version: "v1"}}
+	env.backend.mu.Unlock()
+	require.NoError(t, env.backend.updateSession(ctx, alice.UserKey, ahpTestSession, func(s *ahpSession) {
+		s.Pending = []ahpPending{{ID: "waiting", Kind: string(ahptypes.PendingMessageKindQueued), Version: "v1",
+			Message: ahptypes.Message{Text: "run me", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}}}}
+	}))
+	refusals := &atomic.Int32{}
+	refusals.Store(3)
+	emit := ahpRefusingStartEmitter{Emitter: env.backend.emitterFor(alice), refusals: refusals}
+	// The store also refuses, at first, to put the message back.
+	var restoreRefusals atomic.Int32
+	failing := &ahpFailingStore{AHPStore: env.backend.store, fail: func(record store.AHPRecord) bool {
+		var session ahpSession
+		if json.Unmarshal(record.Value, &session) != nil || len(session.Pending) == 0 {
+			return false
+		}
+		return restoreRefusals.Add(1) <= 2
+	}}
+	env.backend.store = failing
+	failing.armed.Store(true)
+
+	env.backend.runPending(ctx, alice.UserKey, ahpTestSession, emit)
+	require.Eventually(t, func() bool {
+		var tasks corev1alpha1.TaskList
+		return env.kube.List(ctx, &tasks) == nil && len(tasks.Items) == 1
+	}, 5*time.Second, 10*time.Millisecond, "the waiting message runs once its start can be shown")
+	require.LessOrEqual(t, refusals.Load(), int32(0))
+	require.Greater(t, restoreRefusals.Load(), int32(2), "putting the message back was refused, then tried again")
+}
+
+// ahpRefusingStartEmitter refuses to show a turn's start while refusals
+// remain, as a journal that cannot be written.
+type ahpRefusingStartEmitter struct {
+	ahphost.Emitter
+	refusals *atomic.Int32
+}
+
+func (e ahpRefusingStartEmitter) Emit(ctx context.Context, channel string, actions ...ahptypes.StateAction) error {
+	for _, action := range actions {
+		if _, ok := action.Value.(*ahptypes.ChatTurnStartedAction); ok && e.refusals.Add(-1) >= 0 {
+			return errors.New("the journal refused the write")
+		}
+	}
+	return e.Emitter.Emit(ctx, channel, actions...)
 }
 
 // ahpRefusingDeltaEmitter refuses the next text delta while armed, as a

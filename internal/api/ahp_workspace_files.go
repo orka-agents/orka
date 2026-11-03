@@ -111,20 +111,25 @@ func (w *ahpWorkspaces) list(ctx context.Context, pod *corev1.Pod, dir string) (
 }
 
 // stamps reports each file's modification time and size under root, below
-// .git directories excluded, at most ahpWatchFilesMax of them.
+// .git directories excluded, at most ahpWatchFilesMax of them. A root that is
+// a symlink is followed, and its files keep their names under root.
 func (w *ahpWorkspaces) stamps(ctx context.Context, pod *corev1.Pod, root string, recursive bool) (map[string]string, error) {
 	depth := "1"
 	if recursive {
 		depth = "64"
 	}
-	raw, err := w.output(ctx, pod, 4<<20, ahpShell, "-c",
-		ahpInWorkspace+`[ -e "$p" ] || exit 3; find "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%s/%y/%n' -- "$f"; done`,
+	raw, err := w.output(ctx, pod, 4<<20, ahpShell, "-c", ahpInWorkspace+ahpStampsScript,
 		"sh", root, depth, strconv.Itoa(ahpWatchFilesMax))
 	if err != nil {
 		return nil, err
 	}
 	return ahpParseStamps(raw), nil
 }
+
+// ahpStampsScript prints stat's "size/mtime/name" for at most $3 files under
+// $1, to depth $2, once ahpInWorkspace has checked $1. -H follows $1 itself
+// when it is a symlink, to the target checked, and no symlink below it.
+const ahpStampsScript = `[ -e "$p" ] || exit 3; find -H "$1" -maxdepth "$2" -name .git -prune -o -type f -print | head -n "$3" | while IFS= read -r f; do stat -c '%s/%y/%n' -- "$f"; done`
 
 // ahpParseStamps reads stat's "size/mtime/name" lines into each file's stamp.
 // The modification time is stat's %y, with fractional seconds where the

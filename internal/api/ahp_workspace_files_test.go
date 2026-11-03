@@ -161,3 +161,29 @@ func TestAHPStampsSeeASameSecondRewrite(t *testing.T) {
 	require.NoError(t, os.Chtimes(file, second, second.Add(500*time.Millisecond)))
 	require.NotEqual(t, first, stamp())
 }
+
+// A watched symlink inside the workspace is followed to its checked target,
+// and its files are named under the watched path; a symlink below it that
+// leaves the workspace is not followed.
+func TestAHPStampsFollowAWatchedSymlink(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find is not installed")
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret"), []byte("s"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "real", "dir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "real", "dir", "a.txt"), []byte("a"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "real", "dir", "out")))
+	link := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(filepath.Join(root, "real", "dir"), link))
+	out, err := exec.Command("/bin/sh", "-c", ahpInWorkspaceUnder(root)+ahpStampsScript, "sh", link, "64", "10").CombinedOutput()
+	if err != nil && strings.Contains(string(out), "stat") {
+		t.Skip("stat does not take -c here")
+	}
+	require.NoError(t, err, string(out))
+	stamps := ahpParseStamps(out)
+	require.Contains(t, stamps, filepath.Join(link, "a.txt"), string(out))
+	require.Len(t, stamps, 1, "only the watched target's own file: %s", out)
+}

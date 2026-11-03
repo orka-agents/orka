@@ -226,7 +226,12 @@ token. The same operations are available over the API; see the
   does not see them in lists or usage, and cannot continue them with a Task of their own.
   Usage reports keep showing the person their turns' usage after the Tasks are cleaned
   up. Usage that names no requester, such as a chat's in an AHP session, is shown only to
-  ServiceAccounts. ServiceAccounts keep the access RBAC grants them.
+  ServiceAccounts. ServiceAccounts keep the access RBAC grants them. Other Kubernetes
+  identities, such as people the API server signs in through its own OIDC or a webhook,
+  are held to the same privacy and see no one's turns or usage: they carry no Orka issuer
+  and subject to own one. A Task created through the API, CLI or a chat tool cannot
+  continue an AHP session, not even the person's own, since such a Task is not private;
+  continue the session from the AHP client.
 - **Sessions.** A session runs in an Orka Session, which is bound to one runtime profile.
   When the person picks another model, the session moves to a new Orka Session that
   starts with the conversation so far as context. A branch a turn already published

@@ -61,14 +61,16 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 
 // requestTaskCancellation records a cancel request on a Task the caller may
 // operate. A person may cancel only the Tasks they requested; ServiceAccount
-// callers are bounded by the route's Kubernetes permission check.
+// callers are bounded by the route's Kubernetes permission check. A person
+// the API server signs in itself carries no requester identity to match, so
+// cancels nothing.
 func (h *Handlers) requestTaskCancellation(ctx context.Context, ui *UserInfo, task *corev1alpha1.Task) (string, error) {
 	if ui == nil {
 		return "", fiber.NewError(fiber.StatusUnauthorized, "missing authenticated identity")
 	}
 	if person := requesterFromUserInfo(ui); person != nil && !taskRequestedBy(task, person) {
 		return "", fiber.NewError(fiber.StatusForbidden, "only the Task's requester may cancel it")
-	} else if person == nil && ui.AuthType != AuthTypeTokenReview {
+	} else if person == nil && !verifiedServiceAccount(ui) {
 		return "", fiber.NewError(fiber.StatusForbidden, "cancelling a Task requires a verified identity")
 	}
 	reader := h.apiReader

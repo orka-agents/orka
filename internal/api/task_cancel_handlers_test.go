@@ -27,6 +27,8 @@ var (
 	cancelRequester = &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice", Username: "alice"}
 	cancelStranger  = &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob", Username: "bob"}
 	cancelOperator  = &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:ops:operator"}
+	// A person the API server signs in itself, through its own OIDC.
+	cancelKubeUser = &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com", Groups: []string{"system:authenticated"}}
 )
 
 func cancelTestTask(name string, taskType corev1alpha1.TaskType, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
@@ -50,7 +52,7 @@ func setupCancelHandlers(t *testing.T, tasks ...*corev1alpha1.Task) (*Handlers, 
 		builder = builder.WithObjects(task)
 	}
 	h := NewHandlers(HandlersConfig{Client: builder.Build(), ExecutionMode: executionmode.HarnessV2})
-	callers := map[string]*UserInfo{"alice": cancelRequester, "bob": cancelStranger, "operator": cancelOperator}
+	callers := map[string]*UserInfo{"alice": cancelRequester, "bob": cancelStranger, "operator": cancelOperator, "kube-user": cancelKubeUser}
 	app := fiber.New()
 	app.Use(func(c fiber.Ctx) error {
 		if ui := callers[c.Get("X-Test-Caller")]; ui != nil {
@@ -133,6 +135,20 @@ func TestCancelTaskAllowsServiceAccountsWithRBAC(t *testing.T) {
 	}
 	if _, ok := cancelAnnotation(t, h, "queued"); !ok {
 		t.Fatal("cancel annotation missing")
+	}
+}
+
+// TokenReview also authenticates people; only ServiceAccounts are exempt from
+// the requester check.
+func TestCancelTaskRefusesAKubernetesPersonWhoIsNoServiceAccount(t *testing.T) {
+	h, app := setupCancelHandlers(t,
+		cancelTestTask("queued", corev1alpha1.TaskTypeAgent, corev1alpha1.TaskPhasePending))
+
+	if status, _ := postCancel(t, app, "queued", "kube-user"); status != http.StatusForbidden {
+		t.Fatalf("cancel by a Kubernetes person = %d, want 403", status)
+	}
+	if _, ok := cancelAnnotation(t, h, "queued"); ok {
+		t.Fatal("a refused cancel recorded a request")
 	}
 }
 

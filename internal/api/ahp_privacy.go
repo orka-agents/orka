@@ -25,7 +25,8 @@ import (
 // signing in to AHP share a namespace, so the Tasks AHP turns create, and the
 // Orka Sessions those Tasks share, are shown through the API only to that
 // person: anyone else gets 404, as for something that does not exist.
-// ServiceAccounts, which operators use, keep the access RBAC grants them.
+// Verified ServiceAccounts, which operators use, keep the access RBAC grants
+// them.
 
 // ahpNamePrefix starts the name of every Orka Session AHP creates, and so of
 // every Task an AHP turn creates.
@@ -39,15 +40,20 @@ func ahpSessionName(name string) (string, bool) {
 	return name, strings.HasPrefix(name, ahpNamePrefix)
 }
 
-// ahpPerson reports a caller signed in as a person rather than a workload.
+// ahpPerson reports a caller held to AHP privacy: anyone but a verified
+// ServiceAccount. TokenReview also authenticates people the API server signs
+// in itself, through its own OIDC or a webhook; they carry no Orka issuer and
+// subject, so they own no AHP turn and see none.
 func ahpPerson(ui *UserInfo) bool {
-	return ui != nil && (ui.AuthType == AuthTypeOIDC || ui.AuthType == AuthTypeContextToken)
+	return ui != nil && !verifiedServiceAccount(ui)
 }
 
-// ahpOwns reports whether the person sent the turn that created the Task.
+// ahpOwns reports whether the person sent the turn that created the Task. A
+// caller with no issuer and subject owns none.
 func ahpOwns(ui *UserInfo, task *corev1alpha1.Task) bool {
 	requester := task.Spec.RequestedBy
-	return requester != nil && requester.Issuer == ui.Issuer && requester.Subject == ui.Subject
+	return requester != nil && ui.Issuer != "" && ui.Subject != "" &&
+		requester.Issuer == ui.Issuer && requester.Subject == ui.Subject
 }
 
 // ahpTurnTask reports a Task an AHP turn created: labelled so, or, as Tasks
@@ -65,6 +71,23 @@ func ahpTurnTask(task *corev1alpha1.Task) bool {
 	_, ahp := ahpSessionName(ref.Name)
 	return strings.HasPrefix(task.Name, ahpNamePrefix) && ahp && task.Spec.RequestedBy != nil
 }
+
+// ahpSessionContinuation reports a session reference that continues an AHP
+// session. Only AHP's turns and forks of them create Tasks that do, marked
+// private; a Task created any other way is not, so everyone in the namespace
+// could read what the conversation leads it to say. The generic create paths
+// refuse such a Task, even for the session's owner.
+func ahpSessionContinuation(ref *corev1alpha1.SessionReference) bool {
+	if ref == nil {
+		return false
+	}
+	_, ahp := ahpSessionName(ref.Name)
+	return ahp
+}
+
+// errAHPSessionContinuation explains the refusal to the session's owner and to
+// ServiceAccounts; anyone else is told the session does not exist.
+const errAHPSessionContinuation = "a Task cannot continue an AHP session; continue it from the AHP client"
 
 // ahpTaskHidden reports an AHP turn's Task the caller may not see.
 func ahpTaskHidden(ui *UserInfo, task *corev1alpha1.Task) bool {

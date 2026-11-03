@@ -193,6 +193,24 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	require.NoError(t, err, out)
 	require.Equal(t, kept, git(worktree, "rev-parse", "HEAD"), "the unpublished branch is reused as it was")
 
+	// Once the branch is published, a local branch with later commits only
+	// the workspace has keeps them.
+	git(worktree, "push", "--quiet", "origin", "feature")
+	git(worktree, "commit", "--quiet", "--allow-empty", "-m", "local only")
+	local := git(worktree, "rev-parse", "HEAD")
+	git(checkout, "worktree", "remove", "--force", worktree)
+	out, err = script(ahpWorktreeScript, checkout, worktree, "feature", "main")
+	require.NoError(t, err, out)
+	require.Equal(t, local, git(worktree, "rev-parse", "HEAD"), "unpublished commits on a published branch were lost")
+	require.Equal(t, "origin/feature", git(worktree, "rev-parse", "--abbrev-ref", "feature@{upstream}"))
+	// One behind what was published catches up with it.
+	git(worktree, "push", "--quiet", "origin", "feature")
+	git(worktree, "reset", "--quiet", "--hard", "HEAD~1")
+	git(checkout, "worktree", "remove", "--force", worktree)
+	out, err = script(ahpWorktreeScript, checkout, worktree, "feature", "main")
+	require.NoError(t, err, out)
+	require.Equal(t, local, git(worktree, "rev-parse", "HEAD"), "a branch behind what was published did not catch up")
+
 	// Removing a session's worktree keeps one with uncommitted work, and one
 	// whose detached HEAD holds commits no ref has.
 	require.NoError(t, os.WriteFile(filepath.Join(worktree, "draft.txt"), []byte("draft\n"), 0o600))
@@ -217,7 +235,7 @@ func TestAHPCloneAndWorktreeScripts(t *testing.T) {
 	out, err = script(ahpWorktreeRemoveScript, checkout, worktree)
 	require.NoError(t, err, out)
 	require.NoDirExists(t, worktree, "a clean worktree on its branch is removed")
-	require.Equal(t, kept, git(checkout, "rev-parse", "feature"), "its branch stays")
+	require.Equal(t, local, git(checkout, "rev-parse", "feature"), "its branch stays")
 }
 
 // The script runs in the workspace; run it here against real repositories.

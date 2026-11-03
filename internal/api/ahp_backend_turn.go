@@ -63,6 +63,9 @@ const (
 
 // ahpTurn follows one turn's Task and turns its events into chat actions.
 type ahpTurn struct {
+	// published records that the turn pushed its branch, for the write
+	// that ends the turn.
+	published bool
 	b         *ahpBackend
 	principal ahphost.Principal
 	session   ahpSession
@@ -1067,6 +1070,7 @@ func (t *ahpTurn) settle(task *corev1alpha1.Task) {
 	}
 	duration := t.b.now().Sub(t.startedAt).Milliseconds()
 	published := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && ahpDeliveryNote(task) != ""
+	t.published = published
 	reply := strings.TrimSpace(t.reply)
 	logSessionUpdate(t.b.updateSession(t.ctx, t.principal.UserKey, t.session.Session, func(s *ahpSession) {
 		if n := len(s.History); n > 0 && s.History[n-1].Reply == "" {
@@ -1136,10 +1140,13 @@ func (t *ahpTurn) finishSession() {
 	now := ahpNow(t.b)
 	_ = t.emit.Emit(t.ctx, t.session.Session, ahpSessionIdle(t.session.Chat, now)...)
 	// A session still recording the turn refuses every later message, and
-	// nothing else ends it while this process runs.
+	// nothing else ends it while this process runs. The turn's publication
+	// lands with its end: a model switch, which only a later turn makes,
+	// must see that the branch was pushed, or it would continue on it.
 	ended := t.b.updateSessionUntilDone(t.ctx, t.principal.UserKey, t.session.Session, "end the turn", func(s *ahpSession) {
 		if s.ActiveTurn == t.id {
 			s.ActiveTurn, s.ActiveTask, s.ActiveStartedAt = "", "", ""
+			s.Published = s.Published || t.published
 		}
 	})
 	go func() {
@@ -1377,8 +1384,8 @@ func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, em
 	if !b.drainPending(ctx, userKey, session, emit) {
 		return
 	}
-	// The store refused to take a message off the queue, and nothing else
-	// runs it until another turn ends: try again, off the caller.
+	// A message is left waiting, and nothing else runs it until another turn
+	// ends: try again, off the caller.
 	go func() {
 		ctx := context.WithoutCancel(ctx)
 		for delay := b.retryWait(); ; delay = min(2*delay, 32*b.retryWait()) {
@@ -1391,7 +1398,9 @@ func (b *ahpBackend) runPending(ctx context.Context, userKey, session string, em
 }
 
 // drainPending starts the session's waiting messages, as runPending does, and
-// reports whether the store refused to take one off the queue.
+// reports whether one is left waiting that only a retry would start: the
+// store refused to take it off the queue, or its start could not be shown
+// and it went back on.
 func (b *ahpBackend) drainPending(ctx context.Context, userKey, session string, emit ahphost.Emitter) bool {
 	for {
 		var record ahpSession
@@ -1442,13 +1451,27 @@ func (b *ahpBackend) drainPending(ctx context.Context, userKey, session string, 
 				b.pendingAuth[key] = stored
 			}
 			b.mu.Unlock()
-			logSessionUpdate(b.updateSession(ctx, userKey, session, func(s *ahpSession) {
+			// The message is off the stored queue, so putting it back must
+			// not be lost, and once it is back nothing else starts it: try
+			// again, as for a queue the store would not change. A put-back
+			// the store refuses for now drains again once it lands, after the
+			// retry's own wait.
+			restored := b.updateSessionUntilDone(ctx, userKey, session, "put a message back on the queue", func(s *ahpSession) {
 				if !slices.ContainsFunc(s.Pending, func(p ahpPending) bool { return p.ID == next.ID }) {
 					s.Pending = slices.Insert(s.Pending, 0, next)
 				}
-			}), session, "put a message back on the queue")
+			})
 			b.releaseTurn(userKey, session)
-			return false
+			select {
+			case <-restored:
+				return true
+			default:
+				go func() {
+					<-restored
+					b.runPending(context.WithoutCancel(ctx), userKey, session, emit)
+				}()
+				return false
+			}
 		}
 		reason := ""
 		switch {
