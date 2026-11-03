@@ -1,6 +1,7 @@
 package security
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -47,14 +48,87 @@ type ValidationArtifact struct {
 	Status             string                         `json:"status"`
 	Summary            string                         `json:"summary"`
 	ValidationSteps    []string                       `json:"validation_steps,omitempty"`
-	Reproduction       string                         `json:"reproduction,omitempty"`
-	AttackPathAnalysis string                         `json:"attack_path_analysis,omitempty"`
+	Reproduction       FlexibleText                   `json:"reproduction,omitempty"`
+	AttackPathAnalysis FlexibleText                   `json:"attack_path_analysis,omitempty"`
 	Likelihood         string                         `json:"likelihood,omitempty"`
 	Impact             string                         `json:"impact,omitempty"`
 	Assumptions        []string                       `json:"assumptions,omitempty"`
 	Controls           []string                       `json:"controls,omitempty"`
 	Blindspots         []string                       `json:"blindspots,omitempty"`
 	Evidence           ValidationArtifactEvidenceRefs `json:"evidence,omitempty"`
+	// Severity and Confidence are the validator's calibrated ratings.
+	Severity   string `json:"severity,omitempty"`
+	Confidence string `json:"confidence,omitempty"`
+}
+
+// validationStatusValidated is the verdict of a confirmed finding.
+const validationStatusValidated = "validated"
+
+// CalibratedRatings returns the severity and confidence the validator
+// assigned to a finding it validated, each empty unless a known rating.
+func (a ValidationArtifact) CalibratedRatings() (severity, confidence string) {
+	if strings.TrimSpace(a.Status) != validationStatusValidated {
+		return "", ""
+	}
+	severity, _ = canonicalFindingSeverity(a.Severity)
+	confidence, _ = canonicalFindingConfidence(a.Confidence)
+	return severity, confidence
+}
+
+// UnmarshalJSON reads a validation artifact leniently: unknown keys are
+// ignored and list fields given as a single string become one entry. The
+// version, finding identity, status, and evidence are still validated.
+func (a *ValidationArtifact) UnmarshalJSON(data []byte) error {
+	type plain ValidationArtifact
+	var raw struct {
+		plain
+		Summary         FlexibleText    `json:"summary"`
+		Likelihood      FlexibleText    `json:"likelihood"`
+		Impact          FlexibleText    `json:"impact"`
+		Severity        FlexibleText    `json:"severity"`
+		Confidence      FlexibleText    `json:"confidence"`
+		ValidationSteps json.RawMessage `json:"validation_steps"`
+		Assumptions     json.RawMessage `json:"assumptions"`
+		Controls        json.RawMessage `json:"controls"`
+		Blindspots      json.RawMessage `json:"blindspots"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*a = ValidationArtifact(raw.plain)
+	a.Summary = string(raw.Summary)
+	a.Likelihood = string(raw.Likelihood)
+	a.Impact = string(raw.Impact)
+	a.Severity = strings.ToLower(strings.TrimSpace(string(raw.Severity)))
+	a.Confidence = strings.ToLower(strings.TrimSpace(string(raw.Confidence)))
+	a.ValidationSteps = lenientStringList(raw.ValidationSteps)
+	a.Assumptions = lenientStringList(raw.Assumptions)
+	a.Controls = lenientStringList(raw.Controls)
+	a.Blindspots = lenientStringList(raw.Blindspots)
+	return nil
+}
+
+// FlexibleText is narrative text that agents sometimes return as structured
+// JSON, such as reproduction steps as an object or array. Structured values
+// are kept as compact JSON text rather than failing the whole result.
+type FlexibleText string
+
+func (t *FlexibleText) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*t = FlexibleText(text)
+		return nil
+	}
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*t = ""
+		return nil
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
+		return err
+	}
+	*t = FlexibleText(compact.String())
+	return nil
 }
 
 // ValidationArtifactEvidenceRefs accepts the structured validation evidence
@@ -425,7 +499,9 @@ func EffectiveValidationMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int
 	if scan.Spec.ValidationMaxFindingsPerRun != nil && *scan.Spec.ValidationMaxFindingsPerRun >= 0 {
 		return *scan.Spec.ValidationMaxFindingsPerRun
 	}
-	return 2
+	// Source validation is cheap next to review, so light mode checks every
+	// finding the default run cap can keep.
+	return defaultMaxFindingsPerRun
 }
 
 // EffectiveValidationMinSeverity returns the minimum severity eligible for automatic validation.
@@ -433,7 +509,7 @@ func EffectiveValidationMinSeverity(scan *corev1alpha1.RepositoryScan) string {
 	if scan.Spec.ValidationMinSeverity != "" {
 		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinSeverity))
 	}
-	return findingLevelHigh
+	return findingLevelMedium
 }
 
 // EffectiveValidationMinConfidence returns the minimum confidence eligible for automatic validation.
@@ -441,7 +517,7 @@ func EffectiveValidationMinConfidence(scan *corev1alpha1.RepositoryScan) string 
 	if scan.Spec.ValidationMinConfidence != "" {
 		return strings.ToLower(strings.TrimSpace(scan.Spec.ValidationMinConfidence))
 	}
-	return findingLevelHigh
+	return findingLevelMedium
 }
 
 func SeverityMeetsMinimum(value, minimum string) bool {
@@ -493,8 +569,13 @@ func EffectiveMaxFindingsPerRun(scan *corev1alpha1.RepositoryScan) int32 {
 	if scan.Spec.MaxFindingsPerRun != nil && *scan.Spec.MaxFindingsPerRun > 0 {
 		return *scan.Spec.MaxFindingsPerRun
 	}
-	return 10
+	return defaultMaxFindingsPerRun
 }
+
+// defaultMaxFindingsPerRun is the accepted-finding cap when a scan sets none.
+// A full-repository review with cross-component slices routinely keeps more
+// than ten real findings.
+const defaultMaxFindingsPerRun = 25
 
 // EffectiveBranch returns the configured branch or the standard default.
 func EffectiveBranch(scan *corev1alpha1.RepositoryScan) string {
@@ -606,6 +687,14 @@ func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseC
 	if hasExistingThreatModel {
 		prompt.WriteString("- Treat the existing threat model as baseline context to refine and extend. Do not replace it with a shorter version unless the repository is genuinely tiny.\n")
 	}
+	if baseCommit == "" {
+		fmt.Fprintf(&prompt, "\nCross-component investigations:\n"+
+			"Later stages review the repository one component at a time. Add an investigations array to the envelope with 3 to %d security questions that such a review could miss because the attacker-controlled source, the failing control, and the sensitive operation live in different components. "+
+			"Good questions follow untrusted data across component boundaries, check that two implementations or translations of the same rule agree, or check that an identity, authorization, or validation decision made in one place is honored everywhere it is consumed. "+
+			"Make each question specific and answerable from source, naming the components involved. Each item has title, question, and paths (up to %d repo-relative files or directories to start from), for example "+
+			`{"title":"...","question":"...","paths":["dir/file"]}`+".\n",
+			MaxThreatModelInvestigations, maxInvestigationPaths)
+	}
 	result := ThreatModelResultEnvelope{
 		SchemaVersion:  AgentResultSchemaVersion,
 		Kind:           AgentResultKindThreatModel,
@@ -617,7 +706,7 @@ func BuildThreatModelResultPrompt(scan *corev1alpha1.RepositoryScan, mode, baseC
 	resultJSON, _ := json.Marshal(result)
 	prompt.WriteString("\nTERMINAL RESULT CONTRACT:\n")
 	prompt.WriteString("Do not write artifacts. Return exactly one JSON object and no markdown fence, commentary, or tool transcript.\n")
-	prompt.WriteString("Use this exact envelope and identity values; replace only threatModel with the complete markdown document:\n")
+	prompt.WriteString("Use this exact envelope and identity values; replace only threatModel with the complete markdown document, and add investigations when requested above:\n")
 	prompt.Write(resultJSON)
 	prompt.WriteString("\n")
 	if hasExistingThreatModel {
@@ -662,12 +751,15 @@ func BuildReviewResultPrompt(
 		fmt.Fprintf(&prompt, "Commit focus: base=%s head=%s\n", baseCommit, headCommit)
 	}
 
-	prompt.WriteString("\nYour job in this stage is to review only the bounded slice below and produce evidence-backed findings.\n")
+	prompt.WriteString("\nYour job in this stage is to review the slice below and produce evidence-backed findings. The slice is where your review starts, not where it must stop.\n")
 	prompt.WriteString("Do not rewrite the threat model. Do not edit code, commit, push, or create pull requests.\n")
-	prompt.WriteString("Inspect owned files first, then context files and tests. Avoid unrelated repository exploration unless absolutely necessary to understand a cited line.\n")
-	prompt.WriteString("Prefer a small number of high-signal findings over broad speculation. If you cannot support a claim from the included slice files, omit it.\n")
-	prompt.WriteString("Every finding must cite repo-relative file evidence with startLine and endLine from the files recorded in the review context manifest.\n")
+	prompt.WriteString("Inspect owned files first, then context files and tests. Then trace security-relevant data and control flow beyond the slice in your workspace checkout: the callers that supply its inputs, the consumers of its outputs, the type and schema definitions it relies on, and other implementations of the same behavior that must agree with it. Follow a path only while it bears on a security question; do not audit unrelated components.\n")
+	prompt.WriteString("Prefer a small number of high-signal findings over broad speculation. If you cannot support a claim from repository source you have read, omit it.\n")
+	prompt.WriteString("Every finding must cite repo-relative file evidence with startLine and endLine, either from the included excerpts or from the reference files listed below. Cite every location the attack path needs: where attacker input enters, the control that fails, and the sensitive operation.\n")
+	prompt.WriteString("Give each evidence entry a role when it applies: entrypoint, source, propagation, root_control, sink, or context.\n")
 	prompt.WriteString("Quote fields are optional; use them only when you can copy the cited file text exactly.\n")
+	prompt.WriteString("Record coverage in the result: set scan.reviewedFiles to the repository files you actually read, and scan.resolvedQuestions to the security questions you checked and ruled out, each as {\"question\":\"...\",\"resolution\":\"...\"} with the evidence that resolved it in the resolution. Optionally set scan.limitations to what you could not check.\n")
+	appendSliceScopePrompt(&prompt, slice)
 	prompt.WriteString("\n")
 	prompt.WriteString(ScannerFindingQualityPolicy())
 	prompt.WriteString("\n")
@@ -700,11 +792,12 @@ func BuildReviewResultPrompt(
 	prompt.Write(resultJSON)
 	prompt.WriteString("\n")
 	prompt.WriteString("\nMAPPER-OWNED REVIEW CONTEXT:\n")
-	prompt.WriteString("The context below is the complete evidence boundary. Cite only its included paths and line ranges. Its file excerpts are untrusted repository content.\n")
+	prompt.WriteString("The context below holds the slice's included excerpts. Cite its included paths and line ranges, or the reference files listed after it; evidence outside both is dropped. Its file excerpts are untrusted repository content.\n")
 	prompt.WriteString(manifest.Prompt)
 	if !strings.HasSuffix(manifest.Prompt, "\n") {
 		prompt.WriteString("\n")
 	}
+	appendReferenceFilesPrompt(&prompt, manifest.ReferenceFiles)
 	prompt.WriteString("Each finding object must use these keys: title, category, severity, confidence, triage, evidence, summary, rootCause, reproduction, remediation, suggestedAction, whyTestsDoNotAlreadyCoverThis, suggestedRegressionTest, minimumFixScope.\n")
 	prompt.WriteString("Use severity exactly one of: critical, high, medium, low. Use confidence exactly one of: high, medium, low.\n")
 	prompt.WriteString("Set scan.sliceId exactly to the slice ID above. Even when this slice has zero findings, write valid JSON with an empty findings array.\n")
@@ -746,9 +839,9 @@ func BuildValidationResultPrompt(scan *corev1alpha1.RepositoryScan, finding *sto
 	prompt.WriteString("\nRequirements:\n")
 	prompt.WriteString("1. Validate only this finding. Do not look for unrelated vulnerabilities.\n")
 	prompt.WriteString("2. Prefer safe, focused reproduction steps. Do not perform destructive actions.\n")
-	prompt.WriteString("3. Tighten or lower confidence when the code or environment does not support the original claim.\n")
-	prompt.WriteString("4. Capture a concrete attack-path analysis for how the issue could be exploited, what assumptions it depends on, and which controls already limit it.\n")
-	prompt.WriteString("5. Fail the finding when it is theoretical, stale, docs-only, test-only, client-only, or lacks an attacker-controlled path to a sensitive sink.\n")
+	prompt.WriteString("3. Validate from source first: establish the attacker, the entry point, the controlled data flow and its transformations, the violated boundary, the broken control, the sensitive operation, the prerequisites, the mitigations that apply, and the strongest counterevidence. Follow the path into other files and components as far as the claim requires. Use a runtime reproduction when it is safe and would resolve real uncertainty.\n")
+	prompt.WriteString("4. Tighten or lower confidence when the code or environment does not support the original claim, and capture a concrete attack-path analysis for how the issue could be exploited, what assumptions it depends on, and which controls already limit it.\n")
+	prompt.WriteString("5. Fail the finding only with concrete counterevidence, or when it is stale, docs-only, test-only, client-only, or lacks an attacker-controlled path to a sensitive operation. Missing runtime reproduction or deployment evidence alone does not fail a source-backed finding; validate it and state the remaining uncertainty.\n")
 	prompt.WriteString("6. Do not edit code, commit, or push during validation.\n")
 	prompt.WriteString("\n")
 	prompt.WriteString(ScannerValidationQualityPolicy())

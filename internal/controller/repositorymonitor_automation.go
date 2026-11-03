@@ -17,10 +17,25 @@ const repositoryMonitorControllerPolicySource = "controller_policy"
 
 const repositoryMonitorWorkflowPollInterval = 30 * time.Second
 
+// repositoryMonitorRunTriggerWorkflow marks runs the controller queues itself.
+const repositoryMonitorRunTriggerWorkflow = "workflow"
+
+// repositoryMonitorEventRepairRefused records why an automatic repair did not start.
+const repositoryMonitorEventRepairRefused = "repair_refused"
+
 // Repair.Enabled is the repository administrator's authorization for bounded
 // automatic repair. A controller policy action is never recorded as a human.
+// Repair labels narrow it to labelled pull requests; the account that added
+// the label is checked before each new repair.
 func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, owner, repo string, pr repositoryMonitorPullRequest, item *store.MonitorItem) (bool, error) {
-	if !monitor.Spec.Repair.Enabled || run.CommandEventID != "" || pr.Draft || pr.HeadSHA == "" || !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), owner+"/"+repo) {
+	if !monitor.Spec.Repair.Enabled || run.CommandEventID != "" || pr.Draft || pr.HeadSHA == "" {
+		return false, nil
+	}
+	full, ciOnly, labelled := repositoryMonitorPullRequestRepairScope(monitor.Spec, pr)
+	if !full && !ciOnly {
+		return false, nil
+	}
+	if _, reason := repositoryMonitorRepairRepository(monitor, owner+"/"+repo, pr); reason != "" {
 		return false, nil
 	}
 	if repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels) != "" || item.SkipReason == repositoryMonitorIssueSkipStoppedByCommand || item.LastVerdict == repositoryMonitorRunPhaseQueued {
@@ -29,32 +44,29 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	if item.RepairState == repositoryMonitorRepairPhaseQueued {
 		return true, nil
 	}
-	intent := ""
-	if pr.MergeableState == repositoryMonitorMergeableStateDirty {
-		intent = repositoryMonitorCommandIntentUpdateBranch
-	} else {
-		if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
-			return false, nil
-		}
-		ci, err := r.repositoryMonitorCheckCI(ctx, monitor, pr.HeadSHA)
+	// A repair label runs a review-fix loop: each head is reviewed, its
+	// findings are fixed first, and CI is fixed once the review has nothing to fix.
+	reviewFirst := full && labelled
+	ciFirst := false
+	if reviewFirst {
+		// The review must still be current: a stale or pre-validation review
+		// of this head is not a reason to change it.
+		fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, pr.HeadSHA)
 		if err != nil {
 			return false, err
 		}
-		if ci.reason == repositoryMonitorCINotGreen {
-			intent = repositoryMonitorCommandIntentFixCI
-		}
-		if intent == "" && item.LastVerdict == repositoryMonitorReviewVerdictNeedsChanges && item.LastReviewedHeadSHA == pr.HeadSHA && item.LastReviewID != "" {
-			review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
-			if err != nil {
-				return false, err
+		if !fresh {
+			// requireGreenCI holds the review until CI passes, so waiting for
+			// the review would never end; fix the CI the pull request broke first.
+			if !monitor.Spec.Review.RequireGreenCI {
+				return false, nil
 			}
-			if review.HeadSHA == pr.HeadSHA && review.Repairable {
-				intent = repositoryMonitorCommandIntentFix
-			}
+			ciFirst = true
 		}
 	}
-	if intent == "" {
-		return false, nil
+	intent, err := r.repositoryMonitorAutomaticRepairIntent(ctx, monitor, pr, item, full, reviewFirst, ciFirst)
+	if err != nil || intent == "" {
+		return false, err
 	}
 	// The policy helper counts durable attempts, including commands exhausted
 	// before Task creation, before another command identity can be created.
@@ -63,13 +75,20 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 		return false, err
 	}
 	if reason != "" {
-		item.RepairState = repositoryMonitorRepairPhaseFailed
-		item.SkipReason = reason
-		return true, r.Store.UpsertMonitorItem(ctx, item)
+		return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, reason)
 	}
 	id := "policy-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d|%s|%s|%d|%d", monitor.UID, monitor.Generation, pr.Number, pr.HeadSHA, intent, prCount, headCount))
 	command, err := r.Store.GetCommandEvent(ctx, monitor.Namespace, id)
 	if errors.Is(err, store.ErrNotFound) {
+		if labelled {
+			permitted, err := r.repositoryMonitorRepairLabelActorPermitted(ctx, monitor, owner, repo, pr, repositoryMonitorRepairLabels(monitor.Spec, full))
+			if err != nil {
+				return false, err
+			}
+			if !permitted {
+				return r.refuseRepositoryMonitorAutomaticRepair(ctx, monitor, run, pr, item, repositoryMonitorRepairSkipLabelActorNotPermitted)
+			}
+		}
 		now := time.Now()
 		command = &store.CommandEvent{ID: id, CommentID: id, DedupeKey: id, IdempotencyKey: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, MonitorGeneration: monitor.Generation, Repo: owner + "/" + repo, Kind: repositoryMonitorPullRequestKind, Number: pr.Number, Source: repositoryMonitorControllerPolicySource, Author: repositoryMonitorControllerActor, Permission: "repository_repair_policy", Intent: intent, Command: intent, HeadSHA: pr.HeadSHA, Status: repositoryMonitorCommandAccepted, CreatedAt: now}
 		if err := r.Store.CreateCommandEvent(ctx, command); err != nil {
@@ -89,6 +108,62 @@ func (r *RepositoryMonitorReconciler) tryRepositoryMonitorAutomaticRepair(ctx co
 	}
 	item.RepairState = repositoryMonitorRepairPhaseQueued
 	return true, r.Store.UpsertMonitorItem(ctx, item)
+}
+
+// repositoryMonitorAutomaticRepairIntent picks the repair for the pull
+// request's head, or "" for none. A full repair of a dirty head updates the
+// branch. Otherwise a repair label fixes the review's findings before CI, and
+// automatic repair fixes CI first. ciFirst allows only a CI fix, for a head
+// whose review waits for green CI.
+func (r *RepositoryMonitorReconciler) repositoryMonitorAutomaticRepairIntent(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full, reviewFirst, ciFirst bool) (string, error) {
+	// An exhaustive review of this head must finish its passes before any
+	// repair moves the head.
+	if pending, err := r.repositoryMonitorHeadExhaustivePassPending(ctx, monitor, pr); err != nil || pending {
+		return "", err
+	}
+	if full && !ciFirst && pr.MergeableState == repositoryMonitorMergeableStateDirty {
+		return repositoryMonitorCommandIntentUpdateBranch, nil
+	}
+	if monitor.Spec.Agents.Repairer == nil || strings.TrimSpace(monitor.Spec.Agents.Repairer.Name) == "" {
+		return "", nil
+	}
+	if reviewFirst && !ciFirst {
+		fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+		if err != nil {
+			return "", err
+		}
+		if fix {
+			return repositoryMonitorCommandIntentFix, nil
+		}
+	}
+	broke, err := r.repositoryMonitorPullRequestBrokeCI(ctx, monitor, pr)
+	if err != nil {
+		return "", err
+	}
+	if broke {
+		return repositoryMonitorCommandIntentFixCI, nil
+	}
+	if reviewFirst {
+		return "", nil
+	}
+	fix, err := r.repositoryMonitorReviewFindingsRepairable(ctx, monitor, pr, item, full)
+	if err != nil || !fix {
+		return "", err
+	}
+	return repositoryMonitorCommandIntentFix, nil
+}
+
+// repositoryMonitorReviewFindingsRepairable reports whether a full repair can
+// fix the findings of the pull request head's latest review.
+func (r *RepositoryMonitorReconciler) repositoryMonitorReviewFindingsRepairable(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, pr repositoryMonitorPullRequest, item *store.MonitorItem, full bool) (bool, error) {
+	if !full || item.LastVerdict != repositoryMonitorReviewVerdictNeedsChanges || item.LastReviewedHeadSHA != pr.HeadSHA || item.LastReviewID == "" {
+		return false, nil
+	}
+	review, err := r.Store.GetReviewRecord(ctx, monitor.Namespace, item.LastReviewID)
+	if err != nil {
+		return false, err
+	}
+	return review.HeadSHA == pr.HeadSHA && review.Repairable, nil
 }
 
 // Polling advances CI and review/repair outcomes even when GitHub emits no new
@@ -138,12 +213,56 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorWorkflowPoll(ctx con
 		cursor = next
 	}
 	id := "workflow-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, now.Unix()/30))
-	if err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}); err != nil && !errors.Is(err, store.ErrConflict) {
+	if err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, Phase: repositoryMonitorRunPhaseQueued, StartedAt: now}); err != nil && !errors.Is(err, store.ErrConflict) {
 		return err
 	}
 	return nil
 }
 
+// queueRepositoryMonitorExhaustivePass queues a run for the next exhaustive
+// pass on record's head when no workflow poll would: a review-only monitor
+// otherwise waits for an unrelated event or schedule. The run ID is derived
+// from the record, so a repeated ingestion queues it once.
+func (r *RepositoryMonitorReconciler) queueRepositoryMonitorExhaustivePass(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.ReviewRecord) error {
+	if repositoryMonitorSuspended(monitor) || repositoryMonitorManagedWorkflow(monitor) {
+		return nil
+	}
+	id := "exhaustive-" + repositoryMonitorShortHash(monitor.Namespace+"/"+monitor.Name+"|"+record.ID)
+	run := &store.MonitorRun{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: record.Number, TargetSHA: record.HeadSHA, Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now()}
+	if err := r.Store.CreateMonitorRun(ctx, run); err != nil && !errors.Is(err, store.ErrConflict) {
+		return err
+	}
+	return nil
+}
+
+// refuseRepositoryMonitorAutomaticRepair records why no repair starts. A
+// refusal starts no work, so a reviewed pull request whose head has no current
+// review goes on to review selection instead of repeating the refusal every
+// poll; otherwise the refusal handles the pull request for this poll.
+func (r *RepositoryMonitorReconciler) refuseRepositoryMonitorAutomaticRepair(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, pr repositoryMonitorPullRequest, item *store.MonitorItem, reason string) (bool, error) {
+	item.RepairState = repositoryMonitorRepairPhaseFailed
+	item.SkipReason = reason
+	// Review selection may replace the item's skip reason, so the refusal is
+	// also kept as an event, once per head and reason rather than every poll.
+	summary := fmt.Sprintf("Pull request #%d automatic repair refused: %s", pr.Number, reason)
+	recent, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: pr.Number, EventType: repositoryMonitorEventRepairRefused, Limit: 1})
+	if err != nil {
+		return false, err
+	}
+	if len(recent) == 0 || recent[0].ItemSHA != pr.HeadSHA || recent[0].Summary != summary {
+		if err := r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorPullRequestKind, pr.Number, pr.HeadSHA, repositoryMonitorEventRepairRefused, summary, map[string]any{eventReasonField: reason}); err != nil {
+			return false, err
+		}
+	}
+	if repositoryMonitorPullRequestReviewed(monitor.Spec, pr) {
+		fresh, err := r.repositoryMonitorReviewedHeadFresh(ctx, monitor, item, pr.HeadSHA)
+		if err != nil || !fresh {
+			return false, err
+		}
+	}
+	return true, r.Store.UpsertMonitorItem(ctx, item)
+}
+
 func repositoryMonitorManagedWorkflow(monitor *corev1alpha1.RepositoryMonitor) bool {
-	return monitor.Spec.Review.Publish.Enabled || monitor.Spec.Repair.Enabled || (monitor.Spec.Targets.Issues.Enabled && monitor.Spec.Agents.Implementer != nil && (monitor.Spec.IssueWorkflow.Implementation.Enabled == nil || *monitor.Spec.IssueWorkflow.Implementation.Enabled))
+	return monitor.Spec.Review.Publish.Enabled || monitor.Spec.Repair.Enabled || repositoryMonitorIssueImplementationEnabled(monitor.Spec)
 }

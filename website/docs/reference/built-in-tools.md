@@ -18,7 +18,9 @@ Native `type: ai` Tasks run Orka's AI worker, which builds its tool list from th
    [core tool](#core-tools), an [opt-in GitHub tool](#github-tools), or a custom
    [`Tool`](resources.md#tool) resource.
 2. **Tools Orka adds automatically.**
-   - Every `type: ai` Task gets the [memory tools](#memory-tools).
+   - Every native `type: ai` Task gets the [memory tools](#memory-tools) for this warning
+     release. The next release will require coordination or explicit selection; see
+     [migration and release notes](../operations/upgrading.md#memory-tool-opt-in).
    - An Agent with `coordination.enabled: true` gets the [coordination tools](#coordination-tools),
      the [GitHub pull request tools](#github-tools), [agent management](#agent-management-tools),
      and `update_plan`. With `coordination.autonomous: true` it also gets `request_approval`.
@@ -26,8 +28,9 @@ Native `type: ai` Tasks run Orka's AI worker, which builds its tool list from th
      on a built-in coding-agent runtime.
    - A Task that came in through a [gateway](../guides/gateways.md) can get `reply_in_conversation`.
 3. **Nothing else.** The annotation `orka.ai/disable-coordination-tool-injection: "true"` on a
-   Task turns off the automatic coordination, approval, and child-messaging tools. Memory tools
-   stay, and tools you selected explicitly still apply.
+   Task turns off the automatic coordination, approval, and child-messaging tools.
+   Memory tools remain available during this warning release, and explicitly selected tools
+   still apply. The next release will also suppress automatic memory tools with this annotation.
 
 Coding-agent Tasks (`type: agent`) use their CLI's own tools, such as `Read`, `Grep`, and
 `Bash`, controlled by the Agent's `runtime.defaultAllowedTools` and the Task's
@@ -54,8 +57,13 @@ endpoints also offer the first five to clients.
 
 ## Memory tools
 
-Every `type: ai` Task receives these. `remember` and `propose_memory` create proposals for a
-person to review; they never change durable memory directly. See [Memory](../concepts/memory.md).
+Every native `type: ai` Task receives these during the warning release, regardless of
+its selected tools or coordination settings. Calls relying on this compatibility access
+emit deprecation warnings. The next release will require explicit Agent/Task selection or
+coordination with automatic injection enabled; see
+[migration and release notes](../operations/upgrading.md#memory-tool-opt-in).
+`remember` and `propose_memory` create proposals for a person to review; they never change
+durable memory directly. See [Memory](../concepts/memory.md).
 
 | Tool | Description | Parameters |
 |------|-------------|------------|

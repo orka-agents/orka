@@ -9,6 +9,19 @@ This page covers how to run Orka: Helm values, controller flags, environment var
 authentication settings, and metrics. The custom resources you create — Tasks, Agents,
 Providers, Tools, and the rest — are in the [Resource reference](resources.md).
 
+## Memory tools: warning release
+
+Every controller-launched native `type: ai` Task receives `recall_memory`, `remember`,
+`propose_memory`, and `search_transcript` during this warning release, regardless of
+selected tools or `coordination.enabled`. They cannot yet be disabled per Agent, including
+with `enabled: false` or `orka.ai/disable-coordination-tool-injection: "true"`.
+
+Calls relying on compatibility access emit deprecation warnings. The next release will
+require explicit Agent/Task selection or eligible coordination. See
+[migration and release notes](../operations/upgrading.md#memory-tool-opt-in).
+The worker exposes memory tools only when `ORKA_CONTROLLER_URL`, `ORKA_TASK_NAMESPACE`,
+and `ORKA_TASK_NAME` are all nonempty; registration alone does not enable them.
+
 ## Helm chart
 
 Key configuration values for the Helm chart. Published charts use release image
@@ -41,6 +54,9 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.claudeImage` | release image tag | Claude ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.copilotImage` | release image tag | GitHub Copilot ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.opencodeImage` | release image tag | OpenCode ACP image tag or digest; an empty string disables it. |
+| `controller.acpRuntime.pool.maxRunningPrompts` | `4` | Concurrent prompts in each new built-in runtime RuntimePool, such as repository scan review slices for one Agent. Cannot exceed `maxResidentSessions`. Existing pools keep their capacity. |
+| `controller.acpRuntime.pool.maxResidentSessions` | `10` | Resident RuntimeSessions in each new built-in runtime RuntimePool (1-1000). |
+| `controller.acpRuntime.dispatch.maxConcurrentTasks` | `4` | Agent Tasks the controller runs through ACP runtimes at once, across all RuntimePools (1-1000). Raise it with `pool.maxRunningPrompts`: each running prompt holds one place. A coordinator waiting on ACP child Tasks keeps its place, so keep this above the number of coordinators that can wait at once. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
 | `controller.acpRuntime.toolboxes.enabled` | `false` | Let built-in Agents declare `runtime.toolboxes`, read-only tool images bound into runtime Pods. See [Toolboxes](../guides/toolboxes.md). |
 | `controller.acpRuntime.toolboxes.allowedRegistries` | `[]` | Registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing. |
@@ -431,6 +447,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
+| `--acp-runtime-pool-max-running-prompts` | `4` | Concurrent prompts in each new built-in runtime RuntimePool; cannot exceed `--acp-runtime-pool-max-resident-sessions`. |
+| `--acp-runtime-pool-max-resident-sessions` | `10` | Resident RuntimeSessions in each new built-in runtime RuntimePool (1-1000). |
+| `--acp-dispatch-max-concurrent-tasks` | `4` | Agent Tasks the controller runs through ACP runtimes at once, across all RuntimePools (1-1000). Each running prompt holds one place, so pool capacity above this value is not used. A coordinator Task waiting on ACP child Tasks keeps its place, so keep this above the number of coordinators that can wait at once. |
 | `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `""` | Approved provider-proxy namespace selector. The Helm chart uses its release namespace when the proxy is enabled. |
 | `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |
 | `--acp-provider-proxy-pod-labels` / `ORKA_ACP_PROVIDER_PROXY_POD_LABELS` | `orka.ai/network-role=provider-auth-proxy` | Exact Pod labels selected by RuntimePool egress policy. |
@@ -443,6 +462,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--browser-worker-image` / `ORKA_BROWSER_WORKER_IMAGE` | `""` | Browser worker image the chat prompt points browser container tasks at, with guidance on when to use one. Empty leaves that guidance out. The Helm chart sets it from `workers.browser.image`. |
 | `--browser-live-view` | `false` | Stream a view-only screencast of running Tasks on `--browser-worker-image` to the dashboard, for people who can read the Task's artifacts. Frames stay in controller memory and are never stored. Requires `--browser-worker-image`. |
 | `--container-task-runtime-classes` / `ORKA_CONTAINER_TASK_RUNTIME_CLASSES` | `""` | Comma-separated RuntimeClass names that `create_container_task` may set as `execution.runtimeClassName`. Empty refuses the field. Invalid names fail startup. |
+| `--session-loader-image` | Digest-pinned BusyBox 1.37 multi-platform index | Session transcript fetcher image. Requires a SHA256 digest and BusyBox-compatible `sh`, `cat`, `wget`, `rm`, `mv`, and `sleep`; tag-only references fail startup. Helm: `workers.sessionLoader.image.repository` and `.digest`. No registry resolution is performed. |
 | `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
 | `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |
 | `--ai-worker-service-account-name` | `orka-ai-worker` | ServiceAccount name for AI worker Jobs and dynamically ensured worker RBAC |
