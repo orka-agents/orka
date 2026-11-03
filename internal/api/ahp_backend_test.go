@@ -1384,10 +1384,25 @@ func TestAHPBackendRecoveryEndsATurnThatNeverStarted(t *testing.T) {
 	delete(env.backend.recovered, alice.UserKey)
 	env.backend.mu.Unlock()
 
-	env.backend.recoverTurns(ctx, alice)
-	state, err = ahphost.ChannelState(ctx, env.backend.store, alice.UserKey, chat)
-	require.NoError(t, err)
-	require.Nil(t, state.Chat.ActiveTurn, "the turn that never started is ended")
+	// The host lists agents, and so recovers, while it holds the user's lock:
+	// a client subscribing to the root after the restart starts recovery,
+	// and must not wait on the turn's end, which the host emits under that
+	// same lock.
+	subscribed := make(chan error, 1)
+	go func() {
+		_, _, err := c.Subscribe(ctx, ahptypes.RootResourceURI)
+		subscribed <- err
+	}()
+	select {
+	case err := <-subscribed:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("subscribing to the root after a restart waited on recovery")
+	}
+	require.Eventually(t, func() bool {
+		state, err = ahphost.ChannelState(ctx, env.backend.store, alice.UserKey, chat)
+		return err == nil && state.Chat.ActiveTurn == nil
+	}, 5*time.Second, 10*time.Millisecond, "the turn that never started is ended")
 	var tasks corev1alpha1.TaskList
 	require.NoError(t, env.kube.List(ctx, &tasks))
 	require.Empty(t, tasks.Items)

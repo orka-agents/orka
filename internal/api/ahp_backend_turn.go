@@ -1205,13 +1205,20 @@ func (b *ahpBackend) recoverTurns(ctx context.Context, principal ahphost.Princip
 			continue
 		}
 		if record.ActiveTurn == "" {
-			b.endUnstartedTurn(ctx, principal, record)
-			// A message queued while the session was idle can be left behind
-			// when the previous leader stopped before running it. Run what
-			// waits: a message whose sender is gone is reported and dropped.
-			if len(record.Pending) > 0 {
-				go b.runPending(context.WithoutCancel(ctx), principal.UserKey, record.Session, b.emitterFor(principal))
-			}
+			// The host lists agents, and so recovers, while it holds the
+			// user's lock, which ending a turn emits through: end it, and run
+			// what waits, off the caller.
+			go func() {
+				ctx := context.WithoutCancel(ctx)
+				b.endUnstartedTurn(ctx, principal, record)
+				// A message queued while the session was idle can be left
+				// behind when the previous leader stopped before running it.
+				// Run what waits: a message whose sender is gone is reported
+				// and dropped.
+				if len(record.Pending) > 0 {
+					b.runPending(ctx, principal.UserKey, record.Session, b.emitterFor(principal))
+				}
+			}()
 			continue
 		}
 		started, _ := time.Parse(time.RFC3339Nano, record.ActiveStartedAt)
