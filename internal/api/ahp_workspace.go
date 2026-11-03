@@ -634,7 +634,9 @@ git merge --quiet --ff-only "origin/$2"`, "sh", ahpWorktreePath(project, record.
 	if err != nil || changed == nil || w.b.emitterFor == nil {
 		return
 	}
-	// What the branch now holds replaces what the turns reported.
+	// What the branch now holds replaces what the turns reported. Its files
+	// are shown redacted for the person's git tokens, as the workspace's are.
+	ahpRedactGitChanges(changed, w.tokensFor(principal.UserKey))
 	changes := &ahpChanges{b: w.b, ctx: ctx, principal: principal, session: record, emit: w.b.emitterFor(principal)}
 	changes.sync(changed)
 }
