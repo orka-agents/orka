@@ -122,6 +122,26 @@ func TestCreateContainerTaskTool_AppliesBrowserTaskSpecArgs(t *testing.T) {
 	}
 }
 
+// Kubelet expands $(NAME) and collapses $$ in EnvVar.Value, so the Task must
+// store escaped values for the container to receive the literal ones.
+func TestCreateContainerTaskTool_EscapesEnvExpansion(t *testing.T) {
+	args := `{` + containerSpecArgsBase + `,"env":[{"name":"REF","value":"$(HOME)"},{"name":"MIXED","value":"a$$b $PATH $"}]}`
+	for _, path := range containerSpecArgsPaths() {
+		t.Run(path.name, func(t *testing.T) {
+			result, fc := path.run(t, nil, args)
+			expectContainerTaskSuccess(t, result)
+			created := createdContainerTasks(t, fc)
+			if len(created) != 1 {
+				t.Fatalf("created %d container tasks, want 1", len(created))
+			}
+			wantEnv := []corev1.EnvVar{{Name: "REF", Value: "$$(HOME)"}, {Name: "MIXED", Value: "a$$$$b $$PATH $$"}}
+			if fmt.Sprint(created[0].Spec.Env) != fmt.Sprint(wantEnv) {
+				t.Errorf("env = %v, want %v", created[0].Spec.Env, wantEnv)
+			}
+		})
+	}
+}
+
 func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 	manyEnv := make([]string, maxContainerTaskEnvVars+1)
 	for i := range manyEnv {
@@ -142,6 +162,14 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 	for i := range 17 {
 		name := strings.Repeat("A", maxContainerTaskEnvNameBytes-4) + fmt.Sprintf("_%02d", i)
 		largeSecretEnv = append(largeSecretEnv, fmt.Sprintf(`{"name":"%s","valueFrom":{"secretKeyRef":{"name":"s","key":"k"}}}`, name))
+	}
+	// Values under the raw total that pass it once JSON-encoded or once every
+	// $ is escaped for kubelet expansion.
+	controlEnv := make([]string, 16)
+	dollarEnv := make([]string, 16)
+	for i := range controlEnv {
+		controlEnv[i] = fmt.Sprintf(`{"name":"CTL_%d","value":"%s"}`, i, strings.Repeat(`\u0001`, 5000))
+		dollarEnv[i] = fmt.Sprintf(`{"name":"DOLLAR_%d","value":"%s"}`, i, strings.Repeat("$", 9000))
 	}
 	tests := []struct {
 		name      string
@@ -173,6 +201,8 @@ func TestCreateContainerTaskTool_RejectsInvalidSpecArgs(t *testing.T) {
 		{name: "unknown resources key", fragment: `"resources":{"limit":{"cpu":"1"}}`, mention: `"limit"`},
 		{name: "env too large in total", fragment: `"env":[` + strings.Join(largeEnv, ",") + `]`, mention: "in total"},
 		{name: "env too large in total with Secret-backed names", fragment: `"env":[` + strings.Join(largeSecretEnv, ",") + `]`, mention: "in total"},
+		{name: "env too large once JSON-encoded", fragment: `"env":[` + strings.Join(controlEnv, ",") + `]`, mention: "in total"},
+		{name: "env too large once escaped", fragment: `"env":[` + strings.Join(dollarEnv, ",") + `]`, mention: "in total"},
 		{name: "negative quantity", fragment: `"resources":{"requests":{"memory":"-1Gi"}}`, mention: "resources.requests.memory"},
 		{name: "request above limit", fragment: `"resources":{"requests":{"cpu":"4"},"limits":{"cpu":"2"}}`, mention: "resources.requests.cpu"},
 		{name: "too many retries", fragment: `"retryPolicy":{"maxRetries":6}`, mention: "maxRetries"},
