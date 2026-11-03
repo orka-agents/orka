@@ -22,6 +22,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/protectedset"
@@ -450,5 +451,64 @@ func TestHandlePendingFailsMarkedContainerTask(t *testing.T) {
 	var jobs batchv1.JobList
 	if err := r.List(ctx, &jobs); err != nil || len(jobs.Items) != 0 {
 		t.Fatalf("marked container Task created Jobs: %d, err=%v", len(jobs.Items), err)
+	}
+}
+
+// A marked schedule is failed before it creates children, because scheduled
+// children do not carry the improvement role.
+func TestHandlePendingFailsMarkedScheduledTask(t *testing.T) {
+	ctx := context.Background()
+	for name, spec := range map[string]corev1alpha1.TaskSpec{
+		"agent":     {Type: corev1alpha1.TaskTypeAgent, Prompt: "improve", Schedule: "*/5 * * * *"},
+		"container": {Type: corev1alpha1.TaskTypeContainer, Image: "docker.io/library/busybox:1.36", Command: []string{"true"}, Schedule: "*/5 * * * *"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "marked-scheduled-" + name, Namespace: "default", UID: types.UID("marked-scheduled-" + name), Generation: 1,
+					Annotations: map[string]string{labels.AnnotationImprovementRole: labels.ImprovementRoleProposer},
+				},
+				Spec:   spec,
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+			}
+			r := newUnitReconciler(newTestScheme(), task)
+			if _, err := r.handlePending(ctx, task); err != nil {
+				t.Fatal(err)
+			}
+			current := &corev1alpha1.Task{}
+			if err := r.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: task.Name}, current); err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(current.Status.Message, string(proposerConstraintViolationReason)) {
+				t.Fatalf("marked scheduled Task: phase=%s message=%q, want a proposer constraint failure", current.Status.Phase, current.Status.Message)
+			}
+			var tasks corev1alpha1.TaskList
+			if err := r.List(ctx, &tasks); err != nil || len(tasks.Items) != 1 {
+				t.Fatalf("marked scheduled Task created children: %d Tasks, err=%v", len(tasks.Items), err)
+			}
+		})
+	}
+}
+
+// Codex enforces only an unrestricted native policy under write intent, and
+// that policy includes its native web tools, which a proposer must not hold.
+// No tool list satisfies both, so a write-intent Codex proposer never runs.
+func TestWriteIntentCodexProposerIsRefused(t *testing.T) {
+	codex := string(corev1alpha1.AgentRuntimeCodex)
+	unrestricted := acp.BuiltInRuntimeNativeToolNames(codex)
+	if err := validateACPProviderNativePolicy(codex, corev1alpha1.WorkspaceIntentWrite, unrestricted, nil, true); err != nil {
+		t.Fatalf("unrestricted codex write policy rejected: %v", err)
+	}
+	var withoutWeb []string
+	for _, name := range unrestricted {
+		if proposerAllowedToolName(name) {
+			withoutWeb = append(withoutWeb, name)
+		}
+	}
+	if len(withoutWeb) == len(unrestricted) {
+		t.Fatal("the unrestricted codex tool list passed the proposer tool check")
+	}
+	if err := validateACPProviderNativePolicy(codex, corev1alpha1.WorkspaceIntentWrite, withoutWeb, nil, true); err == nil {
+		t.Fatal("codex accepted a write policy without its native web tools; revisit the proposer web restriction")
 	}
 }

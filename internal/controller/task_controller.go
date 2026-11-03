@@ -759,6 +759,12 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return r.handleTransactionTokenPending(ctx, task)
 	}
 
+	// Scheduled children do not inherit the improvement role, so a marked
+	// schedule would run its children without proposer constraints.
+	if role := taskImprovementRole(task.Annotations); role != "" && task.Spec.Schedule != "" {
+		return r.failTask(ctx, task, fmt.Sprintf("%s: a Task with improvement role %q cannot be scheduled", proposerConstraintViolationReason, role))
+	}
+
 	// Scheduled parent Tasks own a recurring fire-time lifecycle; per-run timeout
 	// enforcement begins on the generated child Task rather than at parent creation.
 	if task.Spec.Schedule != "" {
