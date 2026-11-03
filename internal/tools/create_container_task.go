@@ -475,8 +475,9 @@ const (
 	// maxContainerTaskEnvNameBytes keeps every NAME=value entry far below
 	// Linux's 128 KiB limit on a single environment string.
 	maxContainerTaskEnvNameBytes = 1 << 10
-	// maxContainerTaskEnvTotalBytes keeps the Task object well inside the
-	// API server's request limit (1.5 MiB by default on etcd).
+	// maxContainerTaskEnvTotalBytes bounds env names and values as the Task
+	// stores them (escaped and JSON-encoded), leaving most of etcd's default
+	// 1.5 MiB request limit for the rest of the Task.
 	maxContainerTaskEnvTotalBytes     = 256 << 10
 	maxContainerTaskRetries           = 5
 	minContainerTaskBackoffMultiplier = 1
@@ -579,10 +580,6 @@ func parseContainerTaskEnvArg(a map[string]any) ([]corev1.EnvVar, string, bool) 
 			return nil, r, false
 		}
 		seen[name] = true
-		if total += len(name); total > maxContainerTaskEnvTotalBytes {
-			r := containerTaskArgError(fmt.Sprintf("env is more than %d bytes in total", maxContainerTaskEnvTotalBytes), "Pass less through env: read large inputs from a file in the image or workspace")
-			return nil, r, false
-		}
 		value := chatGetStringArg(entry, valueField)
 		if len(value) > maxContainerTaskEnvValueBytes {
 			r := containerTaskArgError(fmt.Sprintf("env[%d].value is %d bytes; at most %d are allowed", i, len(value), maxContainerTaskEnvValueBytes), "Write large inputs to a file in the image or workspace instead")
@@ -592,16 +589,33 @@ func parseContainerTaskEnvArg(a map[string]any) ([]corev1.EnvVar, string, bool) 
 			r := containerTaskArgError(fmt.Sprintf("env[%d].value contains a NUL byte", i), "Environment values cannot hold NUL; encode binary data, for example with base64")
 			return nil, r, false
 		}
-		if total += len(value); total > maxContainerTaskEnvTotalBytes {
-			r := containerTaskArgError(fmt.Sprintf("env is more than %d bytes in total", maxContainerTaskEnvTotalBytes), "Pass less through env: read large inputs from a file in the image or workspace")
+		// Kubelet expands $(NAME) and collapses $$ in EnvVar.Value. Doubling
+		// every $ makes the container receive exactly the literal value, and
+		// expansion can then only shrink the stored value back to that literal.
+		stored := strings.ReplaceAll(value, "$", "$$")
+		// Budget what the Task stores: JSON escaping can turn one byte into
+		// six, so decoded lengths would understate the object's size.
+		if total += jsonStringBytes(name) + jsonStringBytes(stored); total > maxContainerTaskEnvTotalBytes {
+			r := containerTaskArgError(fmt.Sprintf("env is more than %d bytes in total once encoded", maxContainerTaskEnvTotalBytes), "Pass less through env: read large inputs from a file in the image or workspace")
 			return nil, r, false
 		}
-		env = append(env, corev1.EnvVar{Name: name, Value: value})
+		env = append(env, corev1.EnvVar{Name: name, Value: stored})
 	}
 	if len(env) == 0 {
 		return nil, "", true
 	}
 	return env, "", true
+}
+
+// jsonStringBytes returns the size of s once encoded as a JSON string,
+// without the surrounding quotes.
+func jsonStringBytes(s string) int {
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		// Marshaling a string cannot fail; assume the worst-case expansion.
+		return 6 * len(s)
+	}
+	return len(encoded) - 2
 }
 
 // reservedContainerTaskEnvName reports names the job builder sets or reserves:
