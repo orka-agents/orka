@@ -32,6 +32,9 @@ const (
 	acpToolCallTitleEllipsis = "…"
 )
 
+// acpSessionUpdateAgentMessageChunk is the ACP update carrying assistant text.
+const acpSessionUpdateAgentMessageChunk = "agent_message_chunk"
+
 const (
 	acpAssistantPhaseCommentary  = "commentary"
 	acpAssistantPhaseFinalAnswer = "final_answer"
@@ -229,7 +232,7 @@ func mapACPUpdateWithOptions(notification *acp.SessionNotification, options acpU
 		return nil, "", false, fmt.Errorf("decode ACP session update: %w", err)
 	}
 	switch envelope.SessionUpdate {
-	case "agent_message_chunk":
+	case acpSessionUpdateAgentMessageChunk:
 		var content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -502,7 +505,7 @@ func acpAssistantMessagePhase(notification *acp.SessionNotification) string {
 			} `json:"codex"`
 		} `json:"_meta"`
 	}
-	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != "agent_message_chunk" {
+	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != acpSessionUpdateAgentMessageChunk {
 		return ""
 	}
 	switch envelope.Meta.Codex.Phase {
@@ -511,6 +514,23 @@ func acpAssistantMessagePhase(notification *acp.SessionNotification) string {
 	default:
 		return ""
 	}
+}
+
+// acpAssistantMessageID returns the messageId of an agent_message_chunk.
+// codex-acp 2.x sends message phases only to JetBrains AIR clients, but it
+// still names every model message, so the last named message is the answer.
+func acpAssistantMessageID(notification *acp.SessionNotification) string {
+	if notification == nil {
+		return ""
+	}
+	var envelope struct {
+		SessionUpdate string `json:"sessionUpdate"`
+		MessageID     string `json:"messageId"`
+	}
+	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != acpSessionUpdateAgentMessageChunk {
+		return ""
+	}
+	return envelope.MessageID
 }
 
 const (

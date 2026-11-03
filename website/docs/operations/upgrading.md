@@ -23,6 +23,48 @@ from backups is tracked in
 [#499](https://github.com/orka-agents/orka/issues/499) and
 [#505](https://github.com/orka-agents/orka/issues/505).
 
+## Memory tool opt-in: warning release {#memory-tool-opt-in}
+
+This release is the compatibility/warning phase of [#680](https://github.com/orka-agents/orka/issues/680).
+All native `type: ai` Tasks still receive `recall_memory`, `remember`, `propose_memory`,
+and `search_transcript`, regardless of their selected tools or coordination configuration.
+This includes Tasks with `orka.ai/disable-coordination-tool-injection: "true"` and
+Agents whose memory-tool references have `enabled: false`. **This release does not yet
+provide per-Agent memory-tool denial.**
+
+The worker emits a structured warning when the model calls a memory tool that will
+lose automatic access in the next release. Unused tools do not warn. Tools explicitly
+selected by the Agent or Task do not warn, nor do automatically injected tools for an
+Agent with `coordination.enabled: true` and no disable-injection annotation. Child-task
+identity alone is not coordination opt-in. Update the controller and AI worker together
+so the worker receives the controller's deprecation metadata.
+
+**The next release will enforce opt-in.** Before upgrading to that release:
+
+- List the memory tools the Agent needs in `spec.tools`, with `enabled` omitted or `true`,
+  or list them in the Task's `spec.ai.tools`. Explicit selections will remain available
+  even with the disable-injection annotation.
+- Alternatively, use an Agent with `coordination.enabled: true` and no disable-injection
+  annotation. This also adds other coordination tools; prefer explicit memory selections
+  when those capabilities are not needed.
+- Keep transaction-token `tctx.allowedTools` grants for all four memory tools throughout
+  this warning release. Narrow grants only after the enforcing release's effective tool
+  list no longer contains the omitted tools.
+
+For example, preserve only the memory tools an Agent needs by adding these selections
+before the enforcing release (the warning release still exposes all four):
+
+```yaml
+spec:
+  tools:
+    - name: recall_memory
+    - name: remember
+```
+
+`remember` and `propose_memory` still create review proposals rather than applying durable memories.
+Startup loading of reviewed memories into the prompt is separate and unchanged; tool
+opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database
