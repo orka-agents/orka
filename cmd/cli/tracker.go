@@ -32,9 +32,10 @@ const (
 
 // agentEntry tracks one delegated sub-agent.
 type agentEntry struct {
-	name      string
-	taskName  string
-	prompt    string
+	name       string
+	taskName   string
+	toolCallID string
+	prompt     string
 	status    string
 	startTime time.Time
 	done      bool
@@ -160,6 +161,8 @@ func (t *tracker) handleEvent(evt client.SSEEvent) {
 		}
 	case "tool_result":
 		switch data.Name {
+		case "delegate_task", "create_agent_task":
+			t.recordCreatedTaskName(data)
 		case "wait_for_tasks", toolWaitForTask:
 			t.completeAgents(data)
 		case toolCheckTaskProgress:
@@ -209,11 +212,12 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	}
 
 	entry := &agentEntry{
-		name:      agentName,
-		taskName:  taskName,
-		prompt:    prompt,
-		status:    "starting",
-		startTime: time.Now(),
+		name:       agentName,
+		taskName:   taskName,
+		toolCallID: data.ID,
+		prompt:     prompt,
+		status:     "starting",
+		startTime:  time.Now(),
 	}
 	t.agents = append(t.agents, entry)
 
@@ -226,6 +230,51 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 			line += fmt.Sprintf("  %s", prompt)
 		}
 		fmt.Fprintln(t.w, line) //nolint:errcheck
+	}
+}
+
+// recordCreatedTaskName stores the task name a delegate_task or
+// create_agent_task result reports. delegate_task always generates the child
+// name, so later progress and wait results can only be matched to the agent by
+// the name returned here.
+func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
+	var result struct {
+		TaskName string `json:"taskName"`
+		Name     string `json:"name"`
+		Data     struct {
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data.Result, &result); err != nil {
+		return
+	}
+	taskName := result.TaskName
+	if taskName == "" {
+		taskName = result.Data.Name
+	}
+	if taskName == "" {
+		taskName = result.Name
+	}
+	if taskName == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var target *agentEntry
+	for _, a := range t.agents {
+		if data.ID != "" && a.toolCallID == data.ID {
+			target = a
+			break
+		}
+		// Without call IDs, the chat loop runs one tool call at a time, so the
+		// latest unnamed agent belongs to this result.
+		if data.ID == "" && a.taskName == "" {
+			target = a
+		}
+	}
+	if target != nil && target.taskName == "" {
+		target.taskName = taskName
 	}
 }
 

@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -302,6 +303,44 @@ func TestTrackerAppliesWrappedToolResultPhases(t *testing.T) {
 			}
 			if out := buf.String(); strings.Count(out, "✗ task-1") != 1 || strings.Count(out, "✓ task-2") != 1 || strings.Contains(out, "✓ task-1") {
 				t.Fatalf("non-TTY output = %q, want one failure line for task-1 and one success line for task-2", out)
+			}
+		})
+	}
+}
+
+func TestTrackerMatchesGeneratedTaskNames(t *testing.T) {
+	// delegate_task has no name argument; the server generates the child name
+	// and returns it, and later results must still reach the right agent.
+	for _, withIDs := range []bool{true, false} {
+		t.Run(fmt.Sprintf("tool-call-ids=%v", withIDs), func(t *testing.T) {
+			var buf bytes.Buffer
+			tr := newTracker(&buf, VerbosityDefault, false)
+			for i, agent := range []string{"alpha", "beta"} {
+				id := ""
+				if withIDs {
+					id = fmt.Sprintf("call-%d", i)
+				}
+				args, _ := json.Marshal(map[string]any{"agent": agent, "task": "work"})
+				tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{ID: id, Name: "delegate_task", Args: args}))
+				result := fmt.Sprintf(`{"taskName":"parent-child-%s","status":"created"}`, agent)
+				tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{ID: id, Name: "delegate_task", Result: json.RawMessage(result)}))
+			}
+			tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
+				Name:   "wait_for_tasks",
+				Result: json.RawMessage(`{"completed":true,"results":[{"task":"parent-child-beta","phase":"Cancelled"},{"task":"parent-child-alpha","phase":"Succeeded"}]}`),
+			}))
+			tr.stop()
+
+			alpha, beta := tr.agents[0], tr.agents[1]
+			if alpha.taskName != "parent-child-alpha" || beta.taskName != "parent-child-beta" {
+				t.Fatalf("task names = %q, %q, want the generated names", alpha.taskName, beta.taskName)
+			}
+			if !alpha.done || !alpha.success || !beta.done || beta.success || beta.status != "Cancelled" {
+				t.Fatalf("alpha done %v success %v; beta done %v success %v status %q, want alpha succeeded and beta cancelled",
+					alpha.done, alpha.success, beta.done, beta.success, beta.status)
+			}
+			if out := buf.String(); strings.Count(out, "✗ beta") != 1 || strings.Count(out, "✓ alpha") != 1 || strings.Contains(out, "✓ beta") {
+				t.Fatalf("non-TTY output = %q, want alpha succeeded and beta failed exactly once", out)
 			}
 		})
 	}
