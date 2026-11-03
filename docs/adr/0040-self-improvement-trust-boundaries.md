@@ -79,7 +79,7 @@ was tested, and a promotion path for Agent configuration with a canary and rollb
 |---|---|---|---|
 | Proposer | An agent Task the controller creates and marks with the controller-managed annotation `orka.ai/improvement-role: proposer` | Read a pinned clone; return one structured candidate; publish to its own task branch when the flow allows it (#997); create memory proposals | Hold any Kubernetes or forge credential; read held-out cases, held-out trial rows or any evaluation transcript (it receives only the controller-rendered training-split summaries described under #994); publish a change to the protected set; start Tasks, evaluations or promotions; post to the forge |
 | Evaluator | The EvalRun controller and API server, running as the controller ServiceAccount | Create candidate Agents from a validated candidate; run trials; write trial and experiment records; compute the gate | Change a candidate after the run starts; record a decision; promote |
-| Promoter | A person, not a ServiceAccount, bound to the new `orka-eval-promoter` role | Approve or reject one experiment; start, widen, finish or abort a canary; roll back | Edit evidence; promote without an approved experiment that still matches |
+| Promoter | A person bound to the new `orka-eval-promoter` role: a user from the cluster's user authentication or Orka's sign-in, in a configured promoter group; never a ServiceAccount, a workload identity, or a caller authenticated by a transaction or context token | Approve or reject one experiment; start, widen, finish or abort a canary; roll back | Edit evidence; promote without an approved experiment that still matches |
 
 Every rule has one enforcement point:
 
@@ -95,7 +95,7 @@ Every rule has one enforcement point:
 | Proposer cannot push to the default or release branches | Controller-derived push branch under the fixed prefix `orka/`, branch claims, plus forge branch protection | Prefix check new, #992 |
 | Proposer cannot read cases or trial transcripts | Separate namespace; no web, memory-recall or transcript tools; private fixture repository | New, #992 |
 | Only the evaluator writes trial and experiment records | Store writes only from the controller; no write route in the API | #976, #993 |
-| Decisions are human and append-only | `decide` verb SubjectAccessReview, ServiceAccount usernames refused, insert-only table; handlers in `internal/api/eval*.go`, routes in `internal/api/server.go` | New, #993 |
+| Decisions are human and append-only | `decide` verb SubjectAccessReview, only human promoters accepted (see the Promoter row), insert-only table; handlers in `internal/api/eval*.go`, routes in `internal/api/server.go` | New, #993 |
 | Promotion needs a matching approved experiment | `promote` verb SubjectAccessReview and a digest check in the rollout handler (`internal/api/agent_rollout*.go`, routed in `internal/api/server.go`) | New, #995 |
 | Only the controller routes canary traffic | `Agent.status.rollout`; the editor role has only `get` on `agents/status` (`config/rbac/agent_editor_role.yaml`) | New, #995 |
 
@@ -231,7 +231,9 @@ lists cannot be read that way; people audit them when enabling the flow.
 
 An experiment is two EvalRuns, not a new resource: a baseline run and a candidate run
 over the same held-out cases, created together so they run under the same provider and
-infrastructure conditions. Two optional fields are added to the EvalRun spec from #976. Both are
+infrastructure conditions. The controller computes one trial plan (the ordered list of
+case ID and trial index pairs) for the experiment and writes the same plan and its
+digest into both runs, so the two runs can never disagree on assignment. Two optional fields are added to the EvalRun spec from #976. Both are
 immutable, like the rest of the spec:
 
 ```yaml
@@ -269,8 +271,8 @@ status:
 ```
 
 - **Incomparable** when the two runs differ in anything other than the candidate's
-  promotable fields: case-set, grader-set or criteria digest, trial inputs (the trial
-  count and the assignment of case IDs to trial indexes; outcomes are excluded), monitor
+  promotable fields: case-set, grader-set or criteria digest, trial-plan digest (the
+  trial count and the assignment of case IDs to trial indexes; outcomes are excluded), monitor
   UID and generation, review prompt template digest, runtime image, or the subject. For a new capability the case sets differ by design:
   the check instead requires the candidate's cases to be exactly the baseline's case set
   plus the cases in `criteria.caseSetRef`, whose content matches `criteria.caseSetDigest`, and compares the two
@@ -316,8 +318,12 @@ status:
   thresholds or renaming the ConfigMap does not reset it; rotation means new case content.
 - **Who writes.** Only the EvalRun controller writes trial records and `status`. A
   decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
-  SubjectAccessReview for the verb `decide` on `evalruns`. The handler refuses
-  `system:serviceaccount:` usernames. It refuses an approval when the gate did not pass
+  SubjectAccessReview for the verb `decide` on `evalruns`. Every promoter route
+  (`proposals`, `decisions`, `rollout`) accepts only a human promoter: it refuses
+  `system:serviceaccount:` usernames, any request authenticated by a transaction token
+  or context token, and any user not in a group listed by the new controller flag
+  `--eval-promoter-groups`. An empty list refuses everyone, so the feature is off until
+  an operator names the groups. It refuses an approval when the gate did not pass
   or the recomputed tuple no longer matches; a rejection is always accepted. A new ClusterRole, `orka-eval-promoter`, grants the `propose` and `decide`
   verbs on `evalruns` and `promote` on `agents`, and is not aggregated to edit or
   admin. A decision is never updated; a later decision supersedes it. **The effective
@@ -419,7 +425,12 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
   and digest. On restart the controller reconciles any `pending` or `applying` record
   idempotently: if
-  the Agent already holds the target values it finishes step 3. Otherwise it never
+  the Agent already holds the target values, step 2 has committed and the change is live,
+  so it always finishes step 3 and records the promotion as `complete`, even if a later
+  rejection or a changed `status.rollout` has arrived since. It never marks such a record
+  `failed`, because that would leave a live change without a record; a later rejection
+  sets a `PromotedBeforeRejection` condition, and undoing the change is a `rollback`.
+  Otherwise it never
   retries on the strength of the stored values alone: it re-runs every precondition of
   the original request (the decision is still the latest and approving, the full bound
   tuple matches, the Agent's `resourceVersion` equals the one stored in the pending
