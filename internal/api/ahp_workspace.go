@@ -548,9 +548,10 @@ func ahpWorktreePath(project ahpProject, branch string) string {
 	return path.Join(ahpWorktreeRoot, project.Owner, project.Name, branch)
 }
 
-// ensureWorktree adds a session's worktree on its branch: the published
-// branch when it exists, then a local one an earlier session left, otherwise
-// a new branch from the base.
+// ensureWorktree adds a session's worktree on its branch: a local one an
+// earlier session left, caught up with the published branch when it holds
+// nothing unpublished, else the published branch, otherwise a new branch from
+// the base.
 func (w *ahpWorkspaces) ensureWorktree(ctx context.Context, principal ahphost.Principal, pod *corev1.Pod, project ahpProject, record ahpSession) error {
 	return w.withGit(ctx, principal, func(ctx context.Context) error { return w.worktree(ctx, pod, project, record) })
 }
@@ -569,14 +570,23 @@ func (w *ahpWorkspaces) worktree(ctx context.Context, pod *corev1.Pod, project a
 
 // ahpWorktreeScript adds, in the checkout $1, a worktree at $2 on the branch
 // $3: the published branch, a local one a disposed session left unpublished,
-// or a new one from the base branch $4.
+// or a new one from the base branch $4. A local branch is kept even when the
+// branch was published: disposal keeps it for the commits only it has, so it
+// only catches up with what was published when it has none.
 const ahpWorktreeScript = `set -e
 cd "$1"
 [ -e "$2/.git" ] && exit 0
 mkdir -p "$(dirname "$2")"
 if git ls-remote --exit-code --heads origin "$3" >/dev/null 2>&1; then
   git fetch --quiet origin "+refs/heads/$3:refs/remotes/origin/$3"
-  git worktree add --quiet -B "$3" "$2" "origin/$3"
+  if git show-ref --verify --quiet "refs/heads/$3"; then
+    git worktree add --quiet "$2" "$3"
+    if git merge-base --is-ancestor "refs/heads/$3" "origin/$3"; then
+      git -C "$2" merge --quiet --ff-only "origin/$3"
+    fi
+  else
+    git worktree add --quiet -b "$3" "$2" "origin/$3"
+  fi
   git -C "$2" branch --quiet --set-upstream-to="origin/$3" "$3"
 elif git show-ref --verify --quiet "refs/heads/$3"; then
   git worktree add --quiet "$2" "$3"
