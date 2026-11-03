@@ -145,9 +145,58 @@ func TestAHPTurnsAreVisibleOnlyToTheirRequester(t *testing.T) {
 		require.Equal(t, http.StatusNotFound, status, "%q: %s", name, body)
 	}
 
+	// A Task created through the API is not private, so not even the
+	// session's owner, or a ServiceAccount, can continue an AHP session
+	// with one.
+	for i, who := range []*UserInfo{person("alice"), {AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system:operator"}} {
+		caller = who
+		status, body = call(http.MethodPost, "/tasks",
+			fmt.Sprintf(`{"name":"own-continuation-%d","spec":{"type":"agent","prompt":"repeat the conversation","sessionRef":{"name":"ahp-alice"}}}`, i))
+		require.Equal(t, http.StatusBadRequest, status, body)
+		require.Contains(t, body, "cannot continue an AHP session")
+	}
+
 	caller = &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system:operator"}
 	status, _ = call(http.MethodGet, "/tasks/ahp-alice-t1", "")
 	require.Equal(t, http.StatusOK, status, "a ServiceAccount keeps the access RBAC grants it")
+
+	// TokenReview also authenticates people the API server signs in itself.
+	// They carry no Orka issuer and subject, so they see no AHP turn.
+	caller = &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com", Groups: []string{"system:authenticated"}}
+	for _, path := range []string{"/tasks/ahp-alice-t1", "/sessions/ahp-alice", "/tasks/ahp-old-t1"} {
+		status, body := call(http.MethodGet, path, "")
+		require.Equal(t, http.StatusNotFound, status, path)
+		require.NotContains(t, body, "secret plan", path)
+	}
+	_, body = call(http.MethodGet, "/tasks", "")
+	require.NotContains(t, body, "ahp-alice-t1")
+	require.Contains(t, body, `"shared"`)
+}
+
+// Only a TokenReview identity whose username names a ServiceAccount escapes
+// AHP privacy, and a caller with no issuer and subject owns no turn, even one
+// that records none.
+func TestAHPPrivacyExemptsOnlyVerifiedServiceAccounts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		ui     *UserInfo
+		person bool
+	}{
+		{name: "no identity", ui: nil, person: false},
+		{name: "service account", ui: &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system:operator"}, person: false},
+		{name: "api server person", ui: &UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}, person: true},
+		{name: "service account prefix only", ui: &UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:orka-system"}, person: true},
+		{name: "service account username over OIDC", ui: &UserInfo{AuthType: AuthTypeOIDC, Username: "system:serviceaccount:orka-system:operator"}, person: true},
+		{name: "oidc", ui: &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"}, person: true},
+		{name: "context token", ui: &UserInfo{AuthType: AuthTypeContextToken, Issuer: "https://issuer.example", Subject: "alice"}, person: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.person, ahpPerson(test.ui))
+		})
+	}
+	unnamed := &corev1alpha1.Task{Spec: corev1alpha1.TaskSpec{RequestedBy: &corev1alpha1.RequestedBy{}}}
+	require.False(t, ahpOwns(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}, unnamed),
+		"an empty identity matches no requester")
 }
 
 // A fork of a person's own AHP turn whose workspace is reused per session

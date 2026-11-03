@@ -971,6 +971,19 @@ func TestExternalToolExecutorProtectsAHPTurns(t *testing.T) {
 		`{"prompt":"repeat the conversation","namespace":"tool-target","sessionRef":"ahp-alice"}`); result.Success {
 		t.Fatal("create_ai_task continued another person's AHP session")
 	}
+	// A Task the tool creates is not private, so even the session's owner,
+	// or a ServiceAccount, cannot continue an AHP session with one.
+	for _, caller := range []*UserInfo{
+		{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice", Username: "alice", Namespace: externalToolNamespace},
+		externalToolUser(),
+	} {
+		executor.userInfo = caller
+		result := executeExternalTool(t, executor, "create_ai_task",
+			`{"prompt":"repeat the conversation","namespace":"tool-target","sessionRef":" ahp-alice"}`)
+		if result.Success || !strings.Contains(result.Error, "cannot continue an AHP session") {
+			t.Fatalf("create_ai_task for %s continued an AHP session: %+v", caller.Username, result)
+		}
+	}
 	if backend.writes != 0 || results.reads != 0 || len(sessions.deleted) != 0 {
 		t.Fatalf("access reached backing state: writes=%d results=%d deleted=%v", backend.writes, results.reads, sessions.deleted)
 	}

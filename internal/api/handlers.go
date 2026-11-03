@@ -581,8 +581,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 	if spec.Type == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "type is required")
 	}
-	// Another person's AHP conversation cannot be read through a Task that
-	// continues it.
+	// An AHP conversation cannot be read through a Task that continues it:
+	// another person's is not found, and the owner's own is refused, since
+	// such a Task is not private.
 	if spec.SessionRef != nil {
 		hidden, err := ahpSessionHiddenIn(c.Context(), h.client, GetUserInfo(c), namespace, spec.SessionRef.Name)
 		if err != nil {
@@ -590,6 +591,9 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 		}
 		if hidden {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+		if ahpSessionContinuation(spec.SessionRef) {
+			return fiber.NewError(fiber.StatusBadRequest, errAHPSessionContinuation)
 		}
 	}
 	objectMeta := objectMetaFromRequest(name, namespace, req.Metadata)

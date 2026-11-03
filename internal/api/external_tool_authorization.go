@@ -323,8 +323,9 @@ func (c *externalToolClient) Create(ctx context.Context, obj client.Object, opts
 	if err := c.authorize(ctx, obj, obj.GetNamespace(), externalToolCreateVerb, ""); err != nil {
 		return err
 	}
-	// A Task cannot continue another person's AHP session, which would read
-	// their conversation into it.
+	// A Task cannot continue an AHP session, which would read the
+	// conversation into a Task that is not private: another person's is not
+	// found, and the owner's own is refused.
 	if task, ok := obj.(*corev1alpha1.Task); ok && task.Spec.SessionRef != nil {
 		hidden, err := ahpSessionHiddenIn(ctx, c.Client, c.authorization.userInfo, task.Namespace, task.Spec.SessionRef.Name)
 		if err != nil {
@@ -332,6 +333,9 @@ func (c *externalToolClient) Create(ctx context.Context, obj client.Object, opts
 		}
 		if hidden {
 			return apierrors.NewNotFound(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: externalToolSessionResource}, task.Spec.SessionRef.Name)
+		}
+		if ahpSessionContinuation(task.Spec.SessionRef) {
+			return apierrors.NewBadRequest(errAHPSessionContinuation)
 		}
 	}
 	return c.Client.Create(ctx, obj, opts...)
