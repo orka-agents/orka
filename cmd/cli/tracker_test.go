@@ -346,6 +346,38 @@ func TestTrackerMatchesGeneratedTaskNames(t *testing.T) {
 	}
 }
 
+func TestTrackerWaitResultsKeepUnfinishedAgentsPending(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+	for _, name := range []string{"task-1", "task-2"} {
+		args, _ := json.Marshal(map[string]any{"agent": name, "name": name})
+		tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+	}
+
+	// A timed-out wait reports a running phase; neither agent is finished.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Running","message":"Task is still running."}}`)}))
+	if tr.agents[0].done || tr.agents[1].done {
+		t.Fatal("a timed-out wait marked an agent finished")
+	}
+	// Waiting on task-1 alone must not finish task-2.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Succeeded"}}`)}))
+	if !tr.agents[0].done || !tr.agents[0].success || tr.agents[1].done {
+		t.Fatal("waiting on task-1 did not finish only task-1")
+	}
+	// task-2's later cancellation is still recorded.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolCheckTaskProgress,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-2","phase":"Cancelled"}}`)}))
+	tr.stop()
+	if !tr.agents[1].done || tr.agents[1].success {
+		t.Fatalf("task-2 = done %v success %v, want cancelled", tr.agents[1].done, tr.agents[1].success)
+	}
+	if out := buf.String(); strings.Count(out, "✓ task-1") != 1 || strings.Count(out, "✗ task-2") != 1 || strings.Contains(out, "✓ task-2") {
+		t.Fatalf("non-TTY output = %q, want task-1 succeeded and task-2 failed exactly once", out)
+	}
+}
+
 func TestCompleteAgentByName(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)

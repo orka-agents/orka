@@ -280,19 +280,29 @@ func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
 	}
 }
 
-// completeAgents applies the task phases a wait tool reported, then marks the
-// remaining pending agents as done.
+// completeAgents applies the task phases a wait tool reported. Agents the
+// result does not report as terminal stay pending, so a later cancellation is
+// still recorded; only a result with no readable phase completes every pending
+// agent, as before.
 func (t *tracker) completeAgents(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for _, reported := range taskPhasesFromResult(data.Result) {
-		t.applyTaskPhaseLocked(reported.task, reported.phase)
+	reported := taskPhasesFromResult(data.Result)
+	for _, r := range reported {
+		t.applyTaskPhaseLocked(r.task, r.phase)
+	}
+	if len(reported) > 0 {
+		if t.isTTY && t.allAgentsDoneLocked() {
+			t.clearLines(len(t.agents))
+			t.renderFinal()
+		}
+		return
 	}
 	for _, a := range t.agents {
 		if !a.done {
 			a.done = true
-			a.success = true // No terminal phase was reported for this agent.
+			a.success = true // The result reported no phase for this agent.
 			a.status = statusDone
 			elapsed := time.Since(a.startTime).Round(time.Second)
 
@@ -307,6 +317,17 @@ func (t *tracker) completeAgents(data client.SSEEventData) {
 		t.clearLines(len(t.agents))
 		t.renderFinal()
 	}
+}
+
+// allAgentsDoneLocked reports whether every tracked agent is finished. The
+// caller must hold t.mu.
+func (t *tracker) allAgentsDoneLocked() bool {
+	for _, a := range t.agents {
+		if !a.done {
+			return false
+		}
+	}
+	return true
 }
 
 // updateAgentStatus updates the status text for a running agent.
