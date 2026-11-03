@@ -47,7 +47,18 @@ Tags: release, testing
 
 When an AI worker can reach the controller internal API, it loads reviewed durable memories before invoking the model. The durable memory section is appended to the system prompt as background project context, separate from the current session transcript.
 
-Every native `type: ai` Task also receives the memory tools ([parameters](../reference/built-in-tools.md#memory-tools)):
+In this warning release, every native `type: ai` Task receives the memory tools,
+regardless of Agent `spec.tools`, Task `spec.ai.tools`, or `coordination.enabled`.
+They cannot yet be disabled per Agent, including with `enabled: false` or the
+`orka.ai/disable-coordination-tool-injection` Task annotation.
+
+When a model calls a memory tool that is neither explicitly selected nor covered
+by coordination, the worker logs a deprecation warning. **The next release will
+stop adding these tools unless the Agent enables coordination or the Agent/Task
+explicitly selects them.** In that release, the disable-injection annotation will
+also suppress automatic memory tools; explicit selections will remain available.
+See the [migration and release notes](../operations/upgrading.md#memory-tool-opt-in)
+and [tool parameters](../reference/built-in-tools.md#memory-tools).
 
 | Tool | Purpose |
 |------|---------|

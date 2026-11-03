@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -88,11 +90,14 @@ const (
 	findingValidationStatusValidated = "validated"
 	findingValidationStatusFailed    = "failed"
 	findingValidationStatusSkipped   = "skipped"
-	validationModeOff                = "off"
-	validationModeFull               = "full"
-	validationThresholdLow           = "low"
-	findingCategoryCWEPrefix         = "cwe"
-	findingCategoryFromTerm          = "from"
+	// findingValidationStatusError marks a validation that produced no
+	// verdict, unlike failed, which means the validator refuted the finding.
+	findingValidationStatusError = "error"
+	validationModeOff            = "off"
+	validationModeFull           = "full"
+	validationThresholdLow       = "low"
+	findingCategoryCWEPrefix     = "cwe"
+	findingCategoryFromTerm      = "from"
 
 	scanSummaryRunning            = "scan is running"
 	scanSummaryThreatModelPending = "Threat model generated; deterministic mapper pending"
@@ -106,7 +111,7 @@ const (
 	securityReviewInitialAttempt = 0
 	securityReviewRetryAttempt   = 1
 	securityReviewRetryPrompt    = "\n\nThis is the only automatic result retry. " +
-		"The prior review task returned an invalid terminal result. " +
+		"The prior review task failed or returned an invalid terminal result. " +
 		"Re-run the review from the trusted context above and return exactly one JSON object matching the required envelope. " +
 		"Do not include prose, Markdown fences, or tool transcripts."
 )
@@ -123,6 +128,13 @@ type RepositoryScanReconciler struct {
 	ArtifactStore    store.ArtifactStore
 	ResultStore      store.ResultStore
 	PublicationStore store.PublicationStore
+	// ACPDispatchMaxConcurrentTasks is the controller's ACP dispatch
+	// capacity, which bounds each run's review Task window together with
+	// its RuntimePool's prompt capacity. Zero uses the default.
+	ACPDispatchMaxConcurrentTasks int
+	// createdReviewTasks remembers review Tasks this reconciler created
+	// until the informer cache lists them; see reviewTaskBudget.
+	createdReviewTasks *createdTasks
 	// APIReader reads uncached Secrets and verifies RepositoryScan identity
 	// before run admission or cleanup; nil falls back to Client.
 	APIReader client.Reader
@@ -218,6 +230,15 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	scan = current
 
 	if security.IsSuspended(scan) {
+		// Suspension pauses new runs; a run already admitted keeps starting
+		// its next stage and its queued review slices so it can finish.
+		if err := r.topUpReviewTasks(ctx, scan); err != nil {
+			return ctrl.Result{}, err
+		}
+		progressed, err := r.progressLatestScanRun(ctx, scan)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		if scan.Status.Phase != repositoryScanPhaseSuspended {
 			if err := r.updateStatusWithRetry(ctx, scan, func(s *corev1alpha1.RepositoryScan) {
 				s.Status.Phase = repositoryScanPhaseSuspended
@@ -225,6 +246,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			}); err != nil {
 				return ctrl.Result{}, err
 			}
+		}
+		if progressed {
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -259,6 +283,9 @@ func (r *RepositoryScanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 	if active {
+		if err := r.topUpReviewTasks(ctx, scan); err != nil {
+			return ctrl.Result{}, err
+		}
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
@@ -744,6 +771,10 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 	if err != nil {
 		return err
 	}
+	crossComponentEnv, err := r.mapperCrossComponentEnv(ctx, scan, run)
+	if err != nil {
+		return err
+	}
 	timeout := metav1.Duration{Duration: 30 * time.Minute}
 	priority := int32(690)
 	taskName := security.ScanStageTaskNameForRun(scan.Name, run.Mode, security.StageMapper, "", run.ID)
@@ -765,7 +796,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 			Command:  []string{"--security-mapper"},
 			Timeout:  &timeout,
 			Priority: &priority,
-			Env: []corev1.EnvVar{
+			Env: append([]corev1.EnvVar{
 				{Name: security.EnvRepositoryScanName, Value: scan.Name},
 				{Name: security.EnvStage, Value: security.StageMapper},
 				{Name: security.EnvScanID, Value: run.ID},
@@ -774,7 +805,7 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 				{Name: security.EnvPolicyProvenance, Value: security.PolicyProvenanceEnv(policy)},
 				{Name: security.EnvScanBaseCommit, Value: run.BaseCommit},
 				{Name: security.EnvScanHeadCommit, Value: run.HeadCommit},
-			},
+			}, crossComponentEnv...),
 			Workspace: repositoryScanTaskWorkspace(targetScan, ""),
 		},
 	}
@@ -782,6 +813,36 @@ func (r *RepositoryScanReconciler) createMapperTask(ctx context.Context, scan *c
 		return err
 	}
 	return r.createOrValidateScanStageTask(ctx, scan, run, task)
+}
+
+// mapperCrossComponentEnv asks the mapper for slices that are not bounded to
+// one component: the threat model's investigations and an independent audit.
+// Change-focused runs keep to the slices their changes touch.
+func (r *RepositoryScanReconciler) mapperCrossComponentEnv(ctx context.Context, scan *corev1alpha1.RepositoryScan, run *store.ScanRun) ([]corev1.EnvVar, error) {
+	if run.BaseCommit != "" {
+		return nil, nil
+	}
+	env := []corev1.EnvVar{{Name: security.EnvBaselineAudit, Value: booleanTrueValue}}
+	if r.SecurityStore == nil {
+		return env, nil
+	}
+	model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return env, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if investigations := security.ThreatModelInvestigations(model.Content); len(investigations) > 0 {
+		data, err := json.Marshal(investigations)
+		if err != nil {
+			return nil, err
+		}
+		// Kubernetes expands $(VAR) in env values; $$ keeps model-written
+		// question text literal.
+		env = append(env, corev1.EnvVar{Name: security.EnvInvestigations, Value: strings.ReplaceAll(string(data), "$", "$$")})
+	}
+	return env, nil
 }
 
 type latestScanPipelineState struct {
@@ -1059,6 +1120,21 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 	if err != nil {
 		return err
 	}
+	var pool types.NamespacedName
+	if r.Client != nil {
+		// Count past the informer cache, which can miss a retry created
+		// earlier in this reconcile.
+		existing, err := r.listCurrentScanTasksFrom(ctx, uncachedReader(r.APIReader, r.Client), scan, "")
+		if err != nil {
+			return err
+		}
+		available, err := r.reviewTaskBudget(ctx, existing.Items, run.ID)
+		if err != nil {
+			return err
+		}
+		reviewSlices = reviewSlices[:min(len(reviewSlices), available)]
+		pool, _ = r.reviewRuntimePool(ctx, existing.Items, run.ID)
+	}
 	for _, reviewSlice := range reviewSlices {
 		task, err := r.buildReviewTask(ctx, targetScan, run, threatModel, reviewSlice, policy, securityReviewInitialAttempt)
 		if err != nil {
@@ -1067,6 +1143,7 @@ func (r *RepositoryScanReconciler) createReviewTasks(ctx context.Context, scan *
 		if err := r.createOrValidateScanStageTask(ctx, scan, run, task); err != nil {
 			return err
 		}
+		r.reviewTaskLedger().record(client.ObjectKeyFromObject(task), pool, time.Now())
 	}
 	return nil
 }
@@ -1211,9 +1288,32 @@ func (r *RepositoryScanReconciler) retryMissingReviewSliceTasks(
 	run *store.ScanRun,
 	tasks []corev1alpha1.Task,
 ) (bool, error) {
+	missing, err := r.startMissingReviewSliceTasks(ctx, scan, run, tasks)
+	if err != nil || missing == 0 {
+		return false, err
+	}
+	run.Summary = fmt.Sprintf("Threat model generated; retrying %d pending review slices", missing)
+	run.Phase = scanRunPhaseRunning
+	run.CompletedAt = nil
+	run.ErrorMessage = ""
+	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// startMissingReviewSliceTasks creates review Tasks for pending slices that
+// have none, within the outstanding-review bound, and reports how many slices
+// were missing.
+func (r *RepositoryScanReconciler) startMissingReviewSliceTasks(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	run *store.ScanRun,
+	tasks []corev1alpha1.Task,
+) (int, error) {
 	reviewSlices, err := r.pendingReviewSlices(ctx, scan, run.ID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	missing := make([]store.ReviewSlice, 0, len(reviewSlices))
 	for _, reviewSlice := range reviewSlices {
@@ -1223,29 +1323,235 @@ func (r *RepositoryScanReconciler) retryMissingReviewSliceTasks(
 		missing = append(missing, reviewSlice)
 	}
 	if len(missing) == 0 {
-		return false, nil
+		return 0, nil
 	}
-
 	var threatModel string
 	if r.SecurityStore != nil {
 		model, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
 		if err == nil {
 			threatModel = model.Content
 		} else if !errors.Is(err, store.ErrNotFound) {
-			return false, err
+			return 0, err
 		}
 	}
 	if err := r.createReviewTasks(ctx, scan, run, threatModel, missing); err != nil {
-		return false, err
+		return 0, err
 	}
-	run.Summary = fmt.Sprintf("Threat model generated; retrying %d pending review slices", len(missing))
-	run.Phase = scanRunPhaseRunning
-	run.CompletedAt = nil
-	run.ErrorMessage = ""
-	if err := r.SecurityStore.UpdateScanRun(ctx, run); err != nil {
-		return false, err
+	return len(missing), nil
+}
+
+// topUpReviewTasks refills a run's review queue while earlier reviews run.
+// Task deadlines include time spent waiting for a runtime, so a run creates
+// only a bounded number of review Tasks at a time.
+func (r *RepositoryScanReconciler) topUpReviewTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan) error {
+	if r.Client == nil || r.SecurityStore == nil {
+		return nil
 	}
-	return true, nil
+	tasks, err := r.listCurrentScanTasks(ctx, scan, "")
+	if err != nil {
+		return err
+	}
+	scanID := latestOwnedScanPipelineRunID(tasks.Items)
+	if scanID == "" || !latestScanPipelineStateForRun(tasks.Items, scanID).hasReviewTasks {
+		return nil
+	}
+	for i := range tasks.Items {
+		task := &tasks.Items[i]
+		stage := taskSecurityStage(task)
+		if scanTaskRunID(task) == scanID && isScanPipelineStage(stage) && stage != security.StageReview &&
+			(task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)) {
+			return nil
+		}
+	}
+	if outstandingReviewTasks(tasks.Items, scanID) >= r.reviewTaskWindow(ctx, tasks.Items, scanID) {
+		return nil
+	}
+	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
+	if err != nil {
+		return err
+	}
+	if !security.ScanRunMatchesRepositoryScan(run, scan) || !activeScanRunPhase(run.Phase) {
+		return nil
+	}
+	_, err = r.startMissingReviewSliceTasks(ctx, scan, run, tasks.Items)
+	return err
+}
+
+// maxOutstandingReviewTasks bounds a run's queued and running review Tasks
+// at the default ACP dispatch capacity of 4.
+const maxOutstandingReviewTasks = 16
+
+// reviewTaskWindow bounds a run's queued and running review Tasks at four
+// per prompt the run can execute at once: the smaller of the ACP dispatch
+// capacity and the prompt capacity of the RuntimePool the run's reviews are
+// queued to, or one prompt before any is queued. Task
+// deadlines include time spent waiting for a runtime, so lower capacity
+// gets a smaller window.
+func (r *RepositoryScanReconciler) reviewTaskWindow(ctx context.Context, tasks []corev1alpha1.Task, runID string) int {
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	// Until the run's threat model or a review is queued to a RuntimePool,
+	// its pool and capacity are unknown, so the batch assumes one prompt.
+	prompts := 1
+	if _, live := r.reviewRuntimePool(ctx, tasks, runID); live > 0 {
+		prompts = live
+	}
+	return maxOutstandingReviewTasks / DefaultACPDispatchWorkers * min(dispatch, prompts)
+}
+
+// reviewRuntimePool returns the RuntimePool a run's agent Tasks are queued
+// to and its prompt capacity, or zero before any is queued. The threat model
+// runs on the same Agent, so the pool is known before the first review
+// batch. An existing pool keeps the capacity it was created with.
+func (r *RepositoryScanReconciler) reviewRuntimePool(ctx context.Context, tasks []corev1alpha1.Task, runID string) (types.NamespacedName, int) {
+	if r.Client == nil {
+		return types.NamespacedName{}, 0
+	}
+	for i := range tasks {
+		task := &tasks[i]
+		stage := taskSecurityStage(task)
+		if scanTaskRunID(task) != runID || (stage != security.StageReview && stage != security.StageThreatModel) || task.Status.Execution == nil {
+			continue
+		}
+		name := strings.TrimSpace(task.Status.Execution.RuntimePoolName)
+		if name == "" {
+			continue
+		}
+		key := types.NamespacedName{Namespace: task.Namespace, Name: name}
+		pool := &corev1alpha1.RuntimePool{}
+		if err := r.Get(ctx, key, pool); err != nil {
+			return types.NamespacedName{}, 0
+		}
+		if pool.Status.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Status.Capacity.MaxRunningPrompts)
+		}
+		if pool.Spec.Capacity != nil && pool.Spec.Capacity.MaxRunningPrompts > 0 {
+			return key, int(pool.Spec.Capacity.MaxRunningPrompts)
+		}
+		return types.NamespacedName{}, 0
+	}
+	return types.NamespacedName{}, 0
+}
+
+// reviewTaskBudget returns how many review Tasks a run may create now: what
+// its own window leaves, within budgets all scans share, because ACP dispatch
+// capacity is controller-wide and scans can share a RuntimePool. A scan whose
+// reviews do not fit waits for places instead of queueing Tasks that would
+// outlive their deadline.
+func (r *RepositoryScanReconciler) reviewTaskBudget(ctx context.Context, runTasks []corev1alpha1.Task, runID string) (int, error) {
+	available := max(r.reviewTaskWindow(ctx, runTasks, runID)-outstandingReviewTasks(runTasks, runID), 0)
+	var all corev1alpha1.TaskList
+	if err := r.List(ctx, &all, client.MatchingLabels{labels.LabelSecurityStage: security.StageReview}); err != nil {
+		return 0, err
+	}
+	pool, poolPrompts := r.reviewRuntimePool(ctx, runTasks, runID)
+	shared, onPool := 0, 0
+	// settled records listed Tasks that already name their pool or have
+	// finished; the ledger needs to count neither.
+	settled := make(map[types.NamespacedName]bool, len(all.Items))
+	for i := range all.Items {
+		task := &all.Items[i]
+		named := task.Status.Execution != nil && strings.TrimSpace(task.Status.Execution.RuntimePoolName) != ""
+		active := task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)
+		settled[client.ObjectKeyFromObject(task)] = named || !active
+		if !active {
+			continue
+		}
+		shared++
+		if poolPrompts > 0 && named && task.Namespace == pool.Namespace &&
+			strings.TrimSpace(task.Status.Execution.RuntimePoolName) == pool.Name {
+			onPool++
+		}
+	}
+	// The cache can lag reviews created moments ago, for this or another
+	// scan, and a review names its pool only once it is queued.
+	unlisted, unqueuedOnPool := r.reviewTaskLedger().pending(settled, pool, time.Now())
+	shared += unlisted
+	if poolPrompts > 0 {
+		onPool += unqueuedOnPool
+	}
+	dispatch := r.ACPDispatchMaxConcurrentTasks
+	if dispatch <= 0 {
+		dispatch = DefaultACPDispatchWorkers
+	}
+	perPlace := maxOutstandingReviewTasks / DefaultACPDispatchWorkers
+	available = min(available, max(perPlace*dispatch-shared, 0))
+	// Scans whose reviews run on the same RuntimePool share its capacity too.
+	if poolPrompts > 0 {
+		available = min(available, max(perPlace*poolPrompts-onPool, 0))
+	}
+	return available, nil
+}
+
+func (r *RepositoryScanReconciler) reviewTaskLedger() *createdTasks {
+	if r.createdReviewTasks == nil {
+		r.createdReviewTasks = &createdTasks{}
+	}
+	return r.createdReviewTasks
+}
+
+// createdTaskCacheGrace is how long a created Task is counted while the
+// informer cache does not show it queued to its RuntimePool yet.
+const createdTaskCacheGrace = time.Minute
+
+// createdTasks remembers Tasks a reconciler created, with the RuntimePool
+// their run uses, until the informer cache lists them queued to it, so
+// counts taken from the cache include them meanwhile.
+type createdTasks struct {
+	mu      sync.Mutex
+	created map[types.NamespacedName]createdTask
+}
+
+type createdTask struct {
+	at   time.Time
+	pool types.NamespacedName
+}
+
+func (c *createdTasks) record(key, pool types.NamespacedName, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.created == nil {
+		c.created = map[types.NamespacedName]createdTask{}
+	}
+	c.created[key] = createdTask{at: now, pool: pool}
+}
+
+// pending counts recorded Tasks the cache does not list yet, and those
+// recorded for pool that are not yet queued to it. settled maps each listed
+// Task to whether it already names its pool or has finished. Settled
+// entries, and those older than createdTaskCacheGrace, are forgotten.
+func (c *createdTasks) pending(settled map[types.NamespacedName]bool, pool types.NamespacedName, now time.Time) (int, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	unlisted, onPool := 0, 0
+	for key, task := range c.created {
+		done, listed := settled[key]
+		if done || now.Sub(task.at) > createdTaskCacheGrace {
+			delete(c.created, key)
+			continue
+		}
+		if !listed {
+			unlisted++
+		}
+		if pool.Name != "" && task.pool == pool {
+			onPool++
+		}
+	}
+	return unlisted, onPool
+}
+
+func outstandingReviewTasks(tasks []corev1alpha1.Task, runID string) int {
+	count := 0
+	for i := range tasks {
+		task := &tasks[i]
+		if scanTaskRunID(task) == runID && taskSecurityStage(task) == security.StageReview &&
+			(task.Status.Phase == "" || isActiveTaskPhase(task.Status.Phase)) {
+			count++
+		}
+	}
+	return count
 }
 
 func reviewSliceTaskExists(tasks []corev1alpha1.Task, runID, sliceID string) bool {
@@ -1422,6 +1728,29 @@ func needsNoopScanSummary(summary string) bool {
 	return trimmed == "" || trimmed == scanSummaryThreatModelPending
 }
 
+// compareScanTasksForIngestion orders Tasks by creation, except that failed
+// first review attempts come first: their automatic retries must exist
+// before ingesting another Task refreshes the run's progress, or the run
+// would end on a failure that a retry replaces.
+func compareScanTasksForIngestion(a, b corev1alpha1.Task) int {
+	if failedA, failedB := failedFirstReviewAttempt(&a), failedFirstReviewAttempt(&b); failedA != failedB {
+		if failedA {
+			return -1
+		}
+		return 1
+	}
+	if cmp := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); cmp != 0 {
+		return cmp
+	}
+	return strings.Compare(a.Name, b.Name)
+}
+
+func failedFirstReviewAttempt(task *corev1alpha1.Task) bool {
+	attempt, ok := securityReviewAttempt(task)
+	return ok && attempt == securityReviewInitialAttempt &&
+		task.Status.Phase == corev1alpha1.TaskPhaseFailed && taskSecurityStage(task) == security.StageReview
+}
+
 func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan) error {
 	if r.SecurityStore == nil {
 		return nil
@@ -1432,12 +1761,7 @@ func (r *RepositoryScanReconciler) ingestOwnedTasks(ctx context.Context, scan *c
 		return err
 	}
 
-	slices.SortFunc(tasks.Items, func(a, b corev1alpha1.Task) int {
-		if cmp := a.CreationTimestamp.Compare(b.CreationTimestamp.Time); cmp != 0 {
-			return cmp
-		}
-		return strings.Compare(a.Name, b.Name)
-	})
+	slices.SortFunc(tasks.Items, compareScanTasksForIngestion)
 
 	latestScanRunID := latestOwnedScanPipelineRunID(tasks.Items)
 	refreshLatestScanRun := false
@@ -1703,6 +2027,7 @@ type scanRunProgress struct {
 	hasReview           bool
 	reviewCount         int
 	reviewSucceeded     int
+	reviewUnreviewable  int
 	failedStages        []string
 	failureMessage      string
 	latestCompletion    *time.Time
@@ -1765,17 +2090,84 @@ func (r *RepositoryScanReconciler) collectScanRunProgress(
 	sort.Strings(reviewKeys)
 	for _, key := range reviewKeys {
 		task := reviewTasks[key]
+		if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			retryTask, err := r.uncachedReviewRetry(ctx, task)
+			switch {
+			case err != nil:
+				// Whether a retry replaced this failure is unknown, so the run
+				// stays active and the next reconcile reads it again.
+				log.FromContext(ctx).Error(err, "Read review retry Task", "task", task.Name)
+				progress.hasActive = true
+			case retryTask != nil:
+				task = retryTask
+			}
+		}
 		progress.hasReview = true
 		progress.reviewCount++
 		recordScanTaskTiming(&progress, task)
 		if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded {
 			progress.reviewSucceeded++
 		}
+		if unreviewableAfterRetry(task) {
+			progress.reviewUnreviewable++
+			continue
+		}
 		if isFailedScanTaskPhase(task.Status.Phase) {
 			recordScanProgressFailure(&progress, task, r.pipelineTaskFailureSummary(ctx, task))
 		}
 	}
 	return progress
+}
+
+// unreviewableAfterRetry reports a review slice whose retry prompt also
+// failed, for example because the provider stopped the response. The slice
+// stays unreviewed and the run reports it, but one such slice does not
+// discard the rest of the run. Results that fail validation still fail it.
+func unreviewableAfterRetry(task *corev1alpha1.Task) bool {
+	attempt, ok := securityReviewAttempt(task)
+	return ok && attempt == securityReviewRetryAttempt && task.Status.Phase == corev1alpha1.TaskPhaseFailed &&
+		taskSecurityStage(task) == security.StageReview
+}
+
+// uncachedReviewRetry reads the retry of a failed first review attempt past
+// the informer cache. The retry is created just before progress is refreshed,
+// and a cache that has not seen it yet would end the run on the failure the
+// retry replaces.
+func (r *RepositoryScanReconciler) uncachedReviewRetry(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
+	attempt, ok := securityReviewAttempt(task)
+	sliceID := strings.TrimSpace(task.Labels[labels.LabelSecuritySliceID])
+	owner := metav1.GetControllerOf(task)
+	if !ok || attempt != securityReviewInitialAttempt || sliceID == "" || owner == nil || owner.Kind != "RepositoryScan" {
+		return nil, nil
+	}
+	name := security.ScanStageRetryTaskName(owner.Name, scanTaskRunID(task), security.StageReview, sliceID, securityReviewRetryAttempt)
+	reader := uncachedReader(r.APIReader, r.Client)
+	if reader == nil {
+		return nil, nil
+	}
+	retryTask := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, retryTask); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+	if retryAttempt, ok := securityReviewAttempt(retryTask); !ok || retryAttempt != securityReviewRetryAttempt || scanTaskRunID(retryTask) != scanTaskRunID(task) {
+		return nil, nil
+	}
+	return retryTask, nil
+}
+
+// failScanRunWithoutReviews fails a finished run in which every review slice
+// failed its retry: unreviewable slices do not fail a run that reviewed
+// others, but a run that reviewed none has nothing to report. It runs after
+// pending slices reopen the run, so failures in the first batch do not end a
+// run whose other slices have not started.
+func failScanRunWithoutReviews(run *store.ScanRun, progress scanRunProgress) {
+	if run.Phase != scanRunPhaseSucceeded || !progress.hasReview || progress.reviewSucceeded > 0 || progress.reviewUnreviewable == 0 {
+		return
+	}
+	run.Phase = scanRunPhaseFailed
+	run.ErrorMessage = "no review slice could be reviewed after a retry"
+	run.Summary = run.ErrorMessage
+	stampFailedScanRunCompletion(run)
 }
 
 func recordScanTaskTiming(progress *scanRunProgress, task *corev1alpha1.Task) {
@@ -1866,27 +2258,27 @@ func applyScanRunProgress(run *store.ScanRun, progress scanRunProgress) {
 	}
 
 	if progress.hasThreatModelReady && progress.hasReview {
-		if progress.reviewSucceeded < progress.reviewCount {
-			run.Phase = scanRunPhaseRunning
-			run.CompletedAt = nil
-			run.ErrorMessage = ""
-			run.Summary = fmt.Sprintf(
-				"Threat model generated and %d/%d review slices completed successfully",
-				progress.reviewSucceeded,
-				progress.reviewCount,
-			)
-			return
-		}
-		run.Phase = scanRunPhaseSucceeded
-		run.ErrorMessage = ""
-		if progress.latestCompletion != nil {
-			run.CompletedAt = progress.latestCompletion
-		}
-		run.Summary = fmt.Sprintf(
+		summary := fmt.Sprintf(
 			"Threat model generated and %d/%d review slices completed successfully",
 			progress.reviewSucceeded,
 			progress.reviewCount,
 		)
+		if progress.reviewUnreviewable > 0 {
+			summary += fmt.Sprintf("; %d could not be reviewed after a retry", progress.reviewUnreviewable)
+		}
+		if progress.reviewSucceeded+progress.reviewUnreviewable < progress.reviewCount {
+			run.Phase = scanRunPhaseRunning
+			run.CompletedAt = nil
+			run.ErrorMessage = ""
+			run.Summary = summary
+			return
+		}
+		if progress.latestCompletion != nil {
+			run.CompletedAt = progress.latestCompletion
+		}
+		run.Phase = scanRunPhaseSucceeded
+		run.ErrorMessage = ""
+		run.Summary = summary
 		return
 	}
 
@@ -1956,6 +2348,7 @@ func (r *RepositoryScanReconciler) refreshScanRunStatus(
 	if err := r.keepScanRunningForPendingReviewSlices(ctx, scan, run, progress); err != nil {
 		return err
 	}
+	failScanRunWithoutReviews(run, progress)
 	if previousPhase != scanRunPhaseSucceeded && run.Phase == scanRunPhaseSucceeded {
 		if target, ok := frozenScanTargetFromTasks(scan, run, tasks.Items); ok {
 			if err := r.resolveMergedFindingsNotObserved(ctx, scan, run, target); err != nil {
@@ -2039,7 +2432,7 @@ func (r *RepositoryScanReconciler) keepScanRunningForPendingReviewSlices(
 	}
 	// Kubernetes success precedes ingestion. In particular, the mapper may not
 	// have persisted any slices yet when all Tasks are first observed terminal.
-	pending := max(len(reviewSlices), progress.reviewCount-run.ReviewedSliceCount)
+	pending := max(len(reviewSlices), progress.reviewCount-progress.reviewUnreviewable-run.ReviewedSliceCount)
 	if pending == 0 {
 		return nil
 	}
@@ -2220,17 +2613,21 @@ func (r *RepositoryScanReconciler) ensureActiveScanRunPolicyCurrent(ctx context.
 
 func mergeEvidenceRefs(existing []store.FindingEvidenceRef, refs ...store.FindingEvidenceRef) []store.FindingEvidenceRef {
 	merged := append([]store.FindingEvidenceRef{}, existing...)
-	seen := map[string]struct{}{}
-	for _, ref := range merged {
-		key := evidenceRefKey(ref)
-		seen[key] = struct{}{}
+	seen := map[string]int{}
+	for i, ref := range merged {
+		seen[evidenceRefKey(ref)] = i
 	}
 	for _, ref := range refs {
 		key := evidenceRefKey(ref)
-		if _, ok := seen[key]; ok {
+		if i, ok := seen[key]; ok {
+			// The same location reported again can carry the role an
+			// earlier report lacked.
+			if merged[i].Role == "" {
+				merged[i].Role = ref.Role
+			}
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(merged)
 		merged = append(merged, ref)
 	}
 	return merged
@@ -3137,7 +3534,7 @@ func (r *RepositoryScanReconciler) validationTaskCountForScanRun(ctx context.Con
 func (r *RepositoryScanReconciler) enqueueAutoValidationTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, findings []*store.Finding) error {
 	createdByRun := map[string]int{}
 	for _, finding := range findings {
-		if finding == nil || finding.ValidationStatus == findingValidationStatusValidated ||
+		if finding == nil || finding.DuplicateOf != "" || finding.ValidationStatus == findingValidationStatusValidated ||
 			finding.ValidationStatus == findingValidationStatusPending {
 			continue
 		}
@@ -3244,13 +3641,41 @@ func (r *RepositoryScanReconciler) ingestThreatModelTask(ctx context.Context, sc
 			current.ErrorMessage = failure
 			return nil
 		}
-		if err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, threatModel); err != nil {
+		content := threatModel
+		if current.BaseCommit != "" {
+			var err error
+			if content, err = tx.keepThreatModelInvestigations(ctx, scan, content); err != nil {
+				return err
+			}
+		}
+		if err := tx.persistThreatModelIfChanged(ctx, scan, current.ID, current.StartedAt, content); err != nil {
 			return err
 		}
 		clearThreatModelRunError(current)
 		current.Summary = scanSummaryThreatModelPending
 		return nil
 	})
+}
+
+// keepThreatModelInvestigations carries the saved investigations into an
+// incremental threat model that omits them: incremental scans do not ask for
+// investigations, and the next full scan reviews them.
+func (r *RepositoryScanReconciler) keepThreatModelInvestigations(ctx context.Context, scan *corev1alpha1.RepositoryScan, content string) (string, error) {
+	if len(security.ThreatModelInvestigations(content)) > 0 {
+		return content, nil
+	}
+	saved, err := r.SecurityStore.GetLatestThreatModel(ctx, scan.Namespace, scan.Name)
+	if errors.Is(err, store.ErrNotFound) {
+		return content, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	investigations := security.ThreatModelInvestigations(saved.Content)
+	if len(investigations) == 0 {
+		return content, nil
+	}
+	return security.RenderThreatModelInvestigations(content, investigations), nil
 }
 
 //nolint:gocyclo // Review ingestion keeps terminal outcomes and result validation in one state transition.
@@ -3278,6 +3703,17 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	}
 
 	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		// A failed prompt is often a transient provider error; give the
+		// slice its one automatic retry before failing the run.
+		if task.Status.Phase == corev1alpha1.TaskPhaseFailed {
+			retried, err := r.retryReviewSlice(ctx, scan, task, run, reviewSlice, sliceID, "a failed review prompt")
+			if err != nil || retried {
+				return err
+			}
+		}
+		if unreviewableAfterRetry(task) {
+			return r.leaveReviewSliceUnreviewed(ctx, scan, task, run, sliceID, r.pipelineTaskFailureSummary(ctx, task))
+		}
 		return r.failReviewTask(ctx, scan, task, run, sliceID, r.pipelineTaskFailureSummary(ctx, task))
 	}
 
@@ -3291,24 +3727,9 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 	}
 	if validationProblem != "" {
 		if retryableResult {
-			retried, retryErr := r.ensureReviewResultRetry(ctx, scan, task, run, reviewSlice, sliceID)
-			if retryErr != nil {
-				if conflict, ok := errors.AsType[*reviewRetryIdentityConflictError](retryErr); ok {
-					// Fail this slice closed rather than returning the
-					// error: a returned error re-runs on every reconcile
-					// and blocks ingestion for every other run of the scan.
-					return r.failReviewTask(ctx, scan, task, run, sliceID, conflict.Error())
-				}
+			retried, retryErr := r.retryReviewSlice(ctx, scan, task, run, reviewSlice, sliceID, "an invalid terminal result")
+			if retryErr != nil || retried {
 				return retryErr
-			}
-			if retried {
-				return r.applyScanTaskIngestion(ctx, scan, task, run, func(_ *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
-					current.Phase = scanRunPhaseRunning
-					current.CompletedAt = nil
-					current.ErrorMessage = ""
-					current.Summary = fmt.Sprintf("Retrying review slice %s after an invalid terminal result", sliceID)
-					return nil
-				})
 			}
 		}
 		message := validationProblem
@@ -3349,12 +3770,45 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 		if err := tx.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, current.ID, reviewSliceStatusReviewed); err != nil {
 			return err
 		}
-		accepted, capDrops := capAcceptedFindingsForRun(scan, current, partition.Accepted)
+		kept, err := tx.runCanonicalFindings(ctx, scan, current.ID)
+		if err != nil {
+			return err
+		}
+		// A repeat of a finding this run keeps is stored as its duplicate and
+		// does not take a place under the run's cap. Duplicates are linked
+		// only after their canonical finding survives the cap and is stored
+		// under its final ID.
+		stored := make(map[*store.Finding]struct{}, len(kept))
+		storedIDs := make(map[string]struct{}, len(kept))
+		for _, finding := range kept {
+			stored[finding] = struct{}{}
+			storedIDs[finding.ID] = struct{}{}
+		}
+		keptIDs := maps.Clone(storedIDs)
+		unique := make([]*store.Finding, 0, len(partition.Accepted))
+		type duplicateFinding struct{ finding, canonical *store.Finding }
+		var duplicates []duplicateFinding
+		for _, finding := range partition.Accepted {
+			// Slices overlap, so another slice may already have reported this
+			// exact finding; it is kept once.
+			if _, ok := keptIDs[finding.ID]; ok {
+				continue
+			}
+			keptIDs[finding.ID] = struct{}{}
+			if canonical := findingWithSharedAnchor(finding, kept); canonical != nil {
+				duplicates = append(duplicates, duplicateFinding{finding, canonical})
+				continue
+			}
+			unique = append(unique, finding)
+			kept = append(kept, finding)
+		}
+		accepted, capDrops := capAcceptedFindingsForRun(scan, current, unique)
 		dropped := append(partition.Dropped, capDrops...)
 		ingestion.DroppedFindingsJSON, err = tx.persistDroppedFindingDiagnostics(ctx, scan, task, current, dropped)
 		if err != nil {
 			return err
 		}
+		newlyAccepted := 0
 		for _, finding := range accepted {
 			if err := tx.mergeExistingFindingForTarget(ctx, scan, trustedRepository, finding); err != nil {
 				return err
@@ -3362,10 +3816,44 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 			if err := tx.SecurityStore.UpsertObservedFinding(ctx, finding); err != nil {
 				return err
 			}
-			ingestion.FindingIDs = append(ingestion.FindingIDs, finding.ID)
+			stored[finding] = struct{}{}
+			// Every stored finding is reconsidered for validation: a merge
+			// can raise its severity or confidence.
+			if !slices.Contains(ingestion.FindingIDs, finding.ID) {
+				ingestion.FindingIDs = append(ingestion.FindingIDs, finding.ID)
+			}
+			// A finding merged into one this run already counted is not new.
+			if _, ok := storedIDs[finding.ID]; ok {
+				continue
+			}
+			storedIDs[finding.ID] = struct{}{}
+			newlyAccepted++
+		}
+		for _, duplicate := range duplicates {
+			// A repeat of a capped finding is dropped with it.
+			if _, ok := stored[duplicate.canonical]; !ok {
+				continue
+			}
+			// Join the repeat to the finding history it continues, store the
+			// observation, then alias it through the store so a decision
+			// already recorded there (dismissed, suppressed, or false
+			// positive) carries over to its canonical finding.
+			if err := tx.mergeExistingFindingForTarget(ctx, scan, trustedRepository, duplicate.finding); err != nil {
+				return err
+			}
+			if _, ok := storedIDs[duplicate.finding.ID]; ok {
+				// The repeat resolved to a finding this run already kept.
+				continue
+			}
+			if err := tx.SecurityStore.UpsertObservedFinding(ctx, duplicate.finding); err != nil {
+				return err
+			}
+			if err := tx.SecurityStore.MarkFindingDuplicate(ctx, scan.Namespace, duplicate.finding.ID, duplicate.canonical.ID); err != nil {
+				return err
+			}
 		}
 		clearReviewRunError(current, sliceID)
-		current.AcceptedFindings += len(accepted)
+		current.AcceptedFindings += newlyAccepted
 		current.DroppedFindings += len(dropped)
 		current.ReviewedSliceCount++
 		current.Summary = findingsV2.Scan.Summary
@@ -3373,6 +3861,29 @@ func (r *RepositoryScanReconciler) ingestReviewTask(ctx context.Context, scan *c
 			current.Summary = fmt.Sprintf("Reviewed slice %s", sliceID)
 		}
 		ingestion.Completed = false
+		return nil
+	})
+}
+
+// leaveReviewSliceUnreviewed records a slice whose retry prompt also failed
+// and lets the run continue; see unreviewableAfterRetry.
+func (r *RepositoryScanReconciler) leaveReviewSliceUnreviewed(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	task *corev1alpha1.Task,
+	run *store.ScanRun,
+	sliceID string,
+	message string,
+) error {
+	log.FromContext(ctx).Info("Review slice could not be reviewed after its retry; continuing the scan run",
+		"task", task.Name, "slice", sliceID, "reason", message)
+	return r.applyScanTaskIngestion(ctx, scan, task, run, func(tx *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+		if sliceID != "" {
+			if err := tx.SecurityStore.UpdateReviewSliceStatus(ctx, scan.Namespace, scan.Name, sliceID, current.ID, reviewSliceStatusFailed); err != nil {
+				return err
+			}
+		}
+		current.Summary = fmt.Sprintf("Review slice %s could not be reviewed after a retry: %s", sliceID, message)
 		return nil
 	})
 }
@@ -3500,6 +4011,13 @@ func (r *RepositoryScanReconciler) ensureReviewResultRetry(
 	if err := r.validateScanStageRun(ctx, scan, run); err != nil {
 		return false, err
 	}
+	// A retry replaces its failed first attempt rather than waiting for the
+	// shared review budget, but it is counted there like any new review.
+	var retryPool types.NamespacedName
+	if sourceTask.Status.Execution != nil {
+		retryPool = types.NamespacedName{Namespace: sourceTask.Namespace, Name: strings.TrimSpace(sourceTask.Status.Execution.RuntimePoolName)}
+	}
+	r.reviewTaskLedger().record(client.ObjectKeyFromObject(desired), retryPool, time.Now())
 	if err := r.Create(ctx, desired); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return false, err
@@ -3534,6 +4052,38 @@ func (e *reviewRetryIdentityConflictError) Error() string {
 	return e.message + "; re-run the scan after removing the stale retry Task"
 }
 
+// retryReviewSlice starts the slice's one automatic retry and records why.
+// It reports whether a retry now owns the slice.
+func (r *RepositoryScanReconciler) retryReviewSlice(
+	ctx context.Context,
+	scan *corev1alpha1.RepositoryScan,
+	task *corev1alpha1.Task,
+	run *store.ScanRun,
+	reviewSlice *store.ReviewSlice,
+	sliceID, cause string,
+) (bool, error) {
+	retried, err := r.ensureReviewResultRetry(ctx, scan, task, run, reviewSlice, sliceID)
+	if err != nil {
+		if conflict, ok := errors.AsType[*reviewRetryIdentityConflictError](err); ok {
+			// Fail this slice closed rather than returning the error: a
+			// returned error re-runs on every reconcile and blocks
+			// ingestion for every other run of the scan.
+			return true, r.failReviewTask(ctx, scan, task, run, sliceID, conflict.Error())
+		}
+		return false, err
+	}
+	if !retried {
+		return false, nil
+	}
+	return true, r.applyScanTaskIngestion(ctx, scan, task, run, func(_ *RepositoryScanReconciler, current *store.ScanRun, _ *store.ScanTaskIngestion) error {
+		current.Phase = scanRunPhaseRunning
+		current.CompletedAt = nil
+		current.ErrorMessage = ""
+		current.Summary = fmt.Sprintf("Retrying review slice %s after %s", sliceID, cause)
+		return nil
+	})
+}
+
 func reviewResultRetryEligible(
 	scan *corev1alpha1.RepositoryScan,
 	sourceTask *corev1alpha1.Task,
@@ -3545,7 +4095,8 @@ func reviewResultRetryEligible(
 		return false
 	}
 	attempt, validAttempt := securityReviewAttempt(sourceTask)
-	if !validAttempt || attempt != securityReviewInitialAttempt || sourceTask.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+	if !validAttempt || attempt != securityReviewInitialAttempt ||
+		(sourceTask.Status.Phase != corev1alpha1.TaskPhaseSucceeded && sourceTask.Status.Phase != corev1alpha1.TaskPhaseFailed) {
 		return false
 	}
 	if !activeScanRunPhase(run.Phase) || run.Namespace != scan.Namespace || run.RepositoryScan != scan.Name {
@@ -3725,6 +4276,71 @@ func comparableRepositoryScanTaskSpec(spec corev1alpha1.TaskSpec) corev1alpha1.T
 		spec.Suspend = nil
 	}
 	return spec
+}
+
+// runCanonicalFindings lists the findings a run has kept, excluding duplicates.
+func (r *RepositoryScanReconciler) runCanonicalFindings(ctx context.Context, scan *corev1alpha1.RepositoryScan, runID string) ([]*store.Finding, error) {
+	var out []*store.Finding
+	cursor := ""
+	for {
+		page, next, err := r.SecurityStore.ListFindings(ctx, store.FindingFilter{
+			Namespace: scan.Namespace, RepositoryScan: scan.Name, ScanRunID: runID, Limit: 200, Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page {
+			if page[i].ScanRunID == runID {
+				out = append(out, &page[i])
+			}
+		}
+		if next == "" {
+			return out, nil
+		}
+		cursor = next
+	}
+}
+
+// findingWithSharedAnchor returns a kept finding that reports the same broken
+// control as finding: both cite an overlapping root_control location, or,
+// when neither marks one, an overlapping sink. Findings without such roles
+// never match, so reviews that do not mark roles keep today's behavior.
+func findingWithSharedAnchor(finding *store.Finding, kept []*store.Finding) *store.Finding {
+	for _, role := range []string{"root_control", "sink"} {
+		anchors := findingEvidenceWithRole(finding, role)
+		if len(anchors) == 0 {
+			continue
+		}
+		for _, candidate := range kept {
+			if candidate == nil || candidate.ID == finding.ID || candidate.DuplicateOf != "" {
+				continue
+			}
+			// A shared sink identifies the same issue only when neither
+			// finding names its broken control.
+			if role == "sink" && len(findingEvidenceWithRole(candidate, "root_control")) > 0 {
+				continue
+			}
+			for _, left := range anchors {
+				for _, right := range findingEvidenceWithRole(candidate, role) {
+					if left.Path == right.Path && findingRangesOverlap(left.StartLine, left.EndLine, right.StartLine, right.EndLine) {
+						return candidate
+					}
+				}
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func findingEvidenceWithRole(finding *store.Finding, role string) []store.FindingEvidenceRef {
+	var out []store.FindingEvidenceRef
+	for _, ref := range finding.Evidence {
+		if ref.Role == role && ref.Path != "" {
+			out = append(out, ref)
+		}
+	}
+	return out
 }
 
 func capAcceptedFindingsForRun(scan *corev1alpha1.RepositoryScan, run *store.ScanRun, accepted []*store.Finding) ([]*store.Finding, []security.DroppedFindingDiagnostic) {
@@ -4003,15 +4619,7 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 			}
 		}
 		if validationProblem != "" {
-			finding.ValidationStatus = findingValidationStatusFailed
-			failure := security.ValidationArtifact{
-				Version:   1,
-				FindingID: finding.ID,
-				Status:    findingValidationStatusFailed,
-				Summary:   validationProblem,
-			}
-			data, _ := json.Marshal(failure)
-			finding.ValidationJSON = string(data)
+			recordValidationError(finding, validationProblem)
 		} else if artifact != nil {
 			finding.ValidationStatus = strings.TrimSpace(artifact.Status)
 			data, err := json.Marshal(artifact)
@@ -4019,17 +4627,14 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 				return err
 			}
 			finding.ValidationJSON = string(data)
+			applyValidatedRatings(finding)
 			for _, ref := range artifact.Evidence {
 				ref.TaskName = task.Name
 				finding.Evidence = mergeEvidenceRefs(finding.Evidence, ref)
 			}
 		}
 	} else {
-		finding.ValidationStatus = findingValidationStatusFailed
-		finding.ValidationJSON = fmt.Sprintf(
-			"{\"status\":\"failed\",\"summary\":%q}",
-			r.pipelineTaskSummary(ctx, task, "validation task failed"),
-		)
+		recordValidationError(finding, r.pipelineTaskSummary(ctx, task, "validation task failed"))
 	}
 
 	if finding.DuplicateOf == "" {
@@ -4040,6 +4645,28 @@ func (r *RepositoryScanReconciler) ingestValidationTask(ctx context.Context, sca
 	}
 	mergeFindingValidationResult(canonical, finding)
 	return r.SecurityStore.UpsertFinding(ctx, canonical)
+}
+
+// recordValidationError marks a validation that produced no verdict. A
+// revalidation that errors keeps the verdict it was meant to refresh: while
+// the new validation is pending, the finding's validation JSON still holds
+// the earlier result, so a refuted finding stays refuted.
+func recordValidationError(finding *store.Finding, summary string) {
+	var prior struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(finding.ValidationJSON), &prior) == nil {
+		switch status := strings.TrimSpace(prior.Status); status {
+		case findingValidationStatusValidated, findingValidationStatusFailed, findingValidationStatusSkipped:
+			finding.ValidationStatus = status
+			return
+		}
+	}
+	finding.ValidationStatus = findingValidationStatusError
+	data, _ := json.Marshal(security.ValidationArtifact{
+		Version: 1, FindingID: finding.ID, Status: findingValidationStatusError, Summary: summary,
+	})
+	finding.ValidationJSON = string(data)
 }
 
 func (r *RepositoryScanReconciler) canonicalFindingForUpdate(ctx context.Context, scan *corev1alpha1.RepositoryScan, finding *store.Finding) (*store.Finding, error) {
@@ -4084,6 +4711,24 @@ func mergeFindingValidationState(target, source *store.Finding) {
 	}
 	target.ValidationStatus = source.ValidationStatus
 	target.ValidationJSON = validationJSONForFinding(source.ValidationJSON, target.ID)
+	applyValidatedRatings(target)
+}
+
+// applyValidatedRatings adopts the severity and confidence a validator
+// calibrated for a finding it validated, so a merged or re-reported finding
+// keeps them too.
+func applyValidatedRatings(finding *store.Finding) {
+	var artifact security.ValidationArtifact
+	if json.Unmarshal([]byte(finding.ValidationJSON), &artifact) != nil {
+		return
+	}
+	severity, confidence := artifact.CalibratedRatings()
+	if severity != "" {
+		finding.Severity = severity
+	}
+	if confidence != "" {
+		finding.Confidence = confidence
+	}
 }
 
 func validationJSONForFinding(raw, findingID string) string {
@@ -4099,13 +4744,18 @@ func validationJSONForFinding(raw, findingID string) string {
 	return string(data)
 }
 
+// findingValidationStatusRank orders results when a duplicate's validation
+// merges into its canonical finding. An error ends a pending validation
+// without a verdict, so it outranks pending but never a verdict.
 func findingValidationStatusRank(status string) int {
 	switch strings.TrimSpace(status) {
 	case findingValidationStatusValidated:
-		return 5
+		return 6
 	case findingValidationStatusFailed:
-		return 4
+		return 5
 	case findingValidationStatusSkipped:
+		return 4
+	case findingValidationStatusError:
 		return 3
 	case findingValidationStatusPending:
 		return 2
@@ -4572,6 +5222,8 @@ func (r *RepositoryScanReconciler) updateStatusWithRetry(ctx context.Context, sc
 
 // SetupWithManager sets up the controller with the manager.
 func (r *RepositoryScanReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Created before reconciles copy the reconciler, so the copies share it.
+	r.reviewTaskLedger()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.RepositoryScan{}).
 		Owns(&corev1alpha1.Task{}).

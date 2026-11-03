@@ -67,8 +67,8 @@ const (
 	// DefaultGeneralWorkerImage is the default image for container tasks
 	DefaultGeneralWorkerImage = "ghcr.io/orka-agents/orka/general-worker:latest"
 
-	// DefaultInitImage is the default image for init containers
-	DefaultInitImage = "busybox:1.37"
+	// DefaultInitImage pins the multi-platform BusyBox index used to fetch session transcripts.
+	DefaultInitImage = "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 
 	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
 	AIWorkerServiceAccount = "orka-ai-worker"
@@ -1323,6 +1323,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// The tool list is always controller-owned, even when empty, so Task env
 	// and Agent Secret EnvFrom cannot supply it.
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	// Deprecation metadata is controller-owned too, including when empty, so
+	// Task env and Agent Secret EnvFrom cannot suppress compatibility warnings.
+	envVars = setControllerEnvValue(envVars, workerenv.AIDeprecatedMemoryTools,
+		workerenv.JoinCSV(aitools.DeprecatedMemoryToolNames(task, agent)))
 	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
 		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
 	}
