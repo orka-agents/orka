@@ -142,6 +142,17 @@ func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnable
 	return nil
 }
 
+// validateProtectedSetConfig refuses a configured protected set without Task
+// provenance admission. The improvement-role annotation is what marks a Task
+// as a proposer; without the provenance webhook any Task writer could remove
+// it before dispatch and run the Task without proposer constraints.
+func validateProtectedSetConfig(configMap string, provenanceProtected bool) error {
+	if strings.TrimSpace(configMap) != "" && !provenanceProtected {
+		return fmt.Errorf("--protected-set-configmap requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect the improvement-role annotation")
+	}
+	return nil
+}
+
 func validateStaticTrustedServiceReferences(
 	watchNamespace string,
 	trust outboundaccess.TrustConfig,
@@ -546,7 +557,8 @@ func main() {
 		"Physical namespace for managed ACP runtime Pods.")
 	flag.StringVar(&protectedSetConfigMap, "protected-set-configmap", os.Getenv("ORKA_PROTECTED_SET_CONFIGMAP"),
 		"Name of the ConfigMap in the controller namespace that declares the self-improvement protected set "+
-			"(key protectedSet.yaml, schema orka.protectedSet.v1). Empty, missing or invalid disables proposer Tasks.")
+			"(key protectedSet.yaml, schema orka.protectedSet.v1). Empty, missing or invalid disables proposer Tasks. "+
+			"Requires --task-provenance-admission-enabled or --task-provenance-admission-external.")
 	flag.StringVar(&acpProviderProxyNamespace, "acp-provider-proxy-namespace", os.Getenv("ORKA_ACP_PROVIDER_PROXY_NAMESPACE"),
 		"Namespace containing the approved credential-injecting provider proxy.")
 	flag.StringVar(&acpProviderProxyBaseURL, "acp-provider-proxy-base-url", os.Getenv("ORKA_ACP_PROVIDER_PROXY_BASE_URL"),
@@ -980,6 +992,10 @@ func main() {
 		taskProvenanceProtected,
 	); err != nil {
 		setupLog.Error(err, "invalid workspace provider security configuration")
+		os.Exit(1)
+	}
+	if err := validateProtectedSetConfig(protectedSetConfigMap, taskProvenanceProtected); err != nil {
+		setupLog.Error(err, "proposer Tasks fail closed without Task provenance admission")
 		os.Exit(1)
 	}
 	managerAdmissionEnabled := managerWebhookAdmissionEnabled(
