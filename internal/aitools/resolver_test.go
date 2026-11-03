@@ -26,13 +26,18 @@ func TestResolve(t *testing.T) {
 		want  []string
 	}{
 		{
-			name: "configured tools and memory are canonicalized",
+			name: "configured tools and compatibility memory are canonicalized",
 			task: aiToolTask(nil, nil, []string{"task_tool", " agent_tool ", ""}),
 			agent: &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Tools: []corev1alpha1.ToolReference{
 				{Name: " agent_tool ", Enabled: &enabled},
 				{Name: "disabled_tool", Enabled: &disabled},
 			}}},
 			want: []string{"agent_tool", "task_tool", "recall_memory", "remember", "propose_memory", "search_transcript"},
+		},
+		{
+			name: "explicit memory tool keeps compatibility tools without coordination",
+			task: aiToolTask(nil, nil, []string{"recall_memory"}),
+			want: []string{"recall_memory", "remember", "propose_memory", "search_transcript"},
 		},
 		{
 			name: "autonomous coordination adds approval",
@@ -101,7 +106,7 @@ func TestResolve(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "disable annotation suppresses implicit tools",
+			name: "disable annotation retains compatibility memory",
 			task: aiToolTask(
 				map[string]string{labels.LabelParentTask: "parent"},
 				map[string]string{labels.AnnotationDisableCoordinationToolInject: "true"},
@@ -222,6 +227,19 @@ func TestIsImplicitTool(t *testing.T) {
 	}
 	if IsImplicitTool(aiToolTask(nil, nil, []string{"list_issues"}), nil, "list_issues") {
 		t.Fatal("explicit issue tool was classified as implicit")
+	}
+	if !IsImplicitTool(aiToolTask(nil, nil, []string{"recall_memory"}), nil, "recall_memory") {
+		t.Fatal("explicit memory tool was not classified as a platform tool")
+	}
+	if !IsImplicitTool(aiToolTask(nil, nil, nil), nil, "recall_memory") {
+		t.Fatal("compatibility memory tool was not classified as a platform tool")
+	}
+	coordinatedAgent := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Enabled: true}}}
+	if IsImplicitTool(aiToolTask(nil, nil, nil), coordinatedAgent, "custom_tool") {
+		t.Fatal("custom tool was classified as an implicit platform tool with coordination enabled")
+	}
+	if !IsImplicitTool(aiToolTask(nil, nil, nil), coordinatedAgent, "recall_memory") {
+		t.Fatal("memory tool was not classified as implicit with coordination enabled")
 	}
 	child.Spec.Type = corev1alpha1.TaskTypeAgent
 	if IsImplicitTool(child, nil, "send_message") {
