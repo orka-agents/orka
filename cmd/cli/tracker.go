@@ -229,15 +229,19 @@ func (t *tracker) addAgent(data client.SSEEventData) {
 	}
 }
 
-// completeAgents marks all pending agents as done.
-func (t *tracker) completeAgents(_ client.SSEEventData) {
+// completeAgents applies the task phases a wait tool reported, then marks the
+// remaining pending agents as done.
+func (t *tracker) completeAgents(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	for _, reported := range taskPhasesFromResult(data.Result) {
+		t.applyTaskPhaseLocked(reported.task, reported.phase)
+	}
 	for _, a := range t.agents {
 		if !a.done {
 			a.done = true
-			a.success = true // Default success; real status parsed from result
+			a.success = true // No terminal phase was reported for this agent.
 			a.status = statusDone
 			elapsed := time.Since(a.startTime).Round(time.Second)
 
@@ -276,37 +280,77 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	var result map[string]any
-	if err := json.Unmarshal(data.Result, &result); err == nil {
-		phase, _ := result["phase"].(string)
-		taskName, _ := result["name"].(string)
-		if phase == "" {
-			return
+	for _, reported := range taskPhasesFromResult(data.Result) {
+		t.applyTaskPhaseLocked(reported.task, reported.phase)
+	}
+}
+
+// reportedTaskPhase is one task phase found in a tool result.
+type reportedTaskPhase struct {
+	task  string
+	phase string
+}
+
+// taskPhasesFromResult extracts task phases from a check_task_progress,
+// wait_for_task or wait_for_tasks result. Chat tools wrap their payload as
+// {"success":true,"data":{...}}; unwrapped payloads are accepted as well.
+func taskPhasesFromResult(raw json.RawMessage) []reportedTaskPhase {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	payload := raw
+	if err := json.Unmarshal(raw, &envelope); err == nil && len(envelope.Data) > 0 {
+		payload = envelope.Data
+	}
+	var result struct {
+		Name    string `json:"name"`
+		Phase   string `json:"phase"`
+		Results []struct {
+			Task  string `json:"task"`
+			Phase string `json:"phase"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(payload, &result); err != nil {
+		return nil
+	}
+	var phases []reportedTaskPhase
+	for _, r := range result.Results {
+		if r.Phase != "" {
+			phases = append(phases, reportedTaskPhase{task: r.Task, phase: r.Phase})
 		}
-		for _, a := range t.agents {
-			if !a.done && (a.taskName == taskName || taskName == "") {
-				a.status = phase
-				switch phase {
-				case "Succeeded":
-					a.done = true
-					a.success = true
-				case "Failed", "Cancelled":
-					// A cancelled task is terminal but not successful; leaving it
-					// pending would let stop/completeAgents report it as success.
-					a.done = true
-					a.success = false
-				}
-				if a.done && !t.isTTY {
-					// completeAgents and stop skip finished agents in non-TTY
-					// output, so print the terminal outcome now.
-					icon := "✓"
-					if !a.success {
-						icon = "✗"
-					}
-					fmt.Fprintf(t.w, "├─ %s %s  %s\n", icon, a.name, time.Since(a.startTime).Round(time.Second)) //nolint:errcheck
-				}
-				break
+	}
+	if result.Phase != "" {
+		phases = append(phases, reportedTaskPhase{task: result.Name, phase: result.Phase})
+	}
+	return phases
+}
+
+// applyTaskPhaseLocked records a reported phase on the first pending agent for
+// the task. The caller must hold t.mu.
+func (t *tracker) applyTaskPhaseLocked(taskName, phase string) {
+	for _, a := range t.agents {
+		if !a.done && (a.taskName == taskName || taskName == "") {
+			a.status = phase
+			switch phase {
+			case "Succeeded":
+				a.done = true
+				a.success = true
+			case "Failed", "Cancelled":
+				// A cancelled task is terminal but not successful; leaving it
+				// pending would let stop/completeAgents report it as success.
+				a.done = true
+				a.success = false
 			}
+			if a.done && !t.isTTY {
+				// completeAgents and stop skip finished agents in non-TTY
+				// output, so print the terminal outcome now.
+				icon := "✓"
+				if !a.success {
+					icon = "✗"
+				}
+				fmt.Fprintf(t.w, "├─ %s %s  %s\n", icon, a.name, time.Since(a.startTime).Round(time.Second)) //nolint:errcheck
+			}
+			return
 		}
 	}
 }

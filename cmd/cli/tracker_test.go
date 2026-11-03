@@ -269,6 +269,44 @@ func TestUpdateAgentFromProgressCancelledIsNotSuccess(t *testing.T) {
 	}
 }
 
+func TestTrackerAppliesWrappedToolResultPhases(t *testing.T) {
+	// Results use the shapes the chat API streams: check_task_progress and
+	// wait_for_task wrap their payload in the chat tool envelope, while
+	// wait_for_tasks returns a results list.
+	for _, test := range []struct {
+		name   string
+		tool   string
+		result string
+	}{
+		{name: "check_task_progress", tool: toolCheckTaskProgress, result: `{"success":true,"data":{"name":"task-1","namespace":"default","phase":"Cancelled"}}`},
+		{name: "wait_for_task", tool: toolWaitForTask, result: `{"success":true,"data":{"name":"task-1","phase":"Cancelled","message":"cancelled"}}`},
+		{name: "wait_for_tasks", tool: "wait_for_tasks", result: `{"completed":true,"results":[{"task":"task-1","phase":"Cancelled"},{"task":"task-2","phase":"Succeeded"}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tr := newTracker(&buf, VerbosityDefault, false)
+			for _, name := range []string{"task-1", "task-2"} {
+				args, _ := json.Marshal(map[string]any{"agent": name, "name": name})
+				tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+			}
+			tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: test.tool, Result: json.RawMessage(test.result)}))
+			tr.completeAgents(client.SSEEventData{})
+			tr.stop()
+
+			if !tr.agents[0].done || tr.agents[0].success || tr.agents[0].status != "Cancelled" {
+				t.Fatalf("cancelled agent = done %v success %v status %q, want a failed Cancelled agent",
+					tr.agents[0].done, tr.agents[0].success, tr.agents[0].status)
+			}
+			if !tr.agents[1].done || !tr.agents[1].success {
+				t.Fatalf("other agent = done %v success %v, want successful", tr.agents[1].done, tr.agents[1].success)
+			}
+			if out := buf.String(); strings.Count(out, "✗ task-1") != 1 || strings.Count(out, "✓ task-2") != 1 || strings.Contains(out, "✓ task-1") {
+				t.Fatalf("non-TTY output = %q, want one failure line for task-1 and one success line for task-2", out)
+			}
+		})
+	}
+}
+
 func TestCompleteAgentByName(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
