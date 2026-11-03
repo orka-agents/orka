@@ -62,19 +62,20 @@ const (
 	OutboundAccessTrustedTokenEndpointServices = "ORKA_OUTBOUND_ACCESS_TRUSTED_TOKEN_ENDPOINT_SERVICES"
 
 	// AI worker env vars.
-	AIProvider            = "ORKA_AI_PROVIDER"
-	AIModel               = "ORKA_AI_MODEL"
-	AITemperature         = "ORKA_AI_TEMPERATURE"
-	AIMaxTokens           = "ORKA_AI_MAX_TOKENS"
-	AIPrompt              = "ORKA_AI_PROMPT"
-	AISystemPrompt        = "ORKA_AI_SYSTEM_PROMPT"
-	AIBaseURL             = "ORKA_AI_BASE_URL"
-	AIAzureAPIVersion     = "ORKA_AI_AZURE_API_VERSION"
-	AIAzureDeploymentName = "ORKA_AI_AZURE_DEPLOYMENT_NAME"
-	AITools               = "ORKA_AI_TOOLS"
-	GatewayReplyEnabled   = "ORKA_GATEWAY_REPLY_ENABLED"
-	AIFallbackCount       = "ORKA_AI_FALLBACK_COUNT"
-	ControllerMode        = "ORKA_CONTROLLER_MODE"
+	AIProvider              = "ORKA_AI_PROVIDER"
+	AIModel                 = "ORKA_AI_MODEL"
+	AITemperature           = "ORKA_AI_TEMPERATURE"
+	AIMaxTokens             = "ORKA_AI_MAX_TOKENS"
+	AIPrompt                = "ORKA_AI_PROMPT"
+	AISystemPrompt          = "ORKA_AI_SYSTEM_PROMPT"
+	AIBaseURL               = "ORKA_AI_BASE_URL"
+	AIAzureAPIVersion       = "ORKA_AI_AZURE_API_VERSION"
+	AIAzureDeploymentName   = "ORKA_AI_AZURE_DEPLOYMENT_NAME"
+	AITools                 = "ORKA_AI_TOOLS"
+	AIDeprecatedMemoryTools = "ORKA_AI_DEPRECATED_MEMORY_TOOLS"
+	GatewayReplyEnabled     = "ORKA_GATEWAY_REPLY_ENABLED"
+	AIFallbackCount         = "ORKA_AI_FALLBACK_COUNT"
+	ControllerMode          = "ORKA_CONTROLLER_MODE"
 
 	// Telemetry env vars.
 	EnableTelemetry = "ORKA_ENABLE_TELEMETRY"
@@ -439,6 +440,7 @@ type AIWorkerEnv struct {
 	AzureAPIVersion                  string
 	AzureDeploymentName              string
 	Tools                            []string
+	DeprecatedMemoryTools            []string
 	GatewayReplyEnabled              bool
 	Fallbacks                        []FallbackProviderEnv
 	EnforceTransactionCredentialAuth bool
@@ -473,6 +475,9 @@ func (e AIWorkerEnv) EnvVars() []corev1.EnvVar {
 	}
 	if len(e.Tools) > 0 {
 		envVars = append(envVars, Env(AITools, JoinCSV(e.Tools)))
+	}
+	if len(e.DeprecatedMemoryTools) > 0 {
+		envVars = append(envVars, Env(AIDeprecatedMemoryTools, JoinCSV(e.DeprecatedMemoryTools)))
 	}
 	if e.EnforceTransactionCredentialAuth {
 		envVars = append(envVars, Env(TransactionCredentialAuthorizationEnforced, "true"))
@@ -510,6 +515,7 @@ func ParseAIWorkerEnv(getenv func(string) string) AIWorkerEnv {
 		AzureAPIVersion:                  getenv(AIAzureAPIVersion),
 		AzureDeploymentName:              getenv(AIAzureDeploymentName),
 		Tools:                            SplitCSV(getenv(AITools)),
+		DeprecatedMemoryTools:            SplitCSV(getenv(AIDeprecatedMemoryTools)),
 		GatewayReplyEnabled:              IsTrue(getenv(GatewayReplyEnabled)),
 		Fallbacks:                        ParseFallbacks(getenv),
 		EnforceTransactionCredentialAuth: IsTrue(getenv(TransactionCredentialAuthorizationEnforced)),
