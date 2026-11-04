@@ -81,10 +81,9 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		// A requeue means the failure is not projected yet; count it once,
 		// on the pass that marks the Task failed.
 		if err == nil && result.IsZero() {
-			capabilitygap.Record(capabilitygap.Signal{
+			recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), task, capabilitygap.Signal{
 				Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonExecutionWorkspace,
-				Runtime: capabilityGapBoundRuntime(bound), Namespace: task.Namespace, Task: task.Name,
-				Gateway: capabilityGapGatewayOwner(task),
+				Runtime: capabilityGapBoundRuntime(bound),
 			})
 		}
 		return result, err

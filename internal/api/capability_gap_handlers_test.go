@@ -88,7 +88,7 @@ func TestSubmitExecutionEventRecordsWorkerToolRejections(t *testing.T) {
 	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_enabled", "native", "web_fetch"))
 	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_registered", "native", "unknown"))
 
-	summary := recorder.Summary("default", nil)
+	summary := recorder.Summary("default", "default-namespace-uid", nil)
 	require.Len(t, summary.Signals, 2, "only typed worker rejections are signals")
 	for _, signal := range summary.Signals {
 		require.Equal(t, []string{"task-1"}, signal.Tasks)
@@ -107,8 +107,9 @@ func setupManagedAIWorkerEventApp(t *testing.T, taskName string, taskType corev1
 	task, job, pod := testInternalExecutionEventOwnedWorkerObjects(taskName)
 	task.Spec.Type = taskType
 	pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: task.Namespace, UID: "default-namespace-uid"}}
 	return setupInternalExecutionEventAppWithClient(
-		newInternalExecutionEventStore(t), testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name),
+		newInternalExecutionEventStore(t), testInternalExecutionEventClient(t, task, job, pod, namespace), testInternalExecutionEventWorkerUser(pod.Name),
 	)
 }
 
@@ -123,7 +124,7 @@ func TestSubmitExecutionEventIgnoresToolRejectionsFromOtherWorkers(t *testing.T)
 	require.Equal(t, http.StatusCreated, resp.StatusCode, "the event itself is still journaled")
 	require.NoError(t, resp.Body.Close())
 	require.NotContains(t, capabilityGapSeriesText(t), "orka_capability_gap_signals_total{")
-	require.Empty(t, recorder.Summary("default", nil).Signals)
+	require.Empty(t, recorder.Summary("default", "default-namespace-uid", nil).Signals)
 }
 
 func TestSubmitExecutionEventRecordsNothingWhenSignalsAreOff(t *testing.T) {
@@ -156,12 +157,17 @@ func TestGetCapabilityGaps(t *testing.T) {
 	for _, task := range []string{"visible-task", "deleted-task"} {
 		recorder.Record(capabilitygap.Signal{
 			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-			Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", Task: task,
+			Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", NamespaceUID: "namespace-uid", Task: task,
 		})
 	}
 	recorder.Record(capabilitygap.Signal{
 		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonRuntime,
-		Namespace: "other", Task: "other-task",
+		Namespace: "other", NamespaceUID: "other-namespace-uid", Task: "other-task",
+	})
+	// Counts from an earlier namespace with the same name stay hidden.
+	recorder.Record(capabilitygap.Signal{
+		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonMaxTurns,
+		Namespace: "default", NamespaceUID: "deleted-namespace-uid", Task: "visible-task",
 	})
 
 	status, body = f.request(t, http.MethodGet, "/api/v1/capability-gaps?namespace=default", "")
@@ -174,6 +180,7 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, int64(2), signal.Count, "deleted Tasks keep their counts")
 	require.Equal(t, []string{"visible-task"}, signal.Tasks, "only Tasks the caller can list are referenced")
 	require.NotContains(t, body, "other-task")
+	require.NotContains(t, body, string(capabilitygap.ReasonMaxTurns), "a recreated namespace never sees earlier counts")
 	require.NotContains(t, body, hostilePromptText)
 
 	// A Gateway-owned Task's signals count only for callers who can read that
@@ -181,7 +188,7 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.NoError(t, f.kube.Create(t.Context(), &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "private", Namespace: "default", UID: "gateway-uid"}}))
 	recorder.Record(capabilitygap.Signal{
 		Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-		Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", Task: "gateway-task",
+		Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", NamespaceUID: "namespace-uid", Task: "gateway-task",
 		Gateway: capabilitygap.GatewayOwner{Namespace: "default", NamespaceUID: "namespace-uid", Name: "private", UID: "gateway-uid"},
 	})
 	status, body = f.request(t, http.MethodGet, "/api/v1/capability-gaps?namespace=default", "")

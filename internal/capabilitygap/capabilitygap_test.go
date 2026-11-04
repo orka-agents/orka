@@ -31,6 +31,8 @@ var hostileStrings = []string{
 	strings.Repeat("A", 4096),
 }
 
+const teamAUID = "team-a-uid"
+
 type fakeClock struct{ now time.Time }
 
 func (c *fakeClock) Now() time.Time { return c.now }
@@ -69,11 +71,11 @@ func gatheredCapabilityGapSeries(t *testing.T) string {
 func TestRecordCountsEachSignal(t *testing.T) {
 	r, _ := newTestRecorder(t, "web_fetch", "Bash")
 
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonMaxTurns, Runtime: "external", Namespace: "team-a", Task: "task-1"})
-	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotEnabled, Runtime: RuntimeNative, Tool: "web_fetch", Namespace: "team-a", Task: "task-2"})
-	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotRegistered, Runtime: RuntimeNative, Tool: "not_a_tool", Namespace: "team-a", Task: "task-2"})
-	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolDeniedByPolicy, Runtime: "Codex", Tool: "bash", Namespace: "team-a", Task: "task-3"})
-	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolDeniedByPolicy, Runtime: "codex", Tool: "BASH", Namespace: "team-a", Task: "task-4"})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonMaxTurns, Runtime: "external", Namespace: "team-a", NamespaceUID: teamAUID, Task: "task-1"})
+	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotEnabled, Runtime: RuntimeNative, Tool: "web_fetch", Namespace: "team-a", NamespaceUID: teamAUID, Task: "task-2"})
+	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotRegistered, Runtime: RuntimeNative, Tool: "not_a_tool", Namespace: "team-a", NamespaceUID: teamAUID, Task: "task-2"})
+	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolDeniedByPolicy, Runtime: "Codex", Tool: "bash", Namespace: "team-a", NamespaceUID: teamAUID, Task: "task-3"})
+	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolDeniedByPolicy, Runtime: "codex", Tool: "BASH", Namespace: "team-a", NamespaceUID: teamAUID, Task: "task-4"})
 
 	for _, tc := range []struct {
 		labels []string
@@ -89,7 +91,7 @@ func TestRecordCountsEachSignal(t *testing.T) {
 		}
 	}
 
-	summary := r.Summary("team-a", nil)
+	summary := r.Summary("team-a", teamAUID, nil)
 	if !summary.Partial {
 		t.Fatalf("a recorder started today cannot cover the six earlier days: %+v", summary)
 	}
@@ -103,7 +105,7 @@ func TestRecordCountsEachSignal(t *testing.T) {
 	if got := strings.Join(top.Tasks, ","); got != "task-4,task-3" {
 		t.Fatalf("tasks = %q, want most recent first", got)
 	}
-	if other := r.Summary("team-b", nil); len(other.Signals) != 0 {
+	if other := r.Summary("team-b", teamAUID, nil); len(other.Signals) != 0 {
 		t.Fatalf("summary leaked across namespaces: %+v", other.Signals)
 	}
 }
@@ -111,9 +113,9 @@ func TestRecordCountsEachSignal(t *testing.T) {
 func TestRecordNormalizesOutOfRangeValues(t *testing.T) {
 	r, _ := newTestRecorder(t)
 
-	r.Record(Signal{Category: "not_a_category", Reason: ReasonRuntime, Namespace: "team-a"})
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonToolNotEnabled, Runtime: "lisp-machine", Namespace: "team-a"})
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Tool: "web_fetch", Namespace: "team-a"})
+	r.Record(Signal{Category: "not_a_category", Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonToolNotEnabled, Runtime: "lisp-machine", Namespace: "team-a", NamespaceUID: teamAUID})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Tool: "web_fetch", Namespace: "team-a", NamespaceUID: teamAUID})
 
 	if got := counterValue("unsupported_request", "other", "unknown", "none"); got != 1 {
 		t.Fatalf("mismatched reason and unknown runtime = %v, want 1", got)
@@ -121,7 +123,7 @@ func TestRecordNormalizesOutOfRangeValues(t *testing.T) {
 	if got := counterValue("unsupported_request", "runtime", "unknown", "none"); got != 1 {
 		t.Fatalf("non-tool category must label tool none, got %v", got)
 	}
-	if got := len(r.Summary("team-a", nil).Signals); got != 2 {
+	if got := len(r.Summary("team-a", teamAUID, nil).Signals); got != 2 {
 		t.Fatalf("unknown category must be dropped, got %d rows", got)
 	}
 }
@@ -134,12 +136,12 @@ func TestRecordNeverExposesHostileText(t *testing.T) {
 	for _, hostile := range hostileStrings {
 		Record(Signal{
 			Category: CategoryMissingTool, Reason: Reason(hostile), Runtime: hostile, Tool: hostile,
-			Namespace: "team-a", Task: hostile,
+			Namespace: "team-a", NamespaceUID: teamAUID, Task: hostile,
 		})
 		Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: hostile, Task: "task-1"})
 	}
 
-	summary, err := json.Marshal(r.Summary("team-a", nil))
+	summary, err := json.Marshal(r.Summary("team-a", teamAUID, nil))
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
 	}
@@ -174,10 +176,10 @@ func TestUnknownToolNamesShareOneSeries(t *testing.T) {
 	for i := range 500 {
 		r.Record(Signal{
 			Category: CategoryMissingTool, Reason: ReasonToolNotRegistered, Runtime: RuntimeNative,
-			Tool: fmt.Sprintf("invented_tool_%d", i), Namespace: "team-a", Task: fmt.Sprintf("task-%d", i),
+			Tool: fmt.Sprintf("invented_tool_%d", i), Namespace: "team-a", NamespaceUID: teamAUID, Task: fmt.Sprintf("task-%d", i),
 		})
 	}
-	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotEnabled, Runtime: RuntimeNative, Tool: "code_exec", Namespace: "team-a"})
+	r.Record(Signal{Category: CategoryMissingTool, Reason: ReasonToolNotEnabled, Runtime: RuntimeNative, Tool: "code_exec", Namespace: "team-a", NamespaceUID: teamAUID})
 
 	if got := testutilCollectCount(t); got != 2 {
 		t.Fatalf("series = %d, want 2 (unknown plus one catalog tool)", got)
@@ -185,7 +187,7 @@ func TestUnknownToolNamesShareOneSeries(t *testing.T) {
 	if got := counterValue("missing_tool", "not_registered", "native", "unknown"); got != 500 {
 		t.Fatalf("unknown bucket = %v, want 500", got)
 	}
-	summary := r.Summary("team-a", nil)
+	summary := r.Summary("team-a", teamAUID, nil)
 	if len(summary.Signals) != 2 {
 		t.Fatalf("summary rows = %d, want 2", len(summary.Signals))
 	}
@@ -210,11 +212,11 @@ func TestSummaryWindowAndBounds(t *testing.T) {
 	r, clock := newTestRecorder(t)
 	start := clock.now
 
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", Task: "old"})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID, Task: "old"})
 	clock.now = start.Add(6 * 24 * time.Hour)
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", Task: "recent"})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID, Task: "recent"})
 
-	summary := r.Summary("team-a", nil)
+	summary := r.Summary("team-a", teamAUID, nil)
 	if len(summary.Signals) != 1 || summary.Signals[0].Count != 2 {
 		t.Fatalf("both days inside the window must count: %+v", summary.Signals)
 	}
@@ -227,7 +229,7 @@ func TestSummaryWindowAndBounds(t *testing.T) {
 	}
 
 	clock.now = start.Add(7 * 24 * time.Hour)
-	summary = r.Summary("team-a", nil)
+	summary = r.Summary("team-a", teamAUID, nil)
 	if len(summary.Signals) != 1 || summary.Signals[0].Count != 1 || summary.Signals[0].Tasks[0] != "recent" {
 		t.Fatalf("the day outside the window must be pruned: %+v", summary.Signals)
 	}
@@ -236,7 +238,7 @@ func TestSummaryWindowAndBounds(t *testing.T) {
 	}
 
 	for i := range MaxNamespacesPerDay + 5 {
-		r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: fmt.Sprintf("ns-%d", i)})
+		r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: fmt.Sprintf("ns-%d", i), NamespaceUID: teamAUID})
 	}
 	r.mu.Lock()
 	namespaces := len(r.days[dayNumber(clock.now)])
@@ -255,9 +257,9 @@ func TestRecordingIsOffByDefault(t *testing.T) {
 	if Default() != nil {
 		t.Fatal("no recorder may be installed by default")
 	}
-	Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a"})
+	Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID})
 	var nilRecorder *Recorder
-	nilRecorder.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a"})
+	nilRecorder.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID})
 	if got := testutilCollectCount(t); got != 0 {
 		t.Fatalf("disabled recording produced %d series", got)
 	}
@@ -272,11 +274,11 @@ func TestSummaryCountsGatewayOwnedSignalsOnlyForVisibleGateways(t *testing.T) {
 		{Task: "alpha-task", Gateway: alpha},
 		{Task: "beta-task", Gateway: beta},
 	} {
-		signal.Category, signal.Reason, signal.Namespace = CategoryUnsupportedRequest, ReasonRuntime, "team-a"
+		signal.Category, signal.Reason, signal.Namespace, signal.NamespaceUID = CategoryUnsupportedRequest, ReasonRuntime, "team-a", teamAUID
 		r.Record(signal)
 	}
 
-	owners := r.GatewayOwners("team-a")
+	owners := r.GatewayOwners("team-a", teamAUID)
 	if len(owners) != 2 {
 		t.Fatalf("owners = %+v, want alpha and beta", owners)
 	}
@@ -290,7 +292,7 @@ func TestSummaryCountsGatewayOwnedSignalsOnlyForVisibleGateways(t *testing.T) {
 		{"only alpha", func(owner GatewayOwner) bool { return owner == alpha }, 2, "alpha-task,plain-task"},
 		{"all", func(GatewayOwner) bool { return true }, 3, "beta-task,alpha-task,plain-task"},
 	} {
-		summary := r.Summary("team-a", tc.visible)
+		summary := r.Summary("team-a", teamAUID, tc.visible)
 		if len(summary.Signals) != 1 {
 			t.Fatalf("%s: signals = %+v, want one merged row", tc.name, summary.Signals)
 		}
@@ -305,11 +307,110 @@ func TestRecordCopiesBorrowedNames(t *testing.T) {
 	buffer := []byte("team-a/task-1")
 	namespace := unsafe.String(&buffer[0], len("team-a"))
 	task := unsafe.String(&buffer[len("team-a/")], len("task-1"))
-	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: namespace, Task: task})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: namespace, NamespaceUID: teamAUID, Task: task})
 	copy(buffer, "zzzz-z/zzzz-z")
 
-	summary := r.Summary("team-a", nil)
+	summary := r.Summary("team-a", teamAUID, nil)
 	if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != "task-1" {
 		t.Fatalf("summary = %+v, want the original namespace and Task", summary)
+	}
+}
+
+func TestSummaryLeavesOutEarlierNamespaceIncarnations(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	old := GatewayOwner{Namespace: "team-a", NamespaceUID: "old-uid", Name: "gw", UID: "gw-old"}
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: "old-uid", Task: "old-task"})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: "old-uid", Task: "old-gw-task", Gateway: old})
+	// A signal whose namespace identity could not be verified is not kept.
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", Task: "unverified"})
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: "new-uid", Task: "new-task"})
+
+	summary := r.Summary("team-a", "new-uid", func(GatewayOwner) bool { return true })
+	if len(summary.Signals) != 1 || summary.Signals[0].Count != 1 || strings.Join(summary.Signals[0].Tasks, ",") != "new-task" {
+		t.Fatalf("recreated namespace summary = %+v, want only the new incarnation's signal", summary.Signals)
+	}
+	if owners := r.GatewayOwners("team-a", "new-uid"); len(owners) != 0 {
+		t.Fatalf("recreated namespace owners = %+v, want none", owners)
+	}
+	if owners := r.GatewayOwners("team-a", "old-uid"); len(owners) != 1 || owners[0] != old {
+		t.Fatalf("earlier incarnation owners = %+v, want %+v", owners, old)
+	}
+	if got := counterValue("unsupported_request", "runtime", "unknown", "none"); got != 4 {
+		t.Fatalf("Prometheus must count every signal, got %v", got)
+	}
+}
+
+func TestGatewayOwnersAreBoundedPerNamespaceDay(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	gateway := func(i int) GatewayOwner {
+		return GatewayOwner{Namespace: "team-a", NamespaceUID: teamAUID, Name: fmt.Sprintf("gw-%d", i), UID: fmt.Sprintf("gw-uid-%d", i)}
+	}
+	record := func(i int) {
+		r.Record(Signal{
+			Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID,
+			Task: fmt.Sprintf("task-%d", i), Gateway: gateway(i),
+		})
+	}
+	for i := range MaxGatewaysPerNamespaceDay {
+		record(i)
+	}
+	// Seeing gw-0 again makes gw-1 the least recently observed Gateway.
+	record(0)
+	for i := MaxGatewaysPerNamespaceDay; i < MaxGatewaysPerNamespaceDay+3; i++ {
+		record(i)
+	}
+
+	owners := r.GatewayOwners("team-a", teamAUID)
+	if len(owners) != MaxGatewaysPerNamespaceDay {
+		t.Fatalf("owners kept = %d, want %d", len(owners), MaxGatewaysPerNamespaceDay)
+	}
+	kept := map[GatewayOwner]bool{}
+	for _, owner := range owners {
+		kept[owner] = true
+	}
+	for _, evicted := range []int{1, 2, 3} {
+		if kept[gateway(evicted)] {
+			t.Fatalf("least recently observed gw-%d was kept: %+v", evicted, owners)
+		}
+	}
+	if !kept[gateway(0)] || !kept[gateway(MaxGatewaysPerNamespaceDay+2)] {
+		t.Fatalf("recently observed Gateways were evicted: %+v", owners)
+	}
+	summary := r.Summary("team-a", teamAUID, func(GatewayOwner) bool { return true })
+	if len(summary.Signals) != 1 || summary.Signals[0].Count != MaxGatewaysPerNamespaceDay+1 {
+		t.Fatalf("summary = %+v, want the kept Gateways' %d signals", summary.Signals, MaxGatewaysPerNamespaceDay+1)
+	}
+	if got := counterValue("unsupported_request", "runtime", "unknown", "none"); got != float64(MaxGatewaysPerNamespaceDay+4) {
+		t.Fatalf("Prometheus must count evicted Gateways' signals, got %v", got)
+	}
+}
+
+func TestSummaryKeepsNewestTasksAcrossGateways(t *testing.T) {
+	r, clock := newTestRecorder(t)
+	owners := []GatewayOwner{
+		{},
+		{Namespace: "team-a", NamespaceUID: teamAUID, Name: "alpha", UID: "alpha-uid"},
+		{Namespace: "team-a", NamespaceUID: teamAUID, Name: "beta", UID: "beta-uid"},
+	}
+	record := func(i int, task string) {
+		r.Record(Signal{
+			Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", NamespaceUID: teamAUID,
+			Task: task, Gateway: owners[i%len(owners)],
+		})
+	}
+	record(0, "yesterday")
+	clock.now = clock.now.Add(24 * time.Hour)
+	for i := range 8 {
+		record(i, fmt.Sprintf("task-%d", i))
+	}
+	// Observing task-1 again makes it the newest reference.
+	record(1, "task-1")
+
+	want := "task-1,task-7,task-6,task-5,task-4"
+	for range 50 {
+		summary := r.Summary("team-a", teamAUID, func(GatewayOwner) bool { return true })
+		if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != want {
+			t.Fatalf("tasks = %+v, want %q", summary.Signals, want)
+		}
 	}
 }

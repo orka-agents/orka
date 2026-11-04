@@ -5976,10 +5976,9 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	// Count a denial once: only when the runtime applied it fresh, so a
 	// retried or replayed resolution of the same request adds nothing.
 	if err == nil && !allowed && resolved != nil && resolved.Classification.Class == harnessv2.RequestClassificationFresh {
-		capabilitygap.Record(capabilitygap.Signal{
+		recordTaskCapabilityGap(ctx, uncachedReader(d.APIReader, d.Client), task, capabilitygap.Signal{
 			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-			Runtime: gapRuntime, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
-			Gateway: capabilityGapGatewayOwner(task),
+			Runtime: gapRuntime, Tool: permission.ToolName,
 		})
 	}
 	return err

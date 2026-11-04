@@ -96,6 +96,10 @@ const (
 	// MaxNamespacesPerDay bounds the namespaces kept for one day. Signals from
 	// further namespaces still count in Prometheus but not in the summary.
 	MaxNamespacesPerDay = 64
+	// MaxGatewaysPerNamespaceDay bounds the Gateway owners kept for one
+	// namespace and day. A further Gateway evicts the least recently observed
+	// one and its rows; every signal still counts in Prometheus.
+	MaxGatewaysPerNamespaceDay = 16
 )
 
 var categoryReasons = map[Category][]Reason{
@@ -130,7 +134,11 @@ type Signal struct {
 	Runtime   string
 	Tool      string
 	Namespace string
-	Task      string
+	// NamespaceUID is the verified UID of Namespace when the signal was
+	// observed. A signal without one counts in Prometheus but not in the
+	// summary, so a recreated namespace never inherits earlier counts.
+	NamespaceUID string
+	Task         string
 	// Gateway is the Task's owning Gateway, if any.
 	Gateway GatewayOwner
 }
@@ -163,13 +171,31 @@ type signalKey struct {
 	gateway                         GatewayOwner
 }
 
-type signalEntry struct {
-	count int64
-	// tasks holds distinct Task names, most recent last.
-	tasks []string
+// taskRef is a Task name and the Recorder sequence number of its latest
+// observation, which orders references across entries.
+type taskRef struct {
+	name string
+	seq  uint64
 }
 
-type dayBucket map[string]map[signalKey]*signalEntry
+type signalEntry struct {
+	count int64
+	// tasks holds distinct Task references, most recent last.
+	tasks []taskRef
+}
+
+// namespaceKey names one namespace incarnation.
+type namespaceKey struct {
+	name, uid string
+}
+
+type namespaceBucket struct {
+	signals map[signalKey]*signalEntry
+	// gateways maps each Gateway owner to its latest observation sequence.
+	gateways map[GatewayOwner]uint64
+}
+
+type dayBucket map[namespaceKey]*namespaceBucket
 
 // Recorder keeps a bounded in-memory window of signals and increments the
 // Prometheus counter. A nil Recorder ignores every call.
@@ -179,6 +205,8 @@ type Recorder struct {
 	since time.Time
 	tools map[string]string
 	days  map[int64]dayBucket
+	// seq numbers observations in recording order.
+	seq uint64
 }
 
 // NewRecorder returns a Recorder whose tool labels are limited to catalog.
@@ -230,8 +258,8 @@ func RuntimeLabel(value string) string {
 }
 
 // Record counts s. Invalid categories are dropped; every other field is
-// normalized to a closed value, and invalid object names are left out of the
-// summary rather than recorded.
+// normalized to a closed value. Signals with an invalid namespace name or no
+// namespace UID are left out of the summary rather than recorded.
 func (r *Recorder) Record(s Signal) {
 	if r == nil {
 		return
@@ -254,12 +282,12 @@ func (r *Recorder) Record(s Signal) {
 	}
 	metrics.RecordCapabilityGapSignal(key.category, key.reason, key.runtime, key.tool)
 
-	if len(validation.IsDNS1123Label(s.Namespace)) != 0 {
+	if len(validation.IsDNS1123Label(s.Namespace)) != 0 || strings.TrimSpace(s.NamespaceUID) == "" {
 		return
 	}
 	// Callers may pass strings borrowed from a request buffer; the summary
 	// keeps its own copies.
-	namespace := strings.Clone(s.Namespace)
+	namespace := namespaceKey{name: strings.Clone(s.Namespace), uid: strings.Clone(s.NamespaceUID)}
 	task := strings.Clone(s.Task)
 	if task != "" && len(validation.IsDNS1123Subdomain(task)) != 0 {
 		task = ""
@@ -279,29 +307,58 @@ func (r *Recorder) Record(s Signal) {
 		bucket = dayBucket{}
 		r.days[today] = bucket
 	}
-	signals := bucket[namespace]
-	if signals == nil {
+	ns := bucket[namespace]
+	if ns == nil {
 		if len(bucket) >= MaxNamespacesPerDay {
 			return
 		}
-		signals = map[signalKey]*signalEntry{}
-		bucket[namespace] = signals
+		ns = &namespaceBucket{signals: map[signalKey]*signalEntry{}, gateways: map[GatewayOwner]uint64{}}
+		bucket[namespace] = ns
 	}
-	entry := signals[key]
+	r.seq++
+	if key.gateway != (GatewayOwner{}) {
+		if _, known := ns.gateways[key.gateway]; !known && len(ns.gateways) >= MaxGatewaysPerNamespaceDay {
+			ns.evictOldestGateway()
+		}
+		ns.gateways[key.gateway] = r.seq
+	}
+	entry := ns.signals[key]
 	if entry == nil {
 		entry = &signalEntry{}
-		signals[key] = entry
+		ns.signals[key] = entry
 	}
 	entry.count++
 	if task != "" {
-		entry.tasks = appendRecentTask(entry.tasks, task)
+		entry.tasks = appendRecentTask(entry.tasks, taskRef{name: task, seq: r.seq})
+	}
+}
+
+// evictOldestGateway drops the least recently observed Gateway owner and its
+// rows. Sequence numbers are unique, so the choice is deterministic.
+func (b *namespaceBucket) evictOldestGateway() {
+	var oldest GatewayOwner
+	var oldestSeq uint64
+	found := false
+	for owner, seq := range b.gateways {
+		if !found || seq < oldestSeq {
+			oldest, oldestSeq, found = owner, seq, true
+		}
+	}
+	if !found {
+		return
+	}
+	delete(b.gateways, oldest)
+	for key := range b.signals {
+		if key.gateway == oldest {
+			delete(b.signals, key)
+		}
 	}
 }
 
 // GatewayOwners returns the distinct Gateways that own Tasks with signals in
-// namespace's window, so a caller can decide which it may read before calling
-// Summary.
-func (r *Recorder) GatewayOwners(namespace string) []GatewayOwner {
+// the window of the namespace incarnation with namespaceUID, so a caller can
+// decide which it may read before calling Summary.
+func (r *Recorder) GatewayOwners(namespace, namespaceUID string) []GatewayOwner {
 	if r == nil {
 		return nil
 	}
@@ -311,22 +368,28 @@ func (r *Recorder) GatewayOwners(namespace string) []GatewayOwner {
 	seen := map[GatewayOwner]bool{}
 	owners := []GatewayOwner{}
 	for _, bucket := range r.days {
-		for key := range bucket[namespace] {
-			if key.gateway != (GatewayOwner{}) && !seen[key.gateway] {
-				seen[key.gateway] = true
-				owners = append(owners, key.gateway)
+		ns := bucket[namespaceKey{name: namespace, uid: namespaceUID}]
+		if ns == nil {
+			continue
+		}
+		for owner := range ns.gateways {
+			if !seen[owner] {
+				seen[owner] = true
+				owners = append(owners, owner)
 			}
 		}
 	}
 	return owners
 }
 
-// Summary returns namespace's signals for the current UTC day and the
-// WindowDays-1 days before it, largest count first. Signals from a
+// Summary returns the signals of the namespace incarnation with namespaceUID
+// for the current UTC day and the WindowDays-1 days before it, largest count
+// first. Signals recorded under another UID of the same name are left out.
+// Task references are the newest observations first. Signals from a
 // Gateway-owned Task count only when visible reports that Gateway as readable;
 // a nil visible leaves out every Gateway-owned signal. visible runs with the
 // Recorder locked and must not block.
-func (r *Recorder) Summary(namespace string, visible func(GatewayOwner) bool) Summary {
+func (r *Recorder) Summary(namespace, namespaceUID string, visible func(GatewayOwner) bool) Summary {
 	if r == nil {
 		return Summary{Namespace: namespace, Signals: []SignalSummary{}}
 	}
@@ -345,13 +408,12 @@ func (r *Recorder) Summary(namespace string, visible func(GatewayOwner) bool) Su
 	}
 
 	totals := map[signalKey]*signalEntry{}
-	days := make([]int64, 0, len(r.days))
-	for day := range r.days {
-		days = append(days, day)
-	}
-	slices.Sort(days)
-	for _, day := range days {
-		for key, entry := range r.days[day][namespace] {
+	for _, bucket := range r.days {
+		ns := bucket[namespaceKey{name: namespace, uid: namespaceUID}]
+		if ns == nil {
+			continue
+		}
+		for key, entry := range ns.signals {
 			if key.gateway != (GatewayOwner{}) && (visible == nil || !visible(key.gateway)) {
 				continue
 			}
@@ -362,19 +424,15 @@ func (r *Recorder) Summary(namespace string, visible func(GatewayOwner) bool) Su
 				totals[key] = total
 			}
 			total.count += entry.count
-			for _, task := range entry.tasks {
-				total.tasks = appendRecentTask(total.tasks, task)
-			}
+			total.tasks = append(total.tasks, entry.tasks...)
 		}
 	}
 
 	summary.Signals = make([]SignalSummary, 0, len(totals))
 	for key, total := range totals {
-		tasks := slices.Clone(total.tasks)
-		slices.Reverse(tasks)
 		summary.Signals = append(summary.Signals, SignalSummary{
 			Category: key.category, Reason: key.reason, Runtime: key.runtime, Tool: key.tool,
-			Count: total.count, Tasks: tasks,
+			Count: total.count, Tasks: newestTasks(total.tasks),
 		})
 	}
 	slices.SortFunc(summary.Signals, func(a, b SignalSummary) int {
@@ -411,12 +469,45 @@ func dayNumber(t time.Time) int64 {
 }
 
 // appendRecentTask moves task to the end and keeps at most
-// MaxTaskRefsPerSignal names.
-func appendRecentTask(tasks []string, task string) []string {
-	tasks = slices.DeleteFunc(tasks, func(existing string) bool { return existing == task })
+// MaxTaskRefsPerSignal references. task is the newest observation.
+func appendRecentTask(tasks []taskRef, task taskRef) []taskRef {
+	tasks = slices.DeleteFunc(tasks, func(existing taskRef) bool { return existing.name == task.name })
 	tasks = append(tasks, task)
 	if len(tasks) > MaxTaskRefsPerSignal {
 		tasks = slices.Delete(tasks, 0, len(tasks)-MaxTaskRefsPerSignal)
 	}
 	return tasks
+}
+
+// newestTasks merges references from several entries by observation order:
+// each name keeps its latest observation, the newest come first, and names
+// break ties. At most MaxTaskRefsPerSignal names are returned.
+func newestTasks(refs []taskRef) []string {
+	latest := make(map[string]uint64, len(refs))
+	for _, ref := range refs {
+		if seq, ok := latest[ref.name]; !ok || ref.seq > seq {
+			latest[ref.name] = ref.seq
+		}
+	}
+	merged := make([]taskRef, 0, len(latest))
+	for name, seq := range latest {
+		merged = append(merged, taskRef{name: name, seq: seq})
+	}
+	slices.SortFunc(merged, func(a, b taskRef) int {
+		if a.seq != b.seq {
+			if a.seq > b.seq {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.name, b.name)
+	})
+	names := make([]string, 0, min(len(merged), MaxTaskRefsPerSignal))
+	for _, ref := range merged[:min(len(merged), MaxTaskRefsPerSignal)] {
+		names = append(names, ref.name)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }

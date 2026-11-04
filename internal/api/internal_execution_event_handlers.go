@@ -22,6 +22,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
@@ -137,7 +138,7 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	// Task's command could submit the same event shape.
 	if reason, ok := toolCallCapabilityGapReason(event, eventContent); ok && capabilitygap.Default() != nil &&
 		authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask) == nil {
-		capabilitygap.Record(capabilitygap.Signal{
+		signal := capabilitygap.Signal{
 			Category:  capabilitygap.CategoryMissingTool,
 			Reason:    reason,
 			Runtime:   capabilitygap.RuntimeNative,
@@ -145,7 +146,13 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			Namespace: event.Namespace,
 			Task:      event.StreamID,
 			Gateway:   capabilityGapGatewayOwner(writerTask),
-		})
+		}
+		// Without a verified namespace UID the signal still counts in
+		// Prometheus but stays out of the summary.
+		if uid, err := usage.NamespaceUIDForObject(c.Context(), uncachedReaderOr(h.apiReader, h.k8sClient), writerTask); err == nil {
+			signal.NamespaceUID = uid
+		}
+		capabilitygap.Record(signal)
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{

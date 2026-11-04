@@ -196,9 +196,8 @@ func (d *ACPDispatcher) rejectNativeSessionRuntime(
 	if err := d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message); err != nil {
 		return err
 	}
-	capabilitygap.Record(capabilitygap.Signal{
-		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonNativeSession,
-		Runtime: gapRuntime, Namespace: task.Namespace, Task: task.Name, Gateway: capabilityGapGatewayOwner(task),
+	recordTaskCapabilityGap(ctx, uncachedReader(d.APIReader, d.Client), task, capabilitygap.Signal{
+		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonNativeSession, Runtime: gapRuntime,
 	})
 	return nil
 }

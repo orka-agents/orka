@@ -243,15 +243,19 @@ Tasks, so they cannot be filtered per Task.
 }
 ```
 
-Each row lists at most five recent Task names. A name is shown only when the
-caller could list that Task now; deleted Tasks drop out but keep their counts.
-Signals from a Gateway-owned Task count only for callers who can read that
-Gateway, the same check that guards the Task. Prometheus counts every signal.
+Each row lists at most five Task names, most recently observed first. A name is
+shown only when the caller could list that Task now; deleted Tasks drop out but
+keep their counts. Signals from a Gateway-owned Task count only for callers who
+can read that Gateway, the same check that guards the Task. Counts belong to
+one namespace incarnation: if a namespace is deleted and recreated with the same
+name, the new one starts empty. Prometheus counts every signal.
 
 The summary is held in controller memory, so it starts empty after a restart or
 leader change. `partial` is `true` when `recordingSince` is after `from`, so a
-reader can tell the window is incomplete. Each day keeps at most 64 namespaces;
-signals beyond that still count in Prometheus. For history across restarts,
+reader can tell the window is incomplete. Each day keeps at most 64 namespaces,
+and each namespace keeps at most 16 Gateways per day; a further Gateway replaces
+the least recently seen one. Signals beyond these bounds still count in
+Prometheus. For history across restarts,
 query the counter in your metrics backend, for example
 `increase(orka_capability_gap_signals_total[7d])`.
 

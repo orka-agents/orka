@@ -10,8 +10,10 @@ import (
 	"errors"
 
 	"github.com/gofiber/fiber/v3"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
@@ -45,16 +47,23 @@ func (h *Handlers) GetCapabilityGaps(c fiber.Ctx) error {
 		return err
 	}
 
+	// Counts are kept per namespace incarnation; read only the current one so
+	// a recreated namespace never sees its predecessor's counts.
+	namespaceUID, err := h.capabilityGapNamespaceUID(c, namespace)
+	if err != nil {
+		return err
+	}
+
 	gatewayAuthorizations := map[gatewayTaskAuthorizationKey]bool{}
 	visibleGateways := map[capabilitygap.GatewayOwner]bool{}
-	for _, owner := range recorder.GatewayOwners(namespace) {
+	for _, owner := range recorder.GatewayOwners(namespace, namespaceUID) {
 		ok, err := h.capabilityGapGatewayVisible(c, owner, gatewayAuthorizations)
 		if err != nil {
 			return err
 		}
 		visibleGateways[owner] = ok
 	}
-	summary := recorder.Summary(namespace, func(owner capabilitygap.GatewayOwner) bool { return visibleGateways[owner] })
+	summary := recorder.Summary(namespace, namespaceUID, func(owner capabilitygap.GatewayOwner) bool { return visibleGateways[owner] })
 	for i := range summary.Signals {
 		visible := make([]string, 0, len(summary.Signals[i].Tasks))
 		for _, name := range summary.Signals[i].Tasks {
@@ -115,4 +124,22 @@ func (h *Handlers) capabilityGapGatewayVisible(
 	}
 	cache[key] = err == nil
 	return err == nil, nil
+}
+
+// capabilityGapNamespaceUID returns the namespace's current UID with one
+// uncached read. A missing namespace has no current incarnation, so its
+// summary is empty.
+func (h *Handlers) capabilityGapNamespaceUID(c fiber.Ctx, namespace string) (string, error) {
+	reader := h.uncachedReader()
+	if reader == nil {
+		return "", fiber.NewError(fiber.StatusServiceUnavailable, "namespace identity lookup is unavailable")
+	}
+	current := &corev1.Namespace{}
+	if err := reader.Get(c.Context(), client.ObjectKey{Name: namespace}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fiber.NewError(fiber.StatusInternalServerError, "failed to resolve namespace identity")
+	}
+	return string(current.UID), nil
 }

@@ -19,6 +19,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 type agentExecutionPath string
@@ -279,13 +280,10 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 	}
 	result, err := r.failTask(ctx, task, plan.rejectionReason)
 	if err == nil && plan.gapReason != "" {
-		capabilitygap.Record(capabilitygap.Signal{
-			Category:  capabilitygap.CategoryUnsupportedRequest,
-			Reason:    plan.gapReason,
-			Runtime:   capabilityGapAgentRuntime(agent),
-			Namespace: task.Namespace,
-			Task:      task.Name,
-			Gateway:   capabilityGapGatewayOwner(task),
+		recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), task, capabilitygap.Signal{
+			Category: capabilitygap.CategoryUnsupportedRequest,
+			Reason:   plan.gapReason,
+			Runtime:  capabilityGapAgentRuntime(agent),
 		})
 	}
 	return result, err
@@ -314,6 +312,21 @@ func capabilityGapBoundRuntime(bound *verifiedAgentExecution) string {
 		return capabilitygap.RuntimeExternal
 	}
 	return capabilitygap.RuntimeLabel(bound.plan.Profile.ProviderKind)
+}
+
+// recordTaskCapabilityGap records signal for task. It reads the Task's
+// namespace UID, fenced on the Task's own UID, only while recording is on;
+// without a verified UID the signal still counts in Prometheus but stays out
+// of the summary, so a recreated namespace never sees earlier counts.
+func recordTaskCapabilityGap(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, signal capabilitygap.Signal) {
+	if task == nil || capabilitygap.Default() == nil {
+		return
+	}
+	signal.Namespace, signal.Task, signal.Gateway = task.Namespace, task.Name, capabilityGapGatewayOwner(task)
+	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil {
+		signal.NamespaceUID = uid
+	}
+	capabilitygap.Record(signal)
 }
 
 // capabilityGapGatewayOwner names the Gateway that owns task, if any, so the
