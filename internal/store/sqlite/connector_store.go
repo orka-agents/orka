@@ -1039,6 +1039,7 @@ func (s *Store) CommitSealedConnectorCompletion(
 		return nil, err
 	}
 	uid := request.Credential.ConnectionUID
+	now := request.Now.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector completion commit: %w", err)
@@ -1050,8 +1051,7 @@ func (s *Store) CommitSealedConnectorCompletion(
 	}
 	// The token's lifetime is judged at the commit too: a commit that stalled
 	// past the deadline redeems nothing.
-	now := time.Now().UTC()
-	if !parked.ExpiresAt.After(now) {
+	if !parked.ExpiresAt.After(now) || !parked.ExpiresAt.After(time.Now().UTC()) {
 		return nil, store.ErrNotFound
 	}
 	// A newer consent's grant is custody already: this older consent's
