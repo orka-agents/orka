@@ -122,10 +122,11 @@ func (s *Store) DatasetInfo() (DatasetInfo, error) {
 	return info, nil
 }
 
-// completeDatasetBootstrap records successful key activation before controller
-// consumers can start. Encryption authentication and permitted key rotation
-// remain the responsibility of SetAgentExecutionSnapshotCipher.
-func (s *Store) completeDatasetBootstrap() error {
+// CompleteDatasetBootstrap records successful key activation before
+// controller consumers can start. Startup calls it only after the storage
+// client has activated the snapshot key, which authenticates retained sealed
+// records and enforces the permitted key rotation.
+func (s *Store) CompleteDatasetBootstrap() error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

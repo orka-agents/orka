@@ -307,7 +307,7 @@ func (s *Store) sealConnectorCredentialRow(ref store.ConnectorCredentialRef, cre
 	if row.nonce, row.ciphertext, err = sealWithAEAD(dataAEAD, connectorCredentialAdditionalData(ref), body); err != nil {
 		return sealedConnectorRow{}, err
 	}
-	if row.dekNonce, row.dekCiphertext, err = sealWithAEAD(s.snapshotCipher.aead, connectorDataKeyAdditionalData(ref.ConnectionUID), dataKey); err != nil {
+	if row.dekNonce, row.dekCiphertext, err = s.connectorSealer.SealConnectorCustody(connectorDataKeyAdditionalData(ref.ConnectionUID), dataKey); err != nil {
 		return sealedConnectorRow{}, err
 	}
 	if !credential.ExpiresAt.IsZero() {
@@ -336,7 +336,7 @@ func (s *Store) PutConnectorCredential(ctx context.Context, ref store.ConnectorC
 // Grants are numbered from a per-Connection counter that outlives the row,
 // so a re-consent after a shred never repeats a number.
 func (s *Store) putConnectorCredentialTx(ctx context.Context, tx *sql.Tx, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) (store.ConnectorCredential, error) {
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {
@@ -414,7 +414,7 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if strings.TrimSpace(nonce) == "" {
 		return store.ConnectorCredential{}, errors.New("connector completion nonce is required")
 	}
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -455,7 +455,7 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 		_ = s.truncateWAL(ctx)
 		return store.ConnectorCredential{}, store.ErrNotFound
 	}
-	current, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion))
+	current, err := s.connectorSealer.OpenConnectorCustody(payloadNonce, payload, connectorCompletionAdditionalData(completion))
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("open connector completion for commit: %w", err)
 	}
@@ -515,7 +515,7 @@ func (s *Store) CommitConnectorCompletion(ctx context.Context, nonce string, ref
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
-	newNonce, newPayload, err := sealWithAEAD(s.snapshotCipher.aead, connectorCompletionAdditionalData(completion), body)
+	newNonce, newPayload, err := s.connectorSealer.SealConnectorCustody(connectorCompletionAdditionalData(completion), body)
 	if err != nil {
 		return store.ConnectorCredential{}, err
 	}
@@ -586,7 +586,7 @@ func (s *Store) uncommittedCompletionsTx(ctx context.Context, tx *sql.Tx, connec
 			return nil, fmt.Errorf("scan parked connector completion: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()
-		if body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err == nil {
+		if body, err := s.connectorSealer.OpenConnectorCustody(payloadNonce, payload, connectorCompletionAdditionalData(completion)); err == nil {
 			if _, fields, err := decodeSealedConnectorCompletionPayload(body); err == nil && fields.Committed {
 				continue
 			}
@@ -616,7 +616,7 @@ func connectorCommittedConsentTx(ctx context.Context, tx *sql.Tx, connectionUID 
 // GetConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorCredential{}, errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {
@@ -653,7 +653,7 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 // openConnectorCredentialRow unwraps a row's data key and opens its sealed
 // body, both bound to ref.
 func (s *Store) openConnectorCredentialRow(ref store.ConnectorCredentialRef, dekNonce, dekCiphertext, nonce, ciphertext []byte) (store.ConnectorCredential, error) {
-	dataKey, err := s.snapshotCipher.aead.Open(nil, dekNonce, dekCiphertext, connectorDataKeyAdditionalData(ref.ConnectionUID))
+	dataKey, err := s.connectorSealer.OpenConnectorCustody(dekNonce, dekCiphertext, connectorDataKeyAdditionalData(ref.ConnectionUID))
 	if err != nil {
 		return store.ConnectorCredential{}, fmt.Errorf("unwrap connector data key for connection %s: %w", ref.ConnectionUID, err)
 	}
@@ -671,7 +671,7 @@ func (s *Store) openConnectorCredentialRow(ref store.ConnectorCredentialRef, dek
 // ListRetiredConnectorCredentials implements store.ConnectorCredentialStore.
 func (s *Store) ListRetiredConnectorCredentials(ctx context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return nil, errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {
@@ -756,7 +756,7 @@ func reapConnectorTombstonesTx(ctx context.Context, tx *sql.Tx, now time.Time) e
 // ReplaceConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) ReplaceConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential, expectedVersion int64) error {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {
@@ -1037,7 +1037,7 @@ func (s *Store) finishPendingWALTruncate(ctx context.Context) {
 // CreateConnectorConsent implements store.ConnectorConsentStore.
 func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.ConnectorConsent) error {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return errConnectorCipherRequired
 	}
 	for _, field := range []struct{ name, value string }{
@@ -1065,7 +1065,7 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 		RETURNING issued`, consent.ConnectionUID).Scan(&consent.Sequence); err != nil {
 		return fmt.Errorf("number connector consent: %w", err)
 	}
-	verifierNonce, verifierCiphertext, err := sealWithAEAD(s.snapshotCipher.aead,
+	verifierNonce, verifierCiphertext, err := s.connectorSealer.SealConnectorCustody(
 		connectorConsentAdditionalData(consent), []byte(consent.CodeVerifier))
 	if err != nil {
 		return err
@@ -1091,7 +1091,7 @@ func (s *Store) CreateConnectorConsent(ctx context.Context, consent store.Connec
 // ConsumeConnectorConsent implements store.ConnectorConsentStore.
 func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (store.ConnectorConsent, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorConsent{}, errConnectorCipherRequired
 	}
 	if strings.TrimSpace(nonce) == "" {
@@ -1131,7 +1131,7 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 	if !consent.ExpiresAt.After(time.Now()) {
 		return store.ConnectorConsent{}, store.ErrNotFound
 	}
-	verifier, err := s.snapshotCipher.aead.Open(nil, verifierNonce, verifierCiphertext,
+	verifier, err := s.connectorSealer.OpenConnectorCustody(verifierNonce, verifierCiphertext,
 		connectorConsentAdditionalData(consent))
 	if err != nil {
 		return store.ConnectorConsent{}, fmt.Errorf("open connector consent verifier: %w", err)
@@ -1143,7 +1143,7 @@ func (s *Store) ConsumeConnectorConsent(ctx context.Context, nonce string) (stor
 // CreateConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.ConnectorCompletion) error {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return errConnectorCipherRequired
 	}
 	for _, field := range []struct{ name, value string }{
@@ -1162,7 +1162,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 	if err != nil {
 		return err
 	}
-	payloadNonce, payload, err := sealWithAEAD(s.snapshotCipher.aead,
+	payloadNonce, payload, err := s.connectorSealer.SealConnectorCustody(
 		connectorCompletionAdditionalData(completion), body)
 	if err != nil {
 		return err
@@ -1230,7 +1230,7 @@ func (s *Store) CreateConnectorCompletion(ctx context.Context, completion store.
 // ConsumeConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorCompletion{}, errConnectorCipherRequired
 	}
 	if strings.TrimSpace(nonce) == "" {
@@ -1267,7 +1267,7 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 	if !completion.ExpiresAt.After(time.Now()) {
 		return store.ConnectorCompletion{}, store.ErrNotFound
 	}
-	body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload,
+	body, err := s.connectorSealer.OpenConnectorCustody(payloadNonce, payload,
 		connectorCompletionAdditionalData(completion))
 	if err != nil {
 		return store.ConnectorCompletion{}, fmt.Errorf("open connector completion: %w", err)
@@ -1285,7 +1285,7 @@ func (s *Store) ConsumeConnectorCompletion(ctx context.Context, nonce string) (s
 // PeekConnectorCompletion implements store.ConnectorConsentStore.
 func (s *Store) PeekConnectorCompletion(ctx context.Context, nonce string) (store.ConnectorCompletion, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return store.ConnectorCompletion{}, errConnectorCipherRequired
 	}
 	if strings.TrimSpace(nonce) == "" {
@@ -1316,7 +1316,7 @@ func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) err
 // ListConnectorCompletionsForConnection implements store.ConnectorConsentStore.
 func (s *Store) ListConnectorCompletionsForConnection(ctx context.Context, connectionUID string) ([]store.ConnectorCompletion, error) {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return nil, errConnectorCipherRequired
 	}
 	if strings.TrimSpace(connectionUID) == "" {
@@ -1352,7 +1352,7 @@ func (s *Store) queryConnectorCompletions(ctx context.Context, where string, arg
 		if !includeExpired && !completion.ExpiresAt.After(now) {
 			continue
 		}
-		body, err := s.snapshotCipher.aead.Open(nil, payloadNonce, payload,
+		body, err := s.connectorSealer.OpenConnectorCustody(payloadNonce, payload,
 			connectorCompletionAdditionalData(completion))
 		if err != nil {
 			continue
@@ -1415,12 +1415,25 @@ func parseConnectorTime(value string) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
-// verifyConnectorRowsWithCipher authenticates every retained connector row
-// with a candidate key: the wrapped data keys of current and retired
-// custody, and the sealed payloads of pending consents and completions.
-func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnapshotCipher) error {
-	if snapshotCipher == nil {
-		return errors.New("agent execution snapshot cipher is required")
+// ActivateConnectorCustody authenticates every retained connector row with
+// the storage client's sealer before connector custody starts sealing with
+// it, so linked accounts remain usable and revocable. The sealer holds the
+// snapshot key; this store never does. Callers activate before connector
+// readers or writers start.
+func (s *Store) ActivateConnectorCustody(sealer store.ConnectorCustodySealer) error {
+	if err := s.verifyConnectorRows(sealer); err != nil {
+		return err
+	}
+	s.connectorSealer = sealer
+	return nil
+}
+
+// verifyConnectorRows authenticates every retained connector row with a
+// candidate key: the wrapped data keys of current and retired custody, and
+// the sealed payloads of pending consents and completions.
+func (s *Store) verifyConnectorRows(sealer store.ConnectorCustodySealer) error {
+	if sealer == nil {
+		return errors.New("connector custody sealer is required")
 	}
 	for _, table := range []string{"connector_credentials", "connector_retired_credentials"} {
 		rows, err := s.db.Query(`SELECT connection_uid, dek_nonce, dek_ciphertext FROM ` + table)
@@ -1436,7 +1449,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 				_ = rows.Close()
 				return fmt.Errorf("scan connector custody (%s) while verifying key: %w", table, err)
 			}
-			if _, err := snapshotCipher.aead.Open(nil, dekNonce, dekCiphertext, connectorDataKeyAdditionalData(connectionUID)); err != nil {
+			if _, err := sealer.OpenConnectorCustody(dekNonce, dekCiphertext, connectorDataKeyAdditionalData(connectionUID)); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("candidate agent execution snapshot key cannot open connector custody for connection %s (%s); "+
 					"restore the previous key: linked accounts would be unusable and unrevocable: %w", connectionUID, table, err)
@@ -1468,7 +1481,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 		}
 		consent.Scopes = strings.Fields(scopes)
 		consent.ExpiresAt = consent.ExpiresAt.UTC()
-		if _, err := snapshotCipher.aead.Open(nil, verifierNonce, sealed, connectorConsentAdditionalData(consent)); err != nil {
+		if _, err := sealer.OpenConnectorCustody(verifierNonce, sealed, connectorConsentAdditionalData(consent)); err != nil {
 			_ = consents.Close()
 			return fmt.Errorf("candidate agent execution snapshot key cannot open pending connector consent for connection %s; restore the previous key: %w", consent.ConnectionUID, err)
 		}
@@ -1494,7 +1507,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 			return fmt.Errorf("scan connector completion while verifying key: %w", err)
 		}
 		completion.ExpiresAt = completion.ExpiresAt.UTC()
-		if _, err := snapshotCipher.aead.Open(nil, payloadNonce, payload, connectorCompletionAdditionalData(completion)); err != nil {
+		if _, err := sealer.OpenConnectorCustody(payloadNonce, payload, connectorCompletionAdditionalData(completion)); err != nil {
 			_ = completions.Close()
 			return fmt.Errorf("candidate agent execution snapshot key cannot open parked connector completion for connection %s; restore the previous key: %w", completion.ConnectionUID, err)
 		}
@@ -1510,7 +1523,7 @@ func (s *Store) verifyConnectorRowsWithCipher(snapshotCipher *AgentExecutionSnap
 // RetireConnectorCredential implements store.ConnectorCredentialStore.
 func (s *Store) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
 	s.finishPendingWALTruncate(ctx)
-	if s.snapshotCipher == nil {
+	if s.connectorSealer == nil {
 		return errConnectorCipherRequired
 	}
 	if err := ref.Validate(); err != nil {

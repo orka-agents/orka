@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package credential
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -28,6 +27,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -126,13 +126,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	s := sqlite.NewStore(db, dbPath)
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{1}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	storageclienttest.Client(t, s)
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	refresher := &fakeRefresher{response: connectors.TokenResponse{AccessToken: "gho_new", RefreshToken: "ghr_new", ExpiresAt: now.Add(time.Hour)}}
 	source := &Source{Client: c, APIReader: c, Credentials: s, OAuth: refresher, Now: func() time.Time { return now }}
