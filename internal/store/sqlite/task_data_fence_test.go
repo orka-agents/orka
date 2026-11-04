@@ -265,3 +265,18 @@ func TestTaskDataTransactionEventAndInboxCommitRollback(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckTaskDataFenceReadsInOneTransaction requires a fence check made
+// outside a task data transaction to read the cleanup generation and the Job
+// revocations in one transaction, so a reclamation that commits between the
+// reads cannot pair the old generation with a revocation it deleted.
+func TestCheckTaskDataFenceReadsInOneTransaction(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := t.Context()
+	fence, _, err := s.RegisterTaskDataFence(ctx, "tenant", "task")
+	require.NoError(t, err)
+	var inTransaction bool
+	s.checkTaskDataFenceAfterGenerationRead = func(ctx context.Context) { inTransaction = s.taskDataTx(ctx) != nil }
+	require.NoError(t, s.CheckTaskDataFence(ctx, fence))
+	require.True(t, inTransaction, "the generation and the Job revocations are read in one transaction")
+}

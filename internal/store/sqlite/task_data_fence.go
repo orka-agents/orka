@@ -139,9 +139,17 @@ func (s *Store) ReleaseTaskDataFence(ctx context.Context, fence store.TaskDataFe
 	return err
 }
 
-// CheckTaskDataFence reports whether fence is still current.
+// CheckTaskDataFence reports whether fence is still current. It reads the
+// cleanup generation and every Job revocation in one transaction, so a
+// reclamation that commits between the reads cannot pair the old generation
+// with a revocation it already deleted.
 func (s *Store) CheckTaskDataFence(ctx context.Context, fence store.TaskDataFence) error {
-	return s.checkTaskDataFence(ctx, fence)
+	if s.taskDataTx(ctx) != nil {
+		return s.checkTaskDataFence(ctx, fence)
+	}
+	return s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
+		return s.checkTaskDataFence(txCtx, fence)
+	})
 }
 
 func (s *Store) checkTaskDataFence(ctx context.Context, fence store.TaskDataFence) error {
@@ -151,6 +159,9 @@ func (s *Store) checkTaskDataFence(ctx context.Context, fence store.TaskDataFenc
 	current, err := s.taskDataCleanupGeneration(ctx, fence.Namespace, fence.TaskName)
 	if err != nil {
 		return err
+	}
+	if hook := s.checkTaskDataFenceAfterGenerationRead; hook != nil {
+		hook(ctx)
 	}
 	if current != fence.Generation {
 		return store.ErrTaskDataCleanupChanged

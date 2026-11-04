@@ -1001,6 +1001,10 @@ type Store struct {
 	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
 	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
+
+	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
+	// fence check's cleanup generation read and its Job revocation reads.
+	checkTaskDataFenceAfterGenerationRead func(context.Context)
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
