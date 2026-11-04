@@ -57,7 +57,8 @@ spec:
           spec:
             description: |-
               EvalRunSpec defines an eval run. It is immutable; create a new EvalRun to
-              run again.
+              run again. trialTimeout is compared as a duration because typed clients
+              write "20m" back as "20m0s"; every other field is compared exactly.
             properties:
               cases:
                 description: Cases selects the cases to run.
@@ -197,7 +198,17 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: EvalRun spec is immutable; create a new EvalRun
-              rule: self == oldSelf
+              rule: self.subject == oldSelf.subject && self.cases == oldSelf.cases
+                && self.trials == oldSelf.trials && self.graders == oldSelf.graders
+                && has(self.maxConcurrentTrials) == has(oldSelf.maxConcurrentTrials)
+                && (!has(self.maxConcurrentTrials) || self.maxConcurrentTrials ==
+                oldSelf.maxConcurrentTrials) && has(self.trialTimeout) == has(oldSelf.trialTimeout)
+                && (!has(self.trialTimeout) || duration(self.trialTimeout) == duration(oldSelf.trialTimeout))
+                && has(self.maxInfraErrorPercent) == has(oldSelf.maxInfraErrorPercent)
+                && (!has(self.maxInfraErrorPercent) || self.maxInfraErrorPercent ==
+                oldSelf.maxInfraErrorPercent) && has(self.ttlSecondsAfterFinished)
+                == has(oldSelf.ttlSecondsAfterFinished) && (!has(self.ttlSecondsAfterFinished)
+                || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished)
             - message: cases × trials must be at most 500
               rule: '!has(self.cases.ids) || size(self.cases.ids) * self.trials <=
                 500'
@@ -306,7 +317,9 @@ spec:
                 - Failed
                 type: string
               results:
-                description: Results aggregates every grader per case tag.
+                description: |-
+                  Results aggregates every grader overall and per case tag. A case file
+                  has at most 63 distinct tags, so this fits every grader.
                 items:
                   description: |-
                     EvalGraderResult aggregates one grader over the cases with one tag. Values

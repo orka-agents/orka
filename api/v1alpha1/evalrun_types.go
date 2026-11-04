@@ -21,6 +21,11 @@ const (
 	// it when spec.cases.ids lists the cases; otherwise the controller checks
 	// it against the case set it loads.
 	EvalRunMaxCaseTrials = 500
+	// EvalRunMaxResults caps status.results: one result per grader overall
+	// and per distinct case tag.
+	EvalRunMaxResults = 256
+	// EvalGraderCount is the number of EvalGraderName values.
+	EvalGraderCount = 4
 )
 
 // EvalSubjectType names what an EvalRun evaluates. Each value has one Subject
@@ -130,8 +135,9 @@ type EvalCaseSource struct {
 }
 
 // EvalRunSpec defines an eval run. It is immutable; create a new EvalRun to
-// run again.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="EvalRun spec is immutable; create a new EvalRun"
+// run again. trialTimeout is compared as a duration because typed clients
+// write "20m" back as "20m0s"; every other field is compared exactly.
+// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject && self.cases == oldSelf.cases && self.trials == oldSelf.trials && self.graders == oldSelf.graders && has(self.maxConcurrentTrials) == has(oldSelf.maxConcurrentTrials) && (!has(self.maxConcurrentTrials) || self.maxConcurrentTrials == oldSelf.maxConcurrentTrials) && has(self.trialTimeout) == has(oldSelf.trialTimeout) && (!has(self.trialTimeout) || duration(self.trialTimeout) == duration(oldSelf.trialTimeout)) && has(self.maxInfraErrorPercent) == has(oldSelf.maxInfraErrorPercent) && (!has(self.maxInfraErrorPercent) || self.maxInfraErrorPercent == oldSelf.maxInfraErrorPercent) && has(self.ttlSecondsAfterFinished) == has(oldSelf.ttlSecondsAfterFinished) && (!has(self.ttlSecondsAfterFinished) || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished)",message="EvalRun spec is immutable; create a new EvalRun"
 // +kubebuilder:validation:XValidation:rule="!has(self.cases.ids) || size(self.cases.ids) * self.trials <= 500",message="cases × trials must be at most 500"
 type EvalRunSpec struct {
 	// Subject selects what is evaluated.
@@ -314,7 +320,8 @@ type EvalRunStatus struct {
 	// +optional
 	Counts EvalRunCounts `json:"counts,omitempty"`
 
-	// Results aggregates every grader per case tag.
+	// Results aggregates every grader overall and per case tag. A case file
+	// has at most 63 distinct tags, so this fits every grader.
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=atomic
 	// +optional

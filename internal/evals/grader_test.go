@@ -186,6 +186,9 @@ func TestDefaultRegistryCoversEveryGraderName(t *testing.T) {
 			t.Fatalf("Lookup(%q) = %v, %v", name, grader, err)
 		}
 	}
+	if len(registry.graders) != corev1alpha1.EvalGraderCount {
+		t.Fatalf("DefaultRegistry has %d graders, want EvalGraderCount %d", len(registry.graders), corev1alpha1.EvalGraderCount)
+	}
 	if _, err := registry.Lookup("judge"); err == nil {
 		t.Fatal("Lookup accepted an unknown grader")
 	}

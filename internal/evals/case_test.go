@@ -122,6 +122,11 @@ func TestParseCaseRejectsInvalidCases(t *testing.T) {
 		{"backslash path", func(o map[string]any) { file0(o)["filename"] = `pkg\x.go` }, "filename"},
 		{"bad status", func(o map[string]any) { file0(o)["status"] = "exploded" }, "status"},
 		{"negative additions", func(o map[string]any) { file0(o)["additions"] = -1 }, "additions"},
+		{"missing additions", func(o map[string]any) { delete(file0(o), "additions") }, `missing field "additions"`},
+		{"missing deletions", func(o map[string]any) { delete(file0(o), "deletions") }, `missing field "deletions"`},
+		{"missing end line", func(o map[string]any) {
+			o["reference"].(map[string]any)["locations"] = []any{map[string]any{"file": "pkg/x.go", "startLine": 1}}
+		}, `missing field "endLine"`},
 		{"previous name without rename", func(o map[string]any) { file0(o)["previousFilename"] = "pkg/y.go" }, "previousFilename"},
 		{"oversize patch", func(o map[string]any) { file0(o)["patch"] = strings.Repeat("+", MaxReviewPatchBytes+1) }, "patch"},
 		{"private key in patch", func(o map[string]any) {
@@ -163,6 +168,7 @@ func TestParseCaseRejectsHostileJSON(t *testing.T) {
 		{"case-folded key", strings.Replace(valid, `"verdict":"notPassed"`, `"Verdict":"notPassed"`, 1), `unknown field "Verdict"`},
 		{"case-folded nested key", strings.Replace(valid, `"headSHA"`, `"headSha"`, 1), `unknown field "headSha"`},
 		{"duplicate key", strings.Replace(valid, `"verdict":"notPassed"`, `"verdict":"notPassed","verdict":"passed"`, 1), `duplicate field "verdict"`},
+		{"invalid utf8", strings.Replace(valid, "Handle missing config", "Handle \xff config", 1), "UTF-8"},
 		{"trailing object", valid + `{}`, "trailing data"},
 		{"trailing garbage", valid + ` x`, "trailing data"},
 		{"array root", "[" + valid + "]", "decode case"},
@@ -223,5 +229,81 @@ func TestParseCasesCapsCaseCount(t *testing.T) {
 	}
 	if _, err := ParseCases([]byte(data.String()), reviewType); err == nil || !strings.Contains(err.Error(), "more than") {
 		t.Fatalf("ParseCases error = %v, want case count limit", err)
+	}
+}
+
+func TestParseCaseDoesNotEchoRejectedRepoURL(t *testing.T) {
+	for _, repoURL := range []string{
+		"https://x:ghp_secret@github.com/a/b",
+		"https://github.com/a/b?token=ghp_secret",
+	} {
+		object := validCaseObject()
+		reviewInput(object)["repoURL"] = repoURL
+		_, err := ParseCase([]byte(encodeCase(t, object)), reviewType)
+		if err == nil || !strings.Contains(err.Error(), "repoURL") || strings.Contains(err.Error(), "ghp_secret") {
+			t.Fatalf("ParseCase error = %v, want a repoURL error without the URL", err)
+		}
+	}
+}
+
+// TestParseCaseRejectsCredentialIdentifiers checks that a credential-shaped
+// id, tag or path is rejected and that no rejected value is echoed.
+func TestParseCaseRejectsCredentialIdentifiers(t *testing.T) {
+	token := "ghp_" + strings.Repeat("A", 36)
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{"id", func(o map[string]any) { o["id"] = token }, "case id"},
+		{"invalid id", func(o map[string]any) { o["id"] = token + " x" }, "case id"},
+		{"tag", func(o map[string]any) { o["tags"] = []any{token} }, "tags[0]"},
+		{"invalid tag", func(o map[string]any) { o["tags"] = []any{token + " x"} }, "tags[0]"},
+		{"filename", func(o map[string]any) { file0(o)["filename"] = "pkg/" + token + ".go" }, "filename"},
+		{"previous filename", func(o map[string]any) {
+			file0(o)["status"] = "renamed"
+			file0(o)["previousFilename"] = token + "/x.go"
+		}, "previousFilename"},
+		{"invalid filename", func(o map[string]any) { file0(o)["filename"] = "/" + token }, "filename"},
+		{"status", func(o map[string]any) { file0(o)["status"] = token }, "status"},
+		{"location file", func(o map[string]any) {
+			o["reference"].(map[string]any)["locations"] = []any{map[string]any{"file": token + ".go", "startLine": 1, "endLine": 1}}
+		}, "locations[0].file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			object := validCaseObject()
+			test.mutate(object)
+			_, err := ParseCase([]byte(encodeCase(t, object)), reviewType)
+			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), token) {
+				t.Fatalf("ParseCase error = %v, want %q without the rejected value", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseCasesCapsDistinctTags(t *testing.T) {
+	build := func(tagCount int) []byte {
+		object := validCaseObject()
+		var data strings.Builder
+		for i := 0; i*MaxCaseTags < tagCount; i++ {
+			var tags []any
+			for j := i * MaxCaseTags; j < min((i+1)*MaxCaseTags, tagCount); j++ {
+				tags = append(tags, fmt.Sprintf("tag-%03d", j))
+			}
+			object["id"] = fmt.Sprintf("case-%03d", i)
+			object["tags"] = tags
+			data.WriteString(encodeCase(t, object))
+			data.WriteByte('\n')
+		}
+		return []byte(data.String())
+	}
+	if MaxCaseSetTags+1 > corev1alpha1.EvalRunMaxResults/corev1alpha1.EvalGraderCount {
+		t.Fatalf("MaxCaseSetTags %d leaves no room for overall results", MaxCaseSetTags)
+	}
+	if _, err := ParseCases(build(MaxCaseSetTags), reviewType); err != nil {
+		t.Fatalf("ParseCases rejected %d distinct tags: %v", MaxCaseSetTags, err)
+	}
+	if _, err := ParseCases(build(MaxCaseSetTags+1), reviewType); err == nil || !strings.Contains(err.Error(), "distinct tags") {
+		t.Fatalf("ParseCases error = %v, want distinct tag limit", err)
 	}
 }
