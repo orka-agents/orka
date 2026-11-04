@@ -223,6 +223,85 @@ deployment delivers the guarantees above.
   tokens from its own tenant. Each tenant needs its own blueprint
   and agent identities.
 
+### Configuring Entra Agent ID
+
+An illustrative walk-through. Flag names and fields that this ADR does not
+fix above are placeholders until implementation.
+
+1. **In Entra**, an administrator creates one agent identity blueprint per Orka
+   installation. Its federated identity credential trusts the controller
+   ServiceAccount: the cluster's OIDC issuer, subject
+   `system:serviceaccount:<controller namespace>:<controller ServiceAccount>`,
+   and audience `api://AzureADTokenExchange`. The administrator creates one
+   agent identity per Agent under the blueprint and grants it app roles for
+   stage 3. For stage 4, the administrator also configures inheritable
+   delegated permissions on the blueprint with admin consent, a custom scope on
+   the blueprint, and a separate front-end client app registration that
+   requests that scope.
+2. **The controller** is configured once with the tenant and blueprint, for
+   example `--agent-identity-entra-tenant-id` and
+   `--agent-identity-entra-blueprint-client-id`. It authenticates with its own
+   projected ServiceAccount token; no secret is stored.
+3. **An operator** lets a namespace claim one identity and lets callers use the
+   Agent:
+
+   ```yaml
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: Role
+   metadata:
+     namespace: team-a
+     name: inventory-agent-identity
+   rules:
+   - apiGroups: [core.orka.ai]
+     resources: [agentidentities/entra]
+     verbs: [bind]
+     resourceNames: ["<agent identity client ID>"]
+   - apiGroups: [core.orka.ai]
+     resources: [agents]
+     verbs: [use]
+     resourceNames: [inventory-agent]
+   ```
+
+4. **The Agent owner** binds the identity:
+
+   ```yaml
+   apiVersion: core.orka.ai/v1alpha1
+   kind: Agent
+   metadata:
+     namespace: team-a
+     name: inventory-agent
+   spec:
+     identity:
+       entra:
+         agentIdentityID: "<agent identity client ID>"
+   ```
+
+5. **A policy author** chooses how outbound calls use it. The policy names a
+   target and a mode, never an identity:
+
+   ```yaml
+   # Stage 3: the Agent acts as itself.
+   agentIdentity:
+     mode: self
+     resource: https://graph.microsoft.com
+     header: Authorization
+   ---
+   # Stage 4: the Agent acts for its requester, who has linked an Entra
+   # Connection through a ConnectorProvider for the front-end client app.
+   agentIdentity:
+     mode: delegated
+     resource: https://storage.azure.com
+     header: Authorization
+     allow:
+     - host: inventory.blob.core.windows.net
+       methods: [GET]
+       pathPrefixes: [/reports/]
+   ```
+
+A second issuer reuses every step except the first two: it adds a sibling of
+`entra` under `Agent.spec.identity`, a matching `agentidentities/<issuer>`
+subresource, and its own controller configuration.
+
 ### Relationship to ADR 0034
 
 The ceiling and the identity bound different things and stay separate checks.
