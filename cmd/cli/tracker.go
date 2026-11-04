@@ -282,12 +282,15 @@ func (t *tracker) recordCreatedTaskName(data client.SSEEventData) {
 
 // completeAgents applies the task phases a wait tool reported. Agents the
 // result does not report as terminal stay pending, so a later cancellation is
-// still recorded; only a result with no readable phase completes every pending
-// agent, as before.
+// still recorded. A failed tool call finishes nothing; only a successful result
+// with no readable phase completes every pending agent, as before.
 func (t *tracker) completeAgents(data client.SSEEventData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	if toolResultFailed(data.Result) {
+		return
+	}
 	reported := taskPhasesFromResult(data.Result)
 	for _, r := range reported {
 		t.applyTaskPhaseLocked(r.task, r.phase)
@@ -361,6 +364,15 @@ func (t *tracker) updateAgentFromProgress(data client.SSEEventData) {
 type reportedTaskPhase struct {
 	task  string
 	phase string
+}
+
+// toolResultFailed reports whether a tool result is a chat tool error
+// ({"success":false,...}), such as rejected arguments.
+func toolResultFailed(raw json.RawMessage) bool {
+	var envelope struct {
+		Success *bool `json:"success"`
+	}
+	return json.Unmarshal(raw, &envelope) == nil && envelope.Success != nil && !*envelope.Success
 }
 
 // taskPhasesFromResult extracts task phases from a check_task_progress,

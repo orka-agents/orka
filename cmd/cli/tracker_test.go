@@ -378,6 +378,26 @@ func TestTrackerWaitResultsKeepUnfinishedAgentsPending(t *testing.T) {
 	}
 }
 
+func TestTrackerFailedWaitResultFinishesNothing(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+
+	// The payload a kind cluster returned for a wait_for_task with a rejected
+	// timeout argument.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":false,"error":"invalid arguments: timeout must be a whole number, got a non-numeric string","errorType":"invalid_arguments","suggestion":"Resend the call with timeout as a whole number"}`)}))
+	if tr.agents[0].done {
+		t.Fatal("a failed wait_for_task call finished the agent")
+	}
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Cancelled"}}`)}))
+	if !tr.agents[0].done || tr.agents[0].success {
+		t.Fatalf("agent = done %v success %v, want cancelled", tr.agents[0].done, tr.agents[0].success)
+	}
+}
+
 func TestCompleteAgentByName(t *testing.T) {
 	var buf bytes.Buffer
 	tr := newTracker(&buf, VerbosityDefault, false)
