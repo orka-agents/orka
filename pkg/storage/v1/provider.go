@@ -88,12 +88,6 @@ type SessionTypeReader interface {
 	GetSessionType(ctx context.Context, namespace, name string) (string, error)
 }
 
-// TaskTokenUsageReader returns the input and output tokens attributed to one
-// Task, as the usage report counts them.
-type TaskTokenUsageReader interface {
-	TaskTokenUsage(ctx context.Context, namespace, taskUID string) (inputTokens, outputTokens int64, err error)
-}
-
 // StateProvider is the provider side of state.v1.
 type StateProvider interface {
 	HealthChecker
@@ -126,10 +120,13 @@ type StateProvider interface {
 	GatewayTaskCleanupReceiptMaintenanceStore
 	GatewaySessionCleanupCandidateStore
 
+	MemoryStore
+	MemoryProposalStore
+
 	SecurityStore
 	RepositoryMonitorStore
 	UsageStore
-	TaskTokenUsageReader
+	TaskUsageObservationReader
 }
 
 // ArtifactProvider is the provider side of artifacts.v1. Artifact bytes and

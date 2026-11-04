@@ -163,7 +163,55 @@ type UsageStore interface {
 	PruneUsage(context.Context, time.Time) error
 }
 
+// TaskUsageObservationReader returns the observations Orka needs to
+// attribute token usage to one Task.
+type TaskUsageObservationReader interface {
+	// ListTaskCounterObservations returns every observation, from any Task,
+	// of each usage counter that the Task has observed, in accounting order:
+	// by observed time, then in the order the provider recorded them. Other
+	// Tasks' observations of a shared counter are the baselines that keep
+	// their usage out of this Task's share.
+	ListTaskCounterObservations(ctx context.Context, namespace, taskUID string) ([]UsageObservation, error)
+}
+
 var ErrUsageSelectionTooLarge = errors.New("usage report selection is too large")
+
+// ValidateUsageObservation applies the rules every recorded observation must
+// satisfy. Providers enforce them in RecordUsage and for observations carried
+// by execution events.
+func ValidateUsageObservation(observation UsageObservation) error {
+	if observation.ID == "" || observation.Namespace == "" || observation.CounterID == "" || observation.ObservedAt.IsZero() {
+		return ValidationErrorf("usage observation requires identity, namespace, counter and timestamp")
+	}
+	switch observation.Scope {
+	case UsageScopeCall, UsageScopeAttempt, UsageScopeSession:
+	default:
+		return ValidationErrorf("unsupported usage counter scope")
+	}
+	switch observation.Source {
+	case UsageSourceProvider, UsageSourceAgent, UsageSourceEstimate:
+	default:
+		return ValidationErrorf("unsupported usage source")
+	}
+	for _, count := range []*int64{observation.InputTokens, observation.OutputTokens, observation.CachedInputTokens, observation.CacheWriteInputTokens} {
+		if count != nil && (*count < 0 || *count > MaxUsageTokenCount) {
+			return ValidationErrorf("invalid usage count")
+		}
+	}
+	if observation.InputTokens != nil {
+		remainingInput := *observation.InputTokens
+		for _, count := range []*int64{observation.CachedInputTokens, observation.CacheWriteInputTokens} {
+			if count == nil {
+				continue
+			}
+			if *count > remainingInput {
+				return ValidationErrorf("cache usage exceeds inclusive input count")
+			}
+			remainingInput -= *count
+		}
+	}
+	return nil
+}
 
 // MaxUsageTokenCount is the largest exactly representable JSON integer for UI clients.
 const MaxUsageTokenCount int64 = 1<<53 - 1
