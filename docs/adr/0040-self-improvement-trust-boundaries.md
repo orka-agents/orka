@@ -197,12 +197,16 @@ artifact, so it cannot do this check before creating the Publication.) A rejecti
   `search_transcript` or connector tools;
 - credential references only as the existing builders set them today. They stay with
   the clean-room publication boundary and never reach the agent;
-- a push branch under the fixed prefix `orka/`. No monitor is known at dispatch, so a
-  monitor whose `branchPrefix` is outside `orka/` cannot run proposers until it changes;
+- for every write-intent proposer, a push branch under the fixed prefix `orka/`. No
+  monitor is known at dispatch, so a monitor whose `branchPrefix` is outside `orka/`
+  cannot run proposers until it changes. A read-only proposer, such as the #994 pilot,
+  gets no push branch and no publication credential, and its workspace changes are
+  never published;
 - no Session continuation and no fork of another Task, so no earlier transcript reaches
   the proposer.
 
-At dispatch, a Task with the role annotation that lacks any of these, or whose
+At dispatch, a Task with the role annotation that lacks any of these that apply to its
+intent (read-only or write), or whose
 `deniedPaths` no longer covers the current protected set, fails with
 `ProposerConstraintViolation` instead of running.
 
