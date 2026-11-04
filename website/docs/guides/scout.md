@@ -56,8 +56,12 @@ or case-folded fields, enforces field lengths and counts, and accepts only https
 public host names. It requires exactly one source report per watchlist id, taken from the
 watchlist itself, and requires `run.partial` to match those reports. Its verifier rejects a
 digest whose commit or run window doesn't match the run, and keeps a proposal only if every
-Orka path exists at the pinned commit, every cited Orka issue exists and every link
-resolves. Proposals that fail are dropped and counted, never passed on.
+Orka path exists at the pinned commit, every cited or related Orka issue exists and every
+link resolves. Proposals that fail are dropped and counted, never passed on.
+
+In this version nothing runs the parser and verifier for you: a scout Task's raw result is
+the agent's unchecked answer. Whatever reads the result, whether a person or the later
+issue filer, must run it through `internal/scout` and use only the verified digest.
 
 ## Safety properties
 
@@ -75,9 +79,14 @@ resolves. Proposals that fail are dropped and counted, never passed on.
   a forged issue-tracker marker would need, and hidden or bidirectional formatting
   characters. A second `orka-scout-digest` block, such as one copied from a fetched page,
   makes the whole answer invalid.
-- **Fail closed.** An unreachable or rate-limited source is reported, never filled in from
-  memory. A digest that hides or omits a failed source, exceeds N, cites a different commit
-  or reports a different run window is rejected as a whole.
+- **Fail closed.** The prompt tells the scout to report an unreachable or rate-limited
+  source, never fill it in from memory. When a consumer runs the `internal/scout` checks, a
+  digest that hides or omits a failed source, exceeds N, cites a different commit or reports
+  a different run window is rejected as a whole.
+- **No messaging tools.** Scheduled runs are child Tasks, and child Tasks normally get
+  `send_message` and `check_messages` added to their tools. The example sets
+  `orka.ai/disable-coordination-tool-injection: "true"`, which the scheduler copies to every
+  run, so the tool list stays exactly the read-only allowlist.
 - **Capped.** Each run has a timeout and a turn cap, and `concurrencyPolicy: Forbid` keeps
   runs from overlapping. Orka has no per-Task token or cost budget yet, so the timeout and
   turn cap are the only spend limits.

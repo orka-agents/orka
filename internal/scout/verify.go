@@ -151,7 +151,14 @@ func (v Verifier) check(ctx context.Context, proposal *Proposal) (DropReason, er
 			return DropUnverifiedPath, nil
 		}
 	}
-	for _, number := range proposal.Evidence.OrkaIssues {
+	// Cited issues and the duplicate search's related issues are both shown
+	// to reviewers, so both must exist.
+	issues := make([]int, 0, len(proposal.Evidence.OrkaIssues)+len(proposal.Related))
+	issues = append(issues, proposal.Evidence.OrkaIssues...)
+	for _, related := range proposal.Related {
+		issues = append(issues, related.Number)
+	}
+	for _, number := range issues {
 		exists, err := v.Issues.IssueExists(ctx, number)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr

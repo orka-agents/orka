@@ -2,6 +2,11 @@ apiVersion: core.orka.ai/v1alpha1
 kind: Task
 metadata:
   name: orka-scout
+  annotations:
+    # Scheduled runs are child Tasks of this template, and child Tasks get the
+    # messaging tools (send_message, check_messages) added to their allowlist
+    # unless this is set. The scheduler copies it to every run.
+    orka.ai/disable-coordination-tool-injection: "true"
 spec:
   type: agent
   agentRef:

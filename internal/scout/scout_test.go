@@ -439,11 +439,15 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 	missingIssue.Title = "feat(tools): missing issue"
 	missingIssue.Evidence.OrkaPaths = nil
 	missingIssue.Evidence.OrkaIssues = []int{999_999}
-	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky, missingIssue}
+	// Related issues from the duplicate search are shown to reviewers too.
+	missingRelated := validProposal()
+	missingRelated.Title = "feat(tools): missing related issue"
+	missingRelated.Related = []Related{{Number: 999_998, State: IssueStateOpen}}
+	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky, missingIssue, missingRelated}
 
 	verifier := testVerifier()
 	verifier.Links = fakeLinks{"https://example.com/release/v1": nil, "https://example.com/flaky": errors.New("timeout")}
-	verified, err := verifier.Verify(context.Background(), &digest, testLimits(5))
+	verified, err := verifier.Verify(context.Background(), &digest, testLimits(6))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -451,16 +455,16 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 		t.Fatalf("Verify() kept %#v, want only the grounded proposal", verified.Proposals)
 	}
 	for reason, want := range map[DropReason]int{
-		DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1, DropUnverifiedIssue: 1,
+		DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1, DropUnverifiedIssue: 2,
 	} {
 		if got := verified.DroppedCount(reason); got != want {
 			t.Errorf("DroppedCount(%s) = %d, want %d", reason, got, want)
 		}
 	}
-	if len(digest.Proposals) != 5 || digest.DroppedCount(DropUnverifiedPath) != 1 {
+	if len(digest.Proposals) != 6 || digest.DroppedCount(DropUnverifiedPath) != 1 {
 		t.Fatal("Verify() mutated its input digest")
 	}
-	if err := verified.Validate(testLimits(5)); err != nil {
+	if err := verified.Validate(testLimits(6)); err != nil {
 		t.Fatalf("verified digest is no longer valid: %v", err)
 	}
 }
@@ -471,7 +475,7 @@ func testVerifier() Verifier {
 		RunStart:     testRunStart,
 		Paths:        fakePaths{"internal/tools/web_fetch.go": nil},
 		Links:        fakeLinks{"https://example.com/release/v1": nil},
-		Issues:       fakeIssues{985: nil},
+		Issues:       fakeIssues{985: nil, 987: nil},
 	}
 }
 

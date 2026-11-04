@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/scout"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -49,7 +50,7 @@ func TestScoutExampleIsReadOnlyAndCredentialFree(t *testing.T) {
 	}
 
 	agent.Namespace, agent.UID, agent.Generation = "default", types.UID("scout-agent-uid"), 1
-	task.Namespace, task.UID = "default", types.UID("scout-task-uid")
+	task = scheduledScoutRun(t, task)
 	configuration, err := buildACPAgentSessionConfiguration(task, agent, systemPrompt)
 	if err != nil {
 		t.Fatalf("build session configuration: %v", err)
@@ -73,6 +74,32 @@ func TestScoutExampleIsReadOnlyAndCredentialFree(t *testing.T) {
 		t.Fatalf("build scout MCP policy: %v", err)
 	}
 	checkScoutToolSurface(t, mcp)
+}
+
+// scheduledScoutRun returns the child Task the scheduler creates from the
+// template, mirroring its labels and annotation copy, because the tool surface
+// of a scheduled run differs from that of the template itself.
+func scheduledScoutRun(t *testing.T, template *corev1alpha1.Task) *corev1alpha1.Task {
+	t.Helper()
+	annotations := map[string]string{labels.AnnotationParentTaskName: template.Name}
+	if template.Annotations[labels.AnnotationDisableCoordinationToolInject] == scheduledRunLabelValue {
+		annotations[labels.AnnotationDisableCoordinationToolInject] = scheduledRunLabelValue
+	}
+	run := template.DeepCopy()
+	run.Name, run.Namespace, run.UID = template.Name+"-1700000000", "default", types.UID("scout-run-uid")
+	run.Labels = map[string]string{
+		labels.LabelParentTask:   labels.SelectorValue(template.Name),
+		labels.LabelScheduledRun: scheduledRunLabelValue,
+	}
+	run.Annotations = annotations
+	run.Spec.Schedule = ""
+	run.Spec.TimeZone = nil
+	run.Spec.ConcurrencyPolicy = ""
+	run.Spec.StartingDeadlineSeconds = nil
+	run.Spec.SuccessfulRunsHistoryLimit = nil
+	run.Spec.FailedRunsHistoryLimit = nil
+	run.Spec.Suspend = nil
+	return run
 }
 
 // checkScoutSchedule requires a weekly template with no overlapping runs that
