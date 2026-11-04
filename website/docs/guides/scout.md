@@ -56,7 +56,8 @@ or case-folded fields, enforces field lengths and counts, and accepts only https
 public host names. It requires exactly one source report per watchlist id, taken from the
 watchlist itself, and requires `run.partial` to match those reports. Its verifier rejects a
 digest whose commit or run window doesn't match the run, and keeps a proposal only if every
-Orka path exists at the pinned commit, every cited or related Orka issue exists and every
+Orka path exists at the pinned commit, every cited or related Orka issue exists (with the
+reported state for related issues) and every
 link resolves. Proposals that fail are dropped and counted, never passed on. Watchlist
 suggestions whose link can't be confirmed are removed. The parser also rejects an answer that
 uses longer backtick or tilde code fences, so a quoted example can't pass as the digest.

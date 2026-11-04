@@ -42,7 +42,9 @@ type LinkChecker interface {
 // IssueChecker reports whether an Orka issue or pull request number exists.
 // As with PathChecker, an inconclusive check is an error rather than false.
 type IssueChecker interface {
-	IssueExists(ctx context.Context, number int) (bool, error)
+	// IssueState reports whether issue number exists and, if it does, its
+	// current tracker state.
+	IssueState(ctx context.Context, number int) (state IssueState, exists bool, err error)
 }
 
 // Verifier re-checks proposal evidence before anything is published. Every
@@ -165,21 +167,29 @@ func (v Verifier) check(ctx context.Context, proposal *Proposal) (DropReason, er
 		}
 	}
 	// Cited issues and the duplicate search's related issues are both shown
-	// to reviewers, so both must exist.
-	issues := make([]int, 0, len(proposal.Evidence.OrkaIssues)+len(proposal.Related))
-	issues = append(issues, proposal.Evidence.OrkaIssues...)
-	for _, related := range proposal.Related {
-		issues = append(issues, related.Number)
+	// to reviewers, so both must exist. A related issue's reported state is
+	// what consumers use to suppress duplicates or honor a rejection, so it
+	// must also match the tracker now.
+	type issueCheck struct {
+		number int
+		state  IssueState
 	}
-	for _, number := range issues {
-		exists, err := v.Issues.IssueExists(ctx, number)
+	issues := make([]issueCheck, 0, len(proposal.Evidence.OrkaIssues)+len(proposal.Related))
+	for _, number := range proposal.Evidence.OrkaIssues {
+		issues = append(issues, issueCheck{number: number})
+	}
+	for _, related := range proposal.Related {
+		issues = append(issues, issueCheck{number: related.Number, state: related.State})
+	}
+	for _, issue := range issues {
+		state, exists, err := v.Issues.IssueState(ctx, issue.number)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
 		if err != nil {
 			return DropCheckUnavailable, nil
 		}
-		if !exists {
+		if !exists || (issue.state != "" && state != issue.state) {
 			return DropUnverifiedIssue, nil
 		}
 	}

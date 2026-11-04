@@ -413,14 +413,11 @@ func (f fakePaths) PathExists(_ context.Context, commit, repoPath string) (bool,
 	return err == nil, err
 }
 
-type fakeIssues map[int]error
+type fakeIssues map[int]IssueState
 
-func (f fakeIssues) IssueExists(_ context.Context, number int) (bool, error) {
-	err, ok := f[number]
-	if !ok {
-		return false, nil
-	}
-	return err == nil, err
+func (f fakeIssues) IssueState(_ context.Context, number int) (IssueState, bool, error) {
+	state, ok := f[number]
+	return state, ok, nil
 }
 
 type fakeLinks map[string]error
@@ -460,11 +457,15 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 	missingRelated := validProposal()
 	missingRelated.Title = "feat(tools): missing related issue"
 	missingRelated.Related = []Related{{Number: 999_998, State: IssueStateOpen}}
-	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky, missingIssue, missingRelated}
+	// A related issue reported open that the tracker shows closed is dropped.
+	staleRelated := validProposal()
+	staleRelated.Title = "feat(tools): stale related state"
+	staleRelated.Related = []Related{{Number: 986, State: IssueStateOpen}}
+	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky, missingIssue, missingRelated, staleRelated}
 
 	verifier := testVerifier()
 	verifier.Links = fakeLinks{"https://example.com/release/v1": nil, "https://example.com/flaky": errors.New("timeout")}
-	verified, err := verifier.Verify(context.Background(), &digest, testLimits(6))
+	verified, err := verifier.Verify(context.Background(), &digest, testLimits(7))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -475,16 +476,16 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 		t.Fatalf("Verify() kept %#v, want only the grounded proposal", verified.Proposals)
 	}
 	for reason, want := range map[DropReason]int{
-		DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1, DropUnverifiedIssue: 2,
+		DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1, DropUnverifiedIssue: 3,
 	} {
 		if got := verified.DroppedCount(reason); got != want {
 			t.Errorf("DroppedCount(%s) = %d, want %d", reason, got, want)
 		}
 	}
-	if len(digest.Proposals) != 6 || digest.DroppedCount(DropUnverifiedPath) != 1 {
+	if len(digest.Proposals) != 7 || digest.DroppedCount(DropUnverifiedPath) != 1 {
 		t.Fatal("Verify() mutated its input digest")
 	}
-	if err := verified.Validate(testLimits(6)); err != nil {
+	if err := verified.Validate(testLimits(7)); err != nil {
 		t.Fatalf("verified digest is no longer valid: %v", err)
 	}
 }
@@ -495,7 +496,7 @@ func testVerifier() Verifier {
 		RunStart:     testRunStart,
 		Paths:        fakePaths{"internal/tools/web_fetch.go": nil},
 		Links:        fakeLinks{"https://example.com/release/v1": nil},
-		Issues:       fakeIssues{985: nil, 987: nil},
+		Issues:       fakeIssues{985: IssueStateOpen, 987: IssueStateOpen, 986: IssueStateClosed},
 	}
 }
 
