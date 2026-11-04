@@ -533,7 +533,8 @@ func TestConnectorKeyActivationAuthenticatesEveryFamily(t *testing.T) {
 // read and its conditional commit.
 type interleavingStore struct {
 	*sqlite.Store
-	afterRead func()
+	afterRead    func()
+	beforeCommit func()
 }
 
 func (s *interleavingStore) ReadConnectorCustody(ctx context.Context, uid string) (*storagev1.ConnectorCustody, error) {
@@ -545,24 +546,41 @@ func (s *interleavingStore) ReadConnectorCustody(ctx context.Context, uid string
 	return custody, err
 }
 
+func (s *interleavingStore) CommitSealedConnectorCompletion(ctx context.Context, request storagev1.CommitSealedConnectorCompletionRequest) (*storagev1.SealedConnectorCredential, error) {
+	if step := s.beforeCommit; step != nil {
+		s.beforeCommit = nil
+		step()
+	}
+	return s.Store.CommitSealedConnectorCompletion(ctx, request)
+}
+
 // TestConnectorCommitJudgesExpiryWhenItCommits covers a commit that stalls
 // after its read until the completion expires: the provider refuses it at the
 // commit's own time, nothing becomes custody and the completion is dropped.
 func TestConnectorCommitJudgesExpiryWhenItCommits(t *testing.T) {
-	ctx := t.Context()
-	backend := &interleavingStore{Store: openSQLite(t)}
-	client := activatedClient(t, backend, sealedTestKey)
-	ref := connectorRef("uid-stalled")
-	completion := connectorCompletion("completion-stalled", ref.ConnectionUID, 1, "stalled")
-	completion.ExpiresAt = time.Now().Add(300 * time.Millisecond)
-	require.NoError(t, client.CreateConnectorCompletion(ctx, completion))
-	backend.afterRead = func() { time.Sleep(time.Until(completion.ExpiresAt) + 50*time.Millisecond) }
-	_, err := client.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
-	require.ErrorIs(t, err, store.ErrNotFound)
-	_, err = client.GetConnectorCredential(ctx, ref)
-	require.ErrorIs(t, err, store.ErrNotFound, "an expired completion redeems nothing")
-	_, err = backend.GetSealedConnectorCompletion(ctx, completion.Nonce)
-	require.ErrorIs(t, err, store.ErrNotFound, "the expired completion is dropped")
+	for _, delayAt := range []string{"after custody read", "before provider commit"} {
+		t.Run(delayAt, func(t *testing.T) {
+			ctx := t.Context()
+			backend := &interleavingStore{Store: openSQLite(t)}
+			client := activatedClient(t, backend, sealedTestKey)
+			ref := connectorRef("uid-stalled")
+			completion := connectorCompletion("completion-stalled", ref.ConnectionUID, 1, "stalled")
+			completion.ExpiresAt = time.Now().Add(400 * time.Millisecond)
+			require.NoError(t, client.CreateConnectorCompletion(ctx, completion))
+			delay := func() { time.Sleep(time.Until(completion.ExpiresAt) + 50*time.Millisecond) }
+			if delayAt == "after custody read" {
+				backend.afterRead = delay
+			} else {
+				backend.beforeCommit = delay
+			}
+			_, err := client.CommitConnectorCompletion(ctx, completion.Nonce, ref, completion.Credential)
+			require.ErrorIs(t, err, store.ErrNotFound)
+			_, err = client.GetConnectorCredential(ctx, ref)
+			require.ErrorIs(t, err, store.ErrNotFound, "an expired completion redeems nothing")
+			_, err = backend.GetSealedConnectorCompletion(ctx, completion.Nonce)
+			require.ErrorIs(t, err, store.ErrNotFound, "the expired completion is dropped")
+		})
+	}
 }
 
 // TestConnectorWritesRereadCustodyThatChanged covers concurrent writers: a
