@@ -240,9 +240,9 @@ func (c Case) Validate(subject corev1alpha1.EvalSubjectType) error {
 		return fmt.Errorf("case %q has more than %d tags", c.ID, MaxCaseTags)
 	}
 	tags := map[string]struct{}{}
-	for _, tag := range c.Tags {
-		if len(tag) > MaxCaseTagLength || !caseIDPattern.MatchString(tag) {
-			return fmt.Errorf("case %q tag %q must be 1-%d letters, digits, '-', '_' or '.'", c.ID, tag, MaxCaseTagLength)
+	for i, tag := range c.Tags {
+		if len(tag) > MaxCaseTagLength || !caseIDPattern.MatchString(tag) || containsCredential(tag) {
+			return fmt.Errorf("case %q tags[%d] must be 1-%d letters, digits, '-', '_' or '.' and carry no credential", c.ID, i, MaxCaseTagLength)
 		}
 		if _, dup := tags[tag]; dup {
 			return fmt.Errorf("case %q repeats tag %q", c.ID, tag)
@@ -266,9 +266,11 @@ func (c Case) Validate(subject corev1alpha1.EvalSubjectType) error {
 	return nil
 }
 
+// validateCaseID never echoes a rejected id, which may carry a credential.
+// Accepted ids, tags and paths carry none, so later errors may quote them.
 func validateCaseID(id string) error {
-	if id == "" || len(id) > MaxCaseIDLength || !caseIDPattern.MatchString(id) {
-		return fmt.Errorf("case id %q must be 1-%d letters, digits, '-', '_' or '.', starting and ending with a letter or digit", id, MaxCaseIDLength)
+	if id == "" || len(id) > MaxCaseIDLength || !caseIDPattern.MatchString(id) || containsCredential(id) {
+		return fmt.Errorf("case id must be 1-%d letters, digits, '-', '_' or '.', starting and ending with a letter or digit, and carry no credential", MaxCaseIDLength)
 	}
 	return nil
 }
@@ -315,14 +317,14 @@ func (in *ReviewCaseInput) validate() error {
 
 func (f ReviewCaseFile) validate() error {
 	if !safeRepoPath(f.Filename) {
-		return fmt.Errorf("filename %q must be a clean relative path of at most %d bytes", f.Filename, MaxReviewPathBytes)
+		return fmt.Errorf("filename must be a clean relative path of at most %d bytes without a credential", MaxReviewPathBytes)
 	}
 	if _, ok := reviewFileStatuses[f.Status]; !ok {
-		return fmt.Errorf("status %q is not a pull request file status", f.Status)
+		return errors.New("status is not a pull request file status")
 	}
 	if f.PreviousFilename != "" {
 		if !safeRepoPath(f.PreviousFilename) {
-			return fmt.Errorf("previousFilename %q must be a clean relative path of at most %d bytes", f.PreviousFilename, MaxReviewPathBytes)
+			return fmt.Errorf("previousFilename must be a clean relative path of at most %d bytes without a credential", MaxReviewPathBytes)
 		}
 		if f.Status != "renamed" && f.Status != "copied" {
 			return errors.New("previousFilename is only allowed for renamed or copied files")
@@ -355,7 +357,7 @@ func (r CaseReference) validate() error {
 	}
 	for i, location := range r.Locations {
 		if !safeRepoPath(location.File) {
-			return fmt.Errorf("locations[%d].file %q must be a clean relative path", i, location.File)
+			return fmt.Errorf("locations[%d].file must be a clean relative path without a credential", i)
 		}
 		if location.StartLine < 1 || location.EndLine < location.StartLine || location.EndLine > MaxReferenceLine {
 			return fmt.Errorf("locations[%d] needs 1 <= startLine <= endLine <= %d", i, MaxReferenceLine)
@@ -382,7 +384,8 @@ func validateFixtureRepoURL(raw string) error {
 }
 
 func safeRepoPath(p string) bool {
-	if p == "" || len(p) > MaxReviewPathBytes || strings.HasPrefix(p, "/") || strings.Contains(p, `\`) || hasControl(p, false) {
+	if p == "" || len(p) > MaxReviewPathBytes || strings.HasPrefix(p, "/") || strings.Contains(p, `\`) || hasControl(p, false) ||
+		containsCredential(p) {
 		return false
 	}
 	cleaned := path.Clean(p)
