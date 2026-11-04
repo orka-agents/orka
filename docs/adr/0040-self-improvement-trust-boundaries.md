@@ -142,6 +142,8 @@ repositories:
       - internal/controller/acp_dispatcher*.go         # dispatch-time checks
       - internal/controller/acp_task_queue.go          # where the dispatch check runs
       - internal/controller/acp_publication*.go        # publication handoff
+      - internal/controller/acp_credentials.go         # credential binding and version checks
+      - internal/controller/acp_workspace.go           # repository identities used to select protected paths
       - internal/controller/task_controller.go         # Job-path gate
       - internal/protectedset/**                       # protected-set parsing
       - internal/workspacedelta/**                     # path matching
@@ -149,6 +151,10 @@ repositories:
       - internal/acp/runtime_defaults.go
       - internal/labels/labels.go                      # the role annotation key
       - config/samples/orka_protected_set.yaml         # this declaration
+      - config/**                                      # deployed admission, policy and RBAC manifests and their overlays
+      - manifest_staging/**
+      - deploy/**
+      - scripts/**                                     # CI and release validation helpers
       - docs/adr/**                                    # the table the drift test reads
       - internal/controller/agent_execution_binding*.go # canary routing
       - internal/controller/evalrun*.go                # evaluator
@@ -461,7 +467,10 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   (1) insert a `pending` record holding the decision, the Agent's `resourceVersion` and generation,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
   a ConfigMap that may change or disappear), and the target values; (2) move the record
-  `pending → applying`, then update the stable Agent with a `resourceVersion`
+  `pending → applying` in one store transaction that also checks `decisionID` is still
+  the latest decision for its experiment. Decisions live in the same store, so a
+  rejection recorded before this transition makes it fail and the record is marked
+  `failed`; one recorded after it is the `PromotedBeforeRejection` case below. Then update the stable Agent with a `resourceVersion`
   precondition, writing the candidate's inline prompt and the record's marker;
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
   and digest. On restart the controller reconciles any `pending` or `applying` record
