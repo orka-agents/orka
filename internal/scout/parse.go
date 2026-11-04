@@ -57,8 +57,8 @@ func ParseProposal(data []byte) (*Proposal, error) {
 // DigestFenceInfo in a scout's final answer. Zero or several such blocks are
 // errors: a fetched page that smuggles in its own block must not be able to
 // replace or shadow the scout's digest. Any longer backtick fence or tilde
-// fence is an error too, because a tagged line inside one would be quoted
-// text rather than a block, and this scanner does not track enclosing fences.
+// fence is an error too. Other three-backtick blocks are skipped whole, so a
+// tagged line quoted inside one is never read as the digest.
 func ExtractDigest(answer string) ([]byte, error) {
 	if len(answer) > 4*MaxDigestBytes {
 		return nil, fmt.Errorf("answer exceeds %d bytes", 4*MaxDigestBytes)
@@ -71,7 +71,17 @@ func ExtractDigest(answer string) ([]byte, error) {
 		if trimmed := strings.TrimLeft(line, " "); strings.HasPrefix(trimmed, "````") || strings.HasPrefix(trimmed, "~~~") {
 			return nil, errors.New("answer must not contain longer backtick or tilde code fences")
 		}
-		if !strings.HasPrefix(line, "```") || strings.TrimSpace(strings.TrimPrefix(line, "```")) != DigestFenceInfo {
+		if !strings.HasPrefix(line, "```") {
+			continue
+		}
+		if strings.TrimSpace(strings.TrimPrefix(line, "```")) != DigestFenceInfo {
+			// Any other fenced block is quoted text: skip to its closing
+			// fence so a tagged line inside it is never read as a block.
+			for index++; index < len(lines) && strings.TrimRight(lines[index], " \t") != "```"; index++ {
+			}
+			if index >= len(lines) {
+				return nil, errors.New("code block is not closed")
+			}
 			continue
 		}
 		found++

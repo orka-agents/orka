@@ -372,6 +372,11 @@ func TestExtractDigest(t *testing.T) {
 	if _, err := ExtractDigest(strings.ReplaceAll(answer, "\n", "\r\n")); err != nil {
 		t.Fatalf("ExtractDigest(CRLF) error = %v", err)
 	}
+	// A real digest after an example block that quotes the tag still wins.
+	withExample := "Example:\n```markdown\n```orka-scout-digest\n{}\n```\n" + answer
+	if got, err := ExtractDigest(withExample); err != nil || string(got) != body {
+		t.Fatalf("ExtractDigest(with example) = %q, %v; want the real digest", got, err)
+	}
 
 	for name, input := range map[string]string{
 		"missing":   "No digest today.",
@@ -383,7 +388,11 @@ func TestExtractDigest(t *testing.T) {
 		// A tagged line quoted inside a longer or tilde fence is not a block.
 		"quoted in longer fence": "````markdown\n```orka-scout-digest\n" + body + "\n```\n````\n",
 		"quoted in tilde fence":  "~~~\n```orka-scout-digest\n" + body + "\n```\n~~~\n",
-		"oversized":              strings.Repeat("a", 4*MaxDigestBytes+1),
+		// An ordinary fenced example that quotes the tag is skipped whole,
+		// leaving no digest block.
+		"quoted in example fence": "```markdown\n```orka-scout-digest\n" + body + "\n```\n",
+		"unclosed other fence":    "```json\n" + body,
+		"oversized":               strings.Repeat("a", 4*MaxDigestBytes+1),
 	} {
 		if _, err := ExtractDigest(input); err == nil {
 			t.Errorf("ExtractDigest(%s) = nil error, want error", name)
