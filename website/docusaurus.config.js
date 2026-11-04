@@ -3,13 +3,27 @@
 
 const {themes: prismThemes} = require('prism-react-renderer');
 
+const baseUrl = '/orka/';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Orka',
   tagline: 'Kubernetes-native AI task orchestration',
   url: 'https://orka-agents.github.io',
-  baseUrl: '/orka/',
-  favicon: 'img/favicon.png',
+  baseUrl,
+  // The SVG favicon is the small mark on a white disc, so it reads on light and dark tabs. The
+  // 32 px PNG comes first, with sizes, for browsers without SVG favicons; browsers that support
+  // SVG still pick the SVG.
+  headTags: [
+    {
+      tagName: 'link',
+      attributes: {rel: 'icon', type: 'image/png', sizes: '32x32', href: `${baseUrl}img/favicon.png`},
+    },
+    {
+      tagName: 'link',
+      attributes: {rel: 'icon', type: 'image/svg+xml', href: `${baseUrl}img/favicon.svg`},
+    },
+  ],
   organizationName: 'orka-agents',
   projectName: 'orka',
   trailingSlash: false,
@@ -66,8 +80,9 @@ const config = {
         title: 'Orka',
         logo: {
           alt: '',
-          src: 'img/orka-mark.png',
-          srcDark: 'img/orka-mark-dark.png',
+          // 32 px and smaller use the small mark: heavier ring, two waves.
+          src: 'img/orka-mark-small.svg',
+          srcDark: 'img/orka-mark-small-dark.svg',
           width: 30,
           height: 30,
         },
@@ -99,7 +114,7 @@ const config = {
         style: 'dark',
         logo: {
           alt: 'Orka',
-          src: 'img/orka-mark-dark.png',
+          src: 'img/orka-mark-dark.svg',
           width: 44,
           height: 44,
         },

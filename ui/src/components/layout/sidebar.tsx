@@ -129,7 +129,7 @@ export function Sidebar() {
       <div className="flex h-14 items-center border-b border-border px-4">
         {!sidebarCollapsed && (
           <Link to="/" className="flex items-center gap-2 font-semibold text-foreground">
-            <OrcaMark className="h-6 w-6" />
+            <OrcaMark small className="h-6 w-6" />
             <span>Orka</span>
           </Link>
         )}
