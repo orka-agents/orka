@@ -1507,6 +1507,10 @@ func executeAgentLoopWithEvents(
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
 				rejectedErrorType = events.ToolCallErrorTypeNotEnabled
+				// A name no registry knows is a missing tool, not a disabled one.
+				if _, registered := tools.DefaultRegistry.Get(toolName); !registered && customToolForCall == nil {
+					rejectedErrorType = events.ToolCallErrorTypeNotFound
+				}
 				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
