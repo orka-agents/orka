@@ -49,6 +49,16 @@ func (s *Store) AdvanceControllerEpoch(
 		if err := binding.refuseDetached(); err != nil {
 			return err
 		}
+		if request.AcknowledgedEpoch > 0 {
+			current, err := getControllerEpoch(ctx, tx, name)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if current.Epoch < request.AcknowledgedEpoch {
+				return fmt.Errorf("%w: dataset controller epoch %q is at %d, below acknowledged epoch %d",
+					storagev1.ErrNotReady, name, current.Epoch, request.AcknowledgedEpoch)
+			}
+		}
 		now := s.now()
 		if err := advanceControllerEpochTx(ctx, tx, epoch, now); err != nil {
 			return err

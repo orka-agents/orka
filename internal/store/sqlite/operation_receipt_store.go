@@ -19,12 +19,11 @@ const (
 	// aborted record after recording it: the contract's minimum plus
 	// receiptClockStepAllowance.
 	receiptRetention = storagev1.MinReceiptRetention + receiptClockStepAllowance
-	// receiptClockStepAllowance is the largest step back of the host clock
-	// SQLite tolerates. SQLite measures receipt ages on the host's wall
-	// clock, which time synchronization can step back, and the contract
-	// requires a provider whose clock can step back to keep receipts longer
-	// by the largest such step. After a larger step, ResolveOperation could
-	// report an operation whose receipt was already pruned as aborted.
+	// receiptClockStepAllowance bounds cumulative host clock regression
+	// between pruning and every later resolution, including repeated steps,
+	// process restarts and host failovers. It is not a per-step allowance.
+	// SQLite uses the host's wall clock and assumes this bound holds; beyond
+	// it, ResolveOperation could report an already-pruned commit as aborted.
 	receiptClockStepAllowance = 15 * time.Minute
 	// maxReceiptResultBytes is the largest result SQLite keeps with a
 	// receipt: SQLite's own value limit. SQLite keeps every result whole, so

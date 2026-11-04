@@ -64,6 +64,60 @@ func runControllerOwnership(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, jumped, stored, "a bound dataset moves only through AdvanceControllerEpoch")
 	})
 
+	t.Run("acknowledged epoch gaps survive repeated takeovers", func(t *testing.T) {
+		for name, storedEpoch := range map[string]int64{"missing epoch": 0, "restored epoch": 9} {
+			t.Run(name, func(t *testing.T) {
+				provider := newProvider(t)
+				ctx := t.Context()
+				dataset := datasetID(t, provider)
+				if storedEpoch != 0 {
+					_, err := advance(provider, dataset, mirroredEpoch(storedEpoch, "old-owner"), suiteInstance)
+					require.NoError(t, err)
+				}
+				before, beforeErr := provider.GetControllerEpochMirror(ctx, controlEpochName)
+				// Kubernetes acknowledged epoch 10, but the dataset lost it.
+				// Each new controller must refuse without hiding that gap.
+				for _, next := range []int64{11, 12} {
+					_, err := provider.AdvanceControllerEpoch(ctx, storagev1.AdvanceControllerEpochRequest{
+						DatasetID: dataset, Epoch: mirroredEpoch(next, "new-owner"),
+						InstallationID: suiteInstance, AcknowledgedEpoch: 10,
+					})
+					require.ErrorIs(t, err, storagev1.ErrNotReady)
+					after, err := provider.GetControllerEpochMirror(ctx, controlEpochName)
+					if storedEpoch == 0 {
+						require.ErrorIs(t, beforeErr, storagev1.ErrNotFound)
+						require.ErrorIs(t, err, storagev1.ErrNotFound)
+					} else {
+						require.NoError(t, beforeErr)
+						require.NoError(t, err)
+						require.Equal(t, before, after, "a refused takeover preserves rollback evidence")
+					}
+				}
+				if storedEpoch == 0 {
+					_, err := advance(provider, dataset, mirroredEpoch(13, "owner"), "another-installation")
+					require.NoError(t, err, "refused advances did not bind an installation")
+				}
+			})
+		}
+	})
+
+	t.Run("acknowledged epoch floor allows an advance and its retry", func(t *testing.T) {
+		provider := newProvider(t)
+		dataset := datasetID(t, provider)
+		_, err := advance(provider, dataset, mirroredEpoch(10, "old-owner"), suiteInstance)
+		require.NoError(t, err)
+		request := storagev1.AdvanceControllerEpochRequest{
+			DatasetID: dataset, Epoch: mirroredEpoch(11, "new-owner"),
+			InstallationID: suiteInstance, AcknowledgedEpoch: 10,
+		}
+		first, err := provider.AdvanceControllerEpoch(t.Context(), request)
+		require.NoError(t, err)
+		require.EqualValues(t, 10, first.Previous.Epoch)
+		repeated, err := provider.AdvanceControllerEpoch(t.Context(), request)
+		require.NoError(t, err)
+		require.Equal(t, first, repeated)
+	})
+
 	t.Run("an epoch stored before installations binds the first advance", func(t *testing.T) {
 		provider := newProvider(t)
 		dataset := datasetID(t, provider)
