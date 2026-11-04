@@ -354,7 +354,10 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 		}
 		c := casesByID[planned.CaseID]
 		if err := r.validateEvalTrialTask(run, observed.Monitor, c, planned.Trial, task); err != nil {
-			return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, evalRunReasonTrialTaskConflict, err.Error())
+			// Trials recorded earlier in this loop are immutable, and the
+			// run is terminal after this, so its aggregates count them now.
+			aggregate := aggregateEvalRun(observed.Cases, run.Spec.Trials, run.Spec.Graders, records)
+			return ctrl.Result{}, r.finishEvalRun(ctx, run, &aggregate, corev1alpha1.EvalRunPhaseFailed, evalRunReasonTrialTaskConflict, err.Error())
 		}
 		deadline := task.CreationTimestamp.Add(timeout)
 		forceDeadline := deadline.Add(evalTrialSettleGrace)

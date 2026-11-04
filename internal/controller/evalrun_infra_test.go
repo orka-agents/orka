@@ -42,6 +42,7 @@ func TestClassifyEvalTrialInfra(t *testing.T) {
 		"failed before output":      {task: task(corev1alpha1.TaskPhaseFailed, "", ""), want: evals.InfraNoModelOutput},
 		"cancelled before output":   {task: task(corev1alpha1.TaskPhaseCancelled, "", ""), want: evals.InfraNoModelOutput},
 		"failed after output":       {task: task(corev1alpha1.TaskPhaseFailed, "", ""), signals: evalTrialSignals{ModelOutput: true}},
+		"provider rejected request": {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeFailed, ""), signals: evalTrialSignals{RequestRejected: true}},
 		"task timeout no output":    {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpTaskTimeoutReason), want: evals.InfraTimeoutBeforeInference},
 		"deadline before output":    {task: task(corev1alpha1.TaskPhaseRunning, "", ""), deadline: true, want: evals.InfraTimeoutBeforeInference},
 		"deadline after output":     {task: task(corev1alpha1.TaskPhaseRunning, "", ""), deadline: true, signals: evalTrialSignals{ModelOutput: true}},
@@ -67,8 +68,24 @@ func TestEvalProviderProxyFailure(t *testing.T) {
 			t.Errorf("%q: got %v, want %v", message, got, want)
 		}
 	}
+	for message, want := range map[string]bool{
+		"provider upstream returned HTTP 400 for the final inference request": true,
+		"provider upstream returned HTTP 413 for the final inference request": true,
+		"provider upstream returned HTTP 429 for the final inference request": false,
+		"provider upstream returned HTTP 502 for the final inference request": false,
+		"a provider inference request was still in flight":                    false,
+	} {
+		content, _ := json.Marshal(map[string]string{"code": evalProviderUpstreamErrorCode, "message": message})
+		if got := evalProviderRequestRejected(content); got != want {
+			t.Errorf("rejected %q: got %v, want %v", message, got, want)
+		}
+	}
 	other, _ := json.Marshal(map[string]string{"code": "max_turns", "message": "HTTP 503"})
 	if evalProviderProxyFailure(other) {
 		t.Error("a non-provider failure code counted as a provider proxy failure")
+	}
+	other, _ = json.Marshal(map[string]string{"code": "max_turns", "message": "HTTP 400"})
+	if evalProviderRequestRejected(other) {
+		t.Error("a non-provider failure code counted as a rejected request")
 	}
 }

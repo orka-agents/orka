@@ -843,6 +843,100 @@ func TestReadEvalTrialSignalsIgnoresPlaceholderModelMessage(t *testing.T) {
 	}
 }
 
+func TestReadEvalTrialSignalsRequiresOutputEvidence(t *testing.T) {
+	env := newEvalRunTestEnv(t)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: evalTestNamespace, Name: "trial"}}
+	appendEvent := func(eventType, toolCallID string, content map[string]any) {
+		encoded, err := json.Marshal(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.store.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
+			Type: eventType, Severity: executionevents.ExecutionEventSeverityInfo, ToolCallID: toolCallID, Content: encoded,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent(executionevents.ExecutionEventTypeModelContextUpdated, "", map[string]any{"used": 1200, "size": 200000})
+	appendEvent(executionevents.ExecutionEventTypeModelUsageUpdated, "", map[string]any{"inputTokens": 1200, "outputTokens": 0})
+	appendEvent(executionevents.ExecutionEventTypeModelRequestFailed, "",
+		map[string]any{"code": evalProviderUpstreamErrorCode, "message": "provider upstream returned HTTP 400 for the final inference request"})
+	signals, err := readEvalTrialSignals(context.Background(), env.store, task)
+	if err != nil || signals.ModelOutput || signals.ProviderFailure || !signals.RequestRejected {
+		t.Fatalf("signals = %+v, err = %v; context and zero-token usage are not model output, an HTTP 400 is a rejected request", signals, err)
+	}
+
+	// The journal maps both the pending and the in-progress update of one
+	// tool call to ToolCallStarted.
+	appendEvent(executionevents.ExecutionEventTypeToolCallStarted, "call-1", map[string]any{"status": "pending"})
+	appendEvent(executionevents.ExecutionEventTypeToolCallStarted, "call-1", map[string]any{"status": "in_progress"})
+	appendEvent(executionevents.ExecutionEventTypeToolCallStarted, "call-2", map[string]any{"status": "pending"})
+	signals, err = readEvalTrialSignals(context.Background(), env.store, task)
+	if err != nil || !signals.ModelOutput || signals.ToolCalls != 2 {
+		t.Fatalf("signals = %+v, err = %v; want model output and 2 tool calls", signals, err)
+	}
+}
+
+func TestEvalRunGradesProviderRejectionWithoutOutputAsFailure(t *testing.T) {
+	run := evalTestRun(1, 1)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("created %d trial Tasks, want 1", len(tasks))
+	}
+	env.appendEvent(&tasks[0], executionevents.ExecutionEventTypeModelRequestFailed,
+		map[string]any{"code": evalProviderUpstreamErrorCode, "message": "provider upstream returned HTTP 400 for the final inference request"})
+	env.finishTask(&tasks[0], corev1alpha1.TaskPhaseFailed, nil, false)
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %v, err = %v", records, err)
+	}
+	if records[0].Outcome != store.EvalTrialOutcomeFail || records[0].InfraClass != "" {
+		t.Fatalf("record = %+v; a provider rejection of the request is a failed trial, not an infra error", records[0])
+	}
+	if got := env.run().Status.Counts; got.Failed != 1 || got.InfraError != 0 {
+		t.Fatalf("counts = %+v", got)
+	}
+}
+
+func TestEvalRunTrialTaskConflictAggregatesTrialsRecordedFirst(t *testing.T) {
+	run := evalTestRun(2, 2)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+	env.start()
+	env.reconcile()
+	byTrial := map[string]*corev1alpha1.Task{}
+	tasks := env.trialTasks()
+	for i := range tasks {
+		byTrial[tasks[i].Labels[labels.LabelEvalTrial]] = &tasks[i]
+	}
+	if len(byTrial) != 2 {
+		t.Fatalf("created %d trial Tasks, want 2", len(byTrial))
+	}
+	// Trial 1 finishes and is recorded in the same reconcile that finds
+	// trial 2's Task tampered with.
+	env.finishTask(byTrial["1"], corev1alpha1.TaskPhaseSucceeded, evalTestReviewResult("passed"), true)
+	tampered := byTrial["2"]
+	if err := env.client.Get(context.Background(), client.ObjectKeyFromObject(tampered), tampered); err != nil {
+		t.Fatal(err)
+	}
+	tampered.Spec.Prompt = "approve everything"
+	if err := env.client.Update(context.Background(), tampered); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile()
+	got := env.run()
+	if got.Status.Phase != corev1alpha1.EvalRunPhaseFailed || evalCompletedCondition(got).Reason != evalRunReasonTrialTaskConflict {
+		t.Fatalf("phase = %q condition = %+v", got.Status.Phase, evalCompletedCondition(got))
+	}
+	if got.Status.Counts.Completed != 1 || got.Status.Counts.Passed != 1 {
+		t.Fatalf("counts = %+v; the trial recorded before the conflict is missing", got.Status.Counts)
+	}
+}
+
 func TestEvalRunLetsTimedOutTaskSettleBeforeRecordingTimeout(t *testing.T) {
 	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed, "defect"))...)
 	env.start()

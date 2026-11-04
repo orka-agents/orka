@@ -25,24 +25,22 @@ const evalTrialJournalPages = 20
 
 var evalProviderUpstreamStatusPattern = regexp.MustCompile(`HTTP (\d{3})`)
 
-// evalModelOutputEventTypes prove the provider produced output: token
-// usage, context usage or a tool call. A model message proves it too, unless
-// it carries only the placeholder a runtime substitutes for a completion
-// without text (see evalModelMessageIsOutput). ModelRequestStarted only
-// proves the runtime accepted the prompt, so it does not count.
-var evalModelOutputEventTypes = []string{
-	executionevents.ExecutionEventTypeModelUsageUpdated,
-	executionevents.ExecutionEventTypeModelContextUpdated,
-	executionevents.ExecutionEventTypeToolCallStarted,
-}
-
 // evalTrialSignals is what a trial's execution journal shows. Transcript
 // content is never kept, only these facts.
+//
+// ModelOutput is proven by usage with positive output tokens, a tool call, or
+// a model message other than the placeholder a runtime substitutes for a
+// completion without text (see evalModelMessageIsOutput). Context-window
+// telemetry, zero-token usage and ModelRequestStarted only prove the runtime
+// accepted the prompt, so they do not count.
 type evalTrialSignals struct {
 	ModelOutput bool
 	// ProviderFailure is set when a prompt failed because the provider proxy
 	// could not serve it: a 5xx or 429, or a stream that never drained.
 	ProviderFailure bool
+	// RequestRejected is set when the provider rejected the request with a
+	// 4xx other than 429, such as an oversized prompt: the subject's fault.
+	RequestRejected bool
 	InputTokens     *int64
 	OutputTokens    *int64
 	ToolCalls       int64
@@ -58,28 +56,12 @@ func readEvalTrialSignals(ctx context.Context, events store.ExecutionEventStore,
 		StreamType: store.ExecutionEventStreamTypeTask,
 		StreamID:   task.Name,
 	}
-	outputFilter := filter
-	outputFilter.EventTypes = evalModelOutputEventTypes
-	outputFilter.Limit = 1
-	output, err := events.ListExecutionEvents(ctx, outputFilter)
-	if err != nil {
-		return signals, err
-	}
-	signals.ModelOutput = len(output) > 0
-	if !signals.ModelOutput {
-		err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelMessage, func(event store.ExecutionEvent) {
-			if evalModelMessageIsOutput(event) {
-				signals.ModelOutput = true
-			}
-		})
-		if err != nil {
-			return signals, err
-		}
-	}
-
-	err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelRequestFailed, func(event store.ExecutionEvent) {
-		if evalProviderProxyFailure(event.Content) {
+	err := forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelRequestFailed, func(event store.ExecutionEvent) {
+		switch {
+		case evalProviderProxyFailure(event.Content):
 			signals.ProviderFailure = true
+		case evalProviderRequestRejected(event.Content):
+			signals.RequestRejected = true
 		}
 	})
 	if err != nil {
@@ -97,13 +79,36 @@ func readEvalTrialSignals(ctx context.Context, events store.ExecutionEventStore,
 		}
 		signals.InputTokens = maxInt64Pointer(signals.InputTokens, usage.InputTokens)
 		signals.OutputTokens = maxInt64Pointer(signals.OutputTokens, usage.OutputTokens)
+		if usage.OutputTokens != nil && *usage.OutputTokens > 0 {
+			signals.ModelOutput = true
+		}
 	})
 	if err != nil {
 		return signals, err
 	}
-	err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeToolCallStarted, func(store.ExecutionEvent) {
+	// The journal maps both pending and in-progress updates of one tool call
+	// to ToolCallStarted, so calls are counted by ID.
+	toolCalls := map[string]struct{}{}
+	err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeToolCallStarted, func(event store.ExecutionEvent) {
+		signals.ModelOutput = true
+		if id := strings.TrimSpace(event.ToolCallID); id != "" {
+			if _, seen := toolCalls[id]; seen {
+				return
+			}
+			toolCalls[id] = struct{}{}
+		}
 		signals.ToolCalls++
 	})
+	if err != nil {
+		return signals, err
+	}
+	if !signals.ModelOutput {
+		err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelMessage, func(event store.ExecutionEvent) {
+			if evalModelMessageIsOutput(event) {
+				signals.ModelOutput = true
+			}
+		})
+	}
 	return signals, err
 }
 
@@ -171,23 +176,40 @@ func maxInt64Pointer(current, candidate *int64) *int64 {
 // provider the proxy could not serve. A 4xx other than 429 is the request's
 // fault, such as an oversized prompt, so it stays a trial failure.
 func evalProviderProxyFailure(content json.RawMessage) bool {
+	status, ok := evalProviderUpstreamStatus(content)
+	if !ok {
+		return false
+	}
+	// A stream drain timeout carries no status.
+	return status == 0 || status >= 500 || status == 429
+}
+
+// evalProviderRequestRejected reports a ModelRequestFailed journal entry for
+// a request the provider rejected with a 4xx other than 429.
+func evalProviderRequestRejected(content json.RawMessage) bool {
+	status, ok := evalProviderUpstreamStatus(content)
+	return ok && status >= 400 && status < 500 && status != 429
+}
+
+// evalProviderUpstreamStatus reads a provider_upstream_error failure's HTTP
+// status, zero when the message carries none.
+func evalProviderUpstreamStatus(content json.RawMessage) (int, bool) {
 	var failure struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(content, &failure) != nil || failure.Code != evalProviderUpstreamErrorCode {
-		return false
+		return 0, false
 	}
 	match := evalProviderUpstreamStatusPattern.FindStringSubmatch(failure.Message)
 	if match == nil {
-		// A stream drain timeout carries no status.
-		return true
+		return 0, true
 	}
 	status, err := strconv.Atoi(match[1])
 	if err != nil {
-		return true
+		return 0, true
 	}
-	return status >= 500 || status == 429
+	return status, true
 }
 
 // classifyEvalTrialInfra decides whether a terminal trial produced no
@@ -200,6 +222,8 @@ func evalProviderProxyFailure(content json.RawMessage) bool {
 //     settlement or a failed execution-event persistence.
 //   - ProviderProxyError: the journal holds a provider_upstream_error failure
 //     with a 5xx or 429 status, or a provider stream that never drained.
+//   - A provider_upstream_error with any other 4xx status rejected the
+//     request itself, so the trial is graded as a failure.
 //   - TimeoutBeforeInference: the trial timed out (TaskTimeout or the trial
 //     deadline) before any model output.
 //   - NoModelOutput: the Task failed or was cancelled before any model
@@ -239,7 +263,7 @@ func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, r
 	}
 	timedOut := deadlineExceeded || (execution != nil && execution.Reason == acpTaskTimeoutReason)
 	switch {
-	case signals.ModelOutput:
+	case signals.ModelOutput, signals.RequestRejected:
 		return ""
 	case timedOut:
 		return evals.InfraTimeoutBeforeInference
