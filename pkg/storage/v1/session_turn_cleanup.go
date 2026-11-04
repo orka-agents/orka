@@ -1,4 +1,4 @@
-package store
+package v1
 
 import (
 	"encoding/json"

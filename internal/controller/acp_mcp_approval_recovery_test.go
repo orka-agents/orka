@@ -25,6 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
@@ -80,7 +81,7 @@ func newMCPApprovalRecoveryFixture(t *testing.T, configure ...func(*harnessv2.MC
 				return c.List(ctx, list, opts...)
 			},
 		}).Build())
-	f.control, err = storekube.NewComposite(f.kube, "orka-system", f.events, storekube.WithAPIReader(f.kube))
+	f.control, err = storekube.NewComposite(f.kube, "orka-system", storageclienttest.Client(t, f.events), storekube.WithAPIReader(f.kube))
 	require.NoError(t, err)
 	epochs, stop := startArchivedRecoveryEpoch(t, ctx, f.control, nil, "controller-a")
 	f.stopEpoch = stop

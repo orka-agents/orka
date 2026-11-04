@@ -211,16 +211,16 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sqliteStore := sqlite.NewStore(db, "session-composite-test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "session-composite-test"))
 	if options.seedTranscript != nil {
-		options.seedTranscript(context.Background(), sqliteStore)
+		options.seedTranscript(context.Background(), sqliteStore.Store)
 	}
 	controlStore, err := storekube.NewComposite(kubeClient, task.Namespace, sqliteStore, storekube.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	epochs := NewControllerEpochManager(controlStore, "session-composite-controller")
+	epochs := NewControllerEpochManager(controlStore, "session-composite-controller").WithMirror(sqliteStore)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -329,7 +329,7 @@ func testPrepareTaskSessionCompositeStoreOpensTurn(
 		}
 	}
 	if options.finalizeGatewayEventID != "" {
-		testFinalizeGatewaySessionComposite(t, ctx, dispatcher, sqliteStore, session.Turn, fence, options.finalizeGatewayEventID)
+		testFinalizeGatewaySessionComposite(t, ctx, dispatcher, sqliteStore.Store, session.Turn, fence, options.finalizeGatewayEventID)
 	}
 }
 

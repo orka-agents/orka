@@ -35,6 +35,14 @@ const gatewayMessageBudgetSQL = `SELECT
 // terminal projection and cleanup. Reuse the authorized task-data writer rather
 // than nesting BeginTx (the store uses a single SQLite connection).
 func (s *Store) EnqueueGatewayMessage(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
+	result, err := writeOperation(ctx, s, "EnqueueGatewayMessage", nil, func(ctx context.Context) (resultPair[*store.GatewayDelivery, bool], error) {
+		first, second, err := s.enqueueGatewayMessageWrite(ctx, request)
+		return resultPair[*store.GatewayDelivery, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) enqueueGatewayMessageWrite(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
 	if err := validateGatewayMessageEnqueue(request); err != nil {
 		return nil, false, err
 	}

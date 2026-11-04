@@ -17,6 +17,12 @@ import (
 
 // SavePlan upserts an autonomous plan state.
 func (s *Store) SavePlan(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
+	return writeOperationErr(ctx, s, "SavePlan", func(ctx context.Context) error {
+		return s.savePlanWrite(ctx, namespace, taskName, plan)
+	})
+}
+
+func (s *Store) savePlanWrite(ctx context.Context, namespace, taskName string, plan *store.PlanState) error {
 	return upsertSQLitePlan(ctx, s.taskDataExecutor(ctx), namespace, taskName, plan, time.Now().UTC())
 }
 
@@ -68,6 +74,12 @@ func (s *Store) GetPlan(ctx context.Context, namespace, taskName string) (*store
 
 // DeletePlan removes the autonomous plan state for a task.
 func (s *Store) DeletePlan(ctx context.Context, namespace, taskName string) error {
+	return writeOperationErr(ctx, s, "DeletePlan", func(ctx context.Context) error {
+		return s.deletePlanWrite(ctx, namespace, taskName)
+	})
+}
+
+func (s *Store) deletePlanWrite(ctx context.Context, namespace, taskName string) error {
 	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM plan_states WHERE namespace = ? AND task_name = ?`,
 		namespace, taskName,

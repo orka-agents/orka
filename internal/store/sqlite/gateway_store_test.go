@@ -1981,7 +1981,9 @@ func TestGatewayDedupUsesNormalizedMetadata(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := setupTestStore(t)
+			// Orka normalizes metadata above the store, so admissions go
+			// through the storage client.
+			s := orkaClient(t, setupTestStore(t))
 			ctx := context.Background()
 			now := time.Now().UTC().Truncate(time.Second)
 			event := testGatewayEvent(now, fmt.Sprintf("dedupe-metadata-%d", i))

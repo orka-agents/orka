@@ -1,6 +1,8 @@
-package store
+package v1
 
-import "time"
+import (
+	"time"
+)
 
 // RepositoryMonitorRecord stores normalized RepositoryMonitor metadata.
 type RepositoryMonitorRecord struct {
