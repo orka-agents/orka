@@ -186,6 +186,10 @@ type ProviderInfo struct {
 	// Usage reports how much storage the dataset uses, or is nil when the
 	// provider cannot measure it.
 	Usage *DatasetUsage
+	// Binding is the installation the dataset is bound to, as
+	// [DatasetBindingStore.GetDatasetBinding] returns it, or nil when the
+	// dataset is unbound.
+	Binding *DatasetBinding
 }
 
 // ProviderDescriber reports what a provider serves and guarantees.

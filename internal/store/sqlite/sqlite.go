@@ -983,9 +983,12 @@ type Store struct {
 	securityTx *sql.Tx
 	// securityClock, set on a scan ingestion's transaction-scoped store,
 	// supplies the times the security writes of one step assign.
-	securityClock    func() time.Time
-	dbPath           string
-	processLock      io.Closer
+	securityClock func() time.Time
+	dbPath        string
+	processLock   io.Closer
+	// ownsProcessLock is set for a store OpenLockedStore opened under the
+	// process lock, which an embedded dataset binding requires.
+	ownsProcessLock  bool
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
@@ -1046,7 +1049,7 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	s := &Store{db: db, dbPath: path, processLock: lock}
+	s := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true}
 	s.pendingWALTruncate.Store(true)
 	s.incarnation = uuid.NewString()
 	return s, nil

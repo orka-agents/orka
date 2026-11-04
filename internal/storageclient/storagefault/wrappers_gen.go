@@ -147,6 +147,19 @@ func (p *stateProvider) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 	return err
 }
 
+func (p *stateProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
+		r0, err = p.inner.BindDataset(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	_, err := p.injector.call(ctx, p.contract, "BindPatchProposalPublicationEvidence", func(ctx context.Context) error {
 		return p.inner.BindPatchProposalPublicationEvidence(ctx, a1)
@@ -282,6 +295,13 @@ func (p *stateProvider) CommitSealedSessionTurnFinalization(ctx context.Context,
 func (p *stateProvider) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
 	_, err := p.injector.call(ctx, p.contract, "CommitSessionTurn", func(ctx context.Context) error {
 		return p.inner.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
+	})
+	return err
+}
+
+func (p *stateProvider) CompleteDatasetBootstrap(ctx context.Context, a1 string) error {
+	_, err := p.injector.call(ctx, p.contract, "CompleteDatasetBootstrap", func(ctx context.Context) error {
+		return p.inner.CompleteDatasetBootstrap(ctx, a1)
 	})
 	return err
 }
@@ -658,6 +678,19 @@ func (p *stateProvider) DeleteTaskMessages(ctx context.Context, a1 string, a2 st
 	return err
 }
 
+func (p *stateProvider) DetachDatasetBinding(ctx context.Context, a1 storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "DetachDatasetBinding", func(ctx context.Context) (err error) {
+		r0, err = p.inner.DetachDatasetBinding(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) EnqueueGatewayMessage(ctx context.Context, a1 storagev1.GatewayMessageEnqueue) (*storagev1.GatewayDelivery, bool, error) {
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
@@ -762,6 +795,19 @@ func (p *stateProvider) GetControllerEpochMirror(ctx context.Context, a1 string)
 	})
 	if injected {
 		var z0 storagev1.ControllerEpochMirrorState
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetDatasetBinding(ctx context.Context, a1 string) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "GetDatasetBinding", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetDatasetBinding(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
 		return z0, err
 	}
 	return r0, err
@@ -2462,6 +2508,19 @@ func (p *stateProvider) UpdateActionRecord(ctx context.Context, a1 *storagev1.Ac
 	return err
 }
 
+func (p *stateProvider) UpdateBindingKeyFingerprint(ctx context.Context, a1 storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "UpdateBindingKeyFingerprint", func(ctx context.Context) (err error) {
+		r0, err = p.inner.UpdateBindingKeyFingerprint(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) UpdateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateCommandEvent", func(ctx context.Context) error {
 		return p.inner.UpdateCommandEvent(ctx, a1)
@@ -2608,11 +2667,44 @@ func (p *artifactProvider) AdvanceControllerEpoch(ctx context.Context, a1 storag
 	return r0, err
 }
 
+func (p *artifactProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
+		r0, err = p.inner.BindDataset(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) CompleteDatasetBootstrap(ctx context.Context, a1 string) error {
+	_, err := p.injector.call(ctx, p.contract, "CompleteDatasetBootstrap", func(ctx context.Context) error {
+		return p.inner.CompleteDatasetBootstrap(ctx, a1)
+	})
+	return err
+}
+
 func (p *artifactProvider) DeleteArtifacts(ctx context.Context, a1 storagev1.ArtifactOwner) error {
 	_, err := p.injector.call(ctx, p.contract, "DeleteArtifacts", func(ctx context.Context) error {
 		return p.inner.DeleteArtifacts(ctx, a1)
 	})
 	return err
+}
+
+func (p *artifactProvider) DetachDatasetBinding(ctx context.Context, a1 storagev1.DetachDatasetRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "DetachDatasetBinding", func(ctx context.Context) (err error) {
+		r0, err = p.inner.DetachDatasetBinding(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *artifactProvider) GetArtifact(ctx context.Context, a1 storagev1.ArtifactKey) ([]uint8, string, error) {
@@ -2638,6 +2730,19 @@ func (p *artifactProvider) GetControllerEpochMirror(ctx context.Context, a1 stri
 	})
 	if injected {
 		var z0 storagev1.ControllerEpochMirrorState
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) GetDatasetBinding(ctx context.Context, a1 string) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "GetDatasetBinding", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetDatasetBinding(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
 		return z0, err
 	}
 	return r0, err
@@ -2694,6 +2799,19 @@ func (p *artifactProvider) SaveArtifact(ctx context.Context, a1 storagev1.SaveAr
 		return p.inner.SaveArtifact(ctx, a1)
 	})
 	return err
+}
+
+func (p *artifactProvider) UpdateBindingKeyFingerprint(ctx context.Context, a1 storagev1.UpdateBindingKeyRequest) (storagev1.DatasetBinding, error) {
+	var r0 storagev1.DatasetBinding
+	injected, err := p.injector.call(ctx, p.contract, "UpdateBindingKeyFingerprint", func(ctx context.Context) (err error) {
+		r0, err = p.inner.UpdateBindingKeyFingerprint(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *embeddedStore) DeleteArtifacts(ctx context.Context, a1 storagev1.ArtifactOwner) error {

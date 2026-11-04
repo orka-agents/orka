@@ -71,7 +71,6 @@ var sqliteOnlyMethods = map[string]string{
 	"Close":                              "lifecycle",
 	"DatasetInfo":                        "lifecycle",
 	"NeedLeaderElection":                 "lifecycle",
-	"CompleteDatasetBootstrap":           "startup bootstrap history",
 	"SetNativeSessionFinalizationSealer": "duplicate SQL control finalization",
 	"Start":                              "lifecycle",
 	"AcquireLockUntil":                   "SQLite test helper",

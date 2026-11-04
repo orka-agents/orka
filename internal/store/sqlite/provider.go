@@ -42,6 +42,10 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 	if err != nil {
 		return storagev1.ProviderInfo{}, err
 	}
+	binding, err := readDatasetBinding(ctx, tx)
+	if err != nil {
+		return storagev1.ProviderInfo{}, err
+	}
 	return storagev1.ProviderInfo{
 		ContractVersion: storagev1.ContractVersion,
 		Contracts:       []string{storagev1.StateContract, storagev1.ArtifactsContract},
@@ -64,6 +68,7 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		ObservedAt:  time.Now().UTC(),
 		Bootstrap:   storagev1.DatasetBootstrap{Complete: record.complete, Empty: !populated},
 		Usage:       datasetUsage(s.dbPath),
+		Binding:     binding.public(),
 	}, nil
 }
 

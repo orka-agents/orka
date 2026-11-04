@@ -22,7 +22,9 @@ type AdvanceControllerEpochRequest struct {
 	// Epoch is the exact record the Kubernetes compare-and-swap produced.
 	Epoch ControllerEpoch
 	// InstallationID identifies the Orka installation that owns the dataset.
-	// Orka passes the UID of the installation's ControllerEpoch object.
+	// Until Orka records its installation, it passes the UID of the
+	// installation's ControllerEpoch object; afterwards it passes the
+	// installation ID it binds datasets to (see [DatasetBindingStore]).
 	InstallationID string
 }
 
@@ -60,7 +62,7 @@ type ControllerEpochMirrorState struct {
 	DatasetID string
 	// Epoch is the stored epoch record.
 	Epoch ControllerEpoch
-	// InstallationID is the installation the dataset is bound to.
+	// InstallationID is the installation the dataset belongs to.
 	InstallationID string
 	// Previous is the epoch this one replaced, or nil when the dataset held
 	// none before it.
@@ -87,11 +89,17 @@ type ControllerEpochMirrorState struct {
 //  1. A DatasetID other than the provider's dataset returns
 //     [ErrDatasetMismatch].
 //  2. A dataset with no epoch under the name stores the request's epoch, and
-//     binds its InstallationID when the dataset has no installation yet; a
-//     dataset bound to another installation is refused by rule 3 first.
-//  3. An InstallationID other than the bound one returns a [FencedError]: the
-//     dataset belongs to another installation. Moving a dataset to another
-//     installation is an explicit storage switch, never this method.
+//     records its InstallationID when the dataset belongs to no installation
+//     yet; a dataset that belongs to another installation is refused by rule
+//     3 first. The installation recorded this way owns the dataset without a
+//     binding of its own: [DatasetBindingStore.GetDatasetBinding] reports it
+//     at SwitchGeneration 0, and only that installation can bind the dataset.
+//  3. An InstallationID other than the one the dataset belongs to, through
+//     [DatasetBindingStore.BindDataset] or an earlier advance, returns a
+//     [FencedError]: the dataset belongs to another installation. Moving a
+//     dataset to another installation is an explicit storage switch, never
+//     this method. A dataset its installation has detached returns
+//     [ErrDatasetDetached] and commits nothing.
 //  4. An epoch lower than the stored one returns a [FencedError]: the caller
 //     is a stale controller.
 //  5. An equal epoch with the same holder and request digest succeeds without
@@ -101,8 +109,9 @@ type ControllerEpochMirrorState struct {
 //     Epochs may jump forward, because Kubernetes can advance several times
 //     without a store advance when a controller stops right after acquiring.
 //  7. A dataset that holds an epoch but no installation, because it was
-//     written before installations were recorded, binds the InstallationID of
-//     the first advance that succeeds under rule 5 or 6, in the same commit.
+//     written before installations were recorded, records the
+//     InstallationID of the first advance that succeeds under rule 5 or 6, in
+//     the same commit, as rule 2 does.
 //  8. The advance is linearized with fenced writes: it waits for writes in
 //     progress under the stored fence, and once it returns, no write carrying
 //     an older fence commits on this dataset.

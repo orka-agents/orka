@@ -46,7 +46,7 @@ func TestDescribeReportsBindingFacts(t *testing.T) {
 	require.Equal(t, fileBytes(t, path)+fileBytes(t, path+"-wal"), written.Usage.DatasetBytes)
 	require.Equal(t, fresh.Incarnation, written.Incarnation, "the incarnation is stable while the store stays open")
 
-	require.NoError(t, s.CompleteDatasetBootstrap())
+	require.NoError(t, s.CompleteDatasetBootstrap(ctx, fresh.DatasetID))
 	bootstrapped, err := s.Describe(ctx)
 	require.NoError(t, err)
 	require.True(t, bootstrapped.Bootstrap.Complete, "recording key activation completes the bootstrap")
@@ -66,7 +66,9 @@ func TestDescribeCompletedEmptyDataset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
-	require.NoError(t, s.CompleteDatasetBootstrap())
+	dataset, err := s.DatasetInfo()
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteDatasetBootstrap(t.Context(), dataset.ID))
 	info, err := s.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, storagev1.DatasetBootstrap{Complete: true, Empty: true}, info.Bootstrap,
