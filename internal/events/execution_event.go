@@ -1,215 +1,95 @@
 package events
 
-import "strings"
+import (
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+)
 
-const (
-	ExecutionEventTypeTaskCreated                   = "TaskCreated"
-	ExecutionEventTypeTaskPhaseChanged              = "TaskPhaseChanged"
-	ExecutionEventTypeTaskJobCreated                = "TaskJobCreated"
-	ExecutionEventTypeTaskStarted                   = "TaskStarted"
-	ExecutionEventTypeTaskSucceeded                 = "TaskSucceeded"
-	ExecutionEventTypeTaskFailed                    = "TaskFailed"
-	ExecutionEventTypeTaskCancelled                 = "TaskCancelled"
-	ExecutionEventTypeWorkerStarted                 = "WorkerStarted"
-	ExecutionEventTypeWorkerCompleted               = "WorkerCompleted"
-	ExecutionEventTypeWorkerFailed                  = "WorkerFailed"
-	ExecutionEventTypeModelRequestStarted           = "ModelRequestStarted"
-	ExecutionEventTypeModelRequestCompleted         = "ModelRequestCompleted"
-	ExecutionEventTypeModelRequestFailed            = "ModelRequestFailed"
-	ExecutionEventTypeModelUsageUpdated             = "ModelUsageUpdated"
-	ExecutionEventTypeModelContextUpdated           = "ModelContextUpdated"
-	ExecutionEventTypeModelMessage                  = "ModelMessage"
-	ExecutionEventTypeContextTruncated              = "ContextTruncated"
-	ExecutionEventTypeNativeSessionCaptureSkipped   = "NativeSessionCaptureSkipped"
-	ExecutionEventTypeToolCallStarted               = "ToolCallStarted"
-	ExecutionEventTypeToolCallCompleted             = "ToolCallCompleted"
-	ExecutionEventTypeToolCallFailed                = "ToolCallFailed"
-	ExecutionEventTypeWorkspacePreparationStarted   = "WorkspacePreparationStarted"
-	ExecutionEventTypeWorkspacePreparationCompleted = "WorkspacePreparationCompleted"
-	ExecutionEventTypeWorkspacePreparationFailed    = "WorkspacePreparationFailed"
-	ExecutionEventTypeAgentRuntimeStarted           = "AgentRuntimeStarted"
-	ExecutionEventTypeAgentRuntimeCommandStarted    = "AgentRuntimeCommandStarted"
-	ExecutionEventTypeAgentRuntimeCompleted         = "AgentRuntimeCompleted"
-	ExecutionEventTypeAgentRuntimeFailed            = "AgentRuntimeFailed"
-	ExecutionEventTypeAgentRuntimeCancelled         = "AgentRuntimeCancelled"
-	ExecutionEventTypeResultSubmitted               = "ResultSubmitted"
-	ExecutionEventTypeGatewayDeliveryCompleted      = "GatewayDeliveryCompleted"
-	ExecutionEventTypeArtifactUploadCompleted       = "ArtifactUploadCompleted"
-	ExecutionEventTypeArtifactUploadFailed          = "ArtifactUploadFailed"
-	ExecutionEventTypeTaskForkRequested             = "TaskForkRequested"
-	ExecutionEventTypeTaskForkCreated               = "TaskForkCreated"
-	ExecutionEventTypeApprovalRequested             = "ApprovalRequested"
-	ExecutionEventTypeApprovalApproved              = "ApprovalApproved"
-	ExecutionEventTypeApprovalDeclined              = "ApprovalDeclined"
-	ExecutionEventTypeApprovalExpired               = "ApprovalExpired"
-	ExecutionEventTypeApprovalCancelled             = "ApprovalCancelled"
-	ExecutionEventTypeApprovalExecutionUpdated      = "ApprovalExecutionUpdated"
-	ExecutionEventTypePlanUpdated                   = "PlanUpdated"
+// The execution event vocabulary is part of the public storage contract in
+// pkg/storage/v1, because providers validate event filters and terminal
+// approval uniqueness against it. These aliases keep the established names.
+type (
+	ExecutionEventTruncation = storagev1.ExecutionEventTruncation
 )
 
 const (
-	ExecutionEventSeverityDebug   = "debug"
-	ExecutionEventSeverityInfo    = "info"
-	ExecutionEventSeverityWarning = "warning"
-	ExecutionEventSeverityError   = "error"
+	ExecutionEventTypeTaskCreated                   = storagev1.ExecutionEventTypeTaskCreated
+	ExecutionEventTypeTaskPhaseChanged              = storagev1.ExecutionEventTypeTaskPhaseChanged
+	ExecutionEventTypeTaskJobCreated                = storagev1.ExecutionEventTypeTaskJobCreated
+	ExecutionEventTypeTaskStarted                   = storagev1.ExecutionEventTypeTaskStarted
+	ExecutionEventTypeTaskSucceeded                 = storagev1.ExecutionEventTypeTaskSucceeded
+	ExecutionEventTypeTaskFailed                    = storagev1.ExecutionEventTypeTaskFailed
+	ExecutionEventTypeTaskCancelled                 = storagev1.ExecutionEventTypeTaskCancelled
+	ExecutionEventTypeWorkerStarted                 = storagev1.ExecutionEventTypeWorkerStarted
+	ExecutionEventTypeWorkerCompleted               = storagev1.ExecutionEventTypeWorkerCompleted
+	ExecutionEventTypeWorkerFailed                  = storagev1.ExecutionEventTypeWorkerFailed
+	ExecutionEventTypeModelRequestStarted           = storagev1.ExecutionEventTypeModelRequestStarted
+	ExecutionEventTypeModelRequestCompleted         = storagev1.ExecutionEventTypeModelRequestCompleted
+	ExecutionEventTypeModelRequestFailed            = storagev1.ExecutionEventTypeModelRequestFailed
+	ExecutionEventTypeModelUsageUpdated             = storagev1.ExecutionEventTypeModelUsageUpdated
+	ExecutionEventTypeModelContextUpdated           = storagev1.ExecutionEventTypeModelContextUpdated
+	ExecutionEventTypeModelMessage                  = storagev1.ExecutionEventTypeModelMessage
+	ExecutionEventTypeContextTruncated              = storagev1.ExecutionEventTypeContextTruncated
+	ExecutionEventTypeNativeSessionCaptureSkipped   = storagev1.ExecutionEventTypeNativeSessionCaptureSkipped
+	ExecutionEventTypeToolCallStarted               = storagev1.ExecutionEventTypeToolCallStarted
+	ExecutionEventTypeToolCallCompleted             = storagev1.ExecutionEventTypeToolCallCompleted
+	ExecutionEventTypeToolCallFailed                = storagev1.ExecutionEventTypeToolCallFailed
+	ExecutionEventTypeWorkspacePreparationStarted   = storagev1.ExecutionEventTypeWorkspacePreparationStarted
+	ExecutionEventTypeWorkspacePreparationCompleted = storagev1.ExecutionEventTypeWorkspacePreparationCompleted
+	ExecutionEventTypeWorkspacePreparationFailed    = storagev1.ExecutionEventTypeWorkspacePreparationFailed
+	ExecutionEventTypeAgentRuntimeStarted           = storagev1.ExecutionEventTypeAgentRuntimeStarted
+	ExecutionEventTypeAgentRuntimeCommandStarted    = storagev1.ExecutionEventTypeAgentRuntimeCommandStarted
+	ExecutionEventTypeAgentRuntimeCompleted         = storagev1.ExecutionEventTypeAgentRuntimeCompleted
+	ExecutionEventTypeAgentRuntimeFailed            = storagev1.ExecutionEventTypeAgentRuntimeFailed
+	ExecutionEventTypeAgentRuntimeCancelled         = storagev1.ExecutionEventTypeAgentRuntimeCancelled
+	ExecutionEventTypeResultSubmitted               = storagev1.ExecutionEventTypeResultSubmitted
+	ExecutionEventTypeGatewayDeliveryCompleted      = storagev1.ExecutionEventTypeGatewayDeliveryCompleted
+	ExecutionEventTypeArtifactUploadCompleted       = storagev1.ExecutionEventTypeArtifactUploadCompleted
+	ExecutionEventTypeArtifactUploadFailed          = storagev1.ExecutionEventTypeArtifactUploadFailed
+	ExecutionEventTypeTaskForkRequested             = storagev1.ExecutionEventTypeTaskForkRequested
+	ExecutionEventTypeTaskForkCreated               = storagev1.ExecutionEventTypeTaskForkCreated
+	ExecutionEventTypeApprovalRequested             = storagev1.ExecutionEventTypeApprovalRequested
+	ExecutionEventTypeApprovalApproved              = storagev1.ExecutionEventTypeApprovalApproved
+	ExecutionEventTypeApprovalDeclined              = storagev1.ExecutionEventTypeApprovalDeclined
+	ExecutionEventTypeApprovalExpired               = storagev1.ExecutionEventTypeApprovalExpired
+	ExecutionEventTypeApprovalCancelled             = storagev1.ExecutionEventTypeApprovalCancelled
+	ExecutionEventTypeApprovalExecutionUpdated      = storagev1.ExecutionEventTypeApprovalExecutionUpdated
+	ExecutionEventTypePlanUpdated                   = storagev1.ExecutionEventTypePlanUpdated
+	ExecutionEventSeverityDebug                     = storagev1.ExecutionEventSeverityDebug
+	ExecutionEventSeverityInfo                      = storagev1.ExecutionEventSeverityInfo
+	ExecutionEventSeverityWarning                   = storagev1.ExecutionEventSeverityWarning
+	ExecutionEventSeverityError                     = storagev1.ExecutionEventSeverityError
+	ExecutionEventStreamTypeTask                    = storagev1.ExecutionEventStreamTypeTask
+	ExecutionEventStreamTypeSession                 = storagev1.ExecutionEventStreamTypeSession
 )
 
-const (
-	// ExecutionEventStreamTypeTask is the persisted per-task stream type.
-	ExecutionEventStreamTypeTask = "task"
-	// ExecutionEventStreamTypeSession names the public aggregated session stream read model.
-	ExecutionEventStreamTypeSession = "session"
-)
+func TerminalTaskEventTypes() []string { return storagev1.TerminalTaskEventTypes() }
 
-var executionEventTypes = []string{
-	ExecutionEventTypeTaskCreated,
-	ExecutionEventTypeTaskPhaseChanged,
-	ExecutionEventTypeTaskJobCreated,
-	ExecutionEventTypeTaskStarted,
-	ExecutionEventTypeTaskSucceeded,
-	ExecutionEventTypeTaskFailed,
-	ExecutionEventTypeTaskCancelled,
-	ExecutionEventTypeWorkerStarted,
-	ExecutionEventTypeWorkerCompleted,
-	ExecutionEventTypeWorkerFailed,
-	ExecutionEventTypeModelRequestStarted,
-	ExecutionEventTypeModelRequestCompleted,
-	ExecutionEventTypeModelRequestFailed,
-	ExecutionEventTypeModelUsageUpdated,
-	ExecutionEventTypeModelContextUpdated,
-	ExecutionEventTypeModelMessage,
-	ExecutionEventTypeContextTruncated,
-	ExecutionEventTypeNativeSessionCaptureSkipped,
-	ExecutionEventTypeToolCallStarted,
-	ExecutionEventTypeToolCallCompleted,
-	ExecutionEventTypeToolCallFailed,
-	ExecutionEventTypeWorkspacePreparationStarted,
-	ExecutionEventTypeWorkspacePreparationCompleted,
-	ExecutionEventTypeWorkspacePreparationFailed,
-	ExecutionEventTypeAgentRuntimeStarted,
-	ExecutionEventTypeAgentRuntimeCommandStarted,
-	ExecutionEventTypeAgentRuntimeCompleted,
-	ExecutionEventTypeAgentRuntimeFailed,
-	ExecutionEventTypeAgentRuntimeCancelled,
-	ExecutionEventTypeResultSubmitted,
-	ExecutionEventTypeGatewayDeliveryCompleted,
-	ExecutionEventTypeArtifactUploadCompleted,
-	ExecutionEventTypeArtifactUploadFailed,
-	ExecutionEventTypeTaskForkRequested,
-	ExecutionEventTypeTaskForkCreated,
-	ExecutionEventTypeApprovalRequested,
-	ExecutionEventTypeApprovalApproved,
-	ExecutionEventTypeApprovalDeclined,
-	ExecutionEventTypeApprovalExpired,
-	ExecutionEventTypeApprovalCancelled,
-	ExecutionEventTypeApprovalExecutionUpdated,
-	ExecutionEventTypePlanUpdated,
-}
+func IsTerminalTaskEventType(value string) bool { return storagev1.IsTerminalTaskEventType(value) }
 
-var validExecutionEventTypes = stringSet(executionEventTypes)
-
-var terminalTaskEventTypes = []string{
-	ExecutionEventTypeTaskSucceeded,
-	ExecutionEventTypeTaskFailed,
-	ExecutionEventTypeTaskCancelled,
-}
-
-var terminalTaskEventTypeSet = stringSet(terminalTaskEventTypes)
-
-var terminalApprovalEventTypes = []string{
-	ExecutionEventTypeApprovalApproved,
-	ExecutionEventTypeApprovalDeclined,
-	ExecutionEventTypeApprovalExpired,
-	ExecutionEventTypeApprovalCancelled,
-}
-
-var terminalApprovalEventTypeSet = stringSet(terminalApprovalEventTypes)
-
-func stringSet(values []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		set[value] = struct{}{}
-	}
-	return set
-}
-
-// TerminalTaskEventTypes returns task-level terminal events that complete a task
-// execution stream.
-func TerminalTaskEventTypes() []string {
-	return append([]string(nil), terminalTaskEventTypes...)
-}
-
-// IsTerminalTaskEventType reports whether value is a task-level terminal event.
-func IsTerminalTaskEventType(value string) bool {
-	_, ok := terminalTaskEventTypeSet[strings.TrimSpace(value)]
-	return ok
-}
-
-// IsTerminalApprovalEventType reports whether value is an approval terminal event.
 func IsTerminalApprovalEventType(value string) bool {
-	_, ok := terminalApprovalEventTypeSet[strings.TrimSpace(value)]
-	return ok
+	return storagev1.IsTerminalApprovalEventType(value)
 }
 
-// ExecutionEventTypes returns every known execution event type in
-// declaration order, for help text and completion.
-func ExecutionEventTypes() []string {
-	return append([]string(nil), executionEventTypes...)
-}
+func ExecutionEventTypes() []string { return storagev1.ExecutionEventTypes() }
 
-// CanonicalExecutionEventType maps a case-insensitive spelling of a known
-// event type to its canonical name. Unknown values return "".
 func CanonicalExecutionEventType(value string) string {
-	value = strings.TrimSpace(value)
-	if IsValidExecutionEventType(value) {
-		return value
-	}
-	for _, known := range executionEventTypes {
-		if strings.EqualFold(known, value) {
-			return known
-		}
-	}
-	return ""
+	return storagev1.CanonicalExecutionEventType(value)
 }
 
-// IsValidExecutionEventType reports whether value is a known execution event type.
-func IsValidExecutionEventType(value string) bool {
-	_, ok := validExecutionEventTypes[strings.TrimSpace(value)]
-	return ok
-}
+func IsValidExecutionEventType(value string) bool { return storagev1.IsValidExecutionEventType(value) }
 
-// NormalizeExecutionEventType trims a known event type. Unknown values normalize to empty.
 func NormalizeExecutionEventType(value string) string {
-	value = strings.TrimSpace(value)
-	if !IsValidExecutionEventType(value) {
-		return ""
-	}
-	return value
+	return storagev1.NormalizeExecutionEventType(value)
 }
 
-// IsValidExecutionEventSeverity reports whether value is a known severity after normalization.
 func IsValidExecutionEventSeverity(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case ExecutionEventSeverityDebug, ExecutionEventSeverityInfo, ExecutionEventSeverityWarning, ExecutionEventSeverityError:
-		return true
-	default:
-		return false
-	}
+	return storagev1.IsValidExecutionEventSeverity(value)
 }
 
-// NormalizeExecutionEventSeverity normalizes severity to lowercase.
-// Empty or unsupported values intentionally coerce to info so event producers can be permissive
-// while stores and APIs persist a stable severity value.
 func NormalizeExecutionEventSeverity(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if !IsValidExecutionEventSeverity(value) {
-		return ExecutionEventSeverityInfo
-	}
-	return value
+	return storagev1.NormalizeExecutionEventSeverity(value)
 }
 
-// IsValidExecutionEventStreamType reports whether value is a supported persisted stream type.
-// Session timelines are an aggregated read model over task streams, not a direct P1 append target.
 func IsValidExecutionEventStreamType(value string) bool {
-	return strings.TrimSpace(value) == ExecutionEventStreamTypeTask
+	return storagev1.IsValidExecutionEventStreamType(value)
 }
