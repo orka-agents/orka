@@ -5,6 +5,7 @@ WORKDIR /workspace
 
 # Copy go mod files
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 # Copy source

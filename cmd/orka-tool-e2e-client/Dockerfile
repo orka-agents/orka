@@ -5,10 +5,12 @@ ARG TARGETARCH
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 RUN go mod download
 
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 COPY cmd/orka-tool-e2e-client/ cmd/orka-tool-e2e-client/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \

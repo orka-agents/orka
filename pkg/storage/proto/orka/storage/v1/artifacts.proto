@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Artifacts serves public Task artifacts, the artifacts.v1 contract. Artifact
+// bytes travel with blob framing.
+service Artifacts {
+  option (go_interface) = "ArtifactStore";
+
+  rpc SaveArtifact(stream SaveArtifactRequest) returns (SaveArtifactResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetArtifact(GetArtifactRequest) returns (stream GetArtifactResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteArtifacts(DeleteArtifactsRequest) returns (DeleteArtifactsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+}
+
+message ArtifactOwner {
+  string namespace = 1;
+  string task_name = 2;
+  string task_uid = 3;
+}
+
+message ArtifactKey {
+  ArtifactOwner owner = 1;
+  string filename = 2;
+}
+
+message ArtifactMetadata {
+  string filename = 1;
+  string content_type = 2;
+  int64 size = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// SaveArtifactRequest is both the contract record SaveArtifact takes and the
+// RPC's request message.
+message SaveArtifactRequest {
+  ArtifactOwner owner = 1;
+  string filename = 2;
+  string content_type = 3;
+  bytes data = 4 [(blob) = true];
+}
+
+message SaveArtifactResponse {}
+
+message GetArtifactRequest {
+  ArtifactKey key = 1;
+}
+
+message GetArtifactResponse {
+  bytes data = 1 [(blob) = true];
+  string content_type = 2;
+}
+
+message ListArtifactsRequest {
+  ArtifactOwner owner = 1;
+}
+
+message ListArtifactsResponse {
+  repeated ArtifactMetadata artifacts = 1;
+}
+
+message DeleteArtifactsRequest {
+  ArtifactOwner owner = 1;
+}
+
+message DeleteArtifactsResponse {}

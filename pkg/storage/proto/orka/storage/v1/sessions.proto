@@ -1,0 +1,448 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Sessions serves Session transcripts, locks, chat turns, souls and lineage.
+// GetSession, ListSessions, LoadTranscript and LoadTranscriptThrough return
+// lists the contract does not bound by size, so their responses stream the
+// list in batches from one provider result.
+service Sessions {
+  option (go_interface) = "SessionStore";
+  option (go_interface) = "SessionTypeReader";
+  option (go_interface) = "SessionTurnCommitter";
+  option (go_interface) = "FencedSessionWriteStore";
+  option (go_interface) = "SessionSoulReader";
+  option (go_interface) = "SessionSoulWriter";
+  option (go_interface) = "SessionLineageStore";
+
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetSession(GetSessionRequest) returns (stream GetSessionResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "session.messages";
+  }
+  rpc ListSessions(ListSessionsRequest) returns (stream ListSessionsResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "sessions";
+  }
+  rpc ListSessionsPage(ListSessionsPageRequest) returns (ListSessionsPageResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AcquireLock(AcquireLockRequest) returns (AcquireLockResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ReleaseLock(ReleaseLockRequest) returns (ReleaseLockResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  // IsLocked clears an expired Task lock it finds, so it is a write.
+  rpc IsLocked(IsLockedRequest) returns (IsLockedResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AppendMessages(AppendMessagesRequest) returns (AppendMessagesResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc LoadTranscript(LoadTranscriptRequest) returns (stream LoadTranscriptResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "messages";
+  }
+  rpc LoadTranscriptThrough(LoadTranscriptThroughRequest) returns (stream LoadTranscriptThroughResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+    option (batched) = "messages";
+  }
+  rpc SearchTranscript(SearchTranscriptRequest) returns (SearchTranscriptResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc UpdateTokenCounts(UpdateTokenCountsRequest) returns (UpdateTokenCountsResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetSessionType(GetSessionTypeRequest) returns (GetSessionTypeResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc AcquireChatTurn(AcquireChatTurnRequest) returns (AcquireChatTurnResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ReleaseChatTurn(ReleaseChatTurnRequest) returns (ReleaseChatTurnResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc CommitSessionTurn(CommitSessionTurnRequest) returns (CommitSessionTurnResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc AppendMessagesWithLock(AppendMessagesWithLockRequest) returns (AppendMessagesWithLockResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc UpdateTokenCountsWithLock(UpdateTokenCountsWithLockRequest) returns (UpdateTokenCountsWithLockResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ReleaseLockWithTokenUsage(ReleaseLockWithTokenUsageRequest) returns (ReleaseLockWithTokenUsageResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ReadSessionSoul(ReadSessionSoulRequest) returns (ReadSessionSoulResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc EnsureSessionSoulWithLock(EnsureSessionSoulWithLockRequest) returns (EnsureSessionSoulWithLockResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc ProjectSessionLineage(ProjectSessionLineageRequest) returns (ProjectSessionLineageResponse) {
+    option (kind) = METHOD_KIND_WRITE;
+    option (rpc_since) = 1;
+  }
+  rpc GetSessionLineage(GetSessionLineageRequest) returns (GetSessionLineageResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+}
+
+message SessionRecord {
+  string namespace = 1;
+  string name = 2;
+  string session_type = 3;
+  string active_task = 4;
+  string active_task_uid = 5;
+  int64 message_count = 6;
+  int64 input_tokens = 7;
+  int64 output_tokens = 8;
+  bool cancelled = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+  repeated SessionMessage messages = 12;
+}
+
+message SessionMessage {
+  string id = 1;
+  int64 order = 2;
+  string role = 3;
+  string content = 4;
+  string name = 5;
+  JSONValue input = 6;
+  JSONValue tool_calls = 7;
+  string tool_call_id = 8;
+  string source_type = 9;
+  string source_ref = 10;
+  map<string, string> metadata = 11;
+  google.protobuf.Timestamp timestamp = 12;
+}
+
+message SessionMetadata {
+  string name = 1;
+  string session_type = 2;
+  int64 message_count = 3;
+  int64 input_tokens = 4;
+  int64 output_tokens = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  string active_task = 8;
+  string active_task_uid = 9;
+}
+
+message SessionPageCursor {
+  google.protobuf.Timestamp created_at = 1;
+  string name = 2;
+}
+
+message TranscriptSearchFilter {
+  string namespace = 1;
+  string query = 2;
+  string session_name = 3;
+  repeated string session_names = 4;
+  repeated TranscriptSearchHistoryBound history_bounds = 5;
+  string exclude_session_name = 6;
+  repeated string roles = 7;
+  int64 limit = 8;
+  int64 max_snippet_length = 9;
+}
+
+message TranscriptSearchHistoryBound {
+  string session_name = 1;
+  int64 max_messages = 2;
+  string through_message_id = 3;
+}
+
+message TranscriptSearchResult {
+  string session_name = 1;
+  int64 message_id = 2;
+  string stable_message_id = 3;
+  string role = 4;
+  string name = 5;
+  string snippet = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message SessionSoulState {
+  bool established = 1;
+  string digest = 2;
+  int64 message_count = 3;
+  string first_message_id = 4;
+  string session_type = 5;
+}
+
+message SessionLineage {
+  string namespace = 1;
+  string session_name = 2;
+  string namespace_uid = 3;
+  string session_uid = 4;
+  string contract_version = 5;
+  int64 lineage_generation = 6;
+  string runtime_identity = 7;
+  string config_digest = 8;
+  int64 version = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+message CreateSessionRequest {
+  SessionRecord session = 1;
+}
+
+message CreateSessionResponse {}
+
+message GetSessionRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message GetSessionResponse {
+  SessionRecord session = 1;
+}
+
+message ListSessionsRequest {
+  string namespace = 1;
+}
+
+message ListSessionsResponse {
+  repeated SessionMetadata sessions = 1;
+}
+
+message ListSessionsPageRequest {
+  string namespace = 1;
+  SessionPageCursor after = 2;
+  int64 limit = 3;
+  string exclude_type = 4;
+}
+
+message ListSessionsPageResponse {
+  repeated SessionMetadata items = 1;
+  bool more = 2;
+}
+
+message DeleteSessionRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message DeleteSessionResponse {}
+
+message AcquireLockRequest {
+  string namespace = 1;
+  string name = 2;
+  string task_name = 3;
+  string task_uid = 4;
+}
+
+message AcquireLockResponse {}
+
+message ReleaseLockRequest {
+  string namespace = 1;
+  string name = 2;
+  string task_name = 3;
+  string task_uid = 4;
+}
+
+message ReleaseLockResponse {}
+
+message IsLockedRequest {
+  string namespace = 1;
+  string name = 2;
+  string current_task = 3;
+  string current_task_uid = 4;
+}
+
+message IsLockedResponse {
+  bool locked = 1;
+}
+
+message AppendMessagesRequest {
+  string namespace = 1;
+  string name = 2;
+  repeated SessionMessage messages = 3;
+}
+
+message AppendMessagesResponse {}
+
+message LoadTranscriptRequest {
+  string namespace = 1;
+  string name = 2;
+  int64 max_messages = 3;
+}
+
+message LoadTranscriptResponse {
+  repeated SessionMessage messages = 1;
+}
+
+message LoadTranscriptThroughRequest {
+  string namespace = 1;
+  string name = 2;
+  string through_message_id = 3;
+  int64 max_messages = 4;
+}
+
+message LoadTranscriptThroughResponse {
+  repeated SessionMessage messages = 1;
+}
+
+message SearchTranscriptRequest {
+  TranscriptSearchFilter filter = 1;
+}
+
+message SearchTranscriptResponse {
+  repeated TranscriptSearchResult results = 1;
+}
+
+message UpdateTokenCountsRequest {
+  string namespace = 1;
+  string name = 2;
+  int64 input_tokens = 3;
+  int64 output_tokens = 4;
+}
+
+message UpdateTokenCountsResponse {}
+
+message GetSessionTypeRequest {
+  string namespace = 1;
+  string name = 2;
+}
+
+message GetSessionTypeResponse {
+  string session_type = 1;
+}
+
+message AcquireChatTurnRequest {
+  SessionRecord session = 1;
+  string turn_id = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message AcquireChatTurnResponse {
+  bool created = 1;
+}
+
+message ReleaseChatTurnRequest {
+  string namespace = 1;
+  string name = 2;
+  string turn_id = 3;
+  bool delete_empty_created_session = 4;
+}
+
+message ReleaseChatTurnResponse {}
+
+message CommitSessionTurnRequest {
+  SessionRecord session = 1;
+  string turn_id = 2;
+  int64 expected_message_count = 3;
+  repeated SessionMessage messages = 4;
+  int64 input_tokens = 5;
+  int64 output_tokens = 6;
+}
+
+message CommitSessionTurnResponse {}
+
+message AppendMessagesWithLockRequest {
+  string namespace = 1;
+  string name = 2;
+  string owner_name = 3;
+  string owner_uid = 4;
+  repeated SessionMessage messages = 5;
+}
+
+message AppendMessagesWithLockResponse {}
+
+message UpdateTokenCountsWithLockRequest {
+  string namespace = 1;
+  string name = 2;
+  string owner_name = 3;
+  string owner_uid = 4;
+  int64 input_tokens = 5;
+  int64 output_tokens = 6;
+}
+
+message UpdateTokenCountsWithLockResponse {}
+
+message ReleaseLockWithTokenUsageRequest {
+  string namespace = 1;
+  string name = 2;
+  string owner_name = 3;
+  string owner_uid = 4;
+  int64 input_tokens = 5;
+  int64 output_tokens = 6;
+}
+
+message ReleaseLockWithTokenUsageResponse {}
+
+message ReadSessionSoulRequest {
+  string namespace = 1;
+  string name = 2;
+  string task_name = 3;
+  string task_uid = 4;
+}
+
+message ReadSessionSoulResponse {
+  SessionSoulState state = 1;
+}
+
+message EnsureSessionSoulWithLockRequest {
+  string namespace = 1;
+  string name = 2;
+  string task_name = 3;
+  string task_uid = 4;
+  string digest = 5;
+}
+
+message EnsureSessionSoulWithLockResponse {}
+
+message ProjectSessionLineageRequest {
+  SessionLineage lineage = 1;
+}
+
+message ProjectSessionLineageResponse {
+  SessionLineage lineage = 1;
+}
+
+message GetSessionLineageRequest {
+  string namespace = 1;
+  string session_name = 2;
+}
+
+message GetSessionLineageResponse {
+  SessionLineage lineage = 1;
+}

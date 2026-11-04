@@ -4,6 +4,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 COPY test/fixtures/fakeforge ./test/fixtures/fakeforge
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /fakeforge ./test/fixtures/fakeforge/cmd

@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// The usage records. An execution event carries a usage observation, so the
+// record crosses the wire before the Usage service does.
+
+message UsageObservation {
+  string id = 1;
+  string namespace = 2;
+  string namespace_uid = 3;
+  string task_uid = 4;
+  string task_name = 5;
+  string session_name = 6;
+  string attempt_id = 7;
+  string counter_id = 8;
+  string scope = 9;
+  string source = 10;
+  string provider = 11;
+  string model = 12;
+  optional int64 input_tokens = 13;
+  optional int64 output_tokens = 14;
+  optional int64 cached_input_tokens = 15;
+  optional int64 cache_write_input_tokens = 16;
+  string status = 17;
+  bool complete = 18;
+  google.protobuf.Timestamp observed_at = 19;
+}

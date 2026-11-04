@@ -28,14 +28,14 @@ const (
 	defaultTranscriptSnippetLen = 360
 	maxTranscriptSnippetLen     = 1000
 
-	memorySourceProposal = "memory_proposal"
-	proposalTypeMemory   = "memory"
+	memorySourceProposal = store.MemorySourceProposal
+	proposalTypeMemory   = store.MemoryProposalTypeMemory
 
-	proposalStatusPending  = "pending"
-	proposalStatusAccepted = "accepted"
-	proposalStatusRejected = "rejected"
-	proposalStatusArchived = "archived"
-	proposalStatusApplied  = "applied"
+	proposalStatusPending  = store.MemoryProposalStatusPending
+	proposalStatusAccepted = store.MemoryProposalStatusAccepted
+	proposalStatusRejected = store.MemoryProposalStatusRejected
+	proposalStatusArchived = store.MemoryProposalStatusArchived
+	proposalStatusApplied  = store.MemoryProposalStatusApplied
 )
 
 type rowScanner interface {
@@ -50,7 +50,6 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if strings.TrimSpace(memory.Namespace) == "" {
 		return store.ValidationErrorf("namespace is required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -58,7 +57,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.ID = "mem-" + uuid.NewString()
 	}
 	if memory.Source == "" {
-		memory.Source = "manual"
+		memory.Source = store.MemorySourceManual
 	}
 	now := time.Now()
 	if memory.CreatedAt.IsZero() {
@@ -82,7 +81,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Source, memory.SourceProposalID, memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.CreatedAt,
 		memory.UpdatedAt, memory.LastRecalledAt, memory.RecalledCount,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemory fetches a memory by ID within a namespace.
@@ -135,7 +134,6 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory.Namespace == "" || memory.ID == "" {
 		return store.ValidationErrorf("namespace and id are required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
 	if strings.TrimSpace(memory.Content) == "" {
 		return store.ValidationErrorf("content is required")
 	}
@@ -153,7 +151,7 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 		memory.Content, tagsJSON, memory.Disabled, memory.Deleted, memory.Namespace, memory.ID,
 	)
 	if err != nil {
-		return err
+		return uniqueConflict(err)
 	}
 	return ensureRowsAffected(res)
 }
@@ -307,15 +305,8 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	}
 	proposal.Type = strings.ToLower(strings.TrimSpace(proposal.Type))
 	if proposal.Type == "" {
-		proposal.Type = "skill"
+		proposal.Type = store.MemoryProposalTypeSkill
 	}
-	proposal.Title = redact.SensitiveText(proposal.Title)
-	proposal.Description = redact.SensitiveText(proposal.Description)
-	proposal.Content = redact.SensitiveText(proposal.Content)
-	proposal.Patch = redact.SensitiveText(proposal.Patch)
-	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
-	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
-	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
 	if strings.TrimSpace(proposal.Title) == "" {
 		return store.ValidationErrorf("title is required")
 	}
@@ -326,11 +317,11 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 	if proposal.Status == "" {
 		proposal.Status = proposalStatusPending
 	}
-	if !isKnownProposalStatus(proposal.Status) {
-		return store.ValidationErrorf("invalid proposal status %q", proposal.Status)
+	if proposal.Status != proposalStatusPending {
+		return store.ValidationErrorf("a new proposal starts pending; status %q is recorded by review or apply", proposal.Status)
 	}
-	if proposal.Status == proposalStatusApplied && proposal.AppliedMemoryID == "" {
-		return store.ValidationErrorf("invalid applied proposal without applied memory id")
+	if field := proposalDecisionField(proposal); field != "" {
+		return store.ValidationErrorf("a new proposal cannot carry %s; review and apply record it", field)
 	}
 	now := time.Now()
 	if proposal.CreatedAt.IsZero() {
@@ -350,7 +341,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 		proposal.ReviewNote, proposal.AppliedMemoryID, proposal.AppliedBy, proposal.CreatedAt, proposal.UpdatedAt,
 		proposal.ReviewedAt, proposal.AppliedAt,
 	)
-	return err
+	return uniqueConflict(err)
 }
 
 // GetMemoryProposal fetches a proposal by ID within a namespace.
@@ -437,8 +428,6 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 		return store.ValidationErrorf("applied proposal cannot be reviewed")
 	}
 
-	review.Reviewer = redact.SensitiveText(review.Reviewer)
-	review.ReviewNote = redact.SensitiveText(review.ReviewNote)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, reviewer = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -448,7 +437,17 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 	if err != nil {
 		return err
 	}
-	return ensureRowsAffected(res)
+	if err := ensureRowsAffected(res); !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	// A concurrent review or archive changed the proposal after the check
+	// above. Report what a review run after it would: the proposal is no
+	// longer pending, unless it is gone.
+	current, err := s.GetMemoryProposal(ctx, review.Namespace, review.ID)
+	if err != nil {
+		return err
+	}
+	return store.ValidationErrorf("proposal status %q cannot be reviewed", current.Status)
 }
 
 // ArchiveMemoryProposal archives a proposal without applying it.
@@ -497,7 +496,7 @@ func (s *Store) ApplyMemoryProposal(ctx context.Context, apply store.MemoryPropo
 	if apply.Namespace == "" || apply.ID == "" {
 		return nil, store.ValidationErrorf("namespace and id are required")
 	}
-	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
+	apply.AppliedBy = strings.TrimSpace(apply.AppliedBy)
 
 	const maxAttempts = 5
 	retryBackoffs := [...]time.Duration{
@@ -616,6 +615,10 @@ func (s *Store) applyMemoryProposalOnce(ctx context.Context, apply store.MemoryP
 	}
 
 	now := time.Now()
+	// The storage client redacted the proposal when it was created. The copy
+	// re-applies the current rule to that stored text so a proposal written
+	// under an older rule cannot become a memory unredacted. This stays here
+	// while proposal application runs inside the embedded transaction.
 	memory := &store.Memory{
 		ID:               "mem-" + uuid.NewString(),
 		Namespace:        proposal.Namespace,
@@ -857,12 +860,25 @@ func normalizeProposalStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
 }
 
-func isKnownProposalStatus(status string) bool {
-	switch normalizeProposalStatus(status) {
-	case proposalStatusPending, proposalStatusAccepted, proposalStatusRejected, proposalStatusArchived, proposalStatusApplied:
-		return true
+// proposalDecisionField names the first review or apply outcome a proposal
+// carries, or returns "" when it carries none.
+func proposalDecisionField(proposal *store.MemoryProposal) string {
+	switch {
+	case strings.TrimSpace(proposal.Reviewer) != "":
+		return "reviewer"
+	case strings.TrimSpace(proposal.ReviewNote) != "":
+		return "reviewNote"
+	case proposal.ReviewedAt != nil:
+		return "reviewedAt"
+	case proposal.AppliedMemoryID != "":
+		// Review and archive treat any nonempty ID, even whitespace, as applied.
+		return "appliedMemoryId"
+	case strings.TrimSpace(proposal.AppliedBy) != "":
+		return "appliedBy"
+	case proposal.AppliedAt != nil:
+		return "appliedAt"
 	default:
-		return false
+		return ""
 	}
 }
 

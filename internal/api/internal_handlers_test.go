@@ -286,10 +286,13 @@ func TestGetMessages(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 
-		var messages []store.Message
+		var messages []map[string]any
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&messages))
 		require.Len(t, messages, 1)
-		require.Equal(t, "hello from a", messages[0].Content)
+		require.Equal(t, "hello from a", messages[0]["content"])
+		// createdAt keeps the wire format it had as a string: RFC 3339 in UTC
+		// with the stored fractional seconds.
+		require.Regexp(t, `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$`, messages[0]["createdAt"])
 	})
 
 	t.Run("no messages", func(t *testing.T) {

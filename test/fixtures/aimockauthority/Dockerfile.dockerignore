@@ -3,6 +3,10 @@
 **
 !go.mod
 !go.sum
+!pkg/
+!pkg/storage/
+!pkg/storage/go.mod
+!pkg/storage/go.sum
 !internal/
 !internal/transactiontoken/
 !internal/transactiontoken/profile.go

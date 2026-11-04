@@ -1,0 +1,152 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Wire rules
+//
+// Every record crosses the wire with every field, including fields the Go
+// contract tags json:"-". Strings are valid UTF-8. Times are UTC within the
+// google.protobuf.Timestamp range (0001-01-01 to 9999-12-31); the zero Go time
+// is an absent field. Nil and empty lists, maps and byte strings are
+// equivalent. A server refuses a request that carries a field it does not know.
+//
+// Datasets
+//
+// Every request names the dataset it expects in the orka-storage-dataset
+// header, and every response names the dataset the server serves. Only
+// Describe and HealthCheck may omit the request header. The server refuses a
+// call that omits it or names another dataset with DATASET_MISMATCH before the
+// provider runs.
+//
+// Blob framing
+//
+// A client-streaming RPC uploads a request whose blob field (marked with the
+// blob option) may be larger than one message. The request headers
+// orka-storage-blob-size (decimal bytes) and orka-storage-blob-sha256
+// (lowercase hex) describe the whole blob. The first message carries every
+// request field, with at most the first 1 MiB of the blob in its blob field;
+// each later message carries only the next part of the blob, at most 1 MiB and
+// never empty, in the same field. The server calls the provider once, after
+// the client ends the stream and the reassembled blob matches its size and
+// digest. A stream that ends early or fails its digest is refused with
+// UNAVAILABLE, and one larger than the server accepts with TOO_LARGE, so a
+// refused upload never reaches the provider. A server-streaming RPC returns
+// its response the same way, with the size and digest in the response
+// headers.
+//
+// Batched reads
+//
+// A server-streaming read marked with the batched option returns a list the
+// contract does not bound by size. The first message carries every other
+// response field and the first batch of the list; each later message carries
+// only the next batch, never empty, in the same field. A batch holds records
+// of at most 1 MiB in total, or one larger record. The response headers
+// orka-storage-snapshot-records and orka-storage-snapshot-bytes (decimal)
+// declare the number of records and their encoded size as elements of the
+// list, each record's tag and length prefix included, so a client can refuse
+// a list larger than it accepts before reading it.
+//
+// Errors
+//
+// Every status the server library or a provider produces carries a
+// google.rpc.ErrorInfo with domain "storage.orka.ai". Its reason names the
+// contract error, and is authoritative; the status code is advisory. The
+// reasons are NOT_FOUND, CONFLICT, FENCED, SESSION_CONFIGURATION_MISMATCH,
+// NOT_READY, DUPLICATE_MISMATCH, GATEWAY_MESSAGE_REPLAY_ONLY, CAPACITY,
+// VALIDATION, GATEWAY_OWNED_SESSION, GATEWAY_SESSION_CLEANUP_PENDING,
+// TASK_JOB_REVOKED, USAGE_SELECTION_TOO_LARGE, DATASET_MISMATCH,
+// OPERATION_EXPIRED, OPERATION_ABORTED, CLOCK_SKEW, TOO_LARGE, UNAVAILABLE,
+// OUTCOME_UNKNOWN, UNAUTHENTICATED, CONTRACT_MISMATCH,
+// UNSUPPORTED_FIELD, OVERLOADED and PROVIDER_ERROR. VALIDATION, FENCED and
+// CONFLICT carry a client-safe "message" in the ErrorInfo metadata; TOO_LARGE
+// carries "what", "size" and "limit".
+
+// NullableTime carries a Go *time.Time. An absent NullableTime is a nil
+// pointer; a present one with no value points to the zero time.
+message NullableTime {
+  option (wire_only) = true;
+
+  google.protobuf.Timestamp value = 1;
+}
+
+// JSONValue carries a dynamic Go value (any, map[string]any or
+// json.RawMessage) as its encoding/json bytes.
+message JSONValue {
+  option (wire_only) = true;
+
+  bytes json = 1;
+}
+
+// ControllerEpochFence is the controller epoch a write was issued under.
+message ControllerEpochFence {
+  string name = 1;
+  int64 epoch = 2;
+  string holder_id = 3;
+}
+
+// ControllerEpoch is the durable compare-and-swap record of controller
+// ownership.
+message ControllerEpoch {
+  string name = 1;
+  int64 epoch = 2;
+  string holder_id = 3;
+  string request_digest = 4;
+  int64 version = 5;
+  google.protobuf.Timestamp acquired_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// WriteEnvelope carries the cross-cutting identity of one controller write.
+// It travels as the binary request header orka-storage-envelope-bin, never in
+// a request message.
+message WriteEnvelope {
+  string dataset_id = 1;
+  ControllerEpochFence fence = 2;
+  string operation_id = 3;
+  string request_digest = 4;
+  google.protobuf.Timestamp issued_at = 5;
+  uint64 sequence = 6;
+}
+
+// ProviderLimits states a provider's size limits.
+message ProviderLimits {
+  int64 max_artifact_bytes = 1;
+  int64 max_value_bytes = 2;
+  google.protobuf.Duration receipt_retention = 3;
+  int64 max_receipt_result_bytes = 4;
+}
+
+// ProviderInfo describes a provider and the dataset it serves.
+message ProviderInfo {
+  string contract_version = 1;
+  repeated string contracts = 2;
+  string dataset_id = 3;
+  string dataset_origin = 4;
+  string schema_version = 5;
+  repeated string capabilities = 6;
+  ProviderLimits limits = 7;
+  string durability = 8;
+  string state = 9;
+  string incarnation = 10;
+  google.protobuf.Timestamp observed_at = 11;
+}
+
+// ServerInfo describes the server library that serves a provider, rather
+// than the provider itself.
+message ServerInfo {
+  option (wire_only) = true;
+
+  // protocol_revision is the server library's protocol revision.
+  int64 protocol_revision = 1;
+  // library_version is the version of the server library's Go module.
+  string library_version = 2;
+  // adapter_name and adapter_version identify the adapter binary.
+  string adapter_name = 3;
+  string adapter_version = 4;
+}
