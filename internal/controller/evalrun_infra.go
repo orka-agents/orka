@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
 	executionevents "github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -23,11 +25,12 @@ const evalTrialJournalPages = 20
 
 var evalProviderUpstreamStatusPattern = regexp.MustCompile(`HTTP (\d{3})`)
 
-// evalModelOutputEventTypes prove the provider produced output: a message
-// chunk, token usage, context usage or a tool call. ModelRequestStarted only
+// evalModelOutputEventTypes prove the provider produced output: token
+// usage, context usage or a tool call. A model message proves it too, unless
+// it carries only the placeholder a runtime substitutes for a completion
+// without text (see evalModelMessageIsOutput). ModelRequestStarted only
 // proves the runtime accepted the prompt, so it does not count.
 var evalModelOutputEventTypes = []string{
-	executionevents.ExecutionEventTypeModelMessage,
 	executionevents.ExecutionEventTypeModelUsageUpdated,
 	executionevents.ExecutionEventTypeModelContextUpdated,
 	executionevents.ExecutionEventTypeToolCallStarted,
@@ -63,6 +66,16 @@ func readEvalTrialSignals(ctx context.Context, events store.ExecutionEventStore,
 		return signals, err
 	}
 	signals.ModelOutput = len(output) > 0
+	if !signals.ModelOutput {
+		err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelMessage, func(event store.ExecutionEvent) {
+			if evalModelMessageIsOutput(event) {
+				signals.ModelOutput = true
+			}
+		})
+		if err != nil {
+			return signals, err
+		}
+	}
 
 	err = forEachEvalTrialEvent(ctx, events, filter, executionevents.ExecutionEventTypeModelRequestFailed, func(event store.ExecutionEvent) {
 		if evalProviderProxyFailure(event.Content) {
@@ -92,6 +105,34 @@ func readEvalTrialSignals(ctx context.Context, events store.ExecutionEventStore,
 		signals.ToolCalls++
 	})
 	return signals, err
+}
+
+// evalModelMessageIsOutput reports a journaled model message that the model
+// wrote. The dispatcher journals a completed prompt's result as its
+// transcript when nothing streamed, so a completion without text leaves a
+// message holding only the runtime's placeholder.
+func evalModelMessageIsOutput(event store.ExecutionEvent) bool {
+	return !evalResultIsPlaceholder(event.ContentText)
+}
+
+// evalResultIsPlaceholder reports result text a runtime substituted for a
+// completion without model text.
+func evalResultIsPlaceholder(text string) bool {
+	return strings.TrimSpace(text) == harnessv2.CompletedWithoutTextResult
+}
+
+// evalTrialResult is a trial's stored result, read once for classification
+// and grading.
+type evalTrialResult struct {
+	Raw   []byte
+	Found bool
+}
+
+// modelText reports a stored result the model wrote, not an empty result or
+// the placeholder for a completion without text.
+func (r evalTrialResult) modelText() bool {
+	text := string(r.Raw)
+	return r.Found && strings.TrimSpace(text) != "" && !evalResultIsPlaceholder(text)
 }
 
 // forEachEvalTrialEvent visits one event type of a trial journal, reading at
@@ -162,11 +203,13 @@ func evalProviderProxyFailure(content json.RawMessage) bool {
 //   - TimeoutBeforeInference: the trial timed out (TaskTimeout or the trial
 //     deadline) before any model output.
 //   - NoModelOutput: the Task failed or was cancelled before any model
-//     output, for example a workspace, runtime profile or credential failure.
+//     output, for example a workspace, runtime profile or credential failure,
+//     or it succeeded with a stored result that holds no model text.
 //
-// A Task that succeeded with model output or a stored result, or failed
-// after producing model output, is graded.
-func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, deadlineExceeded bool) evals.InfraClass {
+// A Task that succeeded with a stored result the model wrote, or with model
+// output but no stored result, or failed after producing model output, is
+// graded.
+func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, result evalTrialResult, deadlineExceeded bool) evals.InfraClass {
 	execution := task.Status.Execution
 	if execution != nil && execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown {
 		if execution.Reason == corev1alpha1.TaskExecutionReasonRuntimeLost {
@@ -175,9 +218,18 @@ func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, d
 		return evals.InfraOutcomeUnknown
 	}
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && !deadlineExceeded {
-		// A success is graded only with evidence the model ran: output in
-		// the journal or a stored result.
-		if signals.ModelOutput || (task.Status.ResultRef != nil && task.Status.ResultRef.Available) {
+		// A success is graded only with evidence the model answered. A stored
+		// result decides: an empty one or the runtime's placeholder for a
+		// completion without text is no answer, whatever else the journal
+		// shows. Without a stored result, journal output is graded as a
+		// review with a missing result.
+		if result.Found {
+			if result.modelText() {
+				return ""
+			}
+			return evals.InfraNoModelOutput
+		}
+		if signals.ModelOutput {
 			return ""
 		}
 		return evals.InfraNoModelOutput

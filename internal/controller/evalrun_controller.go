@@ -331,12 +331,15 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 	for _, planned := range observed.Plan {
 		task := tasks[evalTrialTaskName(run, planned.CaseID, planned.Trial)]
 		if _, done := recorded[planned]; done {
-			// A trial recorded at its deadline may still be running if the
-			// deletion after the record failed; stop it before starting more.
+			// A trial recorded at its deadline keeps running until its Task
+			// is gone: deletion only requests cancellation, and the Task's
+			// finalizer holds it while the prompt stops. It holds its slot
+			// until then.
 			if task != nil && !evalTrialTaskTerminal(task) {
-				if err := r.deleteEvalTrialTask(ctx, task); err != nil {
+				if err := r.stopEvalTrialTask(ctx, task); err != nil {
 					return ctrl.Result{}, err
 				}
+				active++
 			}
 			continue
 		}
@@ -365,9 +368,10 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 		records = append(records, *record)
 		recorded[planned] = struct{}{}
 		if deadlineExceeded {
-			if err := r.deleteEvalTrialTask(ctx, task); err != nil {
+			if err := r.stopEvalTrialTask(ctx, task); err != nil {
 				return ctrl.Result{}, err
 			}
+			active++
 		}
 	}
 
@@ -436,12 +440,15 @@ func evalRunInfraErrorBudgetExceeded(run *corev1alpha1.EvalRun, counts corev1alp
 }
 
 // evalTrialTaskTerminal reports a trial Task that will not change its result.
+// Only the Task phase decides: the dispatcher records a Succeeded execution
+// outcome before delivery and cleanup finish, and either can still fail the
+// Task.
 func evalTrialTaskTerminal(task *corev1alpha1.Task) bool {
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
 		return true
 	}
-	return task.Status.Execution != nil && task.Status.Execution.Outcome != ""
+	return false
 }
 
 // listEvalTrialTasks returns the run's trial Tasks by name. Only Tasks this
@@ -461,6 +468,14 @@ func (r *EvalRunReconciler) listEvalTrialTasks(ctx context.Context, run *corev1a
 		tasks[task.Name] = task
 	}
 	return tasks, nil
+}
+
+// stopEvalTrialTask requests deletion of a running trial Task once.
+func (r *EvalRunReconciler) stopEvalTrialTask(ctx context.Context, task *corev1alpha1.Task) error {
+	if !task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	return r.deleteEvalTrialTask(ctx, task)
 }
 
 func (r *EvalRunReconciler) deleteEvalTrialTask(ctx context.Context, task *corev1alpha1.Task) error {
@@ -541,13 +556,13 @@ func (r *EvalRunReconciler) gradeEvalTrial(ctx context.Context, run *corev1alpha
 	if err != nil {
 		return nil, fmt.Errorf("read journal of trial Task %s/%s: %w", task.Namespace, task.Name, err)
 	}
-	outcome := evals.TrialOutcome{InfraClass: classifyEvalTrialInfra(task, signals, deadlineExceeded)}
+	result, err := r.readEvalTrialResult(ctx, task, deadlineExceeded)
+	if err != nil {
+		return nil, err
+	}
+	outcome := evals.TrialOutcome{InfraClass: classifyEvalTrialInfra(task, signals, result, deadlineExceeded)}
 	if outcome.InfraClass == "" {
-		review, err := r.evalReviewTrialOutcome(ctx, observed.Monitor, c, task, deadlineExceeded)
-		if err != nil {
-			return nil, err
-		}
-		outcome.RepositoryMonitorReview = review
+		outcome.RepositoryMonitorReview = evalReviewTrialOutcome(observed.Monitor, c, task, result, deadlineExceeded)
 	}
 	grade, err := r.graders().GradeTrial(c, run.Spec.Graders, outcome)
 	if err != nil {
@@ -579,14 +594,15 @@ func (r *EvalRunReconciler) gradeEvalTrial(ctx context.Context, run *corev1alpha
 		ToolCalls:     &signals.ToolCalls,
 		LatencyMillis: &latency,
 		Snapshot: store.EvalTrialSnapshot{
-			MonitorUID:           string(snapshot.MonitorUID),
-			MonitorGeneration:    snapshot.MonitorGeneration,
-			RuntimeImageDigest:   snapshot.RuntimeImageDigest,
-			Model:                snapshot.Model,
-			PromptTemplateDigest: snapshot.PromptTemplateDigest,
-			CaseSetDigest:        snapshot.CaseSetDigest,
-			GraderSetDigest:      snapshot.GraderSetDigest,
-			TrialPlanDigest:      snapshot.TrialPlanDigest,
+			MonitorUID:                 string(snapshot.MonitorUID),
+			MonitorGeneration:          snapshot.MonitorGeneration,
+			RuntimeImageDigest:         snapshot.RuntimeImageDigest,
+			Model:                      snapshot.Model,
+			PromptTemplateDigest:       snapshot.PromptTemplateDigest,
+			ReviewerSystemPromptDigest: snapshot.ReviewerSystemPromptDigest,
+			CaseSetDigest:              snapshot.CaseSetDigest,
+			GraderSetDigest:            snapshot.GraderSetDigest,
+			TrialPlanDigest:            snapshot.TrialPlanDigest,
 		},
 		StartedAt:   &startedAt,
 		CompletedAt: completedAt.UTC(),
@@ -634,30 +650,40 @@ func evalTrialBoundedReason(reason string) string {
 
 func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
 
+// readEvalTrialResult reads the stored result of a trial that succeeded
+// within its deadline. Other trials are graded without one.
+func (r *EvalRunReconciler) readEvalTrialResult(ctx context.Context, task *corev1alpha1.Task, deadlineExceeded bool) (evalTrialResult, error) {
+	if deadlineExceeded || task.Status.Phase != corev1alpha1.TaskPhaseSucceeded ||
+		task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
+		return evalTrialResult{}, nil
+	}
+	raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return evalTrialResult{}, nil
+		}
+		return evalTrialResult{}, fmt.Errorf("get result of trial Task %s/%s: %w", task.Namespace, task.Name, err)
+	}
+	return evalTrialResult{Raw: raw, Found: true}, nil
+}
+
 // evalReviewTrialOutcome is what production would record for a trial that
 // is not an infra error.
-func (r *EvalRunReconciler) evalReviewTrialOutcome(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, c evals.Case, task *corev1alpha1.Task, deadlineExceeded bool) (*evals.ReviewTrialOutcome, error) {
+func evalReviewTrialOutcome(monitor *corev1alpha1.RepositoryMonitor, c evals.Case, task *corev1alpha1.Task, result evalTrialResult, deadlineExceeded bool) *evals.ReviewTrialOutcome {
 	failed := func(skipReason string) *evals.ReviewTrialOutcome {
 		return &evals.ReviewTrialOutcome{Verdict: repositoryMonitorReviewVerdictFailed, SkipReason: skipReason}
 	}
 	switch {
 	case deadlineExceeded, task.Status.Phase == corev1alpha1.TaskPhaseFailed:
-		return failed(repositoryMonitorReviewSkipReasonTaskFailed), nil
+		return failed(repositoryMonitorReviewSkipReasonTaskFailed)
 	case task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
-		return failed(repositoryMonitorReviewSkipReasonTaskCancelled), nil
+		return failed(repositoryMonitorReviewSkipReasonTaskCancelled)
 	case task.Status.Phase != corev1alpha1.TaskPhaseSucceeded:
-		return failed(repositoryMonitorReviewSkipReasonTaskFailed), nil
-	case task.Status.ResultRef == nil || !task.Status.ResultRef.Available:
-		return failed(repositoryMonitorReviewSkipReasonMissingResult), nil
+		return failed(repositoryMonitorReviewSkipReasonTaskFailed)
+	case !result.Found:
+		return failed(repositoryMonitorReviewSkipReasonMissingResult)
 	}
-	raw, err := r.ResultStore.GetResult(ctx, task.Namespace, task.Name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return failed(repositoryMonitorReviewSkipReasonMissingResult), nil
-		}
-		return nil, fmt.Errorf("get result of trial Task %s/%s: %w", task.Namespace, task.Name, err)
-	}
-	return evalReviewOutcomeFromResult(raw, monitor, c, task), nil
+	return evalReviewOutcomeFromResult(result.Raw, monitor, c, task)
 }
 
 func (r *EvalRunReconciler) updateEvalRunAggregate(ctx context.Context, run *corev1alpha1.EvalRun, aggregate evalRunAggregate) error {

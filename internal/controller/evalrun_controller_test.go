@@ -22,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
 	executionevents "github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -331,7 +332,7 @@ func assertEvalTestSnapshot(t *testing.T, frozen *corev1alpha1.EvalRunSnapshot) 
 		t.Fatalf("snapshot = %+v", frozen)
 	}
 	for name, digest := range map[string]string{
-		"prompt": frozen.PromptTemplateDigest, "cases": frozen.CaseSetDigest,
+		"prompt": frozen.PromptTemplateDigest, "system prompt": frozen.ReviewerSystemPromptDigest, "cases": frozen.CaseSetDigest,
 		"graders": frozen.GraderSetDigest, "plan": frozen.TrialPlanDigest,
 	} {
 		if !strings.HasPrefix(digest, evals.DigestPrefix) {
@@ -640,8 +641,204 @@ func TestEvalRunRetriesCleanupOfRecordedTimedOutTrial(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.reconcile()
+	// The deletion only requested cancellation, so the slot frees on the
+	// next reconcile, once the Task is gone.
+	if remaining := env.trialTasks(); len(remaining) != 0 {
+		t.Fatalf("trial Tasks = %v; want the stale trial stopped and none started in its slot", remaining)
+	}
+	env.reconcile()
 	remaining := env.trialTasks()
 	if len(remaining) != 1 || remaining[0].Labels[labels.LabelEvalCase] != "clean-1" {
-		t.Fatalf("trial Tasks = %v; want the stale trial stopped and only clean-1 running", remaining)
+		t.Fatalf("trial Tasks = %v; want only clean-1 running", remaining)
+	}
+}
+
+// evalTestHoldTask adds a finalizer, as the Task controller does, so a
+// deletion leaves the Task in place until the test releases it.
+func (e *evalRunTestEnv) holdTask(task *corev1alpha1.Task) {
+	e.t.Helper()
+	task.Finalizers = append(task.Finalizers, "test.orka.ai/hold")
+	if err := e.client.Update(context.Background(), task); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func (e *evalRunTestEnv) releaseTask(name string) {
+	e.t.Helper()
+	task := &corev1alpha1.Task{}
+	if err := e.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: name}, task); err != nil {
+		e.t.Fatal(err)
+	}
+	task.Finalizers = nil
+	if err := e.client.Update(context.Background(), task); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func TestEvalRunTimedOutTrialHoldsItsSlotUntilTheTaskIsGone(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCases())...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	timedOut := tasks[0].Name
+	env.holdTask(&tasks[0])
+	env.now = tasks[0].CreationTimestamp.Add(21 * time.Minute)
+
+	// The timeout is recorded and the Task is asked to stop, but it is still
+	// running behind its finalizer, so no trial may take its slot.
+	for range 2 {
+		env.reconcile()
+		remaining := env.trialTasks()
+		if len(remaining) != 1 || remaining[0].Name != timedOut || remaining[0].DeletionTimestamp.IsZero() {
+			t.Fatalf("trial Tasks = %v; want only the stopping trial, holding its slot", remaining)
+		}
+	}
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 || records[0].InfraClass != string(evals.InfraTimeoutBeforeInference) {
+		t.Fatalf("records = %+v, err = %v", records, err)
+	}
+
+	env.releaseTask(timedOut)
+	env.reconcile()
+	remaining := env.trialTasks()
+	if len(remaining) != 1 || remaining[0].Labels[labels.LabelEvalCase] != "clean-1" {
+		t.Fatalf("trial Tasks = %v; want clean-1 started once the timed out Task was gone", remaining)
+	}
+}
+
+func TestEvalRunWaitsForTerminalTaskPhaseBeforeGrading(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed, "defect"))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	task := &tasks[0]
+	// The dispatcher records a succeeded execution before delivery and
+	// cleanup finish; the Task is still Running.
+	env.appendEvent(task, executionevents.ExecutionEventTypeModelUsageUpdated, map[string]any{"inputTokens": 120, "outputTokens": 30})
+	if err := env.store.SaveResult(context.Background(), task.Namespace, task.Name, evalTestReviewResult("needs_changes")); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseRunning
+	task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateSucceeded, Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+	}
+	if err := env.client.Status().Update(context.Background(), task); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("records = %+v, err = %v; a Running Task must not be graded", records, err)
+	}
+
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, nil, false)
+	env.reconcile()
+	records, err = env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %+v, err = %v", records, err)
+	}
+	if records[0].Outcome != store.EvalTrialOutcomePass || records[0].Verdict != repositoryMonitorReviewVerdictNeedsChanges {
+		t.Fatalf("record = %+v; want the succeeded review graded", records[0])
+	}
+}
+
+func TestEvalRunExcludesCompletionWithoutModelText(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	task := &tasks[0]
+	// With nothing streamed, the dispatcher journals the runtime's
+	// placeholder result as the transcript and stores it as the result.
+	if _, err := env.store.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
+		Type: executionevents.ExecutionEventTypeModelMessage, Severity: executionevents.ExecutionEventSeverityInfo,
+		ContentText: harnessv2.CompletedWithoutTextResult,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(harnessv2.CompletedWithoutTextResult), false)
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %+v, err = %v", records, err)
+	}
+	if records[0].Outcome != store.EvalTrialOutcomeInfraError || records[0].InfraClass != string(evals.InfraNoModelOutput) {
+		t.Fatalf("record = %+v; want a NoModelOutput infra error", records[0])
+	}
+}
+
+func TestEvalRunInvalidatesWhenConfigMapSystemPromptChanges(t *testing.T) {
+	objects := evalTestObjects(evalTestRun(1, 2), evalTestCases())
+	for _, object := range objects {
+		if agent, ok := object.(*corev1alpha1.Agent); ok {
+			agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{
+				ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "reviewer-prompt", Key: "prompt"},
+			}
+		}
+	}
+	objects = append(objects, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer-prompt", Namespace: evalTestNamespace},
+		Data:       map[string]string{"prompt": "Review strictly."},
+	})
+	env := newEvalRunTestEnv(t, objects...)
+	env.start()
+	frozen := env.run().Status.Snapshot.ReviewerSystemPromptDigest
+	if !strings.HasPrefix(frozen, evals.DigestPrefix) {
+		t.Fatalf("reviewerSystemPromptDigest = %q", frozen)
+	}
+	env.reconcile()
+	if len(env.trialTasks()) != 2 {
+		t.Fatal("trials did not start")
+	}
+	// Editing the ConfigMap changes neither the Agent nor the monitor.
+	cm := &corev1.ConfigMap{}
+	if err := env.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: "reviewer-prompt"}, cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data["prompt"] = "Approve everything."
+	if err := env.client.Update(context.Background(), cm); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile()
+	run := env.run()
+	condition := evalCompletedCondition(run)
+	if run.Status.Phase != corev1alpha1.EvalRunPhaseInvalid || condition.Reason != evalRunReasonSnapshotChanged ||
+		!strings.Contains(condition.Message, "reviewerSystemPromptDigest") {
+		t.Fatalf("phase = %q condition = %+v", run.Status.Phase, condition)
+	}
+}
+
+func TestReadEvalTrialSignalsIgnoresPlaceholderModelMessage(t *testing.T) {
+	env := newEvalRunTestEnv(t)
+	task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Namespace: evalTestNamespace, Name: "trial"}}
+	appendMessage := func(text string) {
+		if _, err := env.store.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+			Namespace: task.Namespace, StreamType: store.ExecutionEventStreamTypeTask, StreamID: task.Name, TaskName: task.Name,
+			Type: executionevents.ExecutionEventTypeModelMessage, Severity: executionevents.ExecutionEventSeverityInfo,
+			ContentText: text,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendMessage(harnessv2.CompletedWithoutTextResult)
+	signals, err := readEvalTrialSignals(context.Background(), env.store, task)
+	if err != nil || signals.ModelOutput {
+		t.Fatalf("signals = %+v, err = %v; the placeholder is not model output", signals, err)
+	}
+	appendMessage("The change dereferences a nil config.")
+	signals, err = readEvalTrialSignals(context.Background(), env.store, task)
+	if err != nil || !signals.ModelOutput {
+		t.Fatalf("signals = %+v, err = %v; a model message is model output", signals, err)
 	}
 }

@@ -2280,7 +2280,7 @@ func (s *Server) buildTerminalEventLocked(
 	case acp.PromptOutcomeCompleted:
 		text, _ := prompt.terminalResultText()
 		if strings.TrimSpace(text) == "" {
-			text = "Prompt completed without textual output."
+			text = harnessv2.CompletedWithoutTextResult
 		}
 		event.Type = harnessv2.EventCompleted
 		event.Completed = &harnessv2.CompletedEvent{

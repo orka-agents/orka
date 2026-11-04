@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/labels"
 )
@@ -236,6 +237,9 @@ type evalReviewSubject struct {
 	Monitor            *corev1alpha1.RepositoryMonitor
 	Reviewer           *corev1alpha1.Agent
 	RuntimeImageDigest string
+	// SystemPromptDigest is the digest of the system prompt a trial Task
+	// resolves for the reviewer.
+	SystemPromptDigest string
 }
 
 // resolveEvalReviewSubject reads the monitor and its reviewer Agent and
@@ -283,11 +287,42 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		return nil, evalRunConfigErrorf(evalRunReasonRuntimeImageUnavailable,
 			"the %s runtime image is not a digest-pinned image on this controller", runtimeSpec.Type)
 	}
+	systemPromptDigest, err := r.evalReviewerSystemPromptDigest(ctx, reviewer)
+	if err != nil {
+		return nil, err
+	}
 	return &evalReviewSubject{
 		Monitor:            monitor,
 		Reviewer:           reviewer,
 		RuntimeImageDigest: image[strings.LastIndex(image, "@")+1:],
+		SystemPromptDigest: systemPromptDigest,
 	}, nil
+}
+
+// evalReviewerSystemPromptDigest resolves the reviewer's system prompt the
+// way each trial Task does, ConfigMap source and soul included, and digests
+// it. A ConfigMap edit changes neither the Agent generation nor the prompt
+// template, so without this digest trials could run with different
+// instructions under one snapshot. The ConfigMap is read uncached so a stale
+// cache cannot hide an edit the trial Task already resolved.
+func (r *EvalRunReconciler) evalReviewerSystemPromptDigest(ctx context.Context, reviewer *corev1alpha1.Agent) (string, error) {
+	reader := r.uncachedReader()
+	systemPrompt, err := resolveACPSystemPrompt(ctx, reader, reviewer)
+	if err != nil {
+		if isPermanentACPAgentConfigurationError(err) {
+			return "", evalRunConfigErrorf(evalRunReasonSubjectInvalid, "reviewer agent %q: %v", reviewer.Name, err)
+		}
+		return "", err
+	}
+	soul, err := agentcontext.ResolveSoul(ctx, reader, reviewer)
+	if err != nil {
+		if agentcontext.IsInvalidSource(err) {
+			return "", evalRunConfigErrorf(evalRunReasonSubjectInvalid, "reviewer agent %q: %v", reviewer.Name, err)
+		}
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(agentcontext.Compose(systemPrompt, soul)))
+	return evals.DigestPrefix + hex.EncodeToString(sum[:]), nil
 }
 
 // snapshot returns the subject's part of the run snapshot.
@@ -300,9 +335,10 @@ func (s *evalReviewSubject) snapshot() corev1alpha1.EvalRunSnapshot {
 			UID:        s.Reviewer.UID,
 			Generation: s.Reviewer.Generation,
 		},
-		RuntimeImageDigest:   s.RuntimeImageDigest,
-		Model:                evalReviewerModel(s.Reviewer),
-		PromptTemplateDigest: evalReviewPromptTemplateDigest(s.Monitor),
+		RuntimeImageDigest:         s.RuntimeImageDigest,
+		Model:                      evalReviewerModel(s.Reviewer),
+		PromptTemplateDigest:       evalReviewPromptTemplateDigest(s.Monitor),
+		ReviewerSystemPromptDigest: s.SystemPromptDigest,
 	}
 }
 
@@ -339,6 +375,7 @@ func evalRunSnapshotChanges(frozen, current corev1alpha1.EvalRunSnapshot) []stri
 	check("runtimeImageDigest", frozen.RuntimeImageDigest == current.RuntimeImageDigest)
 	check("model", frozen.Model == current.Model)
 	check("promptTemplateDigest", frozen.PromptTemplateDigest == current.PromptTemplateDigest)
+	check("reviewerSystemPromptDigest", frozen.ReviewerSystemPromptDigest == current.ReviewerSystemPromptDigest)
 	check("caseSetDigest", frozen.CaseSetDigest == current.CaseSetDigest)
 	check("graderSetDigest", frozen.GraderSetDigest == current.GraderSetDigest)
 	check("trialPlanDigest", frozen.TrialPlanDigest == current.TrialPlanDigest)

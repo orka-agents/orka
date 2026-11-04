@@ -6,6 +6,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 )
 
 func TestClassifyEvalTrialInfra(t *testing.T) {
@@ -19,16 +20,21 @@ func TestClassifyEvalTrialInfra(t *testing.T) {
 	for name, tc := range map[string]struct {
 		task     *corev1alpha1.Task
 		signals  evalTrialSignals
+		result   evalTrialResult
 		deadline bool
 		want     evals.InfraClass
 	}{
-		"succeeded":                {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true}},
-		"succeeded without output": {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), want: evals.InfraNoModelOutput},
-		"succeeded with result only": {task: func() *corev1alpha1.Task {
-			t := task(corev1alpha1.TaskPhaseSucceeded, "", "")
-			t.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
-			return t
-		}()},
+		"succeeded":                  {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true}},
+		"succeeded without output":   {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), want: evals.InfraNoModelOutput},
+		"succeeded with result only": {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), result: evalTrialResult{Raw: []byte(`{"verdict":"passed"}`), Found: true}},
+		"succeeded with placeholder result": {
+			task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true},
+			result: evalTrialResult{Raw: []byte(harnessv2.CompletedWithoutTextResult + "\n"), Found: true}, want: evals.InfraNoModelOutput,
+		},
+		"succeeded with empty result": {
+			task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true},
+			result: evalTrialResult{Raw: []byte("  "), Found: true}, want: evals.InfraNoModelOutput,
+		},
 		"succeeded despite 5xx":     {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true, ProviderFailure: true}},
 		"runtime lost":              {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, corev1alpha1.TaskExecutionReasonRuntimeLost), signals: evalTrialSignals{ModelOutput: true}, want: evals.InfraRuntimeLost},
 		"outcome unknown":           {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, "SettlementUnproven"), want: evals.InfraOutcomeUnknown},
@@ -42,7 +48,7 @@ func TestClassifyEvalTrialInfra(t *testing.T) {
 		"task timeout after output": {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpTaskTimeoutReason), signals: evalTrialSignals{ModelOutput: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := classifyEvalTrialInfra(tc.task, tc.signals, tc.deadline); got != tc.want {
+			if got := classifyEvalTrialInfra(tc.task, tc.signals, tc.result, tc.deadline); got != tc.want {
 				t.Fatalf("classifyEvalTrialInfra() = %q, want %q", got, tc.want)
 			}
 		})

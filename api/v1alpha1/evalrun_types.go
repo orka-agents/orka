@@ -235,6 +235,13 @@ type EvalRunSnapshot struct {
 	// +optional
 	PromptTemplateDigest string `json:"promptTemplateDigest,omitempty"`
 
+	// ReviewerSystemPromptDigest is the digest of the reviewer's system
+	// prompt as trials receive it, after resolving a ConfigMap source, so an
+	// edit to a ConfigMap-backed prompt is a change.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	ReviewerSystemPromptDigest string `json:"reviewerSystemPromptDigest,omitempty"`
+
 	// CaseSetDigest is the digest of the selected cases.
 	// +kubebuilder:validation:MaxLength=128
 	// +optional

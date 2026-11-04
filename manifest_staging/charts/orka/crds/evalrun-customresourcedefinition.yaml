@@ -428,6 +428,13 @@ spec:
                         description: UID is the object UID.
                         type: string
                     type: object
+                  reviewerSystemPromptDigest:
+                    description: |-
+                      ReviewerSystemPromptDigest is the digest of the reviewer's system
+                      prompt as trials receive it, after resolving a ConfigMap source, so an
+                      edit to a ConfigMap-backed prompt is a change.
+                    maxLength: 128
+                    type: string
                   runtimeImageDigest:
                     description: RuntimeImageDigest is the reviewer runtime image
                       digest.

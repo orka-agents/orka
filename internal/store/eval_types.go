@@ -78,9 +78,12 @@ type EvalTrialSnapshot struct {
 	RuntimeImageDigest   string `json:"runtimeImageDigest,omitempty"`
 	Model                string `json:"model,omitempty"`
 	PromptTemplateDigest string `json:"promptTemplateDigest,omitempty"`
-	CaseSetDigest        string `json:"caseSetDigest,omitempty"`
-	GraderSetDigest      string `json:"graderSetDigest,omitempty"`
-	TrialPlanDigest      string `json:"trialPlanDigest,omitempty"`
+	// ReviewerSystemPromptDigest is the digest of the reviewer's resolved
+	// system prompt.
+	ReviewerSystemPromptDigest string `json:"reviewerSystemPromptDigest,omitempty"`
+	CaseSetDigest              string `json:"caseSetDigest,omitempty"`
+	GraderSetDigest            string `json:"graderSetDigest,omitempty"`
+	TrialPlanDigest            string `json:"trialPlanDigest,omitempty"`
 }
 
 // EvalTrialStore persists eval trial records. Only the EvalRun controller

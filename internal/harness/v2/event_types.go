@@ -427,6 +427,12 @@ func (r PromptResult) Validate() error {
 	return nil
 }
 
+// CompletedWithoutTextResult is the result text the built-in supervisor
+// reports for a completed prompt whose model produced no text. It is a
+// placeholder, not model output: consumers that need evidence the model
+// answered must not count it as such.
+const CompletedWithoutTextResult = "Prompt completed without textual output."
+
 type CompletedEvent struct {
 	StopReason ACPStopReason `json:"stopReason"`
 	Result     PromptResult  `json:"result"`
