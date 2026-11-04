@@ -280,38 +280,26 @@ func TestExternalAPIIdentityContracts(t *testing.T) {
 }
 
 func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
-	for _, link := range []string{"applied-memory-id", "source-proposal-id"} {
-		t.Run(link, func(t *testing.T) {
-			f := newExternalAuthorizationFixture(t)
-			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal", Status: "accepted"}
-			if link == "applied-memory-id" {
-				proposal.AppliedMemoryID = "protected"
-			} else {
-				memory, err := f.store.GetMemory(t.Context(), "default", "protected")
-				require.NoError(t, err)
-				memory.SourceProposalID = proposal.ID
-				require.NoError(t, f.store.UpdateMemory(t.Context(), memory))
-			}
-			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
-			permissions := make([]authorizationv1.ResourceAttributes, 0, 3)
-			permissions = append(permissions,
-				authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "reference"},
-				authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "create"},
-			)
-			f.allowOnly(t, permissions...)
-			before := f.changes(t)
-			status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/reference/apply", `{}`)
-			require.Equal(t, http.StatusForbidden, status, body)
-			require.NotContains(t, body, "protected-content")
-			require.Equal(t, before, f.changes(t))
-			read := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "get", Name: "protected"}
-			require.Equal(t, read, *f.reviews[len(f.reviews)-1].ResourceAttributes)
-			f.allowOnly(t, append(permissions, read)...)
-			status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/reference/apply", `{}`)
-			require.Equal(t, http.StatusOK, status, body)
-			require.Contains(t, body, "protected-content")
-		})
-	}
+	f := newExternalAuthorizationFixture(t)
+	proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal", Status: "accepted", AppliedMemoryID: "protected"}
+	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+	permissions := make([]authorizationv1.ResourceAttributes, 0, 3)
+	permissions = append(permissions,
+		authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "reference"},
+		authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "create"},
+	)
+	f.allowOnly(t, permissions...)
+	before := f.changes(t)
+	status, body := f.request(t, http.MethodPost, "/api/v1/memory-proposals/reference/apply", `{}`)
+	require.Equal(t, http.StatusForbidden, status, body)
+	require.NotContains(t, body, "protected-content")
+	require.Equal(t, before, f.changes(t))
+	read := authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memories", Verb: "get", Name: "protected"}
+	require.Equal(t, read, *f.reviews[len(f.reviews)-1].ResourceAttributes)
+	f.allowOnly(t, append(permissions, read)...)
+	status, body = f.request(t, http.MethodPost, "/api/v1/memory-proposals/reference/apply", `{}`)
+	require.Equal(t, http.StatusOK, status, body)
+	require.Contains(t, body, "protected-content")
 }
 
 func TestExternalAPIAuthorizedSecurityActions(t *testing.T) {

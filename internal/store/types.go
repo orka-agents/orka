@@ -204,7 +204,7 @@ type MemoryProposalApply struct {
 	ID        string `json:"id"`
 	AppliedBy string `json:"appliedBy"`
 	// AuthorizeExistingMemory runs inside the apply transaction before returning
-	// an existing memory or changing the proposal to reference it. New memories
-	// are covered by the caller's separate create permission.
+	// the memory an applied proposal already references. New memories are
+	// covered by the caller's separate create permission.
 	AuthorizeExistingMemory func(context.Context, string, string) error `json:"-"`
 }
