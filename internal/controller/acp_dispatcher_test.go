@@ -45,6 +45,7 @@ import (
 	"github.com/orka-agents/orka/internal/tasktrace"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -73,15 +74,8 @@ func dispatchQueuedTask(ctx context.Context, t *testing.T, dispatcher *ACPDispat
 			dispatcher.EventStore = eventStore
 		}
 	}
-	if dispatcher.PlanStore == nil {
-		if planStore, ok := dispatcher.ResultStore.(store.PlanStore); ok {
-			dispatcher.PlanStore = planStore
-		} else if planStore, ok := dispatcher.Store.(store.PlanStore); ok {
-			dispatcher.PlanStore = planStore
-		}
-	}
-	if dispatcher.EventStore == nil || dispatcher.PlanStore == nil {
-		t.Fatal("ACP dispatcher test requires execution event and plan stores")
+	if dispatcher.EventStore == nil {
+		t.Fatal("ACP dispatcher test requires an execution event store")
 	}
 	task, target, err := dispatcher.reserveTask(ctx, queued)
 	if err != nil {
@@ -159,7 +153,6 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 		Store:       persistence,
 		ResultStore: persistence,
 		EventStore:  baseOnlyExecutionEventStore{ExecutionEventStore: persistence},
-		PlanStore:   persistence,
 		Snapshots:   persistence,
 		Epochs:      NewControllerEpochManager(persistence, "start-event-store-controller"),
 	}
@@ -184,7 +177,6 @@ func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
 		EventStore: dedupeOnlyExecutionEventStore{
 			DeduplicatingExecutionEventStore: persistence,
 		},
-		PlanStore: persistence,
 		Snapshots: persistence,
 		Epochs:    NewControllerEpochManager(persistence, "start-plan-store-controller"),
 	}
@@ -260,107 +252,22 @@ func TestAssistantTranscriptForPersistenceOmitsOverflowedPrefix(t *testing.T) {
 	}
 }
 
-func TestSaveACPPlanUpdateWithRetry(t *testing.T) {
-	t.Run("transient failure", func(t *testing.T) {
-		planStore := &retryPlanStore{saveErrors: []error{errors.New("transient")}}
-		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
-		if err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan); err != nil {
-			t.Fatalf("save plan with retry: %v", err)
-		}
-		if planStore.saveCalls != 2 || planStore.lastPlan != plan {
-			t.Fatalf("save calls = %d plan=%p, want 2 and %p", planStore.saveCalls, planStore.lastPlan, plan)
-		}
-	})
-
-	t.Run("persistent failure", func(t *testing.T) {
-		firstErr := errors.New("first")
-		retryErr := errors.New("retry")
-		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		err := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{})
-		if !errors.Is(err, firstErr) || !errors.Is(err, retryErr) {
-			t.Fatalf("persistent save error = %v", err)
-		}
-		if planStore.saveCalls != 2 {
-			t.Fatalf("save calls = %d, want 2", planStore.saveCalls)
-		}
-	})
-
-	t.Run("reconciles after journal append", func(t *testing.T) {
-		firstErr := errors.New("first")
-		retryErr := errors.New("retry")
-		planStore := &retryPlanStore{saveErrors: []error{firstErr, retryErr}}
-		plan := &store.PlanState{TaskName: acpDispatcherTestTaskName, Namespace: acpDispatcherTestNamespace, Summary: "working"}
-		planErr := saveACPPlanUpdateWithRetry(context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan)
-		if err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, plan, planErr, nil,
-		); err != nil {
-			t.Fatalf("reconcile plan after journal append: %v", err)
-		}
-		if planStore.saveCalls != 3 || planStore.lastPlan != plan {
-			t.Fatalf("save calls = %d plan=%p, want 3 and %p", planStore.saveCalls, planStore.lastPlan, plan)
-		}
-	})
-
-	t.Run("does not reconcile before journal append", func(t *testing.T) {
-		planErr := errors.New("plan unavailable")
-		journalErr := errors.New("journal unavailable")
-		planStore := &retryPlanStore{}
-		err := reconcileACPPlanUpdateAfterJournal(
-			context.Background(), planStore, acpDispatcherTestNamespace, acpDispatcherTestTaskName, &store.PlanState{}, planErr, journalErr,
-		)
-		if !errors.Is(err, planErr) || planStore.saveCalls != 0 {
-			t.Fatalf("pre-journal reconciliation error = %v calls=%d", err, planStore.saveCalls)
-		}
-	})
-}
-
 func TestACPUpdatePersistenceError(t *testing.T) {
-	if err := acpUpdatePersistenceError(nil, nil); err != nil {
-		t.Fatalf("nil persistence errors = %v", err)
+	if err := acpUpdatePersistenceError(nil); err != nil {
+		t.Fatalf("nil persistence error = %v", err)
 	}
 	journalErr := errors.New("journal unavailable")
-	planErr := errors.New("plan unavailable")
-	err := acpUpdatePersistenceError(journalErr, planErr)
-	if !errors.Is(err, journalErr) || !errors.Is(err, planErr) {
-		t.Fatalf("joined persistence error = %v", err)
+	err := acpUpdatePersistenceError(journalErr)
+	if !errors.Is(err, journalErr) {
+		t.Fatalf("persistence error = %v", err)
 	}
-	var persistenceErr *acpExecutionUpdatePersistenceError
-	if !errors.As(err, &persistenceErr) {
+	if _, ok := errors.AsType[*acpExecutionUpdatePersistenceError](err); !ok {
 		t.Fatalf("persistence error type = %T, want *acpExecutionUpdatePersistenceError", err)
 	}
-	if !persistenceErr.journalFailed() {
-		t.Fatal("combined persistence error did not retain journal failure provenance")
-	}
-	if !strings.Contains(err.Error(), "persist ACP execution update") ||
-		!strings.Contains(err.Error(), "persist ACP plan update") {
+	if !strings.Contains(err.Error(), "persist ACP execution update") {
 		t.Fatalf("persistence error context = %v", err)
 	}
-	planOnly := acpUpdatePersistenceError(nil, planErr)
-	if !errors.As(planOnly, &persistenceErr) || persistenceErr.journalFailed() {
-		t.Fatalf("plan-only persistence error provenance = %#v", persistenceErr)
-	}
 }
-
-type retryPlanStore struct {
-	saveErrors []error
-	saveCalls  int
-	lastPlan   *store.PlanState
-}
-
-func (s *retryPlanStore) SavePlan(_ context.Context, _, _ string, plan *store.PlanState) error {
-	s.lastPlan = plan
-	s.saveCalls++
-	if s.saveCalls <= len(s.saveErrors) {
-		return s.saveErrors[s.saveCalls-1]
-	}
-	return nil
-}
-
-func (*retryPlanStore) GetPlan(context.Context, string, string) (*store.PlanState, error) {
-	return nil, store.ErrNotFound
-}
-
-func (*retryPlanStore) DeletePlan(context.Context, string, string) error { return nil }
 
 func prepareBoundACPDispatcherTaskForTest(
 	t *testing.T,
@@ -1167,7 +1074,7 @@ func TestPromptStreamDiagnosticIsBoundedAndClassified(t *testing.T) {
 	if got := promptStreamDiagnostic(errors.New("provider-secret-must-not-leak")); got != "non-client prompt stream error" {
 		t.Fatalf("generic diagnostic = %q", got)
 	}
-	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"), nil)); got != "local execution update persistence failed" {
+	if got := promptStreamDiagnostic(acpUpdatePersistenceError(errors.New("store unavailable"))); got != "local execution update persistence failed" {
 		t.Fatalf("persistence diagnostic = %q", got)
 	}
 }
@@ -1323,7 +1230,7 @@ func TestPromptUpdatePersistenceFailureCancelsAndFailsWithoutRuntimeLost(t *test
 	if err := dispatcher.handlePromptStreamError(
 		ctx, nil, runtimeClient, "runtime-session-1", task.DeepCopy(), attempt.ID, fence, runtimeFence,
 		nil, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(errors.New("event store unavailable"), nil), nil,
+		acpUpdatePersistenceError(errors.New("event store unavailable")), nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1526,7 +1433,7 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 	for _, persistenceFailure := range []bool{false, true} {
 		name := "cancelled stream"
 		if persistenceFailure {
-			name = "plan persistence failure"
+			name = "execution update persistence failure"
 		}
 		t.Run(name, func(t *testing.T) {
 			fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
@@ -1541,7 +1448,7 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 			var streamErr = context.Canceled
 			wantState := corev1alpha1.TaskExecutionStateCancelled
 			if persistenceFailure {
-				streamErr = acpUpdatePersistenceError(nil, errors.New("plan store unavailable"))
+				streamErr = acpUpdatePersistenceError(errors.New("execution event store unavailable"))
 				wantState = corev1alpha1.TaskExecutionStateFailed
 			}
 			if err := fixture.dispatcher.handlePromptStreamError(
@@ -1563,33 +1470,6 @@ func TestPromptStreamErrorReusesCancellationResult(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestPromptPlanPersistenceFailureClosesLifecycleAfterProvenSettlement(t *testing.T) {
-	fixture := newPromptStreamLifecycleFixture(t, harnessv2.PromptSettlement{
-		TerminalEvent: harnessv2.EventCancelled, Outcome: harnessv2.PromptOutcomeCancelled,
-		StopReason: harnessv2.ACPStopReasonCancelled, SettledAt: time.Now().UTC(),
-	})
-	if err := fixture.dispatcher.handlePromptStreamError(
-		fixture.ctx, nil, fixture.runtimeClient, "runtime-session-1", fixture.task.DeepCopy(), fixture.attemptID,
-		fixture.fence, fixture.runtimeFence, fixture.journalState, true, harnessv2.RequestWriteEvidence{}, nil,
-		acpUpdatePersistenceError(nil, errors.New("plan store unavailable")), nil,
-	); err != nil {
-		t.Fatal(err)
-	}
-	request := <-fixture.cancelRequests
-	if request.Reason != harnessv2.CancelReasonStreamDisconnected {
-		t.Fatalf("cancel reason = %q", request.Reason)
-	}
-	completed := &corev1alpha1.Task{}
-	if err := fixture.dispatcher.Client.Get(fixture.ctx, client.ObjectKeyFromObject(fixture.task), completed); err != nil {
-		t.Fatal(err)
-	}
-	if completed.Status.Execution == nil || completed.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
-		completed.Status.Execution.Reason != corev1alpha1.TaskExecutionReason(acpExecutionEventPersistenceFailureReason) {
-		t.Fatalf("plan persistence failure status = %#v", completed.Status.Execution)
-	}
-	fixture.assertTerminalLifecycle(t, harnessv2.EventCancelled, true)
 }
 
 func TestPromptStreamFailureClosesLifecycleBeforeOutcomeUnknown(t *testing.T) {
@@ -1867,7 +1747,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

@@ -115,6 +115,7 @@ func TestResumeGatewaySessionCleanupAfterRuntimeFailure(t *testing.T) {
 		}),
 	)
 	require.NoError(t, err)
+	syncTestEpochMirror(t, restarted, persistence)
 	require.NoError(t, restarted.ResumeSessionCleanups(ctx, nextFence))
 	require.Equal(t, 2, calls)
 	assertGatewaySessionCleanupComplete(t, ctx, restarted, kubeClient, persistence, db, f)
@@ -149,6 +150,7 @@ func TestResumeGatewaySessionCleanupAfterStorageRollback(t *testing.T) {
 	execSessionCleanupMutation(t, ctx, db, `DROP TRIGGER fail_gateway_cleanup`)
 	restarted, err := NewComposite(kubeClient, testControlNamespace, persistence, WithSessionRuntimeCleanup(cleanup))
 	require.NoError(t, err)
+	syncTestEpochMirror(t, restarted, persistence)
 	require.NoError(t, restarted.ResumeSessionCleanups(ctx, fence))
 	require.Equal(t, 2, calls)
 	assertGatewaySessionCleanupComplete(t, ctx, restarted, kubeClient, persistence, db, f)
@@ -230,6 +232,7 @@ func TestResumeGatewaySessionCleanupPreservesReplacement(t *testing.T) {
 			}
 			restarted, err := NewComposite(kubeClient, testControlNamespace, persistence)
 			require.NoError(t, err)
+			syncTestEpochMirror(t, restarted, persistence)
 			require.ErrorIs(t, restarted.ResumeSessionCleanups(ctx, fence), controlstore.ErrConflict)
 			assertGatewaySessionCleanupUncommitted(t, ctx, restarted, persistence, f)
 			if kind == "transcript" {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -65,8 +66,8 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 		}
 
 		recorded := &crashRecoveryEpochStore{ControllerEpochStore: authority}
-		mirror := &recordingControllerEpochMirror{}
-		manager := NewControllerEpochManager(recorded, "controller-restarted-before-expiry").WithMirror(mirror)
+		dataset := newRecordingEpochDataset("dataset-a")
+		manager := NewControllerEpochManager(recorded, "controller-restarted-before-expiry").WithStorage(storagev1.StateContract, dataset)
 		cleanup := &crashRecoveryCleanupProbe{}
 		recovery := NewSessionCleanupRecoveryManager(cleanup, manager)
 		ctx, cancel := context.WithCancel(t.Context())
@@ -86,7 +87,7 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 		if cleanup.calls.Load() != 0 {
 			t.Fatal("startup cleanup used a predecessor fence before epoch readiness")
 		}
-		if _, ready := manager.Current(); ready || len(mirror.synced) != 0 {
+		if _, ready := manager.Current(); ready || len(dataset.advancedEpochs()) != 0 {
 			t.Fatal("startup published or mirrored an epoch before mutation expiry")
 		}
 		_, beforeExpiry := kubernetesControllerEpochObjects(t, t.Context(), kubeClient)
@@ -113,7 +114,7 @@ func TestControllerEpochManagerCrashRecoveryAfterMutationExpiry(t *testing.T) {
 				t.Fatal("retry changed the submitted CAS intent")
 			}
 		}
-		if len(mirror.synced) != 1 || !controllerEpochsEqual(&mirror.synced[0], &acquired) {
+		if len(dataset.advancedEpochs()) != 1 || !controllerEpochsEqual(&dataset.advancedEpochs()[0], &acquired) {
 			t.Fatal("recovered epoch was not mirrored before readiness")
 		}
 		if calls := cleanup.calls.Load(); calls != 1 {
@@ -249,6 +250,66 @@ func (s *crashRecoveryEpochStore) CompareAndSwapControllerEpoch(ctx context.Cont
 	s.changes = append(s.changes, change)
 	s.attemptedAt = append(s.attemptedAt, time.Now())
 	return s.ControllerEpochStore.CompareAndSwapControllerEpoch(ctx, change)
+}
+
+func (s *crashRecoveryEpochStore) records() (store.StorageRecordStore, error) {
+	records, ok := s.ControllerEpochStore.(store.StorageRecordStore)
+	if !ok {
+		return nil, errors.New("wrapped controller epoch store keeps no storage record")
+	}
+	return records, nil
+}
+
+func (s *crashRecoveryEpochStore) GetStorageRecord(ctx context.Context, name string) (store.StorageRecord, error) {
+	records, err := s.records()
+	if err != nil {
+		return store.StorageRecord{}, err
+	}
+	return records.GetStorageRecord(ctx, name)
+}
+
+func (s *crashRecoveryEpochStore) RecordStorageAcknowledgement(ctx context.Context, fence store.ControllerEpochFence, ack store.StorageAcknowledgement) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.RecordStorageAcknowledgement(ctx, fence, ack)
+}
+
+func (s *crashRecoveryEpochStore) RecordStorageWatermark(
+	ctx context.Context, fence store.ControllerEpochFence, datasetID string, watermark int64, at time.Time,
+) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.RecordStorageWatermark(ctx, fence, datasetID, watermark, at)
+}
+
+func (s *crashRecoveryEpochStore) HoldStorage(ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold) (store.StorageRecoveryHold, error) {
+	records, err := s.records()
+	if err != nil {
+		return store.StorageRecoveryHold{}, err
+	}
+	return records.HoldStorage(ctx, fence, hold)
+}
+
+func (s *crashRecoveryEpochStore) ReleaseStorageHold(
+	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
+) error {
+	records, err := s.records()
+	if err != nil {
+		return err
+	}
+	return records.ReleaseStorageHold(ctx, fence, id, acks)
+}
+
+func (s *crashRecoveryEpochStore) ControllerEpochInstallationID(ctx context.Context, name string) (string, error) {
+	installations, ok := s.ControllerEpochStore.(store.ControllerEpochInstallationReader)
+	if !ok {
+		return "", errors.New("wrapped controller epoch store has no installation record")
+	}
+	return installations.ControllerEpochInstallationID(ctx, name)
 }
 
 type crashRecoveryUnavailableEpochStore struct {

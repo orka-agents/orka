@@ -36,6 +36,7 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewComposite: %v", err)
 			}
+			syncTestEpochMirror(t, kubeStore, sqliteStore)
 			control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 				Namespace: "tenant-a", SessionName: "session-finalize", SessionUID: "session-finalize-uid",
 				RequestDigest: testDigest("session-finalize"),

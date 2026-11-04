@@ -26,6 +26,7 @@ func gatewayCleanupFixture(t *testing.T) (*Store, store.SessionCleanupIntent, st
 		t.Fatal(err)
 	}
 	fence := store.ControllerEpochFence{Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller"}
+	mirrorTestFence(t, s, fence)
 	turn, err := s.CreateSessionTurnRecord(ctx, store.CreateSessionTurnRecordRequest{
 		Namespace: event.Namespace, SessionName: event.SessionName, Fence: fence,
 		Turn: store.SessionTurn{

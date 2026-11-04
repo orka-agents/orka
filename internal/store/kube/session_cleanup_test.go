@@ -445,6 +445,7 @@ func newSessionCleanupTestStore(
 	if err != nil {
 		t.Fatalf("NewComposite(): %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, persistence)
 	return kubeStore, kubeClient, sqliteStore, db, fence
 }
 

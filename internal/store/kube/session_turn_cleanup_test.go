@@ -82,6 +82,7 @@ func TestSessionTurnCleanupReceiptAllowsTaskReclamationAfterSessionDeletion(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
+			syncTestEpochMirror(t, kubeStore, persistence)
 			if err := kubeStore.ReclaimSession(ctx, deleteRequest); err != nil {
 				t.Fatalf("repeat Session deletion after restart: %v", err)
 			}
