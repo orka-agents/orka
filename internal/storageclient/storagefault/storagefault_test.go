@@ -100,6 +100,7 @@ func TestWrappersPassCallsThrough(t *testing.T) {
 			faults := storagefault.New()
 			track(faults)
 			backend := openSQLite(t)
+			backend.RequireWriteEnvelopes()
 			// The suite gives the dataset its first epoch through the state
 			// mirror when the provider offers one, which binds no
 			// installation; it reaches SQLite directly.

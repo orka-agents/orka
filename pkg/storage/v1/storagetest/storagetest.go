@@ -12,7 +12,8 @@
 // They do not inspect a provider's schema or rely on its clock beyond the
 // times passed in requests.
 //
-// The suite attaches a write envelope to every write it sends without one, as
+// Except for raw-provider missing-envelope rejection cases, the suite attaches
+// a write envelope to every write it sends without one, as
 // the contract requires of callers: the dataset Describe reports, the epoch
 // the dataset holds (a dataset that holds none is given the suite's first
 // epoch), a new operation ID, the request digest, the current time and the
@@ -91,12 +92,19 @@ var stateFamilies = []stateFamily{
 	}},
 }
 
-// RunState runs every state.v1 case against providers from newProvider. The
-// suite attaches a write envelope to every write it sends without one, unless
-// ProviderAttachesEnvelopes is given.
+// RunState runs every state.v1 case against providers from newProvider. Raw
+// writes without envelopes must be rejected; ordinary cases get suite
+// envelopes. ProviderAttachesEnvelopes delegates envelope attachment to the
+// provider and skips the raw-write rejection cases.
 func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 	t.Helper()
-	newProvider = stateFactory(newProvider, collectOptions(options))
+	settings := collectOptions(options)
+	if !settings.providerAttachesEnvelopes {
+		t.Run("missing-envelopes", func(t *testing.T) {
+			runMissingEnvelopes(t, newProvider, wrapState, stateWriteCases)
+		})
+	}
+	newProvider = stateFactory(newProvider, settings)
 	for _, family := range stateFamilies {
 		t.Run(family.name, func(t *testing.T) {
 			family.run(t, newProvider)
@@ -108,7 +116,13 @@ func RunState(t *testing.T, newProvider StateFactory, options ...Option) {
 // newProvider, attaching envelopes as RunState does.
 func RunArtifacts(t *testing.T, newProvider ArtifactFactory, options ...Option) {
 	t.Helper()
-	newProvider = artifactFactory(newProvider, collectOptions(options))
+	settings := collectOptions(options)
+	if !settings.providerAttachesEnvelopes {
+		t.Run("missing-envelopes", func(t *testing.T) {
+			runMissingEnvelopes(t, newProvider, wrapArtifacts, artifactWriteCases)
+		})
+	}
+	newProvider = artifactFactory(newProvider, settings)
 	t.Run("artifacts", func(t *testing.T) {
 		runArtifacts(t, newProvider)
 	})

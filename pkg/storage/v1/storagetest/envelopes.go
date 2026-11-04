@@ -26,10 +26,11 @@ type suiteOptions struct {
 }
 
 // ProviderAttachesEnvelopes runs the suite against a provider that attaches
-// its own write envelopes, such as a client that wraps a provider. Without
-// it, the suite attaches an envelope to every write it sends without one, as
-// the contract requires of callers, so a provider that refuses writes without
-// an envelope passes the suite.
+// its own write envelopes, such as a client that wraps a provider. It skips
+// the suite's envelope wrapper and raw-provider missing-envelope rejection
+// cases, because attaching envelopes is this provider's responsibility.
+// Otherwise the suite attaches envelopes to ordinary writes and separately
+// tests missing-envelope rejection against the raw provider.
 func ProviderAttachesEnvelopes() Option {
 	return func(o *suiteOptions) { o.providerAttachesEnvelopes = true }
 }
