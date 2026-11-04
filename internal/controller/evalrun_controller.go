@@ -53,7 +53,13 @@ const (
 	evalRunReasonGradersInvalid          = "GradersInvalid"
 	evalRunReasonRuntimeImageUnavailable = "RuntimeImageUnavailable"
 
-	evalRunDefaultTrialTimeout        = 20 * time.Minute
+	evalRunDefaultTrialTimeout = 20 * time.Minute
+	// evalTrialSettleGrace is how long a trial Task past its deadline gets
+	// to settle itself. Its own spec.timeout ends at the same deadline: the
+	// Task path cancels the prompt and flushes the assistant text the journal
+	// still buffers. Recording the timeout before that would miss model
+	// output, so the controller forces the timeout only after this grace.
+	evalTrialSettleGrace              = acpPromptCancellationTimeout + acpInterruptedOutputFlushTimeout + 30*time.Second
 	evalRunDefaultMaxInfraErrorPct    = 10
 	evalRunDefaultMaxConcurrentTrials = 1
 )
@@ -351,11 +357,16 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 			return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, evalRunReasonTrialTaskConflict, err.Error())
 		}
 		deadline := task.CreationTimestamp.Add(timeout)
+		forceDeadline := deadline.Add(evalTrialSettleGrace)
 		terminal := evalTrialTaskTerminal(task)
-		deadlineExceeded := !terminal && !now.Before(deadline)
+		deadlineExceeded := !terminal && !now.Before(forceDeadline)
 		if !terminal && !deadlineExceeded {
 			active++
-			requeue = min(requeue, deadline.Sub(now))
+			next := deadline
+			if !now.Before(deadline) {
+				next = forceDeadline
+			}
+			requeue = min(requeue, next.Sub(now))
 			continue
 		}
 		record, err := r.gradeEvalTrial(ctx, run, observed, c, planned.Trial, task, deadlineExceeded, deadline)

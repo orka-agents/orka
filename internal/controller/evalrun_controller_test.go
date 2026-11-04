@@ -535,7 +535,7 @@ func TestEvalRunTrialDeadlineRecordsTimeoutAndStopsTask(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("trial Tasks = %d", len(tasks))
 	}
-	env.now = tasks[0].CreationTimestamp.Add(21 * time.Minute)
+	env.now = tasks[0].CreationTimestamp.Add(20*time.Minute + evalTrialSettleGrace)
 	env.reconcile()
 	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
 	if err != nil || len(records) != 1 {
@@ -685,7 +685,7 @@ func TestEvalRunTimedOutTrialHoldsItsSlotUntilTheTaskIsGone(t *testing.T) {
 	}
 	timedOut := tasks[0].Name
 	env.holdTask(&tasks[0])
-	env.now = tasks[0].CreationTimestamp.Add(21 * time.Minute)
+	env.now = tasks[0].CreationTimestamp.Add(20*time.Minute + evalTrialSettleGrace)
 
 	// The timeout is recorded and the Task is asked to stop, but it is still
 	// running behind its finalizer, so no trial may take its slot.
@@ -840,5 +840,65 @@ func TestReadEvalTrialSignalsIgnoresPlaceholderModelMessage(t *testing.T) {
 	signals, err = readEvalTrialSignals(context.Background(), env.store, task)
 	if err != nil || !signals.ModelOutput {
 		t.Fatalf("signals = %+v, err = %v; a model message is model output", signals, err)
+	}
+}
+
+func TestEvalRunLetsTimedOutTaskSettleBeforeRecordingTimeout(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed, "defect"))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	task := &tasks[0]
+	// Past the deadline the Task is still cancelling its own prompt; the
+	// journal holds no model output yet because assistant text is buffered.
+	env.now = task.CreationTimestamp.Add(21 * time.Minute)
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("records = %+v, err = %v; the timeout was recorded before the Task settled", records, err)
+	}
+	if remaining := env.trialTasks(); len(remaining) != 1 || !remaining[0].DeletionTimestamp.IsZero() {
+		t.Fatalf("trial Tasks = %v; the settling Task was stopped", remaining)
+	}
+	// The Task's own timeout settles it and flushes the streamed text.
+	task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeFailed, Reason: acpTaskTimeoutReason,
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseFailed, nil, true)
+	env.reconcile()
+	records, err = env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %+v, err = %v", records, err)
+	}
+	if records[0].Outcome == store.EvalTrialOutcomeInfraError {
+		t.Fatalf("record = %+v; a trial that produced model output before its timeout is graded", records[0])
+	}
+}
+
+func TestEvalRunRecordsSkippedReviewAsSkipped(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed, "defect"))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	env.finishTask(&tasks[0], corev1alpha1.TaskPhaseSucceeded, evalTestReviewResult(repositoryMonitorVerdictSkipped), true)
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %+v, err = %v", records, err)
+	}
+	record := records[0]
+	if record.Verdict != repositoryMonitorVerdictSkipped || record.SkipReason != repositoryMonitorVerdictSkipped || record.Outcome != store.EvalTrialOutcomeFail {
+		t.Fatalf("record = %+v; a skipped review records production's skip reason and fails", record)
+	}
+	for _, grade := range record.Grades {
+		if grade.Grader == string(corev1alpha1.EvalGraderContract) && grade.Status != string(evals.GradeFail) {
+			t.Fatalf("contract grade = %+v; a skipped review did not review anything", grade)
+		}
 	}
 }

@@ -200,18 +200,18 @@ func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor) str
 func evalReviewOutcomeFromResult(raw []byte, monitor *corev1alpha1.RepositoryMonitor, c evals.Case, task *corev1alpha1.Task) *evals.ReviewTrialOutcome {
 	input := c.Input.RepositoryMonitorReview
 	owner, repository, _ := evalReviewFixture(input.RepoURL)
-	outcome := repositoryMonitorReviewOutcomeFromResult(raw, repositoryMonitorReviewExpectation{
+	parsed := repositoryMonitorReviewOutcomeFromResult(raw, repositoryMonitorReviewExpectation{
 		Repository: owner + "/" + repository,
 		PRNumber:   evalReviewPullRequestNumber,
 		HeadSHA:    input.HeadSHA,
 	}, task.Spec.Prompt)
-	if outcome.Rejection != "" {
+	if parsed.Rejection != "" {
 		return &evals.ReviewTrialOutcome{
 			Verdict:    repositoryMonitorReviewVerdictFailed,
 			SkipReason: repositoryMonitorReviewSkipReasonMalformed,
 		}
 	}
-	review := outcome.Review
+	review := parsed.Review
 	plan := repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull}
 	reviewerVerdict := strings.TrimSpace(review.Verdict)
 	ledger := repositoryMonitorMergeFindingLedger(plan, review, strings.TrimSpace(review.HeadSHA), task.Name, nil)
@@ -229,7 +229,13 @@ func evalReviewOutcomeFromResult(raw []byte, monitor *corev1alpha1.RepositoryMon
 	for _, finding := range review.Findings {
 		result.Findings = append(result.Findings, evals.ReviewFinding{File: strings.TrimSpace(finding.File), Line: finding.Line})
 	}
-	return &evals.ReviewTrialOutcome{Result: result, Verdict: verdict, GateReason: gateReason}
+	outcome := &evals.ReviewTrialOutcome{Result: result, Verdict: verdict, GateReason: gateReason}
+	if verdict == repositoryMonitorVerdictSkipped {
+		// Production ingestion records a skipped review with the skip reason
+		// skipped, so the review counts as not done.
+		outcome.SkipReason = repositoryMonitorVerdictSkipped
+	}
+	return outcome
 }
 
 // evalReviewSubject is the resolved repositoryMonitorReview subject.
