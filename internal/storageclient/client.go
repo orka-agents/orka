@@ -3,16 +3,15 @@
 // Every Orka consumer receives a Client rather than a concrete database. The
 // client composes a state.v1 provider and an artifacts.v1 provider from the
 // public storage contract (pkg/storage/v1). Families that still run Go
-// callbacks inside a database transaction or carry plaintext connector custody
-// are served through Embedded, which only the in-process SQLite store
-// implements.
+// callbacks inside a database transaction are served through Embedded, which
+// only the in-process SQLite store implements.
 //
 // The client applies Orka's redaction, payload sanitization and usage
 // attribution before any provider call, so providers store only content Orka
 // has already made safe to persist. It also owns the snapshot key: it seals
-// execution snapshots and native session state before a provider sees them
-// and opens them after a provider returns them, so a provider stores only
-// sealed bytes and never holds the key.
+// execution snapshots, native session state and connector custody before a
+// provider sees them and opens them after a provider returns them, so a
+// provider stores only sealed bytes and never holds the key.
 package storageclient
 
 import (
@@ -26,19 +25,12 @@ import (
 )
 
 // Embedded is the part of the application store that is not yet expressed in
-// the public provider contract. These families either receive plaintext
-// connector custody or run Orka callbacks inside a database transaction (task
-// data transactions, scan ingestion and memory proposal application). Only
-// the in-process SQLite store implements Embedded, and it must be the same
-// store that serves both contracts so transaction-scoped contexts reach every
-// participating record. The embedded store must also accept the connector
-// custody sealer the client hands over when it activates the snapshot key
-// (see ActivateSnapshotKey); that method is deliberately not part of this
-// interface, so it never joins the client's method set.
+// the public provider contract. These families run Orka callbacks inside a
+// database transaction (task data transactions, scan ingestion and memory
+// proposal application). Only the in-process SQLite store implements
+// Embedded, and it must be the same store that serves both contracts so
+// transaction-scoped contexts reach every participating record.
 type Embedded interface {
-	store.ConnectorCredentialStore
-	store.ConnectorConsentStore
-
 	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
 	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
 	WithAuthorizedTaskDataTransaction(

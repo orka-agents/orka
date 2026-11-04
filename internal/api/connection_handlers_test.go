@@ -37,6 +37,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -54,7 +55,7 @@ type connectorTestHarness struct {
 	// handlers lets a test replace the uncached reader to model informer lag.
 	handlers *Handlers
 	client   client.Client
-	store    *sqlite.Store
+	store    *storageclient.Client
 	identity *UserInfo
 	oauth    *httptest.Server
 	tokens   int
@@ -189,8 +190,7 @@ func buildConnectorTestHarness(t *testing.T, authz ContextTokenAuthorizationConf
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	sqliteStore := sqlite.NewStore(db, ":memory:")
-	storageclienttest.Client(t, sqliteStore)
+	sqliteStore := storageclienttest.Client(t, sqlite.NewStore(db, ":memory:"))
 
 	h := harness
 	h.client, h.store = fakeClient, sqliteStore
@@ -769,7 +769,7 @@ func TestConnectionHandlersDisabled(t *testing.T) {
 }
 
 func TestValidateConnectorConfig(t *testing.T) {
-	sqliteStore := sqlite.NewStore(nil, "")
+	sqliteStore := &storageclient.Client{}
 	oauth := connectors.NewOAuthClient(connectors.OAuthClientOptions{})
 	valid := ConnectorConfig{Enabled: true, CallbackBaseURL: "https://orka.example.test", StateKey: bytes.Repeat([]byte{1}, 32), Credentials: sqliteStore, Consents: sqliteStore, OAuth: oauth}
 	if err := ValidateConnectorConfig(valid); err != nil {
