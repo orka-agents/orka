@@ -7,12 +7,14 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/protectedset"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -36,10 +38,23 @@ func (r *TaskReconciler) checkProposerConstraints(
 	task *corev1alpha1.Task,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 ) (string, error) {
+	return verifyProposerConstraints(ctx, r.ProtectedSet, r.Recorder, task, mcpConfiguration)
+}
+
+// verifyProposerConstraints loads the current protected set from source and
+// checks a marked Task against it. Both queue admission and the dispatcher,
+// immediately before it starts a reserved attempt, call it.
+func verifyProposerConstraints(
+	ctx context.Context,
+	source protectedset.Source,
+	recorder record.EventRecorder,
+	task *corev1alpha1.Task,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+) (string, error) {
 	if task == nil || taskImprovementRole(task.Annotations) == "" {
 		return "", nil
 	}
-	set, err := r.ProtectedSet.Load(ctx)
+	set, err := source.Load(ctx)
 	if err != nil {
 		if errors.Is(err, protectedset.ErrUnavailable) {
 			return "proposer flows are disabled: " + err.Error(), nil
@@ -51,11 +66,42 @@ func (r *TaskReconciler) checkProposerConstraints(
 	}
 	logf.FromContext(ctx).Info("proposer Task constraints verified",
 		"namespace", task.Namespace, "task", task.Name, "protectedSetDigest", set.Digest())
-	if r.Recorder != nil {
-		r.Recorder.Eventf(task, corev1.EventTypeNormal, "ProposerConstraintsVerified",
+	if recorder != nil {
+		recorder.Eventf(task, corev1.EventTypeNormal, "ProposerConstraintsVerified",
 			"Proposer constraints verified against protected set %s", set.Digest())
 	}
 	return "", nil
+}
+
+// rejectProposerBeforeExecution re-checks a marked Task against the current
+// protected set right before the dispatcher creates its Session or prompt. A
+// queued or recovered attempt may have waited while the protected set changed
+// or became unavailable, so a violation fails the attempt and the Task instead
+// of running with stale constraints. It reports whether the Task was handled.
+func (d *ACPDispatcher) rejectProposerBeforeExecution(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	attemptID string,
+	fence store.ControllerEpochFence,
+) (bool, error) {
+	violation, err := verifyProposerConstraints(ctx, d.ProtectedSet, nil, task, mcpConfiguration)
+	if err != nil {
+		return true, d.requeueReservedTask(ctx, task, acpReservedRetryProposerConstraints, err)
+	}
+	if violation == "" {
+		return false, nil
+	}
+	message := boundACPStatusMessage(violation)
+	if err := d.transitionAttemptToFailed(
+		ctx, attemptID, fence, "proposer-constraint-violation", proposerConstraintViolationReason, message,
+	); err != nil {
+		return true, err
+	}
+	return true, d.failTaskBeforeSessionBinding(
+		ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed,
+		proposerConstraintViolationReason, message,
+	)
 }
 
 // proposerConstraintViolation checks a marked Task against every proposer

@@ -96,6 +96,10 @@ func TestSampleProtectsEveryCategory(t *testing.T) {
 		"publication boundary":      "internal/publisher/prepare.go",
 		"records":                   "internal/store/sqlite/store.go",
 		"supervisor path checks":    "workers/acp/supervisor/prompt_handlers.go",
+		"ACP child UID/GID":         "internal/acp/process_linux.go",
+		"ACP session environment":   "internal/acp/runtime_env.go",
+		"ACP supervisor hardening":  "internal/acp/supervisor_hardening_linux.go",
+		"ACP native tool names":     "internal/acp/runtime_defaults.go",
 		"API fields":                "api/v1alpha1/task_types.go",
 		"protected-set declaration": "internal/protectedset/protectedset.go",
 		"agent instructions":        "AGENTS.md",
@@ -133,6 +137,26 @@ func TestParseRejectsInvalidDeclarations(t *testing.T) {
 	} {
 		if _, err := Parse([]byte(document)); err == nil {
 			t.Errorf("%s: Parse() accepted an invalid declaration", name)
+		}
+	}
+}
+
+// A rejected repository identity can be a URL that carries a credential, and
+// the error reaches startup logs and proposer Task status, so it must not echo
+// the value.
+func TestRepositoryErrorsOmitTheRejectedValue(t *testing.T) {
+	const secret = "s3cr3t-token"
+	for _, value := range []string{
+		"https://user:" + secret + "@github.com/a/b.git",
+		"https://github.com/a/b?access_token=" + secret,
+		"github.com/a/b#" + secret,
+	} {
+		if _, err := CanonicalRepositoryID(value); err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("CanonicalRepositoryID(%q) error = %v, want a rejection without the value", value, err)
+		}
+		document := validMinimalSetDoc + "repositories: [{repository: \"" + value + "\", paths: [\"a\"]}]\n"
+		if _, err := Parse([]byte(document)); err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("Parse() with repository %q error = %v, want a rejection without the value", value, err)
 		}
 	}
 }

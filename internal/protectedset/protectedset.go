@@ -238,7 +238,9 @@ func CanonicalRepositoryID(value string) (string, error) {
 	host, repositoryPath, ok := strings.Cut(id, "/")
 	if !ok || host == "" || repositoryPath == "" || strings.ContainsAny(id, " \t\\?#@:") ||
 		strings.Contains(id, "//") || strings.Contains("/"+repositoryPath+"/", "/../") || strings.Contains("/"+repositoryPath+"/", "/./") {
-		return "", fmt.Errorf("repository %q must be a host/owner/name identity", value)
+		// The rejected value is omitted: it may carry credentials, and this
+		// error reaches controller logs and Task status.
+		return "", errors.New("repository must be a host/owner/name identity")
 	}
 	host = strings.ToLower(host)
 	if host == "github.com" {

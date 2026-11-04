@@ -1745,6 +1745,7 @@ func main() {
 		MaxConcurrent:        acpDispatchMaxConcurrentTasks,
 		MCPRegistry:          acpMCPRegistry,
 		PromptLeases:         acpPromptLeases,
+		ProtectedSet:         taskReconciler.ProtectedSet,
 		ACPRuntimeImages: controller.ACPRuntimeImages{
 			Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 			Opencode: acpOpencodeRuntimeImage,

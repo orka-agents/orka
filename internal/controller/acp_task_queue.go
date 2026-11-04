@@ -969,7 +969,7 @@ func (r *TaskReconciler) reconcileDurableACPPlanningFailure(
 	}
 	reason := corev1alpha1.TaskExecutionReason(attempt.TerminalReason)
 	if reason != corev1alpha1.TaskExecutionReason("InvalidRuntimeProfile") &&
-		reason != corev1alpha1.TaskExecutionReason("InvalidWorkspace") {
+		reason != corev1alpha1.TaskExecutionReason("InvalidWorkspace") && reason != proposerConstraintViolationReason {
 		return false, ctrl.Result{}, nil
 	}
 	message := strings.TrimSpace(attempt.OutcomeMarker)

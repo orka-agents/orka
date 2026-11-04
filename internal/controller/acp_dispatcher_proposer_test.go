@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -26,6 +28,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/protectedset"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -510,5 +513,83 @@ func TestWriteIntentCodexProposerIsRefused(t *testing.T) {
 	}
 	if err := validateACPProviderNativePolicy(codex, corev1alpha1.WorkspaceIntentWrite, withoutWeb, nil, true); err == nil {
 		t.Fatal("codex accepted a write policy without its native web tools; revisit the proposer web restriction")
+	}
+}
+
+// TestDispatcherRechecksProposerConstraintsBeforeExecution covers a proposer
+// that passed queue admission and then waited while the protected set changed
+// or became unavailable: the dispatcher re-reads it before the reserved
+// attempt starts, and fails closed without creating a Session or prompt.
+func TestDispatcherRechecksProposerConstraintsBeforeExecution(t *testing.T) {
+	tests := []struct {
+		name          string
+		configMap     func(*testing.T) *corev1.ConfigMap
+		wantViolation string
+	}{
+		{name: "ConfigMap removed", wantViolation: "proposer flows are disabled"},
+		{name: "case set added in the Task namespace", configMap: func(t *testing.T) *corev1.ConfigMap {
+			configMap := loadSampleProtectedSetConfigMap(t)
+			configMap.Data[protectedset.ConfigMapKey] = strings.Replace(configMap.Data[protectedset.ConfigMapKey],
+				"{namespace: orka-evals, name: pr-review-train,", "{namespace: default, name: pr-review-train,", 1)
+			return configMap
+		}, wantViolation: "namespace that holds an evaluation case set"},
+		{name: "unchanged", configMap: loadSampleProtectedSetConfigMap},
+	}
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			var creates, prompts atomic.Int32
+			uid := types.UID(strings.Repeat(string(rune('a'+index)), 8) + "-9999-9999-9999-999999999999")
+			fixture := newTaskScopedCreateConflictFixtureForRuntime(t, ctx, "proposer-recheck", uid, corev1alpha1.AgentRuntimeCodex,
+				func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
+					options := dispatcherRuntimeServerOptions{onPrompt: func(harnessv2.StartPromptRequest) { prompts.Add(1) }}
+					return newDispatcherRuntimeServerWithOptions(t, profile, digest, options, func(harnessv2.CreateRuntimeSessionRequest) { creates.Add(1) })
+				}, func(task *corev1alpha1.Task) {
+					task.Annotations = map[string]string{labels.AnnotationImprovementRole: labels.ImprovementRoleProposer}
+					task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{"Read", "Glob", "Grep"}}
+				})
+			defer fixture.stop()
+			if tt.configMap != nil {
+				if err := fixture.kubeClient.Create(ctx, tt.configMap(t)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fixture.dispatcher.ProtectedSet = protectedset.Source{
+				Reader: fixture.kubeClient, Namespace: proposerTestNamespace, Name: proposerTestConfigMap,
+			}
+
+			reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
+			if err != nil || reserved == nil {
+				t.Fatalf("reserveTask() = %v, %v", reserved, err)
+			}
+			executeErr := fixture.dispatcher.executeReservedTask(ctx, reserved, target)
+			current := fixture.currentTask(t, ctx)
+			if tt.wantViolation == "" {
+				// Only reaching the runtime matters here; this fixture's runtime
+				// does not complete the rest of the turn.
+				if current.Status.Execution.Reason == proposerConstraintViolationReason || creates.Load() == 0 {
+					t.Fatalf("constrained proposer did not start: execution=%#v creates=%d err=%v", current.Status.Execution, creates.Load(), executeErr)
+				}
+				return
+			}
+			if executeErr != nil {
+				t.Fatalf("executeReservedTask() error = %v", executeErr)
+			}
+			attempt, err := fixture.dispatcher.Store.GetPromptAttempt(ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution.Reason != proposerConstraintViolationReason ||
+				!strings.Contains(current.Status.Execution.Message, tt.wantViolation) {
+				t.Fatalf("stale proposer status: phase=%s execution=%#v", current.Status.Phase, current.Status.Execution)
+			}
+			if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != string(proposerConstraintViolationReason) {
+				t.Fatalf("attempt = %s/%s, want Failed/%s", attempt.ExecutionState, attempt.TerminalReason, proposerConstraintViolationReason)
+			}
+			if creates.Load() != 0 || prompts.Load() != 0 {
+				t.Fatalf("stale proposer reached the runtime: creates=%d prompts=%d", creates.Load(), prompts.Load())
+			}
+		})
 	}
 }
