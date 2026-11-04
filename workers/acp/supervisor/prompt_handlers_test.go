@@ -1640,4 +1640,33 @@ func TestWorkspaceDeltaPathViolationReportsControlPathBeforeAllowlist(t *testing
 	if got := workspaceDeltaPathViolation("", ".github/workflows/ci.yml", limits); got != harnessv2.WorkspaceDeltaDisallowedPathMessage {
 		t.Errorf("without control-path denial, got %q", got)
 	}
+	limits.DeniedPaths = []string{"AGENTS.md", "internal/admission/**"}
+	for path, want := range map[string]string{
+		"AGENTS.md":                        harnessv2.WorkspaceDeltaDeniedPathMessage,
+		"internal/admission/provenance.go": harnessv2.WorkspaceDeltaDeniedPathMessage,
+		"internal/x.go":                    "",
+	} {
+		if got := workspaceDeltaPathViolation("", path, limits); got != want {
+			t.Errorf("with denied paths, workspaceDeltaPathViolation(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestWorkspaceDeltaPathDeniedAppliesWorkspaceRelativeRoot(t *testing.T) {
+	denied := []string{"internal/admission/**", "AGENTS.md"}
+	if !workspaceDeltaPathDenied("", "internal/admission/task_provenance.go", denied) {
+		t.Fatal("a denied repository path was allowed")
+	}
+	if !workspaceDeltaPathDenied("internal", "admission/task_provenance.go", denied) {
+		t.Fatal("a workspace subpath change mapping to a denied repository path was allowed")
+	}
+	if !workspaceDeltaPathDenied("", "agents.md", denied) {
+		t.Fatal("a case variant of a denied path was allowed")
+	}
+	if workspaceDeltaPathDenied("website", "docs/intro.md", denied) {
+		t.Fatal("a path outside every denied pattern was denied")
+	}
+	if workspaceDeltaPathDenied("internal", "admission.go", nil) {
+		t.Fatal("an empty denied list denied a path")
+	}
 }

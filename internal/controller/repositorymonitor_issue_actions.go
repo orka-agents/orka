@@ -33,6 +33,7 @@ import (
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspacedelta"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -1543,13 +1544,24 @@ func repositoryMonitorWorkspacePathRejectionReason(task *corev1alpha1.Task) stri
 		return ""
 	}
 	switch message := task.Status.Delivery.Message; {
-	case strings.Contains(message, harnessv2.WorkspaceDeltaRepositoryControlPathMessage):
+	case strings.Contains(message, harnessv2.WorkspaceDeltaRepositoryControlPathMessage),
+		strings.Contains(message, harnessv2.WorkspaceDeltaDeniedPathMessage):
 		return repositoryMonitorPatchPathDenied
 	case strings.Contains(message, harnessv2.WorkspaceDeltaDisallowedPathMessage):
 		return repositoryMonitorPatchPathNotAllowed
 	default:
 		return ""
 	}
+}
+
+// repositoryMonitorTaskPathDenied reports whether a patch path matches the
+// Task's spec.workspace.deniedPaths. The controller re-checks the result's
+// paths so a runtime that skipped the check still cannot land a denied path.
+func repositoryMonitorTaskPathDenied(task *corev1alpha1.Task, path string) bool {
+	if task == nil || task.Spec.Workspace == nil {
+		return false
+	}
+	return workspacedelta.PathDenied(task.Spec.Workspace.DeniedPaths, path)
 }
 
 func repositoryMonitorImplementationPathAllowed(monitor *corev1alpha1.RepositoryMonitor, path string) bool {
@@ -2188,6 +2200,9 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 	for _, path := range paths {
 		lower := strings.ToLower(path)
 		if strings.HasPrefix(lower, ".github/workflows/") || strings.HasPrefix(lower, "config/rbac/") || (strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret")) {
+			return repositoryMonitorPatchPathDenied, nil
+		}
+		if repositoryMonitorTaskPathDenied(task, path) {
 			return repositoryMonitorPatchPathDenied, nil
 		}
 		if !repositoryMonitorImplementationPathAllowed(monitor, path) {

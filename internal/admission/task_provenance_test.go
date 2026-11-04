@@ -539,3 +539,34 @@ func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alph
 	task.Spec.RequestedBy.Subject = subject
 	return task
 }
+
+func withImprovementRole(task *corev1alpha1.Task, role string) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationImprovementRole] = role
+	return task
+}
+
+// The improvement role is controller-managed: nobody else may mark a Task as
+// a proposer, and nobody else may unmark one to drop its constraints.
+func TestTaskProvenanceValidatorProtectsImprovementRole(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposer := withImprovementRole(newAdmissionTestTask(), "proposer")
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, user, proposer, nil, ""))
+		require.False(t, resp.Allowed, "%s created a proposer Task", user)
+		require.Contains(t, resp.Result.Message, labels.AnnotationImprovementRole)
+
+		unmarked := proposer.DeepCopy()
+		delete(unmarked.Annotations, labels.AnnotationImprovementRole)
+		resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, unmarked, proposer, ""))
+		require.False(t, resp.Allowed, "%s removed the proposer role", user)
+		require.Contains(t, resp.Result.Message, labels.AnnotationImprovementRole)
+
+		resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, withImprovementRole(proposer.DeepCopy(), "evaluator"), proposer, ""))
+		require.False(t, resp.Allowed, "%s changed the improvement role", user)
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposer, nil, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}

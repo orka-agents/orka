@@ -508,6 +508,32 @@ func TestOperationJournalRejectsConflictingReuse(t *testing.T) {
 	assertClientCode(t, err, "operation_conflict")
 }
 
+func TestPublicationPrepareReportsDeniedPathCode(t *testing.T) {
+	t.Parallel()
+	repository := newRepositoryFixture(t, false)
+	fixture := newServiceFixture(t)
+	delta := buildDelta(t, repository.seed)
+	publicationID := "publication-uid-denied"
+	deltaReference := fixture.artifact.upload(t, artifactcap.Identity{Namespace: testNamespace, PublicationID: publicationID}, "denied-delta", artifactcap.MediaTypeWorkspaceDelta, delta.Artifact)
+	metadata := OperationMetadata{Namespace: testNamespace, OperationID: "publication-prepare-denied", PublicationID: publicationID}
+	request := publisher.PrepareRequest{
+		PublicationID: publicationID, PublicationGeneration: 1, OperationID: metadata.OperationID,
+		Source: repository.source, SourceRef: githubTestBaseBranch, Target: repository.target, TargetRef: testPublicationRef,
+		BranchClaimGeneration: 1, BaselineOID: repository.baselineOID, RemoteBefore: publisher.RemoteRef{Absent: true},
+		DeltaArtifactDigest: delta.ArtifactDigest, CommitMessage: "Orka publication publication-uid-denied\n",
+		CommitTimestamp: time.Date(2026, time.July, 24, 12, 34, 56, 0, time.UTC),
+		DeniedPaths:     []string{"new.txt"},
+	}
+	_, err := fixture.client.PreparePublication(context.Background(), PublicationPrepareRequest{
+		Metadata: metadata, DeltaArtifact: deltaReference, Request: request,
+	})
+	assertClientCode(t, err, ErrorCodeDeniedPath)
+	clientErr, _ := errors.AsType[*ClientError](err)
+	if clientErr.StatusCode != http.StatusUnprocessableEntity || clientErr.Response.Retryable || strings.Contains(clientErr.Response.Message, "new.txt") {
+		t.Fatalf("denied-path response = %d %#v, want a non-retryable 422 without the path", clientErr.StatusCode, clientErr.Response)
+	}
+}
+
 func TestPublicationPreparePublishVerifyLocalBareRepository(t *testing.T) {
 	t.Parallel()
 	repository := newRepositoryFixture(t, false)

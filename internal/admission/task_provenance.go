@@ -77,6 +77,7 @@ var (
 		labels.AnnotationParentTaskUID,
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
+		labels.AnnotationImprovementRole,
 	}
 )
 
