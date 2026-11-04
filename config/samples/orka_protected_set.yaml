@@ -45,6 +45,8 @@ data:
           - internal/controller/acp_task_queue.go          # calls the dispatch-time check
           - internal/controller/task_controller.go         # fails marked Tasks outside the ACP path
           - internal/controller/acp_publication*.go        # sends deniedPaths to the publisher
+          - internal/controller/acp_credentials.go         # credential binding and version checks
+          - internal/controller/acp_workspace.go           # repository identities used to select protected paths
           - internal/controller/agent_execution_binding*.go # canary routing
           - internal/controller/evalrun*.go                # evaluator
           - internal/controller/runtime_pool_controller*.go # token and network isolation
@@ -63,6 +65,7 @@ data:
           - config/**                                      # deployment inputs: admission webhooks and policies, manager, network policies
           - manifest_staging/**                            # generated install manifests and chart
           - deploy/**                                      # released install manifests
+          - scripts/**                                     # CI and release validation helpers
           - config/samples/orka_protected_set.yaml         # this declaration
           - docs/adr/**                                    # the recorded trust boundaries
           - AGENTS.md
