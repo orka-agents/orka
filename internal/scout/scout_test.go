@@ -294,18 +294,21 @@ func TestLimitsRequireWatchlistSources(t *testing.T) {
 
 func TestWatchlistSourceIDs(t *testing.T) {
 	markdown := "# Watchlist\n\n| id | repository |\n| --- | --- |\n| gh-runtime | example/runtime |\n" +
-		"| gh-sandbox | example/sandbox |\n\nText.\n\n|id|query|\n|:--|--:|\n|tracker-stale|is:open|\n"
+		"| gh-sandbox | example/sandbox |\n\nText.\n\n|id|query|\n|:--|--:|\n|tracker-stale|is:open|\n" +
+		"tracker-epics | is:open label:epic\n\nid | feed\n--- | ---\nfeed-papers | https://example.com/feed\n"
 	ids, err := WatchlistSourceIDs(markdown)
 	if err != nil {
 		t.Fatalf("WatchlistSourceIDs() error = %v", err)
 	}
-	if want := []string{"gh-runtime", "gh-sandbox", "tracker-stale"}; strings.Join(ids, ",") != strings.Join(want, ",") {
+	if want := []string{"gh-runtime", "gh-sandbox", "tracker-stale", "tracker-epics", "feed-papers"}; strings.Join(ids, ",") != strings.Join(want, ",") {
 		t.Fatalf("WatchlistSourceIDs() = %v, want %v", ids, want)
 	}
 	for name, input := range map[string]string{
-		"no tables": "# Watchlist\n\nNothing here.\n",
-		"bad id":    "| id | x |\n| --- | --- |\n| GH Runtime | y |\n",
-		"duplicate": "| id | x |\n| --- | --- |\n| gh-a | y |\n| gh-a | z |\n",
+		"no tables":              "# Watchlist\n\nNothing here.\n",
+		"bad id":                 "| id | x |\n| --- | --- |\n| GH Runtime | y |\n",
+		"duplicate":              "| id | x |\n| --- | --- |\n| gh-a | y |\n| gh-a | z |\n",
+		"no outer pipes, bad id": "| id | x |\n| --- | --- |\n| gh-a | y |\nGH B | z |\n",
+		"row outside table":      "| id | x |\n| --- | --- |\n| gh-a | y |\n\n| gh-b | z |\n",
 	} {
 		if _, err := WatchlistSourceIDs(input); err == nil {
 			t.Errorf("WatchlistSourceIDs(%s) = nil error, want error", name)
