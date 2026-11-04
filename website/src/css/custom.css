@@ -214,8 +214,20 @@ h1, h2, h3 {
 }
 
 /* ---------- Navbar ---------- */
+/* The frosted glass sits on its own layer. A backdrop-filter on .navbar itself would make it the
+   containing block for the fixed mobile drawer rendered inside it, squeezing the drawer into
+   the bar. */
 .navbar {
   border-bottom: 1px solid var(--orka-line);
+  background-color: transparent;
+}
+
+.navbar::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: var(--orka-glass);
   backdrop-filter: saturate(1.4) blur(14px);
   -webkit-backdrop-filter: saturate(1.4) blur(14px);
 }
@@ -997,7 +1009,8 @@ html[data-theme='dark'] .orka-band {
   font-size: 0.68rem;
   line-height: 1.75;
   color: var(--orka-ink-2);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   white-space: pre;
 }
 
@@ -1435,10 +1448,6 @@ html[data-theme='dark'] .orka-band {
 
   .orka-feed__type {
     display: none;
-  }
-
-  .orka-terminal {
-    overflow-x: auto;
   }
 
   .orka-provider {
