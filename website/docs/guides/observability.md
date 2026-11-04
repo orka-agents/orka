@@ -206,7 +206,7 @@ recorded at all:
 
 | Category | Reason | Source |
 |---|---|---|
-| `unsupported_request` | `runtime`, `contract_version`, `execution_workspace`, `toolboxes`, `prior_task_ref`, `max_turns`, `retry_policy`, `resources`, `placement`, `autonomous_coordination`, `transaction_delegation`, `native_session` | The controller refused an agent Task during execution planning, at the workspace dispatch gate, or at native Session restore. Validation errors and missing configuration are not counted. |
+| `unsupported_request` | `runtime`, `contract_version`, `execution_workspace`, `toolboxes`, `prior_task_ref`, `max_turns`, `retry_policy`, `resources`, `placement`, `autonomous_coordination`, `transaction_delegation`, `native_session` | The controller refused an agent Task during execution planning (including an external runtime's `priorTaskRef` rejection during compatibility validation), at the workspace dispatch gate, or at native Session restore. Validation errors and missing configuration are not counted. |
 | `missing_tool` | `not_enabled`, `not_registered` | The built-in AI worker rejected a model's tool call because the Task did not enable it, or no tool had that name. The worker marks the `ToolCallFailed` event with a closed `errorType`; the controller counts it when the event arrives from a managed AI worker Pod. The same event from any other Task is journaled but not counted. |
 | `missing_tool` | `denied_by_policy` | An ACP runtime asked permission to use a tool its frozen tool policy does not allow. |
 
@@ -246,7 +246,9 @@ Tasks, so they cannot be filtered per Task.
 Each row lists at most five Task names, most recently observed first. A name is
 shown only when the caller could list that Task now; deleted Tasks drop out but
 keep their counts. Signals from a Gateway-owned Task count only for callers who
-can read that Gateway, the same check that guards the Task. Counts belong to
+can read that Gateway, the same check that guards the Task. Ownership recorded
+only in a Task's retained GatewayEvent counts too; a signal whose ownership
+cannot be verified stays out of the summary. Counts belong to
 one namespace incarnation: if a namespace is deleted and recreated with the same
 name, the new one starts empty. Prometheus counts every signal.
 

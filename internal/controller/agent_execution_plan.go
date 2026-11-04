@@ -19,6 +19,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/usage"
 )
 
@@ -280,7 +281,7 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 	}
 	result, err := r.failTask(ctx, task, plan.rejectionReason)
 	if err == nil && plan.gapReason != "" {
-		recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), task, capabilitygap.Signal{
+		recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), r.gatewayEventStore(), task, capabilitygap.Signal{
 			Category: capabilitygap.CategoryUnsupportedRequest,
 			Reason:   plan.gapReason,
 			Runtime:  capabilityGapAgentRuntime(agent),
@@ -315,30 +316,47 @@ func capabilityGapBoundRuntime(bound *verifiedAgentExecution) string {
 }
 
 // recordTaskCapabilityGap records signal for task. It reads the Task's
-// namespace UID, fenced on the Task's own UID, only while recording is on;
-// without a verified UID the signal still counts in Prometheus but stays out
-// of the summary, so a recreated namespace never sees earlier counts.
-func recordTaskCapabilityGap(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, signal capabilitygap.Signal) {
+// namespace UID, fenced on the Task's own UID, and resolves the Task's Gateway
+// owner, including ownership recorded only in its retained GatewayEvent, only
+// while recording is on. Without a verified UID or owner the signal still
+// counts in Prometheus but stays out of the summary, so a recreated namespace
+// never sees earlier counts and an unverified Gateway Task never reaches
+// callers who cannot read its Gateway.
+func recordTaskCapabilityGap(
+	ctx context.Context, reader client.Reader, events store.GatewayEventStore, task *corev1alpha1.Task, signal capabilitygap.Signal,
+) {
 	if task == nil || capabilitygap.Default() == nil {
 		return
 	}
-	signal.Namespace, signal.Task, signal.Gateway = task.Namespace, task.Name, capabilityGapGatewayOwner(task)
-	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil {
+	signal.Namespace, signal.Task = task.Namespace, task.Name
+	owner, ok, ownerErr := gatewayruntime.ResolveTaskOwner(ctx, events, task)
+	if ownerErr == nil && ok {
+		signal.Gateway = capabilitygap.GatewayOwner{
+			Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+		}
+	}
+	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil && ownerErr == nil {
 		signal.NamespaceUID = uid
 	}
 	capabilitygap.Record(signal)
 }
 
-// capabilityGapGatewayOwner names the Gateway that owns task, if any, so the
-// summary can hide its signals from callers who cannot read that Gateway.
-func capabilityGapGatewayOwner(task *corev1alpha1.Task) capabilitygap.GatewayOwner {
-	owner, ok := gatewayruntime.TaskOwner(task)
-	if !ok {
-		return capabilitygap.GatewayOwner{}
+// gatewayEventStore returns the store that links Gateway-created Tasks to
+// their retained GatewayEvents, if configured.
+func (r *TaskReconciler) gatewayEventStore() store.GatewayEventStore {
+	if r == nil || r.SessionManager == nil {
+		return nil
 	}
-	return capabilitygap.GatewayOwner{
-		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+	return r.SessionManager.gatewayEventStore
+}
+
+// gatewayEventStore returns the store that links Gateway-created Tasks to
+// their retained GatewayEvents, if configured.
+func (d *ACPDispatcher) gatewayEventStore() store.GatewayEventStore {
+	if d == nil || d.Sessions == nil {
+		return nil
 	}
+	return d.Sessions.gatewayEvents
 }
 
 func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (string, capabilitygap.Reason) {

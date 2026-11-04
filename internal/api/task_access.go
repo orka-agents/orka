@@ -226,57 +226,12 @@ func (a taskAccess) gatewayTaskIdentity(c fiber.Ctx, task *corev1alpha1.Task) (g
 }
 
 func gatewayTaskIdentity(ctx context.Context, events store.GatewayEventStore, task *corev1alpha1.Task) (gatewayruntime.TaskOwnerIdentity, bool, error) {
-	if task == nil {
-		return gatewayruntime.TaskOwnerIdentity{}, false, nil
-	}
-	annotations := task.GetAnnotations()
-	labels := task.GetLabels()
-	eventID := strings.TrimSpace(annotations[gatewayruntime.TaskGatewayEventAnnotation])
-	if eventID == "" {
-		eventID = strings.TrimSpace(labels[gatewayruntime.TaskGatewayEventLabel])
-	}
-	identity, gatewayOwned := gatewayruntime.TaskOwner(task)
-
-	if events != nil {
-		var durable *gatewayruntime.TaskOwnerIdentity
-		if task.UID != "" {
-			event, err := events.GetGatewayEventForTask(ctx, task.Namespace, task.Name, string(task.UID))
-			if err == nil {
-				durable = &gatewayruntime.TaskOwnerIdentity{
-					GatewayNamespace: event.Namespace, NamespaceUID: event.NamespaceUID,
-					GatewayName: event.GatewayName, GatewayUID: event.GatewayUID,
-				}
-			} else if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrValidation) {
-				return gatewayruntime.TaskOwnerIdentity{}, gatewayOwned, fiber.NewError(fiber.StatusInternalServerError, "failed to verify gateway task ownership")
-			}
-		}
-		if durable == nil && eventID != "" {
-			event, err := events.GetGatewayEvent(ctx, task.Namespace, eventID)
-			if err == nil && event.TaskName == task.Name && (event.TaskUID == "" || event.TaskUID == string(task.UID)) {
-				durable = &gatewayruntime.TaskOwnerIdentity{
-					GatewayNamespace: event.Namespace, NamespaceUID: event.NamespaceUID,
-					GatewayName: event.GatewayName, GatewayUID: event.GatewayUID,
-				}
-			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return gatewayruntime.TaskOwnerIdentity{}, true, fiber.NewError(fiber.StatusInternalServerError, "failed to verify gateway task ownership")
-			}
-		}
-		if durable != nil {
-			if gatewayOwned && gatewayTaskOwnerIdentityComplete(identity) && !gatewayTaskOwnerIdentityEqual(identity, *durable) {
-				return gatewayruntime.TaskOwnerIdentity{}, true, fiber.NewError(fiber.StatusNotFound, "task not found")
-			}
-			return *durable, true, nil
-		}
+	identity, gatewayOwned, err := gatewayruntime.ResolveTaskOwner(ctx, events, task)
+	switch {
+	case errors.Is(err, gatewayruntime.ErrTaskOwnerMismatch):
+		return gatewayruntime.TaskOwnerIdentity{}, true, fiber.NewError(fiber.StatusNotFound, "task not found")
+	case err != nil:
+		return gatewayruntime.TaskOwnerIdentity{}, gatewayOwned, fiber.NewError(fiber.StatusInternalServerError, "failed to verify gateway task ownership")
 	}
 	return identity, gatewayOwned, nil
-}
-
-func gatewayTaskOwnerIdentityComplete(identity gatewayruntime.TaskOwnerIdentity) bool {
-	return strings.TrimSpace(identity.GatewayNamespace) != "" && strings.TrimSpace(identity.NamespaceUID) != "" &&
-		strings.TrimSpace(identity.GatewayName) != "" && strings.TrimSpace(identity.GatewayUID) != ""
-}
-
-func gatewayTaskOwnerIdentityEqual(left, right gatewayruntime.TaskOwnerIdentity) bool {
-	return left.GatewayNamespace == right.GatewayNamespace && left.NamespaceUID == right.NamespaceUID &&
-		left.GatewayName == right.GatewayName && left.GatewayUID == right.GatewayUID
 }

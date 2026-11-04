@@ -145,11 +145,12 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			Tool:      event.ToolName,
 			Namespace: event.Namespace,
 			Task:      event.StreamID,
-			Gateway:   capabilityGapGatewayOwner(writerTask),
 		}
-		// Without a verified namespace UID the signal still counts in
-		// Prometheus but stays out of the summary.
-		if uid, err := usage.NamespaceUIDForObject(c.Context(), uncachedReaderOr(h.apiReader, h.k8sClient), writerTask); err == nil {
+		// Without a verified namespace UID or Gateway owner the signal still
+		// counts in Prometheus but stays out of the summary.
+		owner, ownerErr := capabilityGapGatewayOwner(c.Context(), h.gatewayEventStore, writerTask)
+		signal.Gateway = owner
+		if uid, err := usage.NamespaceUIDForObject(c.Context(), uncachedReaderOr(h.apiReader, h.k8sClient), writerTask); err == nil && ownerErr == nil {
 			signal.NamespaceUID = uid
 		}
 		capabilitygap.Record(signal)
@@ -184,15 +185,17 @@ func toolCallCapabilityGapReason(event *store.ExecutionEvent, content map[string
 	}
 }
 
-// capabilityGapGatewayOwner names the Gateway that owns task, if any.
-func capabilityGapGatewayOwner(task *corev1alpha1.Task) capabilitygap.GatewayOwner {
-	owner, ok := gatewayruntime.TaskOwner(task)
-	if !ok {
-		return capabilitygap.GatewayOwner{}
+// capabilityGapGatewayOwner names the Gateway that owns task, if any,
+// including ownership recorded only in its retained GatewayEvent. An error
+// means ownership could not be verified.
+func capabilityGapGatewayOwner(ctx context.Context, gatewayEvents store.GatewayEventStore, task *corev1alpha1.Task) (capabilitygap.GatewayOwner, error) {
+	owner, ok, err := gatewayruntime.ResolveTaskOwner(ctx, gatewayEvents, task)
+	if err != nil || !ok {
+		return capabilitygap.GatewayOwner{}, err
 	}
 	return capabilitygap.GatewayOwner{
 		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
-	}
+	}, nil
 }
 
 func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {

@@ -203,6 +203,7 @@ func TestPermissionDeniedByFrozenPolicyRecordsMissingTool(t *testing.T) {
 	fixture := newPermissionResolutionRetryFixture()
 	var preflight error
 	class := harnessv2.RequestClassificationFresh
+	state := harnessv2.PermissionResolutionApplied
 	runtimeClient := permissionResolutionRetryClient(t, func(context.Context, string) error { return preflight },
 		func(request *http.Request) (*http.Response, error) {
 			var decoded harnessv2.ResolvePermissionRequest
@@ -210,10 +211,18 @@ func TestPermissionDeniedByFrozenPolicyRecordsMissingTool(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := permissionResolutionRetryResponse(t, decoded)
-			if class != harnessv2.RequestClassificationFresh {
+			if class != harnessv2.RequestClassificationFresh || state != harnessv2.PermissionResolutionApplied {
+				decision := decoded.Decision
+				if state == harnessv2.PermissionResolutionCancelledByPrompt {
+					decision = harnessv2.PermissionDecision{Outcome: harnessv2.PermissionDecisionCancelled}
+				}
+				classification := harnessv2.Classification{Class: class}
+				if class != harnessv2.RequestClassificationFresh {
+					classification.Phase = harnessv2.OperationPhaseApplied
+				}
 				body, err := json.Marshal(harnessv2.PermissionResolutionResponse{
-					Protocol: harnessv2.ProtocolVersion, Classification: harnessv2.Classification{Class: class, Phase: harnessv2.OperationPhaseApplied},
-					State: harnessv2.PermissionResolutionApplied, Decision: decoded.Decision, ResolvedAt: time.Now().UTC(),
+					Protocol: harnessv2.ProtocolVersion, Classification: classification,
+					State: state, Decision: decision, ResolvedAt: time.Now().UTC(),
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -241,6 +250,13 @@ func TestPermissionDeniedByFrozenPolicyRecordsMissingTool(t *testing.T) {
 	class = harnessv2.RequestClassificationDuplicate
 	resolve("Bash", false)
 	class = harnessv2.RequestClassificationFresh
+	// A fresh response that did not apply the denial adds nothing either.
+	for _, state = range []harnessv2.PermissionResolutionState{
+		harnessv2.PermissionResolutionAlreadyResolved, harnessv2.PermissionResolutionCancelledByPrompt,
+	} {
+		resolve("Bash", false)
+	}
+	state = harnessv2.PermissionResolutionApplied
 	preflight = errors.New("stop before transport")
 	resolve("Bash", true)
 
@@ -330,5 +346,100 @@ func TestWorkspaceGateRecordsCapabilityGapOnlyOnceTaskFails(t *testing.T) {
 	summary := recorder.Summary(task.Namespace, string(namespace.UID), nil)
 	if len(summary.Signals) != 1 || summary.Signals[0].Count != 1 || strings.Join(summary.Signals[0].Tasks, ",") != task.Name {
 		t.Fatalf("summary = %+v, want one workspace signal for %q", summary.Signals, task.Name)
+	}
+}
+
+// retainedGatewayOwnerStore links Tasks to a retained GatewayEvent only, or
+// fails every ownership lookup with err.
+type retainedGatewayOwnerStore struct {
+	store.GatewayEventStore
+	event *store.GatewayEvent
+	err   error
+}
+
+func (s retainedGatewayOwnerStore) GetGatewayEventForTask(_ context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.event != nil && s.event.Namespace == namespace && s.event.TaskName == taskName && s.event.TaskUID == taskUID {
+		return s.event, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestRecordTaskCapabilityGapUsesRetainedGatewayOwnership(t *testing.T) {
+	task := validPlannerTask()
+	task.UID = "task-uid"
+	namespace := capabilityGapNamespace(task.Namespace)
+	plan := rejectAgentExecutionPlan("unsupported").unsupported(capabilitygap.ReasonMaxTurns)
+	event := &store.GatewayEvent{
+		Namespace: task.Namespace, NamespaceUID: string(namespace.UID), GatewayName: "front-desk", GatewayUID: "gateway-uid",
+		TaskName: task.Name, TaskUID: string(task.UID),
+	}
+
+	recorder := installCapabilityGapRecorder(t)
+	r := newUnitReconciler(newTestScheme(), task.DeepCopy(), namespace.DeepCopy())
+	r.SessionManager.SetGatewayEventStore(retainedGatewayOwnerStore{event: event})
+	if _, err := r.rejectPlannedAgentExecution(context.Background(), task.DeepCopy(), validPlannerAgent(), plan); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	want := capabilitygap.GatewayOwner{Namespace: task.Namespace, NamespaceUID: string(namespace.UID), Name: "front-desk", UID: "gateway-uid"}
+	if owners := recorder.GatewayOwners(task.Namespace, string(namespace.UID)); len(owners) != 1 || owners[0] != want {
+		t.Fatalf("owners = %+v, want %+v", owners, want)
+	}
+	if got := len(recorder.Summary(task.Namespace, string(namespace.UID), nil).Signals); got != 0 {
+		t.Fatalf("a Task owned only through its retained GatewayEvent must stay hidden without Gateway access, got %d rows", got)
+	}
+
+	// Unverifiable ownership keeps the signal out of the summary.
+	recorder = installCapabilityGapRecorder(t)
+	r = newUnitReconciler(newTestScheme(), task.DeepCopy(), namespace.DeepCopy())
+	r.SessionManager.SetGatewayEventStore(retainedGatewayOwnerStore{err: errors.New("store unavailable")})
+	if _, err := r.rejectPlannedAgentExecution(context.Background(), task.DeepCopy(), validPlannerAgent(), plan); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if got := metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "unsupported_request", "max_turns", "codex", "none"); got != 1 {
+		t.Fatalf("counter = %v, want 1", got)
+	}
+	if got := len(recorder.Summary(task.Namespace, string(namespace.UID), func(capabilitygap.GatewayOwner) bool { return true }).Signals); got != 0 {
+		t.Fatalf("a signal with unverified Gateway ownership must stay out of the summary, got %d rows", got)
+	}
+}
+
+func TestHandlePendingRecordsExternalRuntimePriorTaskRefRejection(t *testing.T) {
+	recorder := installCapabilityGapRecorder(t)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "external-agent", Namespace: defaultNS},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "external"},
+		}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "continuation", Namespace: defaultNS, UID: "continuation-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "continue", AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			PriorTaskRef: &corev1alpha1.PriorTaskReference{Name: "earlier"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	namespace := capabilityGapNamespace(defaultNS)
+	r := newUnitReconciler(newTestScheme(), task.DeepCopy(), agent, namespace)
+
+	if _, err := r.handlePending(context.Background(), task.DeepCopy()); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(current.Status.Message, "priorTaskRef") {
+		t.Fatalf("task status = %q %q, want failed on priorTaskRef", current.Status.Phase, current.Status.Message)
+	}
+	if got := metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "unsupported_request", "prior_task_ref", "external", "none"); got != 1 {
+		t.Fatalf("counter = %v, want 1", got)
+	}
+	summary := recorder.Summary(defaultNS, string(namespace.UID), nil)
+	if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != task.Name {
+		t.Fatalf("summary = %+v, want one signal referencing %q", summary.Signals, task.Name)
 	}
 }

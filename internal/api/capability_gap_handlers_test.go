@@ -7,7 +7,9 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
@@ -111,6 +114,54 @@ func setupManagedAIWorkerEventApp(t *testing.T, taskName string, taskType corev1
 	return setupInternalExecutionEventAppWithClient(
 		newInternalExecutionEventStore(t), testInternalExecutionEventClient(t, task, job, pod, namespace), testInternalExecutionEventWorkerUser(pod.Name),
 	)
+}
+
+type failingGatewayOwnerStore struct {
+	store.GatewayEventStore
+}
+
+func (failingGatewayOwnerStore) GetGatewayEventForTask(context.Context, string, string, string) (*store.GatewayEvent, error) {
+	return nil, errors.New("store unavailable")
+}
+
+func TestSubmitExecutionEventUsesRetainedGatewayOwnership(t *testing.T) {
+	submit := func(t *testing.T, gatewayEvents store.GatewayEventStore) {
+		t.Helper()
+		task, job, pod := testInternalExecutionEventOwnedWorkerObjects("task-1")
+		task.Spec.Type = corev1alpha1.TaskTypeAI
+		pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: task.Namespace, UID: "default-namespace-uid"}}
+		h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{
+			Client:              testInternalExecutionEventClient(t, task, job, pod, namespace),
+			ExecutionEventStore: newInternalExecutionEventStore(t),
+			GatewayEventStore:   gatewayEvents,
+		})
+		app := setupInternalExecutionEventAppWithHandler(h, testInternalExecutionEventWorkerUser(pod.Name))
+		resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", map[string]any{
+			"type": events.ExecutionEventTypeToolCallFailed, "toolName": "web_fetch",
+			"content": map[string]any{events.ToolCallErrorTypeContentKey: events.ToolCallErrorTypeNotEnabled},
+		})
+		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
+	}
+	showAll := func(capabilitygap.GatewayOwner) bool { return true }
+
+	recorder := installAPICapabilityGapRecorder(t, "web_fetch")
+	submit(t, &externalToolGatewayStore{event: &store.GatewayEvent{
+		Namespace: "default", NamespaceUID: "default-namespace-uid", GatewayName: "front-desk", GatewayUID: "gateway-uid",
+		TaskName: "task-1", TaskUID: "task-1-uid",
+	}})
+	require.Equal(t, []capabilitygap.GatewayOwner{{
+		Namespace: "default", NamespaceUID: "default-namespace-uid", Name: "front-desk", UID: "gateway-uid",
+	}}, recorder.GatewayOwners("default", "default-namespace-uid"))
+	require.Empty(t, recorder.Summary("default", "default-namespace-uid", nil).Signals,
+		"a Task owned only through its retained GatewayEvent stays hidden without Gateway access")
+
+	recorder = installAPICapabilityGapRecorder(t, "web_fetch")
+	submit(t, failingGatewayOwnerStore{})
+	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_enabled", "native", "web_fetch"))
+	require.Empty(t, recorder.Summary("default", "default-namespace-uid", showAll).Signals,
+		"a signal with unverified Gateway ownership stays out of the summary")
 }
 
 func TestSubmitExecutionEventIgnoresToolRejectionsFromOtherWorkers(t *testing.T) {
