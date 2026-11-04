@@ -374,7 +374,10 @@ persist:
   adapters attach to gateway records: an event's state message, sender
   display name and metadata (also when it looks up a duplicate), expiry, retry
   and dead-letter reasons, a delivery's last error, provider message ID and
-  metadata, and the metadata of a terminal transcript message. Gateway
+  metadata, and the metadata of a terminal transcript message. It also redacts
+  the text of a message enqueued for a Task (`EnqueueGatewayMessage`), and
+  refuses text over the interim text limit or not valid UTF-8 instead of
+  truncating it, as the Gateway service does. Gateway
   identifiers that the protocol already bounds are stored as received, now
   including the copies in a gateway user message's transcript metadata.
 - **Memory.** The client redacts memory content, every free-text proposal

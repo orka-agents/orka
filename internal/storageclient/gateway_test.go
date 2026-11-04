@@ -2,11 +2,13 @@ package storageclient_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -68,6 +70,11 @@ func (r *recordingStore) MarkGatewayDeliveryTerminal(
 	return r.Store.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, reason, now)
 }
 
+func (r *recordingStore) EnqueueGatewayMessage(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
+	r.record("EnqueueGatewayMessage", request)
+	return r.Store.EnqueueGatewayMessage(ctx, request)
+}
+
 // TestProviderReceivesOnlySanitizedGatewayText sends secrets through every
 // gateway write whose text Orka sanitizes. The recorder captures each request
 // before the provider runs it, so a call the provider then refuses for its
@@ -120,15 +127,22 @@ func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 	_ = client.MarkGatewayDeliveryDelivered(ctx, "tenant", "gdl-created", "owner", "api_key="+openAI, now)
 	_ = client.ScheduleGatewayDeliveryRetry(ctx, "tenant", "gdl-created", "owner", "token is "+github, now)
 	_ = client.MarkGatewayDeliveryTerminal(ctx, "tenant", "gdl-created", "owner", store.GatewayDeliveryFailed, "api_key="+openAI, now)
+	_, _, _ = client.EnqueueGatewayMessage(ctx, store.GatewayMessageEnqueue{
+		Namespace: "tenant", NamespaceUID: "tenant-uid", EventID: event.ID, TaskName: "task", TaskUID: "task-uid",
+		RequestID: "request", Text: "progress: token is " + github, MaxMessages: 10, MaxAttempts: 3,
+		Now: now, ExpiresAt: now.Add(time.Hour),
+	})
 
 	recorder.requireCalled(t,
 		"AdmitGatewayEvent", "GetGatewayEventDuplicate", "CreateGatewayDelivery", "RetryGatewayEvent", "ExpireGatewayEvent",
 		"ExpireGatewayEventWithDelivery", "MarkExpiredGatewayEventDeadLettered", "ProjectGatewayTerminal",
 		"MarkGatewayDeliveryDelivered", "ScheduleGatewayDeliveryRetry", "MarkGatewayDeliveryTerminal",
+		"EnqueueGatewayMessage",
 	)
 	recorder.requireNoSecret(t, secrets)
 	recorder.requireReceived(t, "AdmitGatewayEvent", "Authorization:")
 	recorder.requireReceived(t, "ProjectGatewayTerminal", "token is")
+	recorder.requireReceived(t, "EnqueueGatewayMessage", "progress: token is")
 
 	// The provider stores what it received: the admitted event and its
 	// transcript message carry only the sanitized text.
@@ -136,4 +150,39 @@ func TestProviderReceivesOnlySanitizedGatewayText(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "token is [REDACTED]", stored.SenderDisplayName)
 	require.Equal(t, "api_key=[REDACTED]", stored.Metadata["note"])
+}
+
+// TestClientRefusesInvalidGatewayMessageText requires the client to refuse
+// gateway message text the Gateway service refuses, before the provider sees
+// it, and to pass text the service already redacted through unchanged.
+func TestClientRefusesInvalidGatewayMessageText(t *testing.T) {
+	recorder := newRecordingStore(t)
+	client, err := storageclient.NewEmbedded(recorder)
+	require.NoError(t, err)
+	now := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
+	request := func(text string) store.GatewayMessageEnqueue {
+		return store.GatewayMessageEnqueue{
+			Namespace: "tenant", NamespaceUID: "tenant-uid", EventID: "gwe-1", TaskName: "task", TaskUID: "task-uid",
+			RequestID: "request", Text: text, MaxMessages: 10, MaxAttempts: 3, Now: now, ExpiresAt: now.Add(time.Hour),
+		}
+	}
+	for name, text := range map[string]string{
+		"over the interim text limit": strings.Repeat("x", protocol.MaxInterimTextBytes+1),
+		"not UTF-8":                   "progress \xff",
+	} {
+		_, _, err := client.EnqueueGatewayMessage(t.Context(), request(text))
+		require.ErrorIs(t, err, store.ErrValidation, name)
+	}
+	require.Zero(t, recorder.calls["EnqueueGatewayMessage"], "refused text never reaches the provider")
+
+	redacted := protocol.SanitizeMessage("progress: token is "+protectedSecrets()["GitHub token"], 0)
+	_, _, _ = client.EnqueueGatewayMessage(t.Context(), request(redacted))
+	require.Equal(t, 1, recorder.calls["EnqueueGatewayMessage"])
+	var received []string
+	for _, text := range recorder.texts {
+		if text.method == "EnqueueGatewayMessage" {
+			received = append(received, text.value)
+		}
+	}
+	require.Contains(t, received, redacted, "text the service already redacted is unchanged")
 }

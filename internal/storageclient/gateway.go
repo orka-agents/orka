@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/gateway/protocol"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -130,4 +132,20 @@ func (c *Client) MarkGatewayDeliveryTerminal(
 	ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time,
 ) error {
 	return c.StateProvider.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, sanitizeGatewayText(reason, gatewayReasonBytes), now)
+}
+
+// EnqueueGatewayMessage redacts the message text before the provider stores
+// it, as the Gateway service does before it enqueues, so a direct caller
+// cannot store a credential either. Like the service, it refuses text that is
+// over the interim text limit or not valid UTF-8, before or after redaction,
+// instead of truncating it. Text the service already redacted is unchanged.
+func (c *Client) EnqueueGatewayMessage(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
+	if len(request.Text) > protocol.MaxInterimTextBytes || !utf8.ValidString(request.Text) {
+		return nil, false, store.ValidationErrorf("gateway message text is invalid")
+	}
+	request.Text = protocol.SanitizeMessage(request.Text, 0)
+	if len(request.Text) > protocol.MaxInterimTextBytes || !utf8.ValidString(request.Text) {
+		return nil, false, store.ValidationErrorf("gateway message text is invalid after sanitization")
+	}
+	return c.StateProvider.EnqueueGatewayMessage(ctx, request)
 }
