@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -44,9 +45,7 @@ func (s *protocolStore) CommitScanTaskIngestion(ctx context.Context, commit stor
 func newProtocolClient(t *testing.T) (*storageclient.Client, *protocolStore) {
 	t.Helper()
 	backend := &protocolStore{Store: openSQLite(t)}
-	client, err := storageclient.NewEmbedded(backend)
-	require.NoError(t, err)
-	return client, backend
+	return storageclienttest.NewEmbedded(t, backend), backend
 }
 
 func acceptedProposal(t *testing.T, client *storageclient.Client, id, description string) *store.MemoryProposal {

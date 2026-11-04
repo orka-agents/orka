@@ -13,7 +13,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/metrics"
-	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -249,8 +249,7 @@ func TestProviderReceivesOnlyRedactedContent(t *testing.T) {
 	secrets := protectedSecrets()
 	openAI, github, bearer := secrets["OpenAI key"], secrets["GitHub token"], secrets["bearer value"]
 	recorder := newRecordingStore(t)
-	client, err := storageclient.NewEmbedded(recorder)
-	require.NoError(t, err)
+	client := storageclienttest.NewEmbedded(t, recorder)
 	ctx := t.Context()
 
 	content, err := json.Marshal(map[string]any{"apiKey": openAI, "note": "token " + github, "safe": "kept"})

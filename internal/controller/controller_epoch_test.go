@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,7 +66,7 @@ func TestControllerEpochManagerCreatesAndAdvances(t *testing.T) {
 	}
 }
 
-func TestControllerEpochManagerMirrorsAuthoritativeFenceBeforeReadiness(t *testing.T) {
+func TestControllerEpochManagerAdvancesStorageBeforeReadiness(t *testing.T) {
 	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -74,9 +77,9 @@ func TestControllerEpochManagerMirrorsAuthoritativeFenceBeforeReadiness(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = mirrorDB.Close() })
-	authority := sqlite.NewStore(authorityDB, "authority")
+	authority := installationEpochStore{ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), installationID: "installation-a"}
 	mirror := sqlite.NewStore(mirrorDB, "mirror")
-	manager := NewControllerEpochManager(authority, "controller-a").WithMirror(mirror)
+	manager := NewControllerEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, mirror)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(ctx) }()
@@ -85,14 +88,14 @@ func TestControllerEpochManagerMirrorsAuthoritativeFenceBeforeReadiness(t *testi
 		cancel()
 		t.Fatal(err)
 	}
-	mirrored, err := mirror.GetControllerEpoch(context.Background(), fence.Name)
+	mirrored, err := mirror.GetControllerEpochMirror(context.Background(), fence.Name)
 	if err != nil {
 		cancel()
 		t.Fatal(err)
 	}
-	if mirrored.Epoch != fence.Epoch || mirrored.HolderID != fence.HolderID {
+	if mirrored.Epoch.Epoch != fence.Epoch || mirrored.Epoch.HolderID != fence.HolderID || mirrored.InstallationID != "installation-a" {
 		cancel()
-		t.Fatalf("mirrored epoch = %#v, want fence %#v", mirrored, fence)
+		t.Fatalf("advanced epoch = %#v, want fence %#v under installation-a", mirrored, fence)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -102,8 +105,8 @@ func TestControllerEpochManagerMirrorsAuthoritativeFenceBeforeReadiness(t *testi
 
 func TestControllerEpochManagerAdoptsCommittedIntentAfterConflict(t *testing.T) {
 	authority := newRetainedIntentEpochStore(epochConflictCommitThenReportConflict)
-	mirror := &recordingControllerEpochMirror{}
-	manager := NewControllerEpochManager(authority, controllerEpochTestTakeoverHolder).WithMirror(mirror)
+	dataset := newRecordingEpochDataset("dataset-a")
+	manager := NewControllerEpochManager(authority, controllerEpochTestTakeoverHolder).WithStorage(storagev1.StateContract, dataset)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(ctx) }()
@@ -121,9 +124,9 @@ func TestControllerEpochManagerAdoptsCommittedIntentAfterConflict(t *testing.T) 
 		cancel()
 		t.Fatalf("CAS submissions after committed conflict = %d, want 1 (no epoch 9 intent)", len(authority.changes))
 	}
-	if len(mirror.synced) != 1 || !controllerEpochMatchesCAS(&mirror.synced[0], authority.changes[0]) {
+	if len(dataset.advancedEpochs()) != 1 || !controllerEpochMatchesCAS(&dataset.advancedEpochs()[0], authority.changes[0]) {
 		cancel()
-		t.Fatalf("mirrored authority = %#v, submitted intent = %#v", mirror.synced, authority.changes[0])
+		t.Fatalf("mirrored authority = %#v, submitted intent = %#v", dataset.advancedEpochs(), authority.changes[0])
 	}
 
 	cancel()
@@ -276,7 +279,7 @@ func TestControllerEpochManagerAdvancesRestoredAuthorityAndMirrorExactlyOnce(t *
 	}
 	t.Cleanup(func() { _ = mirrorDB.Close() })
 	mirror := sqlite.NewStore(mirrorDB, "restored-mirror")
-	manager := NewControllerEpochManager(authority, "controller-after-restore").WithMirror(mirror)
+	manager := NewControllerEpochManager(authority, "controller-after-restore").WithStorage(storagev1.StateContract, mirror)
 	managerCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(managerCtx) }()
@@ -295,10 +298,16 @@ func TestControllerEpochManagerAdvancesRestoredAuthorityAndMirrorExactlyOnce(t *
 		cancel()
 		t.Fatalf("read advanced Kubernetes authority: %v", err)
 	}
-	mirrored, err := mirror.GetControllerEpoch(ctx, fence.Name)
+	mirrorState, err := mirror.GetControllerEpochMirror(ctx, fence.Name)
 	if err != nil {
 		cancel()
-		t.Fatalf("read synchronized durable mirror: %v", err)
+		t.Fatalf("read the advanced dataset epoch: %v", err)
+	}
+	mirrored := mirrorState.Epoch
+	installationID, err := authority.ControllerEpochInstallationID(ctx, fence.Name)
+	if err != nil || mirrorState.InstallationID != installationID {
+		cancel()
+		t.Fatalf("dataset installation = %q, want the ControllerEpoch UID %q (%v)", mirrorState.InstallationID, installationID, err)
 	}
 	if authoritative.Epoch != 8 || authoritative.Version != 8 || mirrored.Epoch != 8 || mirrored.Version != 8 ||
 		authoritative.HolderID != fence.HolderID || mirrored.HolderID != fence.HolderID ||
@@ -486,6 +495,10 @@ func newRetainedIntentEpochStore(conflict retainedIntentEpochConflict) *retained
 	}
 }
 
+func (s *retainedIntentEpochStore) ControllerEpochInstallationID(context.Context, string) (string, error) {
+	return "installation-retained-intent", nil
+}
+
 func (s *retainedIntentEpochStore) GetControllerEpoch(context.Context, string) (*store.ControllerEpoch, error) {
 	if s.current == nil {
 		return nil, store.ErrNotFound
@@ -550,18 +563,90 @@ func controllerEpochFromTestCAS(change store.ControllerEpochCAS) *store.Controll
 	}
 }
 
-type recordingControllerEpochMirror struct {
-	synced []store.ControllerEpoch
+type recordingEpochDataset struct {
+	datasetID string
+
+	mu       sync.Mutex
+	requests []storagev1.AdvanceControllerEpochRequest
+	// advanceErrs, when non-empty, fail the next advances in order.
+	advanceErrs []error
+	// describeErrs, when non-empty, fail the next descriptions in order.
+	describeErrs []error
 }
 
-func (m *recordingControllerEpochMirror) SyncControllerEpochMirror(_ context.Context, epoch store.ControllerEpoch) error {
-	m.synced = append(m.synced, epoch)
-	return nil
+func newRecordingEpochDataset(datasetID string) *recordingEpochDataset {
+	return &recordingEpochDataset{datasetID: datasetID}
+}
+
+func (d *recordingEpochDataset) Describe(context.Context) (storagev1.ProviderInfo, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.describeErrs) > 0 {
+		err := d.describeErrs[0]
+		d.describeErrs = d.describeErrs[1:]
+		return storagev1.ProviderInfo{}, err
+	}
+	return storagev1.ProviderInfo{DatasetID: d.datasetID}, nil
+}
+
+func (d *recordingEpochDataset) AdvanceControllerEpoch(
+	_ context.Context, request storagev1.AdvanceControllerEpochRequest,
+) (storagev1.ControllerEpochMirrorState, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.advanceErrs) > 0 {
+		err := d.advanceErrs[0]
+		d.advanceErrs = d.advanceErrs[1:]
+		return storagev1.ControllerEpochMirrorState{}, err
+	}
+	d.requests = append(d.requests, request)
+	return storagev1.ControllerEpochMirrorState{
+		DatasetID: request.DatasetID, Epoch: request.Epoch, InstallationID: request.InstallationID,
+	}, nil
+}
+
+func (d *recordingEpochDataset) GetControllerEpochMirror(context.Context, string) (storagev1.ControllerEpochMirrorState, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.requests) == 0 {
+		return storagev1.ControllerEpochMirrorState{}, store.ErrNotFound
+	}
+	last := d.requests[len(d.requests)-1]
+	return storagev1.ControllerEpochMirrorState{DatasetID: last.DatasetID, Epoch: last.Epoch, InstallationID: last.InstallationID}, nil
+}
+
+// advancedEpochs returns the epochs the manager advanced the dataset to.
+func (d *recordingEpochDataset) advancedEpochs() []store.ControllerEpoch {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	epochs := make([]store.ControllerEpoch, 0, len(d.requests))
+	for _, request := range d.requests {
+		epochs = append(epochs, request.Epoch)
+	}
+	return epochs
+}
+
+func (d *recordingEpochDataset) advanceRequests() []storagev1.AdvanceControllerEpochRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.requests)
+}
+
+// installationEpochStore gives an epoch store without its own installation
+// record a fixed installation ID.
+type installationEpochStore struct {
+	store.ControllerEpochStore
+	installationID string
+}
+
+func (s installationEpochStore) ControllerEpochInstallationID(context.Context, string) (string, error) {
+	return s.installationID, nil
 }
 
 var (
-	_ store.ControllerEpochStore  = (*retainedIntentEpochStore)(nil)
-	_ store.ControllerEpochMirror = (*recordingControllerEpochMirror)(nil)
+	_ store.ControllerEpochStore              = (*retainedIntentEpochStore)(nil)
+	_ store.ControllerEpochInstallationReader = (*retainedIntentEpochStore)(nil)
+	_ EpochDataset                            = (*recordingEpochDataset)(nil)
 )
 
 const (
@@ -569,8 +654,14 @@ const (
 	controllerEpochTestTakeoverHolder   = "controller-takeover"
 )
 
-var controllerEpochTestLeaseUIDSequence atomic.Int64
+var (
+	controllerEpochTestLeaseUIDSequence  atomic.Int64
+	controllerEpochTestObjectUIDSequence atomic.Int64
+)
 
+// withControllerEpochLeaseUIDs assigns the UIDs the API server would to
+// controller epoch Leases and ControllerEpoch objects, which the fake client
+// leaves empty.
 func withControllerEpochLeaseUIDs(t testing.TB, baseClient client.Client) client.WithWatch {
 	t.Helper()
 	withWatch, ok := baseClient.(client.WithWatch)
@@ -581,6 +672,9 @@ func withControllerEpochLeaseUIDs(t testing.TB, baseClient client.Client) client
 		Create: func(ctx context.Context, delegate client.WithWatch, object client.Object, options ...client.CreateOption) error {
 			if lease, ok := object.(*coordinationv1.Lease); ok && lease.UID == "" {
 				lease.UID = types.UID(fmt.Sprintf("controller-test-lease-uid-%d", controllerEpochTestLeaseUIDSequence.Add(1)))
+			}
+			if epoch, ok := object.(*corev1alpha1.ControllerEpoch); ok && epoch.UID == "" {
+				epoch.UID = types.UID(fmt.Sprintf("controller-test-installation-%d", controllerEpochTestObjectUIDSequence.Add(1)))
 			}
 			return delegate.Create(ctx, object, options...)
 		},

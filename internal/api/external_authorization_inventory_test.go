@@ -365,6 +365,15 @@ func (f *externalAuthorizationFixture) changes(t *testing.T) int64 {
 	return count
 }
 
+// receipts counts operation receipts: every write through the storage client
+// stores one with its effect.
+func (f *externalAuthorizationFixture) receipts(t *testing.T) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, f.db.QueryRowContext(t.Context(), "SELECT count(*) FROM operation_receipts").Scan(&count))
+	return count
+}
+
 func (f *externalAuthorizationFixture) requireIdentity(t *testing.T, review authorizationv1.SubjectAccessReviewSpec) {
 	t.Helper()
 	require.Equal(t, f.user.Username, review.User)

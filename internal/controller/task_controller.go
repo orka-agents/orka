@@ -1805,10 +1805,13 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// Check timeout
+	// Check timeout. A Job that succeeded before the deadline is completed
+	// below instead: its completion may have been deferred past the timeout,
+	// for example by a storage write the store had not accepted yet.
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
-		if elapsed > task.Spec.Timeout.Duration {
+		deadline := task.Status.StartTime.Add(task.Spec.Timeout.Duration)
+		if elapsed > task.Spec.Timeout.Duration && !r.taskJobSucceededBy(ctx, task, deadline) {
 			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
 				return result, err
 			}
@@ -2093,6 +2096,27 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 		}
 		t.Status.Message = message
 	})
+}
+
+// taskJobSucceededBy reports whether the Task's current Job succeeded no later
+// than deadline, so that a completion deferred past the Task timeout records
+// the Job's outcome rather than a timeout. A Job that finished after the
+// deadline, or whose completion time is unknown, does not qualify. Nor does
+// an autonomous Task: its timeout ends the loop even after a successful
+// iteration. Any lookup failure reports false and leaves the timeout to apply
+// as before.
+func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) bool {
+	if strings.TrimSpace(task.Status.JobName) == "" || r.isAutonomousTask(ctx, task) {
+		return false
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		return false
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return false
+	}
+	return job.Status.Succeeded > 0 && job.Status.CompletionTime != nil && !job.Status.CompletionTime.After(deadline)
 }
 
 // timedOutTaskMessage keeps the last published Pod waiting reason, such as an
@@ -2772,7 +2796,7 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2827,7 +2851,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		// A result the store has not accepted yet, or may have saved, is
+		// collected again on the next attempt rather than dropped.
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 		// Continue anyway, result collection is best-effort
@@ -2838,6 +2864,12 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
 		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
+			// A transcript the store has not accepted yet, or may have saved,
+			// is appended again on the next attempt, before the lock is
+			// released; its stable message IDs make that safe.
+			if store.IsTemporaryStorageError(err) {
+				return ctrl.Result{}, err
+			}
 			// Continue anyway
 		}
 		var err error
@@ -2851,6 +2883,12 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	if task.Spec.SessionRef != nil {
 		if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, inputTokens, outputTokens); err != nil {
 			log.Error(err, "failed to release session lock")
+			// A release the store has not accepted yet is retried rather
+			// than leaving the terminal Task holding the Session; a release
+			// that committed leaves no lock, so retrying it changes nothing.
+			if store.IsTemporaryStorageError(err) {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
@@ -4826,6 +4864,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	// Collect result from this iteration (best-effort)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect iteration result")
+		if store.IsTemporaryStorageError(err) {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {

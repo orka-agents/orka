@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
@@ -287,11 +289,12 @@ func (unavailableEventProvider) ListSessionExecutionEvents(
 
 // TestClientRecordsStoreMetricsForAnyProvider checks that a provider that
 // records nothing in Orka's registry still reports appends and store reads,
-// here as failures during an outage.
+// here as failures during an outage. The client retries an unavailable write
+// until its deadline, so the calls get a short one.
 func TestClientRecordsStoreMetricsForAnyProvider(t *testing.T) {
-	client, err := storageclient.NewEmbedded(unavailableEventProvider{Store: openSQLite(t)})
-	require.NoError(t, err)
-	ctx := t.Context()
+	client := storageclienttest.NewEmbedded(t, unavailableEventProvider{Store: openSQLite(t)})
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
 	delta := storeMetricDelta(t, func() {
 		_, err := client.AppendExecutionEvent(ctx, workloadEvent("a", events.ExecutionEventTypeTaskStarted))
 		require.ErrorIs(t, err, store.ErrUnavailable)

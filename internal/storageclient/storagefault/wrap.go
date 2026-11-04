@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
@@ -70,13 +71,19 @@ func (i *Injector) WrapEmbedded(store storageclient.EmbeddedStore) storageclient
 
 // NewEmbeddedClient wraps store with a new injector and returns a storage
 // client over the wrapper, as cmd/main.go builds one over the embedded store,
-// together with the injector that controls it. As at startup, the caller
-// activates the snapshot key with Client.ActivateSnapshotKey before sealed
-// calls; until then they fail with ErrSnapshotKeyNotActive before they reach
-// the injector.
+// together with the injector that controls it. The client's writes carry the
+// controller epoch store holds (storageclienttest.FollowDataset), read from
+// store itself, so faults reach the client's calls but not its fence. As at
+// startup, the caller activates the snapshot key with
+// Client.ActivateSnapshotKey before sealed calls; until then they fail with
+// ErrSnapshotKeyNotActive before they reach the injector.
 func NewEmbeddedClient(store storageclient.EmbeddedStore) (*storageclient.Client, *Injector, error) {
 	injector := New()
-	client, err := storageclient.NewEmbedded(injector.WrapEmbedded(store))
+	wrapped := injector.WrapEmbedded(store)
+	client, err := storageclient.New(storageclient.Options{
+		State: wrapped, Artifacts: wrapped, Embedded: wrapped,
+		Fences: &storageclienttest.FollowDataset{Dataset: store},
+	})
 	if err != nil {
 		return nil, nil, err
 	}

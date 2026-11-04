@@ -54,11 +54,27 @@ func saveArtifact(ctx context.Context, provider storagev1.ArtifactStore) error {
 	return provider.SaveArtifact(ctx, storagev1.SaveArtifactRequest{Owner: owner, Filename: key.Filename, ContentType: "text/plain", Data: []byte("file")})
 }
 
+// shortCall bounds a write that a test expects to fail through an outage:
+// the client retries an unavailable write until its deadline.
+func shortCall(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func requireInjected(t *testing.T, err error, target error) {
 	t.Helper()
 	require.ErrorIs(t, err, target)
 	var injected *storagefault.Error
 	require.ErrorAs(t, err, &injected, "the outcome came from a fault, not the provider")
+}
+
+// artifactsWithMirror serves the artifact wrapper together with the state
+// mirror of the store behind it.
+type artifactsWithMirror struct {
+	storagev1.ArtifactProvider
+	storagev1.ControllerEpochMirror
 }
 
 // Without faults the wrappers are transparent: the shared provider suite
@@ -77,13 +93,17 @@ func TestWrappersPassCallsThrough(t *testing.T) {
 			client, faults := newClient(t)
 			track(faults)
 			return client
-		})
+		}, storagetest.ProviderAttachesEnvelopes())
 	})
 	t.Run("artifact provider", func(t *testing.T) {
 		storagetest.RunArtifacts(t, func(t *testing.T) storagev1.ArtifactProvider {
 			faults := storagefault.New()
 			track(faults)
-			return faults.WrapArtifacts(openSQLite(t))
+			backend := openSQLite(t)
+			// The suite gives the dataset its first epoch through the state
+			// mirror when the provider offers one, which binds no
+			// installation; it reaches SQLite directly.
+			return artifactsWithMirror{ArtifactProvider: faults.WrapArtifacts(backend), ControllerEpochMirror: backend}
 		})
 	})
 	calls := 0
@@ -186,7 +206,7 @@ func TestStoresGoDownAndComeBackSeparately(t *testing.T) {
 	outage = faults.Down(artifacts)
 	_, _, err = client.GetArtifact(ctx, key)
 	requireInjected(t, err, storagev1.ErrUnavailable)
-	requireInjected(t, saveArtifact(ctx, client), storagev1.ErrUnavailable)
+	requireInjected(t, saveArtifact(shortCall(t), client), storagev1.ErrUnavailable)
 	require.NoError(t, client.SaveResult(ctx, "tenant", "task-2", []byte("new")), "state keeps working while artifact storage is down")
 	outage.Remove()
 	_, _, err = client.GetArtifact(ctx, key)
@@ -221,28 +241,44 @@ func TestFaultsMatchMethodsAndKinds(t *testing.T) {
 	require.Equal(t, 1, method.Hits())
 
 	once := faults.Inject(storagefault.Fault{Action: storagefault.Fail(storagev1.ErrUnavailable), Times: 1})
-	requireInjected(t, client.SaveResult(ctx, "tenant", "task", []byte("changed")), storagev1.ErrUnavailable)
-	require.NoError(t, client.SaveResult(ctx, "tenant", "task", []byte("changed")), "a fault with Times removes itself")
+	_, err = client.GetResult(ctx, "tenant", "task")
+	requireInjected(t, err, storagev1.ErrUnavailable)
+	_, err = client.GetResult(ctx, "tenant", "task")
+	require.NoError(t, err, "a fault with Times removes itself")
+	require.Equal(t, 1, once.Hits())
+
+	// The client retries an unavailable write with the same envelope, so a
+	// fault that fails a write once does not reach the caller.
+	once = faults.Inject(storagefault.Fault{Action: storagefault.Fail(storagev1.ErrUnavailable), Times: 1})
+	require.NoError(t, client.SaveResult(ctx, "tenant", "task", []byte("changed")))
 	require.Equal(t, 1, once.Hits())
 
 	faults.ResetCounts()
 	require.Equal(t, storagefault.Counts{}, faults.Counts(storagefault.Match{}))
 }
 
+// A write whose response is lost after it committed is retried with the same
+// envelope, and the provider answers the retry from the operation's receipt,
+// so the write commits once and the caller sees it succeed. A lost read
+// response reaches the caller.
 func TestLostResponseAfterCommit(t *testing.T) {
 	client, faults := newClient(t)
 	ctx := t.Context()
 	lost := faults.Inject(storagefault.Fault{Action: storagefault.LoseResponse(), Times: 2})
 
-	requireInjected(t, client.SaveResult(ctx, "tenant", "task", []byte("committed")), storagev1.ErrOutcomeUnknown)
+	require.NoError(t, client.SaveResult(ctx, "tenant", "task", []byte("committed")))
+	require.Equal(t, 2, lost.Hits())
+	require.Equal(t, storagefault.Counts{Calls: 3, Delivered: 3}, faults.Counts(storagefault.Match{}))
+
+	lost = faults.Inject(storagefault.Fault{Action: storagefault.LoseResponse(), Times: 1})
 	_, err := client.GetResult(ctx, "tenant", "task")
 	requireInjected(t, err, storagev1.ErrUnavailable)
-	require.Equal(t, 2, lost.Hits())
+	require.Equal(t, 1, lost.Hits())
 
 	data, err := client.GetResult(ctx, "tenant", "task")
 	require.NoError(t, err)
-	require.Equal(t, []byte("committed"), data, "the write committed although its response was lost")
-	require.Equal(t, storagefault.Counts{Calls: 3, Delivered: 3}, faults.Counts(storagefault.Match{}))
+	require.Equal(t, []byte("committed"), data, "the write committed although its responses were lost")
+	require.Equal(t, storagefault.Counts{Calls: 5, Delivered: 5}, faults.Counts(storagefault.Match{}))
 }
 
 func TestHangHoldsCallsUntilReleased(t *testing.T) {
@@ -349,13 +385,15 @@ func TestMatchByCallClass(t *testing.T) {
 		Match:  storagefault.Match{Classes: []storagev1.CallClass{storagev1.CallBulk}},
 		Action: storagefault.Fail(storagev1.ErrUnavailable),
 	})
-	requireInjected(t, client.SaveResult(ctx, "tenant", "task", []byte("x")), storagev1.ErrUnavailable)
-	requireInjected(t, saveArtifact(ctx, client), storagev1.ErrUnavailable)
+	requireInjected(t, client.SaveResult(shortCall(t), "tenant", "task", []byte("x")), storagev1.ErrUnavailable)
+	requireInjected(t, saveArtifact(shortCall(t), client), storagev1.ErrUnavailable)
 	require.NoError(t, client.DeleteResult(ctx, "tenant", "task"), "interactive calls are not matched")
 	require.NoError(t, client.HealthCheck(ctx), "control calls are not matched")
 	_, err := client.GetAgentExecutionSnapshot(ctx, store.AgentExecutionSnapshotKey{TaskUID: "task-uid", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
 	requireInjected(t, err, storagev1.ErrUnavailable)
-	require.Equal(t, 3, bulk.Hits(), "a sealed snapshot read moves a whole sealed body, so it is a bulk call")
+	// The client retried each bulk write until its deadline.
+	writes := faults.Counts(storagefault.Match{Methods: []string{"SaveResult", "SaveArtifact"}}).Calls
+	require.Equal(t, writes+1, bulk.Hits(), "a sealed snapshot read moves a whole sealed body, so it is a bulk call")
 }
 
 // The embedded client probes its store through the state binding. A binding

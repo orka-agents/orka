@@ -294,6 +294,10 @@ func runWriteAborted[P writeCaseProvider](t *testing.T, provider P, c writeCase[
 // refuses the write and changes nothing, that the same operation commits once
 // the installation binds the dataset again, and that a replay of a committed
 // operation is still served after the dataset is detached again.
+//
+// State is observed only while the dataset is bound: some observers call
+// catalog writes that change nothing, such as IsLocked, and a detached
+// dataset refuses those as well once they carry a write envelope.
 func runWriteDetached[P writeCaseProvider](t *testing.T, provider P, c writeCase[P]) {
 	dataset, baseline := prepareWriteCase(t, provider, c)
 	ctx := t.Context()
@@ -304,18 +308,22 @@ func runWriteDetached[P writeCaseProvider](t *testing.T, provider P, c writeCase
 		})
 		require.NoError(t, err)
 	}
+	bind := func(generation int64) {
+		t.Helper()
+		_, err := provider.BindDataset(ctx, storagev1.BindDatasetRequest{
+			DatasetID: dataset, InstallationID: suiteInstance, RecordUID: "suite-record", SwitchGeneration: generation,
+			Mode: storagev1.BindRebind,
+		})
+		require.NoError(t, err)
+	}
 	detach(1)
 	envelope := envelopeFor(t, dataset, c, suiteFence)
 	refused := callWrite(ctx, t, provider, c, envelope, suiteFence)
 	require.ErrorIs(t, refused.err, storagev1.ErrDatasetDetached)
 	require.ErrorIs(t, refused.err, storagev1.ErrNotReady)
-	require.Equal(t, baseline, c.observe(t, provider), "a write to a detached dataset changed state")
 
-	_, err := provider.BindDataset(ctx, storagev1.BindDatasetRequest{
-		DatasetID: dataset, InstallationID: suiteInstance, RecordUID: "suite-record", SwitchGeneration: 2,
-		Mode: storagev1.BindRebind,
-	})
-	require.NoError(t, err)
+	bind(2)
+	require.Equal(t, baseline, c.observe(t, provider), "a write to a detached dataset changed state")
 	committed := callWrite(ctx, t, provider, c, envelope, suiteFence)
 	require.NoError(t, committed.err, "the refused operation commits once the dataset is bound again")
 	if c.afterCommit != nil {
@@ -325,6 +333,7 @@ func runWriteDetached[P writeCaseProvider](t *testing.T, provider P, c writeCase
 
 	detach(3)
 	requireSameOutcome(t, committed, callWrite(ctx, t, provider, c, envelope, suiteFence))
+	bind(4)
 	require.Equal(t, after, c.observe(t, provider), "a replay on a detached dataset changed state")
 }
 

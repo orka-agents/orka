@@ -89,6 +89,25 @@ func requireUnbound(t *testing.T, provider bindingProvider, dataset string) {
 	require.Nil(t, info.Binding)
 }
 
+// requireUnclaimed checks that no installation has bound the dataset itself.
+// It is unbound, or, when the suite gave an artifacts-only provider its first
+// epoch through an advance to store a record, it holds only the binding that
+// advance records: the suite's installation at generation 0, without a
+// record.
+func requireUnclaimed(t *testing.T, provider bindingProvider, dataset string) {
+	t.Helper()
+	if !suiteAdvanced(provider) {
+		requireUnbound(t, provider, dataset)
+		return
+	}
+	recorded, err := provider.GetDatasetBinding(t.Context(), dataset)
+	require.NoError(t, err)
+	require.Equal(t, storagev1.DatasetBinding{
+		InstallationID: suiteInstance, State: storagev1.DatasetBound, BoundAt: recorded.BoundAt,
+	}, recorded, "only the suite's controller epoch advance recorded an installation")
+	requireStoredBinding(t, provider, dataset, recorded)
+}
+
 // requireStoredBinding checks that GetDatasetBinding and Describe both report
 // want.
 func requireStoredBinding(t *testing.T, provider bindingProvider, dataset string, want storagev1.DatasetBinding) {
@@ -214,7 +233,7 @@ func runDatasetBinding[P bindingProvider](t *testing.T, newProvider func(*testin
 			populate(t, provider)
 			_, err := provider.BindDataset(ctx, bindRequest(dataset, storagev1.BindFresh, 1))
 			requireBindingConflict(t, provider, dataset, err)
-			requireUnbound(t, provider, dataset)
+			requireUnclaimed(t, provider, dataset)
 			adopted, err := provider.BindDataset(ctx, bindRequest(dataset, storagev1.BindAdopt, 1))
 			require.NoError(t, err, "a dataset holding data is adopted")
 			requireStoredBinding(t, provider, dataset, adopted)
@@ -266,7 +285,7 @@ func runDatasetBinding[P bindingProvider](t *testing.T, newProvider func(*testin
 			populate(t, provider)
 			bound, err := provider.BindDataset(ctx, bindRequest(dataset, storagev1.BindEmbedded, 1))
 			if errors.Is(err, storagev1.ErrValidation) {
-				requireUnbound(t, provider, dataset)
+				requireUnclaimed(t, provider, dataset)
 				return
 			}
 			require.NoError(t, err, "an embedded provider binds a dataset in any bootstrap state")

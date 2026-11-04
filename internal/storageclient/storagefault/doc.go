@@ -15,6 +15,12 @@
 //	...
 //	outage.Remove() // and back
 //
+// The client retries a write that fails with ErrUnavailable or loses its
+// response, with the same write envelope, until the call's deadline or
+// storageclient.DefaultRetryHorizon. A fault that fails a write once is
+// therefore absorbed by the retry, and a test that expects a write to fail
+// through an outage gives the call a short deadline.
+//
 // Every method of the provider interfaces is wrapped, so a fault applies to
 // every call that reaches the contract it names. The methods of
 // OperationReceiptStore and ControllerEpochAdvancer are not wrapped until

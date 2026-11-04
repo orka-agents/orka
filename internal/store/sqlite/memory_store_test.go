@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -317,6 +318,26 @@ func sqliteConstraintError(t *testing.T) error {
 	return err
 }
 
+// signalAfterResolve closes resolved once its first resolve has returned.
+type signalAfterResolve struct {
+	*Store
+	resolved chan struct{}
+	once     sync.Once
+}
+
+func (s *signalAfterResolve) ResolveMemoryProposalApplication(
+	ctx context.Context, namespace, id string,
+) (store.MemoryProposalApplyTarget, error) {
+	target, err := s.Store.ResolveMemoryProposalApplication(ctx, namespace, id)
+	s.once.Do(func() { close(s.resolved) })
+	return target, err
+}
+
+// Concurrent applies of one proposal create one memory. A commit under a
+// write envelope holds the write lock for its whole operation, so the second
+// apply, which resolved the accepted proposal while the first held its
+// commit, waits for that commit, finds the target it resolved changed,
+// resolves again and returns the memory the first created.
 func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -332,6 +353,123 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	}
 	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
 		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
+	var holdOnce sync.Once
+	s1.applyMemoryProposalAfterAcceptedRead = func() {
+		holdOnce.Do(func() {
+			close(ready)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		})
+	}
+
+	type applyResult struct {
+		name   string
+		memory *store.Memory
+		err    error
+	}
+	results := make(chan applyResult, 2)
+	var wg sync.WaitGroup
+	apply := func(name string, client *storageclient.Client) {
+		wg.Go(func() {
+			memory, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
+			results <- applyResult{name: name, memory: memory, err: err}
+		})
+	}
+	apply("first", orkaClient(t, s1))
+	select {
+	case <-ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the first apply to read the accepted proposal")
+	}
+	// The second apply resolves the accepted proposal while the first holds
+	// its commit, then waits for that commit.
+	second := &signalAfterResolve{Store: s2, resolved: make(chan struct{})}
+	apply("second", orkaClient(t, second))
+	select {
+	case <-second.resolved:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the second apply to resolve the proposal")
+	}
+	releaseFirst()
+	wg.Wait()
+	close(results)
+
+	var memoryID string
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("%s ApplyMemoryProposal: %v", result.name, result.err)
+		}
+		if result.memory == nil || result.memory.ID == "" {
+			t.Fatalf("%s returned empty memory: %+v", result.name, result.memory)
+		}
+		if memoryID == "" {
+			memoryID = result.memory.ID
+		} else if result.memory.ID != memoryID {
+			t.Fatalf("concurrent applies returned different memories: %q and %q", memoryID, result.memory.ID)
+		}
+	}
+
+	listed, err := s1.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != memoryID || listed[0].SourceProposalID != proposal.ID {
+		t.Fatalf("expected exactly one applied memory %q for proposal %q, got %+v", memoryID, proposal.ID, listed)
+	}
+	updated, err := s2.GetMemoryProposal(ctx, ns, proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != proposalStatusApplied || updated.AppliedMemoryID != memoryID {
+		t.Fatalf("proposal apply metadata = %+v, want status applied and memory %q", updated, memoryID)
+	}
+}
+
+// withoutEnvelopes sends a client's memory proposal commits to the store
+// without the client's write envelope, as a store that does not require
+// envelopes accepts them. Such a commit runs in its own deferred
+// transaction, so another connection can change the proposal between the
+// commit's read and its write; an enveloped commit reserves the writer
+// before it reads.
+type withoutEnvelopes struct{ *Store }
+
+func (s withoutEnvelopes) CommitMemoryProposalApplication(
+	_ context.Context, application store.MemoryProposalApplication,
+) (*store.Memory, error) {
+	return s.Store.CommitMemoryProposalApplication(context.Background(), application)
+}
+
+// Without envelopes, two commits that both read the accepted proposal before
+// either writes still create one memory.
+func TestApplyMemoryProposalConcurrentIdempotentWithoutEnvelopes(t *testing.T) {
+	s1, s2 := setupDiskStorePair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const ns = "ns-apply-concurrent-raw"
+	proposal := &store.MemoryProposal{
+		Namespace: ns, TaskName: "task-concurrent", Type: "memory", Title: "Concurrent proposal",
+		Content: "Only one durable memory should be created for concurrent applies.",
+	}
+	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	// The dataset holds its controller epoch before the applies start, so
+	// neither client's fence lookup writes while the other holds its read.
+	if err := s1.SyncControllerEpochMirror(ctx, storageclienttest.InitialEpoch()); err != nil {
+		t.Fatalf("SyncControllerEpochMirror: %v", err)
 	}
 	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
 		t.Fatalf("ReviewMemoryProposal: %v", err)
@@ -368,7 +506,9 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 	}
 	results := make(chan applyResult, 2)
 	var wg sync.WaitGroup
-	for name, client := range map[string]*storageclient.Client{"first": orkaClient(t, s1), "second": orkaClient(t, s2)} {
+	for name, client := range map[string]*storageclient.Client{
+		"first": orkaClient(t, withoutEnvelopes{s1}), "second": orkaClient(t, withoutEnvelopes{s2}),
+	} {
 		wg.Go(func() {
 			memory, err := client.ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: name})
 			results <- applyResult{name: name, memory: memory, err: err}
@@ -390,44 +530,33 @@ func TestApplyMemoryProposalConcurrentIdempotent(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("%s ApplyMemoryProposal: %v", result.name, result.err)
 		}
-		if result.memory == nil || result.memory.ID == "" {
-			t.Fatalf("%s returned empty memory: %+v", result.name, result.memory)
-		}
 		if memoryID == "" {
 			memoryID = result.memory.ID
 		} else if result.memory.ID != memoryID {
 			t.Fatalf("concurrent applies returned different memories: %q and %q", memoryID, result.memory.ID)
 		}
 	}
-
 	listed, err := s1.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
 	if err != nil {
 		t.Fatalf("ListMemories: %v", err)
 	}
-	if len(listed) != 1 || listed[0].ID != memoryID || listed[0].SourceProposalID != proposal.ID {
-		t.Fatalf("expected exactly one applied memory %q for proposal %q, got %+v", memoryID, proposal.ID, listed)
-	}
-	updated, err := s2.GetMemoryProposal(ctx, ns, proposal.ID)
-	if err != nil {
-		t.Fatalf("GetMemoryProposal: %v", err)
-	}
-	if updated.Status != proposalStatusApplied || updated.AppliedMemoryID != memoryID {
-		t.Fatalf("proposal apply metadata = %+v, want status applied and memory %q", updated, memoryID)
+	if len(listed) != 1 || listed[0].ID != memoryID {
+		t.Fatalf("expected exactly one applied memory %q, got %+v", memoryID, listed)
 	}
 }
 
-func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T) {
+// Without envelopes, a commit that read the proposal as accepted does not
+// overwrite a status another connection changed before its write, and no
+// raw SQLite concurrency error reaches the caller.
+func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChangeWithoutEnvelopes(t *testing.T) {
 	s1, s2 := setupDiskStorePair(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	const ns = "ns-apply-stale-status"
+	const ns = "ns-apply-stale-status-raw"
 	proposal := &store.MemoryProposal{
-		Namespace: ns,
-		TaskName:  "task-stale",
-		Type:      "memory",
-		Title:     "Stale apply proposal",
-		Content:   "A stale apply must not overwrite an archived proposal status.",
+		Namespace: ns, TaskName: "task-stale", Type: "memory", Title: "Stale apply proposal",
+		Content: "A stale apply must not overwrite an archived proposal status.",
 	}
 	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
 		t.Fatalf("CreateMemoryProposal: %v", err)
@@ -451,14 +580,13 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T)
 			}
 		})
 	}
-
 	type applyResult struct {
 		memory *store.Memory
 		err    error
 	}
 	resultCh := make(chan applyResult, 1)
 	go func() {
-		memory, err := orkaClient(t, s1).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
+		memory, err := orkaClient(t, withoutEnvelopes{s1}).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
 		resultCh <- applyResult{memory: memory, err: err}
 	}()
 	select {
@@ -466,7 +594,6 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for apply to read accepted proposal")
 	}
-
 	if err := s2.ArchiveMemoryProposal(ctx, ns, proposal.ID); err != nil {
 		t.Fatalf("ArchiveMemoryProposal: %v", err)
 	}
@@ -478,6 +605,86 @@ func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T)
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for stale apply result")
 	}
+	if result.err == nil {
+		t.Fatalf("stale ApplyMemoryProposal returned memory %+v, want error", result.memory)
+	}
+	lowerErr := strings.ToLower(result.err.Error())
+	if strings.Contains(lowerErr, "database is locked") || strings.Contains(lowerErr, "sqlite_busy") || strings.Contains(lowerErr, "sqlite_locked") {
+		t.Fatalf("stale ApplyMemoryProposal returned raw SQLite concurrency error: %v", result.err)
+	}
+	if !errors.Is(result.err, store.ErrConflict) && !strings.Contains(result.err.Error(), "cannot be applied") {
+		t.Fatalf("stale ApplyMemoryProposal error = %v, want conflict or cannot be applied", result.err)
+	}
+	updated, err := s1.GetMemoryProposal(ctx, ns, proposal.ID)
+	if err != nil {
+		t.Fatalf("GetMemoryProposal: %v", err)
+	}
+	if updated.Status != "archived" || updated.AppliedMemoryID != "" {
+		t.Fatalf("proposal after stale apply = %+v, want archived with no applied memory", updated)
+	}
+	listed, err := s2.ListMemories(ctx, store.MemoryFilter{Namespace: ns, Source: "memory_proposal"})
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("stale apply created memories: %+v", listed)
+	}
+}
+
+// archiveBeforeCommit archives the proposal once, right before the client's
+// first commit of its application, as another replica would between the
+// client's resolve and its commit.
+type archiveBeforeCommit struct {
+	*Store
+	archive func() error
+	once    sync.Once
+}
+
+func (s *archiveBeforeCommit) CommitMemoryProposalApplication(
+	ctx context.Context, application store.MemoryProposalApplication,
+) (*store.Memory, error) {
+	var err error
+	s.once.Do(func() { err = s.archive() })
+	if err != nil {
+		return nil, err
+	}
+	return s.Store.CommitMemoryProposalApplication(ctx, application)
+}
+
+// A proposal archived after the client resolved it for application is not
+// applied, and its archived status is kept. A commit under a write envelope
+// holds the write lock for its whole operation, so the status changes
+// between the client's resolve and its commit.
+func TestApplyMemoryProposalDoesNotOverwriteConcurrentStatusChange(t *testing.T) {
+	s1, s2 := setupDiskStorePair(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const ns = "ns-apply-stale-status"
+	proposal := &store.MemoryProposal{
+		Namespace: ns,
+		TaskName:  "task-stale",
+		Type:      "memory",
+		Title:     "Stale apply proposal",
+		Content:   "A stale apply must not overwrite an archived proposal status.",
+	}
+	if err := s1.CreateMemoryProposal(ctx, proposal); err != nil {
+		t.Fatalf("CreateMemoryProposal: %v", err)
+	}
+	if err := s1.ReviewMemoryProposal(ctx, store.MemoryProposalReview{Namespace: ns, ID: proposal.ID, Status: "accepted"}); err != nil {
+		t.Fatalf("ReviewMemoryProposal: %v", err)
+	}
+
+	stale := &archiveBeforeCommit{
+		Store:   s1,
+		archive: func() error { return s2.ArchiveMemoryProposal(ctx, ns, proposal.ID) },
+	}
+	type applyResult struct {
+		memory *store.Memory
+		err    error
+	}
+	var result applyResult
+	result.memory, result.err = orkaClient(t, stale).ApplyMemoryProposal(ctx, store.MemoryProposalApply{Namespace: ns, ID: proposal.ID, AppliedBy: "stale"})
 	if result.err == nil {
 		t.Fatalf("stale ApplyMemoryProposal returned memory %+v, want error", result.memory)
 	}

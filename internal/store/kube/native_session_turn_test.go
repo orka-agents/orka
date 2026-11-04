@@ -25,16 +25,17 @@ func TestCrossStoreCarriedNativeCheckpoint(t *testing.T) {
 			t.Cleanup(func() { _ = db.Close() })
 			sqliteStore := sqlitestore.NewStore(db, "")
 			persistence := storageclienttest.Client(t, sqliteStore)
-			snapshot := storetest.NativeSessionSnapshot(t, "retained native context")
-			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
-			_, err = persistence.StageNativeSessionImport(ctx, controlstore.NativeSessionImport{Namespace: "tenant-a", SessionName: "session-finalize", OperationID: "native-import", RequestDigest: controlstore.NativeSessionImportDigest("tenant-a", "session-finalize", snapshot.DataDigest), Snapshot: snapshot})
-			require.NoError(t, err)
-
 			kubeStore, err := NewComposite(rawClient, testControlNamespace, persistence)
 			if err != nil {
 				t.Fatalf("NewComposite: %v", err)
 			}
+			// The mirror holds the Kubernetes epoch before the first write,
+			// which carries it.
 			syncTestEpochMirror(t, kubeStore, sqliteStore)
+			snapshot := storetest.NativeSessionSnapshot(t, "retained native context")
+			snapshot.RuntimeSessionUID, snapshot.RuntimeProfileDigest, snapshot.WorkingDirectory = "", "", ""
+			_, err = persistence.StageNativeSessionImport(ctx, controlstore.NativeSessionImport{Namespace: "tenant-a", SessionName: "session-finalize", OperationID: "native-import", RequestDigest: controlstore.NativeSessionImportDigest("tenant-a", "session-finalize", snapshot.DataDigest), Snapshot: snapshot})
+			require.NoError(t, err)
 			control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 				Namespace: "tenant-a", SessionName: "session-finalize", SessionUID: "session-finalize-uid",
 				RequestDigest: testDigest("session-finalize"),

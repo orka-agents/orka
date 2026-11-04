@@ -1001,6 +1001,10 @@ type Store struct {
 	// visible as a new incarnation.
 	incarnation string
 
+	// requireWriteEnvelopes refuses a contract write without a write
+	// envelope. Production sets it; package tests may write without one.
+	requireWriteEnvelopes atomic.Bool
+
 	// nativeSessionSealer seals native state for the duplicate SQL control
 	// implementation's turn finalization. Production never installs it.
 	nativeSessionSealer store.NativeSessionFinalizationSealer

@@ -30,6 +30,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	common "github.com/orka-agents/orka/workers/common"
@@ -331,11 +332,7 @@ func newWorkerSQLiteExecutionEventStore(t *testing.T) *storageclient.Client {
 		t.Fatalf("sqlite.NewDB: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	storage, err := storageclient.NewEmbedded(sqlite.NewStore(db, dbPath))
-	if err != nil {
-		t.Fatalf("storageclient.NewEmbedded: %v", err)
-	}
-	return storage
+	return storageclienttest.NewEmbedded(t, sqlite.NewStore(db, dbPath))
 }
 
 func mustRawJSONIntegration(t *testing.T, value any) json.RawMessage {

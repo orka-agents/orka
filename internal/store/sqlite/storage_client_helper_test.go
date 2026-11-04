@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
@@ -19,13 +20,9 @@ var testSnapshotKey = bytes.Repeat([]byte{0x42}, storageclient.SnapshotKeyBytes)
 // orkaClient wraps s in the storage client. Orka's redaction, payload
 // sanitization, usage attribution and sealing run in the client, so tests
 // that cover those behaviors end to end write through it.
-func orkaClient(t *testing.T, s *Store) *storageclient.Client {
+func orkaClient(t *testing.T, s storageclient.EmbeddedStore) *storageclient.Client {
 	t.Helper()
-	client, err := storageclient.NewEmbedded(s)
-	if err != nil {
-		t.Fatalf("NewEmbedded: %v", err)
-	}
-	return client
+	return storageclienttest.NewEmbedded(t, s)
 }
 
 // activateSnapshotKey wraps s in the storage client and activates key, then

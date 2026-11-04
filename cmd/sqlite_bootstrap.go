@@ -45,6 +45,9 @@ func openControllerSQLiteStore(
 	if err := s.CompleteDatasetBootstrap(context.Background(), info.ID); err != nil {
 		return nil, nil, nil, fmt.Errorf("complete SQLite dataset bootstrap: %w", err)
 	}
+	// Every contract write reaches the store through the storage client,
+	// which attaches a write envelope; a write without one is refused.
+	s.RequireWriteEnvelopes()
 	success = true
 	return s, client, key, nil
 }
