@@ -108,6 +108,77 @@ func TestMethodCatalogKinds(t *testing.T) {
 	require.False(t, ok)
 }
 
+// classified lists every method whose call class is not CallInteractive.
+var classified = map[string]storagev1.CallClass{
+	"AdvanceControllerEpoch":    storagev1.CallControl,
+	"Describe":                  storagev1.CallControl,
+	"GetControllerEpochMirror":  storagev1.CallControl,
+	"HealthCheck":               storagev1.CallControl,
+	"ResolveOperation":          storagev1.CallControl,
+	"SyncControllerEpochMirror": storagev1.CallControl,
+
+	"DeleteGatewayTaskCleanupReceipt":     storagev1.CallBackground,
+	"ListGatewaySessionCleanupCandidates": storagev1.CallBackground,
+	"ListGatewayTaskCleanupReceipts":      storagev1.CallBackground,
+	"ListSessionCleanupIntents":           storagev1.CallBackground,
+	"MaintainGatewayRecords":              storagev1.CallBackground,
+	"PruneOperationReceipts":              storagev1.CallBackground,
+	"PruneUsage":                          storagev1.CallBackground,
+
+	// Snapshot retention scans references and deletes snapshots that no
+	// longer have any.
+	"CountAgentExecutionSnapshotReferences":    storagev1.CallBackground,
+	"DeleteAgentExecutionSnapshot":             storagev1.CallBackground,
+	"ListAgentExecutionSnapshotMetadataBefore": storagev1.CallBackground,
+
+	"GetArtifact":             storagev1.CallBulk,
+	"GetPromptResultReceipt":  storagev1.CallBulk,
+	"GetResult":               storagev1.CallBulk,
+	"SaveArtifact":            storagev1.CallBulk,
+	"SavePromptResultReceipt": storagev1.CallBulk,
+	"SaveResult":              storagev1.CallBulk,
+
+	// Sealed snapshot bodies and native session records can each reach
+	// several megabytes.
+	"CommitSealedSessionTurnFinalization": storagev1.CallBulk,
+	"CreateSealedAgentExecutionSnapshot":  storagev1.CallBulk,
+	"GetSealedAgentExecutionSnapshot":     storagev1.CallBulk,
+	"GetSealedNativeSession":              storagev1.CallBulk,
+	"ListSealedAgentExecutionSnapshots":   storagev1.CallBulk,
+	"ListSealedNativeSessions":            storagev1.CallBulk,
+	"ReadSessionTurnFinalizationBasis":    storagev1.CallBulk,
+	"SaveSealedNativeSession":             storagev1.CallBulk,
+	"StageSealedNativeSessionImport":      storagev1.CallBulk,
+}
+
+func TestMethodCatalogClasses(t *testing.T) {
+	catalog := storagev1.Methods()
+	for name := range classified {
+		require.Containsf(t, catalog, name, "classified method %s is in the catalog", name)
+	}
+	for name, info := range catalog {
+		want, ok := classified[name]
+		if !ok {
+			want = storagev1.CallInteractive
+		}
+		require.Equalf(t, want, info.Class, "call class of %s", name)
+		if info.Kind == storagev1.MethodAdmin {
+			require.Containsf(t, []storagev1.CallClass{storagev1.CallControl, storagev1.CallBackground}, info.Class,
+				"administrative method %s is a control or background call", name)
+		}
+	}
+	for class, name := range map[storagev1.CallClass]string{
+		storagev1.CallControl:     "control",
+		storagev1.CallInteractive: "interactive",
+		storagev1.CallBackground:  "background",
+		storagev1.CallStream:      "stream",
+		storagev1.CallBulk:        "bulk",
+		storagev1.CallClass(0):    "unknown",
+	} {
+		require.Equal(t, name, class.String())
+	}
+}
+
 func TestMethodCatalogNaturalKeysResolve(t *testing.T) {
 	for name, info := range storagev1.Methods() {
 		if info.NaturalKey == "" {

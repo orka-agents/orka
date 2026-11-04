@@ -146,24 +146,42 @@ func runArtifacts(t *testing.T, newProvider ArtifactFactory) {
 		info := requireValidProviderInfo(t, provider, storagev1.ArtifactsContract)
 		require.GreaterOrEqual(t, info.Limits.MaxArtifactBytes, int64(storagev1.MaxArtifactBytes),
 			"an artifacts.v1 provider accepts artifacts up to the contract limit")
+		require.NoError(t, provider.HealthCheck(t.Context()), "a fresh dataset is healthy")
+	})
+
+	t.Run("a dataset holding an artifact is not empty", func(t *testing.T) {
+		provider := newProvider(t)
+		saveArtifact(t, provider, artifactOwner("tenant-a", "task-1"), "out.txt", "text/plain", []byte("x"))
+		info := requireValidProviderInfo(t, provider, storagev1.ArtifactsContract)
+		require.False(t, info.Bootstrap.Empty, "a dataset with a stored artifact never reports itself empty")
 	})
 }
 
 // requireValidProviderInfo checks the contract fields of a provider
-// description and that the dataset identity is stable across calls.
+// description of a ready dataset, and that the dataset identity and the
+// incarnation are stable across calls.
 func requireValidProviderInfo(t *testing.T, provider storagev1.ProviderDescriber, contract string) storagev1.ProviderInfo {
 	t.Helper()
 	info, err := provider.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, storagev1.ContractVersion, info.ContractVersion)
+	require.GreaterOrEqual(t, info.ContractRevision, 1, "the contract revision")
 	require.Contains(t, info.Contracts, contract)
 	require.NotEmpty(t, info.DatasetID)
 	require.True(t, storagev1.IsValidDatasetOrigin(info.DatasetOrigin), "dataset origin %q", info.DatasetOrigin)
 	require.NotEmpty(t, info.SchemaVersion)
 	require.True(t, storagev1.IsValidDurabilityClass(info.Durability), "durability class %q", info.Durability)
 	require.GreaterOrEqual(t, info.Limits.MaxValueBytes, int64(0))
+	require.Equal(t, storagev1.DatasetReady, info.State, "a dataset the suite writes to is ready")
+	require.NotEmpty(t, info.Incarnation)
+	require.False(t, info.ObservedAt.IsZero(), "Describe reports the provider clock")
+	require.Equal(t, time.UTC, info.ObservedAt.Location(), "the provider clock is reported in UTC")
+	if info.Usage != nil {
+		require.GreaterOrEqual(t, info.Usage.DatasetBytes, int64(0))
+	}
 	again, err := provider.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, info.DatasetID, again.DatasetID, "the dataset ID is stable")
+	require.Equal(t, info.Incarnation, again.Incarnation, "the incarnation is stable while the provider keeps serving")
 	return info
 }

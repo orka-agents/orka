@@ -58,7 +58,7 @@ func TestEnvelopeErrorsAreDistinct(t *testing.T) {
 		storagev1.ErrDatasetMismatch, storagev1.ErrClockSkew, storagev1.ErrOperationExpired,
 		storagev1.ErrOperationAborted, storagev1.ErrDuplicateMismatch, storagev1.ErrFenced,
 		storagev1.ErrConflict, storagev1.ErrValidation, storagev1.ErrNotReady,
-		storagev1.ErrUnavailable, storagev1.ErrOutcomeUnknown,
+		storagev1.ErrUnavailable, storagev1.ErrOutcomeUnknown, storagev1.ErrUnauthenticated, storagev1.ErrIncompatible,
 	}
 	for i, err := range sentinels {
 		for j, other := range sentinels {
@@ -139,7 +139,7 @@ func TestAdvanceControllerEpochRequestValidate(t *testing.T) {
 
 func TestDatasetStateVocabulary(t *testing.T) {
 	for _, state := range []storagev1.DatasetState{
-		storagev1.DatasetReady, storagev1.DatasetMigrating, storagev1.DatasetImporting,
+		storagev1.DatasetReady, storagev1.DatasetMigrating, storagev1.DatasetImporting, storagev1.DatasetIncompatible,
 	} {
 		require.True(t, storagev1.IsValidDatasetState(state), state)
 	}
