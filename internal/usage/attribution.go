@@ -3,6 +3,7 @@ package usage
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
@@ -51,6 +52,17 @@ func TaskTokens(observations []store.UsageObservation, namespace, taskUID, attem
 	return 0, 0, nil
 }
 
+// hasFieldFold reports whether fields holds name under any letter case, as
+// encoding/json matches a field name when it decodes into a struct.
+func hasFieldFold(fields map[string]json.RawMessage, name string) bool {
+	for key, value := range fields {
+		if value != nil && strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // ExecutionEventObservation derives the usage observation that an execution
 // event carries, or nil when the event reports no countable usage. Only the
 // normalized provider recorder and the controller's ACP journal are
@@ -85,7 +97,7 @@ func ExecutionEventObservation(event store.ExecutionEvent, attribution store.Usa
 	}
 	if err := json.Unmarshal(event.Content, &content); err != nil {
 		var fields map[string]json.RawMessage
-		if json.Unmarshal(event.Content, &fields) == nil && fields["usage"] != nil && attribution.TaskUID != "" {
+		if json.Unmarshal(event.Content, &fields) == nil && hasFieldFold(fields, "usage") && attribution.TaskUID != "" {
 			return nil, store.ValidationErrorf("invalid model usage event")
 		}
 		return nil, nil
