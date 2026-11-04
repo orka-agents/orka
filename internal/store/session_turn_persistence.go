@@ -45,6 +45,11 @@ type CommitSessionTurnFinalizationRequest struct {
 	FinalizedAt          time.Time               `json:"finalizedAt"`
 	NativeSession        *NativeSessionRecord    `json:"-"`
 	NativeSessionCarried bool                    `json:"-"`
+	// InputTokens and OutputTokens are the usage Orka attributes to this
+	// turn's prompt attempt. The first finalization adds them to the
+	// Session's token counters; a repeated finalization adds nothing.
+	InputTokens  int64 `json:"inputTokens,omitempty"`
+	OutputTokens int64 `json:"outputTokens,omitempty"`
 }
 
 // ActivateSessionTurnProjectionRequest releases the deferred outbox record

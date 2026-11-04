@@ -12,6 +12,7 @@ ARG FOUNDRY_RUNTIME_IMAGE
 ARG FOUNDRY_ADAPTER_DIGEST
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 COPY --from=foundry /agent-runtime-foundry /out/agent-runtime-foundry

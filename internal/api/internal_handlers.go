@@ -237,7 +237,7 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	if len(data) == 0 {
 		return fiber.NewError(fiber.StatusBadRequest, "empty request body")
 	}
-	if len(data) > maxResultSize {
+	if len(data) > store.MaxArtifactBytes {
 		return fiber.NewError(fiber.StatusRequestEntityTooLarge, "artifact exceeds 10MB limit")
 	}
 
@@ -249,7 +249,8 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(context.Context) error {
 		return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
 	}, func(ctx context.Context) error {
-		return h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data)
+		owner := store.ArtifactOwner{Namespace: namespace, TaskName: taskName, TaskUID: string(authorizedWorker.UID)}
+		return h.artifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: owner, Filename: filename, ContentType: contentType, Data: data})
 	}); err != nil {
 		return err
 	}

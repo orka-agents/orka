@@ -69,6 +69,10 @@ jobs:
       - name: Check Go coverage reporting
         run: bash scripts/tests/go-coverage-summary-test.sh
 
+      # Before make test, whose generate step rewrites the generated files.
+      - name: Verify generated storage wire code
+        run: scripts/generate-storage-proto.sh verify
+
       - name: Running Tests
         id: go_tests
         run: |

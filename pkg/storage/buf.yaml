@@ -1,0 +1,14 @@
+# buf configuration for the orka.storage.v1 wire protocol. Run it through
+# scripts/generate-storage-proto.sh, which pins buf and the code generators.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # Services are named after contract families (Dataset, Messages, ...).
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE
