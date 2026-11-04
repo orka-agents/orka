@@ -539,6 +539,11 @@ func (r *TaskReconciler) resolveExternalAgentExecutionCandidate(
 	if runtime.UID == "" || runtime.Generation < 1 {
 		return nil, errors.New("external AgentRuntime immutable identity is incomplete")
 	}
+	// Planning judged an earlier read; judge the registration this binding
+	// freezes, so a policy change between the two reads cannot widen tools.
+	if err := validateAgentRuntimeCeilingForRegistration(task, agent, runtime); err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
 	profile, external, err := r.resolveExternalAgentRuntimeSnapshot(ctx, task, runtime)
 	if err != nil {
 		return nil, err

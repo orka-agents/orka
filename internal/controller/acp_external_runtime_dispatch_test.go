@@ -1799,6 +1799,58 @@ func TestACPDispatcherUsesRegisteredExternalMCPPolicy(t *testing.T) {
 	}
 }
 
+// agentRuntimeRewritingReader returns AgentRuntimes rewritten as an earlier
+// read would have seen them.
+type agentRuntimeRewritingReader struct {
+	client.Reader
+	rewrite func(*corev1alpha1.AgentRuntime)
+}
+
+func (r agentRuntimeRewritingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if err := r.Reader.Get(ctx, key, obj, opts...); err != nil {
+		return err
+	}
+	if runtime, ok := obj.(*corev1alpha1.AgentRuntime); ok {
+		r.rewrite(runtime)
+	}
+	return nil
+}
+
+func TestExternalRuntimeBindingRechecksCeilingAgainstFrozenRegistration(t *testing.T) {
+	const readTool, writeTool = "external_read", "external_write"
+	policy := testAgentRuntimeMCPPolicy()
+	policy.AllowedTools = []string{readTool, writeTool}
+	fixture := newExternalACPDispatchFixtureWithPolicy(
+		t, "external-v2", policy, testExternalACPCustomTool(readTool), testExternalACPCustomTool(writeTool),
+	)
+	agent := fixture.agent.DeepCopy()
+	agent.Spec.Runtime.Ceiling = &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{readTool}}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: defaultNS, Name: "external-ceiling-recheck", UID: types.UID("external-ceiling-recheck-uid"), Generation: 1,
+		},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+			Prompt: "look up a value", AgentRuntime: &corev1alpha1.AgentRuntimeSpec{AllowedTools: []string{readTool, writeTool}},
+		},
+	}
+
+	// Planning reads an older registration that still denied the write tool.
+	olderRead := agentRuntimeRewritingReader{Reader: fixture.client, rewrite: func(runtime *corev1alpha1.AgentRuntime) {
+		runtime.Spec.Capabilities.MCPPolicy.DisallowedTools = []string{writeTool}
+	}}
+	planner := &TaskReconciler{Client: fixture.client, APIReader: olderRead}
+	if plan := planner.planAgentExecution(fixture.ctx, task, agent); plan.path != agentExecutionPathExternal {
+		t.Fatalf("planning against the older registration = %#v, want external path", plan)
+	}
+
+	// Binding freezes the current registration, which exposes the write tool.
+	_, err := fixture.reconciler.resolveExternalAgentExecutionCandidate(fixture.ctx, task, agent)
+	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "external_write"`) || !isPermanentACPAgentConfigurationError(err) {
+		t.Fatalf("resolveExternalAgentExecutionCandidate() error = %v, want permanent ceiling rejection", err)
+	}
+}
+
 func TestExternalRuntimeBindingRejectsUnconformedMCPToolDescriptorChange(t *testing.T) {
 	const toolName = "external_lookup"
 	policy := testAgentRuntimeMCPPolicy()

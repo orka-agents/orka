@@ -80,6 +80,20 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 	return nil
 }
 
+// validateAgentRuntimeCeilingForRegistration judges a runtimeRef Task against
+// the MCP policy of the given AgentRuntime read.
+func validateAgentRuntimeCeilingForRegistration(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	registration *corev1alpha1.AgentRuntime,
+) error {
+	var policy *corev1alpha1.AgentRuntimeMCPPolicySpec
+	if registration != nil && registration.Spec.Capabilities != nil {
+		policy = registration.Spec.Capabilities.MCPPolicy
+	}
+	return validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, policy)
+}
+
 // resolvedCeilingToolRequest returns the tools the Task can execute after the
 // runtime's own normalization, deny list, and Bash gate, and whether that
 // policy grants Bash. It starts from the same allowlist dispatch uses and
