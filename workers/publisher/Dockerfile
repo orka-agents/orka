@@ -31,6 +31,7 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
+COPY pkg/storage/go.mod pkg/storage/go.sum ./pkg/storage/
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \

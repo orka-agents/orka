@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+// Package orka.storage.v1 is the wire protocol of the orka.storage.v1 storage
+// extension contract. The Go contract in
+// github.com/orka-agents/orka/pkg/storage/v1 defines the semantics; these files
+// define how its records and methods cross a process boundary.
+package orka.storage.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// MethodKind states whether an RPC may change stored state. A transport
+// failure after a write may have been sent is an unknown outcome; the same
+// failure on a read is safe to repeat.
+enum MethodKind {
+  METHOD_KIND_UNSPECIFIED = 0;
+  // The RPC never changes stored state.
+  METHOD_KIND_READ = 1;
+  // The RPC may change stored state.
+  METHOD_KIND_WRITE = 2;
+}
+
+extend google.protobuf.ServiceOptions {
+  // Each go_interface names a Go contract interface whose methods the service
+  // serves, one RPC per method.
+  repeated string go_interface = 51001;
+}
+
+extend google.protobuf.MethodOptions {
+  // kind states whether the RPC may change stored state.
+  MethodKind kind = 51011;
+  // rpc_since is the protocol revision that introduced the RPC. A client
+  // calls the RPC only on a server of at least that revision.
+  int32 rpc_since = 51012;
+}
+
+extend google.protobuf.MessageOptions {
+  // wire_only marks a message with no Go contract record, such as a wrapper
+  // for a nullable time.
+  bool wire_only = 51021;
+}
+
+extend google.protobuf.FieldOptions {
+  // go_name names the Go parameter or field the wire field carries, when it
+  // is not the wire field's name in camel case.
+  string go_name = 51031;
+  // since is the protocol revision that added a request field to an existing
+  // RPC. A client sets the field only on a server of at least that revision.
+  int32 since = 51032;
+  // library marks a response field the server library sets, which has no Go
+  // contract counterpart.
+  bool library = 51033;
+}

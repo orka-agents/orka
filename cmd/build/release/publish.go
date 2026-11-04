@@ -57,8 +57,35 @@ func (w *workflow) createTag(data candidateBundle, directory string) error {
 	if !shaRE.MatchString(tag.SHA) {
 		return errors.New("GitHub returned an invalid annotated tag")
 	}
+	return w.createTagRef(data.Version, tag.SHA)
+}
+
+// createTagRef creates refs/tags/<name> pointing at sha.
+func (w *workflow) createTagRef(name, sha string) error {
 	return w.api(repoAPI+"/git/refs", http.MethodPost,
-		map[string]string{"ref": "refs/tags/" + data.Version, "sha": tag.SHA}, nil)
+		map[string]string{"ref": "refs/tags/" + name, "sha": sha}, nil)
+}
+
+// storageModuleTagPrefix tags the nested storage contract module
+// (github.com/orka-agents/orka/pkg/storage) at each release, so a separately
+// built storage extension can require the contract at the release version.
+const storageModuleTagPrefix = "pkg/storage/"
+
+// createStorageModuleTag points pkg/storage/<version> at the released commit.
+// A retry accepts only an existing tag on that same commit.
+func (w *workflow) createStorageModuleTag(data candidateBundle) error {
+	name := storageModuleTagPrefix + data.Version
+	existing, err := w.tagRef(name)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if existing.Object.Type != gitCommit || existing.Object.SHA != data.CandidateSHA {
+			return errors.New("existing storage module tag identifies a different commit")
+		}
+		return nil
+	}
+	return w.createTagRef(name, data.CandidateSHA)
 }
 
 var (
@@ -501,6 +528,9 @@ func (w *workflow) publish(directory string) error {
 		return err
 	}
 	if err := w.createTag(data, directory); err != nil {
+		return err
+	}
+	if err := w.createStorageModuleTag(data); err != nil {
 		return err
 	}
 	if err := w.promoteImages(data); err != nil {

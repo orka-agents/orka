@@ -30,13 +30,13 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	require.NoError(t, writer.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		// The database callback excludes cleanup before any payload is read
 		// or written. Network authorization runs before this callback.
-		cleanupErr := cleanup.DeleteArtifacts(ctx, "ns", "task")
+		cleanupErr := cleanup.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
 		require.Error(t, cleanupErr)
 		require.True(t, isSQLiteRetryableError(cleanupErr))
 		if err := writer.SaveResult(txCtx, "ns", "task", []byte("result")); err != nil {
 			return err
 		}
-		if err := writer.SaveArtifact(txCtx, "ns", "task", "output.txt", "text/plain", []byte("artifact")); err != nil {
+		if err := writer.SaveArtifact(txCtx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "ns", TaskName: "task"}, Filename: "output.txt", ContentType: "text/plain", Data: []byte("artifact")}); err != nil {
 			return err
 		}
 		if err := writer.SavePlan(txCtx, "ns", "task", &store.PlanState{Summary: "plan"}); err != nil {
@@ -47,7 +47,7 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	result, err := cleanup.GetResult(ctx, "ns", "task")
 	require.NoError(t, err)
 	require.Equal(t, "result", string(result))
-	artifacts, err := cleanup.ListArtifacts(ctx, "ns", "task")
+	artifacts, err := cleanup.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
 	require.NoError(t, err)
 	require.Len(t, artifacts, 1)
 	plan, err := cleanup.GetPlan(ctx, "ns", "task")
@@ -58,12 +58,12 @@ func TestTaskDataTransactionSerializesCleanupAcrossConnections(t *testing.T) {
 	require.Len(t, messages, 1)
 
 	require.NoError(t, cleanup.DeleteResult(ctx, "ns", "task"))
-	require.NoError(t, cleanup.DeleteArtifacts(ctx, "ns", "task"))
+	require.NoError(t, cleanup.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"}))
 	require.NoError(t, cleanup.DeletePlan(ctx, "ns", "task"))
 	require.NoError(t, cleanup.DeleteTaskMessages(ctx, "ns", "task"))
 	_, err = cleanup.GetResult(ctx, "ns", "task")
 	require.ErrorIs(t, err, store.ErrNotFound)
-	artifacts, err = cleanup.ListArtifacts(ctx, "ns", "task")
+	artifacts, err = cleanup.ListArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
 	require.NoError(t, err)
 	require.Empty(t, artifacts)
 	_, err = cleanup.GetPlan(ctx, "ns", "task")
@@ -79,7 +79,9 @@ func TestTaskDataAuthorizationDetectsCleanupAcrossConnections(t *testing.T) {
 		cleanup func(context.Context, *Store) error
 	}{
 		{"result", func(ctx context.Context, s *Store) error { return s.DeleteResult(ctx, "ns", "task") }},
-		{"artifact", func(ctx context.Context, s *Store) error { return s.DeleteArtifacts(ctx, "ns", "task") }},
+		{"artifact", func(ctx context.Context, s *Store) error {
+			return s.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "ns", TaskName: "task"})
+		}},
 		{"plan", func(ctx context.Context, s *Store) error { return s.DeletePlan(ctx, "ns", "task") }},
 		{"messages", func(ctx context.Context, s *Store) error { return s.DeleteTaskMessages(ctx, "ns", "task") }},
 		{"parent messages", func(ctx context.Context, s *Store) error { return s.DeleteParentMessages(ctx, "ns", "parent") }},

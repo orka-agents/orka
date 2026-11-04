@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package orka.storage.v1;
+
+import "orka/storage/v1/common.proto";
+import "orka/storage/v1/options.proto";
+
+option go_package = "github.com/orka-agents/orka/pkg/storage/v1/wire/storagepb;storagepb";
+
+// Dataset describes the provider and the dataset it serves. Describe and
+// HealthCheck are the only calls that may omit the orka-storage-dataset
+// request header.
+service Dataset {
+  option (go_interface) = "HealthChecker";
+  option (go_interface) = "ProviderDescriber";
+
+  rpc Describe(DescribeRequest) returns (DescribeResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {
+    option (kind) = METHOD_KIND_READ;
+    option (rpc_since) = 1;
+  }
+}
+
+message DescribeRequest {}
+
+message DescribeResponse {
+  ProviderInfo provider = 1;
+  ServerInfo server = 2 [(library) = true];
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {}

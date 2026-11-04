@@ -81,26 +81,30 @@ func (s *Store) SavePromptResultReceipt(ctx context.Context, receipt store.Promp
 	if receipt.Data == nil {
 		return store.ValidationErrorf("prompt result receipt data is required")
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO prompt_result_receipts
+	// The insert and the comparison share one transaction, so the receipt
+	// compared is the one stored when this call committed.
+	return s.writeTransaction(ctx, func(q taskDataExecutor) error {
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO prompt_result_receipts
 		 (attempt_id, namespace, task_name, operation_id, operation_digest, data)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(attempt_id) DO NOTHING`,
-		receipt.AttemptID, receipt.Namespace, receipt.TaskName,
-		receipt.OperationID, receipt.OperationDigest, receipt.Data,
-	); err != nil {
-		return err
-	}
-	persisted, err := s.GetPromptResultReceipt(ctx, receipt.AttemptID)
-	if err != nil {
-		return err
-	}
-	if persisted.Namespace != receipt.Namespace || persisted.TaskName != receipt.TaskName ||
-		persisted.OperationID != receipt.OperationID || persisted.OperationDigest != receipt.OperationDigest ||
-		!bytes.Equal(persisted.Data, receipt.Data) {
-		return fmt.Errorf("%w: prompt result receipt %q was reused with different data", store.ErrDuplicateMismatch, receipt.AttemptID)
-	}
-	return nil
+			receipt.AttemptID, receipt.Namespace, receipt.TaskName,
+			receipt.OperationID, receipt.OperationDigest, receipt.Data,
+		); err != nil {
+			return err
+		}
+		persisted, err := getPromptResultReceipt(ctx, q, receipt.AttemptID)
+		if err != nil {
+			return err
+		}
+		if persisted.Namespace != receipt.Namespace || persisted.TaskName != receipt.TaskName ||
+			persisted.OperationID != receipt.OperationID || persisted.OperationDigest != receipt.OperationDigest ||
+			!bytes.Equal(persisted.Data, receipt.Data) {
+			return fmt.Errorf("%w: prompt result receipt %q was reused with different data", store.ErrDuplicateMismatch, receipt.AttemptID)
+		}
+		return nil
+	})
 }
 
 // GetPromptResultReceipt returns the immutable receipt for one PromptAttempt.
@@ -109,8 +113,12 @@ func (s *Store) GetPromptResultReceipt(ctx context.Context, attemptID string) (*
 	if err := store.ValidateControlIdentifier("prompt result receipt attempt ID", attemptID); err != nil {
 		return nil, err
 	}
+	return getPromptResultReceipt(ctx, s.db, attemptID)
+}
+
+func getPromptResultReceipt(ctx context.Context, q queryRower, attemptID string) (*store.PromptResultReceipt, error) {
 	receipt := &store.PromptResultReceipt{AttemptID: attemptID}
-	err := s.db.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT namespace, task_name, operation_id, operation_digest, data
 		 FROM prompt_result_receipts WHERE attempt_id = ?`,
 		attemptID,

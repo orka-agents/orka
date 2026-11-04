@@ -116,6 +116,39 @@ func TestExistingTagOnlyAllowsIdenticalCandidateAndQualification(t *testing.T) {
 	wantError(t, f.w.createTag(f.data, f.directory), "no qualification binding")
 }
 
+func TestStorageModuleTagPointsAtTheReleasedCommit(t *testing.T) {
+	f := newReleaseFixture(t)
+	moduleTag := "refs/tags/pkg/storage/" + testVersion
+	existing := []gitRef{}
+	var created []apiRequest
+	f.api = func(request apiRequest) (any, error, bool) {
+		switch {
+		case request.method == http.MethodGet && request.path == repoAPI+"/git/matching-refs/tags/pkg/storage/"+testVersion:
+			return existing, nil, true
+		case request.method == http.MethodPost && request.path == repoAPI+"/git/refs":
+			created = append(created, request)
+			return nil, nil, true
+		}
+		t.Fatalf("unexpected API request: %s %s", request.method, request.path)
+		return nil, nil, true
+	}
+	must(t, f.w.createStorageModuleTag(f.data))
+	if len(created) != 1 || created[0].payload["ref"] != moduleTag || created[0].payload["sha"] != f.data.CandidateSHA {
+		t.Fatalf("storage module tag requests: %+v", created)
+	}
+
+	created = nil
+	existing = []gitRef{{Ref: moduleTag, Object: gitObject{Type: "commit", SHA: f.data.CandidateSHA}}}
+	must(t, f.w.createStorageModuleTag(f.data))
+	if len(created) != 0 {
+		t.Fatalf("retry recreated the storage module tag: %+v", created)
+	}
+	existing[0].Object.SHA = strings.Repeat("c", 40)
+	wantError(t, f.w.createStorageModuleTag(f.data), "different commit")
+	existing[0].Object = gitObject{Type: "tag", SHA: f.data.CandidateSHA}
+	wantError(t, f.w.createStorageModuleTag(f.data), "different commit")
+}
+
 func publicationFixture(t *testing.T) *releaseFixture {
 	t.Helper()
 	f := newReleaseFixture(t)
