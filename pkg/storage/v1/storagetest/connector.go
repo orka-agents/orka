@@ -18,7 +18,12 @@ import (
 // conditional command from the plain fields and the expectations Orka sends.
 
 // connectorNow is the time the cases pass as each request's Now.
-var connectorNow = sealedBaseTime
+// Completion redemption also checks the provider clock, so its fixture expiry
+// must remain live while keeping repeat fixture construction deterministic.
+var (
+	connectorNow              = sealedBaseTime
+	connectorCompletionExpiry = time.Now().UTC().Add(time.Hour)
+)
 
 func sealedConnectorCredential(uid string, grant int64, label string) storagev1.SealedConnectorCredential {
 	return storagev1.SealedConnectorCredential{
@@ -41,7 +46,7 @@ func sealedConnectorConsent(uid, nonce string, sequence int64) storagev1.SealedC
 func sealedConnectorCompletion(uid, nonce string, sequence int64) storagev1.SealedConnectorCompletion {
 	return storagev1.SealedConnectorCompletion{
 		Nonce: nonce, ConnectionUID: uid, Namespace: "tenant", Name: "connection-" + uid, SubjectDigest: "subject-digest",
-		Provider: "github", Mode: "readOnly", ConsentSequence: sequence, ExpiresAt: sealedBaseTime.Add(10 * time.Minute),
+		Provider: "github", Mode: "readOnly", ConsentSequence: sequence, ExpiresAt: connectorCompletionExpiry,
 		PayloadNonce: sealedBytes("payload nonce " + nonce), Payload: sealedBytes("payload " + nonce),
 	}
 }
