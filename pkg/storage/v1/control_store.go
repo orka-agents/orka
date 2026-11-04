@@ -24,6 +24,13 @@ type AdvanceControllerEpochRequest struct {
 	// InstallationID identifies the Orka installation that owns the dataset.
 	// Orka passes the UID of the installation's ControllerEpoch object.
 	InstallationID string
+	// AcknowledgedEpoch is the last epoch this installation durably
+	// acknowledged for this dataset, or zero when none was acknowledged.
+	// Before changing anything, the provider atomically checks that its
+	// stored epoch is at least this value (an absent epoch counts as zero).
+	// A lower stored epoch returns ErrNotReady, preserving rollback evidence
+	// across failed takeovers and controller crashes.
+	AcknowledgedEpoch int64
 }
 
 // Validate checks that the dataset, the installation and every field of the
@@ -46,6 +53,9 @@ func (r AdvanceControllerEpochRequest) Validate() error {
 	}
 	if r.Epoch.Epoch < 1 || r.Epoch.Version < 1 {
 		return ValidationErrorf("controller epoch and version must be at least 1")
+	}
+	if r.AcknowledgedEpoch < 0 || r.AcknowledgedEpoch > r.Epoch.Epoch {
+		return ValidationErrorf("acknowledged epoch must be between zero and the requested epoch")
 	}
 	if r.Epoch.AcquiredAt.IsZero() || r.Epoch.UpdatedAt.IsZero() {
 		return ValidationErrorf("controller epoch acquired and updated times are required")
@@ -107,6 +117,13 @@ type ControllerEpochMirrorState struct {
 //  8. The advance is linearized with fenced writes: it waits for writes in
 //     progress under the stored fence, and once it returns, no write carrying
 //     an older fence commits on this dataset.
+//  9. Before storing an epoch or an installation, including an equal-epoch
+//     retry, the stored epoch must be at least AcknowledgedEpoch, with an
+//     absent epoch counting as zero. Otherwise the advance returns
+//     [ErrNotReady] and changes nothing. This check is atomic with the advance:
+//     a failed takeover must not overwrite evidence of an acknowledged epoch
+//     lost by the dataset. Every takeover supplies the durable acknowledgement
+//     again; Previous alone cannot establish that the dataset did not roll back.
 //
 // The advance carries no [WriteEnvelope] and leaves no operation receipt: it
 // establishes the fence, and it is idempotent by epoch and request digest.

@@ -118,16 +118,21 @@ func TestAdvanceControllerEpochRequestValidate(t *testing.T) {
 		InstallationID: "controller-epoch-uid",
 	}
 	require.NoError(t, valid.Validate())
+	acknowledged := valid
+	acknowledged.AcknowledgedEpoch = valid.Epoch.Epoch
+	require.NoError(t, acknowledged.Validate())
 	for name, mutate := range map[string]func(*storagev1.AdvanceControllerEpochRequest){
-		"missing acquired time": func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.AcquiredAt = time.Time{} },
-		"missing updated time":  func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.UpdatedAt = time.Time{} },
-		"missing dataset":       func(r *storagev1.AdvanceControllerEpochRequest) { r.DatasetID = "" },
-		"missing installation":  func(r *storagev1.AdvanceControllerEpochRequest) { r.InstallationID = "" },
-		"missing epoch name":    func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Name = "" },
-		"missing holder":        func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.HolderID = "" },
-		"malformed digest":      func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.RequestDigest = "digest" },
-		"zero epoch":            func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Epoch = 0 },
-		"zero version":          func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Version = 0 },
+		"negative acknowledgement": func(r *storagev1.AdvanceControllerEpochRequest) { r.AcknowledgedEpoch = -1 },
+		"future acknowledgement":   func(r *storagev1.AdvanceControllerEpochRequest) { r.AcknowledgedEpoch = r.Epoch.Epoch + 1 },
+		"missing acquired time":    func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.AcquiredAt = time.Time{} },
+		"missing updated time":     func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.UpdatedAt = time.Time{} },
+		"missing dataset":          func(r *storagev1.AdvanceControllerEpochRequest) { r.DatasetID = "" },
+		"missing installation":     func(r *storagev1.AdvanceControllerEpochRequest) { r.InstallationID = "" },
+		"missing epoch name":       func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Name = "" },
+		"missing holder":           func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.HolderID = "" },
+		"malformed digest":         func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.RequestDigest = "digest" },
+		"zero epoch":               func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Epoch = 0 },
+		"zero version":             func(r *storagev1.AdvanceControllerEpochRequest) { r.Epoch.Version = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := valid
