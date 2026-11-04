@@ -14,6 +14,7 @@ import (
 	"path"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -451,7 +452,7 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 			seen[key] = struct{}{}
 			field, ok := fields[key]
 			if !ok {
-				return fmt.Errorf("%s has unknown field %q", at, key)
+				return fmt.Errorf("%s has unknown field %s", at, quoteKey(key))
 			}
 			var value json.RawMessage
 			if err := decoder.Decode(&value); err != nil {
@@ -478,6 +479,14 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 		}
 	}
 	return nil
+}
+
+// quoteKey quotes a JSON key for an error unless it looks like a credential.
+func quoteKey(key string) string {
+	if containsCredential(key) {
+		return "(redacted)"
+	}
+	return strconv.Quote(key)
 }
 
 type jsonField struct {

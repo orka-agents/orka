@@ -84,6 +84,19 @@ func TestEvalRunSpecAdmission(t *testing.T) {
 		{name: "monitor ref without name", mutate: func(s map[string]any) {
 			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{}}
 		}, want: "name"},
+		{name: "monitor ref with empty label", mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{"name": "monitor..prod"}}
+		}, want: "monitorRef.name"},
+		{name: "monitor ref label starting with hyphen", mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{"name": "monitor.-prod"}}
+		}, want: "monitorRef.name"},
+		{name: "config map ref label ending with hyphen", mutate: func(s map[string]any) {
+			s["cases"].(map[string]any)["configMapRef"] = map[string]any{"name": "cases-.prod", "key": "cases.jsonl"}
+		}, want: "configMapRef.name"},
+		{name: "dotted refs", mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{"name": "monitor.prod"}}
+			s["cases"].(map[string]any)["configMapRef"] = map[string]any{"name": "cases.v1", "key": "cases.jsonl"}
+		}},
 		{name: "unknown grader", mutate: func(s map[string]any) {
 			s["graders"] = []any{"verdict", "judge"}
 		}, want: "Unsupported value"},

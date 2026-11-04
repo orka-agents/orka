@@ -169,6 +169,7 @@ func TestParseCaseRejectsHostileJSON(t *testing.T) {
 		{"case-folded nested key", strings.Replace(valid, `"headSHA"`, `"headSha"`, 1), `unknown field "headSha"`},
 		{"duplicate key", strings.Replace(valid, `"verdict":"notPassed"`, `"verdict":"notPassed","verdict":"passed"`, 1), `duplicate field "verdict"`},
 		{"invalid utf8", strings.Replace(valid, "Handle missing config", "Handle \xff config", 1), "UTF-8"},
+		{"credential key", strings.Replace(valid, `"verdict":"notPassed"`, `"verdict":"notPassed","ghp_`+strings.Repeat("A", 36)+`":1`, 1), "unknown field (redacted)"},
 		{"trailing object", valid + `{}`, "trailing data"},
 		{"trailing garbage", valid + ` x`, "trailing data"},
 		{"array root", "[" + valid + "]", "decode case"},

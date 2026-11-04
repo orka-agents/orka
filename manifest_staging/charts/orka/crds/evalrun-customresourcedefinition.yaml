@@ -79,7 +79,7 @@ spec:
                         description: Name is the ConfigMap name.
                         maxLength: 253
                         minLength: 1
-                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                     required:
                     - key
@@ -147,7 +147,7 @@ spec:
                             description: Name is the object name.
                             maxLength: 253
                             minLength: 1
-                            pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                             type: string
                         required:
                         - name
