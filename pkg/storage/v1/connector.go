@@ -444,7 +444,8 @@ type SealedConnectorConsentStore interface {
 	// grant, replaces the completion's payload, records its consent as the
 	// committed one and drops the completions in Drop. It returns the stored
 	// custody. Its refusals, in order: ErrConflict when what Orka read
-	// changed; ErrNotFound for a completion that expired at Now;
+	// changed; ErrNotFound for a completion that expired at Now or at the
+	// provider's current time inside the commit transaction;
 	// ErrConnectorConsentSuperseded when the completion's consent is not
 	// after CommittedConsentSequence; ErrConnectorRetiredLimit when the
 	// Connection already retains MaxRetiredConnectorConsentGrants consent
