@@ -118,6 +118,7 @@ type Handlers struct {
 	memoryProposalStore       store.MemoryProposalStore
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
+	evalTrialStore            store.EvalTrialStore
 	executionEventStore       store.ExecutionEventStore
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
@@ -149,6 +150,7 @@ type HandlersConfig struct {
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
+	EvalTrialStore            store.EvalTrialStore
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
@@ -181,6 +183,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		memoryProposalStore:       cfg.MemoryProposalStore,
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
+		evalTrialStore:            cfg.EvalTrialStore,
 		executionEventStore:       cfg.ExecutionEventStore,
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,

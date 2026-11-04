@@ -464,6 +464,14 @@ Command events record label/API intake, actor/source authorization, target SHA/s
 
 See [Repository Monitors](../guides/repository-monitors.md) for the full workflow and CRD example.
 
+## Evals
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/evals/runs/:name/trials` | GET | List the trial records of an EvalRun |
+
+Trial records (`orka.eval.trial.v1`) hold the case id, trial number, Task name, outcome (`pass`, `fail` or `infraError`), infra class, each grader's result, the verdict, token and tool-call counts, latency and the run snapshot digests. They never hold transcripts; read those from `/api/v1/tasks/{name}/events`. The response is `{"items": [...]}`, or one record per line with `?format=jsonl` or `Accept: application/jsonl`. Access needs `get` on the EvalRun; transaction-token callers are refused. Records are deleted with the EvalRun. The EvalRun controller runs only with `--enable-evals`.
+
 ## Auth
 
 | Endpoint | Method | Description |

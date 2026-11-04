@@ -3,6 +3,7 @@ package sqlite
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -140,7 +141,8 @@ func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
 			seedMigrationRecords(t, db, path)
 			before := applicationRows(t, db)
 			beforeSchema := storedSchemaSQL(t, db)
-			_, err := db.Exec(`PRAGMA user_version=2`)
+			// An unknown future version marker, never a supported one.
+			_, err := db.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion+1))
 			require.NoError(t, err)
 			require.NoError(t, db.Close())
 			s, err := OpenLockedStore(path)
@@ -152,7 +154,7 @@ func TestDatasetHistoricalVersionMarkerIsNotAdopted(t *testing.T) {
 			require.Equal(t, beforeSchema, storedSchemaSQL(t, raw))
 			version, err := readSchemaVersion(raw)
 			require.NoError(t, err)
-			require.Equal(t, 2, version)
+			require.Equal(t, SchemaVersion+1, version)
 		})
 	}
 }

@@ -12,7 +12,7 @@ import (
 
 // SchemaVersion records the metadata layout. It never replaces validation of
 // every schema object; version zero upgrades require the locked migration path.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),

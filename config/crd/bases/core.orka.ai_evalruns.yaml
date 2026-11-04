@@ -375,6 +375,11 @@ spec:
                     description: CaseSetDigest is the digest of the selected cases.
                     maxLength: 128
                     type: string
+                  graderSetDigest:
+                    description: GraderSetDigest is the digest of the graders' names
+                      and versions.
+                    maxLength: 128
+                    type: string
                   model:
                     description: Model is the model route the reviewer uses.
                     maxLength: 256
@@ -384,6 +389,11 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  monitorUID:
+                    description: |-
+                      MonitorUID is the RepositoryMonitor UID, so a recreated monitor with
+                      the same name and generation is still a change.
+                    type: string
                   promptTemplateDigest:
                     description: PromptTemplateDigest is the digest of the review
                       prompt template.
@@ -408,6 +418,12 @@ spec:
                   runtimeImageDigest:
                     description: RuntimeImageDigest is the reviewer runtime image
                       digest.
+                    maxLength: 128
+                    type: string
+                  trialPlanDigest:
+                    description: |-
+                      TrialPlanDigest is the digest of the ordered (case id, trial) plan.
+                      Two runs with the same digest assign the same trials.
                     maxLength: 128
                     type: string
                 type: object

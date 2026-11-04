@@ -29,9 +29,11 @@ type GradeResult struct {
 }
 
 // Grader checks one trial of one case. Graders are pure: they read only the
-// case and the outcome.
+// case and the outcome. Version changes whenever Grade can judge the same
+// trial differently, so runs graded by different versions are not compared.
 type Grader interface {
 	Name() corev1alpha1.EvalGraderName
+	Version() string
 	Grade(c Case, outcome TrialOutcome) GradeResult
 }
 
@@ -145,6 +147,8 @@ type VerdictGrader struct{}
 
 func (VerdictGrader) Name() corev1alpha1.EvalGraderName { return corev1alpha1.EvalGraderVerdict }
 
+func (VerdictGrader) Version() string { return "1" }
+
 func (VerdictGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	outcome, _, ok := reviewTrial(c, trial)
 	if !ok {
@@ -178,6 +182,9 @@ type LocalizationGrader struct {
 func (LocalizationGrader) Name() corev1alpha1.EvalGraderName {
 	return corev1alpha1.EvalGraderLocalization
 }
+
+// Version covers Tolerance, which changes what counts as a hit.
+func (g LocalizationGrader) Version() string { return fmt.Sprintf("1+tolerance.%d", g.Tolerance) }
 
 func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	outcome, _, ok := reviewTrial(c, trial)
@@ -215,6 +222,8 @@ type ContractGrader struct{}
 
 func (ContractGrader) Name() corev1alpha1.EvalGraderName { return corev1alpha1.EvalGraderContract }
 
+func (ContractGrader) Version() string { return "1" }
+
 func (ContractGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	outcome, input, ok := reviewTrial(c, trial)
 	if !ok {
@@ -242,6 +251,8 @@ func (ContractGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 type HonestyGrader struct{}
 
 func (HonestyGrader) Name() corev1alpha1.EvalGraderName { return corev1alpha1.EvalGraderHonesty }
+
+func (HonestyGrader) Version() string { return "1" }
 
 func (HonestyGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	outcome, _, ok := reviewTrial(c, trial)

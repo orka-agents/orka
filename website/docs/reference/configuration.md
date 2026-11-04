@@ -496,7 +496,7 @@ Capability evals with the `EvalRun` resource. Off by default.
 
 | Flag | Environment variable | Default | Purpose |
 | --- | --- | --- | --- |
-| `--enable-evals` | `ORKA_ENABLE_EVALS` | `false` | Reserved for EvalRun reconciliation. The `EvalRun` CRD is installed, and the built-in `edit` and `admin` ClusterRoles can manage it, but this release does not reconcile EvalRuns. |
+| `--enable-evals` | `ORKA_ENABLE_EVALS` | `false` | Runs the EvalRun controller. Each trial is a low-priority, credential-free review Task; trial records are served at `GET /api/v1/evals/runs/:name/trials`. The built-in `edit` and `admin` ClusterRoles can manage EvalRuns. When off, EvalRuns are accepted but not reconciled. |
 
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 

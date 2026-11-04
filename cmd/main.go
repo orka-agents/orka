@@ -788,7 +788,7 @@ func main() {
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.BoolVar(&evalsEnabled, "enable-evals", envBool("ORKA_ENABLE_EVALS"),
-		"Enable EvalRun capability evals. Reserved: this release serves the EvalRun API but does not reconcile it.")
+		"Enable the EvalRun controller, which runs capability eval trials as Tasks and grades them.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -823,10 +823,6 @@ func main() {
 		setupLog.Error(err, "invalid agent host configuration")
 		os.Exit(1)
 	}
-	if evalsEnabled {
-		setupLog.Info("--enable-evals is set, but this release does not reconcile EvalRuns yet")
-	}
-
 	if !enableLeaderElection {
 		fmt.Fprintln(os.Stderr, "--leader-elect=true is required for an isolated controller installation")
 		os.Exit(1)
@@ -2043,6 +2039,22 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
 	}
+	if evalsEnabled {
+		if err := (&controller.EvalRunReconciler{
+			Client:      mgr.GetClient(),
+			Scheme:      mgr.GetScheme(),
+			TrialStore:  sqliteStore,
+			ResultStore: sqliteStore,
+			EventStore:  sqliteStore,
+			RuntimeImages: controller.ACPRuntimeImages{
+				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+				Opencode: acpOpencodeRuntimeImage,
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "EvalRun")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -2102,6 +2114,7 @@ func main() {
 		MemoryProposalStore:       sqliteStore,
 		SecurityStore:             sqliteStore,
 		RepositoryMonitorStore:    sqliteStore,
+		EvalTrialStore:            sqliteStore,
 		ExecutionEventStore:       sqliteStore,
 		GatewayEventStore:         sqliteStore,
 		GatewayDeliveryStore:      sqliteStore,

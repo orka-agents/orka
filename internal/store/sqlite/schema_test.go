@@ -116,8 +116,16 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	legacy, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = legacy.Close() })
-	statements := currentSchemaStatements()
-	preNative := append(statements[:len(statements)-len(nativeSessionSchemaStatements())-len(connectorSchemaStatements())], connectorSchemaStatements()...)
+	native := map[string]bool{}
+	for _, statement := range nativeSessionSchemaStatements() {
+		native[statement] = true
+	}
+	var preNative []string
+	for _, statement := range currentSchemaStatements() {
+		if !native[statement] {
+			preNative = append(preNative, statement)
+		}
+	}
 	for _, statement := range preNative {
 		_, err := legacy.Exec(statement)
 		require.NoError(t, err)

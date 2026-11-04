@@ -50,6 +50,9 @@ const (
 	LabelGitHubNumber      = "orka.ai/github-number"
 	LabelRepositoryMonitor = "orka.ai/repository-monitor"
 	LabelMonitorRun        = "orka.ai/monitor-run"
+	LabelEvalRun           = "orka.ai/eval-run"
+	LabelEvalCase          = "orka.ai/eval-case"
+	LabelEvalTrial         = "orka.ai/eval-trial"
 	LabelTransactionID     = "orka.ai/transaction-id"
 	LabelAuthProfile       = "orka.ai/auth-profile"
 
