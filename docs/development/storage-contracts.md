@@ -439,7 +439,11 @@ write method.
   records nothing and returns `ErrOperationExpired`: the outcome stays unknown
   for good, and the affected work is held for recovery. The bound uses the
   contract's minimum retention, so raising a provider's retention never
-  turns a receipt pruned earlier into a false abort. While an outcome
+  turns a receipt pruned earlier into a false abort. Retention and operation
+  ages use a durable non-regressing provider clock, or retention is extended
+  by a bound on cumulative clock regression between pruning and every later
+  resolution, including repeated backward steps, restarts and failovers.
+  A bound on the largest individual step does not suffice. While an outcome
   cannot be settled, the client refuses new writes to that dataset with
   `ErrNotReady` and keeps trying to resolve it; an outcome found to be
   permanently unknown moves to a recovery hold on the affected work and stops
@@ -494,12 +498,17 @@ write method.
   Once providers implement the advance, at takeover Orka acquires the epoch in
   Kubernetes, reads the epoch each dataset acknowledged earlier, and then,
   for each distinct dataset it is bound to:
-  1. advances the dataset;
-  2. stops for recovery if the dataset's previous epoch is below its
-     acknowledgement, because the store lost an acknowledged advance;
-  3. records the new acknowledgement in Kubernetes, in the ControllerEpoch
+  1. advances the dataset with `AcknowledgedEpoch` set to that durable
+     acknowledgement. The provider checks its stored epoch against this floor
+     atomically with the advance, before changing any epoch or installation.
+     An absent epoch counts as zero. A lower stored epoch returns `ErrNotReady`
+     without changing anything, and Orka stops for recovery. Every later
+     takeover supplies the same acknowledgement until a new one is recorded,
+     so a controller crash cannot erase the rollback evidence; checking only
+     `Previous` after an advance would lose that evidence on the next advance;
+  2. records the new acknowledgement in Kubernetes, in the ControllerEpoch
      status until an installation record exists;
-  4. opens that dataset's fence for writes.
+  3. opens that dataset's fence for writes.
 
   Each dataset's fence opens independently, and a write waits only for the
   fence of the contract that serves it (`MethodInfo.Contract`), so an

@@ -181,7 +181,10 @@ type OperationReceiptStore interface {
 	// ErrClockSkew and records nothing. The bound assumes the clock the
 	// provider uses for receipt retention never moves backward; a provider
 	// whose clock can step back, for example across a failover, retains
-	// receipts longer by the largest such step.
+	// receipts longer by a bound on cumulative regression between pruning and
+	// every later resolution, including repeated steps, restarts and failovers.
+	// Bounding only an individual step is insufficient. Without such a bound,
+	// it must use a durable non-regressing clock for retention and age checks.
 	ResolveOperation(ctx context.Context, request ResolveOperationRequest) (OperationOutcome, error)
 	// PruneOperationReceipts removes at most limit operation receipts and
 	// aborted records older than the provider's receipt retention, measured on
