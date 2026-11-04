@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,32 +17,41 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-// A storage write that was not accepted for now, or whose outcome is
-// unknown, is neither a success nor a definite failure: the API answers 503
-// with a retry hint.
-func TestTemporaryStorageErrorsAnswerServiceUnavailable(t *testing.T) {
+// Only known uncommitted storage refusals may advertise an HTTP retry. An
+// uncertain write might have consumed messages or created an assigned UUID;
+// a new HTTP request would use a new operation ID and could lose or duplicate it.
+func TestStorageErrorRetryHintsRequireKnownUncommittedOutcome(t *testing.T) {
 	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
-	routes := map[string]error{
-		"/outcome-unknown": fmt.Errorf("save result: %w", store.ErrOutcomeUnknown),
-		"/not-ready":       fmt.Errorf("save result: %w", store.ErrNotReady),
-		"/unavailable":     fmt.Errorf("save result: %w", store.ErrUnavailable),
-		"/gateway-store":   gatewayStoreHTTPError(fmt.Errorf("retry: %w", store.ErrOutcomeUnknown), "retry delivery"),
-		"/failure":         errors.New("boom"),
+	routes := map[string]struct {
+		err    error
+		status int
+	}{
+		"/outcome-unknown": {fmt.Errorf("save result: %w", store.ErrOutcomeUnknown), http.StatusConflict},
+		"/not-ready":       {fmt.Errorf("save result: %w", store.ErrNotReady), http.StatusServiceUnavailable},
+		"/unavailable":     {fmt.Errorf("save result: %w", store.ErrUnavailable), http.StatusServiceUnavailable},
+		"/gateway-store":   {gatewayStoreHTTPError(fmt.Errorf("retry: %w", store.ErrOutcomeUnknown), "retry delivery"), http.StatusConflict},
+		"/memory-create":   {memoryStoreError("create memory", "memory", store.ErrOutcomeUnknown), http.StatusConflict},
+		"/proposal-create": {memoryStoreError("create proposal", "memory proposal", store.ErrOutcomeUnknown), http.StatusConflict},
+		"/failure":         {errors.New("boom"), http.StatusInternalServerError},
 	}
-	for path, err := range routes {
-		app.Get(path, func(fiber.Ctx) error { return err })
+	for path, test := range routes {
+		app.Get(path, func(fiber.Ctx) error { return test.err })
 	}
-	for path := range routes {
+	for path, test := range routes {
 		response, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
 		require.NoError(t, err)
-		_ = response.Body.Close()
-		if path == "/failure" {
-			require.Equal(t, http.StatusInternalServerError, response.StatusCode)
-			require.Empty(t, response.Header.Get(fiber.HeaderRetryAfter))
-			continue
+		body, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, test.status, response.StatusCode, path)
+		if test.status == http.StatusServiceUnavailable {
+			require.Equal(t, serviceUnavailableRetryAfterSeconds, response.Header.Get(fiber.HeaderRetryAfter), path)
+		} else {
+			require.Empty(t, response.Header.Get(fiber.HeaderRetryAfter), path)
 		}
-		require.Equal(t, http.StatusServiceUnavailable, response.StatusCode, path)
-		require.Equal(t, serviceUnavailableRetryAfterSeconds, response.Header.Get(fiber.HeaderRetryAfter), path)
+		if test.status == http.StatusConflict {
+			require.Contains(t, string(body), "outcome is unknown; do not retry this request", path)
+		}
 	}
 }
 
@@ -68,7 +78,7 @@ func TestInternalSubmitExecutionEventAnswersServiceUnavailableWhileStorageIsNotR
 // Memory routes map a temporary storage refusal to 503 before any other
 // storage error.
 func TestMemoryStoreErrorAnswersServiceUnavailableWhileStorageIsNotReady(t *testing.T) {
-	err := memoryStoreError("create memory", "memory", fmt.Errorf("create: %w", store.ErrOutcomeUnknown))
+	err := memoryStoreError("create memory", "memory", fmt.Errorf("create: %w", store.ErrNotReady))
 	fiberErr, ok := errors.AsType[*fiber.Error](err)
 	require.True(t, ok)
 	require.Equal(t, fiber.StatusServiceUnavailable, fiberErr.Code)

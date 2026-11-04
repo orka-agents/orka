@@ -487,8 +487,9 @@ write without one.
   abort recorded by `ResolveOperation` atomic with respect to one another,
   for example by claiming the operation ID first, so an operation never both
   commits and aborts. `ErrOutcomeUnknown` is
-  neither success nor failure: an API handler answers 503 and a reconciler
-  requeues, and neither repeats the effect nor reports success. An operation
+  neither success nor failure: an API handler answers 409 without a retry hint
+  and tells the caller not to repeat the request, while a reconciler requeues
+  using its durable operation identity. Neither reports success. An operation
   ID names one operation instance and is never derived from a durable
   identity, so an aborted instance does not block a later one. A durable
   operation run again after a restart is a new operation. Its natural key, or
@@ -1140,10 +1141,16 @@ Reads and administrative methods reach the provider unchanged.
   such as a connector custody commit that lost a race, seals again and is a
   new operation.
 - **Callers.** `store.IsTemporaryStorageError` matches `ErrNotReady`,
-  `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers them with 503 and
-  a `Retry-After` hint, in its shared error handler, the gateway ingress,
+  `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers `ErrNotReady` and
+  `ErrUnavailable` with 503 and a `Retry-After` hint, in its shared error
+  handler, the gateway ingress,
   gateway store and internal task-data paths, the worker message and
-  execution event routes, and the memory routes. Task result collection
+  execution event routes, and the memory routes. `ErrOutcomeUnknown` answers
+  409 without `Retry-After`: HTTP retries do not preserve the storage operation
+  ID, so resubmitting may consume a new message batch or create another
+  provider-assigned record. The response tells callers not to retry this
+  request; HTTP result recovery requires a future request-level idempotency
+  protocol. Task result collection
   requeues the Task instead of completing it without its result, repository
   monitor implementations retry an artifact the store has not accepted
   instead of blocking, and gateway admission no longer reads a fenced write

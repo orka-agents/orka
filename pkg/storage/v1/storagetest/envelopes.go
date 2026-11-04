@@ -69,6 +69,14 @@ type envelopedArtifacts struct {
 	ops *suiteEnvelopes
 }
 
+// stateWithArtifacts preserves the optional artifact capability of a state
+// provider without shadowing its shared administrative methods. Both write
+// surfaces below use envelope-aware forwarding.
+type stateWithArtifacts struct {
+	storagev1.StateProvider
+	storagev1.ArtifactStore
+}
+
 // suiteEnvelopes builds the envelopes the suite attaches: the provider's
 // dataset, the controller epoch the dataset holds when the write is sent, a
 // new operation ID, the request digest, the current time and the next
@@ -95,7 +103,15 @@ func wrapState(provider storagev1.StateProvider) storagev1.StateProvider {
 	ops.establish = func(ctx context.Context, _ string) error {
 		return provider.SyncControllerEpochMirror(ctx, mirroredEpoch(suiteFence.Epoch, suiteFence.HolderID))
 	}
-	return envelopedState{StateProvider: provider, ops: ops}
+	state := envelopedState{StateProvider: provider, ops: ops}
+	if artifacts, ok := provider.(storagev1.ArtifactStore); ok {
+		combined := stateWithArtifacts{StateProvider: provider, ArtifactStore: artifacts}
+		return stateWithArtifacts{
+			StateProvider: state,
+			ArtifactStore: envelopedArtifacts{ArtifactProvider: combined, ops: ops},
+		}
+	}
+	return state
 }
 
 func wrapArtifacts(provider storagev1.ArtifactProvider) storagev1.ArtifactProvider {
