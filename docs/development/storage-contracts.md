@@ -328,9 +328,10 @@ The SQLite provider runs it directly, and the storage client runs it over
 SQLite.
 
 SQLite also implements the duplicate SQL control-record methods described in
-the next section. They are not part of the provider contract or the client. A
-client test fails if any other SQLite method is missing from the client, so a
-consumer's type assertion cannot silently lose a capability.
+"Kubernetes control authority and retained SQL compatibility" below. They are
+not part of the provider contract or the client. A client test fails if any
+other SQLite method is missing from the client, so a consumer's type assertion
+cannot silently lose a capability.
 
 ### Orka policy above the client
 
