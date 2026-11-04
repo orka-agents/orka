@@ -480,6 +480,77 @@ func TestACPDispatcherPatchRecoveredTerminalExecutionPreservesTerminalClassifica
 	}
 }
 
+func TestACPDispatcherPatchRecoveredTerminalExecutionClassifiesDeliveryPhase(t *testing.T) {
+	tests := []struct {
+		name      string
+		delivery  store.PromptDeliveryState
+		taskState corev1alpha1.TaskDeliveryState
+		outcome   corev1alpha1.TaskDeliveryOutcome
+		wantPhase corev1alpha1.TaskPhase
+	}{
+		{
+			name: "cancelled before publish settles as cancelled", delivery: store.PromptDeliveryCancelledBeforePublish,
+			taskState: corev1alpha1.TaskDeliveryStateCancelledBeforePublish, outcome: corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish,
+			wantPhase: corev1alpha1.TaskPhaseCancelled,
+		},
+		{
+			name: "verified publication settles as succeeded", delivery: store.PromptDeliveryVerifiedExact,
+			taskState: corev1alpha1.TaskDeliveryStateVerifiedExact, outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+			wantPhase: corev1alpha1.TaskPhaseSucceeded,
+		},
+		{
+			name: "delivery conflict settles as failed", delivery: store.PromptDeliveryConflict,
+			taskState: corev1alpha1.TaskDeliveryStateDeliveryConflict, outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
+			wantPhase: corev1alpha1.TaskPhaseFailed,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			storeValue, _, closeStore := newACPSessionTestStore(t, filepath.Join(t.TempDir(), "recovered-delivery-phase.db"))
+			defer closeStore()
+			// A session-bound Task skips the standalone projection, and without a
+			// durable publication the recovered delivery status comes from the Task.
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "recovered-delivery-phase", UID: types.UID("recovered-delivery-phase-uid")},
+				Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent,
+					SessionRef: &corev1alpha1.SessionReference{Name: "session"}},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseRunning,
+					Execution: &corev1alpha1.TaskExecutionStatus{
+						Attempt: 1, PromptID: "prompt-1", State: corev1alpha1.TaskExecutionStateSucceeded,
+						Outcome: corev1alpha1.TaskExecutionOutcomeSucceeded,
+					},
+					Delivery: &corev1alpha1.TaskDeliveryStatus{State: test.taskState, Outcome: test.outcome},
+				},
+			}
+			kubeClient := fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+			if err := kubeClient.Get(ctx, clientObjectKey(task), task); err != nil {
+				t.Fatal(err)
+			}
+			dispatcher := &ACPDispatcher{Client: kubeClient, Store: storeValue}
+			attempt := &store.PromptAttempt{
+				ExecutionState: store.PromptExecutionSucceeded, DeliveryState: test.delivery,
+				SessionUID: "session-uid", SessionLeaseGeneration: 1,
+			}
+			if err := dispatcher.patchRecoveredTerminalExecution(ctx, task, attempt, 2); err != nil {
+				t.Fatal(err)
+			}
+			updated := &corev1alpha1.Task{}
+			if err := kubeClient.Get(ctx, clientObjectKey(task), updated); err != nil {
+				t.Fatal(err)
+			}
+			if updated.Status.Phase != test.wantPhase {
+				t.Fatalf("recovered phase = %s, want %s", updated.Status.Phase, test.wantPhase)
+			}
+			if updated.Status.Delivery == nil || updated.Status.Delivery.Outcome != test.outcome {
+				t.Fatalf("recovered delivery = %#v, want outcome %s", updated.Status.Delivery, test.outcome)
+			}
+		})
+	}
+}
+
 func TestFinalizeRecoveredTerminalSessionPersistsTerminalClassification(t *testing.T) {
 	tests := []struct {
 		name           string
