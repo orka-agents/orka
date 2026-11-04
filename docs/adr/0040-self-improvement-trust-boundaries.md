@@ -125,6 +125,10 @@ repositories:
       - internal/evals/**      # graders and the gate
       - test/evals/**
       - internal/api/*authoriz*
+      - internal/api/auth*.go                          # authentication
+      - internal/api/context_token*.go                 # transaction and context tokens
+      - Makefile                                       # the test and lint targets CI runs
+      - .golangci.yml
       - internal/api/server.go                         # route registration
       - internal/api/eval*.go                          # proposal and decision handlers
       - internal/api/agent_rollout*.go                 # rollout handler
