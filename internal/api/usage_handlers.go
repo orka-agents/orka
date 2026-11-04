@@ -150,14 +150,20 @@ func (h *Handlers) authorizeUsageContextToken(c fiber.Ctx) error {
 	// A counts-only archive cannot reconstruct effective Agent/Provider/tool
 	// policy after objects are deleted. Object-constrained tokens therefore
 	// cannot authorize an aggregate, even with list scopes.
-	if ui := GetUserInfo(c); h.contextTokenAuthorization.Enabled() && ui != nil && ui.AuthType == AuthTypeContextToken && ui.ContextToken != nil {
-		for key := range ui.ContextToken.TransactionContext {
-			if key != toolNamespaceArg {
-				if err := h.handleContextTokenAuthorizationFailures(ui.ContextToken, "usageReport", []string{"usage reporting requires a token without object constraints"}); err != nil {
-					return err
-				}
-				break
-			}
+	return h.rejectObjectConstrainedContextToken(c, "usageReport", "usage reporting requires a token without object constraints")
+}
+
+// rejectObjectConstrainedContextToken fails a context token whose transaction
+// context names anything beyond a namespace. Aggregates that cannot be
+// filtered per object use it.
+func (h *Handlers) rejectObjectConstrainedContextToken(c fiber.Ctx, action, failure string) error {
+	ui := GetUserInfo(c)
+	if !h.contextTokenAuthorization.Enabled() || ui == nil || ui.AuthType != AuthTypeContextToken || ui.ContextToken == nil {
+		return nil
+	}
+	for key := range ui.ContextToken.TransactionContext {
+		if key != toolNamespaceArg {
+			return h.handleContextTokenAuthorizationFailures(ui.ContextToken, action, []string{failure})
 		}
 	}
 	return nil

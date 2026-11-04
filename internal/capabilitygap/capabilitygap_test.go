@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
@@ -88,7 +89,7 @@ func TestRecordCountsEachSignal(t *testing.T) {
 		}
 	}
 
-	summary := r.Summary("team-a")
+	summary := r.Summary("team-a", nil)
 	if !summary.Partial {
 		t.Fatalf("a recorder started today cannot cover the six earlier days: %+v", summary)
 	}
@@ -102,7 +103,7 @@ func TestRecordCountsEachSignal(t *testing.T) {
 	if got := strings.Join(top.Tasks, ","); got != "task-4,task-3" {
 		t.Fatalf("tasks = %q, want most recent first", got)
 	}
-	if other := r.Summary("team-b"); len(other.Signals) != 0 {
+	if other := r.Summary("team-b", nil); len(other.Signals) != 0 {
 		t.Fatalf("summary leaked across namespaces: %+v", other.Signals)
 	}
 }
@@ -120,7 +121,7 @@ func TestRecordNormalizesOutOfRangeValues(t *testing.T) {
 	if got := counterValue("unsupported_request", "runtime", "unknown", "none"); got != 1 {
 		t.Fatalf("non-tool category must label tool none, got %v", got)
 	}
-	if got := len(r.Summary("team-a").Signals); got != 2 {
+	if got := len(r.Summary("team-a", nil).Signals); got != 2 {
 		t.Fatalf("unknown category must be dropped, got %d rows", got)
 	}
 }
@@ -138,7 +139,7 @@ func TestRecordNeverExposesHostileText(t *testing.T) {
 		Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: hostile, Task: "task-1"})
 	}
 
-	summary, err := json.Marshal(r.Summary("team-a"))
+	summary, err := json.Marshal(r.Summary("team-a", nil))
 	if err != nil {
 		t.Fatalf("marshal summary: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestUnknownToolNamesShareOneSeries(t *testing.T) {
 	if got := counterValue("missing_tool", "not_registered", "native", "unknown"); got != 500 {
 		t.Fatalf("unknown bucket = %v, want 500", got)
 	}
-	summary := r.Summary("team-a")
+	summary := r.Summary("team-a", nil)
 	if len(summary.Signals) != 2 {
 		t.Fatalf("summary rows = %d, want 2", len(summary.Signals))
 	}
@@ -213,7 +214,7 @@ func TestSummaryWindowAndBounds(t *testing.T) {
 	clock.now = start.Add(6 * 24 * time.Hour)
 	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a", Task: "recent"})
 
-	summary := r.Summary("team-a")
+	summary := r.Summary("team-a", nil)
 	if len(summary.Signals) != 1 || summary.Signals[0].Count != 2 {
 		t.Fatalf("both days inside the window must count: %+v", summary.Signals)
 	}
@@ -226,7 +227,7 @@ func TestSummaryWindowAndBounds(t *testing.T) {
 	}
 
 	clock.now = start.Add(7 * 24 * time.Hour)
-	summary = r.Summary("team-a")
+	summary = r.Summary("team-a", nil)
 	if len(summary.Signals) != 1 || summary.Signals[0].Count != 1 || summary.Signals[0].Tasks[0] != "recent" {
 		t.Fatalf("the day outside the window must be pruned: %+v", summary.Signals)
 	}
@@ -259,5 +260,56 @@ func TestRecordingIsOffByDefault(t *testing.T) {
 	nilRecorder.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: "team-a"})
 	if got := testutilCollectCount(t); got != 0 {
 		t.Fatalf("disabled recording produced %d series", got)
+	}
+}
+
+func TestSummaryCountsGatewayOwnedSignalsOnlyForVisibleGateways(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	alpha := GatewayOwner{Namespace: "team-a", NamespaceUID: "ns-uid", Name: "alpha", UID: "alpha-uid"}
+	beta := GatewayOwner{Namespace: "team-a", NamespaceUID: "ns-uid", Name: "beta", UID: "beta-uid"}
+	for _, signal := range []Signal{
+		{Task: "plain-task"},
+		{Task: "alpha-task", Gateway: alpha},
+		{Task: "beta-task", Gateway: beta},
+	} {
+		signal.Category, signal.Reason, signal.Namespace = CategoryUnsupportedRequest, ReasonRuntime, "team-a"
+		r.Record(signal)
+	}
+
+	owners := r.GatewayOwners("team-a")
+	if len(owners) != 2 {
+		t.Fatalf("owners = %+v, want alpha and beta", owners)
+	}
+	for _, tc := range []struct {
+		name    string
+		visible func(GatewayOwner) bool
+		count   int64
+		tasks   string
+	}{
+		{"nil hides every Gateway", nil, 1, "plain-task"},
+		{"only alpha", func(owner GatewayOwner) bool { return owner == alpha }, 2, "alpha-task,plain-task"},
+		{"all", func(GatewayOwner) bool { return true }, 3, "beta-task,alpha-task,plain-task"},
+	} {
+		summary := r.Summary("team-a", tc.visible)
+		if len(summary.Signals) != 1 {
+			t.Fatalf("%s: signals = %+v, want one merged row", tc.name, summary.Signals)
+		}
+		if got := summary.Signals[0]; got.Count != tc.count || strings.Join(got.Tasks, ",") != tc.tasks {
+			t.Fatalf("%s: row = %+v, want count %d tasks %q", tc.name, got, tc.count, tc.tasks)
+		}
+	}
+}
+
+func TestRecordCopiesBorrowedNames(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	buffer := []byte("team-a/task-1")
+	namespace := unsafe.String(&buffer[0], len("team-a"))
+	task := unsafe.String(&buffer[len("team-a/")], len("task-1"))
+	r.Record(Signal{Category: CategoryUnsupportedRequest, Reason: ReasonRuntime, Namespace: namespace, Task: task})
+	copy(buffer, "zzzz-z/zzzz-z")
+
+	summary := r.Summary("team-a", nil)
+	if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != "task-1" {
+		t.Fatalf("summary = %+v, want the original namespace and Task", summary)
 	}
 }

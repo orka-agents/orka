@@ -111,6 +111,16 @@ var runtimes = []string{
 	RuntimeNative, RuntimeCodex, RuntimeClaude, RuntimeCopilot, RuntimeOpencode, RuntimeExternal,
 }
 
+// GatewayOwner identifies the Gateway that owns a Task. The zero value means
+// the Task is not Gateway-owned. It is never a metric label; Summary uses it
+// to leave out signals the caller may not read.
+type GatewayOwner struct {
+	Namespace    string
+	NamespaceUID string
+	Name         string
+	UID          string
+}
+
 // Signal is one observation. Namespace and Task are Kubernetes object names;
 // Tool is a candidate tool name that is replaced by ToolUnknown unless it is
 // in the Recorder's catalog. No field may carry free text.
@@ -121,6 +131,8 @@ type Signal struct {
 	Tool      string
 	Namespace string
 	Task      string
+	// Gateway is the Task's owning Gateway, if any.
+	Gateway GatewayOwner
 }
 
 // SignalSummary is one aggregated row of a Summary.
@@ -148,6 +160,7 @@ type Summary struct {
 
 type signalKey struct {
 	category, reason, runtime, tool string
+	gateway                         GatewayOwner
 }
 
 type signalEntry struct {
@@ -244,9 +257,16 @@ func (r *Recorder) Record(s Signal) {
 	if len(validation.IsDNS1123Label(s.Namespace)) != 0 {
 		return
 	}
-	task := s.Task
+	// Callers may pass strings borrowed from a request buffer; the summary
+	// keeps its own copies.
+	namespace := strings.Clone(s.Namespace)
+	task := strings.Clone(s.Task)
 	if task != "" && len(validation.IsDNS1123Subdomain(task)) != 0 {
 		task = ""
+	}
+	key.gateway = GatewayOwner{
+		Namespace: strings.Clone(s.Gateway.Namespace), NamespaceUID: strings.Clone(s.Gateway.NamespaceUID),
+		Name: strings.Clone(s.Gateway.Name), UID: strings.Clone(s.Gateway.UID),
 	}
 
 	r.mu.Lock()
@@ -259,13 +279,13 @@ func (r *Recorder) Record(s Signal) {
 		bucket = dayBucket{}
 		r.days[today] = bucket
 	}
-	signals := bucket[s.Namespace]
+	signals := bucket[namespace]
 	if signals == nil {
 		if len(bucket) >= MaxNamespacesPerDay {
 			return
 		}
 		signals = map[signalKey]*signalEntry{}
-		bucket[s.Namespace] = signals
+		bucket[namespace] = signals
 	}
 	entry := signals[key]
 	if entry == nil {
@@ -278,9 +298,35 @@ func (r *Recorder) Record(s Signal) {
 	}
 }
 
+// GatewayOwners returns the distinct Gateways that own Tasks with signals in
+// namespace's window, so a caller can decide which it may read before calling
+// Summary.
+func (r *Recorder) GatewayOwners(namespace string) []GatewayOwner {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneLocked(dayNumber(r.now().UTC()))
+	seen := map[GatewayOwner]bool{}
+	owners := []GatewayOwner{}
+	for _, bucket := range r.days {
+		for key := range bucket[namespace] {
+			if key.gateway != (GatewayOwner{}) && !seen[key.gateway] {
+				seen[key.gateway] = true
+				owners = append(owners, key.gateway)
+			}
+		}
+	}
+	return owners
+}
+
 // Summary returns namespace's signals for the current UTC day and the
-// WindowDays-1 days before it, largest count first.
-func (r *Recorder) Summary(namespace string) Summary {
+// WindowDays-1 days before it, largest count first. Signals from a
+// Gateway-owned Task count only when visible reports that Gateway as readable;
+// a nil visible leaves out every Gateway-owned signal. visible runs with the
+// Recorder locked and must not block.
+func (r *Recorder) Summary(namespace string, visible func(GatewayOwner) bool) Summary {
 	if r == nil {
 		return Summary{Namespace: namespace, Signals: []SignalSummary{}}
 	}
@@ -306,6 +352,10 @@ func (r *Recorder) Summary(namespace string) Summary {
 	slices.Sort(days)
 	for _, day := range days {
 		for key, entry := range r.days[day][namespace] {
+			if key.gateway != (GatewayOwner{}) && (visible == nil || !visible(key.gateway)) {
+				continue
+			}
+			key.gateway = GatewayOwner{}
 			total := totals[key]
 			if total == nil {
 				total = &signalEntry{}

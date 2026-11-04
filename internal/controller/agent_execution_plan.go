@@ -18,6 +18,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 )
 
 type agentExecutionPath string
@@ -284,6 +285,7 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 			Runtime:   capabilityGapAgentRuntime(agent),
 			Namespace: task.Namespace,
 			Task:      task.Name,
+			Gateway:   capabilityGapGatewayOwner(task),
 		})
 	}
 	return result, err
@@ -299,6 +301,31 @@ func capabilityGapAgentRuntime(agent *corev1alpha1.Agent) string {
 		return capabilitygap.RuntimeExternal
 	}
 	return capabilitygap.RuntimeLabel(string(agent.Spec.Runtime.Type))
+}
+
+// capabilityGapBoundRuntime labels a verified bound execution the way
+// capabilityGapAgentRuntime labels an Agent: runtimeRef dispatch is external,
+// a built-in profile keeps its provider name. It reads only frozen state.
+func capabilityGapBoundRuntime(bound *verifiedAgentExecution) string {
+	if bound == nil || bound.binding == nil {
+		return capabilitygap.RuntimeUnknown
+	}
+	if bound.binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint {
+		return capabilitygap.RuntimeExternal
+	}
+	return capabilitygap.RuntimeLabel(bound.plan.Profile.ProviderKind)
+}
+
+// capabilityGapGatewayOwner names the Gateway that owns task, if any, so the
+// summary can hide its signals from callers who cannot read that Gateway.
+func capabilityGapGatewayOwner(task *corev1alpha1.Task) capabilitygap.GatewayOwner {
+	owner, ok := gatewayruntime.TaskOwner(task)
+	if !ok {
+		return capabilitygap.GatewayOwner{}
+	}
+	return capabilitygap.GatewayOwner{
+		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+	}
 }
 
 func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (string, capabilitygap.Reason) {

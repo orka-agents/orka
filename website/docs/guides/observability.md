@@ -207,7 +207,7 @@ recorded at all:
 | Category | Reason | Source |
 |---|---|---|
 | `unsupported_request` | `runtime`, `contract_version`, `execution_workspace`, `toolboxes`, `prior_task_ref`, `max_turns`, `retry_policy`, `resources`, `placement`, `autonomous_coordination`, `transaction_delegation`, `native_session` | The controller refused an agent Task during execution planning, at the workspace dispatch gate, or at native Session restore. Validation errors and missing configuration are not counted. |
-| `missing_tool` | `not_enabled`, `not_registered` | The built-in AI worker rejected a model's tool call because the Task did not enable it, or no tool had that name. The worker marks the `ToolCallFailed` event with a closed `errorType`; the controller counts it when the event arrives. |
+| `missing_tool` | `not_enabled`, `not_registered` | The built-in AI worker rejected a model's tool call because the Task did not enable it, or no tool had that name. The worker marks the `ToolCallFailed` event with a closed `errorType`; the controller counts it when the event arrives from a managed AI worker Pod. The same event from any other Task is journaled but not counted. |
 | `missing_tool` | `denied_by_policy` | An ACP runtime asked permission to use a tool its frozen tool policy does not allow. |
 
 The Prometheus counter is `orka_capability_gap_signals_total` with labels
@@ -226,6 +226,8 @@ messages or user text. Values outside these sets fall back to `other` or `unknow
 `GET /api/v1/capability-gaps?namespace=<ns>` returns the namespace's signals for
 the current UTC day and the six before it. It needs `list` on `tasks` in that
 namespace, like `GET /api/v1/tasks`, and returns `404` while the flag is off.
+A context token must not be limited to particular objects: counts outlive their
+Tasks, so they cannot be filtered per Task.
 
 ```json
 {
@@ -243,6 +245,8 @@ namespace, like `GET /api/v1/tasks`, and returns `404` while the flag is off.
 
 Each row lists at most five recent Task names. A name is shown only when the
 caller could list that Task now; deleted Tasks drop out but keep their counts.
+Signals from a Gateway-owned Task count only for callers who can read that
+Gateway, the same check that guards the Task. Prometheus counts every signal.
 
 The summary is held in controller memory, so it starts empty after a restart or
 leader change. `partial` is `true` when `recordingSince` is after `from`, so a

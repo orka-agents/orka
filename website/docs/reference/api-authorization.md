@@ -158,7 +158,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/usage` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | `list` on `repositorymonitors` and `sessions`; all selected team namespaces; Gateway read |
 | `GET` | `/api/v1/usage/work/:id` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
 | `GET` | `/api/v1/usage/other/:category` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Same permissions and retained-Task access checks as the summary |
-| `GET` | `/api/v1/capability-gaps` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read on each returned Task reference; `404` unless `--capability-gap-signals-enabled` |
+| `GET` | `/api/v1/capability-gaps` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read on each returned Task reference and on each Gateway whose Tasks' signals are counted; object-constrained context tokens are rejected; `404` unless `--capability-gap-signals-enabled` |
 | `GET` | `/api/v1/tasks` | `core.orka.ai` | `tasks` | `list` | empty | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `DELETE` | `/api/v1/tasks/:id` | `core.orka.ai` | `tasks` | `delete` | `:id` | `Q` | Gateway operate |

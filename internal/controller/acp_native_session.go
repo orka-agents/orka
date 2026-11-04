@@ -182,7 +182,7 @@ func nativeRestoreHonorsHistoryBoundary(ref *corev1alpha1.SessionReference, chec
 // rejectNativeSessionRuntime fails a Task that cannot use the Session's native
 // checkpoint before it binds the Session. cause selects the reported reason.
 func (d *ACPDispatcher) rejectNativeSessionRuntime(
-	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, provider string, cause error,
+	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, gapRuntime string, cause error,
 ) error {
 	reason := corev1alpha1.TaskExecutionReason("NativeSessionRuntimeUnsupported")
 	message := errNativeSessionRuntimeUnsupported.Error()
@@ -198,7 +198,7 @@ func (d *ACPDispatcher) rejectNativeSessionRuntime(
 	}
 	capabilitygap.Record(capabilitygap.Signal{
 		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonNativeSession,
-		Runtime: provider, Namespace: task.Namespace, Task: task.Name,
+		Runtime: gapRuntime, Namespace: task.Namespace, Task: task.Name, Gateway: capabilityGapGatewayOwner(task),
 	})
 	return nil
 }

@@ -17,8 +17,10 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -131,7 +133,20 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	}); err != nil {
 		return err
 	}
-	recordToolCallCapabilityGap(event, eventContent)
+	// Only a managed AI worker reports its own tool rejections; a container
+	// Task's command could submit the same event shape.
+	if reason, ok := toolCallCapabilityGapReason(event, eventContent); ok && capabilitygap.Default() != nil &&
+		authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask) == nil {
+		capabilitygap.Record(capabilitygap.Signal{
+			Category:  capabilitygap.CategoryMissingTool,
+			Reason:    reason,
+			Runtime:   capabilitygap.RuntimeNative,
+			Tool:      event.ToolName,
+			Namespace: event.Namespace,
+			Task:      event.StreamID,
+			Gateway:   capabilityGapGatewayOwner(writerTask),
+		})
+	}
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{
 		ID:        appended.ID,
@@ -140,36 +155,37 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	})
 }
 
-// recordToolCallCapabilityGap counts a built-in AI worker tool call that was
-// rejected before it ran. It reads only the closed errorType value and the
-// tool name, which the recorder replaces with "unknown" unless it is in the
-// catalog; the summary, content text and arguments are never read.
-func recordToolCallCapabilityGap(event *store.ExecutionEvent, content map[string]json.RawMessage) {
+// toolCallCapabilityGapReason classifies a built-in AI worker tool call that
+// was rejected before it ran. It reads only the closed errorType value; the
+// summary, content text and arguments are never read.
+func toolCallCapabilityGapReason(event *store.ExecutionEvent, content map[string]json.RawMessage) (capabilitygap.Reason, bool) {
 	if event == nil || event.Type != events.ExecutionEventTypeToolCallFailed ||
 		event.StreamType != events.ExecutionEventStreamTypeTask {
-		return
+		return "", false
 	}
 	var errorType string
 	if json.Unmarshal(content[events.ToolCallErrorTypeContentKey], &errorType) != nil {
-		return
+		return "", false
 	}
-	var reason capabilitygap.Reason
 	switch errorType {
 	case events.ToolCallErrorTypeNotEnabled:
-		reason = capabilitygap.ReasonToolNotEnabled
+		return capabilitygap.ReasonToolNotEnabled, true
 	case events.ToolCallErrorTypeNotFound:
-		reason = capabilitygap.ReasonToolNotRegistered
+		return capabilitygap.ReasonToolNotRegistered, true
 	default:
-		return
+		return "", false
 	}
-	capabilitygap.Record(capabilitygap.Signal{
-		Category:  capabilitygap.CategoryMissingTool,
-		Reason:    reason,
-		Runtime:   capabilitygap.RuntimeNative,
-		Tool:      event.ToolName,
-		Namespace: event.Namespace,
-		Task:      event.StreamID,
-	})
+}
+
+// capabilityGapGatewayOwner names the Gateway that owns task, if any.
+func capabilityGapGatewayOwner(task *corev1alpha1.Task) capabilitygap.GatewayOwner {
+	owner, ok := gatewayruntime.TaskOwner(task)
+	if !ok {
+		return capabilitygap.GatewayOwner{}
+	}
+	return capabilitygap.GatewayOwner{
+		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+	}
 }
 
 func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {

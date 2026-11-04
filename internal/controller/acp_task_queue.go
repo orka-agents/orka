@@ -59,7 +59,7 @@ const (
 var errACPWorkspaceRecoveryPending = fmt.Errorf("execution workspace recovery is pending: %w", store.ErrNotReady)
 
 //nolint:gocyclo // ACP queueing keeps durable planning, recovery, and binding gates auditable together.
-func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) (ctrl.Result, error) {
+func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1alpha1.Task, _ *corev1alpha1.Agent) (ctrl.Result, error) {
 	if task == nil || task.Status.AgentExecutionBinding == nil {
 		return ctrl.Result{}, errors.New("immutable v2 execution binding is required before ACP queueing")
 	}
@@ -78,10 +78,13 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		// AND bound-task recovery both flow through this chokepoint before
 		// any workspace or RuntimePool demand exists.
 		result, err := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
-		if err == nil {
+		// A requeue means the failure is not projected yet; count it once,
+		// on the pass that marks the Task failed.
+		if err == nil && result.IsZero() {
 			capabilitygap.Record(capabilitygap.Signal{
 				Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonExecutionWorkspace,
-				Runtime: capabilityGapAgentRuntime(agent), Namespace: task.Namespace, Task: task.Name,
+				Runtime: capabilityGapBoundRuntime(bound), Namespace: task.Namespace, Task: task.Name,
+				Gateway: capabilityGapGatewayOwner(task),
 			})
 		}
 		return result, err

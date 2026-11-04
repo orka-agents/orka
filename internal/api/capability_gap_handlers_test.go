@@ -9,14 +9,19 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gofiber/fiber/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 	"github.com/stretchr/testify/require"
+	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
@@ -57,8 +62,7 @@ func capabilityGapSeriesText(t *testing.T) string {
 
 func TestSubmitExecutionEventRecordsWorkerToolRejections(t *testing.T) {
 	recorder := installAPICapabilityGapRecorder(t, "web_fetch")
-	eventStore := newInternalExecutionEventStore(t)
-	app := setupOwnedInternalExecutionEventApp(t, eventStore, "task-1", "worker-pod", "worker-pod-uid")
+	app := setupManagedAIWorkerEventApp(t, "task-1", corev1alpha1.TaskTypeAI)
 
 	submit := func(eventType, toolName string, content map[string]any) {
 		t.Helper()
@@ -71,6 +75,7 @@ func TestSubmitExecutionEventRecordsWorkerToolRejections(t *testing.T) {
 		}
 		resp := doJSONRequest(t, app, "/internal/v1/events/default/task/task-1", body)
 		require.Equal(t, http.StatusCreated, resp.StatusCode)
+		require.NoError(t, resp.Body.Close())
 	}
 	failed := events.ExecutionEventTypeToolCallFailed
 	key := events.ToolCallErrorTypeContentKey
@@ -83,7 +88,7 @@ func TestSubmitExecutionEventRecordsWorkerToolRejections(t *testing.T) {
 	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_enabled", "native", "web_fetch"))
 	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_registered", "native", "unknown"))
 
-	summary := recorder.Summary("default")
+	summary := recorder.Summary("default", nil)
 	require.Len(t, summary.Signals, 2, "only typed worker rejections are signals")
 	for _, signal := range summary.Signals {
 		require.Equal(t, []string{"task-1"}, signal.Tasks)
@@ -95,6 +100,30 @@ func TestSubmitExecutionEventRecordsWorkerToolRejections(t *testing.T) {
 		require.NotContains(t, series, hostile)
 		require.NotContains(t, string(encoded), hostile)
 	}
+}
+
+func setupManagedAIWorkerEventApp(t *testing.T, taskName string, taskType corev1alpha1.TaskType) *fiber.App {
+	t.Helper()
+	task, job, pod := testInternalExecutionEventOwnedWorkerObjects(taskName)
+	task.Spec.Type = taskType
+	pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+	return setupInternalExecutionEventAppWithClient(
+		newInternalExecutionEventStore(t), testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name),
+	)
+}
+
+func TestSubmitExecutionEventIgnoresToolRejectionsFromOtherWorkers(t *testing.T) {
+	recorder := installAPICapabilityGapRecorder(t, "web_fetch")
+	app := setupManagedAIWorkerEventApp(t, "container-task", corev1alpha1.TaskTypeContainer)
+
+	resp := doJSONRequest(t, app, "/internal/v1/events/default/task/container-task", map[string]any{
+		"type": events.ExecutionEventTypeToolCallFailed, "toolName": "web_fetch",
+		"content": map[string]any{events.ToolCallErrorTypeContentKey: events.ToolCallErrorTypeNotEnabled},
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "the event itself is still journaled")
+	require.NoError(t, resp.Body.Close())
+	require.NotContains(t, capabilityGapSeriesText(t), "orka_capability_gap_signals_total{")
+	require.Empty(t, recorder.Summary("default", nil).Signals)
 }
 
 func TestSubmitExecutionEventRecordsNothingWhenSignalsAreOff(t *testing.T) {
@@ -146,4 +175,56 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, []string{"visible-task"}, signal.Tasks, "only Tasks the caller can list are referenced")
 	require.NotContains(t, body, "other-task")
 	require.NotContains(t, body, hostilePromptText)
+
+	// A Gateway-owned Task's signals count only for callers who can read that
+	// Gateway, matching the access check on the Task itself.
+	require.NoError(t, f.kube.Create(t.Context(), &gatewayv1alpha1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "private", Namespace: "default", UID: "gateway-uid"}}))
+	recorder.Record(capabilitygap.Signal{
+		Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
+		Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", Task: "gateway-task",
+		Gateway: capabilitygap.GatewayOwner{Namespace: "default", NamespaceUID: "namespace-uid", Name: "private", UID: "gateway-uid"},
+	})
+	status, body = f.request(t, http.MethodGet, "/api/v1/capability-gaps?namespace=default", "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &summary))
+	require.Len(t, summary.Signals, 1, body)
+	require.Equal(t, int64(2), summary.Signals[0].Count, "a hidden Gateway's signals are not counted")
+
+	f.allowRoute(t, "GET /api/v1/capability-gaps", authorizationv1.ResourceAttributes{Namespace: "default", Group: gatewayv1alpha1.GroupVersion.Group,
+		Resource: "gateways", Verb: "get", Name: "private"})
+	status, body = f.request(t, http.MethodGet, "/api/v1/capability-gaps?namespace=default", "")
+	require.Equal(t, http.StatusOK, status, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &summary))
+	require.Len(t, summary.Signals, 1, body)
+	require.Equal(t, int64(3), summary.Signals[0].Count, "a readable Gateway's signals are counted")
+}
+
+func TestGetCapabilityGapsRejectsObjectConstrainedContextTokens(t *testing.T) {
+	installAPICapabilityGapRecorder(t)
+	for _, tc := range []struct {
+		name        string
+		transaction map[string]any
+		status      int
+	}{
+		{"namespace", map[string]any{"namespace": "default"}, http.StatusOK},
+		{"object constraint", map[string]any{"task": "task"}, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, app := setupTestHandlers()
+			var err error
+			h.contextTokenAuthorization, err = NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+			require.NoError(t, err)
+			app.Use(func(c fiber.Ctx) error {
+				c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeContextToken, Namespace: "default", ContextToken: &ContextToken{
+					Scopes: []string{ContextTokenScopeTaskList}, TransactionContext: tc.transaction,
+				}})
+				return c.Next()
+			})
+			app.Get("/capability-gaps", h.GetCapabilityGaps)
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/capability-gaps?namespace=default", nil))
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			require.Equal(t, tc.status, response.StatusCode)
+		})
+	}
 }

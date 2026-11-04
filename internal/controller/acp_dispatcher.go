@@ -992,6 +992,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		return err
 	}
 	task = bound.frozenTask
+	gapRuntime := capabilityGapBoundRuntime(bound)
 	if target.external != nil {
 		if err := validateFrozenACPDispatchTarget(task, target, bound, bound.plan); err != nil {
 			return err
@@ -1062,7 +1063,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	profile = bound.plan.Profile
 	if nativeErr := d.validateTaskNativeSessionRuntime(runtimeCtx, task, nativeSessionsSupported); nativeErr != nil {
 		if errors.Is(nativeErr, errNativeSessionRuntimeUnsupported) || errors.Is(nativeErr, errNativeSessionHistoryBoundary) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, profile.ProviderKind, nativeErr)
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, gapRuntime, nativeErr)
 		}
 		return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, nativeErr)
 	}
@@ -1115,7 +1116,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	if err != nil {
 		endSessionTrace(err)
 		if errors.Is(err, errNativeSessionRuntimeUnsupported) || errors.Is(err, errNativeSessionHistoryBoundary) {
-			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, profile.ProviderKind, err)
+			return d.rejectNativeSessionRuntime(ctx, task, attemptID, fence, gapRuntime, err)
 		}
 		if errors.Is(err, errACPSessionNotFound) {
 			return d.rejectMissingTaskSession(ctx, task, attemptID, fence)
@@ -1948,7 +1949,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				}
 			case harnessv2.EventPermissionRequested:
 				return d.resolvePromptPermission(
-					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, event,
+					runtimeCtx, runtimeClient, createRequest.RuntimeSessionID, task, runtimeFence, mcpConfiguration, createRequest.Profile.ProviderKind, gapRuntime, event,
 				)
 			case harnessv2.EventCompleted, harnessv2.EventCancelled, harnessv2.EventFailed, harnessv2.EventOutcomeUnknown:
 				copy := event
@@ -5939,6 +5940,7 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	fence harnessv2.Fence,
 	mcpConfiguration harnessv2.MCPPolicyConfiguration,
 	provider string,
+	gapRuntime string,
 	event harnessv2.Event,
 ) error {
 	permission := event.PermissionRequested
@@ -5976,7 +5978,8 @@ func (d *ACPDispatcher) resolvePromptPermission(
 	if err == nil && !allowed && resolved != nil && resolved.Classification.Class == harnessv2.RequestClassificationFresh {
 		capabilitygap.Record(capabilitygap.Signal{
 			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-			Runtime: provider, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
+			Runtime: gapRuntime, Tool: permission.ToolName, Namespace: task.Namespace, Task: task.Name,
+			Gateway: capabilityGapGatewayOwner(task),
 		})
 	}
 	return err

@@ -7,12 +7,15 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"errors"
+
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/capabilitygap"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 )
 
 const capabilityGapTaskAction = "listTasks"
@@ -36,9 +39,22 @@ func (h *Handlers) GetCapabilityGaps(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, capabilityGapTaskAction, h.contextTokenAuthorization.TaskListScopes); err != nil {
 		return err
 	}
+	// Counts outlive their Tasks, so they cannot be filtered per Task. A token
+	// limited to particular objects therefore cannot read the aggregate.
+	if err := h.rejectObjectConstrainedContextToken(c, capabilityGapTaskAction, "capability-gap signals require a token without object constraints"); err != nil {
+		return err
+	}
 
-	summary := recorder.Summary(namespace)
 	gatewayAuthorizations := map[gatewayTaskAuthorizationKey]bool{}
+	visibleGateways := map[capabilitygap.GatewayOwner]bool{}
+	for _, owner := range recorder.GatewayOwners(namespace) {
+		ok, err := h.capabilityGapGatewayVisible(c, owner, gatewayAuthorizations)
+		if err != nil {
+			return err
+		}
+		visibleGateways[owner] = ok
+	}
+	summary := recorder.Summary(namespace, func(owner capabilitygap.GatewayOwner) bool { return visibleGateways[owner] })
 	for i := range summary.Signals {
 		visible := make([]string, 0, len(summary.Signals[i].Tasks))
 		for _, name := range summary.Signals[i].Tasks {
@@ -75,4 +91,28 @@ func (h *Handlers) capabilityGapTaskVisible(
 		}
 	}
 	return h.taskAccess().gatewayTaskReadableCached(c, capabilityGapTaskAction, task, gatewayAuthorizations)
+}
+
+// capabilityGapGatewayVisible reports whether the caller may read Tasks owned
+// by owner, using the check that guards those Tasks themselves. Signals from
+// Gateways the caller cannot read are left out of every count.
+func (h *Handlers) capabilityGapGatewayVisible(
+	c fiber.Ctx, owner capabilitygap.GatewayOwner, cache map[gatewayTaskAuthorizationKey]bool,
+) (bool, error) {
+	key := gatewayTaskAuthorizationKey{
+		GatewayNamespace: owner.Namespace, NamespaceUID: owner.NamespaceUID, GatewayName: owner.Name, GatewayUID: owner.UID,
+	}
+	if allowed, ok := cache[key]; ok {
+		return allowed, nil
+	}
+	identity := gatewayruntime.TaskOwnerIdentity{
+		GatewayNamespace: owner.Namespace, NamespaceUID: owner.NamespaceUID, GatewayName: owner.Name, GatewayUID: owner.UID,
+	}
+	err := h.taskAccess().authorizeGatewayTaskIdentity(c, capabilityGapTaskAction, &corev1alpha1.Task{}, identity, false)
+	var status *fiber.Error
+	if err != nil && (!errors.As(err, &status) || (status.Code != fiber.StatusForbidden && status.Code != fiber.StatusNotFound)) {
+		return false, err
+	}
+	cache[key] = err == nil
+	return err == nil, nil
 }

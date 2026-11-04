@@ -120,7 +120,7 @@ func TestRejectPlannedAgentExecutionRecordsCapabilityGap(t *testing.T) {
 	if got := metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "unsupported_request", "max_turns", "codex", "none"); got != 1 {
 		t.Fatalf("counter = %v, want 1", got)
 	}
-	summary := recorder.Summary(task.Namespace)
+	summary := recorder.Summary(task.Namespace, nil)
 	if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != task.Name {
 		t.Fatalf("summary = %+v, want one signal referencing %q", summary.Signals, task.Name)
 	}
@@ -135,8 +135,49 @@ func TestRejectPlannedAgentExecutionRecordsCapabilityGap(t *testing.T) {
 	if _, err := r.rejectPlannedAgentExecution(context.Background(), other, agent, rejectAgentExecutionPlan("agent runtime configuration is required")); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
-	if got := len(recorder.Summary(task.Namespace).Signals); got != 1 {
+	if got := len(recorder.Summary(task.Namespace, nil).Signals); got != 1 {
 		t.Fatalf("a rejection without a gap reason must not record a signal, got %d rows", got)
+	}
+}
+
+func TestRejectPlannedAgentExecutionKeepsGatewayOwnership(t *testing.T) {
+	recorder := installCapabilityGapRecorder(t)
+	task := validPlannerTask()
+	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/default/ns-uid/front-desk/gateway-uid"}
+	r := newUnitReconciler(newTestScheme(), task.DeepCopy())
+
+	plan := rejectAgentExecutionPlan("unsupported").unsupported(capabilitygap.ReasonMaxTurns)
+	if _, err := r.rejectPlannedAgentExecution(context.Background(), task, validPlannerAgent(), plan); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	want := capabilitygap.GatewayOwner{Namespace: "default", NamespaceUID: "ns-uid", Name: "front-desk", UID: "gateway-uid"}
+	if owners := recorder.GatewayOwners(task.Namespace); len(owners) != 1 || owners[0] != want {
+		t.Fatalf("owners = %+v, want %+v", owners, want)
+	}
+	if got := len(recorder.Summary(task.Namespace, nil).Signals); got != 0 {
+		t.Fatalf("a Gateway-owned signal must stay hidden without Gateway access, got %d rows", got)
+	}
+}
+
+func TestCapabilityGapBoundRuntimeUsesFrozenBackend(t *testing.T) {
+	bound := func(backend corev1alpha1.AgentExecutionBackend, provider string) *verifiedAgentExecution {
+		execution := &verifiedAgentExecution{binding: &corev1alpha1.AgentExecutionBinding{Backend: backend}}
+		execution.plan.Profile.ProviderKind = provider
+		return execution
+	}
+	for _, tc := range []struct {
+		name  string
+		bound *verifiedAgentExecution
+		want  string
+	}{
+		{"missing", nil, capabilitygap.RuntimeUnknown},
+		{"built-in", bound(corev1alpha1.AgentExecutionBackendRuntimePool, "codex"), capabilitygap.RuntimeCodex},
+		{"external custom kind", bound(corev1alpha1.AgentExecutionBackendExternalEndpoint, "acme-agent"), capabilitygap.RuntimeExternal},
+		{"external built-in kind", bound(corev1alpha1.AgentExecutionBackendExternalEndpoint, "codex"), capabilitygap.RuntimeExternal},
+	} {
+		if got := capabilityGapBoundRuntime(tc.bound); got != tc.want {
+			t.Errorf("%s: runtime = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -188,7 +229,7 @@ func TestPermissionDeniedByFrozenPolicyRecordsMissingTool(t *testing.T) {
 	if got := metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "denied_by_policy", "claude", "unknown"); got != 1 {
 		t.Fatalf("denied unknown tool = %v, want 1", got)
 	}
-	summary := recorder.Summary(fixture.task.Namespace)
+	summary := recorder.Summary(fixture.task.Namespace, nil)
 	if len(summary.Signals) != 2 {
 		t.Fatalf("an allowed tool must not record a signal: %+v", summary.Signals)
 	}
