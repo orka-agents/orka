@@ -187,6 +187,33 @@ func TestParseRejectsRepositoryPairsOverTheTaskLimit(t *testing.T) {
 	}
 }
 
+func TestParseBoundsRepositoriesAndCountsSharedPatternsOnce(t *testing.T) {
+	global := make([]string, 255)
+	for index := range global {
+		global[index] = fmt.Sprintf("%q", fmt.Sprintf("global%d/**", index))
+	}
+	document := func(repositories int) string {
+		var builder strings.Builder
+		builder.WriteString("schemaVersion: orka.protectedSet.v1\npaths: [" + strings.Join(global, ", ") + "]\n")
+		builder.WriteString("gate: {maxInfraErrorPercent: 10, maxCandidatesPerBaseline: 3}\nrepositories:\n")
+		for index := range repositories {
+			fmt.Fprintf(&builder, "  - {repository: github.com/a/r%d, paths: [\"shared/**\"]}\n", index)
+		}
+		return builder.String()
+	}
+	// 255 global patterns plus one pattern every repository shares is 256 for
+	// any pair, so it fits.
+	if _, err := Parse([]byte(document(maxRepositories))); err != nil {
+		t.Fatalf("Parse() rejected repositories that share their only extra pattern: %v", err)
+	}
+	if _, err := Parse([]byte(document(maxRepositories + 1))); err == nil {
+		t.Fatalf("Parse() accepted more than %d repositories", maxRepositories)
+	}
+	if _, err := Parse([]byte(strings.Replace(validMinimalSetDoc, ".github/**", "internal/./evals/**", 1))); err == nil {
+		t.Fatal("Parse() accepted a non-canonical denied path pattern")
+	}
+}
+
 func TestMissingDeniedPathsRequiresEveryPatternExactly(t *testing.T) {
 	_, set := loadSample(t)
 	required := set.DeniedPathsFor(orkaRepository)

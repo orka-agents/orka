@@ -41,7 +41,10 @@ const (
 	// effective set for any repository, or any source and publication pair,
 	// always fits one Task.
 	maxPathsPerRepository = 256
-	maxDeclarationBytes   = 256 << 10
+	// maxRepositories bounds the repository list so the pairwise limit check
+	// stays cheap; a protected set names a handful of repositories.
+	maxRepositories     = 64
+	maxDeclarationBytes = 256 << 10
 )
 
 // ErrUnavailable reports that no valid protected set is available, so
@@ -113,6 +116,9 @@ func (s *Set) normalize() error {
 		return fmt.Errorf("protected set paths must not be empty")
 	}
 	s.Paths = paths
+	if len(s.Repositories) > maxRepositories {
+		return fmt.Errorf("protected set repositories exceed %d entries", maxRepositories)
+	}
 	seenRepositories := map[string]struct{}{}
 	for index := range s.Repositories {
 		repository := &s.Repositories[index]
@@ -181,12 +187,34 @@ func (s *Set) checkRepositoryPairLimits() error {
 	for index, repository := range s.Repositories {
 		extras[index] = len(unionPatterns(s.Paths, repository.Paths)) - len(s.Paths)
 	}
+	global := make(map[string]struct{}, len(s.Paths))
+	for _, pattern := range s.Paths {
+		global[pattern] = struct{}{}
+	}
+	// extraSets holds each repository's patterns beyond the global ones, so a
+	// pair is checked by counting shared extras with map lookups rather than
+	// building and sorting a full union for every pair.
+	extraSets := make([]map[string]struct{}, len(s.Repositories))
+	for index, repository := range s.Repositories {
+		extraSets[index] = make(map[string]struct{}, extras[index])
+		for _, pattern := range repository.Paths {
+			if _, ok := global[pattern]; !ok {
+				extraSets[index][pattern] = struct{}{}
+			}
+		}
+	}
 	for i := range s.Repositories {
 		for j := i + 1; j < len(s.Repositories); j++ {
 			if len(s.Paths)+extras[i]+extras[j] <= maxPathsPerRepository {
 				continue
 			}
-			if len(unionPatterns(s.Paths, s.Repositories[i].Paths, s.Repositories[j].Paths)) > maxPathsPerRepository {
+			shared := 0
+			for pattern := range extraSets[i] {
+				if _, ok := extraSets[j][pattern]; ok {
+					shared++
+				}
+			}
+			if len(s.Paths)+extras[i]+extras[j]-shared > maxPathsPerRepository {
 				return fmt.Errorf("protected set for repositories %q and %q together exceeds %d paths",
 					s.Repositories[i].Repository, s.Repositories[j].Repository, maxPathsPerRepository)
 			}
@@ -198,7 +226,7 @@ func (s *Set) checkRepositoryPairLimits() error {
 func normalizePatterns(field string, patterns []string) ([]string, error) {
 	result := make([]string, 0, len(patterns))
 	for index, pattern := range patterns {
-		if !workspacedelta.ValidPathPattern(pattern) {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
 			return nil, fmt.Errorf("protected set %s[%d] is not a valid path pattern", field, index)
 		}
 		result = append(result, normalizePattern(pattern))

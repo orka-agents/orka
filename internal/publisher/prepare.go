@@ -243,7 +243,7 @@ func validateDeniedPaths(patterns []string) error {
 		return invalid("denied paths", "must contain at most %d patterns", maxDeniedPathPatterns)
 	}
 	for _, pattern := range patterns {
-		if !workspacedelta.ValidPathPattern(pattern) {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
 			return invalid("denied paths", "contains an invalid pattern")
 		}
 	}

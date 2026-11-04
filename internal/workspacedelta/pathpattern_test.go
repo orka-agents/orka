@@ -22,6 +22,27 @@ func TestPathDeniedMatchesPatternsIgnoringCase(t *testing.T) {
 	}
 }
 
+func TestValidDeniedPathPatternRequiresCanonicalSegments(t *testing.T) {
+	for _, valid := range []string{"internal/**", "./AGENTS.md", "internal/api/*authoriz*"} {
+		if !ValidDeniedPathPattern(valid) {
+			t.Errorf("ValidDeniedPathPattern(%q) = false, want true", valid)
+		}
+	}
+	// Each of these is a valid pattern, but the matcher would never match
+	// the canonical path it appears to protect.
+	for _, invalid := range []string{"internal/./evals/**", "internal//evals/**", "docs/", "a/."} {
+		if !ValidPathPattern(invalid) {
+			t.Fatalf("ValidPathPattern(%q) = false; the test needs a pattern only the denied check rejects", invalid)
+		}
+		if ValidDeniedPathPattern(invalid) {
+			t.Errorf("ValidDeniedPathPattern(%q) = true, want false", invalid)
+		}
+	}
+	if PathDenied([]string{"internal/./evals/**"}, "internal/evals/gate.go") {
+		t.Fatal("matcher now normalizes segments; revisit ValidDeniedPathPattern")
+	}
+}
+
 func TestValidPathPattern(t *testing.T) {
 	for _, valid := range []string{"internal/**", "./AGENTS.md", "internal/api/*authoriz*", "a/[bc]/d"} {
 		if !ValidPathPattern(valid) {

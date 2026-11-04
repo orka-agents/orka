@@ -1297,7 +1297,7 @@ func validateACPWorkspacePreflight(task *corev1alpha1.Task) error {
 		return fmt.Errorf("deniedPaths exceeds 256 patterns")
 	}
 	for _, pattern := range workspace.DeniedPaths {
-		if !workspacedelta.ValidPathPattern(pattern) {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
 			return fmt.Errorf("deniedPaths contains an invalid pattern")
 		}
 	}

@@ -49,7 +49,7 @@ func (l WorkspaceDeltaLimits) Validate() error {
 		return fmt.Errorf("workspace delta denied paths exceed limit")
 	}
 	for _, pattern := range l.DeniedPaths {
-		if !workspacedelta.ValidPathPattern(pattern) {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
 			return fmt.Errorf("workspace delta denied path pattern is invalid")
 		}
 	}
