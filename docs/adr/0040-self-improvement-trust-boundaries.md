@@ -164,7 +164,7 @@ gate:                          # improvement thresholds, see #994
   maxCandidatesPerBaseline: 3
   maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
   minTargetImprovementPoints: 5      # target pass@1 must rise by at least this many points
-  significance: 0.05                 # one-sided paired test, divided by maxCandidatesPerBaseline
+  significance: 0.05                 # one-sided paired test, divided by maxExperimentsPerHeldOutSet
 ```
 
 Every file that implements an enforcement point in the table above belongs in the
@@ -231,9 +231,12 @@ lists cannot be read that way; people audit them when enabling the flow.
 
 An experiment is two EvalRuns, not a new resource: a baseline run and a candidate run
 over the same held-out cases, created together so they run under the same provider and
-infrastructure conditions. The controller computes one trial plan (the ordered list of
-case ID and trial index pairs) for the experiment and writes the same plan and its
-digest into both runs, so the two runs can never disagree on assignment. Two optional fields are added to the EvalRun spec from #976. Both are
+infrastructure conditions. The controller computes one regression trial plan (the
+ordered list of case ID and trial index pairs over the cases both runs share) for the
+experiment and writes the same plan and its digest into both runs, so the two runs can
+never disagree on assignment. For a new capability the candidate run also gets a
+separate criteria trial plan over the criteria cases only, with its own digest; the
+baseline run has none. Two optional fields are added to the EvalRun spec from #976. Both are
 immutable, like the rest of the spec:
 
 ```yaml
@@ -271,8 +274,9 @@ status:
 ```
 
 - **Incomparable** when the two runs differ in anything other than the candidate's
-  promotable fields: case-set, grader-set or criteria digest, trial-plan digest (the
-  trial count and the assignment of case IDs to trial indexes; outcomes are excluded), monitor
+  promotable fields: case-set, grader-set or criteria digest, regression trial-plan digest (the
+  trial count and the assignment of shared case IDs to trial indexes; outcomes are
+  excluded; the candidate-only criteria plan is not compared), monitor
   UID and generation, review prompt template digest, runtime image, or the subject. For a new capability the case sets differ by design:
   the check instead requires the candidate's cases to be exactly the baseline's case set
   plus the cases in `criteria.caseSetRef`, whose content matches `criteria.caseSetDigest`, and compares the two
@@ -363,8 +367,11 @@ Piloted on the PR reviewer's Agent configuration only.
    (improvement experiments: target pass@1 must rise by at least
    `gate.minTargetImprovementPoints`, and a one-sided paired sign test over the target
    cases, comparing each case's candidate and baseline pass counts, must be significant
-   at `gate.significance / gate.maxCandidatesPerBaseline`, so trying several candidates
-   against one baseline does not make a lucky one more likely to pass; too few cases to
+   at `gate.significance / gate.maxExperimentsPerHeldOutSet`. Every experiment on a
+   held-out case set, across all baselines, spends from that one budget, and proposers
+   see earlier decisions, so the correction covers the held-out set's whole lifetime
+   rather than one baseline's candidates; a lucky candidate does not become more likely
+   to pass by trying again. Too few cases to
    reach significance fails with `insufficient_evidence`) or any criteria tag misses its threshold (new
    capabilities); or if infrastructure errors exceed the threshold. A person then records a decision either way.
 
@@ -413,20 +420,34 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   sets a `RolloutInvalid` condition, and keeps doing so until a promoter aborts or
   starts a new canary. A protected-set or criteria change, or a later rejection,
   therefore stops a canary even though no Agent changed.
-- **Promotion log** in the store. A record moves through `pending → applying →
-  complete`, or ends `failed` or `canceled`; every transition is a compare-and-swap on
-  the record's state, which fences concurrent rollout actions on the same Agent.
+- **Promotion log** in the store. Every rollout action (`canary`, `promote`, `abort`,
+  `rollback`) is a record that moves through `pending → applying → complete`, or ends
+  `failed` or `canceled`; every transition is a compare-and-swap on the record's state.
+  A CAS on one record does not fence a second record, so the store also allows at most
+  one open (`pending` or `applying`) record per stable Agent UID, enforced by a unique
+  partial index. An action first inserts its record; if another action on the same Agent
+  is open, the insert fails and the request is refused with a conflict. This serializes
+  canary changes, promotions, aborts, rollbacks and `status.rollout` cleanup per Agent.
+  The one exception is `abort` against an open promotion, which acts on that record
+  instead of inserting its own, as described below.
   `promote` runs in three durable steps so a crash cannot lose the rollback record:
-  (1) insert a `pending` record holding the decision, the Agent's `resourceVersion`,
+  (1) insert a `pending` record holding the decision, the Agent's `resourceVersion` and generation,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
   a ConfigMap that may change or disappear), and the target values; (2) move the record
   `pending → applying`, then update the stable Agent with a `resourceVersion`
-  precondition, writing the candidate's inline prompt;
+  precondition, writing the candidate's inline prompt and, in the same update, the
+  controller-managed annotation `orka.ai/promotion-record: <record id>` (admission
+  rejects writes to it from anyone but the controller, as it does for controller-managed
+  Task annotations);
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
   and digest. On restart the controller reconciles any `pending` or `applying` record
-  idempotently: if
-  the Agent already holds the target values, step 2 has committed and the change is live,
-  so it always finishes step 3 and records the promotion as `complete`, even if a later
+  idempotently, deciding whether step 2 committed from the marker, never from the
+  Agent's current values, which a direct edit could make look applied or unapplied. If
+  the Agent's `orka.ai/promotion-record` annotation names this record, step 2 has
+  committed and the change is live. The applied generation is the stored generation plus
+  one, since the single fenced spec update bumped it once, and the applied digest is the
+  target digest, so recovery records them without reading values a later edit may have
+  changed. It always finishes step 3 and records the promotion as `complete`, even if a later
   rejection or a changed `status.rollout` has arrived since. It never marks such a record
   `failed`, because that would leave a live change without a record; a later rejection
   sets a `PromotedBeforeRejection` condition, and undoing the change is a `rollback`.
