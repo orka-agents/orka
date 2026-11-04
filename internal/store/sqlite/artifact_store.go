@@ -19,6 +19,12 @@ import (
 // store.MaxArtifactBytes is rejected with store.ErrTooLarge. The Task UID is
 // not stored yet; artifacts are keyed by namespace, Task name and filename.
 func (s *Store) SaveArtifact(ctx context.Context, request store.SaveArtifactRequest) error {
+	return writeOperationErr(ctx, s, "SaveArtifact", func(ctx context.Context) error {
+		return s.saveArtifactWrite(ctx, request)
+	})
+}
+
+func (s *Store) saveArtifactWrite(ctx context.Context, request store.SaveArtifactRequest) error {
 	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		return s.saveArtifactUnfenced(ctx, request)
 	})
@@ -80,6 +86,12 @@ func (s *Store) ListArtifacts(ctx context.Context, owner store.ArtifactOwner) ([
 
 // DeleteArtifacts removes all artifacts for a task.
 func (s *Store) DeleteArtifacts(ctx context.Context, owner store.ArtifactOwner) error {
+	return writeOperationErr(ctx, s, "DeleteArtifacts", func(ctx context.Context) error {
+		return s.deleteArtifactsWrite(ctx, owner)
+	})
+}
+
+func (s *Store) deleteArtifactsWrite(ctx context.Context, owner store.ArtifactOwner) error {
 	return s.deleteTaskData(ctx, owner.Namespace, owner.TaskName,
 		`DELETE FROM artifacts WHERE namespace = ? AND task_name = ?`,
 		owner.Namespace, owner.TaskName,

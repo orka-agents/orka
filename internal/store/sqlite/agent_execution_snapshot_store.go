@@ -28,10 +28,16 @@ var _ storagev1.SealedAgentExecutionSnapshotStore = (*Store)(nil)
 // CreateSealedAgentExecutionSnapshot implements
 // storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) CreateSealedAgentExecutionSnapshot(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
+	return writeOperationErr(ctx, s, "CreateSealedAgentExecutionSnapshot", func(ctx context.Context) error {
+		return s.createSealedAgentExecutionSnapshotWrite(ctx, snapshot)
+	})
+}
+
+func (s *Store) createSealedAgentExecutionSnapshotWrite(ctx context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
 	if err := snapshot.Validate(); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO agent_execution_snapshots
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx, `INSERT INTO agent_execution_snapshots
 		(task_uid, digest, schema_version, nonce, ciphertext, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_uid, digest) DO NOTHING`,
@@ -216,10 +222,16 @@ func (s *Store) CountAgentExecutionSnapshotReferences(
 // store.AgentExecutionSnapshotLifecycleStore. It deliberately does not alter
 // the Task-scoped broad deletion method below or perform lifecycle policy.
 func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.AgentExecutionSnapshotKey) error {
+	return writeOperationErr(ctx, s, "DeleteAgentExecutionSnapshot", func(ctx context.Context) error {
+		return s.deleteAgentExecutionSnapshotWrite(ctx, key)
+	})
+}
+
+func (s *Store) deleteAgentExecutionSnapshotWrite(ctx context.Context, key store.AgentExecutionSnapshotKey) error {
 	if err := key.Validate(); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_execution_snapshots
+	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM agent_execution_snapshots
 		WHERE task_uid = ? AND digest = ?`, key.TaskUID, key.Digest); err != nil {
 		return fmt.Errorf("delete agent execution snapshot: %w", err)
 	}
@@ -229,10 +241,16 @@ func (s *Store) DeleteAgentExecutionSnapshot(ctx context.Context, key store.Agen
 // DeleteAgentExecutionSnapshots implements
 // storagev1.SealedAgentExecutionSnapshotStore.
 func (s *Store) DeleteAgentExecutionSnapshots(ctx context.Context, taskUID string) error {
+	return writeOperationErr(ctx, s, "DeleteAgentExecutionSnapshots", func(ctx context.Context) error {
+		return s.deleteAgentExecutionSnapshotsWrite(ctx, taskUID)
+	})
+}
+
+func (s *Store) deleteAgentExecutionSnapshotsWrite(ctx context.Context, taskUID string) error {
 	if strings.TrimSpace(taskUID) == "" {
 		return store.ValidationErrorf("snapshot task UID is required")
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM agent_execution_snapshots WHERE task_uid = ?`, taskUID); err != nil {
+	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM agent_execution_snapshots WHERE task_uid = ?`, taskUID); err != nil {
 		return fmt.Errorf("delete agent execution snapshots: %w", err)
 	}
 	return nil

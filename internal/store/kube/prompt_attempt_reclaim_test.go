@@ -884,10 +884,12 @@ func newPromptAttemptReclaimStore(t *testing.T) (*Store, client.Client, controls
 		t.Fatalf("NewDB: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	kubeStore, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, sqlitestore.NewStore(db, "")))
+	persistence := sqlitestore.NewStore(db, "")
+	kubeStore, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence))
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, persistence)
 	return kubeStore, kubeClient, fence
 }
 

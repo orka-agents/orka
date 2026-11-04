@@ -19,6 +19,12 @@ var deferredSessionTurnProjectionTime = time.Date(9999, time.December, 31, 23, 5
 // CreateSessionTurnRecord persists only the SQLite-owned open turn after the
 // Kubernetes store has validated SessionControl and PromptAttempt fences.
 func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.CreateSessionTurnRecordRequest) (*store.SessionTurn, error) {
+	return writeOperation(ctx, s, "CreateSessionTurnRecord", &request.Fence, func(ctx context.Context) (*store.SessionTurn, error) {
+		return s.createSessionTurnRecordWrite(ctx, request)
+	})
+}
+
+func (s *Store) createSessionTurnRecordWrite(ctx context.Context, request store.CreateSessionTurnRecordRequest) (*store.SessionTurn, error) {
 	request.Namespace = strings.TrimSpace(request.Namespace)
 	request.SessionName = strings.TrimSpace(request.SessionName)
 	if err := store.ValidateControlIdentifier("session namespace", request.Namespace); err != nil {
@@ -32,11 +38,14 @@ func (s *Store) CreateSessionTurnRecord(ctx context.Context, request store.Creat
 		return nil, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, request.Fence); err != nil {
+		return nil, err
+	}
 	if existing, getErr := getSessionTurn(ctx, tx, normalized.ID); getErr == nil {
 		if !store.SameSessionTurnCreation(existing, normalized) {
 			return nil, store.ConflictErrorf("session turn %q was reused with different prompt input or request digest", normalized.ID)
@@ -134,6 +143,12 @@ func sessionTranscriptBoundaryTx(ctx context.Context, tx *sql.Tx, namespace, ses
 // finalized turn receipt, and a deliberately deferred terminal projection. It
 // never reads or mutates SQLite control-plane mirror tables.
 func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finalization storagev1.SealedSessionTurnFinalization) (*store.SessionTurn, error) {
+	return writeOperation(ctx, s, "CommitSealedSessionTurnFinalization", &finalization.Fence, func(ctx context.Context) (*store.SessionTurn, error) {
+		return s.commitSealedSessionTurnFinalizationWrite(ctx, finalization)
+	})
+}
+
+func (s *Store) commitSealedSessionTurnFinalizationWrite(ctx context.Context, finalization storagev1.SealedSessionTurnFinalization) (*store.SessionTurn, error) {
 	normalized, projection, err := normalizeSealedSessionTurnFinalization(finalization)
 	if err != nil {
 		return nil, err
@@ -141,11 +156,14 @@ func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finaliz
 	deferredProjection := projection
 	deferredProjection.AvailableAt = deferredSessionTurnProjectionTime
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, normalized.Fence); err != nil {
+		return nil, err
+	}
 	turnID, err := normalized.Key.CanonicalID()
 	if err != nil {
 		return nil, err
@@ -176,7 +194,7 @@ func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finaliz
 		return nil, err
 	}
 	if native := normalized.NativeSession; native != nil {
-		count, lastID, err := sessionTranscriptBoundaryTx(ctx, tx, normalized.Namespace, normalized.SessionName)
+		count, lastID, err := sessionTranscriptBoundaryTx(ctx, tx.Tx, normalized.Namespace, normalized.SessionName)
 		if err != nil {
 			return nil, err
 		}
@@ -195,7 +213,7 @@ func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finaliz
 			terminalRole = sessionTurnRoleOutcomeMarker
 		}
 		messageCountDelta, err = appendSessionTurnTranscript(
-			ctx, tx, normalized.Namespace, normalized.SessionName, turn.UserPrompt,
+			ctx, tx.Tx, normalized.Namespace, normalized.SessionName, turn.UserPrompt,
 			terminalRole, normalized.TerminalContent, normalized.FinalizedAt,
 			normalized.UserMessageID, normalized.TerminalMessageID,
 		)
@@ -203,11 +221,11 @@ func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finaliz
 			return nil, err
 		}
 	}
-	if err := finalizeSessionTranscriptTx(ctx, tx, normalized.Namespace, normalized.SessionName,
+	if err := finalizeSessionTranscriptTx(ctx, tx.Tx, normalized.Namespace, normalized.SessionName,
 		normalized.Key, messageCountDelta, normalized.InputTokens, normalized.OutputTokens, normalized.FinalizedAt); err != nil {
 		return nil, err
 	}
-	if err := commitSealedNativeFinalizationTx(ctx, tx, turn.ID, normalized.Namespace, normalized.SessionName,
+	if err := commitSealedNativeFinalizationTx(ctx, tx.Tx, turn.ID, normalized.Namespace, normalized.SessionName,
 		normalized.Key.SessionUID, normalized.NativeSession, normalized.NativeSessionDigest); err != nil {
 		return nil, err
 	}
@@ -229,7 +247,7 @@ func (s *Store) CommitSealedSessionTurnFinalization(ctx context.Context, finaliz
 	if err := rowsAffectedExactlyOne(turnResult, "session turn finalization"); err != nil {
 		return nil, err
 	}
-	if _, err := enqueueOutboxProjectionTx(ctx, tx, deferredProjection, true); err != nil {
+	if _, err := enqueueOutboxProjectionTx(ctx, tx.Tx, deferredProjection, true); err != nil {
 		return nil, err
 	}
 
@@ -290,15 +308,24 @@ func finalizeSessionTranscriptTx(
 // ActivateSessionTurnProjection makes the deferred terminal projection
 // claimable only after Kubernetes control finalization has committed.
 func (s *Store) ActivateSessionTurnProjection(ctx context.Context, request store.ActivateSessionTurnProjectionRequest) (*store.OutboxProjection, error) {
+	return writeOperation(ctx, s, "ActivateSessionTurnProjection", &request.Fence, func(ctx context.Context) (*store.OutboxProjection, error) {
+		return s.activateSessionTurnProjectionWrite(ctx, request)
+	})
+}
+
+func (s *Store) activateSessionTurnProjectionWrite(ctx context.Context, request store.ActivateSessionTurnProjectionRequest) (*store.OutboxProjection, error) {
 	normalized, err := normalizeActivateSessionTurnProjectionRequest(request)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireControllerEpoch(ctx, tx, normalized.Fence); err != nil {
+		return nil, err
+	}
 	turn, err := getSessionTurn(ctx, tx, normalized.TurnID)
 	if err != nil {
 		return nil, err

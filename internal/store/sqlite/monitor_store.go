@@ -88,6 +88,13 @@ func queryPage[T any](ctx context.Context, db *sql.DB, q *monitorQuery, orderBy,
 
 // UpsertRepositoryMonitor inserts or updates normalized monitor metadata.
 func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.RepositoryMonitorRecord) error {
+	_, err := writeOperationInto(ctx, s, "UpsertRepositoryMonitor", nil, monitor, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.upsertRepositoryMonitorWrite(ctx, monitor)
+	})
+	return err
+}
+
+func (s *Store) upsertRepositoryMonitorWrite(ctx context.Context, monitor *store.RepositoryMonitorRecord) error {
 	if monitor == nil {
 		return store.ValidationErrorf("repository monitor is required")
 	}
@@ -100,7 +107,7 @@ func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.Repo
 	}
 	monitor.UpdatedAt = now
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -121,7 +128,7 @@ func (s *Store) UpsertRepositoryMonitor(ctx context.Context, monitor *store.Repo
 	case err != nil:
 		return err
 	case repositoryMonitorIdentityChanged(existing, *monitor):
-		if _, err := deleteRepositoryMonitorDependentState(ctx, tx, monitor.Namespace, monitor.Name); err != nil {
+		if _, err := deleteRepositoryMonitorDependentState(ctx, tx.Tx, monitor.Namespace, monitor.Name); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -164,7 +171,7 @@ func repositoryMonitorIdentityChanged(existing, next store.RepositoryMonitorReco
 // GetRepositoryMonitor fetches normalized monitor metadata.
 func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string) (*store.RepositoryMonitorRecord, error) {
 	var monitor store.RepositoryMonitorRecord
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`SELECT namespace, name, uid, repo_url, owner, repository, branch, generation, created_at, updated_at
 		 FROM repository_monitors
 		 WHERE namespace = ? AND name = ?`,
@@ -184,7 +191,13 @@ func (s *Store) GetRepositoryMonitor(ctx context.Context, namespace, name string
 
 // DeleteRepositoryMonitor deletes normalized monitor metadata.
 func (s *Store) DeleteRepositoryMonitor(ctx context.Context, namespace, name string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "DeleteRepositoryMonitor", func(ctx context.Context) error {
+		return s.deleteRepositoryMonitorWrite(ctx, namespace, name)
+	})
+}
+
+func (s *Store) deleteRepositoryMonitorWrite(ctx context.Context, namespace, name string) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -202,7 +215,7 @@ func (s *Store) DeleteRepositoryMonitor(ctx context.Context, namespace, name str
 		deletedRows += rows
 	}
 
-	dependentRows, err := deleteRepositoryMonitorDependentState(ctx, tx, namespace, name)
+	dependentRows, err := deleteRepositoryMonitorDependentState(ctx, tx.Tx, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -243,6 +256,13 @@ func deleteRepositoryMonitorDependentState(ctx context.Context, tx *sql.Tx, name
 
 // CreateMonitorRun inserts a new monitor run.
 func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
+	_, err := writeOperationInto(ctx, s, "CreateMonitorRun", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createMonitorRunWrite(ctx, run)
+	})
+	return err
+}
+
+func (s *Store) createMonitorRunWrite(ctx context.Context, run *store.MonitorRun) error {
 	if run == nil {
 		return store.ValidationErrorf("monitor run is required")
 	}
@@ -256,7 +276,7 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 		run.StartedAt = time.Now().UTC()
 	}
 	run.StartedAt, run.CompletedAt = run.StartedAt.UTC(), utcTimePtr(run.CompletedAt)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO monitor_runs
 		 (id, monitor_namespace, monitor_name, trigger, target_kind, target_number, target_sha, command_event_id, phase,
 		  started_at, completed_at, selected_count, created_task_count, skipped_count, error)
@@ -273,8 +293,15 @@ func (s *Store) CreateMonitorRun(ctx context.Context, run *store.MonitorRun) err
 
 // UpdateMonitorRun updates a monitor run.
 func (s *Store) UpdateMonitorRun(ctx context.Context, run *store.MonitorRun) error {
+	_, err := writeOperationInto(ctx, s, "UpdateMonitorRun", nil, run, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateMonitorRunWrite(ctx, run)
+	})
+	return err
+}
+
+func (s *Store) updateMonitorRunWrite(ctx context.Context, run *store.MonitorRun) error {
 	run.StartedAt, run.CompletedAt = run.StartedAt.UTC(), utcTimePtr(run.CompletedAt)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE monitor_runs
 		 SET trigger = ?, target_kind = ?, target_number = ?, target_sha = ?, command_event_id = ?, phase = ?,
 		     started_at = ?, completed_at = ?, selected_count = ?, created_task_count = ?,
@@ -348,6 +375,13 @@ func monitorItemKey(item *store.MonitorItem) string {
 
 // UpsertMonitorItem inserts or updates the latest state for one monitor item.
 func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) error {
+	_, err := writeOperationInto(ctx, s, "UpsertMonitorItem", nil, item, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.upsertMonitorItemWrite(ctx, item)
+	})
+	return err
+}
+
+func (s *Store) upsertMonitorItemWrite(ctx context.Context, item *store.MonitorItem) error {
 	if item == nil {
 		return store.ValidationErrorf("monitor item is required")
 	}
@@ -366,7 +400,7 @@ func (s *Store) UpsertMonitorItem(ctx context.Context, item *store.MonitorItem) 
 	if item.LabelsJSON == "" {
 		item.LabelsJSON = "[]"
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO monitor_items
 		 (monitor_namespace, monitor_name, kind, item_key, number, sha, title, body, html_url, author, state, labels_json,
 		  snapshot_digest, github_updated_at, workflow_phase, linked_pr_number, last_command_id, last_command_intent,
@@ -471,6 +505,13 @@ func (s *Store) ListMonitorItems(ctx context.Context, filter store.MonitorItemFi
 
 // CreateActionRecord inserts a durable action record.
 func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionRecord) error {
+	_, err := writeOperationInto(ctx, s, "CreateActionRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createActionRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) createActionRecordWrite(ctx context.Context, record *store.ActionRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("action record is required")
 	}
@@ -483,7 +524,7 @@ func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionReco
 	if record.PayloadJSON == "" {
 		record.PayloadJSON = "{}"
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO action_records
 		 (id, monitor_namespace, monitor_name, kind, number, action_kind, snapshot_digest, head_sha,
 		  task_name, command_event_id, work_action_id, monitor_generation, verdict, confidence, summary,
@@ -499,6 +540,13 @@ func (s *Store) CreateActionRecord(ctx context.Context, record *store.ActionReco
 
 // UpdateActionRecord replaces result fields when sensitive content must be redacted.
 func (s *Store) UpdateActionRecord(ctx context.Context, record *store.ActionRecord) error {
+	_, err := writeOperationInto(ctx, s, "UpdateActionRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateActionRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) updateActionRecordWrite(ctx context.Context, record *store.ActionRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("action record is required")
 	}
@@ -508,7 +556,7 @@ func (s *Store) UpdateActionRecord(ctx context.Context, record *store.ActionReco
 	if record.PayloadJSON == "" {
 		record.PayloadJSON = "{}"
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE action_records
 		 SET verdict = ?, confidence = ?, summary = ?, payload_json = ?, payload_digest = ?
 		 WHERE monitor_namespace = ? AND id = ?`,
@@ -559,10 +607,17 @@ func (s *Store) ListActionRecords(ctx context.Context, filter store.ActionRecord
 
 // CreateReviewRecord inserts an immutable review record.
 func (s *Store) CreateReviewRecord(ctx context.Context, record *store.ReviewRecord) error {
+	_, err := writeOperationInto(ctx, s, "CreateReviewRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createReviewRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) createReviewRecordWrite(ctx context.Context, record *store.ReviewRecord) error {
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO review_records
 		 (id, monitor_namespace, monitor_name, kind, number, head_sha, task_name, task_namespace,
 		  verdict, confidence, repairable, security_status, findings_json, summary, suggested_comment,
@@ -620,6 +675,13 @@ func (s *Store) ListReviewRecords(ctx context.Context, filter store.ReviewRecord
 
 // CreateReviewPublishRecord inserts a review publish attempt/outcome record.
 func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
+	_, err := writeOperationInto(ctx, s, "CreateReviewPublishRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createReviewPublishRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) createReviewPublishRecordWrite(ctx context.Context, record *store.ReviewPublishRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("review publish record is required")
 	}
@@ -633,7 +695,7 @@ func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.Rev
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = record.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO review_publish_records
 		 (id, monitor_namespace, monitor_name, item_kind, item_number, head_sha, run_id,
 		  review_task_name, review_record_id, phase, event, github_review_id, github_review_url,
@@ -649,6 +711,13 @@ func (s *Store) CreateReviewPublishRecord(ctx context.Context, record *store.Rev
 
 // UpdateReviewPublishRecord updates a review publish attempt/outcome record.
 func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.ReviewPublishRecord) error {
+	_, err := writeOperationInto(ctx, s, "UpdateReviewPublishRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateReviewPublishRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) updateReviewPublishRecordWrite(ctx context.Context, record *store.ReviewPublishRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("review publish record is required")
 	}
@@ -658,7 +727,7 @@ func (s *Store) UpdateReviewPublishRecord(ctx context.Context, record *store.Rev
 	if record.UpdatedAt.IsZero() {
 		record.UpdatedAt = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE review_publish_records
 		 SET phase = ?, event = ?, github_review_id = ?, github_review_url = ?, body_digest = ?,
 		     inline_comment_count = ?, skip_reason = ?, error = ?, updated_at = ?
@@ -717,10 +786,17 @@ func (s *Store) ListReviewPublishRecords(ctx context.Context, filter store.Revie
 
 // CreateCommandEvent inserts a maintainer command event.
 func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
+	_, err := writeOperationInto(ctx, s, "CreateCommandEvent", nil, event, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createCommandEventWrite(ctx, event)
+	})
+	return err
+}
+
+func (s *Store) createCommandEventWrite(ctx context.Context, event *store.CommandEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO command_events
 		 (id, monitor_namespace, monitor_name, repo, kind, number, source, delivery_id, label, monitor_generation,
 		  dedupe_key, idempotency_key, comment_id, comment_url, author, author_association, permission,
@@ -738,7 +814,14 @@ func (s *Store) CreateCommandEvent(ctx context.Context, event *store.CommandEven
 
 // UpdateCommandEvent updates command processing state.
 func (s *Store) UpdateCommandEvent(ctx context.Context, event *store.CommandEvent) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := writeOperationInto(ctx, s, "UpdateCommandEvent", nil, event, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateCommandEventWrite(ctx, event)
+	})
+	return err
+}
+
+func (s *Store) updateCommandEventWrite(ctx context.Context, event *store.CommandEvent) error {
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE command_events
 		 SET repo = ?, kind = ?, number = ?, source = ?, delivery_id = ?, label = ?, monitor_generation = ?,
 		     dedupe_key = ?, idempotency_key = ?, comment_id = ?, comment_url = ?, author = ?,
@@ -797,12 +880,19 @@ func (s *Store) ListCommandEvents(ctx context.Context, filter store.CommandEvent
 
 // CreateRepairJob inserts a repair job.
 func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error {
+	_, err := writeOperationInto(ctx, s, "CreateRepairJob", nil, job, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createRepairJobWrite(ctx, job)
+	})
+	return err
+}
+
+func (s *Store) createRepairJobWrite(ctx context.Context, job *store.RepairJob) error {
 	now := time.Now().UTC()
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
 	}
 	job.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO repair_jobs
 		 (id, monitor_namespace, monitor_name, repo, pr_number, intent, source, head_sha, base_sha, base_branch,
 		  phase, repair_count_pr, repair_count_head, validation_attempts, review_fix_attempts,
@@ -818,8 +908,15 @@ func (s *Store) CreateRepairJob(ctx context.Context, job *store.RepairJob) error
 
 // UpdateRepairJob updates repair job state.
 func (s *Store) UpdateRepairJob(ctx context.Context, job *store.RepairJob) error {
+	_, err := writeOperationInto(ctx, s, "UpdateRepairJob", nil, job, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateRepairJobWrite(ctx, job)
+	})
+	return err
+}
+
+func (s *Store) updateRepairJobWrite(ctx context.Context, job *store.RepairJob) error {
 	job.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE repair_jobs
 		 SET repo = ?, pr_number = ?, intent = ?, source = ?, head_sha = ?, base_sha = ?, base_branch = ?, phase = ?,
 		     repair_count_pr = ?, repair_count_head = ?, validation_attempts = ?, review_fix_attempts = ?,
@@ -874,13 +971,20 @@ func (s *Store) ListRepairJobs(ctx context.Context, filter store.RepairJobFilter
 
 // CreateMonitorEvent inserts an audit event.
 func (s *Store) CreateMonitorEvent(ctx context.Context, event *store.MonitorEvent) error {
+	_, err := writeOperationInto(ctx, s, "CreateMonitorEvent", nil, event, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createMonitorEventWrite(ctx, event)
+	})
+	return err
+}
+
+func (s *Store) createMonitorEventWrite(ctx context.Context, event *store.MonitorEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
 	if event.MetadataJSON == "" {
 		event.MetadataJSON = "{}"
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO monitor_events
 		 (id, monitor_namespace, monitor_name, run_id, item_kind, item_number, item_sha,
 		  event_type, actor, summary, metadata_json, created_at)
@@ -921,6 +1025,13 @@ func scanMonitorEvent(r rowScanner) (store.MonitorEvent, error) {
 
 // CreateWorkAction inserts a durable workflow action.
 func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	_, err := writeOperationInto(ctx, s, "CreateWorkAction", nil, action, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createWorkActionWrite(ctx, action)
+	})
+	return err
+}
+
+func (s *Store) createWorkActionWrite(ctx context.Context, action *store.WorkAction) error {
 	if action == nil {
 		return store.ValidationErrorf("work action is required")
 	}
@@ -935,7 +1046,7 @@ func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) 
 	if action.MetadataJSON == "" {
 		action.MetadataJSON = "{}"
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO work_actions
 		 (id, monitor_namespace, monitor_name, run_id, command_event_id, monitor_generation,
 		  target_kind, target_number, target_sha, target_snapshot_digest, intent, desired_action,
@@ -956,6 +1067,13 @@ func (s *Store) CreateWorkAction(ctx context.Context, action *store.WorkAction) 
 
 // UpdateWorkAction updates durable workflow action state.
 func (s *Store) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	_, err := writeOperationInto(ctx, s, "UpdateWorkAction", nil, action, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateWorkActionWrite(ctx, action)
+	})
+	return err
+}
+
+func (s *Store) updateWorkActionWrite(ctx context.Context, action *store.WorkAction) error {
 	if action == nil {
 		return store.ValidationErrorf("work action is required")
 	}
@@ -963,7 +1081,7 @@ func (s *Store) UpdateWorkAction(ctx context.Context, action *store.WorkAction) 
 	if action.MetadataJSON == "" {
 		action.MetadataJSON = "{}"
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE work_actions SET run_id = ?, command_event_id = ?, monitor_generation = ?,
 		 target_kind = ?, target_number = ?, target_sha = ?, target_snapshot_digest = ?, intent = ?,
 		 desired_action = ?, depends_on_action_id = ?, dedupe_key = ?, idempotency_key = ?, status = ?,
@@ -1041,8 +1159,14 @@ func (s *Store) ListWorkActions(ctx context.Context, filter store.WorkActionFilt
 
 // CancelWorkActions cancels non-terminal target actions except the executing control action.
 func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
+	return writeOperation(ctx, s, "CancelWorkActions", nil, func(ctx context.Context) (int, error) {
+		return s.cancelWorkActionsWrite(ctx, namespace, monitorName, targetKind, targetNumber, reason, exceptActionID)
+	})
+}
+
+func (s *Store) cancelWorkActionsWrite(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error) {
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE work_actions SET status = 'cancelled', blocked_reason = ?, error = '', completed_at = ?, updated_at = ?
 		 WHERE monitor_namespace = ? AND monitor_name = ? AND target_kind = ? AND target_number = ?
 		 AND id <> ? AND status IN ('queued', 'leased', 'running', 'retry_pending')`, reason, now, now, namespace, monitorName, targetKind, targetNumber, exceptActionID)
@@ -1055,6 +1179,13 @@ func (s *Store) CancelWorkActions(ctx context.Context, namespace, monitorName, t
 
 // CreateImplementationJob inserts an implementation job.
 func (s *Store) CreateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
+	_, err := writeOperationInto(ctx, s, "CreateImplementationJob", nil, job, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createImplementationJobWrite(ctx, job)
+	})
+	return err
+}
+
+func (s *Store) createImplementationJobWrite(ctx context.Context, job *store.ImplementationJob) error {
 	if job == nil {
 		return store.ValidationErrorf("implementation job is required")
 	}
@@ -1066,7 +1197,7 @@ func (s *Store) CreateImplementationJob(ctx context.Context, job *store.Implemen
 		job.CreatedAt = now
 	}
 	job.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO implementation_jobs
 		 (id, monitor_namespace, monitor_name, repo, issue_number, plan_id, snapshot_digest, phase,
 		  attempt, branch, patch_artifact_id, pr_number, validation_state, task_name, mutation_task_name,
@@ -1082,11 +1213,18 @@ func (s *Store) CreateImplementationJob(ctx context.Context, job *store.Implemen
 
 // UpdateImplementationJob updates implementation job state.
 func (s *Store) UpdateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
+	_, err := writeOperationInto(ctx, s, "UpdateImplementationJob", nil, job, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateImplementationJobWrite(ctx, job)
+	})
+	return err
+}
+
+func (s *Store) updateImplementationJobWrite(ctx context.Context, job *store.ImplementationJob) error {
 	if job == nil {
 		return store.ValidationErrorf("implementation job is required")
 	}
 	job.UpdatedAt = time.Now().UTC()
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE implementation_jobs SET repo = ?, issue_number = ?, plan_id = ?, snapshot_digest = ?, phase = ?,
 		 attempt = ?, branch = ?, patch_artifact_id = ?, pr_number = ?, validation_state = ?, task_name = ?,
 		 mutation_task_name = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?, error = ?,
@@ -1193,7 +1331,7 @@ func (s *Store) CountImplementationJobs(ctx context.Context, filter store.Implem
 		}
 	}
 	var count int
-	if err := s.db.QueryRowContext(ctx, query.String(), args...).Scan(&count); err != nil {
+	if err := s.taskDataExecutor(ctx).QueryRowContext(ctx, query.String(), args...).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -1201,6 +1339,13 @@ func (s *Store) CountImplementationJobs(ctx context.Context, filter store.Implem
 
 // CreateGitHubMutationRecord inserts an immutable GitHub mutation audit record.
 func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
+	_, err := writeOperationInto(ctx, s, "CreateGitHubMutationRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createGitHubMutationRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) createGitHubMutationRecordWrite(ctx context.Context, record *store.GitHubMutationRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("github mutation record is required")
 	}
@@ -1210,7 +1355,7 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO github_mutation_records
 		 (id, monitor_namespace, monitor_name, run_id, command_event_id, work_action_id, monitor_generation,
 		  operation, target_kind, target_number, target_sha, actor, reason, request_digest, github_url,
@@ -1227,13 +1372,20 @@ func (s *Store) CreateGitHubMutationRecord(ctx context.Context, record *store.Gi
 
 // UpdateGitHubMutationRecord updates the durable outcome of one mutation attempt.
 func (s *Store) UpdateGitHubMutationRecord(ctx context.Context, record *store.GitHubMutationRecord) error {
+	_, err := writeOperationInto(ctx, s, "UpdateGitHubMutationRecord", nil, record, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateGitHubMutationRecordWrite(ctx, record)
+	})
+	return err
+}
+
+func (s *Store) updateGitHubMutationRecordWrite(ctx context.Context, record *store.GitHubMutationRecord) error {
 	if record == nil {
 		return store.ValidationErrorf("github mutation record is required")
 	}
 	if record.ID == "" || record.MonitorNamespace == "" || record.MonitorName == "" || record.Operation == "" {
 		return store.ValidationErrorf("github mutation record id, monitor namespace, monitor name, and operation are required")
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE github_mutation_records
 		 SET monitor_name = ?, run_id = ?, command_event_id = ?, work_action_id = ?, monitor_generation = ?,
 		     operation = ?, target_kind = ?, target_number = ?, target_sha = ?, actor = ?, reason = ?,

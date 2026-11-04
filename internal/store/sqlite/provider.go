@@ -48,13 +48,18 @@ func (s *Store) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
 		DatasetID:       record.id,
 		DatasetOrigin:   storagev1.DatasetOrigin(record.origin),
 		SchemaVersion:   "sqlite/" + strconv.Itoa(version),
-		Limits:          storagev1.ProviderLimits{MaxArtifactBytes: storagev1.MaxArtifactBytes},
-		Durability:      storagev1.DurabilityLocalBuffered,
+		Limits: storagev1.ProviderLimits{
+			MaxArtifactBytes:      storagev1.MaxArtifactBytes,
+			ReceiptRetention:      receiptRetention,
+			MaxReceiptResultBytes: maxReceiptResultBytes,
+		},
+		Durability: storagev1.DurabilityLocalBuffered,
 
 		ContractRevision: storagev1.ContractRevision,
 		// The schema is upgraded when the store opens, under the process lock,
-		// so an open store always serves a ready dataset.
-		State:       storagev1.DatasetReady,
+		// so an open store serves a ready dataset unless a test holds it in
+		// another state.
+		State:       s.datasetState(),
 		Incarnation: s.incarnation,
 		ObservedAt:  time.Now().UTC(),
 		Bootstrap:   storagev1.DatasetBootstrap{Complete: record.complete, Empty: !populated},

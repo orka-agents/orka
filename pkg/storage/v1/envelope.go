@@ -25,8 +25,9 @@ var ErrClockSkew = errors.New("clock skew")
 // Orka does not attach the envelope yet, and providers must accept writes
 // without one. When the storage client attaches it, every method that
 // [LookupMethod] classifies as [MethodWrite] carries one in its context, and
-// reads and [MethodAdmin] methods carry none. A provider then runs these checks,
-// in this order, in the transaction that commits the write:
+// reads and [MethodAdmin] methods carry none. A provider runs these checks on
+// every write that carries an envelope, in this order, in the transaction
+// that commits the write:
 //
 //  1. DatasetID equals the provider's own dataset, or [ErrDatasetMismatch].
 //  2. A receipt for OperationID committed with the same method and

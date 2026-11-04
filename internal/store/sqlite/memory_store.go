@@ -43,6 +43,13 @@ type rowScanner interface {
 
 // CreateMemory inserts a durable memory record.
 func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
+	_, err := writeOperationInto(ctx, s, "CreateMemory", nil, memory, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createMemoryWrite(ctx, memory)
+	})
+	return err
+}
+
+func (s *Store) createMemoryWrite(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
 	}
@@ -71,7 +78,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO memories
 		 (id, namespace, session_name, agent_name, task_name, parent_task, source, source_proposal_id, content, tags_json,
 		  disabled, deleted, created_at, updated_at, last_recalled_at, recalled_count)
@@ -85,7 +92,7 @@ func (s *Store) CreateMemory(ctx context.Context, memory *store.Memory) error {
 
 // GetMemory fetches a memory by ID within a namespace.
 func (s *Store) GetMemory(ctx context.Context, namespace, id string) (*store.Memory, error) {
-	memory, err := scanMemory(s.db.QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, namespace, id))
+	memory, err := scanMemory(s.taskDataExecutor(ctx).QueryRowContext(ctx, selectMemorySQL()+` WHERE namespace = ? AND id = ?`, namespace, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -127,6 +134,13 @@ func (s *Store) ListMemories(ctx context.Context, filter store.MemoryFilter) ([]
 
 // UpdateMemory updates mutable memory fields.
 func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
+	_, err := writeOperationInto(ctx, s, "UpdateMemory", nil, memory, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.updateMemoryWrite(ctx, memory)
+	})
+	return err
+}
+
+func (s *Store) updateMemoryWrite(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
 	}
@@ -141,7 +155,7 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 		return err
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memories
 		 SET session_name = ?, agent_name = ?, task_name = ?, parent_task = ?, source = ?, source_proposal_id = ?, content = ?, tags_json = ?,
 		     disabled = ?, deleted = ?, updated_at = CURRENT_TIMESTAMP
@@ -157,7 +171,13 @@ func (s *Store) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 
 // DeleteMemory soft-deletes a memory by ID within a namespace.
 func (s *Store) DeleteMemory(ctx context.Context, namespace, id string) error {
-	res, err := s.db.ExecContext(ctx,
+	return writeOperationErr(ctx, s, "DeleteMemory", func(ctx context.Context) error {
+		return s.deleteMemoryWrite(ctx, namespace, id)
+	})
+}
+
+func (s *Store) deleteMemoryWrite(ctx context.Context, namespace, id string) error {
+	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memories SET deleted = TRUE, disabled = TRUE, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ?`,
 		namespace, id,
 	)
@@ -169,7 +189,13 @@ func (s *Store) DeleteMemory(ctx context.Context, namespace, id string) error {
 
 // SetMemoryDisabled toggles memory recall without deleting the provenance record.
 func (s *Store) SetMemoryDisabled(ctx context.Context, namespace, id string, disabled bool) error {
-	res, err := s.db.ExecContext(ctx,
+	return writeOperationErr(ctx, s, "SetMemoryDisabled", func(ctx context.Context) error {
+		return s.setMemoryDisabledWrite(ctx, namespace, id, disabled)
+	})
+}
+
+func (s *Store) setMemoryDisabledWrite(ctx context.Context, namespace, id string, disabled bool) error {
+	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memories SET disabled = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND id = ? AND deleted = FALSE`,
 		disabled, namespace, id,
 	)
@@ -306,6 +332,13 @@ func (s *Store) searchTranscriptUnfenced(ctx context.Context, filter store.Trans
 
 // CreateMemoryProposal inserts a governance proposal.
 func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.MemoryProposal) error {
+	_, err := writeOperationInto(ctx, s, "CreateMemoryProposal", nil, proposal, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createMemoryProposalWrite(ctx, proposal)
+	})
+	return err
+}
+
+func (s *Store) createMemoryProposalWrite(ctx context.Context, proposal *store.MemoryProposal) error {
 	if proposal == nil {
 		return store.ValidationErrorf("proposal is required")
 	}
@@ -340,7 +373,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 		proposal.UpdatedAt = now
 	}
 
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`INSERT INTO memory_proposals
 		 (id, namespace, task_name, agent_name, type, skill_name, title, description, content, patch,
 		  status, reviewer, review_note, applied_memory_id, applied_by, created_at, updated_at, reviewed_at, applied_at)
@@ -355,7 +388,7 @@ func (s *Store) CreateMemoryProposal(ctx context.Context, proposal *store.Memory
 
 // GetMemoryProposal fetches a proposal by ID within a namespace.
 func (s *Store) GetMemoryProposal(ctx context.Context, namespace, id string) (*store.MemoryProposal, error) {
-	proposal, err := scanMemoryProposal(s.db.QueryRowContext(ctx, selectMemoryProposalSQL()+` WHERE namespace = ? AND id = ?`, namespace, id))
+	proposal, err := scanMemoryProposal(s.taskDataExecutor(ctx).QueryRowContext(ctx, selectMemoryProposalSQL()+` WHERE namespace = ? AND id = ?`, namespace, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -416,6 +449,12 @@ func (s *Store) ListMemoryProposals(ctx context.Context, filter store.MemoryProp
 
 // ReviewMemoryProposal records a reviewer decision. It never applies the proposal automatically.
 func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
+	return writeOperationErr(ctx, s, "ReviewMemoryProposal", func(ctx context.Context) error {
+		return s.reviewMemoryProposalWrite(ctx, review)
+	})
+}
+
+func (s *Store) reviewMemoryProposalWrite(ctx context.Context, review store.MemoryProposalReview) error {
 	review.Namespace = strings.TrimSpace(review.Namespace)
 	review.ID = strings.TrimSpace(review.ID)
 	if review.Namespace == "" || review.ID == "" {
@@ -437,7 +476,7 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 		return store.ValidationErrorf("applied proposal cannot be reviewed")
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, reviewer = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
 		 WHERE namespace = ? AND id = ? AND status = ?`,
@@ -461,6 +500,12 @@ func (s *Store) ReviewMemoryProposal(ctx context.Context, review store.MemoryPro
 
 // ArchiveMemoryProposal archives a proposal without applying it.
 func (s *Store) ArchiveMemoryProposal(ctx context.Context, namespace, id string) error {
+	return writeOperationErr(ctx, s, "ArchiveMemoryProposal", func(ctx context.Context) error {
+		return s.archiveMemoryProposalWrite(ctx, namespace, id)
+	})
+}
+
+func (s *Store) archiveMemoryProposalWrite(ctx context.Context, namespace, id string) error {
 	namespace = strings.TrimSpace(namespace)
 	id = strings.TrimSpace(id)
 	if namespace == "" || id == "" {
@@ -480,7 +525,7 @@ func (s *Store) ArchiveMemoryProposal(ctx context.Context, namespace, id string)
 		s.archiveMemoryProposalAfterActiveRead()
 	}
 
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`UPDATE memory_proposals
 		 SET status = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE namespace = ? AND id = ? AND status != ? AND applied_memory_id = ''`,
@@ -524,6 +569,12 @@ func (s *Store) ResolveMemoryProposalApplication(ctx context.Context, namespace,
 // CommitMemoryProposalApplication applies a proposal only while it still
 // resolves to the caller's target.
 func (s *Store) CommitMemoryProposalApplication(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
+	return writeOperation(ctx, s, "CommitMemoryProposalApplication", nil, func(ctx context.Context) (*store.Memory, error) {
+		return s.commitMemoryProposalApplicationWrite(ctx, application)
+	})
+}
+
+func (s *Store) commitMemoryProposalApplicationWrite(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
 	application.Target.Namespace = strings.TrimSpace(application.Target.Namespace)
 	application.Target.ProposalID = strings.TrimSpace(application.Target.ProposalID)
 	if application.Target.Namespace == "" || application.Target.ProposalID == "" {
@@ -625,7 +676,7 @@ func resolveMemoryProposalTarget(ctx context.Context, q memoryProposalQueryer, n
 }
 
 func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, application store.MemoryProposalApplication) (*store.Memory, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +707,7 @@ func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, applica
 		if expected.AppliedMemoryID == "" {
 			// Record the application of a memory already created from this
 			// proposal, keeping any earlier application time.
-			if err := markMemoryProposalApplied(ctx, tx, application, memory.ID, true); err != nil {
+			if err := markMemoryProposalApplied(ctx, tx.Tx, application, memory.ID, true); err != nil {
 				return nil, err
 			}
 		}
@@ -703,7 +754,7 @@ func (s *Store) commitMemoryProposalApplicationOnce(ctx context.Context, applica
 		}
 		return nil, err
 	}
-	if err := markMemoryProposalApplied(ctx, tx, application, memory.ID, false); err != nil {
+	if err := markMemoryProposalApplied(ctx, tx.Tx, application, memory.ID, false); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

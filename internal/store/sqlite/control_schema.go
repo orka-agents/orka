@@ -10,7 +10,10 @@ func controlSchemaStatements() []string {
 			request_digest TEXT NOT NULL,
 			version        INTEGER NOT NULL CHECK(version > 0),
 			acquired_at    TIMESTAMP NOT NULL,
-			updated_at     TIMESTAMP NOT NULL
+			updated_at     TIMESTAMP NOT NULL,
+			previous_epoch INTEGER,
+			previous_holder_id TEXT,
+			advanced_at    TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompt_attempts (
 			id                       TEXT PRIMARY KEY,

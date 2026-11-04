@@ -3,6 +3,7 @@ package sqlite
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestDescribeWithoutUsageForInMemoryDatabase(t *testing.T) {
 
 func TestDescribeReportsUnsupportedSchemaAsIncompatible(t *testing.T) {
 	s := setupDiskStore(t)
-	_, err := s.db.Exec(`PRAGMA user_version=2`)
+	_, err := s.db.Exec(`PRAGMA user_version=` + strconv.Itoa(SchemaVersion+1))
 	require.NoError(t, err)
 	_, err = s.Describe(t.Context())
 	require.ErrorIs(t, err, storagev1.ErrIncompatible)

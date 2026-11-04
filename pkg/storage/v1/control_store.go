@@ -70,10 +70,9 @@ type ControllerEpochMirrorState struct {
 }
 
 // ControllerEpochAdvancer is the forward-only, installation-bound form of the
-// controller epoch mirror. It will replace
-// [ControllerEpochMirror.SyncControllerEpochMirror] on the state provider,
-// and the artifact provider will implement it too. Until then no provider is
-// required to implement it, and Orka does not call it. Once Orka advances a
+// controller epoch mirror. Both providers implement it, and it will replace
+// [ControllerEpochMirror.SyncControllerEpochMirror] on the state provider;
+// Orka does not call it yet. Once Orka advances a
 // dataset with AdvanceControllerEpoch, it no longer calls
 // SyncControllerEpochMirror on it, and a provider that implements both
 // refuses SyncControllerEpochMirror on a dataset bound to an installation

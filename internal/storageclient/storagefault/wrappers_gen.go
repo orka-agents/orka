@@ -57,6 +57,19 @@ func (p *stateProvider) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	var r0 storagev1.ControllerEpochMirrorState
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceControllerEpoch", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceControllerEpoch(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.ControllerEpochMirrorState
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEvent", func(ctx context.Context) (err error) {
@@ -736,6 +749,19 @@ func (p *stateProvider) GetCommandEvent(ctx context.Context, a1 string, a2 strin
 	})
 	if injected {
 		var z0 *storagev1.CommandEvent
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetControllerEpochMirror(ctx context.Context, a1 string) (storagev1.ControllerEpochMirrorState, error) {
+	var r0 storagev1.ControllerEpochMirrorState
+	injected, err := p.injector.call(ctx, p.contract, "GetControllerEpochMirror", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetControllerEpochMirror(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.ControllerEpochMirrorState
 		return z0, err
 	}
 	return r0, err
@@ -2048,6 +2074,19 @@ func (p *stateProvider) ProjectSessionLineage(ctx context.Context, a1 storagev1.
 	return r0, err
 }
 
+func (p *stateProvider) PruneOperationReceipts(ctx context.Context, a1 int) (int, error) {
+	var r0 int
+	injected, err := p.injector.call(ctx, p.contract, "PruneOperationReceipts", func(ctx context.Context) (err error) {
+		r0, err = p.inner.PruneOperationReceipts(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 int
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) PruneUsage(ctx context.Context, a1 time.Time) error {
 	_, err := p.injector.call(ctx, p.contract, "PruneUsage", func(ctx context.Context) error {
 		return p.inner.PruneUsage(ctx, a1)
@@ -2232,6 +2271,19 @@ func (p *stateProvider) ResolveMemoryProposalApplication(ctx context.Context, a1
 	})
 	if injected {
 		var z0 storagev1.MemoryProposalApplyTarget
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) ResolveOperation(ctx context.Context, a1 storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	var r0 storagev1.OperationOutcome
+	injected, err := p.injector.call(ctx, p.contract, "ResolveOperation", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ResolveOperation(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.OperationOutcome
 		return z0, err
 	}
 	return r0, err
@@ -2543,6 +2595,19 @@ func (p *stateProvider) UpsertReviewSlice(ctx context.Context, a1 *storagev1.Rev
 	return err
 }
 
+func (p *artifactProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {
+	var r0 storagev1.ControllerEpochMirrorState
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceControllerEpoch", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceControllerEpoch(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.ControllerEpochMirrorState
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *artifactProvider) DeleteArtifacts(ctx context.Context, a1 storagev1.ArtifactOwner) error {
 	_, err := p.injector.call(ctx, p.contract, "DeleteArtifacts", func(ctx context.Context) error {
 		return p.inner.DeleteArtifacts(ctx, a1)
@@ -2565,6 +2630,19 @@ func (p *artifactProvider) GetArtifact(ctx context.Context, a1 storagev1.Artifac
 	return r0, r1, err
 }
 
+func (p *artifactProvider) GetControllerEpochMirror(ctx context.Context, a1 string) (storagev1.ControllerEpochMirrorState, error) {
+	var r0 storagev1.ControllerEpochMirrorState
+	injected, err := p.injector.call(ctx, p.contract, "GetControllerEpochMirror", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetControllerEpochMirror(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.ControllerEpochMirrorState
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *artifactProvider) HealthCheck(ctx context.Context) error {
 	_, err := p.injector.call(ctx, p.contract, "HealthCheck", func(ctx context.Context) error {
 		return p.inner.HealthCheck(ctx)
@@ -2580,6 +2658,32 @@ func (p *artifactProvider) ListArtifacts(ctx context.Context, a1 storagev1.Artif
 	})
 	if injected {
 		var z0 []storagev1.ArtifactMetadata
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) PruneOperationReceipts(ctx context.Context, a1 int) (int, error) {
+	var r0 int
+	injected, err := p.injector.call(ctx, p.contract, "PruneOperationReceipts", func(ctx context.Context) (err error) {
+		r0, err = p.inner.PruneOperationReceipts(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 int
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) ResolveOperation(ctx context.Context, a1 storagev1.ResolveOperationRequest) (storagev1.OperationOutcome, error) {
+	var r0 storagev1.OperationOutcome
+	injected, err := p.injector.call(ctx, p.contract, "ResolveOperation", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ResolveOperation(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 storagev1.OperationOutcome
 		return z0, err
 	}
 	return r0, err

@@ -388,8 +388,8 @@ func TestArtifactsBindingProbesOfTheEmbeddedStore(t *testing.T) {
 
 // notWrappedYet lists catalog methods of optional provider interfaces that the
 // wrappers do not serve until those interfaces join StateProvider or
-// ArtifactProvider.
-var notWrappedYet = []string{"AdvanceControllerEpoch", "GetControllerEpochMirror", "ResolveOperation", "PruneOperationReceipts"}
+// ArtifactProvider. Every catalog method is served now.
+var notWrappedYet []string
 
 // Every catalog method reaches the provider through the wrappers, except the
 // listed optional ones, and those stay listed only while the embedded store

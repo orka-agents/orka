@@ -414,23 +414,29 @@ func (s *Store) GetSealedConnectorCredential(ctx context.Context, connectionUID 
 // PutSealedConnectorCredential implements storagev1.SealedConnectorCustodyStore.
 func (s *Store) PutSealedConnectorCredential(ctx context.Context, request storagev1.PutSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	s.finishPendingWALTruncate(ctx)
+	return writeCustodyOperation(ctx, s, "PutSealedConnectorCredential", func(ctx context.Context) (*storagev1.SealedConnectorCredential, error) {
+		return s.putSealedConnectorCredentialWrite(ctx, request)
+	}, credentialCustodyScope)
+}
+
+func (s *Store) putSealedConnectorCredentialWrite(ctx context.Context, request storagev1.PutSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	if err := request.Credential.Validate(); err != nil {
 		return nil, err
 	}
 	if err := requireConnectorRequestTime(request.Now); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector credential transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if tombstoned, err := connectorTombstonedTx(ctx, tx, request.Credential.ConnectionUID); err != nil {
+	if tombstoned, err := connectorTombstonedTx(ctx, tx.Tx, request.Credential.ConnectionUID); err != nil {
 		return nil, err
 	} else if tombstoned {
 		return nil, store.ErrConnectorCustodyTombstoned
 	}
-	stored, err := s.putConnectorCredentialTx(ctx, tx, request.Credential, request.Now)
+	stored, err := s.putConnectorCredentialTx(ctx, tx.Tx, request.Credential, request.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -512,6 +518,14 @@ func (s *Store) ReplaceSealedConnectorCredential(
 	ctx context.Context, request storagev1.ReplaceSealedConnectorCredentialRequest,
 ) (*storagev1.SealedConnectorCredential, error) {
 	s.finishPendingWALTruncate(ctx)
+	return writeCustodyOperation(ctx, s, "ReplaceSealedConnectorCredential", func(ctx context.Context) (*storagev1.SealedConnectorCredential, error) {
+		return s.replaceSealedConnectorCredentialWrite(ctx, request)
+	}, credentialCustodyScope)
+}
+
+func (s *Store) replaceSealedConnectorCredentialWrite(
+	ctx context.Context, request storagev1.ReplaceSealedConnectorCredentialRequest,
+) (*storagev1.SealedConnectorCredential, error) {
 	credential := request.Credential
 	if err := credential.Validate(); err != nil {
 		return nil, err
@@ -519,7 +533,7 @@ func (s *Store) ReplaceSealedConnectorCredential(
 	if err := requireConnectorRequestTime(request.Now); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector credential replacement: %w", err)
 	}
@@ -527,13 +541,13 @@ func (s *Store) ReplaceSealedConnectorCredential(
 	// A disconnect fences custody before it reads the material to revoke; a
 	// refresh that lands afterwards must not add a rotated credential outside
 	// that revocation set.
-	if tombstoned, err := connectorTombstonedTx(ctx, tx, credential.ConnectionUID); err != nil {
+	if tombstoned, err := connectorTombstonedTx(ctx, tx.Tx, credential.ConnectionUID); err != nil {
 		return nil, err
 	} else if tombstoned {
 		return nil, store.ErrConnectorCustodyTombstoned
 	}
 	// The version fence is checked next so a stale writer retires nothing.
-	current, err := connectorCredentialTx(ctx, tx, credential.ConnectionUID)
+	current, err := connectorCredentialTx(ctx, tx.Tx, credential.ConnectionUID)
 	switch {
 	case err != nil:
 		return nil, err
@@ -546,15 +560,15 @@ func (s *Store) ReplaceSealedConnectorCredential(
 		return nil, store.ConflictErrorf("a replacement must carry the stored grant")
 	}
 	now := request.Now.UTC()
-	if err := pruneRetiredConnectorCredentialsTx(ctx, tx, credential.ConnectionUID, now); err != nil {
+	if err := pruneRetiredConnectorCredentialsTx(ctx, tx.Tx, credential.ConnectionUID, now); err != nil {
 		return nil, err
 	}
 	if request.Retire != nil {
-		if err := s.retireConnectorCredentialTx(ctx, tx, *current, request.Retire.RevocableUntil, false, now); err != nil {
+		if err := s.retireConnectorCredentialTx(ctx, tx.Tx, *current, request.Retire.RevocableUntil, false, now); err != nil {
 			return nil, err
 		}
 	}
-	version, err := nextConnectorCredentialVersion(ctx, tx, credential.ConnectionUID)
+	version, err := nextConnectorCredentialVersion(ctx, tx.Tx, credential.ConnectionUID)
 	if err != nil {
 		return nil, err
 	}
@@ -636,6 +650,12 @@ func (s *Store) boundRefreshRetiredTx(ctx context.Context, tx *sql.Tx, connectio
 // RetireSealedConnectorCredential implements storagev1.SealedConnectorCustodyStore.
 func (s *Store) RetireSealedConnectorCredential(ctx context.Context, retired storagev1.SealedRetiredConnectorCredential) error {
 	s.finishPendingWALTruncate(ctx)
+	return writeOperationErr(ctx, s, "RetireSealedConnectorCredential", func(ctx context.Context) error {
+		return s.retireSealedConnectorCredentialWrite(ctx, retired)
+	})
+}
+
+func (s *Store) retireSealedConnectorCredentialWrite(ctx context.Context, retired storagev1.SealedRetiredConnectorCredential) error {
 	if err := requireConnectionUID(retired.ConnectionUID); err != nil {
 		return err
 	}
@@ -649,22 +669,22 @@ func (s *Store) RetireSealedConnectorCredential(ctx context.Context, retired sto
 		return err
 	}
 	now := retired.RetiredAt.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector retirement transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if tombstoned, err := connectorTombstonedTx(ctx, tx, retired.ConnectionUID); err != nil {
+	if tombstoned, err := connectorTombstonedTx(ctx, tx.Tx, retired.ConnectionUID); err != nil {
 		return err
 	} else if tombstoned {
 		return store.ErrConnectorCustodyTombstoned
 	}
-	if err := pruneRetiredConnectorCredentialsTx(ctx, tx, retired.ConnectionUID, now); err != nil {
+	if err := pruneRetiredConnectorCredentialsTx(ctx, tx.Tx, retired.ConnectionUID, now); err != nil {
 		return err
 	}
 	// Refresh material retired here is bounded like any rotated grant, so a
 	// store that keeps failing replacement cannot grow custody without limit.
-	if err := s.retireConnectorCredentialTx(ctx, tx, storagev1.SealedConnectorCredential{
+	if err := s.retireConnectorCredentialTx(ctx, tx.Tx, storagev1.SealedConnectorCredential{
 		ConnectionUID: retired.ConnectionUID, DataKeyNonce: retired.DataKeyNonce, DataKeyCiphertext: retired.DataKeyCiphertext,
 		Nonce: retired.Nonce, Ciphertext: retired.Ciphertext,
 	}, retired.RevocableUntil, false, now); err != nil {
@@ -676,21 +696,36 @@ func (s *Store) RetireSealedConnectorCredential(ctx context.Context, retired sto
 // TombstoneConnectorCustody implements storagev1.SealedConnectorCustodyStore.
 func (s *Store) TombstoneConnectorCustody(ctx context.Context, connectionUID string) error {
 	s.finishPendingWALTruncate(ctx)
+	err := writeOperationErr(ctx, s, "TombstoneConnectorCustody", func(ctx context.Context) error {
+		return s.tombstoneConnectorCustodyWrite(ctx, connectionUID)
+	})
+	s.finishPendingWALTruncate(ctx)
+	return err
+}
+
+func (s *Store) tombstoneConnectorCustodyWrite(ctx context.Context, connectionUID string) error {
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
 	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector tombstone transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := reapConnectorTombstonesTx(ctx, tx, now); err != nil {
+	if err := reapConnectorTombstonesTx(ctx, tx.Tx, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO connector_credential_tombstones (connection_uid, deleted_at) VALUES (?, ?)
 		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, now); err != nil {
 		return fmt.Errorf("tombstone connector custody: %w", err)
+	}
+	// Tombstoning removes no custody row, but the results receipts hold for
+	// it go: the wrapper truncates their log copies after the commit.
+	if cleared, err := s.clearCustodyReceipts(ctx, tx, connectionUID); err != nil {
+		return err
+	} else if cleared {
+		s.pendingWALTruncate.Store(true)
 	}
 	return tx.Commit()
 }
@@ -721,6 +756,20 @@ func reapConnectorTombstonesTx(ctx context.Context, tx *sql.Tx, now time.Time) e
 // ShredConnectorCredential implements storagev1.SealedConnectorCustodyStore.
 func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error {
 	s.finishPendingWALTruncate(ctx)
+	err := writeOperationErr(ctx, s, "ShredConnectorCredential", func(ctx context.Context) error {
+		return s.shredConnectorCredentialWrite(ctx, connectionUID, expectedVersion)
+	})
+	// A shred is a crypto-shred only once the log frames that carried the
+	// row are gone too. The truncation runs after the operation commits,
+	// whether or not this call was the one that removed the row and on a
+	// replay too, so a retry after a busy log finishes it.
+	if truncateErr := s.truncateWAL(ctx); truncateErr != nil && err == nil {
+		return truncateErr
+	}
+	return err
+}
+
+func (s *Store) shredConnectorCredentialWrite(ctx context.Context, connectionUID string, expectedVersion int64) error {
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
@@ -728,21 +777,14 @@ func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID stri
 	if err != nil {
 		return err
 	}
-	var fenced error
 	switch {
 	case deleted:
+		return nil
 	case remaining:
-		fenced = store.ErrConflict
+		return store.ErrConflict
 	default:
-		fenced = store.ErrNotFound
+		return store.ErrNotFound
 	}
-	// A shred is a crypto-shred only once the log frames that carried the
-	// row are gone too. The truncation runs whether or not this call was the
-	// one that removed the row, so a retry after a busy log finishes it.
-	if err := s.truncateWAL(ctx); err != nil && fenced == nil {
-		return err
-	}
-	return fenced
 }
 
 // shredConnectorCredentialTx deletes the record at expectedVersion and, when
@@ -751,7 +793,7 @@ func (s *Store) ShredConnectorCredential(ctx context.Context, connectionUID stri
 // would report a grant committed in between as a conflict, which matches no
 // serial order.
 func (s *Store) shredConnectorCredentialTx(ctx context.Context, connectionUID string, expectedVersion int64) (deleted, remaining bool, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return false, false, fmt.Errorf("begin connector credential shred: %w", err)
 	}
@@ -763,6 +805,11 @@ func (s *Store) shredConnectorCredentialTx(ctx context.Context, connectionUID st
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return false, false, fmt.Errorf("inspect connector credential write: %w", err)
+	}
+	if affected > 0 {
+		if _, err := s.clearCustodyReceipts(ctx, tx, connectionUID); err != nil {
+			return false, false, err
+		}
 	}
 	if affected == 0 {
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_credentials WHERE connection_uid = ?)`,
@@ -779,10 +826,19 @@ func (s *Store) shredConnectorCredentialTx(ctx context.Context, connectionUID st
 // DeleteConnectorCredential implements storagev1.SealedConnectorCustodyStore.
 func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID string) error {
 	s.finishPendingWALTruncate(ctx)
+	if err := writeOperationErr(ctx, s, "DeleteConnectorCredential", func(ctx context.Context) error {
+		return s.deleteConnectorCredentialWrite(ctx, connectionUID)
+	}); err != nil {
+		return err
+	}
+	return s.truncateWAL(ctx)
+}
+
+func (s *Store) deleteConnectorCredentialWrite(ctx context.Context, connectionUID string) error {
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector credential connection UID is required")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector credential transaction: %w", err)
 	}
@@ -797,10 +853,10 @@ func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID str
 		ON CONFLICT(connection_uid) DO NOTHING`, connectionUID, time.Now().UTC()); err != nil {
 		return fmt.Errorf("tombstone connector custody: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := s.clearCustodyReceipts(ctx, tx, connectionUID); err != nil {
 		return err
 	}
-	return s.truncateWAL(ctx)
+	return tx.Commit()
 }
 
 // truncateWAL checkpoints the write-ahead log and truncates it, so frames
@@ -808,6 +864,12 @@ func (s *Store) DeleteConnectorCredential(ctx context.Context, connectionUID str
 // ciphertext) do not outlive the deletion in the -wal file. secure_delete
 // zeroes the row in the main file; this removes the log copy.
 func (s *Store) truncateWAL(ctx context.Context) error {
+	// SQLite has one connection: a checkpoint cannot run while ctx carries a
+	// transaction. The next custody operation finishes it.
+	if s.taskDataTx(ctx) != nil || ctx.Value(writeOperationKey{}) != nil {
+		s.pendingWALTruncate.Store(true)
+		return nil
+	}
 	var err error
 	for range 5 {
 		var busy, logFrames, checkpointed int
@@ -843,6 +905,12 @@ func (s *Store) finishPendingWALTruncate(ctx context.Context) {
 // CreateSealedConnectorConsent implements storagev1.SealedConnectorConsentStore.
 func (s *Store) CreateSealedConnectorConsent(ctx context.Context, request storagev1.CreateSealedConnectorConsentRequest) error {
 	s.finishPendingWALTruncate(ctx)
+	return writeOperationErr(ctx, s, "CreateSealedConnectorConsent", func(ctx context.Context) error {
+		return s.createSealedConnectorConsentWrite(ctx, request)
+	})
+}
+
+func (s *Store) createSealedConnectorConsentWrite(ctx context.Context, request storagev1.CreateSealedConnectorConsentRequest) error {
 	consent := request.Consent
 	if err := consent.Validate(); err != nil {
 		return err
@@ -851,14 +919,14 @@ func (s *Store) CreateSealedConnectorConsent(ctx context.Context, request storag
 		return err
 	}
 	now := request.Now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector consent transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	// Each consent takes the Connection's next sequence, sealed with its
 	// verifier; commits follow this order, not callback arrival.
-	issued, _, err := connectorConsentSequencesTx(ctx, tx, consent.ConnectionUID)
+	issued, _, err := connectorConsentSequencesTx(ctx, tx.Tx, consent.ConnectionUID)
 	if err != nil {
 		return err
 	}
@@ -891,13 +959,19 @@ func (s *Store) CreateSealedConnectorConsent(ctx context.Context, request storag
 // ConsumeSealedConnectorConsent implements storagev1.SealedConnectorConsentStore.
 func (s *Store) ConsumeSealedConnectorConsent(ctx context.Context, nonce string, now time.Time) (*storagev1.SealedConnectorConsent, error) {
 	s.finishPendingWALTruncate(ctx)
+	return writeCustodyOperation(ctx, s, "ConsumeSealedConnectorConsent", func(ctx context.Context) (*storagev1.SealedConnectorConsent, error) {
+		return s.consumeSealedConnectorConsentWrite(ctx, nonce, now)
+	}, consentCustodyScope)
+}
+
+func (s *Store) consumeSealedConnectorConsentWrite(ctx context.Context, nonce string, now time.Time) (*storagev1.SealedConnectorConsent, error) {
 	if strings.TrimSpace(nonce) == "" {
 		return nil, store.ErrNotFound
 	}
 	if err := requireConnectorRequestTime(now); err != nil {
 		return nil, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector consent transaction: %w", err)
 	}
@@ -925,6 +999,14 @@ func (s *Store) ConsumeSealedConnectorConsent(ctx context.Context, nonce string,
 // CreateSealedConnectorCompletion implements storagev1.SealedConnectorConsentStore.
 func (s *Store) CreateSealedConnectorCompletion(ctx context.Context, request storagev1.CreateSealedConnectorCompletionRequest) error {
 	s.finishPendingWALTruncate(ctx)
+	err := writeOperationErr(ctx, s, "CreateSealedConnectorCompletion", func(ctx context.Context) error {
+		return s.createSealedConnectorCompletionWrite(ctx, request)
+	})
+	s.finishPendingWALTruncate(ctx)
+	return err
+}
+
+func (s *Store) createSealedConnectorCompletionWrite(ctx context.Context, request storagev1.CreateSealedConnectorCompletionRequest) error {
 	completion := request.Completion
 	if err := completion.Validate(); err != nil {
 		return err
@@ -935,24 +1017,24 @@ func (s *Store) CreateSealedConnectorCompletion(ctx context.Context, request sto
 	if err := validateConnectorCompletionRefs(request.ExpectedCompletions, request.Replace, "replaced completions"); err != nil {
 		return err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector completion transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	// Expired completions are not purged here: the Connection reconciler
 	// reaps them (their tokens are left to expire, never revoked).
-	if tombstoned, err := connectorTombstonedTx(ctx, tx, completion.ConnectionUID); err != nil {
+	if tombstoned, err := connectorTombstonedTx(ctx, tx.Tx, completion.ConnectionUID); err != nil {
 		return err
 	} else if tombstoned {
 		return store.ErrConnectorCustodyTombstoned
 	}
-	if _, committed, err := connectorConsentSequencesTx(ctx, tx, completion.ConnectionUID); err != nil {
+	if _, committed, err := connectorConsentSequencesTx(ctx, tx.Tx, completion.ConnectionUID); err != nil {
 		return err
 	} else if completion.ConsentSequence <= committed {
 		return store.ErrConnectorConsentSuperseded
 	}
-	current, err := connectorCompletionsTx(ctx, tx, completion.ConnectionUID)
+	current, err := connectorCompletionsTx(ctx, tx.Tx, completion.ConnectionUID)
 	if err != nil {
 		return err
 	}
@@ -976,9 +1058,9 @@ func (s *Store) CreateSealedConnectorCompletion(ctx context.Context, request sto
 		return err
 	}
 	if len(request.Replace) > 0 {
-		// Best effort: a log that readers kept busy is truncated by the next
-		// custody deletion.
-		_ = s.truncateWAL(ctx)
+		// The wrapper truncates the log after the operation commits; a log
+		// that readers kept busy is truncated by the next custody operation.
+		s.pendingWALTruncate.Store(true)
 	}
 	return nil
 }
@@ -1003,10 +1085,18 @@ func (s *Store) GetSealedConnectorCompletion(ctx context.Context, nonce string) 
 // ConsumeSealedConnectorCompletion implements storagev1.SealedConnectorConsentStore.
 func (s *Store) ConsumeSealedConnectorCompletion(ctx context.Context, nonce string) (*storagev1.SealedConnectorCompletion, error) {
 	s.finishPendingWALTruncate(ctx)
+	completion, err := writeCustodyOperation(ctx, s, "ConsumeSealedConnectorCompletion", func(ctx context.Context) (*storagev1.SealedConnectorCompletion, error) {
+		return s.consumeSealedConnectorCompletionWrite(ctx, nonce)
+	}, completionCustodyScope)
+	s.finishPendingWALTruncate(ctx)
+	return completion, err
+}
+
+func (s *Store) consumeSealedConnectorCompletionWrite(ctx context.Context, nonce string) (*storagev1.SealedConnectorCompletion, error) {
 	if strings.TrimSpace(nonce) == "" {
 		return nil, store.ErrNotFound
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector completion transaction: %w", err)
 	}
@@ -1025,8 +1115,11 @@ func (s *Store) ConsumeSealedConnectorCompletion(ctx context.Context, nonce stri
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit connector completion: %w", err)
 	}
-	// The consumed row held sealed tokens: its log copy goes too.
-	_ = s.truncateWAL(ctx)
+	// The consumed row held sealed tokens: the wrapper truncates its log copy
+	// after the operation commits. With an envelope, the operation receipt
+	// keeps the sealed result until the Connection's custody is removed or
+	// the receipt expires.
+	s.pendingWALTruncate.Store(true)
 	return &completion, nil
 }
 
@@ -1035,17 +1128,27 @@ func (s *Store) CommitSealedConnectorCompletion(
 	ctx context.Context, request storagev1.CommitSealedConnectorCompletionRequest,
 ) (*storagev1.SealedConnectorCredential, error) {
 	s.finishPendingWALTruncate(ctx)
+	stored, err := writeCustodyOperation(ctx, s, "CommitSealedConnectorCompletion", func(ctx context.Context) (*storagev1.SealedConnectorCredential, error) {
+		return s.commitSealedConnectorCompletionWrite(ctx, request)
+	}, credentialCustodyScope)
+	s.finishPendingWALTruncate(ctx)
+	return stored, err
+}
+
+func (s *Store) commitSealedConnectorCompletionWrite(
+	ctx context.Context, request storagev1.CommitSealedConnectorCompletionRequest,
+) (*storagev1.SealedConnectorCredential, error) {
 	if err := validateConnectorCommit(request); err != nil {
 		return nil, err
 	}
 	uid := request.Credential.ConnectionUID
 	now := request.Now.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin connector completion commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	parked, current, err := connectorCommitBasisTx(ctx, tx, request)
+	parked, current, err := connectorCommitBasisTx(ctx, tx.Tx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -1056,7 +1159,7 @@ func (s *Store) CommitSealedConnectorCompletion(
 	}
 	// A newer consent's grant is custody already: this older consent's
 	// tokens never replace it.
-	if _, committed, err := connectorConsentSequencesTx(ctx, tx, uid); err != nil {
+	if _, committed, err := connectorConsentSequencesTx(ctx, tx.Tx, uid); err != nil {
 		return nil, err
 	} else if parked.ConsentSequence <= committed {
 		return nil, store.ErrConnectorConsentSuperseded
@@ -1065,7 +1168,7 @@ func (s *Store) CommitSealedConnectorCompletion(
 	// a bound keeps repeated relinking from growing custody without limit.
 	// Records with nothing left to revoke are pruned first, so they never
 	// count.
-	if err := pruneRetiredConnectorCredentialsTx(ctx, tx, uid, now); err != nil {
+	if err := pruneRetiredConnectorCredentialsTx(ctx, tx.Tx, uid, now); err != nil {
 		return nil, err
 	}
 	var retained int
@@ -1076,17 +1179,17 @@ func (s *Store) CommitSealedConnectorCompletion(
 	if retained >= maxRetiredConnectorCredentials {
 		return nil, store.ErrConnectorRetiredLimit
 	}
-	if tombstoned, err := connectorTombstonedTx(ctx, tx, uid); err != nil {
+	if tombstoned, err := connectorTombstonedTx(ctx, tx.Tx, uid); err != nil {
 		return nil, err
 	} else if tombstoned {
 		return nil, store.ErrConnectorCustodyTombstoned
 	}
 	if request.Retire != nil {
-		if err := s.retireConnectorCredentialTx(ctx, tx, *current, request.Retire.RevocableUntil, true, now); err != nil {
+		if err := s.retireConnectorCredentialTx(ctx, tx.Tx, *current, request.Retire.RevocableUntil, true, now); err != nil {
 			return nil, err
 		}
 	}
-	stored, err := s.putConnectorCredentialTx(ctx, tx, request.Credential, now)
+	stored, err := s.putConnectorCredentialTx(ctx, tx.Tx, request.Credential, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,9 +1211,10 @@ func (s *Store) CommitSealedConnectorCompletion(
 		return nil, err
 	}
 	if len(request.Drop) > 0 {
-		// The commit stands either way: a log that readers kept busy is
-		// truncated by the next custody deletion.
-		_ = s.truncateWAL(ctx)
+		// The commit stands either way: the wrapper truncates the log after
+		// the operation commits, and a log that readers kept busy is
+		// truncated by the next custody operation.
+		s.pendingWALTruncate.Store(true)
 	}
 	return stored, nil
 }
@@ -1184,22 +1288,40 @@ func validateConnectorCommit(request storagev1.CommitSealedConnectorCompletionRe
 // DeleteConnectorCompletion implements storagev1.SealedConnectorConsentStore.
 func (s *Store) DeleteConnectorCompletion(ctx context.Context, nonce string) error {
 	s.finishPendingWALTruncate(ctx)
+	if err := writeOperationErr(ctx, s, "DeleteConnectorCompletion", func(ctx context.Context) error {
+		return s.deleteConnectorCompletionWrite(ctx, nonce)
+	}); err != nil {
+		return err
+	}
+	return s.truncateWAL(ctx)
+}
+
+func (s *Store) deleteConnectorCompletionWrite(ctx context.Context, nonce string) error {
 	if strings.TrimSpace(nonce) == "" {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
+	if _, err := s.taskDataExecutor(ctx).ExecContext(ctx, `DELETE FROM connector_completions WHERE nonce = ?`, nonce); err != nil {
 		return fmt.Errorf("delete connector completion: %w", err)
 	}
-	return s.truncateWAL(ctx)
+	return nil
 }
 
 // DeleteConnectorConsentsForConnection implements storagev1.SealedConnectorConsentStore.
 func (s *Store) DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error {
 	s.finishPendingWALTruncate(ctx)
+	if err := writeOperationErr(ctx, s, "DeleteConnectorConsentsForConnection", func(ctx context.Context) error {
+		return s.deleteConnectorConsentsForConnectionWrite(ctx, connectionUID)
+	}); err != nil {
+		return err
+	}
+	return s.truncateWAL(ctx)
+}
+
+func (s *Store) deleteConnectorConsentsForConnectionWrite(ctx context.Context, connectionUID string) error {
 	if strings.TrimSpace(connectionUID) == "" {
 		return errors.New("connector consent connection UID is required")
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin connector consent transaction: %w", err)
 	}
@@ -1210,12 +1332,13 @@ func (s *Store) DeleteConnectorConsentsForConnection(ctx context.Context, connec
 	if _, err := tx.ExecContext(ctx, `DELETE FROM connector_completions WHERE connection_uid = ?`, connectionUID); err != nil {
 		return fmt.Errorf("delete connector completions: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := s.clearCustodyReceipts(ctx, tx, connectionUID); err != nil {
 		return err
 	}
 	// Parked completions carry token material sealed under the controller
-	// key itself; their log frames go with the rows, as custody's do.
-	return s.truncateWAL(ctx)
+	// key itself; the wrapper truncates their log frames after the operation
+	// commits, as custody's are.
+	return tx.Commit()
 }
 
 // ListSealedConnectorCredentials implements storagev1.SealedConnectorCustodyStore.
@@ -1350,4 +1473,27 @@ func connectorPage[T any](records []T, limit int, key func(T) string) ([]T, stri
 	}
 	records = records[:limit]
 	return records, key(records[limit-1])
+}
+
+// credentialCustodyScope, consentCustodyScope and completionCustodyScope
+// name the Connection whose custody a sealed result carries.
+func credentialCustodyScope(credential *storagev1.SealedConnectorCredential) string {
+	if credential == nil {
+		return ""
+	}
+	return credential.ConnectionUID
+}
+
+func consentCustodyScope(consent *storagev1.SealedConnectorConsent) string {
+	if consent == nil {
+		return ""
+	}
+	return consent.ConnectionUID
+}
+
+func completionCustodyScope(completion *storagev1.SealedConnectorCompletion) string {
+	if completion == nil {
+		return ""
+	}
+	return completion.ConnectionUID
 }

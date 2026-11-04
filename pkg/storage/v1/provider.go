@@ -85,9 +85,10 @@
 // checks the envelope in the transaction that commits the write and records an
 // operation receipt with the change, so a retry returns the original outcome
 // and a delayed write from a replaced controller cannot commit
-// ([OperationReceiptStore], [ControllerEpochAdvancer]). Orka does not attach
-// envelopes yet, and until it does providers must accept writes without one
-// and need not implement those two interfaces.
+// ([OperationReceiptStore], [ControllerEpochAdvancer]). Both providers
+// implement those two interfaces and check every write that carries an
+// envelope. Orka does not attach envelopes yet, so until it does providers
+// must also accept writes without one.
 //
 // # Records and wire format
 //
@@ -160,6 +161,8 @@ type StateProvider interface {
 	SealedConnectorConsentStore
 
 	ControllerEpochMirror
+	ControllerEpochAdvancer
+	OperationReceiptStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -188,5 +191,7 @@ type StateProvider interface {
 type ArtifactProvider interface {
 	HealthChecker
 	ProviderDescriber
+	ControllerEpochAdvancer
+	OperationReceiptStore
 	ArtifactStore
 }

@@ -105,11 +105,19 @@ func (s *Store) ResolveTaskDataFence(ctx context.Context, namespace, taskName st
 // RegisterTaskDataFence registers a Task at the current namespace generation
 // unless it is registered already.
 func (s *Store) RegisterTaskDataFence(ctx context.Context, namespace, taskName string) (store.TaskDataFence, bool, error) {
+	result, err := writeOperation(ctx, s, "RegisterTaskDataFence", nil, func(ctx context.Context) (resultPair[store.TaskDataFence, bool], error) {
+		first, second, err := s.registerTaskDataFenceWrite(ctx, namespace, taskName)
+		return resultPair[store.TaskDataFence, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) registerTaskDataFenceWrite(ctx context.Context, namespace, taskName string) (store.TaskDataFence, bool, error) {
 	if err := validateTaskDataScope(namespace, taskName, true); err != nil {
 		return store.TaskDataFence{}, false, err
 	}
 	fence := store.TaskDataFence{Namespace: namespace, TaskName: taskName}
-	err := s.db.QueryRowContext(ctx,
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
 		`INSERT INTO task_data_task_generations(namespace, task_name, generation)
 		 VALUES (?, ?, COALESCE((SELECT generation FROM task_data_cleanup_generations WHERE namespace = ?), 0))
 		 ON CONFLICT(namespace, task_name) DO NOTHING RETURNING generation`, namespace, taskName, namespace,
@@ -129,10 +137,16 @@ func (s *Store) RegisterTaskDataFence(ctx context.Context, namespace, taskName s
 // does not need another cleanup generation; a later cleanup generation is
 // preserved.
 func (s *Store) ReleaseTaskDataFence(ctx context.Context, fence store.TaskDataFence) error {
+	return writeOperationErr(ctx, s, "ReleaseTaskDataFence", func(ctx context.Context) error {
+		return s.releaseTaskDataFenceWrite(ctx, fence)
+	})
+}
+
+func (s *Store) releaseTaskDataFenceWrite(ctx context.Context, fence store.TaskDataFence) error {
 	if err := validateTaskDataScope(fence.Namespace, fence.TaskName, true); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
 		`DELETE FROM task_data_task_generations WHERE namespace = ? AND task_name = ? AND generation = ?`,
 		fence.Namespace, fence.TaskName, fence.Generation,
 	)
@@ -226,12 +240,12 @@ func advanceTaskDataCleanupGeneration(ctx context.Context, tx *sql.Tx, namespace
 }
 
 func (s *Store) deleteTaskData(ctx context.Context, namespace, taskName, statement string, args ...any) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx.Tx, namespace, taskName); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, statement, args...); err != nil {
