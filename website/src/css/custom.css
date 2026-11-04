@@ -15,7 +15,7 @@
   --orka-line-2: #d4d4d8;
   --orka-ink: #0b0b0c;
   --orka-ink-2: #4b4c52;
-  --orka-ink-3: #7a7b82;
+  --orka-ink-3: #6b6c73;
   --orka-invert: #0b0b0c;
   --orka-invert-ink: #ffffff;
   --orka-band: #0b0b0c;
@@ -45,7 +45,7 @@ html[data-theme='dark'] {
   --orka-line-2: #313136;
   --orka-ink: #f4f4f5;
   --orka-ink-2: #a1a1a9;
-  --orka-ink-3: #77777f;
+  --orka-ink-3: #83838b;
   --orka-invert: #f4f4f5;
   --orka-invert-ink: #09090a;
   --orka-band: #111113;
@@ -144,6 +144,14 @@ body {
   outline-offset: 2px;
 }
 
+/* The footer, code blocks and the install bar stay dark in both modes, so their focus ring is
+   always light. */
+.footer--dark :focus-visible,
+.theme-code-block :focus-visible,
+.orka-install :focus-visible {
+  outline-color: #f4f4f5;
+}
+
 h1, h2, h3 {
   text-wrap: balance;
 }
@@ -184,8 +192,9 @@ h1, h2, h3 {
 }
 
 .markdown table {
-  display: table;
-  width: 100%;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   font-size: 0.92rem;
 }
@@ -427,7 +436,7 @@ html[data-theme='dark'] .footer--dark {
 
 .footer__copyright {
   font-size: 0.8rem;
-  color: #77777f;
+  color: #83838b;
 }
 
 /* ---------- Video demos (docs) ---------- */
@@ -664,7 +673,7 @@ html[data-theme='dark'] .footer--dark {
 }
 
 .orka-install__prompt {
-  color: #6b6b73;
+  color: #83838b;
   user-select: none;
 }
 
@@ -764,7 +773,7 @@ html[data-theme='dark'] .footer--dark {
   --orka-line-2: #313136;
   --orka-ink: #f4f4f5;
   --orka-ink-2: #a1a1a9;
-  --orka-ink-3: #77777f;
+  --orka-ink-3: #83838b;
   --orka-invert: #f4f4f5;
   --orka-invert-ink: #0b0b0c;
   --orka-pending: #f5b544;
@@ -801,6 +810,38 @@ html[data-theme='dark'] .orka-band {
   margin: 0;
   font-size: 1.08rem;
   color: var(--orka-ink-2);
+}
+
+.orka-band__pause {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 1.25rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--orka-line-2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--orka-ink-2);
+  font-family: var(--orka-font-mono);
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: border-color 150ms var(--orka-ease), color 150ms var(--orka-ease);
+}
+
+.orka-band__pause:hover {
+  border-color: var(--orka-ink-3);
+  color: var(--orka-ink);
+}
+
+.orka-band__pause[hidden] {
+  display: none;
+}
+
+/* Paused: the scripted timeline stops, and so does every animation in the band. */
+.orka-band[data-paused] *,
+.orka-band[data-paused] *::before,
+.orka-band[data-paused] *::after {
+  animation-play-state: paused !important;
 }
 
 .orka-band__grid {

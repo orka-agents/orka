@@ -59,7 +59,7 @@
   --color-live-bg: rgb(34 211 238 / 0.14);
 
   /* ---- Task type tokens: greys, so they never compete with phase ---- */
-  --color-type-container: #71717a;
+  --color-type-container: #63636b;
   --color-type-ai: #52525b;
   --color-type-agent: #27272a;
 

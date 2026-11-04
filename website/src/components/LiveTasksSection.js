@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
 import clsx from 'clsx';
+import {Pause, Play} from 'lucide-react';
 
 // A scripted slice of a real Orka day (Task names come from the dashboard demo). The feed
 // and the terminal both derive from the same events, so they always agree.
@@ -82,11 +83,24 @@ function Phase({phase}) {
 
 export default function LiveTasksSection() {
   const [step, setStep] = useState(REST_STEP);
+  const [paused, setPaused] = useState(false);
+  const [reduced, setReduced] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-    if (reduce || !ref.current) return undefined;
+    const query = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!query) return undefined;
+    const update = () => setReduced(query.matches);
+    update();
+    query.addEventListener?.('change', update);
+    return () => query.removeEventListener?.('change', update);
+  }, []);
+
+  // Plays only while on screen, not paused, and motion is welcome; reduced motion shows the
+  // static frame.
+  useEffect(() => {
+    if (reduced) setStep(REST_STEP);
+    if (reduced || paused || !ref.current) return undefined;
     let timer = null;
     const start = () => {
       if (timer) return;
@@ -107,12 +121,16 @@ export default function LiveTasksSection() {
       observer.disconnect();
       stop();
     };
-  }, []);
+  }, [reduced, paused]);
 
   const {rows, lines, last} = derive(step);
 
   return (
-    <section className="orka-band" ref={ref} aria-labelledby="orka-live-title">
+    <section
+      className="orka-band"
+      ref={ref}
+      aria-labelledby="orka-live-title"
+      data-paused={paused || undefined}>
       <div className="orka-container">
         <header className="orka-band__head">
           <p className="orka-kicker">Live view</p>
@@ -121,6 +139,15 @@ export default function LiveTasksSection() {
             Each Task runs in a Pod and reports its phase. Consequential actions
             wait for a person, and every step is kept in a durable record.
           </p>
+          <button
+            type="button"
+            className="orka-band__pause"
+            hidden={reduced}
+            aria-label={paused ? 'Play the live view' : 'Pause the live view'}
+            onClick={() => setPaused((value) => !value)}>
+            {paused ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
+            {paused ? 'Play' : 'Pause'}
+          </button>
         </header>
 
         <div className="orka-band__grid" aria-hidden="true">
@@ -130,7 +157,7 @@ export default function LiveTasksSection() {
               <span>default</span>
               <span className="orka-window__live">
                 <span className="orka-live-dot" />
-                live
+                {paused ? 'paused' : 'live'}
               </span>
             </div>
             <ul className="orka-feed">

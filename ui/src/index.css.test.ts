@@ -45,6 +45,15 @@ function contrast(a: string, b: string): number {
   return (high + 0.05) / (low + 0.05)
 }
 
+/** `color` at `alpha` over `base`, as #rrggbb: how a Tailwind `bg-x/10` tint renders. */
+function over(color: string, base: string, alpha: number): string {
+  const channel = (hex: string, i: number) => parseInt(hex.slice(i, i + 2), 16)
+  return `#${[1, 3, 5]
+    .map((i) => Math.round(channel(color, i) * alpha + channel(base, i) * (1 - alpha)))
+    .map((c) => c.toString(16).padStart(2, '0'))
+    .join('')}`
+}
+
 describe('index.css design tokens', () => {
   const themeBody = block('@theme')
   // Anchored to the rule itself: the header comment also mentions ".dark".
@@ -130,6 +139,19 @@ describe('index.css design tokens', () => {
       const color = tokenValue(themeBody, `--color-${name}`)!
       expect(contrast(color, tokenValue(themeBody, '--color-card')!)).toBeGreaterThanOrEqual(4.5)
       expect(contrast(color, tokenValue(themeBody, '--color-background')!)).toBeGreaterThanOrEqual(4.5)
+    },
+  )
+
+  it.each(['container', 'ai', 'agent'])(
+    'keeps --color-type-%s badge text at WCAG AA contrast on cards and its own tint, in both themes',
+    (type) => {
+      for (const body of [themeBody, darkBody]) {
+        const color = tokenValue(body, `--color-type-${type}`)!
+        const card = tokenValue(body, '--color-card')!
+        expect(contrast(color, card)).toBeGreaterThanOrEqual(4.5)
+        // typeStyle() badges draw the label on a 10% tint of the same colour.
+        expect(contrast(color, over(color, card, 0.1))).toBeGreaterThanOrEqual(4.5)
+      }
     },
   )
 
