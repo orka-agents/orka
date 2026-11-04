@@ -1154,7 +1154,7 @@ func (s *Store) commitSealedConnectorCompletionWrite(
 	}
 	// The token's lifetime is judged at the commit too: a commit that stalled
 	// past the deadline redeems nothing.
-	if !parked.ExpiresAt.After(now) {
+	if !parked.ExpiresAt.After(now) || !parked.ExpiresAt.After(time.Now().UTC()) {
 		return nil, store.ErrNotFound
 	}
 	// A newer consent's grant is custody already: this older consent's
