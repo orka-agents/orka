@@ -134,6 +134,10 @@ spec:
 
     Rules for the JSON:
     - Use only the fields shown. Unknown fields make the whole digest invalid.
+    - run.windowEnd is when this run started and run.windowStart is exactly
+      8 days earlier, both in UTC. The digest is checked against the run's
+      scheduled start and rejected if either is more than a day off.
+    - sources has exactly one entry per watchlist id: no more, no fewer.
     - proposals, related, dropped and watchlistSuggestions are always present;
       use [] when empty. At most N proposals and 5 watchlist suggestions.
     - URLs must be https with a public host name. No IP addresses.
@@ -141,8 +145,8 @@ spec:
     - Each evidence block needs at least one source and at least one Orka path
       or issue.
     - dropped reasons: out-of-scope, duplicate, previously-rejected,
-      below-rank, unverified-link, unverified-path. List each reason once with
-      its count; omit reasons with a count of zero.
+      below-rank, unverified-link, unverified-path, unverified-issue. List
+      each reason once with its count; omit reasons with a count of zero.
     - title, quotes, notes, details and reasons are single lines. problem,
       sketch and risks are at most 2000 characters each.
     - Zero proposals is a valid result. A short honest digest is better than

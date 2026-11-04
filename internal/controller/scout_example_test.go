@@ -20,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/scout"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -40,6 +41,12 @@ func TestScoutExampleIsReadOnlyAndCredentialFree(t *testing.T) {
 	checkScoutSchedule(t, task)
 	checkScoutCredentialFree(t, task, agent)
 	systemPrompt := scoutSystemPrompt(t, agent, watchlist)
+	// A digest must report exactly the watchlist's sources, so the shipped
+	// watchlist has to yield its source ids.
+	sourceIDs, err := scout.WatchlistSourceIDs(systemPrompt)
+	if err != nil || len(sourceIDs) != 14 {
+		t.Fatalf("watchlist source ids = %v, %v; want 14 ids", sourceIDs, err)
+	}
 
 	agent.Namespace, agent.UID, agent.Generation = "default", types.UID("scout-agent-uid"), 1
 	task.Namespace, task.UID = "default", types.UID("scout-task-uid")

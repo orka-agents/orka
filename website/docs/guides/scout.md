@@ -52,10 +52,12 @@ The digest also reports every source's status, whether the run was partial, coun
 dropped by reason, and up to five suggested watchlist additions for a person to review.
 
 The Go package `internal/scout` parses and checks this format. It rejects unknown, duplicate
-or case-folded fields, enforces field lengths and counts, accepts only https links to public
-host names, and requires `run.partial` to match the source report. Its verifier keeps a
-proposal only if every Orka path exists at the pinned commit and every link resolves.
-Proposals that fail are dropped and counted, never passed on.
+or case-folded fields, enforces field lengths and counts, and accepts only https links to
+public host names. It requires exactly one source report per watchlist id, taken from the
+watchlist itself, and requires `run.partial` to match those reports. Its verifier rejects a
+digest whose commit or run window doesn't match the run, and keeps a proposal only if every
+Orka path exists at the pinned commit, every cited Orka issue exists and every link
+resolves. Proposals that fail are dropped and counted, never passed on.
 
 ## Safety properties
 
@@ -74,8 +76,8 @@ Proposals that fail are dropped and counted, never passed on.
   characters. A second `orka-scout-digest` block, such as one copied from a fetched page,
   makes the whole answer invalid.
 - **Fail closed.** An unreachable or rate-limited source is reported, never filled in from
-  memory. A digest that hides a failed source, exceeds N or cites a different commit is
-  rejected as a whole.
+  memory. A digest that hides or omits a failed source, exceeds N, cites a different commit
+  or reports a different run window is rejected as a whole.
 - **Capped.** Each run has a timeout and a turn cap, and `concurrencyPolicy: Forbid` keeps
   runs from overlapping. Orka has no per-Task token or cost budget yet, so the timeout and
   turn cap are the only spend limits.
@@ -122,6 +124,9 @@ Every run is a dry run for now: it writes a digest and files nothing.
 
 - The agent can't read Task history, so each run covers a fixed window (the 8 days before
   it starts) instead of the time since the last successful run.
+- Orka doesn't put the run's start time in the prompt, so the scout reports its own window.
+  The verifier compares it with the run's scheduled start (the child Task's
+  `creationTimestamp`) and rejects the digest if either end is more than a day off.
 - The agent can't see the commit of its own clone, so it pins the commit from the GitHub
   API. Before trusting a digest, compare `run.orkaCommit` with the run's
   `status.delivery.startingSHA`. The verifier in `internal/scout` requires that match.

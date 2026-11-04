@@ -58,13 +58,15 @@ const (
 	DropBelowRank          DropReason = "below-rank"
 	DropUnverifiedLink     DropReason = "unverified-link"
 	DropUnverifiedPath     DropReason = "unverified-path"
+	DropUnverifiedIssue    DropReason = "unverified-issue"
 	DropInvalidSchema      DropReason = "invalid-schema"
 	DropCheckUnavailable   DropReason = "check-unavailable"
 )
 
 var dropReasons = map[DropReason]struct{}{
 	DropOutOfScope: {}, DropDuplicate: {}, DropPreviouslyRejected: {}, DropBelowRank: {},
-	DropUnverifiedLink: {}, DropUnverifiedPath: {}, DropInvalidSchema: {}, DropCheckUnavailable: {},
+	DropUnverifiedLink: {}, DropUnverifiedPath: {}, DropUnverifiedIssue: {}, DropInvalidSchema: {},
+	DropCheckUnavailable: {},
 }
 
 // Digest is the orka.scout.digest.v1 result of one scout run.
@@ -114,11 +116,16 @@ type WatchlistSuggestion struct {
 
 var sourceIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
-// Limits bounds a digest. The caller's cap is authoritative; a digest never
-// declares its own.
+// Limits bounds a digest with trusted caller configuration. The caller's cap
+// and source list are authoritative; a digest never declares its own.
 type Limits struct {
 	// MaxProposals is N. Zero selects DefaultMaxProposals.
 	MaxProposals int
+	// SourceIDs lists every watchlist source id, from the people-owned
+	// watchlist (see WatchlistSourceIDs). Required: the digest must report
+	// exactly these sources, so a run cannot hide a failed source by leaving
+	// it out.
+	SourceIDs []string
 }
 
 func (l Limits) maxProposals() (int, error) {
@@ -129,6 +136,33 @@ func (l Limits) maxProposals() (int, error) {
 		return 0, fmt.Errorf("max proposals must be between 1 and %d", MaxProposalsLimit)
 	}
 	return l.MaxProposals, nil
+}
+
+func (l Limits) sourceIDs() (map[string]struct{}, error) {
+	if len(l.SourceIDs) == 0 {
+		return nil, errors.New("limits require the watchlist source ids")
+	}
+	if len(l.SourceIDs) > MaxSources {
+		return nil, fmt.Errorf("limits list %d source ids, maximum is %d", len(l.SourceIDs), MaxSources)
+	}
+	ids := make(map[string]struct{}, len(l.SourceIDs))
+	for _, id := range l.SourceIDs {
+		if err := checkSourceID(id); err != nil {
+			return nil, fmt.Errorf("limits source id %q: %w", id, err)
+		}
+		if _, duplicate := ids[id]; duplicate {
+			return nil, fmt.Errorf("limits source id %q is listed twice", id)
+		}
+		ids[id] = struct{}{}
+	}
+	return ids, nil
+}
+
+func checkSourceID(id string) error {
+	if len(id) > MaxSourceIDBytes || !sourceIDPattern.MatchString(id) {
+		return fmt.Errorf("must be a lowercase identifier of at most %d bytes", MaxSourceIDBytes)
+	}
+	return nil
 }
 
 // Validate checks the digest structure, every proposal, and the partial-run
@@ -143,13 +177,17 @@ func (d *Digest) Validate(limits Limits) error {
 	if err != nil {
 		return err
 	}
+	sourceIDs, err := limits.sourceIDs()
+	if err != nil {
+		return err
+	}
 	if d.SchemaVersion != DigestSchemaVersion {
 		return fmt.Errorf("schemaVersion must be %q", DigestSchemaVersion)
 	}
 	if err := d.Run.validate(); err != nil {
 		return fmt.Errorf("run: %w", err)
 	}
-	if err := d.validateSources(); err != nil {
+	if err := d.validateSources(limits.SourceIDs, sourceIDs); err != nil {
 		return err
 	}
 	if d.Proposals == nil {
@@ -210,21 +248,22 @@ func (r *RunMetadata) validate() error {
 	return nil
 }
 
-// validateSources requires a report for every source the run attempted, and
-// requires run.partial to agree with it, so a run cannot claim completeness
-// while a source failed, or hide the fact that it read nothing.
-func (d *Digest) validateSources() error {
-	if len(d.Sources) == 0 {
-		return errors.New("sources must report every watchlist source the run attempted")
-	}
+// validateSources requires exactly one report for every trusted watchlist
+// source, and requires run.partial to agree with those reports, so a run
+// cannot claim completeness while a source failed, omit a failed source, or
+// hide the fact that it read nothing.
+func (d *Digest) validateSources(order []string, expected map[string]struct{}) error {
 	if len(d.Sources) > MaxSources {
 		return fmt.Errorf("sources has %d entries, maximum is %d", len(d.Sources), MaxSources)
 	}
 	partial := false
 	seen := make(map[string]struct{}, len(d.Sources))
 	for index, source := range d.Sources {
-		if len(source.ID) > MaxSourceIDBytes || !sourceIDPattern.MatchString(source.ID) {
-			return fmt.Errorf("sources[%d].id must be a lowercase identifier of at most %d bytes", index, MaxSourceIDBytes)
+		if err := checkSourceID(source.ID); err != nil {
+			return fmt.Errorf("sources[%d].id %w", index, err)
+		}
+		if _, known := expected[source.ID]; !known {
+			return fmt.Errorf("sources[%d].id %q is not a watchlist source", index, source.ID)
 		}
 		if _, duplicate := seen[source.ID]; duplicate {
 			return fmt.Errorf("sources[%d].id %q is listed twice", index, source.ID)
@@ -252,6 +291,11 @@ func (d *Digest) validateSources() error {
 			if err := checkText(fmt.Sprintf("sources[%d].detail", index), source.Detail, MaxReasonRunes, false); err != nil {
 				return err
 			}
+		}
+	}
+	for _, id := range order {
+		if _, reported := seen[id]; !reported {
+			return fmt.Errorf("sources must report every watchlist source; %q is missing", id)
 		}
 	}
 	if partial != d.Run.Partial {

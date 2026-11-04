@@ -13,6 +13,17 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
+)
+
+const (
+	// DefaultRunWindow is the source window a scout run reads: the 8 days
+	// that end when the run starts.
+	DefaultRunWindow = 8 * 24 * time.Hour
+	// RunWindowTolerance is how far a digest's reported window may sit from
+	// the trusted one. The scout has no trusted clock of its own, so it may
+	// only know the date.
+	RunWindowTolerance = 24 * time.Hour
 )
 
 // PathChecker reports whether a repository path exists at a commit.
@@ -28,34 +39,60 @@ type LinkChecker interface {
 	LinkResolves(ctx context.Context, rawURL string) (bool, error)
 }
 
+// IssueChecker reports whether an Orka issue or pull request number exists.
+// As with PathChecker, an inconclusive check is an error rather than false.
+type IssueChecker interface {
+	IssueExists(ctx context.Context, number int) (bool, error)
+}
+
 // Verifier re-checks proposal evidence before anything is published. Every
-// field is required; there is no way to skip a check.
+// field except RunWindow is required; there is no way to skip a check.
 type Verifier struct {
 	// PinnedCommit is the trusted commit of the scout's read-only checkout,
 	// such as the scout Task's status.delivery.startingSHA. A digest that
 	// claims a different commit is rejected as a whole.
 	PinnedCommit string
-	Paths        PathChecker
-	Links        LinkChecker
+	// RunStart is the trusted time the run started, such as the scout child
+	// Task's creationTimestamp. A digest whose window is more than
+	// RunWindowTolerance away from [RunStart-RunWindow, RunStart] is rejected
+	// as a whole, because the scout cannot read a trusted clock and a guessed
+	// window would misstate what was read.
+	RunStart time.Time
+	// RunWindow is the window length the watchlist sets. Zero selects
+	// DefaultRunWindow.
+	RunWindow time.Duration
+	Paths     PathChecker
+	Links     LinkChecker
+	Issues    IssueChecker
 }
 
 // Verify returns a copy of digest that keeps only proposals whose every Orka
-// path exists at the digest commit and whose every source link resolves.
-// Removed proposals are counted under dropped by reason and never returned.
-// The input digest must already be valid; Verify validates it again so a
-// caller cannot verify unvalidated data by mistake.
+// path exists at the digest commit, whose every cited Orka issue exists and
+// whose every source link resolves. Removed proposals are counted under
+// dropped by reason and never returned. The input digest must already be
+// valid; Verify validates it again so a caller cannot verify unvalidated data
+// by mistake, and validates the result before returning it.
 func (v Verifier) Verify(ctx context.Context, digest *Digest, limits Limits) (*Digest, error) {
-	if v.Paths == nil || v.Links == nil {
-		return nil, errors.New("verifier requires both a path checker and a link checker")
+	if v.Paths == nil || v.Links == nil || v.Issues == nil {
+		return nil, errors.New("verifier requires a path checker, a link checker and an issue checker")
 	}
 	if !commitPattern.MatchString(v.PinnedCommit) {
 		return nil, errors.New("verifier requires a full lowercase hexadecimal pinned commit")
+	}
+	if v.RunStart.IsZero() {
+		return nil, errors.New("verifier requires the trusted run start time")
+	}
+	if v.RunWindow < 0 {
+		return nil, errors.New("verifier run window must not be negative")
 	}
 	if err := digest.Validate(limits); err != nil {
 		return nil, fmt.Errorf("invalid digest: %w", err)
 	}
 	if digest.Run.OrkaCommit != v.PinnedCommit {
 		return nil, fmt.Errorf("digest commit %s does not match pinned commit %s", digest.Run.OrkaCommit, v.PinnedCommit)
+	}
+	if err := v.checkWindow(digest.Run); err != nil {
+		return nil, err
 	}
 	verified := *digest
 	verified.Proposals = make([]Proposal, 0, len(digest.Proposals))
@@ -74,7 +111,31 @@ func (v Verifier) Verify(ctx context.Context, digest *Digest, limits Limits) (*D
 		}
 		verified.Proposals = append(verified.Proposals, proposal)
 	}
+	if err := verified.Validate(limits); err != nil {
+		return nil, fmt.Errorf("verified digest: %w", err)
+	}
 	return &verified, nil
+}
+
+// checkWindow compares the reported window with the trusted one.
+func (v Verifier) checkWindow(run RunMetadata) error {
+	window := v.RunWindow
+	if window == 0 {
+		window = DefaultRunWindow
+	}
+	// Validate already parsed both timestamps.
+	start, _ := time.Parse(time.RFC3339, run.WindowStart)
+	end, _ := time.Parse(time.RFC3339, run.WindowEnd)
+	if !within(end, v.RunStart) || !within(start, v.RunStart.Add(-window)) {
+		return fmt.Errorf("digest window %s to %s does not match the run window ending at %s",
+			run.WindowStart, run.WindowEnd, v.RunStart.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func within(got, want time.Time) bool {
+	delta := got.Sub(want)
+	return delta >= -RunWindowTolerance && delta <= RunWindowTolerance
 }
 
 func (v Verifier) check(ctx context.Context, proposal *Proposal) (DropReason, error) {
@@ -88,6 +149,18 @@ func (v Verifier) check(ctx context.Context, proposal *Proposal) (DropReason, er
 		}
 		if !exists {
 			return DropUnverifiedPath, nil
+		}
+	}
+	for _, number := range proposal.Evidence.OrkaIssues {
+		exists, err := v.Issues.IssueExists(ctx, number)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		if err != nil {
+			return DropCheckUnavailable, nil
+		}
+		if !exists {
+			return DropUnverifiedIssue, nil
 		}
 	}
 	for _, source := range proposal.Evidence.Sources {

@@ -301,7 +301,7 @@ func ValidateSourceURL(raw string) error {
 		return errors.New("must use the default https port")
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if net.ParseIP(host) != nil || strings.HasPrefix(host, "[") {
+	if net.ParseIP(host) != nil || strings.HasPrefix(host, "[") || endsInNumber(host) {
 		return errors.New("must use a DNS host name, not an IP address")
 	}
 	if !strings.Contains(host, ".") || strings.HasSuffix(host, ".") {
@@ -313,6 +313,21 @@ func ValidateSourceURL(raw string) error {
 		}
 	}
 	return nil
+}
+
+// endsInNumber applies the WHATWG URL "ends in a number" rule. Browsers and
+// inet_aton-based resolvers parse such hosts (127.1, 0x7f.0.0.1,
+// 127.000.000.001) as IPv4 addresses, which net.ParseIP does not. No public
+// top-level domain is numeric, so this rejects no public host name.
+func endsInNumber(host string) bool {
+	last := host[strings.LastIndexByte(host, '.')+1:]
+	if last == "" {
+		return false
+	}
+	if hex, ok := strings.CutPrefix(last, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return strings.Trim(last, "0123456789") == ""
 }
 
 // ValidateOrkaPath accepts a clean, relative, repository path.

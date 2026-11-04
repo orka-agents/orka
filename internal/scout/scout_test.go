@@ -16,9 +16,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testCommit = "0123456789abcdef0123456789abcdef01234567"
+
+// testRunStart is the trusted start of the run validDigest describes.
+var testRunStart = time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC)
+
+func testLimits(maxProposals int) Limits {
+	return Limits{MaxProposals: maxProposals, SourceIDs: []string{"gh-runtime", "tracker-stale"}}
+}
 
 func validProposal() Proposal {
 	return Proposal{
@@ -68,7 +76,7 @@ func encode(t *testing.T, value any) []byte {
 }
 
 func TestParseDigestAcceptsValidDigest(t *testing.T) {
-	digest, err := ParseDigest(encode(t, validDigest()), Limits{})
+	digest, err := ParseDigest(encode(t, validDigest()), testLimits(0))
 	if err != nil {
 		t.Fatalf("ParseDigest() error = %v", err)
 	}
@@ -148,6 +156,8 @@ func TestValidateSourceURL(t *testing.T) {
 		"https://example.com/" + strings.Repeat("a", MaxURLBytes),
 		"https://example.com/#<!-- scout-source: sha256:00 -->", "https://example.com/?q=-->",
 		"https://example.com/\"onmouseover", "https://example.com/a\\b", "https://example.com/{x}",
+		"https://127.1/", "https://0x7f.0.0.1/", "https://127.000.000.001/", "https://10.1/",
+		"https://2130706433/", "https://example.0x7f/",
 	} {
 		if err := ValidateSourceURL(raw); err == nil {
 			t.Errorf("ValidateSourceURL(%q) = nil, want error", raw)
@@ -201,7 +211,7 @@ func TestParseRejectsHostileInput(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseDigest([]byte(tc.input), Limits{})
+			_, err := ParseDigest([]byte(tc.input), testLimits(0))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("ParseDigest() error = %v, want containing %q", err, tc.want)
 			}
@@ -216,17 +226,17 @@ func TestDigestProposalCap(t *testing.T) {
 		proposal.Title = fmt.Sprintf("feat(tools): proposal %d", index)
 		digest.Proposals = append(digest.Proposals, proposal)
 	}
-	if err := digest.Validate(Limits{}); err == nil || !strings.Contains(err.Error(), "cap is 3") {
+	if err := digest.Validate(testLimits(0)); err == nil || !strings.Contains(err.Error(), "cap is 3") {
 		t.Fatalf("Validate() over default cap error = %v", err)
 	}
-	if err := digest.Validate(Limits{MaxProposals: 5}); err != nil {
+	if err := digest.Validate(testLimits(5)); err != nil {
 		t.Fatalf("Validate() under raised cap error = %v", err)
 	}
-	if err := digest.Validate(Limits{MaxProposals: MaxProposalsLimit + 1}); err == nil {
+	if err := digest.Validate(testLimits(MaxProposalsLimit + 1)); err == nil {
 		t.Fatal("Validate() accepted a cap above MaxProposalsLimit")
 	}
 	digest.Proposals[1].Title = digest.Proposals[0].Title
-	if err := digest.Validate(Limits{MaxProposals: 5}); err == nil || !strings.Contains(err.Error(), "repeats") {
+	if err := digest.Validate(testLimits(5)); err == nil || !strings.Contains(err.Error(), "repeats") {
 		t.Fatalf("Validate() duplicate title error = %v", err)
 	}
 }
@@ -235,26 +245,71 @@ func TestDigestPartialReportMustBeHonest(t *testing.T) {
 	digest := validDigest()
 	digest.Sources[0].Status = SourceStatusRateLimited
 	digest.Sources[0].Detail = "HTTP 403 rate limit exceeded"
-	if err := digest.Validate(Limits{}); err == nil || !strings.Contains(err.Error(), "run.partial") {
+	if err := digest.Validate(testLimits(0)); err == nil || !strings.Contains(err.Error(), "run.partial") {
 		t.Fatalf("Validate() hid a failed source: %v", err)
 	}
 	digest.Run.Partial = true
-	if err := digest.Validate(Limits{}); err != nil {
+	if err := digest.Validate(testLimits(0)); err != nil {
 		t.Fatalf("Validate() partial digest error = %v", err)
 	}
 	digest.Sources[0].Detail = ""
-	if err := digest.Validate(Limits{}); err == nil || !strings.Contains(err.Error(), "detail") {
+	if err := digest.Validate(testLimits(0)); err == nil || !strings.Contains(err.Error(), "detail") {
 		t.Fatalf("Validate() accepted an unexplained failure: %v", err)
 	}
 	digest = validDigest()
 	digest.Run.Partial = true
-	if err := digest.Validate(Limits{}); err == nil {
+	if err := digest.Validate(testLimits(0)); err == nil {
 		t.Fatal("Validate() accepted partial=true with every source ok")
 	}
 	digest = validDigest()
 	digest.Sources = nil
-	if err := digest.Validate(Limits{}); err == nil {
+	if err := digest.Validate(testLimits(0)); err == nil {
 		t.Fatal("Validate() accepted a digest that reports no sources")
+	}
+	// Leaving a failed source out must not make the rest look complete.
+	digest = validDigest()
+	digest.Sources = digest.Sources[:1]
+	if err := digest.Validate(testLimits(0)); err == nil || !strings.Contains(err.Error(), `"tracker-stale" is missing`) {
+		t.Fatalf("Validate() accepted a digest that omits a watchlist source: %v", err)
+	}
+	digest = validDigest()
+	digest.Sources[1].ID = "gh-invented"
+	if err := digest.Validate(testLimits(0)); err == nil || !strings.Contains(err.Error(), "not a watchlist source") {
+		t.Fatalf("Validate() accepted a source outside the watchlist: %v", err)
+	}
+}
+
+func TestLimitsRequireWatchlistSources(t *testing.T) {
+	digest := validDigest()
+	for name, limits := range map[string]Limits{
+		"none":      {},
+		"bad id":    {SourceIDs: []string{"gh-runtime", "Tracker Stale"}},
+		"duplicate": {SourceIDs: []string{"gh-runtime", "tracker-stale", "gh-runtime"}},
+	} {
+		if err := digest.Validate(limits); err == nil || !strings.Contains(err.Error(), "limits") {
+			t.Errorf("Validate(%s) error = %v, want a limits error", name, err)
+		}
+	}
+}
+
+func TestWatchlistSourceIDs(t *testing.T) {
+	markdown := "# Watchlist\n\n| id | repository |\n| --- | --- |\n| gh-runtime | example/runtime |\n" +
+		"| gh-sandbox | example/sandbox |\n\nText.\n\n|id|query|\n|:--|--:|\n|tracker-stale|is:open|\n"
+	ids, err := WatchlistSourceIDs(markdown)
+	if err != nil {
+		t.Fatalf("WatchlistSourceIDs() error = %v", err)
+	}
+	if want := []string{"gh-runtime", "gh-sandbox", "tracker-stale"}; strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("WatchlistSourceIDs() = %v, want %v", ids, want)
+	}
+	for name, input := range map[string]string{
+		"no tables": "# Watchlist\n\nNothing here.\n",
+		"bad id":    "| id | x |\n| --- | --- |\n| GH Runtime | y |\n",
+		"duplicate": "| id | x |\n| --- | --- |\n| gh-a | y |\n| gh-a | z |\n",
+	} {
+		if _, err := WatchlistSourceIDs(input); err == nil {
+			t.Errorf("WatchlistSourceIDs(%s) = nil error, want error", name)
+		}
 	}
 }
 
@@ -292,7 +347,7 @@ func TestDigestValidationRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			digest := validDigest()
 			tc.mutate(&digest)
-			err := digest.Validate(Limits{})
+			err := digest.Validate(testLimits(0))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Validate() error = %v, want containing %q", err, tc.want)
 			}
@@ -307,7 +362,7 @@ func TestExtractDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractDigest() error = %v", err)
 	}
-	if _, err := ParseDigest(extracted, Limits{}); err != nil {
+	if _, err := ParseDigest(extracted, testLimits(0)); err != nil {
 		t.Fatalf("ParseDigest(extracted) error = %v", err)
 	}
 	if _, err := ExtractDigest(strings.ReplaceAll(answer, "\n", "\r\n")); err != nil {
@@ -342,6 +397,16 @@ func (f fakePaths) PathExists(_ context.Context, commit, repoPath string) (bool,
 	return err == nil, err
 }
 
+type fakeIssues map[int]error
+
+func (f fakeIssues) IssueExists(_ context.Context, number int) (bool, error) {
+	err, ok := f[number]
+	if !ok {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 type fakeLinks map[string]error
 
 func (f fakeLinks) LinkResolves(_ context.Context, rawURL string) (bool, error) {
@@ -365,55 +430,90 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 	flaky := validProposal()
 	flaky.Title = "feat(tools): flaky link"
 	flaky.Evidence.Sources = []Source{{URL: "https://example.com/flaky"}}
-	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky}
+	// Issue-only evidence is allowed, so a cited issue must be checked too.
+	missingIssue := validProposal()
+	missingIssue.Title = "feat(tools): missing issue"
+	missingIssue.Evidence.OrkaPaths = nil
+	missingIssue.Evidence.OrkaIssues = []int{999_999}
+	digest.Proposals = []Proposal{good, missingPath, deadLink, flaky, missingIssue}
 
-	verifier := Verifier{
-		PinnedCommit: testCommit,
-		Paths:        fakePaths{"internal/tools/web_fetch.go": nil},
-		Links:        fakeLinks{"https://example.com/release/v1": nil, "https://example.com/flaky": errors.New("timeout")},
-	}
-	verified, err := verifier.Verify(context.Background(), &digest, Limits{MaxProposals: 4})
+	verifier := testVerifier()
+	verifier.Links = fakeLinks{"https://example.com/release/v1": nil, "https://example.com/flaky": errors.New("timeout")}
+	verified, err := verifier.Verify(context.Background(), &digest, testLimits(5))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
 	if len(verified.Proposals) != 1 || verified.Proposals[0].Title != good.Title {
 		t.Fatalf("Verify() kept %#v, want only the grounded proposal", verified.Proposals)
 	}
-	for reason, want := range map[DropReason]int{DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1} {
+	for reason, want := range map[DropReason]int{
+		DropUnverifiedPath: 2, DropUnverifiedLink: 1, DropCheckUnavailable: 1, DropUnverifiedIssue: 1,
+	} {
 		if got := verified.DroppedCount(reason); got != want {
 			t.Errorf("DroppedCount(%s) = %d, want %d", reason, got, want)
 		}
 	}
-	if len(digest.Proposals) != 4 || digest.DroppedCount(DropUnverifiedPath) != 1 {
+	if len(digest.Proposals) != 5 || digest.DroppedCount(DropUnverifiedPath) != 1 {
 		t.Fatal("Verify() mutated its input digest")
 	}
-	if err := verified.Validate(Limits{MaxProposals: 4}); err != nil {
+	if err := verified.Validate(testLimits(5)); err != nil {
 		t.Fatalf("verified digest is no longer valid: %v", err)
+	}
+}
+
+func testVerifier() Verifier {
+	return Verifier{
+		PinnedCommit: testCommit,
+		RunStart:     testRunStart,
+		Paths:        fakePaths{"internal/tools/web_fetch.go": nil},
+		Links:        fakeLinks{"https://example.com/release/v1": nil},
+		Issues:       fakeIssues{985: nil},
 	}
 }
 
 func TestVerifierFailsClosed(t *testing.T) {
 	digest := validDigest()
-	paths := fakePaths{"internal/tools/web_fetch.go": nil}
-	links := fakeLinks{"https://example.com/release/v1": nil}
-	for name, verifier := range map[string]Verifier{
-		"no path checker":  {PinnedCommit: testCommit, Links: links},
-		"no link checker":  {PinnedCommit: testCommit, Paths: paths},
-		"no pinned commit": {Paths: paths, Links: links},
-		"other commit":     {PinnedCommit: strings.Repeat("e", 40), Paths: paths, Links: links},
-	} {
-		if _, err := verifier.Verify(context.Background(), &digest, Limits{}); err == nil {
+	broken := map[string]func(*Verifier){
+		"no path checker":   func(v *Verifier) { v.Paths = nil },
+		"no link checker":   func(v *Verifier) { v.Links = nil },
+		"no issue checker":  func(v *Verifier) { v.Issues = nil },
+		"no pinned commit":  func(v *Verifier) { v.PinnedCommit = "" },
+		"other commit":      func(v *Verifier) { v.PinnedCommit = strings.Repeat("e", 40) },
+		"no run start":      func(v *Verifier) { v.RunStart = time.Time{} },
+		"negative window":   func(v *Verifier) { v.RunWindow = -time.Hour },
+		"guessed window":    func(v *Verifier) { v.RunStart = testRunStart.AddDate(0, 3, 0) },
+		"window end late":   func(v *Verifier) { v.RunStart = testRunStart.Add(-RunWindowTolerance - time.Second) },
+		"window too narrow": func(v *Verifier) { v.RunWindow = 2 * DefaultRunWindow },
+	}
+	for name, mutate := range broken {
+		verifier := testVerifier()
+		mutate(&verifier)
+		if _, err := verifier.Verify(context.Background(), &digest, testLimits(0)); err == nil {
 			t.Errorf("Verify(%s) = nil error, want error", name)
 		}
 	}
+	// A scout that only knows the date still matches within the tolerance.
+	dateOnly := testVerifier()
+	dateOnly.RunStart = testRunStart.Add(5 * time.Hour)
+	if _, err := dateOnly.Verify(context.Background(), &digest, testLimits(0)); err != nil {
+		t.Errorf("Verify(date-only window) error = %v", err)
+	}
 	invalid := validDigest()
 	invalid.Proposals[0].Title = "not conventional"
-	if _, err := (Verifier{PinnedCommit: testCommit, Paths: paths, Links: links}).Verify(context.Background(), &invalid, Limits{}); err == nil {
+	if _, err := testVerifier().Verify(context.Background(), &invalid, testLimits(0)); err == nil {
 		t.Error("Verify() accepted an invalid digest")
+	}
+	// Dropping one more proposal must not push a count past the schema
+	// limit and still report success.
+	full := validDigest()
+	full.Dropped = []Dropped{{Reason: DropUnverifiedPath, Count: MaxDroppedCount}}
+	full.Proposals[0].Evidence.OrkaPaths = []string{"internal/tools/does_not_exist.go"}
+	if _, err := testVerifier().Verify(context.Background(), &full, testLimits(0)); err == nil || !strings.Contains(err.Error(), "verified digest") {
+		t.Errorf("Verify(count overflow) error = %v, want a verified digest error", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (Verifier{PinnedCommit: testCommit, Paths: paths, Links: links}).Verify(ctx, &digest, Limits{}); !errors.Is(err, context.Canceled) {
+	if _, err := testVerifier().Verify(ctx, &digest, testLimits(0)); !errors.Is(err, context.Canceled) {
 		t.Errorf("Verify(canceled) error = %v, want context.Canceled", err)
 	}
 }
