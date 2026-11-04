@@ -38,11 +38,13 @@ const (
 var evalTestNow = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
 type evalRunTestEnv struct {
-	t          *testing.T
-	client     client.Client
-	store      *sqlite.Store
-	reconciler *EvalRunReconciler
-	now        time.Time
+	t *testing.T
+	// staleTaskCache makes cached Task listings miss every Task.
+	staleTaskCache bool
+	client         client.Client
+	store          *sqlite.Store
+	reconciler     *EvalRunReconciler
+	now            time.Time
 }
 
 func evalTestCaseLine(id, verdict string, tags ...string) string {
@@ -142,6 +144,12 @@ func newEvalRunTestEnv(t *testing.T, objects ...client.Object) *evalRunTestEnv {
 			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				obj.SetCreationTimestamp(metav1.NewTime(env.now))
 				return c.Create(ctx, obj, opts...)
+			},
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, tasks := list.(*corev1alpha1.TaskList); tasks && env.staleTaskCache {
+					return nil
+				}
+				return c.List(ctx, list, opts...)
 			},
 		}).
 		Build()
@@ -592,5 +600,48 @@ func TestEvalRunTTLDeletesRunAndFinalizerDeletesRecords(t *testing.T) {
 	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
 	if err != nil || len(records) != 0 {
 		t.Fatalf("records after deletion = %d, err = %v", len(records), err)
+	}
+}
+
+func TestEvalRunAdoptsOwnTrialMissingFromStaleCache(t *testing.T) {
+	env := newEvalRunTestEnv(t, evalTestObjects(evalTestRun(1, 1), evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+	env.start()
+	env.reconcile()
+	if len(env.trialTasks()) != 1 {
+		t.Fatal("trial did not start")
+	}
+	env.staleTaskCache = true
+	env.reconcile()
+	env.staleTaskCache = false
+	if run := env.run(); run.Status.Phase != corev1alpha1.EvalRunPhaseRunning {
+		t.Fatalf("phase = %q condition = %+v; a stale cache must not fail the run", run.Status.Phase, evalCompletedCondition(run))
+	}
+	if len(env.trialTasks()) != 1 {
+		t.Fatal("the trial was duplicated")
+	}
+}
+
+func TestEvalRunRetriesCleanupOfRecordedTimedOutTrial(t *testing.T) {
+	run := evalTestRun(1, 1)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCases())...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("trial Tasks = %d", len(tasks))
+	}
+	// The controller recorded the timeout, then lost the deletion.
+	record := &store.EvalTrialRecord{
+		SchemaVersion: store.EvalTrialSchemaVersion, Namespace: evalTestNamespace, EvalRun: "pr-review", EvalRunUID: "run-uid",
+		CaseID: "defect-1", Trial: 1, TaskName: tasks[0].Name, Outcome: store.EvalTrialOutcomeInfraError,
+		InfraClass: string(evals.InfraTimeoutBeforeInference), CompletedAt: env.now,
+	}
+	if err := env.store.CreateEvalTrial(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcile()
+	remaining := env.trialTasks()
+	if len(remaining) != 1 || remaining[0].Labels[labels.LabelEvalCase] != "clean-1" {
+		t.Fatalf("trial Tasks = %v; want the stale trial stopped and only clean-1 running", remaining)
 	}
 }

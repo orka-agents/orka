@@ -78,7 +78,8 @@ type EvalRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// APIReader reads case ConfigMaps uncached, so the controller does not
-	// cache every ConfigMap in its namespaces.
+	// cache every ConfigMap in its namespaces, and confirms trial Tasks the
+	// cache has not seen yet.
 	APIReader     client.Reader
 	TrialStore    store.EvalTrialStore
 	ResultStore   store.ResultStore
@@ -240,6 +241,13 @@ func (r *EvalRunReconciler) observeEvalRun(ctx context.Context, run *corev1alpha
 	return &evalRunObservation{Snapshot: snapshot, Cases: cases, Plan: plan, Monitor: subject.Monitor}, nil
 }
 
+func (r *EvalRunReconciler) uncachedReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 func (r *EvalRunReconciler) graders() *evals.Registry {
 	if r.Graders != nil {
 		return r.Graders
@@ -254,12 +262,8 @@ func (r *EvalRunReconciler) loadEvalCases(ctx context.Context, run *corev1alpha1
 	if ref == nil {
 		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "spec.cases.configMapRef is required")
 	}
-	reader := r.APIReader
-	if reader == nil {
-		reader = r.Client
-	}
 	configMap := &corev1.ConfigMap{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, configMap); err != nil {
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, configMap); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "case ConfigMap %q was not found", ref.Name)
 		}
@@ -325,10 +329,17 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 	requeue := evalRunRequeueInterval
 	active := 0
 	for _, planned := range observed.Plan {
+		task := tasks[evalTrialTaskName(run, planned.CaseID, planned.Trial)]
 		if _, done := recorded[planned]; done {
+			// A trial recorded at its deadline may still be running if the
+			// deletion after the record failed; stop it before starting more.
+			if task != nil && !evalTrialTaskTerminal(task) {
+				if err := r.deleteEvalTrialTask(ctx, task); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 			continue
 		}
-		task := tasks[evalTrialTaskName(run, planned.CaseID, planned.Trial)]
 		if task == nil {
 			continue
 		}
@@ -472,14 +483,25 @@ func (r *EvalRunReconciler) createEvalTrialTask(ctx context.Context, run *corev1
 	if err := controllerutil.SetControllerReference(run, task, r.Scheme); err != nil {
 		return err
 	}
-	if err := r.Create(ctx, task); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			// Listed Tasks are never recreated, so this one is not the
-			// run's own trial.
-			return evalRunConfigErrorf(evalRunReasonTrialTaskConflict,
-				"Task %s/%s already exists and is not a trial of this EvalRun", task.Namespace, task.Name)
-		}
+	err = r.Create(ctx, task)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create trial %d of case %q: %w", trial, c.ID, err)
+	}
+	// The cached listing can miss a trial this run created moments ago, so
+	// read the Task uncached and adopt it only when it is exactly that trial.
+	existing := &corev1alpha1.Task{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(task), existing); err != nil {
+		return fmt.Errorf("read existing trial %d of case %q: %w", trial, c.ID, err)
+	}
+	if owner := metav1.GetControllerOf(existing); owner == nil || owner.UID != run.UID {
+		return evalRunConfigErrorf(evalRunReasonTrialTaskConflict,
+			"Task %s/%s already exists and is not a trial of this EvalRun", task.Namespace, task.Name)
+	}
+	if err := r.validateEvalTrialTask(run, monitor, c, trial, existing); err != nil {
+		return evalRunConfigErrorf(evalRunReasonTrialTaskConflict, "%v", err)
 	}
 	return nil
 }

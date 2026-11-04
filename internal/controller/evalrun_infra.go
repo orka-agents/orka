@@ -164,7 +164,8 @@ func evalProviderProxyFailure(content json.RawMessage) bool {
 //   - NoModelOutput: the Task failed or was cancelled before any model
 //     output, for example a workspace, runtime profile or credential failure.
 //
-// A Task that succeeded, or failed after producing model output, is graded.
+// A Task that succeeded with model output or a stored result, or failed
+// after producing model output, is graded.
 func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, deadlineExceeded bool) evals.InfraClass {
 	execution := task.Status.Execution
 	if execution != nil && execution.Outcome == corev1alpha1.TaskExecutionOutcomeOutcomeUnknown {
@@ -174,7 +175,12 @@ func classifyEvalTrialInfra(task *corev1alpha1.Task, signals evalTrialSignals, d
 		return evals.InfraOutcomeUnknown
 	}
 	if task.Status.Phase == corev1alpha1.TaskPhaseSucceeded && !deadlineExceeded {
-		return ""
+		// A success is graded only with evidence the model ran: output in
+		// the journal or a stored result.
+		if signals.ModelOutput || (task.Status.ResultRef != nil && task.Status.ResultRef.Available) {
+			return ""
+		}
+		return evals.InfraNoModelOutput
 	}
 	if signals.ProviderFailure {
 		return evals.InfraProviderProxyError

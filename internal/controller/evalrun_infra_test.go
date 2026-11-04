@@ -22,7 +22,13 @@ func TestClassifyEvalTrialInfra(t *testing.T) {
 		deadline bool
 		want     evals.InfraClass
 	}{
-		"succeeded":                 {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true}},
+		"succeeded":                {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true}},
+		"succeeded without output": {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), want: evals.InfraNoModelOutput},
+		"succeeded with result only": {task: func() *corev1alpha1.Task {
+			t := task(corev1alpha1.TaskPhaseSucceeded, "", "")
+			t.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+			return t
+		}()},
 		"succeeded despite 5xx":     {task: task(corev1alpha1.TaskPhaseSucceeded, "", ""), signals: evalTrialSignals{ModelOutput: true, ProviderFailure: true}},
 		"runtime lost":              {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, corev1alpha1.TaskExecutionReasonRuntimeLost), signals: evalTrialSignals{ModelOutput: true}, want: evals.InfraRuntimeLost},
 		"outcome unknown":           {task: task(corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, "SettlementUnproven"), want: evals.InfraOutcomeUnknown},
