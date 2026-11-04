@@ -279,8 +279,10 @@ the observable parts.
   `storagev1.ContractRevision`, so startup validation can refuse an older
   provider with one precise reason instead of failing at the first missing
   method; an optional family is announced as a capability instead. Revision
-  2 added the dataset binding (see "Installation binding"). The
-  revision Orka requires for each part belongs to Orka, not to the contract.
+  2 added the dataset binding (see "Installation binding"). Revision 3 requires
+  a valid write envelope on every write and `ErrValidation` when it is missing;
+  revision 2 still required accepting writes without one during the transition.
+  The revision Orka requires for each part belongs to Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;

@@ -123,8 +123,9 @@ const (
 	// one precise reason instead of failing at the first missing method. An
 	// optional family is announced through [ProviderInfo.Capabilities]
 	// instead. Revision 2 added [DatasetBindingStore] and
-	// [ProviderInfo.Binding].
-	ContractRevision = 2
+	// [ProviderInfo.Binding]. Revision 3 requires a valid [WriteEnvelope] on
+	// every write and [ErrValidation] when it is missing.
+	ContractRevision = 3
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
