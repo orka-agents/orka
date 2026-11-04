@@ -401,7 +401,7 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   the stable Agent with a `resourceVersion` precondition, so a concurrent edit makes it
   fail instead of merging into a configuration neither arm tested.
 - **New status field `Agent.status.rollout`**:
-  `{candidate: {name, uid, generation, digest}, percent, decisionID}`. Only the
+  `{candidate: {name, uid, generation, digest}, percent, decisionID, recordID}`. Only the
   controller can write it. At binding (`agent_execution_binding.go`), the arm is chosen
   once per Session: a Task that starts a new Session, or a standalone Task, goes to the
   candidate when a hash of that Session's or Task's UID modulo 100 is below `percent`. A
@@ -430,24 +430,31 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   canary changes, promotions, aborts, rollbacks and `status.rollout` cleanup per Agent.
   The one exception is `abort` against an open promotion, which acts on that record
   instead of inserting its own, as described below.
+  Every action marks its own write so a restart can tell whether it committed: `promote`
+  and `rollback` set the controller-managed annotation `orka.ai/promotion-record: <record
+  id>` in the same fenced spec update, and `canary` and `abort` set
+  `Agent.status.rollout.recordID` in the same status update (`abort` clears the rest of
+  `status.rollout` but keeps that field). Admission rejects writes to the annotation from
+  anyone but the controller, as it does for controller-managed Task annotations. On
+  restart, an open record whose ID the Agent carries in that place has committed, and
+  the controller marks it `complete`; for `promote` and `rollback` it records the applied
+  generation as the stored generation plus one and the applied digest as the target
+  digest, without reading values a later edit may have changed. An open record whose ID
+  the Agent does not carry is retried only if every precondition of its own action still
+  holds; otherwise it is marked `failed` without changing the Agent. No record stays open
+  across a restart, so the per-Agent index cannot wedge rollouts.
   `promote` runs in three durable steps so a crash cannot lose the rollback record:
   (1) insert a `pending` record holding the decision, the Agent's `resourceVersion` and generation,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
   a ConfigMap that may change or disappear), and the target values; (2) move the record
   `pending → applying`, then update the stable Agent with a `resourceVersion`
-  precondition, writing the candidate's inline prompt and, in the same update, the
-  controller-managed annotation `orka.ai/promotion-record: <record id>` (admission
-  rejects writes to it from anyone but the controller, as it does for controller-managed
-  Task annotations);
+  precondition, writing the candidate's inline prompt and the record's marker;
   (3) clear `status.rollout` and mark the record `complete` with the resulting generation
   and digest. On restart the controller reconciles any `pending` or `applying` record
   idempotently, deciding whether step 2 committed from the marker, never from the
   Agent's current values, which a direct edit could make look applied or unapplied. If
-  the Agent's `orka.ai/promotion-record` annotation names this record, step 2 has
-  committed and the change is live. The applied generation is the stored generation plus
-  one, since the single fenced spec update bumped it once, and the applied digest is the
-  target digest, so recovery records them without reading values a later edit may have
-  changed. It always finishes step 3 and records the promotion as `complete`, even if a later
+  the marker names this record, step 2 has committed and the change is live, so it
+  always finishes step 3 and records the promotion as `complete`, even if a later
   rejection or a changed `status.rollout` has arrived since. It never marks such a record
   `failed`, because that would leave a live change without a record; a later rejection
   sets a `PromotedBeforeRejection` condition, and undoing the change is a `rollback`.
@@ -459,7 +466,7 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   retries step 2 only if all pass. If any fails, it marks the record `failed`
   without changing the Agent and sets `RolloutInvalid`. One consequence: after a promotion or rollback the stable Agent
   always carries an inline prompt, even if it used `configMapRef` before. `rollback`
-  writes back the recorded resolved previous values. It needs no new evidence, but it
+  writes back the recorded resolved previous values, with its own marker. It needs no new evidence, but it
   is a compare-and-swap: the live stable Agent's generation and
   promotable-field digest must equal what the latest promotion record wrote, and the
   update carries a `resourceVersion` precondition. If anyone edited the Agent after the
