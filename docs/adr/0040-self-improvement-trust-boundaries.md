@@ -443,6 +443,12 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   the Agent does not carry is retried only if every precondition of its own action still
   holds; otherwise it is marked `failed` without changing the Agent. No record stays open
   across a restart, so the per-Agent index cannot wedge rollouts.
+  `promote` refuses, before inserting its record, a candidate whose resolved promotable
+  values equal the stable Agent's current spec: a spec-neutral update would change only
+  the marker and leave the generation where it was. Every recorded promotion therefore
+  changes the spec and bumps the generation by exactly one, and so does its rollback,
+  whose compare-and-swap requires the live Agent to still hold the promoted values,
+  which differ from the previous ones.
   `promote` runs in three durable steps so a crash cannot lose the rollback record:
   (1) insert a `pending` record holding the decision, the Agent's `resourceVersion` and generation,
   the previous values with the prompt *resolved to text* (so rollback does not depend on
