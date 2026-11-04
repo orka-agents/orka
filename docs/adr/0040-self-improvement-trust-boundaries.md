@@ -148,7 +148,7 @@ repositories:
       - internal/protectedset/**                       # protected-set parsing
       - internal/workspacedelta/**                     # path matching
       - internal/harness/v2/workspace.go               # limits carried to the supervisor
-      - internal/acp/runtime_defaults.go
+      - internal/acp/**                                # child UID/GID isolation, session environment, supervisor hardening, native tool names
       - internal/labels/labels.go                      # the role annotation key
       - config/samples/orka_protected_set.yaml         # this declaration
       - config/**                                      # deployed admission, policy and RBAC manifests and their overlays
