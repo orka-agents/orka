@@ -246,6 +246,41 @@ func TestParseCaseDoesNotEchoRejectedRepoURL(t *testing.T) {
 	}
 }
 
+// TestParseCaseRejectsCredentialIdentifiers checks that a credential-shaped
+// id, tag or path is rejected and that no rejected value is echoed.
+func TestParseCaseRejectsCredentialIdentifiers(t *testing.T) {
+	token := "ghp_" + strings.Repeat("A", 36)
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{"id", func(o map[string]any) { o["id"] = token }, "case id"},
+		{"invalid id", func(o map[string]any) { o["id"] = token + " x" }, "case id"},
+		{"tag", func(o map[string]any) { o["tags"] = []any{token} }, "tags[0]"},
+		{"invalid tag", func(o map[string]any) { o["tags"] = []any{token + " x"} }, "tags[0]"},
+		{"filename", func(o map[string]any) { file0(o)["filename"] = "pkg/" + token + ".go" }, "filename"},
+		{"previous filename", func(o map[string]any) {
+			file0(o)["status"] = "renamed"
+			file0(o)["previousFilename"] = token + "/x.go"
+		}, "previousFilename"},
+		{"invalid filename", func(o map[string]any) { file0(o)["filename"] = "/" + token }, "filename"},
+		{"status", func(o map[string]any) { file0(o)["status"] = token }, "status"},
+		{"location file", func(o map[string]any) {
+			o["reference"].(map[string]any)["locations"] = []any{map[string]any{"file": token + ".go", "startLine": 1, "endLine": 1}}
+		}, "locations[0].file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			object := validCaseObject()
+			test.mutate(object)
+			_, err := ParseCase([]byte(encodeCase(t, object)), reviewType)
+			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), token) {
+				t.Fatalf("ParseCase error = %v, want %q without the rejected value", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseCasesCapsDistinctTags(t *testing.T) {
 	build := func(tagCount int) []byte {
 		object := validCaseObject()
