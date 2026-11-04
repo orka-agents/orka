@@ -91,6 +91,41 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	return appended, isNew, nil
 }
 
+// AppendExecutionEventsIfAbsent sanitizes each event payload before the
+// grouped append. Each event in the group counts as one append attempt: a
+// refused group counts every event as failed, as does a provider error, since
+// the provider commits a group in one transaction. A deduplicated replay
+// counts as appended, and an invalid deduplication key is refused before the
+// provider is called and is not counted, as for the single-event methods.
+func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	started := time.Now()
+	prepared := make([]store.ExecutionEventAppend, len(appends))
+	for i, entry := range appends {
+		event, err := c.prepareExecutionEvent(ctx, entry.Event)
+		if err != nil {
+			recordExecutionEventGroupAppend(appends, false, started)
+			return nil, err
+		}
+		prepared[i] = store.ExecutionEventAppend{Event: event, DedupeKey: entry.DedupeKey}
+	}
+	for _, entry := range appends {
+		if _, err := store.NormalizeExecutionEventDedupeKey(entry.DedupeKey); err != nil {
+			return nil, err
+		}
+	}
+	results, err := c.StateProvider.AppendExecutionEventsIfAbsent(providerContext(ctx), prepared)
+	recordExecutionEventGroupAppend(appends, err == nil, started)
+	if err != nil {
+		return nil, err
+	}
+	for i, result := range results {
+		if result.Appended {
+			recordExecutionEventSanitization(appends[i].Event, result.Event)
+		}
+	}
+	return results, nil
+}
+
 // prepareExecutionEvent returns a sanitized copy of event: payload fields are
 // redacted and bounded, the truncation metadata records what was cut, and the
 // usage observation the event carries is derived from the sanitized payload.
@@ -191,12 +226,6 @@ func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryPr
 	return c.StateProvider.ReviewMemoryProposal(ctx, review)
 }
 
-// ApplyMemoryProposal redacts the applier identity before applying a proposal.
-func (c *Client) ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error) {
-	apply.AppliedBy = redact.SensitiveText(strings.TrimSpace(apply.AppliedBy))
-	return c.Embedded.ApplyMemoryProposal(ctx, apply)
-}
-
 // SaveThreatModel sanitizes the threat model content before storing it. The
 // caller's record receives the sanitized content.
 func (c *Client) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
@@ -228,49 +257,6 @@ func saveThreatModelIfVersion(ctx context.Context, writer threatModelWriter, mod
 	}
 	model.Content = security.SanitizeThreatModel(model.Content)
 	return writer.SaveThreatModelIfVersion(ctx, model, expectedVersion)
-}
-
-// ApplyScanTaskIngestion gives the ingestion callback a transaction-scoped
-// security store that applies the same sanitization as the client.
-func (c *Client) ApplyScanTaskIngestion(
-	ctx context.Context,
-	ingestion *store.ScanTaskIngestion,
-	validate func(*store.ScanRun) error,
-	apply func(store.SecurityStore, *store.ScanRun) error,
-) (bool, error) {
-	return c.Embedded.ApplyScanTaskIngestion(ctx, ingestion, validate, protectIngestionApply(apply))
-}
-
-func protectIngestionApply(apply func(store.SecurityStore, *store.ScanRun) error) func(store.SecurityStore, *store.ScanRun) error {
-	if apply == nil {
-		return nil
-	}
-	return func(tx store.SecurityStore, run *store.ScanRun) error {
-		return apply(protectedSecurityStore{SecurityStore: tx}, run)
-	}
-}
-
-// protectedSecurityStore sanitizes threat models written through a
-// transaction-scoped security store.
-type protectedSecurityStore struct {
-	store.SecurityStore
-}
-
-func (s protectedSecurityStore) SaveThreatModel(ctx context.Context, model *store.ThreatModel) error {
-	return saveThreatModel(ctx, s.SecurityStore, model)
-}
-
-func (s protectedSecurityStore) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
-	return saveThreatModelIfVersion(ctx, s.SecurityStore, model, expectedVersion)
-}
-
-func (s protectedSecurityStore) ApplyScanTaskIngestion(
-	ctx context.Context,
-	ingestion *store.ScanTaskIngestion,
-	validate func(*store.ScanRun) error,
-	apply func(store.SecurityStore, *store.ScanRun) error,
-) (bool, error) {
-	return s.SecurityStore.ApplyScanTaskIngestion(ctx, ingestion, validate, protectIngestionApply(apply))
 }
 
 // RecordUsage redacts and bounds the provider and model names before storing

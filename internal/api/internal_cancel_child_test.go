@@ -62,7 +62,7 @@ func setupCancelChildHandlers(t *testing.T) (*InternalHandlers, func(path string
 		WithStatusSubresource(&corev1alpha1.Task{}).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewInternalHandlers(ss, ss, ss, ss, ss, InternalHandlersConfig{
 		Client: k8sClient, APIReader: k8sClient, TaskProvenanceProtected: true,
 	})

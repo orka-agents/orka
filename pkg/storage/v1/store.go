@@ -56,6 +56,13 @@ var ErrFenced = errors.New("fenced")
 // of the provider. Providers report it with [TooLargeError].
 var ErrTooLarge = errors.New("too large")
 
+// ErrPreconditionFailed is returned when a conditional command finds that the
+// target or version it was resolved against has changed. Nothing is applied
+// and nothing the command would have returned is disclosed. The caller
+// resolves the target again, repeats any authorization for the new target and
+// retries. Providers report it with [PreconditionFailedErrorf].
+var ErrPreconditionFailed = errors.New("precondition failed")
+
 // FencedError reports a write rejected by a stale fence. It matches
 // [ErrFenced]. Orka callers written before ErrFenced existed branch on
 // [ErrConflict], so a FencedError also matches ErrConflict until those callers
@@ -76,6 +83,27 @@ func (e FencedError) Is(target error) bool {
 // FencedErrorf formats a fence rejection.
 func FencedErrorf(format string, args ...any) error {
 	return FencedError{Message: fmt.Sprintf(format, args...)}
+}
+
+// PreconditionFailedError reports a conditional command whose expected target
+// or version no longer matches. It matches [ErrPreconditionFailed] and, so
+// callers that branch on concurrent changes keep working, [ErrConflict].
+type PreconditionFailedError struct {
+	Message string
+}
+
+func (e PreconditionFailedError) Error() string {
+	return e.Message
+}
+
+// Is reports whether target is ErrPreconditionFailed or ErrConflict.
+func (e PreconditionFailedError) Is(target error) bool {
+	return target == ErrPreconditionFailed || target == ErrConflict
+}
+
+// PreconditionFailedErrorf formats a precondition failure.
+func PreconditionFailedErrorf(format string, args ...any) error {
+	return PreconditionFailedError{Message: fmt.Sprintf(format, args...)}
 }
 
 // TooLargeError reports a value that exceeds a size limit. It matches

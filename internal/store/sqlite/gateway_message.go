@@ -35,6 +35,17 @@ const gatewayMessageBudgetSQL = `SELECT
 // terminal projection and cleanup. Reuse the authorized task-data writer rather
 // than nesting BeginTx (the store uses a single SQLite connection).
 func (s *Store) EnqueueGatewayMessage(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
+	var delivery *store.GatewayDelivery
+	var created bool
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		delivery, created, err = s.enqueueGatewayMessageUnfenced(ctx, request)
+		return err
+	})
+	return delivery, created, err
+}
+
+func (s *Store) enqueueGatewayMessageUnfenced(ctx context.Context, request store.GatewayMessageEnqueue) (*store.GatewayDelivery, bool, error) {
 	if err := validateGatewayMessageEnqueue(request); err != nil {
 		return nil, false, err
 	}
@@ -43,7 +54,7 @@ func (s *Store) EnqueueGatewayMessage(ctx context.Context, request store.Gateway
 	}
 	var delivery *store.GatewayDelivery
 	var created bool
-	err := s.WithTaskDataTransaction(ctx, func(txCtx context.Context) error {
+	err := s.withTaskDataTransaction(ctx, func(txCtx context.Context) error {
 		var err error
 		delivery, created, err = enqueueGatewayMessageTx(txCtx, s.taskDataTx(txCtx), request)
 		return err
@@ -158,6 +169,16 @@ func gatewayMessageDeliveryID(namespace, namespaceUID, eventID, taskUID, request
 // GetGatewayMessageBudget never admits, reserves, or consumes a message slot.
 // Reuse an authorized writer when supplied, including its revocation fence.
 func (s *Store) GetGatewayMessageBudget(ctx context.Context, request store.GatewayMessageBudgetQuery) (*store.GatewayMessageBudget, error) {
+	var budget *store.GatewayMessageBudget
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		budget, err = s.getGatewayMessageBudgetUnfenced(ctx, request)
+		return err
+	})
+	return budget, err
+}
+
+func (s *Store) getGatewayMessageBudgetUnfenced(ctx context.Context, request store.GatewayMessageBudgetQuery) (*store.GatewayMessageBudget, error) {
 	if err := validateGatewayMessageIdentity(request.Namespace, request.NamespaceUID, request.EventID, request.TaskName, request.TaskUID, request.RequestID); err != nil {
 		return nil, err
 	}

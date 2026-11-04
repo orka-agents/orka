@@ -45,7 +45,7 @@ func setupRepositoryMonitorHandlers(t *testing.T, ctxTokenConfig ContextTokenCon
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	monitorStore := sqlite.NewStore(db, ":memory:")
+	monitorStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
 	require.NoError(t, err)
 

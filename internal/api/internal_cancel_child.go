@@ -29,8 +29,9 @@ const cancellationRequestedStatus = "cancellation requested"
 // the calling Task for the native worker's cancel_task tool. The Task
 // controller then completes the child through its normal terminal path, which
 // revokes the worker Job, releases session locks, and records the outcome.
-// The request is written inside the caller's task data transaction, so a
-// parent whose Job authority was revoked cannot cancel its children. Agent
+// The request is written inside the caller's authorized task data access,
+// which checks the parent's Job authority first, so a parent whose Job
+// authority was revoked cannot cancel its children. Agent
 // children are refused: their terminal status needs the controller epoch
 // mutation guard.
 func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
@@ -65,7 +66,7 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 	}
 	var child *corev1alpha1.Task
 	result := tools.CancelTaskResult{TaskName: childName}
-	if err := withInternalTaskDataTransaction(c, h.resultStore, taskName, func(ctx context.Context) error {
+	if err := withInternalTaskData(c, h.resultStore, taskName, func(ctx context.Context) error {
 		if err := authorizer.revalidateTaskCaller(c, parent); err != nil {
 			return err
 		}

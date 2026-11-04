@@ -22,6 +22,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -35,7 +36,8 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 	db, err := sqlitestore.NewDB(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
-	s := sqlitestore.NewStore(db, path)
+	s, err := storageclient.NewEmbedded(sqlitestore.NewStore(db, path))
+	require.NoError(t, err)
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1alpha1.AddToScheme(scheme))
 	scan := &corev1alpha1.RepositoryScan{
@@ -124,7 +126,8 @@ func TestRepositoryScanRetainedPipelineTasks(t *testing.T) {
 		require.NoError(t, db.Close())
 		db, err = sqlitestore.NewDB(path)
 		require.NoError(t, err)
-		s = sqlitestore.NewStore(db, path)
+		s, err = storageclient.NewEmbedded(sqlitestore.NewStore(db, path))
+		require.NoError(t, err)
 		r = &RepositoryScanReconciler{Client: cl, Scheme: scheme, SecurityStore: s, ArtifactStore: s, ResultStore: s}
 		reconcile()
 		got, err := s.GetScanRun(ctx, defaultNS, runID)
@@ -191,7 +194,7 @@ func TestRepositoryScanIngestsTerminalPipelineOnRestart(t *testing.T) {
 	require.Equal(t, 2, run.DroppedFindings)
 }
 
-func seedRetainedScanPipeline(t *testing.T, s *sqlitestore.Store, cl client.Client, scan *corev1alpha1.RepositoryScan, runID string, started time.Time, sliceCount int) []*corev1alpha1.Task {
+func seedRetainedScanPipeline(t *testing.T, s *storageclient.Client, cl client.Client, scan *corev1alpha1.RepositoryScan, runID string, started time.Time, sliceCount int) []*corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()
 	policyDigest := security.ScannerPolicyDigest(security.ScannerPolicy{})

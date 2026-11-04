@@ -56,6 +56,15 @@ func recordExecutionEventAppend(event *store.ExecutionEvent, success bool, start
 	metrics.RecordExecutionEventAppend(streamType, eventType, success, time.Since(started).Seconds())
 }
 
+// recordExecutionEventGroupAppend records one append attempt for each event of
+// a grouped append, all with the group's outcome and duration, since the
+// provider commits the group in one transaction or not at all.
+func recordExecutionEventGroupAppend(appends []store.ExecutionEventAppend, success bool, started time.Time) {
+	for _, entry := range appends {
+		recordExecutionEventAppend(entry.Event, success, started)
+	}
+}
+
 // recordExecutionEventSanitization counts redaction and truncation once per
 // newly persisted event, from its final stored state.
 func recordExecutionEventSanitization(submitted, appended *store.ExecutionEvent) {

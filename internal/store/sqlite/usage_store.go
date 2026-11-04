@@ -22,7 +22,7 @@ func (s *Store) usageTransaction(ctx context.Context, fn func(context.Context) e
 	if s.taskDataTx(ctx) != nil {
 		return fn(ctx)
 	}
-	return s.WithTaskDataTransaction(ctx, fn)
+	return s.withTaskDataTransaction(ctx, fn)
 }
 
 func (s *Store) RegisterUsageWork(ctx context.Context, work store.UsageWorkRequest) error {

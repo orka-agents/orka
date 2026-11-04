@@ -29,12 +29,13 @@ import (
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	common "github.com/orka-agents/orka/workers/common"
 )
 
-type failingExecutionEventStore struct{ *sqlite.Store }
+type failingExecutionEventStore struct{ *storageclient.Client }
 
 func (failingExecutionEventStore) AppendExecutionEvent(
 	context.Context,
@@ -162,7 +163,7 @@ func TestEventRecorderHTTPIntegrationNonFatalFailures(t *testing.T) {
 	t.Run("real API 500", func(t *testing.T) {
 		const bearerToken = "event-recorder-500-token"
 		app := setupWorkerInternalEventAPI(
-			t, failingExecutionEventStore{Store: newWorkerSQLiteExecutionEventStore(t)}, bearerToken, nil,
+			t, failingExecutionEventStore{Client: newWorkerSQLiteExecutionEventStore(t)}, bearerToken, nil,
 		)
 		controllerURL := startFiberAppForWorkerTest(t, app)
 		recorder := common.NewHTTPEventRecorder(common.HTTPEventRecorderConfig{
@@ -320,7 +321,9 @@ func startFiberAppForWorkerTest(t *testing.T, app *fiber.App) string {
 	return "http://" + ln.Addr().String()
 }
 
-func newWorkerSQLiteExecutionEventStore(t *testing.T) *sqlite.Store {
+// newWorkerSQLiteExecutionEventStore returns SQLite behind the storage client,
+// which provides the fenced task data access the internal API uses.
+func newWorkerSQLiteExecutionEventStore(t *testing.T) *storageclient.Client {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
 	db, err := sqlite.NewDB(dbPath)
@@ -328,7 +331,11 @@ func newWorkerSQLiteExecutionEventStore(t *testing.T) *sqlite.Store {
 		t.Fatalf("sqlite.NewDB: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return sqlite.NewStore(db, dbPath)
+	storage, err := storageclient.NewEmbedded(sqlite.NewStore(db, dbPath))
+	if err != nil {
+		t.Fatalf("storageclient.NewEmbedded: %v", err)
+	}
+	return storage
 }
 
 func mustRawJSONIntegration(t *testing.T, value any) json.RawMessage {
