@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -19,7 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -29,9 +32,9 @@ const cancellationRequestedStatus = "cancellation requested"
 // the calling Task for the native worker's cancel_task tool. The Task
 // controller then completes the child through its normal terminal path, which
 // revokes the worker Job, releases session locks, and records the outcome.
-// The request is written inside the caller's authorized task data access,
-// which checks the parent's Job authority first, so a parent whose Job
-// authority was revoked cannot cancel its children. Agent
+// Cancellation intent is committed under the caller's task data fence before
+// publishing the Kubernetes request. Revocation before that commit refuses
+// cancellation; a committed intent may finish publishing after revocation. Agent
 // children are refused: their terminal status needs the controller epoch
 // mutation guard.
 func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
@@ -74,7 +77,7 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 		child = verified
 		return err
 	}, func(ctx context.Context) error {
-		status, err := h.requestChildCancellation(ctx, child.Namespace, child.Name, child.UID, message)
+		status, err := h.requestChildCancellation(ctx, parent, child.Namespace, child.Name, child.UID, message)
 		result.Status = status
 		return err
 	}); err != nil {
@@ -87,6 +90,7 @@ func (h *InternalHandlers) CancelChildTask(c fiber.Ctx) error {
 // unless it already finished, fenced on its UID and resourceVersion.
 func (h *InternalHandlers) requestChildCancellation(
 	ctx context.Context,
+	parent *corev1alpha1.Task,
 	namespace, name string,
 	uid types.UID,
 	message string,
@@ -96,6 +100,7 @@ func (h *InternalHandlers) requestChildCancellation(
 		reader = h.k8sClient
 	}
 	var status string
+	var committedMessage *string
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		child := &corev1alpha1.Task{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, child); err != nil {
@@ -121,15 +126,64 @@ func (h *InternalHandlers) requestChildCancellation(
 		if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
 			return nil
 		}
+		if committedMessage == nil {
+			intentMessage, err := h.recordChildCancellationIntent(ctx, parent, child, message)
+			if err != nil {
+				return err
+			}
+			committedMessage = &intentMessage
+		}
 		patched := child.DeepCopy()
 		if patched.Annotations == nil {
 			patched.Annotations = map[string]string{}
 		}
-		patched.Annotations[labels.AnnotationCancelRequested] = message
+		patched.Annotations[labels.AnnotationCancelRequested] = *committedMessage
 		return h.k8sClient.Patch(ctx, patched, client.MergeFromWithOptions(child, client.MergeFromWithOptimisticLock{}))
 	})
 	if apierrors.IsConflict(err) {
 		return "", fiber.NewError(fiber.StatusConflict, "the child task kept changing while it was being cancelled; retry")
 	}
 	return status, err
+}
+
+// childCancellationIntent is the durable authorization for one child's cancel
+// request. The event's dedupe key binds both Task UIDs, so retries retain the
+// first reason and a reused Task name cannot inherit the authorization.
+type childCancellationIntent struct {
+	ParentUID string `json:"parentUID"`
+	ChildUID  string `json:"childUID"`
+	ChildName string `json:"childName"`
+	Message   string `json:"message"`
+}
+
+func (h *InternalHandlers) recordChildCancellationIntent(ctx context.Context, parent, child *corev1alpha1.Task, message string) (string, error) {
+	intents, ok := h.resultStore.(store.DeduplicatingExecutionEventStore)
+	if !ok {
+		return "", fiber.NewError(fiber.StatusServiceUnavailable, "cancellation intent storage unavailable")
+	}
+	intent := childCancellationIntent{
+		ParentUID: string(parent.UID), ChildUID: string(child.UID), ChildName: child.Name, Message: message,
+	}
+	content, err := json.Marshal(intent)
+	if err != nil {
+		return "", err
+	}
+	// This append checks the parent Job and cleanup fence in the same
+	// transaction as the intent. The Kubernetes patch below is only the
+	// publication of an action this commit already authorized.
+	persisted, _, err := intents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+		Namespace: parent.Namespace, StreamType: store.ExecutionEventStreamTypeTask,
+		StreamID: parent.Name, TaskName: parent.Name, ToolName: promptToolCancel,
+		Type: events.ExecutionEventTypeTaskCancellationRequested, Severity: events.ExecutionEventSeverityInfo,
+		Summary: "Child task cancellation requested", Content: content,
+	}, fmt.Sprintf("cancel-child:%s:%s", parent.UID, child.UID))
+	if err != nil {
+		return "", err
+	}
+	var committed childCancellationIntent
+	if persisted == nil || json.Unmarshal(persisted.Content, &committed) != nil ||
+		committed.ParentUID != intent.ParentUID || committed.ChildUID != intent.ChildUID || committed.ChildName != intent.ChildName {
+		return "", fmt.Errorf("invalid child cancellation intent")
+	}
+	return committed.Message, nil
 }
