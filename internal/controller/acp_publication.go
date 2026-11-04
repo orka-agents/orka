@@ -635,6 +635,12 @@ func classifyPublisherDeliveryError(reason string, err error) error {
 	state := corev1alpha1.TaskDeliveryStateDeliveryConflict
 	outcome := corev1alpha1.TaskDeliveryOutcomeDeliveryConflict
 	var clientErr *publisherservice.ClientError
+	if errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath {
+		// The publisher re-checks the denied paths the runtime already enforces.
+		// Report its rejection exactly as a runtime rejection so the reason does
+		// not depend on which layer caught the path.
+		return &acpDeliveryError{state: state, outcome: outcome, reason: acpWorkspaceValidationFailedReason, message: harnessv2.WorkspaceDeltaDeniedPathMessage}
+	}
 	if errors.As(err, &clientErr) && (clientErr.StatusCode == 401 || clientErr.StatusCode == 403 || strings.Contains(clientErr.Response.Code, "credential")) {
 		state = corev1alpha1.TaskDeliveryStateCredentialBlocked
 		outcome = corev1alpha1.TaskDeliveryOutcomeCredentialBlocked

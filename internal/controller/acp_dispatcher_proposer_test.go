@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/protectedset"
+	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -408,6 +410,31 @@ func TestDeniedPathRejectionUsesPatchPathDenied(t *testing.T) {
 	if !repositoryMonitorTaskPathDenied(withDenied, "internal/admission/task_provenance.go") ||
 		repositoryMonitorTaskPathDenied(withDenied, "internal/api/server.go") || repositoryMonitorTaskPathDenied(&corev1alpha1.Task{}, "AGENTS.md") {
 		t.Fatal("the controller re-check does not apply the Task's deniedPaths")
+	}
+}
+
+func TestPublisherDeniedPathRejectionMatchesTheRuntimeRejection(t *testing.T) {
+	err := classifyPublisherDeliveryError("PublicationPrepareFailed", &publisherservice.ClientError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Response:   publisherservice.ErrorResponse{Code: publisherservice.ErrorCodeDeniedPath, Message: "workspace delta contains a denied path"},
+	})
+	deliveryErr, ok := errors.AsType[*acpDeliveryError](err)
+	if !ok || deliveryErr.reason != acpWorkspaceValidationFailedReason || deliveryErr.message != harnessv2.WorkspaceDeltaDeniedPathMessage ||
+		deliveryErr.state != corev1alpha1.TaskDeliveryStateDeliveryConflict || deliveryErr.outcome != corev1alpha1.TaskDeliveryOutcomeDeliveryConflict {
+		t.Fatalf("publisher denied-path delivery error = %#v, want WorkspaceValidationFailed with the denied-path message", err)
+	}
+	task := &corev1alpha1.Task{Status: corev1alpha1.TaskStatus{Delivery: &corev1alpha1.TaskDeliveryStatus{
+		Reason: deliveryErr.reason, Message: deliveryErr.message,
+	}}}
+	if reason := repositoryMonitorWorkspacePathRejectionReason(task); reason != repositoryMonitorPatchPathDenied {
+		t.Fatalf("publisher denied-path rejection reason = %q, want %q", reason, repositoryMonitorPatchPathDenied)
+	}
+
+	unsafe, ok := errors.AsType[*acpDeliveryError](classifyPublisherDeliveryError("PublicationPrepareFailed", &publisherservice.ClientError{
+		StatusCode: http.StatusUnprocessableEntity, Response: publisherservice.ErrorResponse{Code: "unsafe_delta"},
+	}))
+	if !ok || unsafe.reason != "PublicationPrepareFailed" {
+		t.Fatalf("other unsafe delta delivery error = %#v, want PublicationPrepareFailed", unsafe)
 	}
 }
 

@@ -228,7 +228,7 @@ func (d parsedDelta) rejectDeniedPaths(patterns []string) error {
 	paths = append(paths, symlinkPaths(d.symlinks)...)
 	for _, changedPath := range paths {
 		if workspacedelta.PathDenied(patterns, changedPath) {
-			return operationError(ErrUnsafeDelta, "validate workspace delta paths", "workspace delta contains a denied path", nil)
+			return operationError(ErrDeniedPath, "validate workspace delta paths", "workspace delta contains a denied path", nil)
 		}
 	}
 	return nil
