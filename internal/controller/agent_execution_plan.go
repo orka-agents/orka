@@ -103,6 +103,13 @@ func (r *TaskReconciler) planAgentExecution(
 			if task.Spec.PriorTaskRef != nil {
 				return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by external v2 runtimes; use sessionRef")
 			}
+			var registered *corev1alpha1.AgentRuntimeMCPPolicySpec
+			if runtime.Spec.Capabilities != nil {
+				registered = runtime.Spec.Capabilities.MCPPolicy
+			}
+			if err := validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, registered); err != nil {
+				return rejectAgentExecutionPlan(err.Error())
+			}
 			return agentExecutionPlan{path: agentExecutionPathExternal, externalRuntimeName: name}
 		default:
 			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q contractVersion %q is unsupported; explicit %s is required", name, runtime.RegisteredContractVersion(), corev1alpha1.AgentRuntimeContractHarnessV2))

@@ -336,7 +336,9 @@ How the check reads a policy:
   `allowBash: false`). Otherwise, include `reply_in_conversation` in an explicit
   allowlist and in the ceiling.
 - **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
-  already fixes Bash and the turn budget.
+  already fixes Bash and the turn budget. The check uses the tools the
+  registered AgentRuntime policy exposes, so a tool the registration lists but
+  also denies does not count against the ceiling.
 
 A Task is checked against the Agent generation it binds to. Changing a
 ceiling does not affect Tasks that are already bound. When an Agent's own

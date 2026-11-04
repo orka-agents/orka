@@ -420,3 +420,37 @@ func TestAgentRuntimeCeilingJSONPreservesExplicitEmptyTools(t *testing.T) {
 		t.Fatalf("encoded unbounded ceiling = %s, want {}", unbounded)
 	}
 }
+
+func TestRuntimeRefCeilingJudgesRegisteredPolicy(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+			Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"read-inventory"}},
+		}},
+	}
+	registered := func(disallowed ...string) *corev1alpha1.AgentRuntimeMCPPolicySpec {
+		return &corev1alpha1.AgentRuntimeMCPPolicySpec{
+			AllowedTools:    []string{"read-inventory", "update-inventory"},
+			DisallowedTools: append([]string{}, disallowed...),
+		}
+	}
+	exact := ceilingTestTask([]string{"read-inventory", "update-inventory"}, nil)
+	if err := validateAgentRuntimeCeilingWithRegisteredPolicy(exact, agent, registered("update-inventory")); err != nil {
+		t.Fatalf("registration denies the tool outside the ceiling: error = %v, want nil", err)
+	}
+	// The registered deny list matches names exactly, as at dispatch.
+	err := validateAgentRuntimeCeilingWithRegisteredPolicy(exact, agent, registered("Update-Inventory"))
+	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "update-inventory"`) {
+		t.Fatalf("differently cased registered deny: error = %v, want ceiling rejection", err)
+	}
+	// An allowlist that does not match the registration is judged as requested.
+	mismatch := ceilingTestTask([]string{"update-inventory"}, nil)
+	err = validateAgentRuntimeCeilingWithRegisteredPolicy(mismatch, agent, registered("update-inventory"))
+	if err == nil || !strings.Contains(err.Error(), `ceiling does not allow tool "update-inventory"`) {
+		t.Fatalf("allowlist not matching the registration: error = %v, want ceiling rejection", err)
+	}
+	if err := validateAgentRuntimeCeilingWithRegisteredPolicy(exact, agent, registered()); err == nil {
+		t.Fatal("registration exposing a tool outside the ceiling: error = nil, want ceiling rejection")
+	}
+}

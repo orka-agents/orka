@@ -19,6 +19,19 @@ const ceilingToolBash = "Bash"
 // defaults the Agent sets explicitly, because Tasks may still supply their own
 // policy within the ceiling. Orka-injected coordination tools are not counted.
 func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	return validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, nil)
+}
+
+// validateAgentRuntimeCeilingWithRegisteredPolicy is validateAgentRuntimeCeiling
+// for a runtimeRef Agent whose registered AgentRuntime MCP policy is known. A
+// Task allowlist that exactly matches the registration is judged by the tools
+// that policy actually exposes after its own deny list and Bash gate; any other
+// allowlist, which dispatch rejects anyway, is judged as requested.
+func validateAgentRuntimeCeilingWithRegisteredPolicy(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	registered *corev1alpha1.AgentRuntimeMCPPolicySpec,
+) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Ceiling == nil {
 		return nil
 	}
@@ -43,7 +56,7 @@ func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 	if !checkTools || (ceiling.AllowedTools == nil && (ceiling.AllowBash == nil || *ceiling.AllowBash)) {
 		return nil
 	}
-	tools, bash := resolvedCeilingToolRequest(task, agent, runtimeRef)
+	tools, bash := resolvedCeilingToolRequest(task, agent, runtimeRef, registered)
 	// Registered external runtimes fix the Bash gate in their profile, so only
 	// the tool allowlist applies to them.
 	if ceiling.AllowBash != nil && !*ceiling.AllowBash && bash && !runtimeRef {
@@ -72,12 +85,26 @@ func validateAgentRuntimeCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 // policy grants Bash. It starts from the same allowlist dispatch uses and
 // then drops only the injected coordination tools. A nil tool list means the
 // unrestricted native set.
-func resolvedCeilingToolRequest(task *corev1alpha1.Task, agent *corev1alpha1.Agent, runtimeRef bool) ([]string, bool) {
+func resolvedCeilingToolRequest(
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	runtimeRef bool,
+	registered *corev1alpha1.AgentRuntimeMCPPolicySpec,
+) ([]string, bool) {
 	requested := requestedACPAllowedTools(task, agent)
 	if runtimeRef {
 		// External runtimes accept only an exact registered allowlist and
-		// reject allowBash and disallowedTools overrides.
+		// reject allowBash and disallowedTools overrides, then expose what the
+		// registered policy allows, as buildAgentRuntimeMCPConfigurationWithRegistry does.
 		tools := sortedUnique(requested)
+		if tools != nil && registered != nil && slices.Equal(effectiveACPAllowedTools(task, agent), registered.AllowedTools) {
+			policy := harnessv2.MCPToolPolicy{
+				AllowedToolNames:    registered.AllowedTools,
+				DisallowedToolNames: registered.DisallowedTools,
+				AllowBash:           registered.AllowBash,
+			}
+			tools = slices.DeleteFunc(tools, func(tool string) bool { return !policy.Allows(tool) })
+		}
 		return tools, slices.ContainsFunc(tools, isCeilingBashTool)
 	}
 	if len(requested) > 0 && !slices.ContainsFunc(requested, func(tool string) bool { return strings.TrimSpace(tool) != "" }) {

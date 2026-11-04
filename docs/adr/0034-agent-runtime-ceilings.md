@@ -48,6 +48,8 @@ than a capability the caller requested. The implicit `reply_in_conversation`
 grant for gateway Tasks does reach outside the Task, so Orka keeps it only when
 the projected policy still fits the ceiling. For `runtimeRef` Agents only
 `allowedTools` applies; the registered profile already fixes Bash and turns.
+They are judged when planning resolves the AgentRuntime, against the tools
+the registered policy exposes after its own deny list.
 
 ## Consequences
 
