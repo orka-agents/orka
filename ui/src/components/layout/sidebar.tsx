@@ -163,15 +163,16 @@ export function Sidebar() {
               onClick={() => { if (overlayOpen) closeOverlay() }}
               className={cn(
                 'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
-                // Refined active state: left accent bar + subtle tint + colored
-                // icon/text, replacing the old heavy solid fill.
+                // Active: a quiet grey fill and full-strength ink. In a
+                // black-and-white UI an accent bar or tint would be the
+                // loudest thing in the sidebar.
                 isActive
-                  ? 'bg-primary/10 text-primary before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary'
+                  ? 'bg-accent text-foreground'
                   : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
                 sidebarCollapsed && 'justify-center px-2'
               )}
             >
-              <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-primary')} />
+              <Icon className="h-4 w-4 shrink-0" />
               {!sidebarCollapsed && <span>{label}</span>}
             </Link>
           )

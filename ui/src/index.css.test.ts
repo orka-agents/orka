@@ -82,12 +82,12 @@ describe('index.css design tokens', () => {
     expect(card).not.toBe(bg)
   })
 
-  it('Inter is still declared as the sans font', () => {
-    expect(themeBody).toMatch(/--font-sans:\s*"Inter"/)
+  it('declares Geist as the sans font', () => {
+    expect(themeBody).toMatch(/--font-sans:\s*"Geist Variable"/)
   })
 
   it('defines a monospace font token for machine data', () => {
-    expect(tokenValue(themeBody, '--font-mono')).toMatch(/JetBrains Mono/)
+    expect(tokenValue(themeBody, '--font-mono')).toMatch(/Geist Mono Variable/)
   })
 
   it('defines the four phase status tokens in both themes', () => {

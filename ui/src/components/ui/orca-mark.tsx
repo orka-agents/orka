@@ -1,24 +1,34 @@
 import { cn } from '@/lib/utils'
 
 /**
- * Single source of truth for the Orka brand mark.
+ * Single source of truth for the Orka brand mark in the app.
  *
- * Renders the same `public/favicon.svg` asset used by the browser tab, so the
- * wordmark and favicon can never drift (replaces the old emoji-brand mismatch).
- * The path follows Vite's base, so the static demo build (served from a
- * subpath) finds it too.
+ * The mark is the orca's head cropped from the existing Orka logo (no new art).
+ * Light and dark variants follow the app theme: the dark one carries a light
+ * outline so the black orca reads on a near-black background. Paths follow
+ * Vite's base, so the static demo build (served from a subpath) finds them too.
  */
 export function OrcaMark({
   className,
   ...props
 }: React.ComponentProps<'img'>) {
+  const base = import.meta.env.BASE_URL
   return (
-    <img
-      src={`${import.meta.env.BASE_URL}favicon.svg`}
-      alt=""
-      aria-hidden="true"
-      className={cn('shrink-0 select-none', className)}
-      {...props}
-    />
+    <>
+      <img
+        src={`${base}orka-mark.png`}
+        alt=""
+        aria-hidden="true"
+        className={cn('shrink-0 select-none dark:hidden', className)}
+        {...props}
+      />
+      <img
+        src={`${base}orka-mark-dark.png`}
+        alt=""
+        aria-hidden="true"
+        className={cn('hidden shrink-0 select-none dark:block', className)}
+        {...props}
+      />
+    </>
   )
 }

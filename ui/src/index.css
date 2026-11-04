@@ -4,39 +4,40 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Orka design tokens — deep-ocean identity.
+ * Orka design tokens — black and white.
  *
- * Color is an encoding, not decoration. It carries exactly three meanings:
+ * Ink and paper do the structural work. Color is an encoding, not decoration.
+ * It carries exactly three meanings:
  *   - phase     (status-*): pending / running / succeeded / failed
- *   - task type (type-*):   container / ai / agent
- *   - liveness  (live):     reserved bioluminescent cyan = "happening now"
- * Everything else is neutral.
+ *   - task type (type-*):   container / ai / agent (greys: the label carries it)
+ *   - liveness  (live):     reserved cyan = "happening now"
+ * Everything else, including the primary action, is neutral ink.
  */
 
 @theme {
-  /* ---- Neutral ground (light = cool paper) ---- */
-  --color-background: #f6f8fa;
+  /* ---- Neutral ground (light = paper; cards sit on a faint grey page) ---- */
+  --color-background: #fafafa;
 
-  --color-foreground: #0b1220;
+  --color-foreground: #0b0b0c;
   --color-card: #ffffff;
-  --color-card-foreground: #0b1220;
+  --color-card-foreground: #0b0b0c;
   --color-popover: #ffffff;
-  --color-popover-foreground: #0b1220;
+  --color-popover-foreground: #0b0b0c;
 
-  /* ---- Brand / interactive (deep azure — distinct from the reserved cyan) ---- */
-  --color-primary: #0b69c7;
+  /* ---- Interactive: ink. The primary action is the darkest thing on screen. ---- */
+  --color-primary: #0b0b0c;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #eef2f6;
-  --color-secondary-foreground: #0b1220;
-  --color-muted: #eef2f6;
-  --color-muted-foreground: #56657a;
-  --color-accent: #e7eef6;
-  --color-accent-foreground: #0b1220;
-  --color-destructive: #e11d48;
+  --color-secondary: #f0f0f2;
+  --color-secondary-foreground: #0b0b0c;
+  --color-muted: #f0f0f2;
+  --color-muted-foreground: #5b5c63;
+  --color-accent: #ececee;
+  --color-accent-foreground: #0b0b0c;
+  --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
-  --color-border: #e2e8f0;
-  --color-input: #e2e8f0;
-  --color-ring: #0b69c7;
+  --color-border: #e6e6e9;
+  --color-input: #dcdce0;
+  --color-ring: #0b0b0c;
 
   /* ---- Phase status tokens (foreground-strength: dots / text / rails) ----
    * Text use: each clears WCAG AA 4.5:1 on card and page backgrounds. */
@@ -53,28 +54,30 @@
   --color-status-succeeded-bg: rgb(16 185 129 / 0.12);
   --color-status-failed-bg: rgb(244 63 94 / 0.12);
 
-  /* ---- Reserved liveness (bioluminescent cyan; consumed only in active contexts) ---- */
+  /* ---- Reserved liveness (consumed only in active contexts) ---- */
   --color-live: #0e7490;
   --color-live-bg: rgb(34 211 238 / 0.14);
 
-  /* ---- Task type tokens (kept off the status hues) ---- */
-  --color-type-container: #475569;
-  --color-type-ai: #7c3aed;
-  --color-type-agent: #4f46e5;
+  /* ---- Task type tokens: greys, so they never compete with phase ---- */
+  --color-type-container: #71717a;
+  --color-type-ai: #52525b;
+  --color-type-agent: #27272a;
 
   /* ---- Type / radius / fonts ---- */
-  --radius: 0.5rem;
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
-    Consolas, monospace;
+  --radius: 0.375rem;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, SFMono-Regular, "SF Mono",
+    Menlo, Consolas, monospace;
 
-  /* ---- Shadow scale that reads on both paper and abyss ---- */
-  --shadow-xs: 0 1px 3px 0 rgb(15 23 42 / 0.06);
-  --shadow-sm: 0 1px 2px 0 rgb(15 23 42 / 0.06), 0 1px 3px 0 rgb(15 23 42 / 0.1);
-  --shadow-md: 0 2px 4px -1px rgb(15 23 42 / 0.08),
-    0 6px 16px -4px rgb(15 23 42 / 0.1);
-  --shadow-lg: 0 10px 28px -6px rgb(15 23 42 / 0.14);
-  --shadow-xl: 0 20px 48px -12px rgb(15 23 42 / 0.2);
+  /* ---- Shadows: hairlines do the separating; shadows only lift overlays ---- */
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 12px 32px -12px rgb(0 0 0 / 0.18);
+  --shadow-xl: 0 24px 56px -16px rgb(0 0 0 / 0.24);
+
+  /* ---- Motion ---- */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Native controls (checkboxes, date pickers, select popups) follow the app theme. */
@@ -83,35 +86,35 @@
 }
 
 /*
- * Dark = layered abyss (not flat black). The elevation ramp does the work that
- * shadows do on light, so cards stay legible without relying on invisible shadow.
+ * Dark = ink. Near-black page, slightly lifted cards, hairline borders; the
+ * primary action inverts to white so it stays the highest-contrast object.
  */
 .dark {
   color-scheme: dark;
 
-  --color-background: #0a0e14;
+  --color-background: #09090a;
 
-  --color-foreground: #e6edf3;
-  --color-card: #111722;
-  --color-card-foreground: #e6edf3;
-  --color-popover: #18202c;
-  --color-popover-foreground: #e6edf3;
+  --color-foreground: #f4f4f5;
+  --color-card: #111113;
+  --color-card-foreground: #f4f4f5;
+  --color-popover: #18181b;
+  --color-popover-foreground: #f4f4f5;
 
-  --color-primary: #38a3ff;
-  --color-primary-foreground: #04121f;
-  --color-secondary: #18202c;
-  --color-secondary-foreground: #e6edf3;
-  --color-muted: #18202c;
-  --color-muted-foreground: #8b9aad;
-  --color-accent: #1e2a38;
-  --color-accent-foreground: #e6edf3;
-  --color-destructive: #fb7185;
-  --color-destructive-foreground: #04121f;
-  --color-border: #1e2a38;
-  --color-input: #1e2a38;
-  --color-ring: #38a3ff;
+  --color-primary: #f4f4f5;
+  --color-primary-foreground: #09090a;
+  --color-secondary: #1b1b1e;
+  --color-secondary-foreground: #f4f4f5;
+  --color-muted: #1b1b1e;
+  --color-muted-foreground: #a1a1a9;
+  --color-accent: #222226;
+  --color-accent-foreground: #f4f4f5;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #09090a;
+  --color-border: #232326;
+  --color-input: #2e2e33;
+  --color-ring: #f4f4f5;
 
-  /* Status: brighter faces so they sit on the abyss without glowing falsely. */
+  /* Status: brighter faces so they read on near-black. */
   --color-status-pending: #f59e0b;
   --color-status-running: #22d3ee;
   --color-status-finalizing: #a78bfa;
@@ -127,16 +130,16 @@
   --color-live: #22d3ee;
   --color-live-bg: rgb(34 211 238 / 0.18);
 
-  --color-type-container: #94a3b8;
-  --color-type-ai: #a78bfa;
-  --color-type-agent: #818cf8;
+  --color-type-container: #a1a1aa;
+  --color-type-ai: #d4d4d8;
+  --color-type-agent: #f4f4f5;
 
-  /* Deeper shadows so elevation still reads against near-black. */
-  --shadow-xs: 0 1px 3px 0 rgb(0 0 0 / 0.45);
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.45), 0 1px 3px 0 rgb(0 0 0 / 0.55);
-  --shadow-md: 0 2px 4px -1px rgb(0 0 0 / 0.5), 0 8px 20px -6px rgb(0 0 0 / 0.6);
-  --shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.65);
-  --shadow-xl: 0 24px 56px -12px rgb(0 0 0 / 0.7);
+  /* Deeper shadows so overlays still lift off near-black. */
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.45);
+  --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.6);
+  --shadow-lg: 0 12px 32px -12px rgb(0 0 0 / 0.7);
+  --shadow-xl: 0 24px 56px -16px rgb(0 0 0 / 0.75);
 }
 
 @layer base {
@@ -145,7 +148,37 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
   }
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  ::selection {
+    background: var(--color-foreground);
+    color: var(--color-background);
+  }
+}
+
+/*
+ * Page enter — a short rise when you move between sections, so navigation
+ * reads as one surface settling rather than a hard cut.
+ */
+@keyframes orka-page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility animate-page-enter {
+  animation: orka-page-enter 280ms var(--ease-out-quint);
 }
 
 /*

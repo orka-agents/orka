@@ -9,6 +9,7 @@ const config = {
   tagline: 'Kubernetes-native AI task orchestration',
   url: 'https://orka-agents.github.io',
   baseUrl: '/orka/',
+  favicon: 'img/favicon.png',
   organizationName: 'orka-agents',
   projectName: 'orka',
   trailingSlash: false,
@@ -23,6 +24,9 @@ const config = {
   },
 
   themes: ['@docusaurus/theme-mermaid'],
+
+  // Self-hosted Geist and Geist Mono (no runtime font CDN).
+  clientModules: [require.resolve('./src/clientModules/fonts.js')],
 
   i18n: {
     defaultLocale: 'en',
@@ -55,8 +59,18 @@ const config = {
       colorMode: {
         respectPrefersColorScheme: true,
       },
+      mermaid: {
+        theme: {light: 'neutral', dark: 'dark'},
+      },
       navbar: {
         title: 'Orka',
+        logo: {
+          alt: '',
+          src: 'img/orka-mark.png',
+          srcDark: 'img/orka-mark-dark.png',
+          width: 30,
+          height: 30,
+        },
         items: [
           {
             type: 'docSidebar',
@@ -83,6 +97,12 @@ const config = {
       },
       footer: {
         style: 'dark',
+        logo: {
+          alt: 'Orka',
+          src: 'img/orka-mark-dark.png',
+          width: 44,
+          height: 44,
+        },
         links: [
           {
             title: 'Docs',
@@ -142,9 +162,10 @@ const config = {
         ],
         copyright: `Copyright © ${new Date().getFullYear()} Orka contributors.`,
       },
+      // Code blocks stay dark in both colour modes; custom.css sets their ground.
       prism: {
-        theme: prismThemes.github,
-        darkTheme: prismThemes.dracula,
+        theme: prismThemes.vsDark,
+        darkTheme: prismThemes.vsDark,
       },
     }),
 };
