@@ -309,6 +309,7 @@ func TestWatchlistSourceIDs(t *testing.T) {
 		"duplicate":              "| id | x |\n| --- | --- |\n| gh-a | y |\n| gh-a | z |\n",
 		"no outer pipes, bad id": "| id | x |\n| --- | --- |\n| gh-a | y |\nGH B | z |\n",
 		"row outside table":      "| id | x |\n| --- | --- |\n| gh-a | y |\n\n| gh-b | z |\n",
+		"bare row outside table": "| id | x |\n| --- | --- |\n| gh-a | y |\n\ngh-b | z\n",
 	} {
 		if _, err := WatchlistSourceIDs(input); err == nil {
 			t.Errorf("WatchlistSourceIDs(%s) = nil error, want error", name)

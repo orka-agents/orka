@@ -19,7 +19,7 @@ var tableSeparatorCell = regexp.MustCompile(`^:?-+:?$`)
 // watchlist, in order, for Limits.SourceIDs. A table starts at a header row
 // followed by a "| --- |" delimiter row and runs to the next blank line; every
 // row in it, with or without outer pipes, must start with a source id cell. A
-// pipe row outside a table, a row without a valid id, a repeated id, or a
+// "|" anywhere outside a table, a row without a valid id, a repeated id, or a
 // watchlist with no sources is an error, so a malformed watchlist cannot
 // quietly shrink the set of sources a digest must report.
 func WatchlistSourceIDs(markdown string) ([]string, error) {
@@ -39,8 +39,10 @@ func WatchlistSourceIDs(markdown string) ([]string, error) {
 				index++ // skip the delimiter row
 				continue
 			}
-			if strings.HasPrefix(line, "|") {
-				return nil, fmt.Errorf("watchlist line %d: table row outside a table with a header and delimiter row", index+1)
+			// Any other pipe may be a source row that lost its table; fail
+			// rather than silently drop it.
+			if strings.Contains(line, "|") {
+				return nil, fmt.Errorf("watchlist line %d: \"|\" outside a table with a header and delimiter row", index+1)
 			}
 			continue
 		}
