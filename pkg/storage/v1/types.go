@@ -71,7 +71,10 @@ type ArtifactOwner struct {
 	// TaskUID is the owning Task's UID when the caller knows it. It is
 	// reserved: providers accept it and may ignore it until artifact identity
 	// is enforced, after which a write for an older Task with the same name
-	// must not overwrite or delete a newer Task's artifacts.
+	// must not overwrite or delete a newer Task's artifacts. Until then an
+	// artifact is addressed by namespace, Task name and filename alone: a
+	// request without TaskUID reaches the same artifact as one with it, so a
+	// provider must not use TaskUID to find an artifact.
 	TaskUID string
 }
 

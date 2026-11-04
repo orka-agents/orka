@@ -78,9 +78,18 @@ func runPlans(t *testing.T, newProvider StateFactory) {
 	_, err := provider.GetPlan(ctx, "tenant-a", "coordinator")
 	require.ErrorIs(t, err, storagev1.ErrNotFound)
 
-	plan := &storagev1.PlanState{Iteration: 1, Summary: "started", ProgressPct: 10, PlanDocument: "# plan"}
+	// The provider assigns a plan's times from its own clock and ignores the
+	// caller's (see "Clock ownership" in docs/development/storage-contracts.md).
+	supplied := time.Date(2001, time.February, 3, 4, 5, 6, 7, time.UTC)
+	plan := &storagev1.PlanState{Iteration: 1, Summary: "started", ProgressPct: 10, PlanDocument: "# plan",
+		CreatedAt: supplied, UpdatedAt: supplied}
 	require.NoError(t, provider.SavePlan(ctx, "tenant-a", "coordinator", plan))
-	plan = &storagev1.PlanState{Iteration: 2, Summary: "done", ProgressPct: 100, GoalComplete: true, PlanDocument: "# done"}
+	first, err := provider.GetPlan(ctx, "tenant-a", "coordinator")
+	require.NoError(t, err)
+	require.False(t, first.CreatedAt.Equal(supplied), "the provider assigns the creation time")
+	require.False(t, first.UpdatedAt.Equal(supplied), "the provider assigns the update time")
+	plan = &storagev1.PlanState{Iteration: 2, Summary: "done", ProgressPct: 100, GoalComplete: true, PlanDocument: "# done",
+		CreatedAt: supplied, UpdatedAt: supplied}
 	require.NoError(t, provider.SavePlan(ctx, "tenant-a", "coordinator", plan))
 
 	got, err := provider.GetPlan(ctx, "tenant-a", "coordinator")
@@ -92,8 +101,9 @@ func runPlans(t *testing.T, newProvider StateFactory) {
 	require.Equal(t, 100, got.ProgressPct)
 	require.True(t, got.GoalComplete)
 	require.Equal(t, "# done", got.PlanDocument)
-	require.False(t, got.CreatedAt.IsZero())
+	require.True(t, got.CreatedAt.Equal(first.CreatedAt), "a later save keeps the creation time")
 	require.False(t, got.UpdatedAt.Before(got.CreatedAt))
+	require.Equal(t, time.UTC, got.CreatedAt.Location(), "plan times are UTC")
 
 	_, err = provider.GetPlan(ctx, "tenant-b", "coordinator")
 	require.ErrorIs(t, err, storagev1.ErrNotFound)

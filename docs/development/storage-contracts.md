@@ -269,7 +269,8 @@ the named step.
   these values.
 - **Clock ownership.** Callers supply lease times (`now` and lease durations)
   and most record times. The provider assigns some: artifact and message
-  creation times, Task result timestamps, and in SQLite the repository monitor
+  creation times, Task result timestamps, a plan's creation and update times
+  (`SavePlan` ignores the caller's), and in SQLite the repository monitor
   times it fills when a caller leaves them zero or always sets, such as in
   `UpsertRepositoryMonitor` and `CancelWorkActions`. Those two clocks diverge
   once the store is a separate service; operation receipts (step 3) decide

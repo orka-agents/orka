@@ -27,9 +27,10 @@
 // recording a terminal approval, keeps that guarantee across its read and its
 // write, and a method that returns several records, such as a Session with its
 // transcript, reads them from one snapshot. A nil error from a write means its
-// change is durable: it survives a provider restart and any failover the
-// provider declares automatic (see [DurabilityClass]). No operation or
-// transaction spans state.v1 and artifacts.v1.
+// change is durable to the degree the provider's [DurabilityClass] states:
+// every class survives a restart of the provider process, and the class says
+// whether the change also survives host loss and an automatic failover. No
+// operation or transaction spans state.v1 and artifacts.v1.
 //
 // # Errors
 //
@@ -43,10 +44,14 @@
 //
 // # Times
 //
-// A provider preserves every caller-supplied time exactly, to the nanosecond,
-// and returns stored times in UTC. Some records bind exact times into
-// encryption associated data or keys, so rounding to a database's native
-// precision corrupts them.
+// A provider preserves every time a caller supplies exactly, to the
+// nanosecond, and returns stored times in UTC. Some records bind exact times
+// into encryption associated data or keys, so rounding to a database's native
+// precision corrupts them. The exceptions are the record times the provider
+// assigns from its own clock and for which it ignores any value the caller
+// set: artifact and message creation times, Task result timestamps, a plan's
+// CreatedAt and UpdatedAt, and the repository monitor times listed under
+// "Clock ownership" in docs/development/storage-contracts.md.
 //
 // # Records and wire format
 //
