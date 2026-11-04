@@ -68,7 +68,8 @@ type Verifier struct {
 
 // Verify returns a copy of digest that keeps only proposals whose every Orka
 // path exists at the digest commit, whose every cited Orka issue exists and
-// whose every source link resolves. Removed proposals are counted under
+// whose every source link resolves, and only watchlist suggestions whose link
+// resolves. Removed proposals are counted under
 // dropped by reason and never returned. The input digest must already be
 // valid; Verify validates it again so a caller cannot verify unvalidated data
 // by mistake, and validates the result before returning it.
@@ -97,6 +98,18 @@ func (v Verifier) Verify(ctx context.Context, digest *Digest, limits Limits) (*D
 	verified := *digest
 	verified.Proposals = make([]Proposal, 0, len(digest.Proposals))
 	verified.Dropped = append([]Dropped{}, digest.Dropped...)
+	// Suggestions are advisory, so one whose link cannot be confirmed is
+	// removed rather than failing the digest; a person never sees it.
+	verified.WatchlistSuggestions = make([]WatchlistSuggestion, 0, len(digest.WatchlistSuggestions))
+	for _, suggestion := range digest.WatchlistSuggestions {
+		resolves, err := v.Links.LinkResolves(ctx, suggestion.URL)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err == nil && resolves {
+			verified.WatchlistSuggestions = append(verified.WatchlistSuggestions, suggestion)
+		}
+	}
 	for _, proposal := range digest.Proposals {
 		if err := ctx.Err(); err != nil {
 			return nil, err

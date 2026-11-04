@@ -56,7 +56,9 @@ func ParseProposal(data []byte) (*Proposal, error) {
 // ExtractDigest returns the JSON body of the single fenced block tagged
 // DigestFenceInfo in a scout's final answer. Zero or several such blocks are
 // errors: a fetched page that smuggles in its own block must not be able to
-// replace or shadow the scout's digest.
+// replace or shadow the scout's digest. Any longer backtick fence or tilde
+// fence is an error too, because a tagged line inside one would be quoted
+// text rather than a block, and this scanner does not track enclosing fences.
 func ExtractDigest(answer string) ([]byte, error) {
 	if len(answer) > 4*MaxDigestBytes {
 		return nil, fmt.Errorf("answer exceeds %d bytes", 4*MaxDigestBytes)
@@ -66,6 +68,9 @@ func ExtractDigest(answer string) ([]byte, error) {
 	found := 0
 	for index := 0; index < len(lines); index++ {
 		line := strings.TrimRight(lines[index], " \t")
+		if trimmed := strings.TrimLeft(line, " "); strings.HasPrefix(trimmed, "````") || strings.HasPrefix(trimmed, "~~~") {
+			return nil, errors.New("answer must not contain longer backtick or tilde code fences")
+		}
 		if !strings.HasPrefix(line, "```") || strings.TrimSpace(strings.TrimPrefix(line, "```")) != DigestFenceInfo {
 			continue
 		}

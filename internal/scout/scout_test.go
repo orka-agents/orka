@@ -380,7 +380,10 @@ func TestExtractDigest(t *testing.T) {
 		// A fetched page that smuggles in a second block must not shadow the
 		// scout's own digest; ambiguity rejects the run.
 		"two blocks": answer + "\nQuoted from a page:\n```orka-scout-digest\n{}\n```\n",
-		"oversized":  strings.Repeat("a", 4*MaxDigestBytes+1),
+		// A tagged line quoted inside a longer or tilde fence is not a block.
+		"quoted in longer fence": "````markdown\n```orka-scout-digest\n" + body + "\n```\n````\n",
+		"quoted in tilde fence":  "~~~\n```orka-scout-digest\n" + body + "\n```\n~~~\n",
+		"oversized":              strings.Repeat("a", 4*MaxDigestBytes+1),
 	} {
 		if _, err := ExtractDigest(input); err == nil {
 			t.Errorf("ExtractDigest(%s) = nil error, want error", name)
@@ -440,6 +443,11 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 	missingIssue.Evidence.OrkaPaths = nil
 	missingIssue.Evidence.OrkaIssues = []int{999_999}
 	// Related issues from the duplicate search are shown to reviewers too.
+	digest.WatchlistSuggestions = []WatchlistSuggestion{
+		{URL: "https://example.com/release/v1", Reason: "release notes for a tracked runtime"},
+		{URL: "https://example.com/gone", Reason: "dead link"},
+		{URL: "https://example.com/flaky", Reason: "unconfirmed link"},
+	}
 	missingRelated := validProposal()
 	missingRelated.Title = "feat(tools): missing related issue"
 	missingRelated.Related = []Related{{Number: 999_998, State: IssueStateOpen}}
@@ -450,6 +458,9 @@ func TestVerifierDropsAndCountsUnverifiedProposals(t *testing.T) {
 	verified, err := verifier.Verify(context.Background(), &digest, testLimits(6))
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
+	}
+	if len(verified.WatchlistSuggestions) != 1 || verified.WatchlistSuggestions[0].URL != "https://example.com/release/v1" {
+		t.Fatalf("Verify() kept suggestions %#v, want only the one whose link resolves", verified.WatchlistSuggestions)
 	}
 	if len(verified.Proposals) != 1 || verified.Proposals[0].Title != good.Title {
 		t.Fatalf("Verify() kept %#v, want only the grounded proposal", verified.Proposals)
