@@ -555,6 +555,71 @@ func TestUsageWorkerAuthorityRejectsUntrustedExecution(t *testing.T) {
 	}
 }
 
+// encoding/json decodes any key equal under strings.EqualFold into a tagged
+// field, including non-ASCII folds such as U+017F (ſ) for "s". The handler
+// must recognize the reserved content keys in every such spelling.
+func TestUsageWorkerReservedContentKeysMatchAnySpelling(t *testing.T) {
+	harness := map[string]any{"taskUID": "other-task-uid", "taskAttempt": 1, "promptID": "prompt-1", "sequence": 1}
+	harnessContent := func(key string) map[string]any {
+		return map[string]any{key: harness, "inputTokens": 100, "outputTokens": 20, "usageReported": true, "usageComplete": true}
+	}
+	observation := store.UsageObservation{ID: "call", CounterID: "call", Status: store.UsageStatusCompleted,
+		InputTokens: new(int64(100)), OutputTokens: new(int64(20)), Complete: true}
+	for _, tc := range []struct {
+		name     string
+		taskType corev1alpha1.TaskType
+		content  map[string]any
+		status   int
+		recorded bool
+	}{
+		{"harness mixed case", corev1alpha1.TaskTypeAI, harnessContent("HarnessV2"), http.StatusForbidden, false},
+		{"harness upper case", corev1alpha1.TaskTypeAI, harnessContent("HARNESSV2"), http.StatusForbidden, false},
+		{"harness unicode fold", corev1alpha1.TaskTypeAI, harnessContent("harneſsV2"), http.StatusForbidden, false},
+		{"usage upper case without usage authority", corev1alpha1.TaskTypeContainer, map[string]any{"USAGE": observation}, http.StatusForbidden, false},
+		{"usage unicode fold without usage authority", corev1alpha1.TaskTypeContainer, map[string]any{"uſage": observation}, http.StatusForbidden, false},
+		{"usage upper case from usage writer", corev1alpha1.TaskTypeAI, map[string]any{"USAGE": observation}, http.StatusCreated, true},
+		{"similar keys are ordinary content", corev1alpha1.TaskTypeContainer,
+			map[string]any{"harnessV2Note": "note", "usages": 1, "usageScope": "call"}, http.StatusCreated, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newInternalExecutionEventStore(t)
+			task, job, pod := testInternalExecutionEventOwnedWorkerObjects("owned-task")
+			task.Spec.Type = tc.taskType
+			pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
+			for _, registered := range []store.UsageTask{
+				{Namespace: task.Namespace, NamespaceUID: "namespace-uid", TaskUID: string(task.UID), TaskName: task.Name, Phase: "Running"},
+				{Namespace: task.Namespace, NamespaceUID: "namespace-uid", TaskUID: "other-task-uid", TaskName: "other-task", Phase: "Running"},
+			} {
+				require.NoError(t, backend.RegisterUsageTask(t.Context(), registered))
+			}
+			app := setupInternalExecutionEventAppWithClient(backend, testInternalExecutionEventClient(t, task, job, pod), testInternalExecutionEventWorkerUser(pod.Name))
+			body := map[string]any{"type": events.ExecutionEventTypeModelUsageUpdated, "content": tc.content}
+			response := doJSONRequest(t, app, "/internal/v1/events/default/task/owned-task", body)
+			require.Equal(t, tc.status, response.StatusCode)
+			require.NoError(t, response.Body.Close())
+
+			data, err := backend.LoadUsage(t.Context(), store.UsageFilter{Namespaces: []string{"default"}, AsOf: time.Now().UTC()})
+			require.NoError(t, err)
+			journal, err := backend.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "default", StreamType: "task", StreamID: "owned-task"})
+			require.NoError(t, err)
+			if tc.status != http.StatusCreated {
+				require.Empty(t, data.Observations)
+				require.Empty(t, journal)
+				return
+			}
+			require.Len(t, journal, 1)
+			if !tc.recorded {
+				require.Empty(t, data.Observations)
+				return
+			}
+			require.Len(t, data.Observations, 1)
+			require.Equal(t, string(task.UID), data.Observations[0].TaskUID)
+			require.Equal(t, store.UsageScopeCall, data.Observations[0].Scope)
+			require.Equal(t, store.UsageSourceProvider, data.Observations[0].Source)
+		})
+	}
+}
+
 func TestUsageDetachedStreamingContextRetainsRecorder(t *testing.T) {
 	backend := newInternalExecutionEventStore(t)
 	kube := testInternalExecutionEventClient(t, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default", UID: "namespace-uid"}})
