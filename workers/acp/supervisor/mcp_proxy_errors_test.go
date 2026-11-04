@@ -73,7 +73,7 @@ func TestMCPProxyPreservesToolErrorsWithoutHidingBrokerFailures(t *testing.T) {
 }
 
 func TestMCPProxyPreservesBrokeredApprovalOutcomes(t *testing.T) {
-	for _, code := range []string{"approval_declined", "approval_expired", "approval_cancelled", "approval_stale", "tool_execution_failed", "tool_outcome_unknown"} {
+	for _, code := range []string{"approval_declined", "approval_expired", "approval_cancelled", "approval_stale", "tool_execution_failed", "tool_failed_without_effect", "tool_outcome_unknown"} {
 		t.Run(code, func(t *testing.T) {
 			broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
 				result, err := json.Marshal(map[string]any{"isError": true, "code": code, "message": "controller tool outcome"})

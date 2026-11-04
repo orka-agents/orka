@@ -17,6 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+//nolint:gocyclo // One table covers every terminal lifecycle projection.
 func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.T) {
 	const assistantResult = "fixture-assistant-result-must-not-become-status"
 	for _, test := range []struct {
@@ -129,6 +130,14 @@ func TestACPSessionResultProjectionPreservesTerminalLifecycleMessage(t *testing.
 						session := &acpTaskSession{Turn: turn, Binding: ACPRuntimeSessionBinding{SessionUID: control.SessionUID}}
 						if err := dispatcher.finalizeTaskSessionResult(ctx, task, fence, session, assistantResult, publicationID, test.phase, delivery); err != nil {
 							t.Fatal(err)
+						}
+						// The live finalization already ran the activation tail. The
+						// recovery sweep must not resume it once the Task settles, or
+						// it resettles the Task as if live settlement was interrupted.
+						settled := task.DeepCopy()
+						settled.Status.Phase = test.phase
+						if needs, err := dispatcher.sessionTurnRequiresTerminalRecovery(ctx, settled, attempt); err != nil || needs {
+							t.Fatalf("live-finalized turn = (%v, %v), want no recovery", needs, err)
 						}
 					}
 					finalized, err := controls.GetSessionTurn(ctx, turn.Turn.ID)

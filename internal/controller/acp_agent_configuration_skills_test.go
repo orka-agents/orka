@@ -107,7 +107,7 @@ func TestQueueACPRuntimeTaskRejectsAgentSkillsBeforePoolDemand(t *testing.T) {
 
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: "orka-runtimes",
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: "orka-runtimes",
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)

@@ -376,12 +376,29 @@ describe('AgentDetail', () => {
       },
     }
     server.use(
-      http.get('/api/v1/agents/:name', () => HttpResponse.json(agentWithCMPrompt))
+      http.get('/api/v1/agents/:name', () => HttpResponse.json(agentWithCMPrompt)),
+      http.get('/api/v1/agents/:name/system-prompt', () =>
+        HttpResponse.json({ configMapRef: { name: 'my-cm', key: 'prompt.md' }, content: 'Prompt from the ConfigMap.' })),
     )
     render(<AgentDetail agentId="test-agent" />)
-    await waitFor(() => {
-      expect(screen.getByText('ConfigMap: my-cm/prompt.md')).toBeInTheDocument()
-    })
+    expect(await screen.findByRole('region', { name: 'System prompt' })).toHaveTextContent('Prompt from the ConfigMap.')
+    expect(screen.getByText('my-cm')).toBeInTheDocument()
+    expect(screen.getByText('prompt.md')).toBeInTheDocument()
+  })
+
+  it('names the ConfigMap but not its content when the caller may not read it', async () => {
+    server.use(
+      http.get('/api/v1/agents/:name', () => HttpResponse.json({
+        ...fullAgent,
+        spec: { ...fullAgent.spec, systemPrompt: { configMapRef: { name: 'my-cm', key: 'prompt.md' } } },
+      })),
+      http.get('/api/v1/agents/:name/system-prompt', () =>
+        HttpResponse.json({ error: { code: 403, message: 'not authorized' } }, { status: 403 })),
+    )
+    render(<AgentDetail agentId="test-agent" />)
+    expect(await screen.findByText('You are not allowed to read this ConfigMap.')).toBeInTheDocument()
+    expect(screen.getByText('my-cm')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'System prompt' })).not.toBeInTheDocument()
   })
 
   it('renders agent with conditions that have messages', async () => {

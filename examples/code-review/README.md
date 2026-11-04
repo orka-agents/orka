@@ -89,5 +89,5 @@ or `headSHA` is missing, the coordinator reports the result and stops.
 
 These are enforced when the child Task is reconciled, so a coordinator that ignores its
 system prompt still cannot exceed them. See
-[Multi-agent coordination](../../website/docs/reference/multi-agent-coordination.md) for
+[Multi-agent coordination](../../website/docs/guides/multi-agent-coordination.md) for
 the full tool schemas and controller checks.

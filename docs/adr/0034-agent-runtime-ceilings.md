@@ -29,14 +29,14 @@ The ceiling is a validation gate, not a new way of computing policy. Before a
 Task is bound, the Task controller resolves the policy the Task would run with,
 using the same resolution and normalization the runtime uses, and fails the
 Task when that policy exceeds the ceiling. Effective-policy computation, the
-execution snapshot, and harness v1 dispatch are unchanged. A Task that passes
+execution snapshot, and dispatch are unchanged. A Task that passes
 the gate therefore runs with a policy inside the ceiling, and no consumer of
 the frozen snapshot can disagree with the check. A Task is judged against the
 Agent generation it binds to, which the binding already freezes.
 
 The alternative was to make an omitted Task policy fall back to the ceiling
 instead of the defaults. That would change effective-policy computation in
-several places, including the snapshot that harness v1 replays, and any path
+several places, including the frozen execution snapshot, and any path
 that missed the change would silently run with the old, wider default. A
 mismatch between defaults and ceiling is surfaced instead: the Task fails with
 the reason, and an Agent whose explicit defaults exceed its ceiling reports
@@ -48,8 +48,6 @@ than a capability the caller requested. The implicit `reply_in_conversation`
 grant for gateway Tasks does reach outside the Task, so Orka keeps it only when
 the projected policy still fits the ceiling. For `runtimeRef` Agents only
 `allowedTools` applies; the registered profile already fixes Bash and turns.
-The exception is a harness v1 registration, which takes `maxTurns` from the
-Task or Agent, so it is also held to the turn ceiling once planning resolves it.
 
 ## Consequences
 

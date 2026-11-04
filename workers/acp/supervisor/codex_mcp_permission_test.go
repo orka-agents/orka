@@ -66,6 +66,7 @@ func TestCodexMCPPermissionIdentityFailsClosed(t *testing.T) {
 		update   string
 		deny     bool
 		want     string
+		unnamed  bool
 		wantErr  bool
 	}{
 		{name: "registered builtin", update: `{"rawInput":{"server":"orka","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, want: reply},
@@ -82,10 +83,11 @@ func TestCodexMCPPermissionIdentityFailsClosed(t *testing.T) {
 		{name: "native explicit identity with false marker", update: `{"name":"Read","_meta":{"is_mcp_tool_call":false}}`, want: "Read"},
 		{name: "nonexecute MCP kind", update: `{"kind":"read","rawInput":{"server":"orka","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
 		{name: "empty MCP kind", update: `{"kind":"","rawInput":{"server":"orka","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
-		{name: "wrong server", update: `{"rawInput":{"server":"other","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
-		{name: "native name collision", update: `{"rawInput":{"server":"orka","tool":"Read"},"_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
-		{name: "unregistered tool", update: `{"rawInput":{"server":"orka","tool":"unknown"},"_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
-		{name: "explicit denial", update: `{"rawInput":{"server":"orka","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, deny: true, wantErr: true},
+		{name: "wrong server", update: `{"rawInput":{"server":"other","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, unnamed: true},
+		{name: "native name collision", update: `{"rawInput":{"server":"orka","tool":"Read"},"_meta":{"is_mcp_tool_call":true}}`, unnamed: true},
+		{name: "unregistered tool", update: `{"rawInput":{"server":"orka","tool":"unknown"},"_meta":{"is_mcp_tool_call":true}}`, unnamed: true},
+		{name: "explicit denial", update: `{"rawInput":{"server":"orka","tool":"reply_in_conversation"},"_meta":{"is_mcp_tool_call":true}}`, deny: true, unnamed: true},
+		{name: "explicit identity outside policy", update: `{"name":"Read","rawInput":{"server":"orka","tool":"unknown"},"_meta":{"is_mcp_tool_call":true}}`, unnamed: true},
 		{name: "missing raw input", update: `{"title":"mcp.orka.reply_in_conversation","_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
 		{name: "wrong raw input type", update: `{"rawInput":"reply_in_conversation","_meta":{"is_mcp_tool_call":true}}`, wantErr: true},
 		{name: "wrong marker type", update: `{"_meta":{"is_mcp_tool_call":"true"}}`, wantErr: true},
@@ -124,8 +126,85 @@ func TestCodexMCPPermissionIdentityFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := prompt.toolCallNames[id]; got != test.want {
-				t.Fatalf("remembered tool = %q, want %q", got, test.want)
+			got, recorded := prompt.toolCallNames[id]
+			if got != test.want || recorded != (test.want != "" || test.unnamed) {
+				t.Fatalf("remembered tool = %q (recorded %v), want %q (unnamed %v)", got, recorded, test.want, test.unnamed)
+			}
+		})
+	}
+}
+
+// A model can call an MCP tool the frozen policy does not hold. The prompt
+// broker refuses that call, so the prompt keeps running, and the call's
+// permission request can neither name a tool nor be renamed later.
+func TestCodexMCPCallOutsidePolicyKeepsThePromptRunning(t *testing.T) {
+	server, cfg, _ := newTestServer(t, "immediate")
+	fence := cfg.Fence
+	fence.RuntimeSessionUID = "permission-session"
+	fence.RuntimeSessionGeneration = 1
+	policy := harnessv2.MCPToolPolicy{
+		AllowedToolNames: []string{"Read", "reply_in_conversation"},
+		Tools: []harnessv2.MCPToolDescriptor{
+			{Name: "Read", Source: harnessv2.MCPToolSourceProviderNative},
+			{Name: "reply_in_conversation", Source: harnessv2.MCPToolSourceBrokeredBuiltin},
+		},
+	}
+	newState := func() *sessionState {
+		return &sessionState{
+			descriptor:  harnessv2.RuntimeSessionDescriptor{RuntimeSessionUID: fence.RuntimeSessionUID, Generation: 1},
+			profile:     harnessv2.RuntimeProfile{ProviderKind: providerKindCodex},
+			permissions: make(map[harnessv2.PermissionRequestID]permissionState),
+			mcpProxy:    &mcpProxySession{configuration: harnessv2.MCPPolicyConfiguration{ToolPolicy: policy}},
+		}
+	}
+	update := func(tool string) acp.PromptEvent {
+		return acp.PromptEvent{
+			Type: acp.PromptEventUpdate, Timestamp: time.Now().UTC(),
+			Update: &acp.SessionNotification{Update: json.RawMessage(`{"sessionUpdate":"tool_call","toolCallId":"call-1","kind":"execute","title":"mcp.orka.` + tool + `","status":"in_progress","rawInput":{"server":"orka","tool":"` + tool + `","arguments":{}},"_meta":{"is_mcp_tool_call":true}}`)},
+		}
+	}
+	permission := func(call string) acp.PromptEvent {
+		return acp.PromptEvent{
+			Type: acp.PromptEventPermissionRequested, Timestamp: time.Now().UTC(),
+			Permission: &acp.PermissionRequestEvent{RequestID: "permission-1", Request: acp.RequestPermissionRequest{
+				ToolCall: json.RawMessage(call),
+				Options:  []acp.PermissionOption{{OptionID: "allow", Name: "Allow once", Kind: "allow_once"}},
+			}},
+		}
+	}
+
+	state := newState()
+	prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+	mapped, err := server.mapRuntimeEvent(state, prompt, update("file_read"))
+	if err != nil || mapped == nil || mapped.Update == nil || mapped.Update.ToolCall == nil {
+		t.Fatalf("out-of-policy MCP update = %+v, %v; want a projected tool call", mapped, err)
+	}
+	mapped, err = server.mapRuntimeEvent(state, prompt, permission(`{"toolCallId":"call-1","kind":"execute","status":"pending"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapped.PermissionRequested.ToolName != "" {
+		t.Fatalf("out-of-policy MCP permission names %q", mapped.PermissionRequested.ToolName)
+	}
+
+	for _, test := range []struct {
+		name  string
+		event acp.PromptEvent
+	}{
+		{name: "a later update", event: update("reply_in_conversation")},
+		{name: "the permission request", event: permission(`{"toolCallId":"call-1","name":"Read","kind":"execute"}`)},
+	} {
+		t.Run(test.name+" cannot name the call", func(t *testing.T) {
+			state := newState()
+			prompt := &promptState{request: testStartPromptRequest(t, cfg, fence)}
+			if _, err := server.mapRuntimeEvent(state, prompt, update("Read")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.mapRuntimeEvent(state, prompt, test.event); err == nil {
+				t.Fatal("an out-of-policy MCP call gained a tool identity")
+			}
+			if len(state.permissions) != 0 {
+				t.Fatal("a renamed out-of-policy MCP call recorded a pending permission")
 			}
 		})
 	}

@@ -67,8 +67,8 @@ const (
 	// DefaultGeneralWorkerImage is the default image for container tasks
 	DefaultGeneralWorkerImage = "ghcr.io/orka-agents/orka/general-worker:latest"
 
-	// DefaultInitImage is the default image for init containers
-	DefaultInitImage = "busybox:1.37"
+	// DefaultInitImage pins the multi-platform BusyBox index used to fetch session transcripts.
+	DefaultInitImage = "docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 
 	// AIWorkerServiceAccount is the ServiceAccount used by trusted AI task workers.
 	AIWorkerServiceAccount = "orka-ai-worker"
@@ -453,6 +453,8 @@ func buildTaskJobName(task *corev1alpha1.Task) string {
 // JobBuildOptions carries optional inputs that affect Job rendering while keeping
 // the historical Build signature stable.
 type JobBuildOptions struct {
+	AISoul *resolvedAISoul
+
 	// GatewayReplyEligible is resolved from an exact durable event/TaskUID binding.
 	GatewayReplyEligible        bool
 	ResolvedApprovalsJSON       string
@@ -493,7 +495,16 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
-	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent); err != nil {
+	if task.Spec.Type == corev1alpha1.TaskTypeAI {
+		if err := validatePreparedAISoul(task, agent, opts.AISoul); err != nil {
+			return nil, err
+		}
+	}
+	var promptOverride []string
+	if opts.AISoul != nil {
+		promptOverride = []string{literalKubernetesPrompt(opts.AISoul.Prompt)}
+	}
+	if err := b.validateContainerDeliveredPromptSize(ctx, task, agent, promptOverride...); err != nil {
 		return nil, err
 	}
 
@@ -534,6 +545,19 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 				},
 			},
 		},
+	}
+
+	if task.Spec.Type == corev1alpha1.TaskTypeAI && !validationTask && agent != nil {
+		// Name selectors can be installed before the Agent exists; restrict them
+		// to same-namespace Agents so the policy namespace supplies the scope.
+		if agent.Name != "" && agent.Namespace == task.Namespace {
+			job.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+			job.Spec.Template.Labels[labels.LabelAgentName] = labels.SelectorValue(agent.Name)
+		}
+		if agent.UID != "" {
+			job.Labels[labels.LabelAgentUID] = string(agent.UID)
+			job.Spec.Template.Labels[labels.LabelAgentUID] = string(agent.UID)
+		}
 	}
 
 	taskmeta.ApplyTransactionMetadata(&job.ObjectMeta, task.Spec.Transaction)
@@ -879,6 +903,10 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 			return nil, err
 		}
 		envVars = aiEnvVars
+		if opts.AISoul != nil {
+			envVars = setControllerEnvValue(envVars, workerenv.AISystemPrompt, literalKubernetesPrompt(opts.AISoul.Prompt))
+			envVars = setControllerEnvValue(envVars, workerenv.AIPrompt, literalKubernetesPrompt(opts.AISoul.UserPrompt))
+		}
 	}
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
@@ -1182,6 +1210,9 @@ var ErrConnectorToolResolution = errors.New("connector tool resolution failed")
 func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	envVars []corev1.EnvVar, task *corev1alpha1.Task, agent *corev1alpha1.Agent, providerCRD *corev1alpha1.Provider, opts JobBuildOptions) ([]corev1.EnvVar, error) {
 	cfg := resolveAIConfig(task, agent, providerCRD)
+	if opts.AISoul != nil {
+		cfg.systemPrompt = opts.AISoul.Prompt
+	}
 
 	// Resolve system prompt from ConfigMapRef if not already set inline
 	if cfg.systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil && agent.Spec.SystemPrompt.ConfigMapRef != nil {
@@ -1242,6 +1273,10 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 	// The tool list is always controller-owned, even when empty, so Task env
 	// and Agent Secret EnvFrom cannot supply it.
 	envVars = setControllerEnvValue(envVars, workerenv.AITools, strings.Join(cfg.tools, ","))
+	// Deprecation metadata is controller-owned too, including when empty, so
+	// Task env and Agent Secret EnvFrom cannot suppress compatibility warnings.
+	envVars = setControllerEnvValue(envVars, workerenv.AIDeprecatedMemoryTools,
+		workerenv.JoinCSV(aitools.DeprecatedMemoryToolNames(task, agent)))
 	if slices.Contains(cfg.tools, aitools.GatewayReplyToolName) {
 		envVars = setControllerEnvValue(envVars, workerenv.GatewayReplyEnabled, "true")
 	}
@@ -2596,7 +2631,7 @@ func (b *JobBuilder) addSkillVolumes(ctx context.Context, job *batchv1.Job, task
 // message instead of a dead container.
 const maxContainerDeliveredPromptBytes = 110 * 1024
 
-func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, promptOverride ...string) error {
 	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
 		// Only AI worker Jobs export prompts through the process
 		// environment; a container Task's unused optional prompt fields must
@@ -2617,6 +2652,9 @@ func (b *JobBuilder) validateContainerDeliveredPromptSize(ctx context.Context, t
 	systemPrompt := ""
 	if task.Spec.AI != nil {
 		systemPrompt = task.Spec.AI.SystemPrompt
+	}
+	if len(promptOverride) > 0 {
+		systemPrompt = promptOverride[0]
 	}
 	if systemPrompt == "" && agent != nil && agent.Spec.SystemPrompt != nil {
 		systemPrompt = agent.Spec.SystemPrompt.Inline

@@ -107,7 +107,7 @@ export const builtinTools: BuiltinTool[] = [
 
 function customTool(name: string, createdDaysAgo: number, spec: Tool['spec'], status: Tool['status']): Tool {
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'Tool',
     metadata: { name, namespace: DEMO_NAMESPACE, uid: uid(`tool:${name}`), creationTimestamp: ago(createdDaysAgo * 24 * 60) },
     spec,

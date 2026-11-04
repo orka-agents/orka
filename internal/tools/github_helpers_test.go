@@ -740,6 +740,7 @@ func linkedAccountFixture(t *testing.T) (client.Client, *corev1alpha1.Task) {
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(task, secret).Build(), task
 }
 
+//nolint:gocyclo // One table covers every linked-account precedence case.
 func TestResolveRepoAndToken_LinkedAccountFirst(t *testing.T) {
 	k8sClient, task := linkedAccountFixture(t)
 

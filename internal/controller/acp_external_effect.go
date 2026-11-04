@@ -23,6 +23,12 @@ import (
 // committed under a valid lease.
 const externalEffectLeaseSettlementMargin = time.Minute
 
+// Field names inside external-effect request digests.
+const (
+	identityKey = "identity"
+	requestKey  = "request"
+)
+
 // maxACPExternalEffectCallDuration bounds one in-flight brokered custom-Tool
 // call so its outcome can always be committed while the ledger lease is still
 // valid. Without this bound, a call that outlives the lease plus the
@@ -132,7 +138,7 @@ func runExternalEffectWithReplayCallTimeout[T any](
 		return zero, false, fmt.Errorf("external-effect call timeout must be positive")
 	}
 	requestDigest, err := acpDomainDigest("external-effect-request", map[string]any{
-		"identity": identity, "request": request,
+		identityKey: identity, requestKey: request,
 	})
 	if err != nil {
 		return zero, false, err
@@ -509,6 +515,6 @@ func SettlePendingExternalEffect(
 // reserves an effect, so a caller can recognize its own committed record.
 func ExternalEffectRequestDigest(identity store.ExternalEffectIdentity, request any) (string, error) {
 	return acpDomainDigest("external-effect-request", map[string]any{
-		"identity": identity, "request": request,
+		identityKey: identity, requestKey: request,
 	})
 }

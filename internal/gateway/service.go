@@ -25,9 +25,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/orka-agents/orka/internal/agentcontext"
+
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1363,6 +1366,7 @@ func (s *Service) deferProjection(ctx context.Context, event *store.GatewayEvent
 	)
 }
 
+//nolint:gocyclo // Terminal projection handles each delivery outcome explicitly.
 func (s *Service) projectTerminal(
 	ctx context.Context,
 	event *store.GatewayEvent,
@@ -1409,6 +1413,32 @@ func (s *Service) projectTerminal(
 		"gateway": event.GatewayName, "binding": event.BindingName,
 		eventIDField: event.ID, "taskName": task.Name, "deliveryId": deliveryID,
 	}
+	if digest := agentcontext.SessionDigest(task.Status.SoulBinding); digest != "" {
+		messageMetadata[store.SessionSoulDigestMetadata] = digest
+	} else if task.Spec.Type == corev1alpha1.TaskTypeAI && task.Status.Phase == corev1alpha1.TaskPhaseFailed &&
+		task.UID != "" && task.Status.SoulBinding == nil && task.Status.Attempts == 0 && task.Status.StartTime == nil &&
+		task.Status.JobName == "" && task.Status.JobUID == "" && task.Status.Iteration == 0 &&
+		task.Status.Execution == nil && task.Status.ExecutionOutcome == nil && task.Status.ResultRef == nil {
+		// Any failure before binding and execution, including soul, Provider and
+		// compatibility errors, ran no model turn, so it must not pin absence.
+		// The status alone cannot rule out an earlier no-soul Job whose
+		// start-status write was lost, so an owned Job also counts as execution.
+		// Read failures retry projection rather than pin the wrong identity.
+		var jobs batchv1.JobList
+		if err := s.freshReader().List(ctx, &jobs, client.InNamespace(task.Namespace)); err != nil {
+			return false, err
+		}
+		unbound := true
+		for i := range jobs.Items {
+			if metav1.IsControlledBy(&jobs.Items[i], task) {
+				unbound = false
+				break
+			}
+		}
+		if unbound {
+			messageMetadata[store.SessionSoulUnboundMetadata] = "true"
+		}
+	}
 	deliveryTrace := orkatracing.InjectContext(ctx)
 	deliveryExpiresAt := gatewayDeliveryExpiresAt(event.ExpiresAt, now, s.Config)
 	delivery := store.GatewayDelivery{
@@ -1444,6 +1474,8 @@ func (s *Service) projectTerminal(
 }
 
 // DeliverOnce claims one due delivery and records the synchronous terminal adapter result.
+//
+//nolint:gocyclo // Delivery keeps claim, send, and settlement branches together under one lease.
 func (s *Service) DeliverOnce(ctx context.Context) error {
 	claimAt := time.Now().UTC()
 	delivery, err := s.DeliveryStore.ClaimNextGatewayDelivery(ctx, s.Config.Namespace, s.Owner, claimAt, s.Config.ClaimLease)
@@ -1821,7 +1853,8 @@ func gatewayTaskMatchesExpected(
 	existingSpec := existing.Spec.DeepCopy()
 	expectedSpec := expected.Spec.DeepCopy()
 	existingSpec.Timeout = expectedSpec.Timeout
-	if !apiequality.Semantic.DeepEqual(*existingSpec, *expectedSpec) {
+	// Control fields such as suspend can change after creation.
+	if !apiequality.Semantic.DeepEqual(existingSpec.ExecutionInputs(), expectedSpec.ExecutionInputs()) {
 		return false
 	}
 	for key, value := range expected.Labels {

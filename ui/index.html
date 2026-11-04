@@ -6,18 +6,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orka</title>
     <script>
-      // Kill dark-mode FOUC: apply the persisted theme before first paint.
-      // Mirrors the zustand `persist` store keyed as "orka-ui"
-      // ({ state: { theme } }). __root.tsx remains the post-hydration source of truth.
+      // Kill dark-mode FOUC: apply the theme before first paint. Mirrors the
+      // zustand `persist` store keyed as "orka-ui" ({ state: { theme }, version })
+      // and its migration; __root.tsx remains the post-hydration source of truth.
       (function () {
+        var theme
         try {
           var raw = localStorage.getItem('orka-ui')
           var parsed = raw ? JSON.parse(raw) : null
-          if (parsed && parsed.state && parsed.state.theme === 'dark') {
-            document.documentElement.classList.add('dark')
-          }
+          theme = parsed && parsed.state && parsed.state.theme
+          // Before version 1, 'light' was everyone's default, not a choice.
+          // Like zustand, migrate only an entry with an older numeric version.
+          if (theme === 'light' && typeof parsed.version === 'number' && parsed.version < 1) theme = 'system'
         } catch (e) {
-          /* ignore malformed storage; React syncs on mount */
+          /* blocked or malformed storage: follow the system */
+        }
+        var systemDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+        if (theme === 'dark' || (theme !== 'light' && systemDark)) {
+          document.documentElement.classList.add('dark')
         }
       })()
     </script>

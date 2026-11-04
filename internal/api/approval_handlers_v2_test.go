@@ -41,6 +41,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -638,6 +639,8 @@ func (s *v2ApprovalAPIDecisionBarrier) AppendExecutionEvent(ctx context.Context,
 func TestV2ApprovalAPIConcurrentDecisionsHaveOneDurableWinner(t *testing.T) {
 	for _, decisions := range [][2]string{{"approve", "approve"}, {"approve", "decline"}} {
 		t.Run(strings.Join(decisions[:], "-"), func(t *testing.T) {
+			metrics.ApprovalDecisionDuration.Reset()
+			t.Cleanup(metrics.ApprovalDecisionDuration.Reset)
 			f := newV2ApprovalAPIFixture(t)
 			call := f.start(t)
 			pending := f.pending(t)
@@ -674,6 +677,11 @@ func TestV2ApprovalAPIConcurrentDecisionsHaveOneDurableWinner(t *testing.T) {
 			listed := f.list(t)
 			require.Len(t, listed, 1)
 			require.Len(t, f.decisionEvents(t), 1)
+			samples := approvalDecisionSamples(t)
+			require.Len(t, samples, 1, "only the committed concurrent winner counts")
+			for _, histogram := range samples {
+				require.EqualValues(t, 1, histogram.GetSampleCount())
+			}
 			if listed[0].Status == approvals.StatusApproved {
 				require.False(t, result.IsError)
 				require.JSONEq(t, `{"workOrder":"fixture-order-1","created":true}`, string(result.Result))
@@ -690,6 +698,8 @@ func TestV2ApprovalAPIConcurrentDecisionsHaveOneDurableWinner(t *testing.T) {
 func TestV2ApprovalAPILateDecisionsCannotExecuteAnotherTaskRun(t *testing.T) {
 	for _, scenario := range []string{"task-replaced", "attempt-replaced", "prompt-replaced"} {
 		t.Run(scenario, func(t *testing.T) {
+			metrics.ApprovalDecisionDuration.Reset()
+			t.Cleanup(metrics.ApprovalDecisionDuration.Reset)
 			f := newV2ApprovalAPIFixture(t)
 			call := f.start(t)
 			pending := f.pending(t)
@@ -715,6 +725,9 @@ func TestV2ApprovalAPILateDecisionsCannotExecuteAnotherTaskRun(t *testing.T) {
 			require.NoError(t, response.err)
 			require.Equal(t, wantStatus, response.status, "%s", response.body)
 			requireV2ApprovalAPIError(t, call.result(t), "approval_stale")
+			samples := approvalDecisionSamples(t)
+			require.NotContains(t, samples, "approved/acp", "stale human decisions must not count")
+			require.NotContains(t, samples, "denied/acp")
 			require.Empty(t, f.decisionEvents(t))
 			require.Zero(t, f.count.Load())
 		})
@@ -742,6 +755,8 @@ func TestV2ApprovalAPIExpiredReviewRejectsLateDecisions(t *testing.T) {
 }
 
 func TestV2ApprovalAPIExpiresReviewAfterWaitingBrokerDisconnects(t *testing.T) {
+	metrics.ApprovalDecisionDuration.Reset()
+	t.Cleanup(metrics.ApprovalDecisionDuration.Reset)
 	f := newV2ApprovalAPIFixture(t)
 	f.broker.ApprovalWaitTimeout = 500 * time.Millisecond
 	call := f.start(t)
@@ -771,6 +786,7 @@ func TestV2ApprovalAPIExpiresReviewAfterWaitingBrokerDisconnects(t *testing.T) {
 	response := f.decide("reviewer-a", pending.ID, "approve")
 	require.NoError(t, response.err)
 	require.Equal(t, http.StatusConflict, response.status, "%s", response.body)
+	require.Empty(t, approvalDecisionSamples(t), "passive display expiry and a rejected decision must not count")
 	requireV2ApprovalAPIError(t, f.start(t).result(t), "approval_expired")
 	require.Empty(t, f.decisionEvents(t))
 	require.Zero(t, f.count.Load())

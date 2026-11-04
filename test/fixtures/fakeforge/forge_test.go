@@ -159,6 +159,7 @@ func TestForgeAcceptsEachTokenOnlyOnItsSurface(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // End-to-end forge scenario asserts each reconciliation step in sequence.
 func TestForgeReconcilesPullRequestsForPushedBranches(t *testing.T) {
 	server, host := startForge(t)
 	work := filepath.Join(t.TempDir(), "work")

@@ -782,7 +782,7 @@ func (a *aimockAuthorityEval) patchArgs(args []string) {
 		"deployment/"+a.deployment,
 		"-n",
 		namespace,
-		"--timeout=5m"))
+		"--timeout="+controllerRolloutTimeout(a.deployment).String()))
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 }
 

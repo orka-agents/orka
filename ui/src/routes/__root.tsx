@@ -2,13 +2,13 @@ import { createRootRoute, Outlet, useNavigate, useLocation } from '@tanstack/rea
 import { useEffect } from 'react'
 import { RootLayout } from '@/components/layout/root-layout'
 import { useAuthStore } from '@/stores/auth'
-import { useUIStore } from '@/stores/ui'
+import { useResolvedTheme } from '@/hooks/use-resolved-theme'
 import { hasPendingHashToken, rememberLoginReturn } from '@/lib/login-return'
 
 function RootComponent() {
   const location = useLocation()
   const token = useAuthStore((s) => s.token)
-  const theme = useUIStore((s) => s.theme)
+  const theme = useResolvedTheme()
   const navigate = useNavigate()
 
   useEffect(() => {

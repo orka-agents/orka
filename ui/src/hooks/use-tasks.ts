@@ -10,18 +10,6 @@ function fetchTaskListPage(namespace: string, limit: string, continueToken?: str
   return api.get<ListResponse<Task>>('/tasks', pageParams({ namespace, limit }, continueToken))
 }
 
-export function useTaskList(limit = '25', refetchInterval: number | false = 10000) {
-  const namespace = useUIStore((s) => s.namespace)
-  const token = useAuthStore((s) => s.token)
-  return useQuery({
-    queryKey: ['tasks', namespace, limit],
-    queryFn: () => fetchTaskListPage(namespace, limit),
-    enabled: Boolean(token),
-    retry: retryUnlessForbidden,
-    refetchInterval: pollUnlessForbidden(refetchInterval),
-  })
-}
-
 export function useTaskListAll(pageLimit = '100', refetchInterval: number | false = 10000) {
   const namespace = useUIStore((s) => s.namespace)
   const token = useAuthStore((s) => s.token)

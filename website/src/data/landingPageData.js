@@ -3,40 +3,67 @@
 
 export const features = [
   {
-    emoji: '🤖',
-    title: 'AI Agents',
+    emoji: '🧑‍💻',
+    title: 'Coding agents that open PRs',
     description:
-      'Anthropic, OpenAI, or Azure OpenAI agents with tools, skills, and session persistence.',
+      'Codex, Claude Code, Copilot CLI, and OpenCode work on a clean checkout. A separate publisher pushes the verified change and opens the pull request.',
+    href: '/docs/agent-runtimes',
+  },
+  {
+    emoji: '🤖',
+    title: 'AI tasks with tools',
+    description:
+      'Anthropic, OpenAI, or Azure OpenAI models with web search, code execution, custom HTTP and MCP tools, skills, and sessions.',
+    href: '/docs/guides/agents-skills-and-tools',
   },
   {
     emoji: '🔀',
-    title: 'Multi-Agent Coordination',
+    title: 'Multi-agent coordination',
     description:
-      'Coordinators decompose tasks and delegate to specialists with depth and concurrency controls.',
+      'Coordinators delegate to specialists within allowlist, depth, and concurrency limits, or work toward a goal autonomously.',
+    href: '/docs/multi-agent-coordination',
   },
   {
-    emoji: '💬',
-    title: 'Interactive Chat',
+    emoji: '🔁',
+    title: 'Issue to pull request',
     description:
-      'An agentic orchestrator with SSE streaming that creates and manages agents and tasks for you.',
-  },
-  {
-    emoji: '🧠',
-    title: 'Durable Memory',
-    description:
-      'Namespace-scoped recall, transcript search, and reviewable memory proposals for coordinated agents.',
+      'Review every pull request, or label an issue and let agents plan, implement, repair, and mark it ready to merge.',
+    href: '/docs/repository-monitors',
   },
   {
     emoji: '🛡️',
-    title: 'Repository Security Scanning',
+    title: 'Repository security scanning',
     description:
-      'Scheduled scans with threat models, validated findings, patch generation, and remediation PRs.',
+      'Threat models, validated findings, and remediation pull requests, with a person choosing what gets fixed.',
+    href: '/docs/repository-security-scanning',
+  },
+  {
+    emoji: '💬',
+    title: 'Chat, dashboard, and CLI',
+    description:
+      'Describe work in plain language to an orchestrator, watch it live in the dashboard, or script it with the orka CLI.',
+    href: '/docs/chat',
   },
   {
     emoji: '🔌',
     title: 'OpenAI & Anthropic APIs',
     description:
-      'Drop-in compatible endpoints for Continue, Cursor, Claude Code, and any OpenAI-native client.',
+      'Point Claude Code, Cursor, or Continue at Orka. People get a cluster token; nobody needs a provider key.',
+    href: '/docs/openai-compat',
+  },
+  {
+    emoji: '📨',
+    title: 'Teams, Telegram, and A2A',
+    description:
+      'Gateways bring agents into the conversations people and other agents already have, with durable, deduplicated delivery.',
+    href: '/docs/gateways',
+  },
+  {
+    emoji: '✅',
+    title: 'Approvals and governance',
+    description:
+      'Hold consequential actions for a person, let people act through their own linked accounts, and audit every Task.',
+    href: '/docs/guides/human-approval-v2',
   },
 ];
 
@@ -55,7 +82,7 @@ export const providers = [
   },
   {
     name: 'Azure OpenAI',
-    href: '/docs/configuration',
+    href: '/docs/resources#provider',
     description: 'Enterprise OpenAI deployments running on Azure.',
   },
   {

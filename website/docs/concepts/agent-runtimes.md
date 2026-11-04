@@ -5,20 +5,37 @@ description: "How Orka runs coding agents: ACP RuntimePools, sessions, and the p
 
 # Agent runtimes
 
-`type: agent` Tasks use the ACP core runtime and the `orka.harness.v2` session protocol. Built-in Codex, Claude, Copilot, and OpenCode profiles run in controller-owned `RuntimePool` resources; there is no per-Task agent Job and no fallback runtime path.
+A `type: agent` Task runs a real coding-agent CLI — Codex, Claude Code, GitHub Copilot CLI,
+or OpenCode — against a git repository. This page explains how Orka runs them: warm pools of
+runtime Pods, private sessions inside them, a strict separation between the agent and your
+credentials, and a durable record of every attempt.
 
-Orka harness v2 is the controller-to-supervisor contract, carried over HTTP with
-NDJSON prompt streams. The supervisor drives each agent CLI using ACP over
-stdin/stdout. These are separate protocols with independent versions.
+In short:
 
-Orka owns the durable Task attempt, RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and result projection. The runtime Pod owns only the short-lived provider process and ACP session for a fenced RuntimeSession.
+- **Pools, not Jobs.** Orka keeps a controller-owned `RuntimePool` per runtime profile. Its
+  Pod scales to zero when idle and hosts several private **RuntimeSessions** when busy, so a
+  Task usually starts in seconds. There is no per-Task Job and no fallback path.
+- **The agent edits; Orka publishes.** The CLI works on a sanitized checkout with no Git
+  credentials. When it finishes, Orka validates the change, and a separate
+  Workspace/Publisher commits, pushes, and verifies it, optionally opening a pull request.
+- **Every attempt is durable.** Orka records each prompt attempt, so a controller restart
+  never sends the same prompt twice and an uncertain outcome is reported as uncertain.
+- **Models through a proxy.** Runtimes reach your model gateway through Orka's authenticated
+  [provider proxy](../operations/provider-proxy.md); no provider key enters the agent.
 
-The supported built-in set is intentionally closed: `codex`, `claude`,
-`copilot`, and `opencode`. Operators can also register and conformance-test an
-external `orka.harness.v2` `AgentRuntime`. A ready strict-governed registration
-selected through `runtimeRef` uses the same durable Task and RuntimeSession
-state machines, while the operator remains responsible for the external
-service lifecycle and capacity.
+Orka harness v2 (`orka.harness.v2`) is the controller-to-supervisor contract, carried over
+HTTP with NDJSON prompt streams. The supervisor in each runtime Pod drives the agent CLI over
+the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) on stdin/stdout. These are
+separate protocols with independent versions. Orka owns the durable Task attempt,
+RuntimeSession identity, queueing, workspace validation, delivery receipt, transcript, and
+result projection; the runtime Pod owns only the short-lived provider process and ACP session
+for a fenced RuntimeSession.
+
+The built-in set is intentionally closed: `codex`, `claude`, `copilot`, and `opencode`.
+Operators can also register and conformance-test an external `orka.harness.v2`
+`AgentRuntime`. A ready strict-governed registration selected through `runtimeRef` uses the
+same durable Task and RuntimeSession state machines, while the operator remains responsible
+for the external service lifecycle and capacity.
 
 ## Supported runtime profiles
 
@@ -28,6 +45,10 @@ service lifecycle and capacity.
 | Claude | `claude` | Immutable Claude ACP image definition is included. Configure a digest-pinned image. |
 | Copilot | `copilot` | Immutable Copilot ACP image definition is included. Configure a digest-pinned image. |
 | OpenCode | `opencode` | Immutable OpenCode ACP image definition is included. Configure a digest-pinned image. |
+
+Built-in runtimes can mount extra command-line tools from read-only toolbox
+images declared in `Agent.spec.runtime.toolboxes`; see
+[Toolboxes](../guides/toolboxes.md).
 
 External runtimes use an `AgentRuntime` registration with `contractVersion: orka.harness.v2`. Current-generation conformance proves the exact instance, profile, cancellation, duplicate, and workspace-governance claims. Dispatch revalidates the frozen registration, authentication authority, and observed runtime identity before every mutation. See [Bring your own AgentRuntime](../guides/bring-your-own-agent-runtime.md) and the [adapter contract](../development/agent-runtime-adapter-contract.md).
 
@@ -119,6 +140,7 @@ stateDiagram-v2
     prompt_running --> validating: prompt settled
     validating --> idle: read Task, or no changes
     validating --> preparing_publication: write Task with changes
+    validating --> publication_prepared: delta frozen during validation
 
     preparing_publication --> publication_prepared
     publication_prepared --> finalizing: publication reconciled
@@ -129,6 +151,7 @@ stateDiagram-v2
     deleted --> [*]
 
     prompt_running --> cancelling: cancellation requested
+    cancelling --> validating: prompt completed first
     cancelling --> poisoned
     poisoned --> deleting
 ```
@@ -240,10 +263,10 @@ spec:
       - Glob
       - Grep
   model:
-    name: gpt-5.4
+    name: gpt-6-astra
 ```
 
-OpenCode model IDs use provider/model form, for example `openai/gpt-5.4`.
+OpenCode model IDs use provider/model form, for example `openai/gpt-6-astra`.
 OpenCode selects `apply_patch` for GPT-family models and `edit`/`write` for
 others; Orka normalizes those aliases into one governed mutation capability, so
 allowing one exposes the group and disallowing one closes the group. For
@@ -290,18 +313,17 @@ How the check reads a policy:
 - **Tools.** The check uses the tools the runtime would actually expose, after
   `disallowedTools`, the Bash gate, and runtime normalization (such as
   OpenCode's alias grouping) apply. Tool names ignore case. Brokered and
-  custom tool names count too. For runtimes that accept scoped names such as
-  `Bash(git status)` (the harness v1 CLI wrappers; v2 RuntimePools accept only
-  plain names), a bare ceiling entry covers every scope of that tool, but a
-  scoped entry covers only that exact scope, compared case-sensitively. A `disallowedTools` entry narrows
+  custom tool names count too. For scoped names such as `Bash(git status)`, a
+  bare ceiling entry covers every scope of that tool, but a scoped entry
+  covers only that exact scope, compared case-sensitively. A `disallowedTools` entry narrows
   the request only when it matches an allowed name exactly, as at dispatch, so
   `bash` does not remove `Bash`.
 - **No explicit list.** A Task with no allowlist and an Agent with no
   `defaultAllowedTools` resolve to the full native tool set, less anything
   `disallowedTools` or `allowBash: false` removes. That usually exceeds a tool
   ceiling, so set `defaultAllowedTools` within the ceiling. An allowlist of only
-  blank entries is judged the same way, because the harness v1 wrappers read
-  it as no list. Likewise,
+  blank entries is judged the same way, so it can never slip past a ceiling.
+  Likewise,
   `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
@@ -314,8 +336,7 @@ How the check reads a policy:
   `allowBash: false`). Otherwise, include `reply_in_conversation` in an explicit
   allowlist and in the ceiling.
 - **`runtimeRef` Agents.** Only `allowedTools` applies; the registered profile
-  already fixes Bash and the turn budget. Harness v1 registrations, which take
-  `maxTurns` from the Task or Agent, are also held to `maxTurns`.
+  already fixes Bash and the turn budget.
 
 A Task is checked against the Agent generation it binds to. Changing a
 ceiling does not affect Tasks that are already bound. When an Agent's own
@@ -422,26 +443,10 @@ through short-lived artifact capabilities bound to the operation, method,
 path, digest, size, media type, identity, and expiry. The Publisher does not
 hold the artifact signing key.
 
-## Workspace fields
+Every `spec.workspace` field, with defaults, is in the
+[Resource reference](../reference/resources.md#workspace).
 
-| Field | Purpose |
-| --- | --- |
-| `intent` | `read` or `write`; defaults to `read` for agent Tasks and is immutable for an active attempt. |
-| `gitRepo` | Credential-free source repository URL. |
-| `sourceRepository` | Optional canonical provider repository identity. |
-| `branch` / `ref` | Source branch or exact ref/commit/tag. |
-| `readCredentialRef.name` | Secret used only by the clean-room clone/read boundary. |
-| `publicationGitRepo` | Credential-free repository URL that receives the publication branch. |
-| `publicationRepository` | Optional canonical publication repository identity. |
-| `publicationReadCredentialRef.name` | Target-read Secret used only for publication preflight and independent verification. |
-| `publicationCredentialRef.name` | Target-write Secret used only for the exact compare-and-swap push. |
-| `forgeCredentialRef.name` | Forge API Secret used only for pull-request reconciliation. Required when `createPR` is true. |
-| `subPath` | Repository subdirectory exposed as the workspace root. |
-| `pushBranch` | Publication branch. If omitted for a write Task, Orka derives a full-entropy Task- or Session-owned branch. |
-| `prBaseBranch` | Pull-request base branch when `createPR` is true. |
-| `prTitle` | Optional exact pull-request title, up to 256 characters. Empty uses the prompt's first nonblank line, trimmed and truncated to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
-| `prBody` | Optional pull-request body, up to 32,768 characters. Defaults to the publisher summary with the Task namespace/name. Publication generation and reconciliation markers are appended in either case. |
-| `createPR` | Explicitly request PR reconciliation after verified branch publication. |
+## Pull request text
 
 Pull-request text comes from the frozen Task spec and prompt, never from files or output produced by the agent. Orka rejects secret-like titles and bodies at runtime before publication, including prompt-derived titles. Orka reserves comments beginning with `<!-- orka.publisher.pr-` for reconciliation. Remove these comments when copying an existing PR body into `prBody`. The publisher keeps the original title and body when reconciling an existing pull request. A continuation does not overwrite a person's edits.
 
@@ -490,30 +495,13 @@ the supported format and import/export commands.
 
 ## Runtime and credential boundaries
 
-Built-in runtime Pods:
-
-- use a digest-pinned image and immutable runtime-profile digest;
-- have no Git read or publication credential;
-- have no direct SCM egress;
-- use a read-only root filesystem and no service-account token;
-- isolate resident sessions with private directories, distinct non-reused UIDs/GIDs, and process-tree cleanup;
-- expose only non-sensitive health/capability probes without authentication;
-- require controller authentication and operation-scoped authorization for status and mutations.
-
-Provider traffic goes only to the central authenticated provider proxy. The
-proxy accepts the controller-issued RuntimePool bearer, enforces the configured
-provider/model path, and forwards to Vekil. The `config/acp-production` overlay
-also applies the Vekil ingress policy so runtime Pods cannot bypass that proxy.
-
-Each RuntimeSession receives a credential-protected loopback MCP endpoint. It
-lists the canonical prompt tool policy while idle, but executes calls only for
-the active Task/attempt/prompt/lease. The controller broker revalidates the
-exact runtime fences, tool allowlist, approval evidence, and lease expiry on
-every call. Consequential calls reserve an `ExternalEffect` identity before
-execution and replay only a committed matching response.
-
-The Workspace/Publisher has brokered SCM/forge credentials and artifact access,
-but no provider or prompt-scoped MCP access.
+A built-in runtime Pod uses a digest-pinned image, a read-only root filesystem, and no
+service-account token. It holds no Git credential and has no route to source control. Its
+model traffic goes only to the central provider proxy, and each RuntimeSession reaches Orka
+tools only through a credential-protected loopback MCP proxy that the controller rechecks on
+every call. A call to a tool outside the frozen policy, such as one the model names on its own,
+is refused there as a failed tool call and the prompt continues. The Workspace/Publisher, which does hold the Git credentials, has no access to
+models or tools. [Security](security.md#acp-runtimepool-pods) describes each boundary.
 
 ## Controller configuration
 
@@ -532,12 +520,19 @@ immutable images:
 --acp-opencode-runtime-image=<repository>@sha256:<digest>
 ```
 
-:::warning[The two provider-proxy flags must name the same namespace]
-`--acp-provider-proxy-base-url` is the address runtime Pods call.
-`--acp-provider-proxy-namespace` is what the generated NetworkPolicy allows them to reach.
-If they disagree, every provider call is dropped by default-deny egress with no useful error.
-The flag defaults to `vekil-system`, but the Helm chart overrides it to the release namespace
-(`orka-system` on a default install), which is where the chart puts `provider-auth-proxy`.
+:::warning[The provider-proxy flags must match the proxy Pods]
+`--acp-provider-proxy-base-url` is the address runtime Pods call. Its host must end in
+`.<namespace>.svc` or `.<namespace>.svc.cluster.local`, where the namespace is
+`--acp-provider-proxy-namespace`, as in `<service>.<namespace>.svc`. Otherwise the controller
+rejects the configuration and RuntimePools report `Degraded`. Pools without an execution workspace
+show the error in their status message; execution-workspace pools show
+`runtime configuration is not admitted`. The namespace flag is unset by default. With
+`providerProxy.enabled=true`, the Helm chart sets it to the release namespace, where the chart
+deploys `provider-auth-proxy`.
+The generated NetworkPolicy allows TCP to Pods matching `--acp-provider-proxy-pod-labels` in that
+namespace, on the base URL's port. If those labels miss the proxy Pods, or that port differs from
+the port the proxy Pods listen on, every provider call is dropped by default-deny egress with no
+useful error.
 :::
 
 Mutable image tags are rejected for built-in pools. For Kustomize deployment,
@@ -548,8 +543,18 @@ cross-namespace Vekil ingress boundary.
 
 - **Task fails before queueing**: for a built-in runtime, verify the Agent has `runtime.type: codex`, `claude`, `copilot`, or `opencode`, ACP is enabled, and the matching digest-pinned image is configured. For `runtimeRef`, verify the registration is current-generation, ready, strict-governed, and matches the Task workspace intent.
 - **Task remains queued**: inspect the selected RuntimePool lifecycle/admission/capacity and the runtime Pod scheduling conditions.
+- **Agent warnings in Task results**: Orka advertises ACP session notices, so Codex and Claude Code send their own warnings, such as Codex's missing model metadata, as notices, which Orka keeps out of the result and does not log. Copilot CLI 1.0.96 ignores notices and still writes its `Info:` lines into the reply.
 - **Task reports `OutcomeUnknown`**: do not retry the same attempt automatically. Inspect the recorded attempt, controller epoch, runtime instance, and event timeline.
 - **Read Task fails validation**: inspect `status.delivery` for `ReadOnlyWorkspaceModified` and treat the session as poisoned.
 - **Write Task is blocked**: verify all required source-read, target-read, target-write, and forge credential references, the publication repository/branch, and the Workspace/Publisher broker configuration. Require a terminal verified delivery receipt before claiming success.
 - **`runtimeRef` Task is rejected**: inspect `AgentRuntime.status` for current-generation conformance, exact profile and instance identity, strict workspace governance, and valid authentication Secret bindings. Remove unsupported Task overrides such as `maxTurns`, `disallowedTools`, or `allowBash`.
-- **`spec.execution.workspace` Task is rejected**: workspace-provider-backed RuntimeSession dispatch is fail-closed unless `--acp-workspace-dispatch-enabled` is set together with the matching provider flag: `--agent-sandbox-enabled` for `provider: agent-sandbox` (which must omit `templateRef`), or `--substrate-enabled` for `provider: substrate` (which requires an infrastructure `templateRef`). Other options (`retain`, boot/pool/snapshot/hibernation, `onDetach`) stay fail-closed. The rejection reason is projected to `Task.status.executionWorkspace`. Repository access always uses top-level `spec.workspace`; see [Agent Sandbox](agent-sandbox.md) and [Substrate](substrate.md).
+- **`spec.execution.workspace` Task is rejected**: enable the workspace provider API and ACP dispatch with the required admission webhooks, then check the selected `classRef`, live `use` authorization, provider heartbeat/contracts, and immutable profile binding. Provider-specific Task selectors are removed. An ACP class must require `acp.runtime.v2`; its allowed reuse and detach actions must match the request. Core also needs read-only access to native worker Pods when applicable. The rejection reason appears in `Task.status.executionWorkspace`. Repository access uses top-level `spec.workspace`; see [Agent Sandbox](agent-sandbox.md) and [Substrate](substrate.md).
+
+## Agent persona
+
+Built-in harness v2 runtimes support an optional [`Agent.spec.soul`](./soul.md)
+source, independent of the role system prompt. The controller resolves and pins
+its content before dispatch. Codex and Claude use native instruction settings;
+Copilot and OpenCode use protected per-session instruction files. These files are
+not repository content and are not published or restored from a repository
+workspace checkpoint. External `runtimeRef` registrations do not accept souls.

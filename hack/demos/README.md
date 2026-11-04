@@ -230,52 +230,35 @@ hack/demos/10-chat-pr.sh
 hack/demos/20-manual-workflow.sh
 hack/demos/30-cron-workflow.sh
 hack/demos/40-security-scanning.sh
-hack/demos/60-agent-sandbox.sh    # requires hack/demos/cluster/install-agent-sandbox.sh
 ```
 
-Demo 70 (Agent Substrate) runs on its **own** kind cluster, not the shared
-`orka-demo` cluster (Substrate needs a custom registry + gVisor node config):
+### Backend setup
+
+The Substrate target installs the native backend and runs pooled MCP Tools
+conformance in a dedicated kind cluster. It does not install an external ACP
+provider or the `substrate-coding` class used by archived Demo 70:
 
 ```bash
-make demo-substrate-up                                # stand up the dedicated cluster
-kubectl config use-context kind-orka-agent-substrate-e2e
-DEMO_SUBSTRATE_NAMESPACE=default ./hack/demos/70-agent-substrate.sh
-make demo-substrate-down                              # tear it down
+make demo-substrate-up
+# Use the scoped kubeconfig printed by the installer; for the default run:
+export KUBECONFIG="$PWD/bin/substrate-e2e-orka-agent-substrate-e2e/kubeconfig"
+make demo-substrate-down
 ```
 
-### One cluster for everything (`demo-cluster-up-all`)
-
-Because the Substrate cluster is the superset (custom registry + gVisor nodes),
-a single bootstrap can host the current demos (00–40 and 60–70) on it:
+`demo-cluster-up-all` adds the model configuration and archived agent-sandbox
+assets to that MCP conformance cluster. `demo-cluster-up` installs Orka and those
+add-ons on `orka-demo`. Neither target installs an external ACP provider or class:
 
 ```bash
-make demo-cluster-up-all        # substrate cluster + Orka + agent-sandbox + vekil + Provider/secrets
-                                # (one-time GitHub device-code login for vekil — follow the log prompt)
+make demo-cluster-up-all        # MCP conformance + Orka demo add-ons
+# Model setup may require a one-time GitHub device-code login; follow the log prompt.
 ```
 
-> **Re-running is guarded.** If a kind cluster named `orka-agent-substrate-e2e`
-> already exists, the bootstrap prompts **reuse / recreate / cancel** instead of
-> silently destroying it (the Substrate standup does `kind delete` + rebuild,
-> which would wipe a completed vekil login). Choose **reuse** to keep the cluster
-> and just reconcile the add-ons. For non-interactive runs, set
-> `DEMO_CLUSTER_REUSE=reuse|recreate|cancel` to skip the prompt; with no TTY and
-> no override it defaults to `recreate` (the historical behavior).
+Reusing an existing Substrate cluster requires `DEMO_CLUSTER_REUSE=reuse`.
+Remove completed conformance resources before rerunning, or choose a new
+`KIND_CLUSTER`; the installer does not automatically recreate existing clusters.
 
 ```bash
-# Workspace demos bring their own namespace/env:
-kubectl config use-context kind-orka-agent-substrate-e2e
-
-# Demo 60 (agent-sandbox): the bootstrap installs the SandboxTemplate
-# (orka-live-template) and the sandbox-model-key Secret into the controller's
-# watched namespace (orka-system by default), so the demo MUST run there —
-# any other DEMO_NAMESPACE leaves the Tasks unreconciled.
-DEMO_NAMESPACE=orka-system DEMO_RUNTIME_TYPE=codex DEMO_RUNTIME_MODEL=gpt-5.5 \
-  DEMO_RUNTIME_SECRET_REF=sandbox-model-key DEMO_GIT_SECRET_REF=github-credentials \
-  DEMO_SANDBOX_TEMPLATE_REF=orka-live-template ./hack/demos/60-agent-sandbox.sh
-
-# Demo 70 (substrate): sets provider: substrate explicitly; runs in `default`.
-./hack/demos/70-agent-substrate.sh
-
 # Model-backed SDLC demos share one env file (points at the in-cluster vekil + secrets):
 source hack/demos/cluster/demo-env.sh
 ./hack/demos/20-manual-workflow.sh
@@ -286,17 +269,16 @@ source hack/demos/cluster/demo-env.sh
 make demo-cluster-up-all-down     # tear it all down
 ```
 
-Notes: the agent-sandbox/Substrate bootstrap and demos are retained only for
-prototype archaeology. Current Orka harness v2 validation must not set a default execution
-workspace provider or rely on a per-Task worker path. kontxt's `enforce` mode only
-gates requests carrying a `Txn-Token`, so the other demos remain independent.
-
-Known flake (Demo 70): the warm-reuse Task occasionally fails during workspace
-release with a gVisor `RestoreWorkload: ... eth0: Link not found` daemon error
-*after* the agent's work and PR have already landed. This is Substrate runtime
-nondeterminism on `runsc`, not an Orka bug — the demo's story (cold run opens a
-real PR, warm run reattaches with `reused=true`) still completes. Re-run if the
-final card matters for a recording.
+Demos 60/70 and their runtime assets are retained for prototype archaeology.
+Reviving them requires the external provider installation and class/profile setup
+described in the [workspace provider guide](../../docs/development/workspace-provider-authoring.md),
+the generic `--enable-workspace-provider-api` and
+`--acp-workspace-dispatch-enabled` flags, and migration to the harness v2 runtime
+and Workspace/Publisher credential contract. The classes default to
+`sandbox-coding` and `substrate-coding`; the bootstrap targets create neither.
+Current validation must not set a default workspace provider or use a per-Task
+worker path. kontxt's `enforce` mode only gates requests carrying a `Txn-Token`,
+so the other demos remain independent.
 
 ## Recording
 

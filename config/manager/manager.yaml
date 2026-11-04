@@ -92,6 +92,7 @@ spec:
           - --acp-provider-proxy-token-file=/var/run/orka/provider-auth/token
           - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1
           - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1
+          - --session-loader-image=docker.io/library/busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
           - --gateway-enabled=true
           - --gateway-pending-per-session=100
           - --gateway-max-records-per-gateway=1000
@@ -101,14 +102,7 @@ spec:
           - --gateway-delivery-timeout=15s
           - --gateway-delivery-max-attempts=10
 
-          - --execution-workspace-default-provider=agent-sandbox
-          - --agent-sandbox-enabled=false
-          - --agent-sandbox-warm-pool-policy=disabled
-          - --agent-sandbox-namespace-strategy=task
-          - --agent-sandbox-claim-timeout=2m
-          - --agent-sandbox-command-timeout=30m
-          - --agent-sandbox-cleanup-policy=delete
-          - --substrate-enabled=false
+          - --substrate-mcp-tools-enabled=false
           - --substrate-api-endpoint=api.ate-system.svc:443
           - --substrate-router-url=http://atenet-router.ate-system.svc
           - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev

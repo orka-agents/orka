@@ -20,7 +20,6 @@ interface RuntimeControlBarProps {
  * Production-safe runtime controls mapped to real Orka APIs: read-only
  * refresh and follow, plus fork through the same confirm-and-name dialog the
  * timeline rows use. Delete lives in the task header, visible on every tab.
- * No Step/Run/Inject — those are dev-simulator only.
  */
 export function RuntimeControlBar({ task, following, onToggleFollow, latestSeq, forkSupported = true }: RuntimeControlBarProps) {
   const queryClient = useQueryClient()
@@ -40,7 +39,7 @@ export function RuntimeControlBar({ task, following, onToggleFollow, latestSeq, 
         </Button>
       )}
       <Button variant="outline" size="sm" onClick={() => {
-        // The runtime view reads task + events + trace + approvals + artifacts;
+        // The task page reads task + events + trace + approvals + artifacts;
         // refresh all of them, not just the ['tasks'] list, so the visible task
         // data actually updates. Broad prefixes match the namespace/uid-keyed entries.
         const id = task.metadata.name

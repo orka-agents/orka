@@ -16,6 +16,8 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+var errSessionAdmissionRollback = errors.New("session admission rollback failed")
+
 type acpTaskSession struct {
 	Turn             *ACPSessionTurn
 	Binding          ACPRuntimeSessionBinding
@@ -31,6 +33,11 @@ type acpTaskSession struct {
 }
 
 const acpPreSubmissionCleanupTimeout = 30 * time.Second
+
+// errACPSessionNotFound marks a sessionRef with create=false that names a
+// Session that does not exist. Retrying cannot create it, so the Task fails
+// instead of waiting for its deadline.
+var errACPSessionNotFound = errors.New("SessionNotFound")
 
 func promptAttemptSessionBound(attempt *store.PromptAttempt) (bool, error) {
 	if attempt == nil {
@@ -153,8 +160,9 @@ func (d *ACPDispatcher) sessionTurnRequiresTerminalRecovery(
 	// cross-store activation tail (lease release, status projection, outbox
 	// activation). The Task controller can terminalize independently after
 	// that commit, so Task phase is never durable tail-completion proof.
-	// ResumeSessionTurnFinalization is idempotent, and its successful recovery
-	// records the immutable turn ID in the cache above.
+	// ResumeSessionTurnFinalization is idempotent. A successful live
+	// finalization, which runs the same tail, or a successful recovery records
+	// the immutable turn ID in the cache above.
 	return true, nil
 }
 
@@ -377,6 +385,17 @@ func (d *ACPDispatcher) prepareTaskSession(
 	}, nil
 }
 
+// rejectMissingTaskSession fails a Task whose sessionRef has create=false and
+// names a Session that does not exist. It runs before any Session binding.
+func (d *ACPDispatcher) rejectMissingTaskSession(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence) error {
+	reason := corev1alpha1.TaskExecutionReason(errACPSessionNotFound.Error())
+	message := fmt.Sprintf("session %s does not exist and sessionRef.create is false", strings.TrimSpace(task.Spec.SessionRef.Name))
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "session-not-found", reason, message); err != nil {
+		return err
+	}
+	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
+}
+
 func (d *ACPDispatcher) planTaskSession(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -396,7 +415,7 @@ func (d *ACPDispatcher) planTaskSession(
 	if !task.Spec.SessionRef.Create && !transcriptBackedPrompt {
 		if _, err := d.Store.GetSessionControl(ctx, task.Namespace, name); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return nil, fmt.Errorf("session %s/%s does not exist and create=false", task.Namespace, name)
+				return nil, fmt.Errorf("%w: session %s/%s does not exist and sessionRef.create is false", errACPSessionNotFound, task.Namespace, name)
 			}
 			return nil, err
 		}
@@ -637,8 +656,7 @@ func (d *ACPDispatcher) bindAndOpenTaskSessionTurn(
 	// failed after the Kubernetes-authoritative status CAS.
 	lease, err := d.acquireTaskSessionLease(ctx, task, fence, control, lineage)
 	if err != nil {
-		requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, err)
-		return nil, nil, errors.Join(err, requeueErr)
+		return nil, nil, d.requeueSessionLeaseFailure(ctx, task, attemptID, fence, err)
 	}
 	if lease.Key.LeaseGeneration != leaseGeneration {
 		err := fmt.Errorf("%w: acquired ACP Session lease generation changed after PromptAttempt binding", store.ErrConflict)
@@ -909,7 +927,7 @@ func (d *ACPDispatcher) finalizeTaskSessionResult(
 		FinalizedAt:   time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		// Only a complete binding may replace the live one: a recovered
 		// session that could not rebuild its generation must not clobber
 		// the binding the live path recorded.
@@ -952,10 +970,19 @@ func (d *ACPDispatcher) finalizeTaskSessionUnknown(ctx context.Context, task *co
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		d.removeRuntimeSessionBinding(session.Binding.SessionUID)
 	}
 	return err
+}
+
+// markTaskSessionFinalized records a turn whose finalization store call
+// succeeded. That call already completed the activation tail, so the recovery
+// sweep must not resume it: doing so reruns the tail and resettles the Task as
+// if its live settlement had been interrupted.
+func (d *ACPDispatcher) markTaskSessionFinalized(task *corev1alpha1.Task, session *acpTaskSession) {
+	session.finalized = true
+	d.rememberFinalizedSessionTurn(task.UID, session.Turn.Turn.ID)
 }
 
 func (d *ACPDispatcher) finalizeTaskSessionMarker(
@@ -994,7 +1021,7 @@ func (d *ACPDispatcher) finalizeTaskSessionMarker(
 		FinalizedAt: time.Now().UTC(),
 	})
 	if err == nil {
-		session.finalized = true
+		d.markTaskSessionFinalized(task, session)
 		d.removeRuntimeSessionBinding(session.Binding.SessionUID)
 	}
 	return err
@@ -1108,4 +1135,13 @@ func bootstrapPromptText(bootstrap *ACPBootstrapTranscript) string {
 		return ""
 	}
 	return "Orka canonical session transcript (JSONL; provider-native history is non-authoritative):\n" + string(bootstrap.Artifact)
+}
+
+func (d *ACPDispatcher) requeueSessionLeaseFailure(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
+	rollbackErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, cause)
+	if rollbackErr != nil && errors.Is(cause, store.ErrSessionConfigurationMismatch) {
+		// Candidate Session authority must be cleared before terminal settlement.
+		return errors.Join(errSessionAdmissionRollback, rollbackErr)
+	}
+	return errors.Join(cause, rollbackErr)
 }

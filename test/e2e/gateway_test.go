@@ -134,7 +134,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		if managerCAConfigured && managerDeploymentName != "" {
 			By("removing Gateway E2E CA trust from the manager")
 			Expect(gatewayE2ERemoveManagerCATrust(managerDeploymentName)).To(Succeed())
-			Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
+			rolloutTimeout := controllerRolloutTimeout(managerDeploymentName)
+			Expect(gatewayE2EWaitForDeployment(managerDeploymentName, rolloutTimeout)).To(Succeed())
 			managerCAConfigured = false
 		}
 		if !managerCAConfigured {
@@ -178,7 +179,8 @@ var _ = Describe("Gateway live E2E", Ordered, func() {
 		Expect(gatewayE2EConfigureManagerCATrust(managerDeploymentName, gatewayE2EFixtureArgs(originalManagerArgs))).To(Succeed())
 		managerCAConfigured = true
 		workerImageConfigured = true
-		Expect(gatewayE2EWaitForDeployment(managerDeploymentName, 5*time.Minute)).To(Succeed())
+		rolloutTimeout := controllerRolloutTimeout(managerDeploymentName)
+		Expect(gatewayE2EWaitForDeployment(managerDeploymentName, rolloutTimeout)).To(Succeed())
 
 		By("deploying the TLS reference adapter")
 		Expect(applyManifestJSON(gatewayE2EAdapterManifest())).To(Succeed())

@@ -8,7 +8,6 @@ RUN go mod download
 COPY api/ api/
 COPY cmd/ cmd/
 COPY internal/ internal/
-COPY pkg/ pkg/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/orka-workspace-agent ./cmd/orka-workspace-agent
 

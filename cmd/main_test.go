@@ -23,26 +23,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
-	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
-	storekube "github.com/orka-agents/orka/internal/store/kube"
 )
 
-func TestManagerSchemeRegistersAgentSandboxCoreAPI(t *testing.T) {
-	if _, err := scheme.New(sandboxv1beta1.GroupVersion.WithKind(sandboxv1beta1.SandboxKind)); err != nil {
-		t.Fatalf("create core Sandbox from manager scheme: %v", err)
+func TestManagerSchemeExcludesNativeProviderAPIs(t *testing.T) {
+	for _, gvk := range []schema.GroupVersionKind{
+		{Group: "agents.x-k8s.io", Version: "v1beta1", Kind: "Sandbox"},
+		{Group: "acp.workspace.orka.ai", Version: "v1alpha1", Kind: "RuntimeProviderConfig"},
+		{Group: "fake.workspace.orka.ai", Version: "v1alpha1", Kind: "FakeWorkspaceProfile"},
+	} {
+		if _, err := scheme.New(gvk); err == nil {
+			t.Fatalf("Core registered provider API %s", gvk)
+		}
 	}
 }
 
@@ -80,24 +83,6 @@ func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	}
 	if first == "workstation" || second == "workstation" {
 		t.Fatal("holder ID omitted its process incarnation")
-	}
-}
-
-func TestValidateEnabledSubstrateConfigSelectsActivePathRequirements(t *testing.T) {
-	cfg := controller.SubstrateConfig{
-		APIEndpoint:           "api.ate-system.svc:443",
-		APIInsecureSkipVerify: true,
-		APICertFile:           "/run/substrate-client/credential-bundle.pem",
-		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
-		RouterURL:             "http://atenet-router.ate-system.svc",
-		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
-	}
-	if err := validateEnabledSubstrateConfig(cfg, false); err != nil {
-		t.Fatalf("ACP-only Substrate configuration rejected: %v", err)
-	}
-	if err := validateEnabledSubstrateConfig(cfg, true); err == nil ||
-		!strings.Contains(err.Error(), "bootstrap token secret name") {
-		t.Fatalf("legacy workspace-provider configuration error = %v, want bootstrap Secret requirement", err)
 	}
 }
 
@@ -148,12 +133,11 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		return tool
 	}
 	tests := []struct {
-		name        string
-		objects     []client.Object
-		acpDisabled bool
-		config      controller.SubstrateConfig
-		configErr   error
-		wantError   string
+		name      string
+		objects   []client.Object
+		config    controller.SubstrateConfig
+		configErr error
+		wantError string
 	}{
 		{
 			name:      "no existing pools ignores disabled provider configuration",
@@ -165,24 +149,7 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			objects: []client.Object{pool("sandbox", corev1alpha1.WorkspaceProviderAgentSandbox)},
 			config:  invalidConfig,
 		},
-		{
-			name:      "existing substrate pool preserves environment parse failures",
-			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:    validConfig,
-			configErr: errors.New("invalid disabled-only duration"),
-			wantError: "parse substrate recovery configuration",
-		},
-		{
-			name:      "existing substrate pool requires provider trust",
-			objects:   []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:    invalidConfig,
-			wantError: "requires valid recovery configuration",
-		},
-		{
-			name:    "existing substrate pool accepts valid recovery configuration",
-			objects: []client.Object{pool("substrate", corev1alpha1.WorkspaceProviderSubstrate)},
-			config:  validConfig,
-		},
+
 		{
 			name:      "existing actor pool requires control authentication",
 			objects:   []client.Object{actorPool("team-a", true)},
@@ -243,70 +210,20 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 			config:    invalidConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 		},
-		{
-			name:      "retained checkpoint outside watch namespace requires recovery credentials",
-			objects:   []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
-			config:    invalidConfig,
-			wantError: "recovery ConfigMap controller-system/retained-native-data requires valid recovery configuration",
-		},
-		{
-			name:      "retained template preserves configuration parse failure",
-			objects:   []client.Object{journal("orka.ai/substrate-template-binding")},
-			config:    validConfig,
-			configErr: errors.New("invalid disabled-only duration"),
-			wantError: "parse substrate recovery configuration for existing recovery ConfigMap",
-		},
-		{
-			name:    "retained checkpoint accepts valid cleanup credentials",
-			objects: []client.Object{journal("orka.ai/substrate-checkpoint-catalog")},
-			config:  validConfig,
-		},
+
 		{
 			name:      "ordinary configmap does not require recovery credentials",
 			objects:   []client.Object{journal("example.invalid/unrelated")},
 			config:    invalidConfig,
 			configErr: errors.New("invalid disabled-only duration"),
 		},
-		{
-			name:        "harness v1 ignores resources without registered ACP cleanup",
-			acpDisabled: true,
-			objects: []client.Object{
-				pool("unused-substrate", corev1alpha1.WorkspaceProviderSubstrate),
-				journal("orka.ai/substrate-checkpoint-catalog"),
-			},
-			config:    unauthenticatedConfig,
-			configErr: errors.New("invalid disabled-only duration"),
-		},
-		{
-			name:        "harness v1 still requires actor pool cleanup credentials",
-			acpDisabled: true,
-			objects:     []client.Object{actorPool("team-a", true)},
-			config:      unauthenticatedConfig,
-			wantError:   "SubstrateActorPool team-a/native-mcp requires valid recovery configuration",
-		},
-		{
-			name:        "harness v1 still requires dedicated tool cleanup credentials",
-			acpDisabled: true,
-			objects:     []client.Object{mcpTool("team-a", true)},
-			config:      unauthenticatedConfig,
-			wantError:   "Tool team-a/native-tool requires valid recovery configuration",
-		},
-		{
-			name:        "harness v1 accepts valid MCP cleanup credentials",
-			acpDisabled: true,
-			objects:     []client.Object{actorPool("team-a", true), mcpTool("team-a", true)},
-			config:      validConfig,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var reader client.Reader = fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
-			if tt.acpDisabled {
-				reader = noACPRecoveryScanReader{Reader: reader}
-			}
 			err := validateDisabledSubstrateRecoveryConfig(
-				context.Background(), reader, "team-a", "controller-system", !tt.acpDisabled, tt.config, tt.configErr,
+				context.Background(), reader, "team-a", tt.config, tt.configErr,
 			)
 			if tt.wantError == "" {
 				if err != nil {
@@ -318,17 +235,6 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 				t.Fatalf("validation error = %v, want substring %q", err, tt.wantError)
 			}
 		})
-	}
-}
-
-type noACPRecoveryScanReader struct{ client.Reader }
-
-func (r noACPRecoveryScanReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	switch list.(type) {
-	case *corev1alpha1.RuntimePoolList, *corev1.ConfigMapList:
-		return errors.New("ACP-only recovery APIs must not be read without registered ACP cleanup controllers")
-	default:
-		return r.Reader.List(ctx, list, opts...)
 	}
 }
 
@@ -494,167 +400,9 @@ func TestWorkspacePublisherClientFromEnvRejectsInvalidArtifactCapability(t *test
 	}
 }
 
-func TestACPControlNamespace(t *testing.T) {
-	tests := []struct {
-		name                string
-		runtimeEnabled      bool
-		controllerNamespace string
-		want                string
-		wantErr             bool
-	}{
-		{
-			name: "disabled runtime does not require controller namespace",
-		},
-		{
-			name:                "disabled runtime keeps discovered controller namespace for cleanup",
-			controllerNamespace: "orka-system",
-			want:                "orka-system",
-		},
-		{
-			name:           "enabled runtime fails closed without controller namespace",
-			runtimeEnabled: true,
-			wantErr:        true,
-		},
-		{
-			name:                "enabled runtime rejects blank controller namespace",
-			runtimeEnabled:      true,
-			controllerNamespace: "  ",
-			wantErr:             true,
-		},
-		{
-			name:                "enabled runtime uses controller namespace",
-			runtimeEnabled:      true,
-			controllerNamespace: " orka-system ",
-			want:                "orka-system",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := acpControlNamespace(tt.runtimeEnabled, tt.controllerNamespace)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("acpControlNamespace() error = %v, wantErr %t", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Fatalf("acpControlNamespace() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestACPArtifactRetentionWiring(t *testing.T) {
-	tests := []struct {
-		name                    string
-		runtimeEnabled          bool
-		wantCollector           bool
-		wantRuntimeReservations bool
-	}{
-		{
-			name: "harness v1 has no ACP artifact wiring",
-		},
-		{
-			name:                    "enabled runtime exposes reservation recorder",
-			runtimeEnabled:          true,
-			wantCollector:           true,
-			wantRuntimeReservations: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			wiring, err := newACPArtifactRetentionWiring(
-				tt.runtimeEnabled,
-				filepath.Join(t.TempDir(), "artifacts"),
-			)
-			if err != nil {
-				t.Fatalf("newACPArtifactRetentionWiring() error = %v", err)
-			}
-			if got := wiring.collector != nil; got != tt.wantCollector {
-				t.Fatalf("collector present = %t, want %t", got, tt.wantCollector)
-			}
-			if wiring.collector == nil {
-				if wiring.taskCleanup != nil || wiring.runtimeReservations != nil {
-					t.Fatal("disabled ACP artifact wiring retained active components")
-				}
-				return
-			}
-			if wiring.taskCleanup != wiring.collector {
-				t.Fatal("Task cleanup retirer does not preserve the collector")
-			}
-			if got := wiring.runtimeReservations != nil; got != tt.wantRuntimeReservations {
-				t.Fatalf("runtime reservation recorder present = %t, want %t", got, tt.wantRuntimeReservations)
-			}
-			if wiring.runtimeReservations != nil && wiring.runtimeReservations != wiring.collector {
-				t.Fatal("runtime reservation recorder does not preserve the collector")
-			}
-			if !wiring.collector.NeedLeaderElection() {
-				t.Fatal("collector must remain a leader-elected cleanup runnable")
-			}
-		})
-	}
-}
-
 func TestACPArtifactRetentionWiringFailsClosedForUnsafeV2Root(t *testing.T) {
-	if _, err := newACPArtifactRetentionWiring(true, "relative/artifacts"); err == nil {
+	if _, err := newACPArtifactRetentionWiring("relative/artifacts"); err == nil {
 		t.Fatal("newACPArtifactRetentionWiring() error = nil, want unsafe-root error")
-	}
-}
-
-func TestACPControlStoreWiring(t *testing.T) {
-	tests := []struct {
-		name            string
-		runtimeEnabled  bool
-		withStore       bool
-		wantTaskCleanup bool
-		wantRuntime     bool
-		wantErr         bool
-	}{
-		{
-			name: "disabled runtime without controller namespace has no control store",
-		},
-		{
-			name:      "harness v1 does not receive ACP cleanup wiring",
-			withStore: true,
-		},
-		{
-			name:            "enabled runtime shares store with Task cleanup",
-			runtimeEnabled:  true,
-			withStore:       true,
-			wantTaskCleanup: true,
-			wantRuntime:     true,
-		},
-		{
-			name:           "enabled runtime fails closed without control store",
-			runtimeEnabled: true,
-			wantErr:        true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var kubeControlStore *storekube.Store
-			if tt.withStore {
-				kubeControlStore = &storekube.Store{}
-			}
-
-			wiring, err := newACPControlStoreWiring(tt.runtimeEnabled, kubeControlStore)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("newACPControlStoreWiring() error = %v, wantErr %t", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if got := wiring.taskCleanup; (got != nil) != tt.wantTaskCleanup {
-				t.Fatalf("task cleanup store present = %t, want %t", got != nil, tt.wantTaskCleanup)
-			} else if got != nil && got != kubeControlStore {
-				t.Fatal("task cleanup store does not preserve the Kubernetes store")
-			}
-			if got := wiring.runtime; (got != nil) != tt.wantRuntime {
-				t.Fatalf("runtime store present = %t, want %t", got != nil, tt.wantRuntime)
-			} else if got != nil && got != kubeControlStore {
-				t.Fatal("runtime store does not preserve the Kubernetes store")
-			}
-		})
 	}
 }
 
@@ -842,35 +590,37 @@ func TestWorkspaceCleanupAPIsInstalled(t *testing.T) {
 	if !installed {
 		t.Fatal("complete workspace API discovery reported missing")
 	}
+	checkpointInstalled, err := workspaceCheckpointAPIInstalled(mapper)
+	if err != nil || checkpointInstalled {
+		t.Fatalf("checkpoint API discovery = %t, %v; cleanup must not require the optional CRD", checkpointInstalled, err)
+	}
 }
 
-func TestSubstrateCheckpointAPIInstalled(t *testing.T) {
+func TestWorkspaceCheckpointAPIInstalled(t *testing.T) {
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{workspacev1alpha1.GroupVersion})
-	// Existing workspace CRDs do not imply that the newer checkpoint API exists.
-	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspace"), meta.RESTScopeNamespace)
-	installed, err := substrateCheckpointAPIInstalled(mapper)
+	installed, err := workspaceCheckpointAPIInstalled(mapper)
 	if err != nil || installed {
-		t.Fatalf("missing checkpoint API = %v, %v; want false, nil", installed, err)
+		t.Fatalf("absent checkpoint API discovery = %t, %v", installed, err)
 	}
 	mapper.Add(workspacev1alpha1.GroupVersion.WithKind("ExecutionWorkspaceCheckpoint"), meta.RESTScopeNamespace)
-	installed, err = substrateCheckpointAPIInstalled(mapper)
+	installed, err = workspaceCheckpointAPIInstalled(mapper)
 	if err != nil || !installed {
-		t.Fatalf("installed checkpoint API = %v, %v; want true, nil", installed, err)
+		t.Fatalf("installed checkpoint API discovery = %t, %v", installed, err)
 	}
-	// A discovery outage is not absence and must still fail controller startup.
-	failure := errors.New("discovery unavailable")
-	installed, err = substrateCheckpointAPIInstalled(checkpointDiscoveryFailureMapper{RESTMapper: mapper, err: failure})
-	if installed || !errors.Is(err, failure) {
-		t.Fatalf("failed checkpoint discovery = %v, %v; want false and original error", installed, err)
+
+	discoveryErr := errors.New("discovery unavailable")
+	installed, err = workspaceCheckpointAPIInstalled(checkpointDiscoveryErrorMapper{RESTMapper: mapper, err: discoveryErr})
+	if installed || !errors.Is(err, discoveryErr) {
+		t.Fatalf("failed checkpoint API discovery = %t, %v; want discovery error", installed, err)
 	}
 }
 
-type checkpointDiscoveryFailureMapper struct {
+type checkpointDiscoveryErrorMapper struct {
 	meta.RESTMapper
 	err error
 }
 
-func (m checkpointDiscoveryFailureMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
+func (m checkpointDiscoveryErrorMapper) RESTMapping(schema.GroupKind, ...string) (*meta.RESTMapping, error) {
 	return nil, m.err
 }
 
@@ -915,48 +665,39 @@ func TestValidateWorkspaceProviderSecurityConfig(t *testing.T) {
 func TestValidateAgentExecutionSnapshotOptions(t *testing.T) {
 	tests := []struct {
 		name      string
-		mode      executionmode.Mode
 		keyFile   string
 		retention time.Duration
 		interval  time.Duration
 		wantError bool
 	}{
 		{
-			name: "harness v1 requires key", mode: executionmode.HarnessV1,
+			name:      "harness v2 requires key",
 			retention: time.Hour, interval: time.Minute, wantError: true,
 		},
 		{
-			name: "harness v2 requires key", mode: executionmode.HarnessV2,
-			retention: time.Hour, interval: time.Minute, wantError: true,
-		},
-		{
-			name: "harness v1 enabled", mode: executionmode.HarnessV1,
+			name:    "harness v2 enabled",
 			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
 		},
 		{
-			name: "harness v2 enabled", mode: executionmode.HarnessV2,
-			keyFile: "/var/run/orka/snapshot/key", retention: 30 * 24 * time.Hour, interval: time.Hour,
-		},
-		{
-			name: "zero retention", mode: executionmode.HarnessV2,
+			name:    "zero retention",
 			keyFile: "/var/run/orka/snapshot/key", retention: 0, interval: time.Hour, wantError: true,
 		},
 		{
-			name: "negative retention", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
+			name: "negative retention", keyFile: "/var/run/orka/snapshot/key",
 			retention: -time.Hour, interval: time.Hour, wantError: true,
 		},
 		{
-			name: "zero interval", mode: executionmode.HarnessV2,
+			name:    "zero interval",
 			keyFile: "/var/run/orka/snapshot/key", retention: time.Hour, interval: 0, wantError: true,
 		},
 		{
-			name: "negative interval", mode: executionmode.HarnessV2, keyFile: "/var/run/orka/snapshot/key",
+			name: "negative interval", keyFile: "/var/run/orka/snapshot/key",
 			retention: time.Hour, interval: -time.Minute, wantError: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAgentExecutionSnapshotOptions(tt.mode, tt.keyFile, tt.retention, tt.interval)
+			err := validateAgentExecutionSnapshotOptions(tt.keyFile, tt.retention, tt.interval)
 			if (err != nil) != tt.wantError {
 				t.Fatalf("validation error = %v, wantError = %t", err, tt.wantError)
 			}
@@ -998,5 +739,98 @@ func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.
 				t.Fatalf("loadAgentExecutionSnapshotCipher() error = %v, wantError = %t", err, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestValidateAgentHostConfig(t *testing.T) {
+	image := "registry.example/orka@sha256:" + strings.Repeat("a", 64)
+	reserved := []string{"orka-system", "orka-runtimes", "orka-controller"}
+	if err := validateAgentHostConfig(false, "", ""); err != nil {
+		t.Fatalf("disabled config rejected: %v", err)
+	}
+	if err := validateAgentHostConfig(true, "orka-agent-hosts", image, reserved...); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	for name, args := range map[string][2]string{
+		"no namespace":         {"", image},
+		"invalid namespace":    {"host_ns", image},
+		"namespace path":       {"hosts/one", image},
+		"watch namespace":      {"orka-system", image},
+		"runtime namespace":    {"orka-runtimes", image},
+		"controller namespace": {"orka-controller", image},
+		"no agent image":       {"orka-agent-hosts", ""},
+		"tagged image":         {"orka-agent-hosts", "registry.example/orka:latest"},
+	} {
+		if err := validateAgentHostConfig(true, args[0], args[1], reserved...); err == nil {
+			t.Errorf("%s: config accepted", name)
+		}
+	}
+}
+
+// Labels that become selectors, such as the controller Pods a host's
+// NetworkPolicy admits, must be valid Kubernetes labels.
+func TestParseExactLabels(t *testing.T) {
+	parsed, err := parseExactLabels(" orka.ai/network-role=controller , app=orka ")
+	if err != nil || len(parsed) != 2 || parsed["orka.ai/network-role"] != "controller" || parsed["app"] != "orka" {
+		t.Fatalf("labels = %v, %v", parsed, err)
+	}
+	for _, raw := range []string{
+		"", "role", "=controller", "role=", "role=a,role=b",
+		"role=not/a-label", "role=-leading", "bad key=value", "a/b/c=value", strings.Repeat("k", 64) + "=v",
+	} {
+		if parsed, err := parseExactLabels(raw); err == nil {
+			t.Errorf("parseExactLabels(%q) = %v, want an error", raw, parsed)
+		}
+	}
+}
+
+func TestAgentHostCacheOptionsAddsTheHostNamespace(t *testing.T) {
+	base := managerCacheOptions("orka-system", "orka-runtimes", "orka-system")
+	options := agentHostCacheOptions(base, "orka-agent-hosts")
+	objects := []client.Object{
+		&corev1.Pod{}, &corev1.Secret{}, &corev1.PersistentVolumeClaim{}, &networkingv1.NetworkPolicy{},
+	}
+	for _, object := range objects {
+		found := false
+		for candidate, byObject := range options.ByObject {
+			if reflect.TypeOf(candidate) != reflect.TypeOf(object) {
+				continue
+			}
+			found = true
+			if _, ok := byObject.Namespaces["orka-agent-hosts"]; !ok {
+				t.Errorf("%T cache omits the host namespace", object)
+			}
+			if _, ok := byObject.Namespaces["orka-system"]; !ok {
+				t.Errorf("%T cache lost the watch namespace", object)
+			}
+		}
+		if !found {
+			t.Errorf("%T has no cache entry", object)
+		}
+	}
+}
+
+func TestACPControlNamespace(t *testing.T) {
+	for _, namespace := range []string{"", "  "} {
+		if _, err := acpControlNamespace(namespace); err == nil {
+			t.Fatalf("acpControlNamespace(%q) accepted a missing namespace", namespace)
+		}
+	}
+	if got, err := acpControlNamespace(" orka-system "); err != nil || got != "orka-system" {
+		t.Fatalf("acpControlNamespace() = %q, %v", got, err)
+	}
+}
+
+func TestACPArtifactRetentionWiring(t *testing.T) {
+	wiring, err := newACPArtifactRetentionWiring(filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wiring.collector == nil || wiring.taskCleanup != wiring.collector ||
+		wiring.runtimeReservations != wiring.collector {
+		t.Fatal("Task cleanup and runtime reservations must share the artifact collector")
+	}
+	if !wiring.collector.NeedLeaderElection() {
+		t.Fatal("collector must remain a leader-elected cleanup runnable")
 	}
 }

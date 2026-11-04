@@ -107,6 +107,43 @@ func TestACPAssistantMessagePhaseAllowsOnlyCodexProtocolEnums(t *testing.T) {
 	}
 }
 
+func TestACPAssistantMessageIDReadsOnlyAgentMessageChunks(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "named message", raw: `{"sessionUpdate":"agent_message_chunk","messageId":"msg-1","content":{"type":"text","text":"x"}}`, want: "msg-1"},
+		{name: "unnamed message", raw: `{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}`},
+		{name: "thought", raw: `{"sessionUpdate":"agent_thought_chunk","messageId":"msg-1","content":{"type":"text","text":"x"}}`},
+		{name: "malformed", raw: `{`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := acpAssistantMessageID(&acp.SessionNotification{Update: json.RawMessage(test.raw)})
+			if got != test.want {
+				t.Fatalf("messageId = %q, want %q", got, test.want)
+			}
+		})
+	}
+	if got := acpAssistantMessageID(nil); got != "" {
+		t.Fatalf("nil messageId = %q", got)
+	}
+}
+
+// The runtime advertises ACP session notices, so the pinned codex-acp sends
+// Codex warnings in this shape; they never reach the agent's reply.
+func TestMapACPUpdateDropsSessionNotices(t *testing.T) {
+	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
+		"sessionUpdate":"notice",
+		"severity":"warning",
+		"title":"Model metadata for ` + "`gpt-5.4-nano`" + ` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	}`)})
+	if err != nil || ok || update != nil || text != "" {
+		t.Fatalf("notice mapped to update=%+v text=%q ok=%v err=%v", update, text, ok, err)
+	}
+}
+
 func TestMapACPUpdatePreservesWhitespaceChunk(t *testing.T) {
 	update, text, ok, err := mapACPUpdate(&acp.SessionNotification{Update: json.RawMessage(`{
 		"sessionUpdate":"agent_message_chunk",

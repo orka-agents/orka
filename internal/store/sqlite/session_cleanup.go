@@ -322,14 +322,6 @@ func completeSessionCleanupTx(ctx context.Context, tx *sql.Tx, request store.Com
 	if err := archiveSessionTurnCleanupReceipts(ctx, tx, *intent); err != nil {
 		return err
 	}
-	if intent.Gateway != nil {
-		// Live legacy runtime records were refused by Gateway eligibility.
-		// Only already-retired mirrors can be pruned with the transcript.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_sessions WHERE namespace = ? AND session_name = ?`,
-			request.Namespace, request.SessionName); err != nil {
-			return err
-		}
-	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM outbox_projections
 		 WHERE aggregate_kind = ?

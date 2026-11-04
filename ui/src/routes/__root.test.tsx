@@ -58,6 +58,28 @@ describe('__root route', () => {
     expect(Route.component).toBeDefined()
   })
 
+  it('applies the system theme while the user follows it, and an explicit pick over it', () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
+      matches: query === '(prefers-color-scheme: dark)',
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+    const RootComponent = Route.component!
+    useUIStore.setState({ theme: 'system' })
+    const { unmount } = render(<RootComponent />)
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    unmount()
+
+    useUIStore.setState({ theme: 'light' })
+    render(<RootComponent />)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+
   it('renders layout when authenticated', () => {
     const RootComponent = Route.component!
     render(<RootComponent />)

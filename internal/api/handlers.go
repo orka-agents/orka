@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/controller"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -303,6 +304,24 @@ type CreateTaskRequest struct {
 	Suspend           *bool                            `json:"suspend,omitempty"`
 }
 
+// UnmarshalJSON validates status in Kubernetes-style manifests even though
+// creation never copies controller-owned status into the new Task.
+func (in *CreateTaskRequest) UnmarshalJSON(data []byte) error {
+	var status struct {
+		Status corev1alpha1.TaskStatus `json:"status"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return err
+	}
+	type plain CreateTaskRequest
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*in = CreateTaskRequest(value)
+	return nil
+}
+
 func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	if req.Type != "" {
 		spec.Type = req.Type
@@ -511,7 +530,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	var req CreateTaskRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	name := req.Name
@@ -1467,11 +1486,67 @@ func (h *Handlers) GetAgent(c fiber.Ctx) error {
 	return c.JSON(agent)
 }
 
+// AgentSystemPromptResponse is the system prompt an Agent reads from a ConfigMap.
+type AgentSystemPromptResponse struct {
+	ConfigMapRef corev1alpha1.ConfigMapKeySelector `json:"configMapRef"`
+	Content      string                            `json:"content"`
+}
+
+// GetAgentSystemPrompt returns the key of the ConfigMap that an Agent's
+// spec.systemPrompt.configMapRef selects. It reads only that key, and only for
+// callers who may also read the ConfigMap itself.
+func (h *Handlers) GetAgentSystemPrompt(c fiber.Ctx) error {
+	name := c.Params(apiFieldName)
+	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
+	if err != nil {
+		return err
+	}
+	if err := h.authorizeContextTokenAction(c, "getAgentSystemPrompt", h.contextTokenAuthorization.AgentReadScopes); err != nil {
+		return err
+	}
+
+	agent := &corev1alpha1.Agent{}
+	ctx := c.Context()
+	if err := h.client.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "agent not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get agent: %v", err))
+	}
+	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "getAgentSystemPrompt", agent.Namespace, agent.Name); err != nil {
+		return err
+	}
+	if agent.Spec.SystemPrompt == nil || agent.Spec.SystemPrompt.ConfigMapRef == nil {
+		return fiber.NewError(fiber.StatusNotFound, "agent has no ConfigMap system prompt")
+	}
+	ref := *agent.Spec.SystemPrompt.ConfigMapRef
+	if err := h.authorizeContextTokenPolicyConfigMapName(c, "getAgentSystemPrompt", agent.Namespace, ref.Name); err != nil {
+		return err
+	}
+	if err := authorizeKubernetesResourceAction(ctx, h.clientset, GetUserInfo(c),
+		agent.Namespace, "get", "", "configmaps", ref.Name); err != nil {
+		return err
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := h.client.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: agent.Namespace}, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "system prompt ConfigMap not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get system prompt ConfigMap: %v", err))
+	}
+	content, ok := configMap.Data[ref.Key]
+	if !ok {
+		return fiber.NewError(fiber.StatusNotFound, "key not found in system prompt ConfigMap")
+	}
+	return c.JSON(AgentSystemPromptResponse{ConfigMapRef: ref, Content: content})
+}
+
 // CreateAgent creates a new agent
 func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	var req CreateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	// Support both flat format {"name":"x"} and Kubernetes-style {"metadata":{"name":"x"}}
@@ -1504,6 +1579,9 @@ func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 		Spec:       req.Spec,
 	}
 	if err := executionmode.DefaultBuiltInAgentContract(agent, h.executionMode); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
+	if err := agentcontext.ValidateAgentWrite(agent); err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
 	if err := authorizeContextTokenAgentContext(c, h.contextTokenAuthorization, "createAgent", agent.Namespace, agent.Name); err != nil {
@@ -1542,7 +1620,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 	if err := validateAgentSpec(req.Spec); err != nil {
 		return err
@@ -1563,6 +1641,12 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 
 		patchBase := current.DeepCopy()
 		current.Spec = req.Spec
+		if err := executionmode.DefaultBuiltInAgentContract(current, h.executionMode); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
+		if err := agentcontext.ValidateAgentWrite(current); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, err.Error())
+		}
 		if err := authorizeContextTokenAgentSpec(ctx, h.uncachedReader(), token, h.contextTokenAuthorization, "updateAgent", current); err != nil {
 			return err
 		}

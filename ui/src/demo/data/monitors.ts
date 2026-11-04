@@ -23,7 +23,7 @@ const sha = (seed: string) => digest(`monitor:${seed}`)
 
 function monitor(name: string, repo: RepoKey, createdAgo: number, spec: Partial<RepositoryMonitor['spec']>, status: NonNullable<RepositoryMonitor['status']>): RepositoryMonitor {
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'RepositoryMonitor',
     metadata: { name, namespace: ns, uid: uid(`repositorymonitor:${name}`), creationTimestamp: ago(createdAgo) },
     spec: {

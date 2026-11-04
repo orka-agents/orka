@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 132 authenticated external route registrations, including 50
+The table covers all 133 authenticated external route registrations, including 50
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -90,6 +90,11 @@ Scanner policies selected by `customScanInstructionsRef` and
 RepositoryScan namespace. Configuration create/update, scan start, and finding
 validation check these grants before loading the policies. The policy opt-in
 label or annotation remains required.
+
+Reading an Agent's system prompt from its `systemPrompt.configMapRef` also
+requires named `get` on that core `configmaps` object in the Agent namespace.
+Transaction tokens need a ConfigMap read scope as well. The response holds only
+the referenced key.
 
 Workspace-class `use` remains a separate check for every authenticated identity,
 including OIDC and transaction-token callers. When a Task or workspace-backed Tool
@@ -219,6 +224,7 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/agents` | `core.orka.ai` | `agents` | `create` | empty | `C` | none |
 | `GET` | `/api/v1/agents` | `core.orka.ai` | `agents` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none |
+| `GET` | `/api/v1/agents/:name/system-prompt` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | Named `get` on core `configmaps` for the Agent's `systemPrompt.configMapRef` |
 | `PUT` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
 | `DELETE` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `delete` | `:name` | `Q` | none |
 | `POST` | `/api/v1/skills` | `core.orka.ai` | `skills` | `create` | empty | `C` | none |

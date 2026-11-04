@@ -6,7 +6,20 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/google/uuid"
 )
+
+// SchemaVersion records the metadata layout. It never replaces validation of
+// every schema object; version zero upgrades require the locked migration path.
+const SchemaVersion = 1
+
+const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
+ singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+ dataset_id TEXT NOT NULL,
+ origin TEXT NOT NULL CHECK(origin IN ('new', 'adopted')),
+ bootstrap_complete INTEGER NOT NULL CHECK(bootstrap_complete IN (0, 1))
+)`
 
 // initializeSchema creates an empty database or checks the existing layout.
 // Callers without the controller lock only validate; OpenLockedStore can also
@@ -18,20 +31,64 @@ func initializeSchema(db *sql.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	version, err := readSchemaVersion(tx)
+	if err != nil {
+		return err
+	}
+	if version != 0 && version != SchemaVersion {
+		return fmt.Errorf("unsupported SQLite schema version %d (supported: %d)", version, SchemaVersion)
+	}
 	existing, err := readSchema(tx)
 	if err != nil {
 		return err
 	}
 	statements := currentSchemaStatements()
 	if len(existing) > 0 {
-		return validateSchema(existing, statements)
+		if err := validateSchema(existing, statements); err != nil {
+			return err
+		}
+		if version != SchemaVersion {
+			return fmt.Errorf("unsupported SQLite schema: dataset metadata requires schema version %d", SchemaVersion)
+		}
+		_, err := readDataset(tx)
+		return err
+	}
+	if version != 0 {
+		return fmt.Errorf("unsupported SQLite schema: versioned dataset has no schema")
 	}
 	for _, statement := range statements {
 		if _, err := tx.Exec(statement); err != nil {
 			return fmt.Errorf("create current schema: %w", err)
 		}
 	}
+	if err := initializeDatasetRecord(tx, datasetOriginNew); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func readSchemaVersion(q schemaQuerier) (int, error) {
+	var version int
+	err := q.QueryRowContext(context.Background(), `PRAGMA user_version`).Scan(&version)
+	return version, err
+}
+
+type datasetInitializer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// Called only within the fresh-schema or exact-upgrade transaction. No repair
+// path may regenerate a missing identity in an established dataset.
+func initializeDatasetRecord(q datasetInitializer, origin string) error {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return fmt.Errorf("generate SQLite dataset identity: %w", err)
+	}
+	if _, err := q.ExecContext(context.Background(), `INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(1, ?, ?, 0)`, id.String(), origin); err != nil {
+		return err
+	}
+	_, err = q.ExecContext(context.Background(), fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion))
+	return err
 }
 
 type schemaQuerier interface {

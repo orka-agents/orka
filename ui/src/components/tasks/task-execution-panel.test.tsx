@@ -178,32 +178,6 @@ describe('TaskExecutionPanel', () => {
     expect(elapsed.textContent).toBe('-')
   })
 
-  it('displays child task summary', () => {
-    render(
-      <TaskExecutionPanel
-        task={makeTask({
-          status: {
-            phase: 'Running',
-            attempts: 1,
-            childTasks: [
-              { name: 'child-1', agent: 'agent-a', phase: 'Running' },
-              { name: 'child-2', agent: 'agent-b', phase: 'Succeeded' },
-              { name: 'child-3', agent: 'agent-a', phase: 'Failed' },
-              { name: 'child-4', agent: 'agent-c', phase: 'Pending' },
-            ],
-          },
-        })}
-      />,
-    )
-    const summary = screen.getByTestId('child-task-summary')
-    expect(summary).toBeInTheDocument()
-    expect(summary.textContent).toContain('4 total')
-    expect(summary.textContent).toContain('1 running')
-    expect(summary.textContent).toContain('1 succeeded')
-    expect(summary.textContent).toContain('1 failed')
-    expect(summary.textContent).toContain('1 pending')
-  })
-
   it('displays GenAI token rollup from execution events', () => {
     render(
       <TaskExecutionPanel

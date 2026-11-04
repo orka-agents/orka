@@ -26,8 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -140,8 +140,7 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
-		ACPRuntimeEnabled:       true, ACPRuntimeNamespace: "orka-runtimes",
-		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+		ACPRuntimeImages:        ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}, snapshotStore
 }
 
@@ -195,6 +194,16 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		}
 	}
 
+	recorder := reconciler.Recorder.(*record.FakeRecorder)
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, agentExecutionSettingsReason) || !strings.Contains(event, "model "+acpTestModel) {
+			t.Fatalf("binding event = %q, want the effective model", event)
+		}
+	default:
+		t.Fatal("first binding did not report its execution settings")
+	}
+
 	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
@@ -206,6 +215,11 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("verify pass reported settings again: %q", event)
+	default:
 	}
 }
 
@@ -257,6 +271,7 @@ func TestSettleACPClassWorkspaceRequiresFrozenSessionUID(t *testing.T) {
 				},
 			}
 			reconciler, _ := newBindingTestReconciler(t, task, bindingTestNamespace(), workspace)
+			installTestACPWorkspaceClass(t, reconciler)
 			reconciler.APIReader = reconciler.Client
 			reconciler.WorkspaceSettlementProtected = true
 			candidate, err := reconciler.resolveAgentExecutionCandidateWithWorkspaceSessionUID(

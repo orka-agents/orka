@@ -18,11 +18,11 @@ function agentTask(status: Task['status']): Task {
   }
 }
 
-function harnessV1Binding(): NonNullable<NonNullable<Task['status']>['agentExecutionBinding']> {
+function runtimePoolBinding(): NonNullable<NonNullable<Task['status']>['agentExecutionBinding']> {
   return {
     schemaVersion: 1,
-    contractVersion: 'orka.harness.v1',
-    backend: 'harness-wrapper',
+    contractVersion: 'orka.harness.v2',
+    backend: 'runtime-pool',
     bindingDigest: digest('c'),
     task: { namespaceUID: 'namespace-uid', uid: 'task-uid', boundSpecGeneration: 2 },
     snapshot: { id: 'task-uid/snapshot', digest: digest('d'), schemaVersion: 1 },
@@ -61,16 +61,16 @@ describe('TaskExecutionRouteLedger', () => {
     expect(container.innerHTML).not.toContain(digest('b'))
   })
 
-  it('requires reconciliation for a harness v1 unknown outcome', () => {
+  it('requires reconciliation for an unknown execution outcome', () => {
     render(
       <TaskExecutionRouteLedger
         task={agentTask({
           phase: 'Failed',
-          agentExecutionBinding: harnessV1Binding(),
-          harnessRuntime: {
+          agentExecutionBinding: runtimePoolBinding(),
+          execution: {
             state: 'OutcomeUnknown',
             outcome: 'OutcomeUnknown',
-            reason: 'WrapperRestarted',
+            reason: 'RuntimeRestarted',
             message: 'accepted turn could not be settled after restart',
           },
         })}
@@ -79,7 +79,7 @@ describe('TaskExecutionRouteLedger', () => {
 
     expect(screen.getByText('Outcome unknown')).toHaveClass('text-status-failed')
     expect(screen.getByText('Human reconciliation required')).toBeInTheDocument()
-    expect(screen.getByText('WrapperRestarted')).toBeInTheDocument()
+    expect(screen.getByText('RuntimeRestarted')).toBeInTheDocument()
   })
 
 })

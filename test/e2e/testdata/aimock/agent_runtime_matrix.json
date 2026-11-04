@@ -1,6 +1,19 @@
 {
   "fixtures": [
     {
+      "match": {"userMessage": "[e2e:runtime-codex-external-workspace-read]", "toolResultContains": "Hello World!"},
+      "latency": 5000,
+      "response": {"content": "Hello World!"}
+    },
+    {
+      "match": {"userMessage": "[e2e:runtime-codex-external-workspace-read]", "hasToolResult": false},
+      "response": {
+        "toolCalls": [
+          {"name": "exec_command", "arguments": {"cmd": "cat README"}}
+        ]
+      }
+    },
+    {
       "match": {"userMessage": "[e2e:runtime-codex-read]", "toolResultContains": "Hello World!"},
       "response": {"content": "Hello World!"}
     },

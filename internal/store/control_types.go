@@ -1164,10 +1164,10 @@ func SessionMutationLeaseRequestDigest(
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte("orka.acp.session-mutation-lease\x00"))
-	_, _ = hash.Write(canonical)
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	h := sha256.New()
+	_, _ = h.Write([]byte("orka.acp.session-mutation-lease\x00"))
+	_, _ = h.Write(canonical)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func SessionLeaseReleaseOperationDigest(turnID, leaseRequestDigest string) (string, error) {
@@ -1185,10 +1185,10 @@ func SessionLeaseReleaseOperationDigest(turnID, leaseRequestDigest string) (stri
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.New()
-	_, _ = hash.Write([]byte("orka.acp.session-lease-release\x00"))
-	_, _ = hash.Write(canonical)
-	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
+	h := sha256.New()
+	_, _ = h.Write([]byte("orka.acp.session-lease-release\x00"))
+	_, _ = h.Write(canonical)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func CanonicalControlID(kind string, components ...string) string {

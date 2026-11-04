@@ -9,6 +9,8 @@ package connectors
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -367,6 +370,18 @@ func TestValidateProviderSpec(t *testing.T) {
 			p.Spec.OAuth.AdditionalAuthorizeParameters = map[string]string{"prompt": "a\nb"}
 		}, want: "without control bytes"},
 		{name: "no tools", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools = nil }, want: "at least one"},
+		{name: "no tools for an agent-host provider", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.Tools = nil
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		}},
+		{name: "agent host without a template", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{}
+		}, want: "agentHost.templateRef.name is required"},
+		{name: "agent host from another token endpoint", mutate: func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.OAuth.AuthorizeURL = "https://example.ghe.com/login/oauth/authorize"
+			p.Spec.OAuth.TokenURL = "https://example.ghe.com/login/oauth/access_token"
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		}, want: "agentHost requires a github.com provider"},
 		{name: "bad tool name", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[0].Name = "List-PRs" }, want: "snake_case"},
 		{name: "duplicate tool", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[1].Name = p.Spec.Tools[0].Name }, want: "more than once"},
 		{name: "bad class", mutate: func(p *corev1alpha1.ConnectorProvider) { p.Spec.Tools[0].Class = "coordination" }, want: "class must be read or write"},
@@ -677,6 +692,9 @@ func TestProviderAuthorityDigestAndConsent(t *testing.T) {
 		"client auth": func(p *corev1alpha1.ConnectorProvider) {
 			p.Spec.OAuth.ClientAuthentication = corev1alpha1.ConnectorClientAuthSecretPost
 		},
+		"serving agent hosts": func(p *corev1alpha1.ConnectorProvider) {
+			p.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+		},
 	} {
 		changed := provider.DeepCopy()
 		mutate(changed)
@@ -774,5 +792,60 @@ func TestValidScopeTokenRefusesCommas(t *testing.T) {
 		if got := validScopeToken(scope); got != want {
 			t.Fatalf("validScopeToken(%q) = %t, want %t", scope, got, want)
 		}
+	}
+}
+
+// A provider that serves agent hosts resolves only with a Relay template.
+func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	provider := validProvider()
+	provider.Spec.AgentHost = &corev1alpha1.ConnectorAgentHost{TemplateRef: corev1alpha1.LocalObjectReference{Name: "copilotd"}}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "oauth", Namespace: "tenant"},
+		Data:       map[string][]byte{"clientSecret": []byte("s3cret")},
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "samples", "core_v1alpha1_agenthosttemplate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := func(change func(*corev1alpha1.AgentHostTemplateSpec)) *corev1alpha1.AgentHostTemplate {
+		sample := &corev1alpha1.AgentHostTemplate{}
+		if err := yaml.Unmarshal(raw, sample); err != nil {
+			t.Fatal(err)
+		}
+		sample.ObjectMeta = metav1.ObjectMeta{Name: "copilotd", Namespace: "tenant"}
+		change(&sample.Spec)
+		return sample
+	}
+	for name, test := range map[string]struct {
+		objects []runtime.Object
+		want    string
+	}{
+		"no template": {objects: []runtime.Object{secret}, want: ReasonReferenceNotFound},
+		"a Standalone template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.Access = corev1alpha1.AgentHostAccessStandalone
+		})}, want: ReasonReferenceInvalid},
+		// A template the AgentHost reconciler would refuse.
+		"an invalid template": {objects: []runtime.Object{secret, template(func(spec *corev1alpha1.AgentHostTemplateSpec) {
+			spec.RuntimeClassName = new("Bad_Name")
+		})}, want: ReasonReferenceInvalid},
+		"a Relay template": {objects: []runtime.Object{secret, template(func(*corev1alpha1.AgentHostTemplateSpec) {})}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(test.objects...).Build()
+			issue, err := ResolveProviderReferences(context.Background(), reader, provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (issue == nil) != (test.want == "") || (issue != nil && issue.Reason != test.want) {
+				t.Fatalf("issue = %v, want reason %q", issue, test.want)
+			}
+		})
 	}
 }

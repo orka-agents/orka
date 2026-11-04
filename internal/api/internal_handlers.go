@@ -22,9 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/artifactcap"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
 )
@@ -226,13 +224,9 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid filename")
 	}
 
-	var authorizedWorker *corev1alpha1.Task
-	if c.Get(artifactcap.CapabilityHeader) == "" {
-		var err error
-		authorizedWorker, err = h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
-		if err != nil {
-			return err
-		}
+	authorizedWorker, err := h.internalCallerAuthorizer().verifyTaskCaller(c, namespace, taskName)
+	if err != nil {
+		return err
 	}
 
 	if h.artifactStore == nil {
@@ -252,22 +246,9 @@ func (h *InternalHandlers) UploadArtifact(c fiber.Ctx) error {
 		contentType = "application/octet-stream"
 	}
 
-	var verifyHarnessAttempt func(context.Context) error
-	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(ctx context.Context) error {
-		if authorizedWorker != nil {
-			return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
-		}
-		var err error
-		verifyHarnessAttempt, err = h.prepareHarnessV1ArtifactUpload(ctx, c, harness.ArtifactUpload{
-			Namespace: namespace, TaskName: taskName, Filename: filename, ContentType: contentType, Data: data,
-		})
-		return err
+	if err := withInternalTaskDataTransaction(c, h.artifactStore, taskName, func(context.Context) error {
+		return h.internalCallerAuthorizer().revalidateTaskCaller(c, authorizedWorker)
 	}, func(ctx context.Context) error {
-		if verifyHarnessAttempt != nil {
-			if err := verifyHarnessAttempt(ctx); err != nil {
-				return err
-			}
-		}
 		return h.artifactStore.SaveArtifact(ctx, namespace, taskName, filename, contentType, data)
 	}); err != nil {
 		return err

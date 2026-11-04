@@ -8,6 +8,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
+	github.com/coder/websocket v1.8.13
 	github.com/distribution/reference v0.6.0
 	github.com/github/copilot-sdk/go v0.1.25
 	github.com/go-logr/logr v1.4.4
@@ -16,10 +17,13 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/lestrrat-go/jwx/v3 v3.2.0
+	github.com/microsoft/agent-host-protocol/clients/go v1.0.0
 	github.com/onsi/ginkgo/v2 v2.33.0
 	github.com/onsi/gomega v1.44.0
 	github.com/open-policy-agent/cert-controller v0.16.0
 	github.com/openai/openai-go/v3 v3.50.0
+	github.com/opencontainers/go-digest v1.0.0
+	github.com/orka-agents/orka-workspace v0.1.0-alpha.5
 	github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
@@ -55,7 +59,6 @@ require (
 	k8s.io/utils v0.0.0-20260626114624-be93311217bd
 	modernc.org/sqlite v1.60.1
 	oras.land/oras-go/v2 v2.6.2
-	sigs.k8s.io/agent-sandbox v1.0.3
 	sigs.k8s.io/controller-runtime v0.25.0
 	sigs.k8s.io/yaml v1.6.0
 )
@@ -138,7 +141,6 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect

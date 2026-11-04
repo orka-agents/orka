@@ -27,6 +27,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/orka-agents/orka/test/utils"
 )
@@ -57,6 +58,7 @@ var (
 	acpOpencodeRuntimeRef        string
 	workspacePublisherRef        string
 	e2eRegistryContainerName     string
+	e2eRegistryAddress           string
 
 	// E2E environment configuration (loaded from .env or environment)
 	e2eOpenAIAPIKey            string
@@ -110,6 +112,7 @@ var _ = BeforeSuite(func() {
 	registry, registryContainer, err := prepareKindLocalRegistry()
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to prepare Kind-local registry")
 	e2eRegistryContainerName = registryContainer
+	e2eRegistryAddress = registry
 	managerRef, err = pushImageToLocalRegistry(registry, managerImage, "orka/controller:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish controller image")
 	aiWorkerRef, err = pushImageToLocalRegistry(registry, aiWorkerImage, "orka/ai-worker:e2e")
@@ -305,14 +308,20 @@ var _ = BeforeSuite(func() {
 		"kubectl", "patch", "deployment", controllerManagerDeployment, "-n", namespace, "--type=strategic",
 		"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent","env":[`+
 			`{"name":"ORKA_ACP_IDLE_POOL_TTL","value":"`+e2eACPIdlePoolTTL.String()+`"},`+
-			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"}]}]}}}}`,
+			`{"name":"ORKA_TASK_PROVENANCE_ADMISSION_EXTERNAL","value":"true"},`+
+			`{"name":"ORKA_ENABLE_WORKSPACE_PROVIDER_API","value":"true"},`+
+			`{"name":"ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED","value":"true"},`+
+			`{"name":"ORKA_ACP_WORKSPACE_DISPATCH_ENABLED","value":"true"}],`+
+			`"volumeMounts":[{"name":"e2e-workspace-webhook-tls",`+
+			`"mountPath":"/tmp/k8s-webhook-server/serving-certs","readOnly":true}]}],`+
+			`"volumes":[{"name":"e2e-workspace-webhook-tls","secret":{"secretName":"orka-admission-tls"}}]}}}}`,
 	)
 	_, err = utils.Run(cmd)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to patch controller-manager imagePullPolicy")
 
 	By("waiting for controller-manager to be ready")
 	cmd = exec.Command("kubectl", "rollout", "status", "deployment/"+controllerManagerDeployment,
-		"-n", namespace, "--timeout=5m")
+		"-n", namespace, "--timeout="+controllerRolloutTimeout(controllerManagerDeployment).String())
 	_, err = utils.Run(cmd)
 	if err != nil {
 		dumpControllerManagerDiagnostics()
@@ -485,6 +494,30 @@ func controllerManagerDeploymentName() (string, error) {
 	}
 
 	return name, nil
+}
+
+// controllerRolloutStartupMargin covers scheduling, image start and readiness
+// of the replacement controller-manager Pod.
+const controllerRolloutStartupMargin = 3 * time.Minute
+
+// controllerRolloutMinimumTimeout keeps a short grace period from making the
+// wait shorter than the fixed 5m these rollouts used before.
+const controllerRolloutMinimumTimeout = 5 * time.Minute
+
+// controllerRolloutTimeout bounds a controller-manager rollout. The Deployment
+// uses the Recreate strategy, so the new Pod starts only after the old one has
+// exited, and the old one may spend its whole termination grace period in the
+// upgrade drain.
+func controllerRolloutTimeout(deployment string) time.Duration {
+	output, err := utils.Run(exec.Command("kubectl", "get", "deployment", deployment, "-n", namespace,
+		"-o", "jsonpath={.spec.template.spec.terminationGracePeriodSeconds}"))
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "failed to read the controller-manager termination grace period")
+	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+	if value := strings.TrimSpace(output); value != "" {
+		grace, err = strconv.ParseInt(value, 10, 64)
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "invalid controller-manager termination grace period %q", value)
+	}
+	return max(time.Duration(grace)*time.Second+controllerRolloutStartupMargin, controllerRolloutMinimumTimeout)
 }
 
 // createK8sSecret creates a Kubernetes Secret with the given key-value data.

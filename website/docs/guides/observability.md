@@ -148,6 +148,41 @@ do not enable telemetry. Standard SDK sampling is
 available through `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (for
 example `always_off`, `always_on`, or `parentbased_traceidratio`).
 
+## Approval decision duration
+
+The Prometheus endpoint on `--metrics-bind-address` exports
+`orka_approval_decision_duration_seconds`, independently of OpenTelemetry enablement.
+It measures seconds between the stored approval request timestamp and the first
+committed terminal decision timestamp. Buckets cover one second through one day,
+with longer waits included in the `+Inf` bucket.
+
+The only labels are:
+
+| Label | Values |
+|---|---|
+| `outcome` | `approved`, `denied`, `cancelled`, `expired` |
+| `path` | `acp` for broker-owned approvals with a call binding; `worker` for built-in AI worker approvals |
+
+Human approvals and declines record `approved` and `denied`. ACP wait/deadline
+expiry records `expired`; Task cancellation or loss of the original tool/prompt
+authority records `cancelled`. Recovery records a sample when it commits a missing
+terminal decision from a verified execution receipt. Revocation after a human
+decision preserves that original decision and adds no second sample. Polling,
+receipt replay, rejected decisions and rolled-back writes add no samples.
+
+Worker approvals currently have human decisions only: passive timeout metadata,
+Task termination and cancellation do not create worker terminal approval events.
+This metric does not introduce worker expiry or agent parking. A pending approval
+whose expiry is derived for display is counted only when a terminal event commits.
+Missing or backwards timestamps are omitted. Labels contain no Task names,
+approval IDs, users or request text.
+
+Histograms are in memory and reset on process restart. Existing terminal events
+are not replayed into the histogram. A crash between committing a decision and
+observing it, or between scrapes, can lose a sample; use durable approval events
+for audits. Pending requests retained across a restart still use their original
+request timestamps when a new decision commits.
+
 ## Trace topology
 
 A delegated Task should appear as one distributed trace:
@@ -192,6 +227,25 @@ spans remain linked.
 Outbound HTTP and MCP Tool CRD requests receive W3C `traceparent` headers. If a
 Tool config supplies its own `traceparent` header, the active Orka trace context
 wins.
+
+### Instrumented components
+
+| Tracer | Span | Attributes |
+|--------|------|------------|
+| `orka.api` | HTTP/API middleware spans | HTTP request/route/status metadata |
+| `orka.chat` | `chat.request`, `chat.tool_loop.iteration` | session metadata; `chat.iteration`, `orka.tenant`, requested model, tool-call count |
+| `orka.worker` | `task.run` | `orka.task.id`, namespace, and agent name when known |
+| `orka.acp` | `acp.prompt`, `acp.session.create`, `acp.session.continue`, `acp.publication.reconcile` | `orka.task.id`, namespace, attempt/prompt identity, RuntimePool/RuntimeSession identity, prompt/session outcome, publication identity, and agent name when known |
+| `orka.acp.supervisor` | `acp.supervisor.*` authenticated runtime operations | Task UID/attempt, prompt/operation IDs and runtime pool/session identity; no request content |
+| `orka.agent` | `agent.step` | iteration, requested model/provider, tool-call count, Orka task metadata |
+| `orka.gen_ai` | `chat {model}` | `gen_ai.*` provider/model/token metadata and `error.type` |
+| `orka.gen_ai` | `execute_tool {tool.name}` | `gen_ai.tool.*`, `orka.tool.name`, `orka.tool.kind`, `orka.tool.result.size_bytes`, parent/child task fields for delegation |
+| `orka.controller` | `task.reconcile` | task name, namespace, type, and propagated trace context |
+
+Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
+executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
+children. Tool spans do not include raw arguments or complete result bodies, but a structured tool
+error message can appear in the span status description.
 
 ### OpenTelemetry traces vs Task trace read model
 

@@ -193,7 +193,7 @@ const securityRoutes: RequestHandler[] = [
     if ((body.namespace ?? DEMO_NAMESPACE) !== DEMO_NAMESPACE) return apiError(403, `the demo only accepts repositories in namespace ${DEMO_NAMESPACE}`)
     if (findScan(name)) return apiError(409, `repositoryscans.orka.ai "${name}" already exists`)
     const resource: RepositoryScan = {
-      apiVersion: 'orka.ai/v1alpha1',
+      apiVersion: 'core.orka.ai/v1alpha1',
       kind: 'RepositoryScan',
       metadata: { name, namespace: DEMO_NAMESPACE, uid: uid(`repositoryscan:${name}:${Date.now()}`), creationTimestamp: now() },
       spec: { provider: 'github', branch: 'main', ...body.spec },

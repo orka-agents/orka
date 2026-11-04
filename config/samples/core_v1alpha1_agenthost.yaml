@@ -1,0 +1,12 @@
+# One user's host from the copilotd template. Create the token Secret first:
+#   kubectl create secret generic alice-github-token --from-literal=token=<GitHub token>
+# The token's owner is the only GitHub user the host serves.
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentHost
+metadata:
+  name: alice
+spec:
+  templateRef:
+    name: copilotd
+  githubTokenSecretRef:
+    name: alice-github-token

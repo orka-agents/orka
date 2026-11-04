@@ -53,7 +53,7 @@ function runtimePool(seed: PoolSeed, index: number): RuntimePool {
   const podName = `${name}-${digest(`rs:${key}`, 9)}-${digest(`pod:${key}`, 5)}`
   const serving = seed.replicas > 0
   return {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'RuntimePool',
     metadata: {
       name,
@@ -186,7 +186,7 @@ const governance = {
 
 export const agentRuntimes: AgentRuntime[] = [
   {
-    apiVersion: 'orka.ai/v1alpha1',
+    apiVersion: 'core.orka.ai/v1alpha1',
     kind: 'AgentRuntime',
     metadata: { name: 'goose-data-team', namespace: DEMO_NAMESPACE, uid: uid('agentruntime:goose'), creationTimestamp: ago(18 * 24 * 60) },
     spec: {
@@ -227,36 +227,8 @@ export const agentRuntimes: AgentRuntime[] = [
         supportsPublicationFinalization: true,
         workspaceGovernance: governance,
         lifecycle: 'Serving',
-        runtimeName: 'goose',
-        runtimeVersion: '1.9.3',
       },
       conditions: [{ type: 'Ready', status: 'True', reason: 'CapabilitiesValidated', message: 'Runtime capabilities match the registration', lastTransitionTime: ago(4) }],
-    },
-  },
-  {
-    apiVersion: 'orka.ai/v1alpha1',
-    kind: 'AgentRuntime',
-    metadata: { name: 'review-harness-legacy', namespace: DEMO_NAMESPACE, uid: uid('agentruntime:legacy'), creationTimestamp: ago(96 * 24 * 60) },
-    spec: {
-      contractVersion: 'orka.harness.v1',
-      deployment: { mode: 'external-endpoint', endpoint: 'http://review-harness.platform-tools.svc.cluster.local:7070' },
-      clientAuth: { bearerTokenSecretRef: { name: 'review-harness-token', key: 'token' } },
-      capabilities: {
-        toolExecutionModes: ['observed'],
-        brokeredToolClasses: ['read'],
-        supportsCancel: true,
-        supportsRuntimeSessions: false,
-        supportsContinuation: false,
-        supportsArtifacts: true,
-      },
-    },
-    status: {
-      ready: false,
-      observedGeneration: 5,
-      lastValidated: ago(2),
-      observedAuthRefResourceVersion: '40177342',
-      message: 'Health probe failed: GET /v1/health returned 503 Service Unavailable (3 consecutive failures).',
-      conditions: [{ type: 'Ready', status: 'False', reason: 'HealthCheckFailed', message: 'GET /v1/health returned 503', lastTransitionTime: ago(37) }],
     },
   },
 ]

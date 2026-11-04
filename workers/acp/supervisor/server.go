@@ -280,8 +280,15 @@ type promptState struct {
 	finalAnswer         strings.Builder
 	finalAnswerSeen     bool
 	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	lastMessage         strings.Builder
+	lastMessageID       string
+	lastMessageOverflow bool
+	// untagged holds text Codex sent without a message ID since the last
+	// named chunk, such as a /review result.
+	untagged         strings.Builder
+	untaggedOverflow bool
+	settlement       *harnessv2.PromptSettlement
+	settlementDigest string
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.
@@ -921,6 +928,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	state.runtime = runtimeSession
 	state.promptMutations = runtimeSession
+	setSessionState(state, descriptor.State)
 	state.descriptor = descriptor
 	state.paths = paths
 	state.baseline = baseline
@@ -1223,6 +1231,9 @@ func (s *Server) createSession(
 		maps.Copy(envValues, values)
 	}
 	maps.Copy(envValues, projection.Environment)
+	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
+	}
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
@@ -1251,6 +1262,11 @@ func (s *Server) createSession(
 	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
+	if projection.Instructions != nil {
+		if err := acp.ProjectInstructions(paths, *projection.Instructions, gid); err != nil {
+			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("protected instruction projection", err)
+		}
+	}
 	if s.cfg.DurableWorkspaceDir != "" {
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
@@ -1264,7 +1280,9 @@ func (s *Server) createSession(
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("read-only workspace protection", err)
 		}
 	}
-	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{Values: envValues})
+	environment, err := acp.BuildChildEnvironment(paths, acp.EnvironmentConfig{
+		PATH: harnessv2.RuntimeToolboxChildPath(acp.DefaultChildPath, s.cfg.Toolboxes), Values: envValues,
+	})
 	if err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("provider environment setup", err)
 	}
@@ -1638,7 +1656,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		s.mu.Unlock()
 		return
 	}
-	state.descriptor.State = harnessv2.RuntimeSessionStateDeleting
+	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
 	if state.mcpProxy != nil {
@@ -1678,7 +1696,7 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 		// The attempt has returned, so an authenticated delete or a fresh
 		// drain may retry cleanup. Keep admission closed and retain all
 		// session evidence until that retry proves retirement.
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		state.drainCleanupScheduled = false
 	}

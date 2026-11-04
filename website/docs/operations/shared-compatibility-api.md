@@ -1,6 +1,6 @@
 ---
-sidebar_position: 12
 title: Shared OpenAI and Anthropic endpoints
+description: "Give every team one OpenAI- and Anthropic-compatible base URL that routes each caller to its own Orka installation."
 ---
 
 The optional compatibility router lets teams use the same OpenAI or Anthropic
@@ -135,6 +135,10 @@ spec:
         - protocol: TCP
           port: 8080
 ```
+
+Such a controller policy must also admit the Publisher and any native workspace
+workers, because Core does not grant controller ingress for them. See the
+[workspace provider guide](https://github.com/orka-agents/orka/blob/main/docs/development/workspace-provider-authoring.md).
 
 If router egress is restricted, allow DNS, the Kubernetes API for TokenReview,
 and the configured installation API destinations. Router health probes report

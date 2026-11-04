@@ -32,7 +32,7 @@ import json
 from pathlib import Path
 import sys
 
-roles = ("controller", "ai-worker", "general-worker", "agent-harness-wrapper", "acp-codex-runtime",
+roles = ("controller", "ai-worker", "general-worker", "acp-codex-runtime",
          "acp-claude-runtime", "acp-copilot-runtime", "acp-opencode-runtime", "workspace-publisher")
 images = {role: "ghcr.io/orka-agents/orka" + ("" if role == "controller" else "/" + role)
           + "@sha256:" + format(index, "064x") for index, role in enumerate(roles, 1)}
@@ -55,7 +55,8 @@ jq -e '
   and .publisher.auth.existingSecret == "release-chart-publisher"
   and .controller.agentExecutionSnapshot.existingSecret == "release-chart-snapshot"
   and .webhooks.tls.existingSecret == "release-chart-webhook"
-  and ([.controller.image, .publisher.image, .workers.ai.image, .workers.general.image, .harnessV1.image]
+  and (has("harnessV1") | not)
+  and ([.controller.image, .publisher.image, .workers.ai.image, .workers.general.image]
     | all(.[]; .digest | test("^sha256:[a-f0-9]{64}$")))
   and ([.. | objects | keys[] | select(. == "token" or . == "controllerToken" or . == "capabilitySecret" or . == "secret")] | length == 0)
 ' "${test_root}/values.json" >/dev/null
@@ -131,7 +132,7 @@ jq -n '{release:{revision:1,status:"deployed"},namespace:{mode:"harness-v2"},
   objects:[{uid:"same",generation:2}],secrets:[range(6) | {uid:("secret-" + tostring),resourceVersion:"1"}]}' \
   >"${test_root}/mode-before.json"
 cp "${test_root}/mode-before.json" "${test_root}/mode-after.json"
-printf 'Error: controller mode identity is missing or incompatible; namespace must already claim harness-v1\n' >"${test_root}/mode-error.log"
+printf 'Error: controller.mode must be harness-v2; other harness protocols are unsupported\n' >"${test_root}/mode-error.log"
 live_acp_release_chart_assert_mode_rejection "${test_root}/mode-before.json" "${test_root}/mode-after.json" "${test_root}/mode-error.log" 1
 if live_acp_release_chart_assert_mode_rejection "${test_root}/mode-before.json" "${test_root}/mode-after.json" "${test_root}/mode-error.log" 0; then
   fail "mode rejection accepted successful upgrade"

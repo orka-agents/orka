@@ -123,22 +123,6 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 	return tools, slices.ContainsFunc(tools, isCeilingBashTool)
 }
 
-// validateHarnessV1RuntimeRefCeiling enforces the turn ceiling for a runtimeRef
-// Agent whose AgentRuntime resolved to harness v1. Unlike v2 registrations, v1
-// freezes the Task or Agent maxTurns into the session configuration.
-func validateHarnessV1RuntimeRefCeiling(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
-	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Ceiling == nil || agent.Spec.Runtime.Ceiling.MaxTurns == nil ||
-		agent.Spec.Runtime.RuntimeRef == nil || strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) == "" {
-		return nil
-	}
-	limit := *agent.Spec.Runtime.Ceiling.MaxTurns
-	if turns := effectiveACPMaxTurns(task, agent); turns > limit {
-		return fmt.Errorf("agent %q ceiling allows at most %d turns, but the task resolves to %d; set maxTurns or the Agent defaultMaxTurns within the ceiling",
-			agent.Name, limit, turns)
-	}
-	return nil
-}
-
 // ceilingAllowsTool reports whether a requested tool is within the ceiling.
 // Tool names match without regard to case, but scopes must match exactly
 // because they carry command or path text. A bare ceiling entry also covers

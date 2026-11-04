@@ -494,6 +494,8 @@ func (s *Store) acquireLock(ctx context.Context, namespace, name, taskName, task
 // AcquireChatTurn creates a chat Session when needed and reserves its current
 // transcript revision for one turn. Expired reservations may be reclaimed, but
 // Task locks and Gateway-owned Sessions are never taken over by chat.
+//
+//nolint:gocyclo // Turn acquisition validates every lease and fencing condition in one transaction.
 func (s *Store) AcquireChatTurn(
 	ctx context.Context,
 	session *store.SessionRecord,
@@ -1021,7 +1023,7 @@ func (s *Store) loadTranscript(
 ) ([]store.SessionMessage, error) {
 	baseColumns := `message_id, sort_order, role, content, name, input, tool_calls, tool_call_id,
 		 source_type, source_ref, metadata_json, created_at`
-	where := `namespace = ? AND session_name = ?`
+	where := `namespace = ? AND session_name = ? AND source_type <> 'soul-context'`
 	args := []any{namespace, name}
 	if throughOrder > 0 {
 		where += ` AND sort_order <= ?`
@@ -1133,6 +1135,10 @@ func nullableStringMatches(stored sql.NullString, expected *string) bool {
 }
 
 func encodeSessionMessagePayload(msg store.SessionMessage) (*string, *string, string, error) {
+	if msg.SourceType == store.SessionSoulAnchorSource || msg.ID == "orka:soul-context" {
+		return nil, nil, "", store.ValidationErrorf("Session identity anchors are reserved for retention maintenance")
+	}
+
 	var inputJSON, toolCallsJSON *string
 	if msg.Input != nil {
 		data, err := json.Marshal(msg.Input)

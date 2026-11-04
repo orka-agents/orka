@@ -1,4 +1,5 @@
 ---
+sidebar_label: Execution events
 slug: /execution-events
 description: "The event stream behind task timelines, traces, forks, and approvals."
 ---

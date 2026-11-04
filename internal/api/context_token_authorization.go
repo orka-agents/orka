@@ -2077,6 +2077,7 @@ func connectorReadToolAuthorizer(ui *UserInfo, cfg ContextTokenAuthorizationConf
 	}
 }
 
+//nolint:unparam // Callers name the excluded tool so each filter site reads on its own.
 func filterCompletionToolsExcluding(tools []llm.Tool, name string) []llm.Tool {
 	filtered := make([]llm.Tool, 0, len(tools))
 	for _, tool := range tools {

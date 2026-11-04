@@ -168,4 +168,4 @@ compile and test their own work. They are given the same rules above in their sy
 prompt, so they usually get it right — but if you see an agent looping on
 `go: command not found`, this page is what it failed to apply.
 
-See [Multi-agent coordination](../reference/multi-agent-coordination.md).
+See [Multi-agent coordination](multi-agent-coordination.md).

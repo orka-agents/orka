@@ -55,10 +55,13 @@ private registries or installations without registry access from the controller.
 
 ## CRDs and Helm lifecycle
 
-- The chart packages production CRDs under `crds/`. Development-only fake
-  workspace CRDs are excluded.
+- The chart packages core and shared workspace CRDs under `crds/`. Provider
+  configuration CRDs and compute controllers are installed separately.
 - Helm creates these CRDs during installation, but does not update them during
   `helm upgrade` or delete them during `helm uninstall`.
+- Drain every legacy ACP allocation under the old release before applying the
+  RuntimePool schema or upgrading the controller. Retained legacy objects block
+  startup even after their native settings are pruned.
 - Use `--skip-crds` only when another workflow manages compatible Orka CRDs.
 - Uninstall removes chart-managed PVCs. Depending on the volume reclaim policy,
   this can delete stored data. Back up before uninstalling.

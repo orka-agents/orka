@@ -26,9 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	acpworkspacev1alpha1 "github.com/orka-agents/orka/api/acp.workspace/v1alpha1"
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	workspacev1alpha1 "github.com/orka-agents/orka/api/workspace/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -2149,13 +2148,13 @@ func TestResolveACPWorkspaceClassRejectsSuspendableClassWithoutExpiry(t *testing
 			fixture.profile.Spec.Retention = nil
 			if test.withCap {
 				limit := int32(1)
-				fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+				fixture.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 			}
 			fixture.pinProfileHash(t)
 			task := suspendableSessionTask()
 			r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 			if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
-				!strings.Contains(err.Error(), "requires an expiry bound") {
+				!strings.Contains(err.Error(), "lifetime must be bounded") {
 				t.Fatalf("suspend-capable class without expiry error = %v, want an expiry-bound rejection", err)
 			}
 		})
@@ -2169,12 +2168,12 @@ func TestResolveACPWorkspaceClassRejectsSuspendQuotaWithoutMaxLifetime(t *testin
 	fixture.class.Spec.Lifecycle.IdleTimeout = &metav1.Duration{Duration: 30 * time.Minute}
 	fixture.class.Spec.Lifecycle.MaxLifetime = nil
 	limit := int32(1)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 	fixture.pinProfileHash(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
 	if _, err := r.resolveACPWorkspaceClass(ctx, task); err == nil ||
-		!strings.Contains(err.Error(), "requires maxLifetime") {
+		!strings.Contains(err.Error(), "lifetime must be bounded") {
 		t.Fatalf("quota-capped class without maxLifetime error = %v, want maxLifetime rejection", err)
 	}
 }
@@ -2188,7 +2187,7 @@ func TestACPWorkspaceSuspendQuotaMessageOmitsForbiddenDeleteOverride(t *testing.
 		workspacev1alpha1.WorkspaceOnDetachSuspend,
 	}
 	limit := int32(0)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 	fixture.pinProfileHash(t)
 	task := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
@@ -2211,7 +2210,7 @@ func TestValidateACPWorkspaceClassBindingAllowsLegacyUnboundedRetention(t *testi
 	if err != nil {
 		t.Fatalf("resolve bounded class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve bounded workspace binding: %v", err)
 	}
@@ -2228,7 +2227,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsOwnSessionContinuation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{
+	fixture.profile.Spec.Retention = &RetentionPolicy{
 		MaxSuspendedWorkspaces: func() *int32 { limit := int32(1); return &limit }(),
 	}
 	fixture.pinProfileHash(t)
@@ -2280,7 +2279,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsQuotaBlockedReadyContinuation(t *testing.
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
 	limit := int32(1)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{MaxSuspendedWorkspaces: &limit}
+	fixture.profile.Spec.Retention = &RetentionPolicy{MaxSuspendedWorkspaces: &limit}
 	fixture.pinProfileHash(t)
 	holder := suspendableSessionTask()
 	r := acpClassTestReconciler(t, append(fixture.objects(), holder)...)
@@ -2289,7 +2288,7 @@ func TestACPWorkspaceSuspendQuotaAdmitsQuotaBlockedReadyContinuation(t *testing.
 	if err != nil {
 		t.Fatalf("resolve holder class: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(holder, "", false, suspendTestSessionUID, resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(holder, suspendTestSessionUID, resolved)
 	if err != nil {
 		t.Fatalf("resolve holder binding: %v", err)
 	}
@@ -2351,7 +2350,7 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	fixture := suspendableSubstrateFixture(t)
-	fixture.profile.Spec.Retention = &acpworkspacev1alpha1.RetentionPolicy{
+	fixture.profile.Spec.Retention = &RetentionPolicy{
 		MaxSuspendedWorkspaces: func() *int32 { limit := int32(1); return &limit }(),
 	}
 	fixture.pinProfileHash(t)
@@ -2382,7 +2381,7 @@ func TestSettleACPClassWorkspaceEnforcesSuspendQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve class with headroom: %v", err)
 	}
-	binding, err := resolveACPWorkspaceBindingWithClass(task, "", false, "session-uid-1", resolved)
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "session-uid-1", resolved)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

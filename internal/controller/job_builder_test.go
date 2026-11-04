@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -739,6 +740,12 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		t.Fatal("Job should have init container for session fetch")
 	}
 	initContainer := job.Spec.Template.Spec.InitContainers[0]
+	if !regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`).MatchString(initContainer.Image) {
+		t.Fatalf("session loader image must be digest-pinned, got %q", initContainer.Image)
+	}
+	if initContainer.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("digest-pinned loader pull policy = %s, want IfNotPresent", initContainer.ImagePullPolicy)
+	}
 	if initContainer.Name != "fetch-session" {
 		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
 	}
@@ -1032,10 +1039,7 @@ func TestResolveExecution_IgnoresWorkspace(t *testing.T) {
 	task := &corev1alpha1.Task{
 		Spec: corev1alpha1.TaskSpec{
 			Execution: &corev1alpha1.ExecutionSpec{
-				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
-					Enabled:     true,
-					TemplateRef: &corev1alpha1.WorkspaceTemplateReference{Name: "default"},
-				},
+				Workspace: &corev1alpha1.ExecutionWorkspaceSpec{ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "acp-class"}},
 			},
 		},
 	}

@@ -13,12 +13,16 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/tools"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
 const (
@@ -29,8 +33,10 @@ const (
 	acpApprovalCodeStale      = "approval_stale"
 	acpApprovalStaleMessage   = "The original task or tool authority is no longer valid."
 	acpApprovalCodeUnknown    = "tool_outcome_unknown"
+	acpApprovalCodeNoEffect   = "tool_failed_without_effect"
 	acpApprovalOutcomeFailed  = "failed"
 	acpApprovalOutcomeUnknown = "unknown"
+	acpApprovalNotStarted     = "not_started"
 	acpMCPToolEffectKind      = "acp-mcp-tool"
 
 	// Settlement work must outlive the cancelled request context but stay
@@ -303,27 +309,32 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 	target.ApprovalID = call.ID
 	// Runtime call IDs can contain private text that generic redaction misses.
 	binding := approvalCallBinding(call)
-	return b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
+	_, err = b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
 		approvals.ApprovalTarget
 		ToolCallID string                 `json:"toolCallID"`
 		Binding    *approvals.CallBinding `json:"binding"`
 		Timeout    string                 `json:"timeout"`
 		ExpiresAt  time.Time              `json:"expiresAt"`
 	}{target, binding.CallIDDigest, binding, call.ExpiresAt.Sub(call.CreatedAt).String(), call.ExpiresAt})
+	return err
 }
 
-func (b *ACPMCPBroker) appendApprovalEvent(ctx context.Context, call *acpMCPApprovalCall, eventType, key, summary string, payload any) error {
+// A nil event means the append was a replay, rather than a new observation.
+func (b *ACPMCPBroker) appendApprovalEvent(ctx context.Context, call *acpMCPApprovalCall, eventType, key, summary string, payload any) (*store.ExecutionEvent, error) {
 	content, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, _, err = b.ApprovalEvents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+	appended, isNew, err := b.ApprovalEvents.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
 		Namespace: call.Task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: call.Task.Name,
 		TaskName: call.Task.Name, SessionName: call.Task.SessionName, AgentName: call.Task.AgentName,
 		Type: eventType, Severity: events.ExecutionEventSeverityInfo, ToolName: call.Request.Call.ToolName,
 		ToolCallID: call.ID, Summary: summary, Content: content,
 	}, "acp-approval:"+call.ID+":"+key)
-	return err
+	if err != nil || !isNew {
+		return nil, err
+	}
+	return appended, nil
 }
 
 func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApprovalCall, outcome, reason string, result json.RawMessage) error {
@@ -333,7 +344,7 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 	}
 	retained, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
-		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			return b.appendApprovalEvent(txCtx, call, events.ExecutionEventTypeApprovalExecutionUpdated, "execution:"+outcome,
 				"Tool execution "+outcome, json.RawMessage(content))
 		})
@@ -348,17 +359,17 @@ func (b *ACPMCPBroker) approvalOutcome(ctx context.Context, call *acpMCPApproval
 func (b *ACPMCPBroker) approvalDecision(ctx context.Context, call *acpMCPApprovalCall, eventType, reason string) error {
 	_, err := withRetainedMCPApproval(ctx, b.ApprovalEvents, call.Task.Namespace, call.Task.Name,
 		approvals.Approval{ID: call.ID, TaskUID: call.Task.UID, Binding: approvalCallBinding(call), ExpiresAt: &call.ExpiresAt},
-		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) error {
-			err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,
+		func(txCtx context.Context, _ approvals.Approval, _ []store.ExecutionEvent) (*store.ExecutionEvent, error) {
+			appended, err := b.appendApprovalEvent(txCtx, call, eventType, eventType, reason,
 				struct {
 					ApprovalID string `json:"approvalID"`
 					TaskUID    string `json:"taskUID"`
 					Reason     string `json:"reason"`
 				}{ApprovalID: call.ID, TaskUID: call.Task.UID, Reason: reason})
 			if errors.Is(err, store.ErrConflict) {
-				return nil // A reviewer decision may have won; execution still rechecks authority and expiry.
+				return nil, nil // A reviewer decision may have won; execution still rechecks authority and expiry.
 			}
-			return err
+			return appended, err
 		})
 	return err
 }
@@ -651,6 +662,7 @@ func (b *ACPMCPBroker) blockApproval(ctx context.Context, call *acpMCPApprovalCa
 		return nil, false, err
 	}
 	result := acpApprovalError(call.ID, code)
+	outcome, reason := acpApprovalNotStarted, code
 	switch current.State {
 	case store.ExternalEffectPending:
 		// A delivered denial is final even when the reviewer had already
@@ -665,7 +677,8 @@ func (b *ACPMCPBroker) blockApproval(ctx context.Context, call *acpMCPApprovalCa
 			return nil, false, err
 		}
 	case store.ExternalEffectFailed:
-		_, code, result, err = acpMCPApprovalReceiptOutcome(current, call.ID)
+		// A denial, or an approved call that failed without effect.
+		outcome, reason, result, err = acpMCPApprovalReceiptOutcome(current, call.ID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -674,9 +687,9 @@ func (b *ACPMCPBroker) blockApproval(ctx context.Context, call *acpMCPApprovalCa
 		// outcome; this waiter must not report that an action was unstarted.
 		return nil, false, store.ErrConflict
 	}
-	// The durable denial already proves that this call did not execute.
+	// The durable receipt already proves that this call had no effect.
 	// Recovery retries its event projection if the event store is unavailable.
-	_ = b.approvalOutcome(ctx, call, "not_started", code, result)
+	_ = b.approvalOutcome(ctx, call, outcome, reason, result)
 	return result, false, nil
 }
 
@@ -804,6 +817,14 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	callCtx, stopPrompt := b.watchPromptAuthority(callCtx, call.Request, false)
 	defer stopPrompt()
 	result, executeErr := prepared(withACPMCPAuthenticatedTask(callCtx, credentials.Task))
+	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
+		// Nothing reached the remote system, so the failure is final whatever
+		// happened to the prompt's authority meanwhile. A receipt that cannot
+		// be recorded leaves the outcome unknown below, as the record shows.
+		if failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect); err == nil {
+			return failure, false, nil
+		}
+	}
 	if executeErr == nil {
 		executeErr = callCtx.Err()
 	}
@@ -824,6 +845,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer stop()
 	if executeErr != nil {
+		logApprovedCallFailure(ctx, call, acpApprovalOutcomeUnknown, executeErr)
 		_ = settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, effect.Identity, store.ExternalEffectOutcomeUnknown, nil)
 		if err := b.approvalOutcome(settleCtx, call, acpApprovalOutcomeUnknown, acpMCPApprovalUnknownReason, nil); err != nil {
 			return nil, false, err
@@ -838,6 +860,45 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	// replace that receipt with a transport error; recovery repairs the event.
 	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", result)
 	return result, false, nil
+}
+
+// failApprovedCall settles an approved call that failed without effect as a
+// definite failure whose safe summary both the reviewer and the model see.
+func (b *ACPMCPBroker) failApprovedCall(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, cause *tools.NoEffectError) (json.RawMessage, error) {
+	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
+	defer stop()
+	summary := acpApprovalFailureSummary(cause.Summary)
+	failure := acpApprovalResult(call.ID, acpApprovalCodeNoEffect, summary)
+	if err := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, effect.Identity, store.ExternalEffectFailed, failure); err != nil {
+		return nil, err
+	}
+	logApprovedCallFailure(ctx, call, acpApprovalOutcomeFailed, cause)
+	// The receipt is committed; recovery repairs a failed event projection.
+	_ = b.approvalOutcome(settleCtx, call, acpApprovalOutcomeFailed, summary, failure)
+	return failure, nil
+}
+
+// logApprovedCallFailure records why an approved call failed. Tool errors
+// can quote remote responses, so the cause is redacted and bounded first.
+func logApprovedCallFailure(ctx context.Context, call *acpMCPApprovalCall, outcome string, cause error) {
+	log.FromContext(ctx).Info("Approved MCP tool call failed",
+		"namespace", call.Task.Namespace, "task", call.Task.Name, "approvalID", call.ID,
+		"tool", call.Request.Call.ToolName, "outcome", outcome,
+		"error", acpApprovalFailureDetail(workerexecutor.ToolErrorDiagnostic(cause)))
+}
+
+// acpApprovalFailureDetail strips control runes and credential shapes from
+// text, then bounds it. Redacting first keeps a cut from splitting a value
+// ahead of the text its recognizer needs.
+func acpApprovalFailureDetail(text string) string {
+	return boundACPStatusMessage(redact.SensitiveText(stripACPControlRunes(text)))
+}
+
+func acpApprovalFailureSummary(summary string) string {
+	if summary = strings.TrimSpace(acpApprovalFailureDetail(summary)); summary == "" {
+		return "The tool failed without any effect."
+	}
+	return summary
 }
 
 // Kubernetes stores responses as JSON values and can change their field order,
@@ -862,11 +923,15 @@ func acpApprovalError(id, code string) json.RawMessage {
 		acpApprovalCodeStale:     acpApprovalStaleMessage,
 		acpApprovalCodeUnknown:   "The tool may have run. Do not repeat it automatically.",
 	}
+	return acpApprovalResult(id, code, messages[code])
+}
+
+func acpApprovalResult(id, code, message string) json.RawMessage {
 	result, _ := harnessv2.CanonicalValue(struct {
 		IsError    bool   `json:"isError"`
 		Code       string `json:"code"`
 		ApprovalID string `json:"approvalID"`
 		Error      string `json:"error"`
-	}{IsError: true, Code: code, ApprovalID: id, Error: messages[code]})
+	}{IsError: true, Code: code, ApprovalID: id, Error: message})
 	return result
 }

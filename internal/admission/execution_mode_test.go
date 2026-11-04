@@ -37,14 +37,6 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 			},
 		},
 		{
-			name: "harness runtime",
-			mutate: func(task *corev1alpha1.Task) {
-				task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
-					ContractVersion: "orka.harness.v1",
-				}
-			},
-		},
-		{
 			name: "execution",
 			mutate: func(task *corev1alpha1.Task) {
 				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
@@ -65,7 +57,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldTask := newAdmissionTestTask()
-			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 			statusUpdate := oldTask.DeepCopy()
 			tt.mutate(statusUpdate)
 
@@ -81,7 +73,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 func TestTaskExecutionAuthorityValidatorAllowsControllerStatusUpdate(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
 	oldTask := newAdmissionTestTask()
-	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 	statusUpdate := oldTask.DeepCopy()
 	statusUpdate.Status.Phase = corev1alpha1.TaskPhaseRunning
 
@@ -145,7 +137,7 @@ func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
 		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),
 	}
 	v2 := executionmode.HarnessV2.ContractVersion()
-	v1 := executionmode.HarnessV1.ContractVersion()
+	v1 := corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1")
 	agent := func(contract *corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.Agent {
 		return &corev1alpha1.Agent{
 			TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "Agent"},
@@ -182,10 +174,10 @@ func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
 	}{
 		{name: "create without contract takes the namespace mode", operation: admissionv1.Create, object: agent(nil), allowed: true},
 		{name: "create with the namespace contract", operation: admissionv1.Create, object: agent(&v2), allowed: true},
-		{name: "create with the other contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "must match namespace execution mode"},
+		{name: "create with an unsupported contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "only orka.harness.v2 is supported"},
 		{name: "update keeps an omitted contract omitted", operation: admissionv1.Update, object: agent(nil), old: agent(nil), allowed: true},
 		{name: "update may write the namespace contract", operation: admissionv1.Update, object: agent(&v2), old: agent(nil), allowed: true},
-		{name: "update may not write the other contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "must match namespace execution mode"},
+		{name: "update may not write an unsupported contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "only orka.harness.v2 is supported"},
 		{name: "update may not remove a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), messagePart: "immutable"},
 	}
 	for _, tt := range tests {
@@ -236,4 +228,62 @@ func TestAgentContractValidatorRequiresModelForHarnessV2Agents(t *testing.T) {
 	require.Contains(t, denied.Result.Message, "requires spec.model.name")
 	allowed := validator.Handle(context.Background(), request(agent("gpt-5.6-sol")))
 	require.True(t, allowed.Allowed, allowed.Result.Message)
+}
+
+func TestTaskSoulBindingAuthority(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	original := newAdmissionTestTask()
+	original.Spec.Type = corev1alpha1.TaskTypeAI
+	original.Generation = 1
+	bound := original.DeepCopy()
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bound.Status.SoulBinding = &corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid", AgentGeneration: 1, SoulDigest: digest, PromptDigest: digest}
+	response := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, bound, nil, ""))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, bound, original, statusSubresource))
+	require.False(t, response.Allowed)
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, bound, original, statusSubresource))
+	require.True(t, response.Allowed)
+	cleared := bound.DeepCopy()
+	cleared.Status.SoulBinding = nil
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, cleared, bound, statusSubresource))
+	require.False(t, response.Allowed)
+	changed := bound.DeepCopy()
+	changed.Spec.Prompt = "another task"
+	response = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, changed, bound, ""))
+	require.False(t, response.Allowed)
+}
+
+// A soul-only binding freezes the execution inputs but leaves control fields
+// mutable, so an autonomous soul Task can still be paused. An ACP execution
+// binding keeps the whole spec frozen.
+func TestTaskSoulBindingLeavesControlFieldsMutable(t *testing.T) {
+	validator := newTestTaskExecutionAuthorityValidator(t)
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	soulBound := newAdmissionTestTask()
+	soulBound.Spec.Type = corev1alpha1.TaskTypeAI
+	soulBound.Generation = 1
+	soulBound.Status.SoulBinding = &corev1alpha1.TaskSoulBinding{TaskGeneration: 1, AgentUID: "agent-uid",
+		AgentGeneration: 1, SoulDigest: digest, PromptDigest: digest, InputsDigest: digest}
+	acpBound := soulBound.DeepCopy()
+	acpBound.Status.SoulBinding = nil
+	acpBound.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	mixed := soulBound.DeepCopy()
+	mixed.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	update := func(old *corev1alpha1.Task, mutate func(*corev1alpha1.Task)) bool {
+		changed := old.DeepCopy()
+		mutate(changed)
+		return validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, changed, old, "")).Allowed
+	}
+	suspend := func(task *corev1alpha1.Task) { task.Spec.Suspend = new(true) }
+	prompt := func(task *corev1alpha1.Task) { task.Spec.Prompt = "another task" }
+	require.True(t, update(soulBound, suspend), "soul-bound Tasks must remain pausable")
+	resumed := soulBound.DeepCopy()
+	resumed.Spec.Suspend = new(true)
+	require.True(t, update(resumed, func(task *corev1alpha1.Task) { task.Spec.Suspend = nil }), "soul-bound Tasks must resume")
+	require.False(t, update(soulBound, prompt), "soul-bound execution inputs must stay frozen")
+	require.False(t, update(soulBound, func(task *corev1alpha1.Task) { suspend(task); prompt(task) }),
+		"a control-field edit must not carry an input edit")
+	require.False(t, update(acpBound, suspend), "ACP-bound Tasks keep the whole spec frozen")
+	require.False(t, update(mixed, suspend), "an ACP binding keeps the whole spec frozen")
 }

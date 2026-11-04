@@ -53,6 +53,27 @@ spec:
               ConnectorProviderSpec is the operator-owned catalog entry for one third-party
               service that people may link through OAuth.
             properties:
+              agentHost:
+                description: |-
+                  AgentHost makes this provider the source of agent hosts: each person who
+                  links it gets an AgentHost from the template, fed short-lived access
+                  tokens from their link. Linking discloses that code on the host can read
+                  those tokens. At most one provider in a namespace may set it.
+                properties:
+                  templateRef:
+                    description: TemplateRef names an AgentHostTemplate in the provider's
+                      namespace.
+                    properties:
+                      name:
+                        description: Name is the referenced object name.
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - templateRef
+                type: object
               displayName:
                 description: |-
                   DisplayName is shown to people in the dashboard and CLI. Defaults to the
@@ -168,6 +189,7 @@ spec:
                   Tools declares the tools this provider offers to agents acting for a
                   linked person. Built-in tools name an Orka built-in; HTTP tools carry a
                   curated definition executed by the controller with the person's token.
+                  A provider that serves agent hosts may declare none.
                 items:
                   description: ConnectorTool declares one tool a provider offers.
                   properties:
@@ -263,15 +285,17 @@ spec:
                   - message: Builtin tools must not set http or description
                     rule: self.source != 'Builtin' || (!has(self.http) && !has(self.description))
                 maxItems: 64
-                minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
             required:
             - oauth
-            - tools
             type: object
+            x-kubernetes-validations:
+            - message: a provider declares tools unless it serves agent hosts
+              rule: has(self.agentHost) || (has(self.tools) && size(self.tools) >
+                0)
           status:
             description: ConnectorProviderStatus contains only safe validation state.
             properties:

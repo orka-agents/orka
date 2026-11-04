@@ -1798,6 +1798,59 @@ func TestToolExecutor_Execute_HTTPError(t *testing.T) {
 	}
 }
 
+func TestToolExecutor_Execute_HTTPErrorCarriesStatus(t *testing.T) {
+	for status, delivered := range map[int]bool{http.StatusForbidden: false, http.StatusNotFound: true} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+		tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL}}}
+
+		_, err := executor.Execute(context.Background(), tool, nil)
+		server.Close()
+		statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+		_, isDelivered := errors.AsType[ToolExecutionError](err)
+		if !ok || statusErr.StatusCode != status || statusErr.Redirected || !ToolRequestWasAttempted(err) || isDelivered != delivered {
+			t.Fatalf("Execute() for HTTP %d error = %#v, want an attempted status error (delivered=%t)", status, err, delivered)
+		}
+	}
+}
+
+func TestToolExecutor_Execute_HTTPErrorAfterRedirectIsMarked(t *testing.T) {
+	// The POST may have taken effect before redirecting to a result the
+	// caller may not read.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /action", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/result", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /result", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "default", secretPath: "/secrets/tools"}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{URL: server.URL + "/action"}}}
+
+	_, err := executor.Execute(context.Background(), tool, nil)
+	statusErr, ok := errors.AsType[ToolHTTPStatusError](err)
+	if !ok || statusErr.StatusCode != http.StatusForbidden || !statusErr.Redirected {
+		t.Fatalf("Execute() error = %#v, want a redirected HTTP 403", err)
+	}
+}
+
+func TestToolErrorDiagnosticKeepsGatewayMCPCause(t *testing.T) {
+	err := ToolRequestAttemptedError{Err: gatewayMCPError{Err: errors.New("tool returned HTTP 403: denied")}}
+	if err.Error() != "gateway MCP request failed" {
+		t.Fatalf("Error() = %q, want the cause kept out of the message", err.Error())
+	}
+	if got := ToolErrorDiagnostic(err); got != "gateway MCP request failed: tool returned HTTP 403: denied" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the gateway cause", got)
+	}
+	if got := ToolErrorDiagnostic(errors.New("plain")); got != "plain" {
+		t.Fatalf("ToolErrorDiagnostic() = %q, want the plain message", got)
+	}
+}
+
 func TestToolExecutor_Execute_HTTPErrorRedactsPropagatedTransactionToken(t *testing.T) {
 	txnTokenPath := filepath.Join(t.TempDir(), "txn-token")
 	if err := os.WriteFile(txnTokenPath, []byte("tx-token-sensitive"), 0600); err != nil {

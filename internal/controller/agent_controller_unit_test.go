@@ -117,7 +117,7 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		wantErr       string
 	}{
 		{name: "valid", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096))},
-		{name: "system prompt", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "ignored", wantErr: "does not support spec.systemPrompt"},
+		{name: "system prompt", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), maxTokens: new(int32(4096)), systemPrompt: "native instructions"},
 		{name: "missing model", wantErr: "requires spec.model.name"},
 		{name: "missing context window", model: "openai/gpt-5.4", maxTokens: new(int32(4096)), wantErr: "requires a positive spec.model.contextWindow"},
 		{name: "missing max tokens", model: "openai/gpt-5.4", contextWindow: new(int32(32768)), wantErr: "requires a positive spec.model.maxTokens"},
@@ -127,6 +127,8 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			agent := baseAgent("opencode")
+			agent.UID = "opencode-agent-uid"
+			agent.Generation = 1
 			agent.Spec.ProviderRef = nil
 			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
 				Type:            corev1alpha1.AgentRuntimeOpencode,
@@ -152,33 +154,6 @@ func TestValidateAgent_OpenCodeRequirements(t *testing.T) {
 		})
 	}
 
-	// runtime.type: opencode exists in both harness protocols and is never
-	// protocol evidence: the v2 rules must not fire for v1-classified or
-	// still-unclassified stored legacy OpenCode Agents, even when they carry
-	// historically valid v1 shapes the v2 contract forbids.
-	for _, test := range []struct {
-		name            string
-		contractVersion *corev1alpha1.AgentRuntimeContractVersion
-	}{
-		{name: "unclassified legacy opencode agent is preserved", contractVersion: nil},
-		{name: "harness v1 opencode agent is preserved", contractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			agent := baseAgent("opencode-legacy")
-			agent.Spec.ProviderRef = nil
-			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-				Type:            corev1alpha1.AgentRuntimeOpencode,
-				ContractVersion: test.contractVersion,
-			}
-			agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "legacy prompt"}
-			agent.Spec.Model = &corev1alpha1.ModelConfig{Name: "gpt-5.4"}
-			agent.Spec.SecretRef = &corev1.LocalObjectReference{Name: "legacy-provider-creds"}
-
-			if err := ValidateOpenCodeAgentSpec(agent); err != nil {
-				t.Fatalf("ValidateOpenCodeAgentSpec() error = %v, want nil for preserved legacy opencode agent", err)
-			}
-		})
-	}
 }
 
 func TestValidateAgent_BuiltInRuntimeRejectsCredentialSecretRef(t *testing.T) {
@@ -1493,6 +1468,7 @@ func strContains(s, substr string) bool {
 	return false
 }
 
+//nolint:unparam // Callers name the condition type they assert on.
 func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
 	for i := range conditions {
 		if conditions[i].Type == condType {

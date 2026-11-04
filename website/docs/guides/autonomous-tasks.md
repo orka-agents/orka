@@ -1,4 +1,5 @@
 ---
+sidebar_label: Autonomous tasks
 slug: /autonomous-tasks
 description: "Letting a coordinator agent plan, run, and re-plan on its own until a goal is met."
 ---
@@ -36,7 +37,7 @@ spec:
   providerRef:
     name: my-provider
   model:
-    name: claude-sonnet-4.6
+    name: claude-opus-5
   coordination:
     enabled: true
     autonomous: true

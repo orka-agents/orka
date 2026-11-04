@@ -1482,7 +1482,7 @@ func TestRepositoryMonitorReviewTaskReuseAllowsDefaultedTaskScheduleFields(t *te
 	existing.Spec.SuccessfulRunsHistoryLimit = &successfulRunsHistoryLimit
 	existing.Spec.FailedRunsHistoryLimit = &failedRunsHistoryLimit
 
-	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr); err != nil {
+	if err := validateRepositoryMonitorReviewTaskMatchesExpected(&existing, expected, monitor, run, "orka-agents", "orka", pr, repositoryMonitorReviewPlan{}); err != nil {
 		t.Fatalf("validateRepositoryMonitorReviewTaskMatchesExpected() error = %v", err)
 	}
 }
@@ -1946,6 +1946,15 @@ func TestRepositoryMonitorReviewPublishSafetySkips(t *testing.T) {
 			},
 			serverConfig: repositoryMonitorPublishTestServerConfig{Labels: []string{"do-not-touch"}},
 			wantReason:   repositoryMonitorPublishSkipBlockedLabel,
+		},
+		{
+			name:    "missing include label",
+			verdict: repositoryMonitorReviewVerdictNeedsChanges,
+			mutateMonitor: func(m *corev1alpha1.RepositoryMonitor) {
+				m.Spec.ForgeCredentialRef = &corev1.LocalObjectReference{Name: "github-token"}
+				m.Spec.Targets.PullRequests.IncludeLabels = []string{"orka:review"}
+			},
+			wantReason: repositoryMonitorPublishSkipNotIncluded,
 		},
 		{
 			name:    "duplicate same head",
@@ -3322,7 +3331,7 @@ func TestRepositoryMonitorPullRequestShortcutsIgnoreIssueCommands(t *testing.T) 
 	if handled, created, err := reconciler.processTargetedPullRequestControlCommand(ctx, monitor, issueRun, "orka-agents", "orka"); err != nil || handled || created != 0 {
 		t.Fatalf("issue run pull-request shortcut handled=%v created=%d err=%v", handled, created, err)
 	}
-	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(nil, "main", issueRun); reason != "" {
+	if reason := repositoryMonitorTargetPullRequestCommandBlockReason(corev1alpha1.RepositoryMonitorSpec{}, nil, "main", issueRun); reason != "" {
 		t.Fatalf("issue run pull-request block reason = %q, want empty", reason)
 	}
 	malformedRun := *issueRun
@@ -3721,6 +3730,9 @@ func newRepositoryMonitorSinglePullRequestServerWithBodyAndAuth(t *testing.T, nu
 			t.Fatalf("Authorization header = %q, want %q", got, wantAuth)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			return
+		}
 		if r.URL.Path == wantPath+"/files" {
 			_, _ = w.Write([]byte(`[]`))
 			return
@@ -3751,8 +3763,32 @@ func newRepositoryMonitorReviewContextUnavailableServer(t *testing.T) *httptest.
 // request and pull request files endpoints the review-context builder calls,
 // derived from the same inventory body. It returns true when it handled the
 // request.
+// repositoryMonitorTestServesNoHeldWorkflowRuns answers the workflow-run
+// approval lookup: no run for the commit waits for a maintainer.
+func repositoryMonitorTestServesNoHeldWorkflowRuns(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.Path != "/repos/orka-agents/orka/actions/runs" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"total_count":0,"workflow_runs":[]}`))
+	return true
+}
+
+// repositoryMonitorTestWithoutHeldWorkflowRuns serves no held workflow runs
+// and passes every other request to next.
+func repositoryMonitorTestWithoutHeldWorkflowRuns(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+			next(w, r)
+		}
+	}
+}
+
 func repositoryMonitorInventoryServerRoutesReviewContext(t *testing.T, w http.ResponseWriter, r *http.Request, body string) bool {
 	t.Helper()
+	if repositoryMonitorTestServesNoHeldWorkflowRuns(w, r) {
+		return true
+	}
 	const prefix = "/repos/orka-agents/orka/pulls/"
 	const comparePrefix = "/repos/orka-agents/orka/compare/"
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, comparePrefix) {
@@ -3947,6 +3983,12 @@ func repositoryMonitorReviewResultEnvelopeWith(t *testing.T, prNumber int64, hea
 		},
 		"suggestedComment": "Please fix the failing path.",
 	}
+	// Orka derives a passed verdict only when no blocking finding is open,
+	// so a passed review reports no findings by default.
+	if verdict == repositoryMonitorReviewVerdictPassed {
+		payload["findings"] = []map[string]any{}
+		payload["summary"] = "Review found no issues."
+	}
 	if mutate != nil {
 		mutate(payload)
 	}
@@ -3973,12 +4015,18 @@ type repositoryMonitorPublishTestServerConfig struct {
 	FilesBody   string
 	PostStatus  int
 	PostBody    string
+	// PutBody answers review summary updates; it defaults to PostBody.
+	PutBody string
 }
 
 type repositoryMonitorPublishTestServer struct {
 	*httptest.Server
 	PostCount    int
 	PostedReview repositoryMonitorPullRequestReviewRequest
+	// PutPath and PutBody record the last review summary update.
+	PutCount int
+	PutPath  string
+	PutBody  string
 }
 
 func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPublishTestServerConfig) *repositoryMonitorPublishTestServer {
@@ -4003,6 +4051,9 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 	}
 	if cfg.PostBody == "" {
 		cfg.PostBody = `{"id":123,"html_url":"https://github.com/orka-agents/orka/pull/1#pullrequestreview-123"}`
+	}
+	if cfg.PutBody == "" {
+		cfg.PutBody = cfg.PostBody
 	}
 	testServer := &repositoryMonitorPublishTestServer{}
 	testServer.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4030,6 +4081,17 @@ func newRepositoryMonitorPublishTestServer(t *testing.T, cfg repositoryMonitorPu
 			}
 			w.WriteHeader(cfg.PostStatus)
 			_, _ = w.Write([]byte(cfg.PostBody))
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/repos/orka-agents/orka/pulls/1/reviews/"):
+			testServer.PutCount++
+			testServer.PutPath = r.URL.Path
+			var update struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+				t.Fatalf("decode review update: %v", err)
+			}
+			testServer.PutBody = update.Body
+			_, _ = w.Write([]byte(cfg.PutBody))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.String())
 		}
@@ -4674,8 +4736,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeReviewerWithoutSecret(t *testi
 	reviewer := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "opencode-reviewer", Namespace: "default"},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	reconciler := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(reviewer).Build()}
@@ -4855,15 +4920,6 @@ func (s failingMonitorEventStore) CreateMonitorEvent(ctx context.Context, event 
 		return errors.New("audit event unavailable")
 	}
 	return s.RepositoryMonitorStore.CreateMonitorEvent(ctx, event)
-}
-
-type failingReviewRecordLookupStore struct {
-	store.RepositoryMonitorStore
-	err error
-}
-
-func (s failingReviewRecordLookupStore) GetReviewRecord(context.Context, string, string) (*store.ReviewRecord, error) {
-	return nil, s.err
 }
 
 type statusPatchCountingClient struct {
@@ -6032,7 +6088,7 @@ func TestRepositoryMonitorRepairTaskCreationRetryRestoresQueuedJob(t *testing.T)
 	reconciler := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: monitorStore}
 	run := &store.MonitorRun{ID: "run-repair-retry"}
 	command := &store.CommandEvent{ID: "cmd-repair-retry", Intent: "fix", Source: "api"}
-	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", BaseBranch: "main"}
+	pr := repositoryMonitorPullRequest{Number: 31, HeadSHA: "head31", BaseSHA: "base31", HeadBranch: "feature-fix", HeadRepo: "orka-agents/orka", BaseBranch: "main"}
 	item := &store.MonitorItem{MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "31", Number: 31, HeadSHA: pr.HeadSHA, AutomergeState: repositoryMonitorAutomergeStateMergeReady}
 
 	if created, err := reconciler.createRepositoryMonitorRepairTask(ctx, monitor, run, command, "orka-agents", "orka", pr, item, 1, 1); err == nil || created != 0 {
@@ -7148,6 +7204,8 @@ func TestRepositoryMonitorRequireGreenCIGatesReviewQueue(t *testing.T) {
 			_, _ = w.Write([]byte(`{"number":90,"title":"Wait for CI","state":"open","draft":false,"mergeable_state":"clean","user":{"login":"alice"},"base":{"ref":"main","sha":"base90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"head":{"ref":"feature-ci","sha":"head90","repo":{"full_name":"orka-agents/orka","clone_url":"https://github.com/orka-agents/orka.git"}},"labels":[]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/check-runs":
 			_, _ = w.Write([]byte(`{"total_count":1,"check_runs":[{"name":"test","status":"completed","conclusion":"failure"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/orka-agents/orka/commits/head90/status":
+			_, _ = w.Write([]byte(`{"total_count":0,"statuses":[]}`))
 		default:
 			t.Fatalf("unexpected GitHub request %s %s", r.Method, r.URL.Path)
 		}
@@ -7228,8 +7286,11 @@ func TestRepositoryMonitorValidationAllowsOpenCodeIssueReadOnlyRolesWithoutSecre
 			agent := &corev1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: role, Namespace: "default"},
 				Spec: corev1alpha1.AgentSpec{
-					Model:   testOpenCodeModelConfig(),
-					Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+					Model: testOpenCodeModelConfig(),
+					Runtime: &corev1alpha1.AgentCLIRuntime{
+						Type:            corev1alpha1.AgentRuntimeOpencode,
+						ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+					},
 				},
 			}
 			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: role + "-monitor", Namespace: "default"}}

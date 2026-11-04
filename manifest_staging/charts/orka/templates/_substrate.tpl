@@ -18,12 +18,12 @@
 {{- if or $auth.certKey $auth.privateKeyKey $auth.bearerTokenKey $auth.caKey -}}
 {{- fail "controller.substrate.apiCredentials.existingSecret is required when Secret keys are selected" -}}
 {{- end -}}
-{{- if $cfg.enabled -}}
+{{- if $cfg.mcpToolsEnabled -}}
 {{- if or (ne (empty $cfg.apiCertFile) (empty $cfg.apiKeyFile)) (eq (empty $cfg.apiCertFile) (empty $cfg.apiBearerTokenFile)) -}}
-{{- fail "controller.substrate.enabled requires exactly one control authentication method; configure apiCredentials or mounted API file paths" -}}
+{{- fail "controller.substrate.mcpToolsEnabled requires exactly one control authentication method; configure apiCredentials or mounted API file paths" -}}
 {{- end -}}
 {{- end -}}
-{{- if and (or $cfg.enabled $cfg.apiCertFile $cfg.apiKeyFile $cfg.apiBearerTokenFile) (not $cfg.apiInsecureSkipVerify) (empty $cfg.apiCAFile) -}}
+{{- if and (or $cfg.mcpToolsEnabled $cfg.apiCertFile $cfg.apiKeyFile $cfg.apiBearerTokenFile) (not $cfg.apiInsecureSkipVerify) (empty $cfg.apiCAFile) -}}
 {{- fail "controller.substrate.apiCAFile is required for verified Substrate API TLS" -}}
 {{- end -}}
 {{- end -}}

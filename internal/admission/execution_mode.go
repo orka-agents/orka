@@ -121,7 +121,7 @@ func (v *AgentContractValidator) Handle(ctx context.Context, req ctrladmission.R
 	if object.Spec.Runtime.ContractVersion != nil && *object.Spec.Runtime.ContractVersion != mode.ContractVersion() {
 		return ctrladmission.Denied(fmt.Sprintf("Agent contractVersion must match namespace execution mode %q", mode))
 	}
-	if mode == executionmode.HarnessV2 && (object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "") {
+	if object.Spec.Model == nil || strings.TrimSpace(object.Spec.Model.Name) == "" {
 		// The ACP session configuration requires a model; rejecting here
 		// turns a run-time Task failure into an immediate, actionable error.
 		return ctrladmission.Denied("built-in Agent runtime requires spec.model.name (the ACP runtime session has no default model)")
@@ -143,12 +143,15 @@ type AgentRuntimeContractValidator struct {
 }
 
 func (v *AgentRuntimeContractValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
-	if req.SubResource == statusSubresource || (req.Operation != admissionv1.Create && req.Operation != admissionv1.Update) {
+	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return ctrladmission.Allowed("not an AgentRuntime contract write")
 	}
 	object := &corev1alpha1.AgentRuntime{}
 	if err := v.decoder.Decode(req, object); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode AgentRuntime: %w", err))
+	}
+	if req.SubResource == statusSubresource {
+		return ctrladmission.Allowed("not an AgentRuntime contract write")
 	}
 	mode, response := namespaceExecutionMode(ctx, v.reader, object.Namespace)
 	if !response.Allowed {
@@ -166,7 +169,7 @@ func (v *AgentRuntimeContractValidator) Handle(ctx context.Context, req ctrladmi
 			return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old AgentRuntime: %w", err))
 		}
 		if oldObject.Spec.ContractVersion == nil {
-			return ctrladmission.Denied("stored unclassified AgentRuntime cannot be adopted; recreate it in the mode namespace")
+			return ctrladmission.Denied("stored AgentRuntime has no contractVersion; recreate it with orka.harness.v2")
 		}
 		if *oldObject.Spec.ContractVersion != *object.Spec.ContractVersion {
 			return ctrladmission.Denied("AgentRuntime contractVersion is immutable")
@@ -181,6 +184,7 @@ type TaskExecutionAuthorityValidator struct {
 	config  ExecutionModeConfig
 }
 
+//nolint:gocyclo // Admission checks every execution-authority invariant in one fail-closed pass.
 func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrladmission.Request) ctrladmission.Response {
 	if req.Operation != admissionv1.Create && req.Operation != admissionv1.Update {
 		return ctrladmission.Allowed("not a Task execution-authority write")
@@ -199,7 +203,7 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 	if err := v.decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
 		return ctrladmission.Errored(http.StatusBadRequest, fmt.Errorf("decode old Task execution authority: %w", err))
 	}
-	if taskHasExecutionAuthority(oldObject) && !reflect.DeepEqual(oldObject.Spec, object.Spec) {
+	if taskHasExecutionAuthority(oldObject) && !taskSpecUnchangedForAuthority(oldObject, object) {
 		return ctrladmission.Denied("Task spec is immutable after execution authority is recorded")
 	}
 	if taskHasExecutionAuthority(oldObject) && slices.Contains(oldObject.Finalizers, labels.TaskFinalizer) &&
@@ -209,6 +213,16 @@ func (v *TaskExecutionAuthorityValidator) Handle(ctx context.Context, req ctrlad
 		}
 	}
 
+	if oldObject.Status.SoulBinding != nil && !reflect.DeepEqual(oldObject.Status.SoulBinding, object.Status.SoulBinding) {
+		return ctrladmission.Denied("AI soul binding is write-once and immutable")
+	}
+	// Match the live generation when first binding, not when preserving a
+	// binding: deletion can advance metadata.generation without changing spec.
+	// The immutable spec/binding and finalizer ownership checks above still apply.
+	if binding := object.Status.SoulBinding; binding != nil && (object.Spec.Type != corev1alpha1.TaskTypeAI ||
+		oldObject.Status.SoulBinding == nil && (binding.TaskGeneration != object.Generation || !object.DeletionTimestamp.IsZero())) {
+		return ctrladmission.Denied("AI soul binding does not match the Task identity")
+	}
 	oldBinding, newBinding := oldObject.Status.AgentExecutionBinding, object.Status.AgentExecutionBinding
 	if response, handled := taskStatusWriteResponse(v.config, req.UserInfo.Username, oldObject, object); handled {
 		return response
@@ -281,16 +295,9 @@ func bindingBackendMatchesMode(binding *corev1alpha1.AgentExecutionBinding, mode
 	if binding == nil {
 		return false
 	}
-	switch mode {
-	case executionmode.HarnessV1:
-		return binding.Backend == corev1alpha1.AgentExecutionBackendHarnessWrapper ||
-			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
-	case executionmode.HarnessV2:
-		return binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool ||
-			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
-	default:
-		return false
-	}
+	return mode == executionmode.HarnessV2 &&
+		(binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool ||
+			binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint)
 }
 
 func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {
@@ -298,7 +305,7 @@ func agentUsesBuiltInRuntime(agent *corev1alpha1.Agent) bool {
 }
 
 func taskHasExecutionAuthority(task *corev1alpha1.Task) bool {
-	return task != nil && task.Status.AgentExecutionBinding != nil
+	return task != nil && (task.Status.AgentExecutionBinding != nil || task.Status.SoulBinding != nil)
 }
 
 func admissionReadError(operation string, err error) ctrladmission.Response {
@@ -306,4 +313,14 @@ func admissionReadError(operation string, err error) ctrladmission.Response {
 		return ctrladmission.Denied(operation + ": referenced object does not exist")
 	}
 	return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("%s: %w", operation, err))
+}
+
+// taskSpecUnchangedForAuthority applies the same freeze as the Task CRD rule:
+// an ACP execution binding freezes the whole spec, while a soul-only binding
+// freezes the execution inputs and leaves control fields such as suspend mutable.
+func taskSpecUnchangedForAuthority(oldObject, object *corev1alpha1.Task) bool {
+	if oldObject.Status.AgentExecutionBinding != nil {
+		return reflect.DeepEqual(oldObject.Spec, object.Spec)
+	}
+	return reflect.DeepEqual(oldObject.Spec.ExecutionInputs(), object.Spec.ExecutionInputs())
 }

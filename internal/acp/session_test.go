@@ -287,6 +287,27 @@ func TestMergeNewSessionMetaRejectsProtectedNamespace(t *testing.T) {
 	}
 }
 
+// Adapters send advisories as notices only to a client that advertises them;
+// otherwise the pinned codex-acp prefixes them to the agent's reply.
+func TestRuntimeSessionAdvertisesSessionNotices(t *testing.T) {
+	_, stateDir := newTestRuntimeSessionWithOptions(t, "immediate", nil, nil)
+	data, err := os.ReadFile(filepath.Join(stateDir, helperClientCapabilities))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capabilities struct {
+		Session struct {
+			Notices json.RawMessage `json:"notices"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal(data, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if string(capabilities.Session.Notices) != "{}" {
+		t.Fatalf("client capabilities = %s, want session.notices {}", data)
+	}
+}
+
 func newTestRuntimeSession(t *testing.T, mode string) *RuntimeSession {
 	return newTestRuntimeSessionWithMeta(t, mode, nil)
 }
@@ -396,6 +417,7 @@ const (
 	helperResumeReleaseFile     = "resume-release"
 	helperPromptAfterResumeFile = "prompt-after-resume"
 	helperClosedStateFile       = "closed"
+	helperClientCapabilities    = "client-capabilities"
 )
 
 // helperCreationResumeMode reports the modes that resume a provider session
@@ -452,6 +474,7 @@ func readHelperState(name string) string {
 	return string(data)
 }
 
+//nolint:gocyclo // Helper process dispatches every scripted ACP scenario in one switch.
 func TestACPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_ACP_HELPER") != "1" {
 		return
@@ -475,6 +498,12 @@ func TestACPHelperProcess(t *testing.T) {
 		}
 		switch message.Method {
 		case MethodInitialize:
+			var initialize struct {
+				ClientCapabilities json.RawMessage `json:"clientCapabilities"`
+			}
+			if err := json.Unmarshal(message.Params, &initialize); err == nil {
+				writeHelperState(helperClientCapabilities, string(initialize.ClientCapabilities))
+			}
 			capabilities := map[string]any{"loadSession": true, "mcpCapabilities": map[string]bool{"http": true}}
 			if sessionCapabilities := helperSessionCapabilities(mode); sessionCapabilities != nil {
 				capabilities["sessionCapabilities"] = sessionCapabilities

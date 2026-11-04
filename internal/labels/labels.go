@@ -23,6 +23,8 @@ const (
 	// Labels
 	LabelTask              = "orka.ai/task"
 	LabelTaskType          = "orka.ai/task-type"
+	LabelAgentName         = "orka.ai/agent-name"
+	LabelAgentUID          = "orka.ai/agent-uid"
 	LabelParentTask        = "orka.ai/parent-task"
 	LabelScheduledRun      = "orka.ai/scheduled-run"
 	LabelCreatedBy         = "orka.ai/created-by"

@@ -83,8 +83,8 @@ type ToolReconciler struct {
 	// private or cluster-local endpoint. Local fixtures only.
 	AllowPrivateConnectorEndpoints bool
 
-	// SubstrateEnabled enables durable MCP tool actors.
-	SubstrateEnabled            bool
+	// SubstrateMCPToolsEnabled enables durable MCP tool actors.
+	SubstrateMCPToolsEnabled    bool
 	SubstrateConfig             SubstrateConfig
 	EnforceNamespaceIsolation   bool
 	WorkspaceProviderAPIEnabled bool
@@ -321,6 +321,7 @@ func (r *ToolReconciler) validateToolHTTPURL(rawURL string, allowPrivate bool) e
 	return nil
 }
 
+//nolint:gocyclo // Each HTTP auth mode has its own validation branch.
 func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1alpha1.Tool) error {
 	if tool == nil || tool.Spec.HTTP == nil {
 		return nil
@@ -397,8 +398,8 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 }
 
 func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *corev1alpha1.Tool) error {
-	if !r.SubstrateEnabled {
-		return fmt.Errorf("MCP substrateActor requires substrate to be enabled")
+	if !r.SubstrateMCPToolsEnabled {
+		return fmt.Errorf("MCP substrateActor requires Substrate MCP tools to be enabled with --substrate-mcp-tools-enabled")
 	}
 	actor := tool.Spec.MCP.SubstrateActor
 	if strings.TrimSpace(actor.TemplateRef.Name) == "" {

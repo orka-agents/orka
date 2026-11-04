@@ -61,6 +61,7 @@ func (t *CreateAgentTaskTool) Parameters() json.RawMessage {
 	})
 }
 
+//nolint:gocyclo // Argument validation enforces each schema constraint again before creating the Task.
 func (t *CreateAgentTaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	tc := GetToolContext(ctx)
 	if tc == nil {

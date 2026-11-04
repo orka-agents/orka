@@ -13,7 +13,7 @@ import (
 )
 
 func TestListExecutionEventsUsesTaskDataTransaction(t *testing.T) {
-	s := newCoexistenceTestStore(t)
+	s := newAgentExecutionTestStore(t)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	rollback := errors.New("rollback the uncommitted history")

@@ -37,6 +37,16 @@ const (
 )
 
 var (
+	// Approval labels are restricted to lifecycle outcomes and execution paths.
+	ApprovalDecisionDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_approval_decision_duration_seconds",
+			Help:    "Time from approval request to committed decision in seconds",
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400},
+		},
+		[]string{"outcome", "path"},
+	)
+
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -303,6 +313,7 @@ var (
 
 func init() {
 	metrics.Registry.MustRegister(
+		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
 		APIRequestsTotal,
 		APIRequestDuration,

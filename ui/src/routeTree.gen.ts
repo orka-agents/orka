@@ -10,9 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as UsageRouteImport } from './routes/usage'
-import { Route as RuntimeSimulatorRouteImport } from './routes/runtime-simulator'
 import { Route as LoginRouteImport } from './routes/login'
-import { Route as LiveRouteImport } from './routes/live'
 import { Route as KanbanRouteImport } from './routes/kanban'
 import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
@@ -45,19 +43,9 @@ const UsageRoute = UsageRouteImport.update({
   path: '/usage',
   getParentRoute: () => rootRouteImport,
 } as any)
-const RuntimeSimulatorRoute = RuntimeSimulatorRouteImport.update({
-  id: '/runtime-simulator',
-  path: '/runtime-simulator',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LiveRoute = LiveRouteImport.update({
-  id: '/live',
-  path: '/live',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KanbanRoute = KanbanRouteImport.update({
@@ -197,9 +185,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -229,9 +215,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -262,9 +246,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/chat': typeof ChatRoute
   '/kanban': typeof KanbanRoute
-  '/live': typeof LiveRoute
   '/login': typeof LoginRoute
-  '/runtime-simulator': typeof RuntimeSimulatorRoute
   '/usage': typeof UsageRoute
   '/agents/$agentId': typeof AgentsAgentIdRoute
   '/agents/new': typeof AgentsNewRoute
@@ -296,9 +278,7 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -328,9 +308,7 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -360,9 +338,7 @@ export interface FileRouteTypes {
     | '/'
     | '/chat'
     | '/kanban'
-    | '/live'
     | '/login'
-    | '/runtime-simulator'
     | '/usage'
     | '/agents/$agentId'
     | '/agents/new'
@@ -393,9 +369,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChatRoute: typeof ChatRoute
   KanbanRoute: typeof KanbanRoute
-  LiveRoute: typeof LiveRoute
   LoginRoute: typeof LoginRoute
-  RuntimeSimulatorRoute: typeof RuntimeSimulatorRoute
   UsageRoute: typeof UsageRoute
   AgentsAgentIdRoute: typeof AgentsAgentIdRoute
   AgentsNewRoute: typeof AgentsNewRoute
@@ -431,25 +405,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UsageRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/runtime-simulator': {
-      id: '/runtime-simulator'
-      path: '/runtime-simulator'
-      fullPath: '/runtime-simulator'
-      preLoaderRoute: typeof RuntimeSimulatorRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/login': {
       id: '/login'
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/live': {
-      id: '/live'
-      path: '/live'
-      fullPath: '/live'
-      preLoaderRoute: typeof LiveRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/kanban': {
@@ -641,9 +601,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChatRoute: ChatRoute,
   KanbanRoute: KanbanRoute,
-  LiveRoute: LiveRoute,
   LoginRoute: LoginRoute,
-  RuntimeSimulatorRoute: RuntimeSimulatorRoute,
   UsageRoute: UsageRoute,
   AgentsAgentIdRoute: AgentsAgentIdRoute,
   AgentsNewRoute: AgentsNewRoute,

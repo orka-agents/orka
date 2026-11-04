@@ -1251,8 +1251,7 @@ func TestInternalApplyMemoryProposal(t *testing.T) {
 		Reviewer:  "reviewer",
 	}))
 
-	body, _ := json.Marshal(map[string]string{"appliedBy": "coordinator"})
-	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/"+proposal.ID+"/apply", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/internal/v1/memory-proposals/default/"+proposal.ID+"/apply", strings.NewReader(`{}`))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := app.Test(req)
 	require.NoError(t, err)
@@ -1268,7 +1267,7 @@ func TestInternalApplyMemoryProposal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "applied", updated.Status)
 	require.Equal(t, memory.ID, updated.AppliedMemoryID)
-	require.Equal(t, "coordinator", updated.AppliedBy)
+	require.Equal(t, "system:serviceaccount:default:worker", updated.AppliedBy)
 }
 
 func TestInternalApplyMemoryProposalRejectsNamespaceMismatch(t *testing.T) {

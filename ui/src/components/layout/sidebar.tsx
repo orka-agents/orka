@@ -1,7 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { Link, useLocation } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Activity, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
+import { LayoutDashboard, ListTodo, MessageSquare, Bot, Wrench, Sparkles, Columns3, Shield, Radar, Boxes, RadioTower, PanelLeftClose, PanelLeftOpen, ChartNoAxesCombined, Link2 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { useUIStore } from '@/stores/ui'
@@ -19,7 +19,6 @@ const NAV_ITEMS = [
   { to: '/security', label: 'Security', icon: Shield },
   { to: '/tasks', label: 'Tasks', icon: ListTodo },
   { to: '/kanban', label: 'Board', icon: Columns3 },
-  { to: '/live', label: 'Live', icon: Activity },
   { to: '/gateways', label: 'Gateways', icon: RadioTower },
   { to: '/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/runtimes', label: 'Runtimes', icon: Boxes },
@@ -27,6 +26,11 @@ const NAV_ITEMS = [
   { to: '/tools', label: 'Tools', icon: Wrench },
   { to: '/settings/connectors', label: 'Connectors', icon: Link2 },
 ] as const
+
+// The demo build's tour entry; other builds drop it (static mode check).
+const DemoTourLauncher = import.meta.env.MODE === 'demo'
+  ? lazy(() => import('@/demo/tour/tour').then((m) => ({ default: m.TourLauncher })))
+  : null
 
 export function Sidebar() {
   const location = useLocation()
@@ -143,7 +147,8 @@ export function Sidebar() {
           )}
         </Button>
       </div>
-      <nav className="flex-1 space-y-1 p-2">
+      {/* Scrolls on short screens, so whatever sits below it stays in view. */}
+      <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
         {navItems.map(({ to, label, icon: Icon }) => {
           const isActive = to === '/' ? location.pathname === '/' : location.pathname.startsWith(to)
           return (
@@ -172,6 +177,11 @@ export function Sidebar() {
           )
         })}
       </nav>
+      {DemoTourLauncher && (
+        <Suspense fallback={null}>
+          <DemoTourLauncher collapsed={sidebarCollapsed} onSelect={() => { if (overlayOpen) closeOverlay() }} />
+        </Suspense>
+      )}
     </aside>
     </>
   )

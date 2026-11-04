@@ -104,6 +104,19 @@ the route in the URL fragment so any static host can serve it. Chat replies are 
 and tasks created in the demo run through a simulated lifecycle. Nothing persists past a
 reload. The mode check is static, so `bun run build` contains none of it.
 
+A guided tour (`src/demo/tour/`) opens on a visitor's first visit and from **Take the tour**
+in the sidebar. It follows one incident Task through its trace and approval and the agent
+behind it, then visits Chat, a repository monitor and Usage; visitors who keep going also
+see a coordinator's child Tasks, a security finding, the Slack gateway and the runtime
+pools. Stops backed by a Kubernetes resource can show it as YAML, trimmed to the fields the
+stop mentions (`src/demo/tour/manifests.ts`); the others say their data comes from Orka's
+own record. Each stop can also show the equivalent `orka` CLI commands. Its steps name
+sample objects, and `src/demo/tour/steps.test.ts` fails if they are renamed, a YAML stops
+matching the resource its page shows, a command is missing from the generated
+[CLI reference](../website/docs/reference/cli-commands.md), the incident stops waiting on
+its approval, or the coordinator loses its children.
+`src/demo/data/agents.test.ts` holds the sample agents to the controller's approval rules.
+
 `.github/workflows/website.yml` publishes the demo to GitHub Pages under `/demo/`, next to
 the documentation site, whenever `ui/` or `website/` changes on `main`. When an API response changes shape, update the matching
 fixtures in `src/demo/`; the tests under `src/demo/handlers/` parse them with the real

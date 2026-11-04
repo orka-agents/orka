@@ -415,25 +415,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandIntentForID(ctx co
 	return fallback
 }
 
-func repositoryMonitorImplementationActionAlreadyStarted(action *store.WorkAction) bool {
-	if action == nil {
-		return false
-	}
-	switch strings.TrimSpace(action.Phase) {
-	case repositoryMonitorIssuePhaseImplementationQueued,
-		repositoryMonitorIssuePhaseImplementing,
-		repositoryMonitorIssuePhasePatchReady,
-		repositoryMonitorIssuePhaseMutationQueued,
-		repositoryMonitorIssuePhaseMutatingToPR,
-		repositoryMonitorIssuePhasePROpened,
-		repositoryMonitorIssuePhaseComplete,
-		repositoryMonitorIssuePhaseBlocked:
-		return true
-	default:
-		return false
-	}
-}
-
 func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTaskName bool) {
 	if action == nil {
 		return
@@ -1146,16 +1127,6 @@ func repositoryMonitorWorkspaceValidationGuidance(task *corev1alpha1.Task) strin
 	}
 }
 
-func anySliceField(body map[string]any, key string) []any {
-	if body == nil {
-		return nil
-	}
-	if values, ok := body[key].([]any); ok {
-		return values
-	}
-	return nil
-}
-
 func repositoryMonitorIssueActionRecordID(task *corev1alpha1.Task) string {
 	if task == nil {
 		return "act-unknown"
@@ -1394,7 +1365,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ct
 	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
 	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
-		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
 		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrConflict) {

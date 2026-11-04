@@ -102,6 +102,24 @@ spec:
                 minItems: 1
                 type: array
                 x-kubernetes-list-type: set
+              serviceAccountRef:
+                description: |-
+                  ServiceAccountRef identifies the installed adapter for core's provider-status
+                  authorization check. External runtime dispatch requires this reference.
+                  Legacy installations may omit it only while retiring existing resources.
+                properties:
+                  name:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  namespace:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
               usagePolicy:
                 description: UsagePolicy constrains which namespaces may resolve classes
                   to this provider.
@@ -168,6 +186,9 @@ spec:
               rule: self.parametersRef == oldSelf.parametersRef
             - message: requiredContracts is immutable
               rule: self.requiredContracts == oldSelf.requiredContracts
+            - message: serviceAccountRef is immutable
+              rule: has(self.serviceAccountRef) == has(oldSelf.serviceAccountRef)
+                && (!has(self.serviceAccountRef) || self.serviceAccountRef == oldSelf.serviceAccountRef)
           status:
             description: |-
               ExecutionWorkspaceProviderStatus defines the observed provider state. The matching adapter is the

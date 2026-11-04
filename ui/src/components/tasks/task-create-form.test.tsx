@@ -1108,7 +1108,7 @@ describe('TaskCreateForm', () => {
     expect(toast.success).not.toHaveBeenCalled()
   })
 
-  it('submits a harness-v1 runtimeRef Agent with an explicit empty allowlist', async () => {
+  it('rejects a harness-v1 runtimeRef Agent before creating a Task', async () => {
     useStateTypeOverride = 'agent'
     let submitted: any
     server.use(
@@ -1137,11 +1137,11 @@ describe('TaskCreateForm', () => {
     fireEvent.click(await screen.findByRole('option', { name: /external-agent/ }))
     await user.click(screen.getByRole('button', { name: 'Create Task' }))
 
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Task created'))
-    expect(submitted).toMatchObject({
-      agentRef: { name: 'external-agent' },
-      agentRuntime: { allowedTools: [] },
-    })
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(
+      expect.stringContaining('orka.harness.v2'),
+    ))
+    expect(submitted).toBeUndefined()
+    expect(toast.success).not.toHaveBeenCalled()
   })
 
   it.each([

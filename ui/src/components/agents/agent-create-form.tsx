@@ -37,6 +37,7 @@ export function AgentCreateForm() {
   const [maxTokens, setMaxTokens] = useState('')
   const [secretRef, setSecretRef] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
+  const [soul, setSoul] = useState('')
 
   // ACP runtime mode selects either an Orka-managed profile or a registered v2 runtime.
   const [runtimeSource, setRuntimeSource] = useState<'built-in' | 'external'>('built-in')
@@ -48,6 +49,8 @@ export function AgentCreateForm() {
   // Model, token, and runtime fields mean different things per mode (the
   // native max-tokens field and OpenCode's output limit share state), so a
   // mode switch starts the mode-specific fields over instead of carrying them.
+  // The role and soul apply to native AI and built-in runtimes alike, so they
+  // carry over.
   const handleModeChange = (value: string) => {
     setMode(value as 'ai' | 'runtime')
     setProvider('')
@@ -56,7 +59,6 @@ export function AgentCreateForm() {
     setTemperature('0.7')
     setContextWindow('')
     setMaxTokens('')
-    setSystemPrompt('')
     setRuntimeSource('built-in')
     setRuntimeType('claude')
     setRuntimeRef('')
@@ -121,6 +123,16 @@ export function AgentCreateForm() {
       return
     }
 
+    if (
+      mode === 'runtime'
+      && runtimeSource === 'built-in'
+      && runtimeType === 'copilot'
+      && (systemPrompt.includes('@') || soul.includes('@'))
+    ) {
+      toast.error('Copilot instructions must not contain @ references; inline the referenced text')
+      return
+    }
+
     const spec: Record<string, unknown> = {}
 
     if (mode === 'ai') {
@@ -133,9 +145,6 @@ export function AgentCreateForm() {
       }
       if (Object.keys(modelConfig).length > 0) {
         spec.model = modelConfig
-      }
-      if (systemPrompt) {
-        spec.systemPrompt = { inline: systemPrompt }
       }
       if (secretRef.trim() && secretRef !== '__none__') {
         spec.secretRef = { name: secretRef.trim() }
@@ -155,6 +164,15 @@ export function AgentCreateForm() {
           ? { name: trimmedModel, contextWindow: parsedContextWindow, maxTokens: parsedMaxTokens }
           : { name: trimmedModel }
       }
+    }
+
+    if (mode === 'ai' || runtimeSource === 'built-in') {
+      if (new TextEncoder().encode(soul).length > 8192) {
+        toast.error('Soul must not exceed 8192 UTF-8 bytes')
+        return
+      }
+      if (soul.trim()) spec.soul = { inline: soul }
+      if (systemPrompt) spec.systemPrompt = { inline: systemPrompt }
     }
 
     try {
@@ -260,16 +278,6 @@ export function AgentCreateForm() {
                   </div>
                 </div>
                 <div className="space-y-2">
-                  <label htmlFor="agent-system-prompt" className="text-sm font-medium">System Prompt</label>
-                  <textarea
-                    id="agent-system-prompt"
-                    className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    value={systemPrompt}
-                    onChange={(e) => setSystemPrompt(e.target.value)}
-                    placeholder="Optional system prompt..."
-                  />
-                </div>
-                <div className="space-y-2">
                   <label htmlFor="agent-secret-ref" className="text-sm font-medium">Secret Reference</label>
                   <SecretNameField id="agent-secret-ref" value={secretRef} onChange={setSecretRef} placeholder="Select a secret..." />
                   <p className="text-xs text-muted-foreground">Kubernetes Secret containing native AI provider credentials</p>
@@ -371,6 +379,28 @@ export function AgentCreateForm() {
                     </p>
                   </div>
                 )}
+              </div>
+            )}
+
+            {(mode === 'ai' || runtimeSource === 'built-in') && (
+              <div className="space-y-2">
+                <label htmlFor="agent-system-prompt" className="text-sm font-medium">System Prompt</label>
+                <textarea
+                  id="agent-system-prompt"
+                  className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder="Optional system prompt..."
+                />
+              </div>
+            )}
+
+            {(mode === 'ai' || runtimeSource === 'built-in') && (
+              <div className="space-y-2">
+                <label htmlFor="agent-soul" className="text-sm font-medium">Soul (optional)</label>
+                <textarea className="flex min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" id="agent-soul" value={soul} onChange={(e) => setSoul(e.target.value)} rows={5} maxLength={8192}
+                  placeholder="Persistent persona and communication defaults, separate from role instructions." />
+                <p className="text-xs text-muted-foreground">Maximum 8 KiB. New revisions require a new Session. Use YAML for digest-pinned ConfigMap sources.</p>
               </div>
             )}
 

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -24,6 +25,9 @@ const (
 	maxACPToolCallTitleBytes = 1024
 	acpToolCallTitleEllipsis = "…"
 )
+
+// acpSessionUpdateAgentMessageChunk is the ACP update carrying assistant text.
+const acpSessionUpdateAgentMessageChunk = "agent_message_chunk"
 
 const (
 	acpAssistantPhaseCommentary  = "commentary"
@@ -70,7 +74,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 		return nil, "", false, fmt.Errorf("decode ACP session update: %w", err)
 	}
 	switch envelope.SessionUpdate {
-	case "agent_message_chunk":
+	case acpSessionUpdateAgentMessageChunk:
 		var content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
@@ -137,7 +141,7 @@ func mapACPUpdate(notification *acp.SessionNotification) (*harnessv2.UpdateEvent
 			return nil, "", false, nil
 		}
 		return &harnessv2.UpdateEvent{Kind: harnessv2.UpdateUsage, Usage: usage}, "", true, nil
-	case "agent_thought_chunk", "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update":
+	case "agent_thought_chunk", "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update", "notice":
 		return nil, "", false, nil
 	default:
 		return nil, "", false, nil
@@ -288,7 +292,7 @@ func acpAssistantMessagePhase(notification *acp.SessionNotification) string {
 			} `json:"codex"`
 		} `json:"_meta"`
 	}
-	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != "agent_message_chunk" {
+	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != acpSessionUpdateAgentMessageChunk {
 		return ""
 	}
 	switch envelope.Meta.Codex.Phase {
@@ -297,6 +301,23 @@ func acpAssistantMessagePhase(notification *acp.SessionNotification) string {
 	default:
 		return ""
 	}
+}
+
+// acpAssistantMessageID returns the messageId of an agent_message_chunk.
+// codex-acp 2.x sends message phases only to JetBrains AIR clients, but it
+// still names every model message, so the last named message is the answer.
+func acpAssistantMessageID(notification *acp.SessionNotification) string {
+	if notification == nil {
+		return ""
+	}
+	var envelope struct {
+		SessionUpdate string `json:"sessionUpdate"`
+		MessageID     string `json:"messageId"`
+	}
+	if json.Unmarshal(notification.Update, &envelope) != nil || envelope.SessionUpdate != acpSessionUpdateAgentMessageChunk {
+		return ""
+	}
+	return envelope.MessageID
 }
 
 const (
@@ -363,13 +384,19 @@ func (prompt *promptState) rememberToolCallName(
 	if err != nil {
 		return err
 	}
+	outsidePolicy := false
 	if provider == providerKindCodex {
 		name, err = codexMCPPermissionToolName(call.Meta.IsMCPToolCall, call.Kind, call.RawInput, name, policy)
-		if err != nil {
+		// The model can name any MCP server or tool, and the prompt broker
+		// refuses a call outside the frozen policy. Record the call without a
+		// name, so a permission request for it identifies no tool and a later
+		// update cannot give it one.
+		outsidePolicy = errors.Is(err, errCodexMCPToolOutsidePolicy)
+		if err != nil && !outsidePolicy {
 			return err
 		}
 	}
-	if name == "" {
+	if name == "" && !outsidePolicy {
 		return nil
 	}
 	id, err := canonicalACPToolCallID(call.ToolCallID)
@@ -392,6 +419,8 @@ func (prompt *promptState) rememberToolCallName(
 	return nil
 }
 
+var errCodexMCPToolOutsidePolicy = errors.New("codex MCP tool identity is outside the frozen broker policy")
+
 // The pinned Codex adapter marks MCP updates and supplies structured server/tool
 // fields instead of name. Only the configured Orka server and a frozen brokered
 // descriptor can supply an identity; titles and native-tool collisions cannot.
@@ -413,9 +442,12 @@ func codexMCPPermissionToolName(marker json.RawMessage, kind string, rawInput js
 	if err := json.Unmarshal(rawInput, &input); err != nil {
 		return "", fmt.Errorf("codex MCP tool update has invalid structured identity")
 	}
+	if kind != "execute" {
+		return "", fmt.Errorf("codex MCP tool update has an unexpected kind")
+	}
 	descriptor, allowed := policy.Descriptor(input.Tool)
-	if kind != "execute" || input.Server != supervisorMCPServerName || !allowed || !descriptor.Source.Brokered() {
-		return "", fmt.Errorf("codex MCP tool identity is outside the frozen broker policy")
+	if input.Server != supervisorMCPServerName || !allowed || !descriptor.Source.Brokered() {
+		return "", errCodexMCPToolOutsidePolicy
 	}
 	if name != "" && name != descriptor.Name {
 		return "", fmt.Errorf("codex MCP tool update has conflicting structured identities")

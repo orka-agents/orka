@@ -359,6 +359,11 @@ func (s *RuntimeSession) launchAdapter(ctx context.Context) (*Process, AgentCapa
 		ClientCapabilities: ClientCapabilities{
 			FS:       FileSystemCapabilities{},
 			Terminal: false,
+			// Adapters that support ACP session notices (the pinned codex-acp
+			// and claude-agent-acp) then send advisories, such as Codex's
+			// missing model metadata warning, as notice updates instead of
+			// prefixing them to the agent's reply.
+			Session: map[string]any{"notices": map[string]any{}},
 		},
 	})
 	if err != nil {

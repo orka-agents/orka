@@ -740,7 +740,6 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if tt.withBuiltInRuntimeFields {
 				maxTurns := int32(10)
 				allowBash := true
-				source.Spec.AgentRuntime.Workspace = &corev1alpha1.LegacyAgentWorkspaceConfig{GitRepo: "https://example.test/repo.git"}
 				source.Spec.AgentRuntime.MaxTurns = &maxTurns
 				source.Spec.AgentRuntime.DisallowedTools = []string{"stale_denied_tool"}
 				source.Spec.AgentRuntime.AllowBash = &allowBash
@@ -784,7 +783,7 @@ func TestForkTaskAPIMaterializesSelectedAgentCurrentRuntimePolicy(t *testing.T) 
 			if created.Spec.AgentRuntime.AllowedTools == nil {
 				t.Fatal("allowedTools = nil, want explicit current policy")
 			}
-			if created.Spec.AgentRuntime.Workspace != nil || created.Spec.AgentRuntime.MaxTurns != nil ||
+			if created.Spec.AgentRuntime.MaxTurns != nil ||
 				created.Spec.AgentRuntime.DisallowedTools != nil || created.Spec.AgentRuntime.AllowBash != nil {
 				t.Fatalf("agentRuntime = %#v, want inherited runtime overrides cleared", created.Spec.AgentRuntime)
 			}

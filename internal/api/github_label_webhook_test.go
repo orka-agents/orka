@@ -8,7 +8,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -607,18 +606,6 @@ func newGitHubWebhookFakeClient(t *testing.T, objs ...client.Object) client.Clie
 		t.Fatalf("add core scheme: %v", err)
 	}
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
-}
-
-type githubWebhookAgentGetErrorClient struct {
-	client.Client
-	err error
-}
-
-func (c githubWebhookAgentGetErrorClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-	if _, ok := obj.(*corev1alpha1.Agent); ok {
-		return c.err
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 func runtimeAgent(name string) *corev1alpha1.Agent {

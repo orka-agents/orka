@@ -5,7 +5,11 @@ description: "The namespace-scoped memory layer: durable memories, proposals, an
 
 # Memory
 
-Orka provides a namespace-scoped memory layer for AI worker tasks. It is designed for shared Kubernetes environments where memory should be useful, auditable, and safe by default.
+Memory lets agents carry knowledge from one Task to the next: project facts, decisions,
+conventions, and procedures. In a shared cluster, memory that any model output could change
+would be a liability, so Orka makes writing a memory a review request. Agents propose; a
+person reviews and applies; only then do future Tasks see it. Memory is scoped to a namespace
+and available to native `type: ai` Tasks.
 
 The current model has three related concepts:
 
@@ -16,6 +20,8 @@ The current model has three related concepts:
 | **Transcript search** | Compact search over prior session messages | Stored in SQLite session transcript tables |
 
 Memory proposal review is **non-applying**. Reviewing a proposal as accepted or rejected records the decision only. Accepted proposals with `type: "memory"` can then be applied explicitly, which creates (or idempotently returns) durable memory linked back to the proposal.
+
+Both steps record who took them: `reviewer` on the review and `appliedBy` on the apply. The server takes these names from the signed-in identity of the request. A client cannot set them: a request body with a non-empty `reviewer` or `appliedBy` is rejected with `400 Bad Request`, and a request without an identity is refused.
 
 :::tip[Video demo]
 Watch [Review and publish an agent's memory](https://www.youtube.com/watch?v=iCqyVfWBpyg).
@@ -41,7 +47,18 @@ Tags: release, testing
 
 When an AI worker can reach the controller internal API, it loads reviewed durable memories before invoking the model. The durable memory section is appended to the system prompt as background project context, separate from the current session transcript.
 
-When coordination is enabled on an Agent, Orka auto-injects the memory tool family along with the coordination tools:
+In this warning release, every native `type: ai` Task receives the memory tools,
+regardless of Agent `spec.tools`, Task `spec.ai.tools`, or `coordination.enabled`.
+They cannot yet be disabled per Agent, including with `enabled: false` or the
+`orka.ai/disable-coordination-tool-injection` Task annotation.
+
+When a model calls a memory tool that is neither explicitly selected nor covered
+by coordination, the worker logs a deprecation warning. **The next release will
+stop adding these tools unless the Agent enables coordination or the Agent/Task
+explicitly selects them.** In that release, the disable-injection annotation will
+also suppress automatic memory tools; explicit selections will remain available.
+See the [migration and release notes](../operations/upgrading.md#memory-tool-opt-in)
+and [tool parameters](../reference/built-in-tools.md#memory-tools).
 
 | Tool | Purpose |
 |------|---------|
@@ -168,25 +185,20 @@ curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/re
   -H "Content-Type: application/json" \
   -d '{
     "status": "accepted",
-    "reviewer": "platform-team",
     "reviewNote": "Valid reusable release procedure."
   }'
 ```
 
-Review returns `204 No Content`. It records governance state only; it does not apply the proposal as durable memory.
+Review returns the stored review record: `id`, `namespace`, `status`, `reviewer`, `reviewNote`, and `reviewedAt`. `reviewer` is the identity that made the request. Review records governance state only; it does not apply the proposal as durable memory.
 
 Apply an accepted memory proposal:
 
 ```bash
 curl -sS -X POST "http://localhost:8080/api/v1/memory-proposals/mprop-example/apply?namespace=orka-system" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "appliedBy": "platform-team"
-  }'
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy`, and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
+Apply returns the durable memory as JSON. The created memory has `source: "memory_proposal"` and `sourceProposalId` set to the proposal ID, and the proposal is updated to `status: "applied"` with `appliedMemoryId`, `appliedBy` (the identity that made the request), and `appliedAt`. Repeating the apply request is idempotent and returns the same durable memory. Only accepted proposals with `type: "memory"` can be applied; rejected and archived proposals cannot be applied.
 
 ## Safety model
 
@@ -196,22 +208,6 @@ Apply returns the durable memory as JSON. The created memory has `source: "memor
 - Disabled and deleted memories are excluded from normal recall by default.
 - Memory writes are namespace-scoped and authenticated through the same ServiceAccount-token API model as other Orka APIs.
 - Applying accepted memory proposals preserves proposal-to-memory linkage for auditability.
-
-## Validation
-
-The live copilot-proxy E2E suite validates the native `type: ai` memory path
-with a real model-backed worker. The proxy is test infrastructure and is
-separate from the built-in Copilot ACP RuntimePool path:
-
-- durable memory can be pre-seeded through the API
-- a live worker receives memory tools through `ORKA_AI_TOOLS`
-- the worker executes `recall_memory`, `remember`, `propose_memory`, and `search_transcript`
-- durable recall does not create duplicate durable memory
-- proposed memory remains a proposal until it is explicitly applied
-- proposal review persists accepted/rejected state without applying the proposal
-- accepted memory proposals apply idempotently into linked durable memory
-
-Deterministic unit and integration tests cover store behavior, API handlers, tool registration, prompt composition, and worker/tool plumbing.
 
 ## Current limitations
 
