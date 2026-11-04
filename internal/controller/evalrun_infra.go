@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,8 +39,8 @@ type evalTrialSignals struct {
 	// ProviderFailure is set when a prompt failed because the provider proxy
 	// could not serve it: a 5xx or 429, or a stream that never drained.
 	ProviderFailure bool
-	// RequestRejected is set when the provider rejected the request with a
-	// 4xx other than 429, such as an oversized prompt: the subject's fault.
+	// RequestRejected is set when the provider rejected the request for its
+	// content, such as an oversized prompt: the subject's fault.
 	RequestRejected bool
 	InputTokens     *int64
 	OutputTokens    *int64
@@ -173,22 +174,31 @@ func maxInt64Pointer(current, candidate *int64) *int64 {
 }
 
 // evalProviderProxyFailure reports a ModelRequestFailed journal entry for a
-// provider the proxy could not serve. A 4xx other than 429 is the request's
-// fault, such as an oversized prompt, so it stays a trial failure.
+// provider the proxy could not serve: a 5xx, a 429 or a 402 for exhausted
+// quota. Any other 4xx is not the provider's capacity failing, so it stays a
+// trial outcome.
 func evalProviderProxyFailure(content json.RawMessage) bool {
 	status, ok := evalProviderUpstreamStatus(content)
 	if !ok {
 		return false
 	}
 	// A stream drain timeout carries no status.
-	return status == 0 || status >= 500 || status == 429
+	return status == 0 || status >= 500 || status == http.StatusTooManyRequests || status == http.StatusPaymentRequired
 }
 
 // evalProviderRequestRejected reports a ModelRequestFailed journal entry for
-// a request the provider rejected with a 4xx other than 429.
+// a request the provider rejected for its content, such as an oversized or
+// malformed prompt: the subject's fault.
 func evalProviderRequestRejected(content json.RawMessage) bool {
 	status, ok := evalProviderUpstreamStatus(content)
-	return ok && status >= 400 && status < 500 && status != 429
+	if !ok {
+		return false
+	}
+	switch status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }
 
 // evalProviderUpstreamStatus reads a provider_upstream_error failure's HTTP
@@ -221,8 +231,8 @@ func evalProviderUpstreamStatus(content json.RawMessage) (int, bool) {
 //   - OutcomeUnknown: any other OutcomeUnknown outcome, such as an unproven
 //     settlement or a failed execution-event persistence.
 //   - ProviderProxyError: the journal holds a provider_upstream_error failure
-//     with a 5xx or 429 status, or a provider stream that never drained.
-//   - A provider_upstream_error with any other 4xx status rejected the
+//     with a 5xx, 429 or 402 status, or a provider stream that never drained.
+//   - A provider_upstream_error with a 400, 413 or 422 status rejected the
 //     request itself, so the trial is graded as a failure.
 //   - TimeoutBeforeInference: the trial timed out (TaskTimeout or the trial
 //     deadline) before any model output.

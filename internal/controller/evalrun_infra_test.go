@@ -60,6 +60,7 @@ func TestEvalProviderProxyFailure(t *testing.T) {
 	for message, want := range map[string]bool{
 		"provider upstream returned HTTP 502 for the final inference request": true,
 		"provider upstream returned HTTP 429 for the final inference request": true,
+		"provider upstream returned HTTP 402 for the final inference request": true,
 		"provider upstream returned HTTP 400 for the final inference request": false,
 		"a provider inference request was still in flight":                    true,
 	} {
@@ -71,6 +72,8 @@ func TestEvalProviderProxyFailure(t *testing.T) {
 	for message, want := range map[string]bool{
 		"provider upstream returned HTTP 400 for the final inference request": true,
 		"provider upstream returned HTTP 413 for the final inference request": true,
+		"provider upstream returned HTTP 402 for the final inference request": false,
+		"provider upstream returned HTTP 403 for the final inference request": false,
 		"provider upstream returned HTTP 429 for the final inference request": false,
 		"provider upstream returned HTTP 502 for the final inference request": false,
 		"a provider inference request was still in flight":                    false,

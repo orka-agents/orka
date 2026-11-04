@@ -42,6 +42,8 @@ type evalRunTestEnv struct {
 	t *testing.T
 	// staleTaskCache makes cached Task listings miss every Task.
 	staleTaskCache bool
+	// staleTaskPhase makes cached Task listings report this phase.
+	staleTaskPhase corev1alpha1.TaskPhase
 	client         client.Client
 	store          *sqlite.Store
 	reconciler     *EvalRunReconciler
@@ -150,7 +152,15 @@ func newEvalRunTestEnv(t *testing.T, objects ...client.Object) *evalRunTestEnv {
 				if _, tasks := list.(*corev1alpha1.TaskList); tasks && env.staleTaskCache {
 					return nil
 				}
-				return c.List(ctx, list, opts...)
+				if err := c.List(ctx, list, opts...); err != nil {
+					return err
+				}
+				if tasks, ok := list.(*corev1alpha1.TaskList); ok && env.staleTaskPhase != "" {
+					for i := range tasks.Items {
+						tasks.Items[i].Status.Phase = env.staleTaskPhase
+					}
+				}
+				return nil
 			},
 		}).
 		Build()
@@ -483,6 +493,9 @@ func TestEvalRunFailsConfigurationsItCannotRun(t *testing.T) {
 		}},
 		"external runtime": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectUnsupported, mutate: func(objects []client.Object) {
 			objects[3].(*corev1alpha1.Agent).Spec.Runtime = &corev1alpha1.AgentCLIRuntime{RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "byo"}}
+		}},
+		"copilot reviewer": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectUnsupported, mutate: func(objects []client.Object) {
+			objects[3].(*corev1alpha1.Agent).Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
 		}},
 		"cross-namespace reviewer": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectInvalid, mutate: func(objects []client.Object) {
 			objects[2].(*corev1alpha1.RepositoryMonitor).Spec.Agents.Reviewer.Namespace = "other"
@@ -900,6 +913,29 @@ func TestEvalRunGradesProviderRejectionWithoutOutputAsFailure(t *testing.T) {
 	}
 	if got := env.run().Status.Counts; got.Failed != 1 || got.InfraError != 0 {
 		t.Fatalf("counts = %+v", got)
+	}
+}
+
+func TestEvalRunConfirmsTaskIsRunningBeforeRecordingTimeout(t *testing.T) {
+	run := evalTestRun(1, 1)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+	env.start()
+	env.reconcile()
+	tasks := env.trialTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("created %d trial Tasks, want 1", len(tasks))
+	}
+	env.finishTask(&tasks[0], corev1alpha1.TaskPhaseSucceeded, evalTestReviewResult("passed"), true)
+	// The cache has not delivered the Succeeded status by the force deadline.
+	env.staleTaskPhase = corev1alpha1.TaskPhaseRunning
+	env.now = tasks[0].CreationTimestamp.Add(20*time.Minute + evalTrialSettleGrace)
+	env.reconcile()
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %v, err = %v", records, err)
+	}
+	if records[0].Outcome != store.EvalTrialOutcomePass || records[0].InfraClass != "" {
+		t.Fatalf("record = %+v; a trial that succeeded before its deadline was recorded as a timeout", records[0])
 	}
 }
 

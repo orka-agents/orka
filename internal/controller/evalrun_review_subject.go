@@ -285,6 +285,12 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported,
 			"reviewer agent %q must use a built-in runtime; external runtimes are not supported by evals", reviewer.Name)
 	}
+	if runtimeSpec.Type == corev1alpha1.AgentRuntimeCopilot {
+		// Review Tasks are read-only, and Task admission rejects Copilot
+		// there because its runtime credential can mutate GitHub.
+		return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported,
+			"reviewer agent %q cannot use copilot for read-only reviews; use claude, codex, or opencode", reviewer.Name)
+	}
 	_, image, err := acpRuntimeArtifacts(runtimeSpec.Type, r.RuntimeImages)
 	if err != nil {
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported, "reviewer agent %q: %v", reviewer.Name, err)

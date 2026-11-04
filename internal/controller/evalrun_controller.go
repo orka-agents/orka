@@ -352,6 +352,10 @@ func (r *EvalRunReconciler) runEvalTrials(ctx context.Context, run *corev1alpha1
 		if task == nil {
 			continue
 		}
+		task, err = r.confirmOverdueEvalTrialTask(ctx, task, task.CreationTimestamp.Add(timeout).Add(evalTrialSettleGrace), now)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 		c := casesByID[planned.CaseID]
 		if err := r.validateEvalTrialTask(run, observed.Monitor, c, planned.Trial, task); err != nil {
 			// Trials recorded earlier in this loop are immutable, and the
@@ -457,6 +461,24 @@ func evalRunInfraErrorBudgetExceeded(run *corev1alpha1.EvalRun, counts corev1alp
 // Only the Task phase decides: the dispatcher records a Succeeded execution
 // outcome before delivery and cleanup finish, and either can still fail the
 // Task.
+// confirmOverdueEvalTrialTask re-reads, uncached, a Task the cache shows
+// running past its force deadline. Trial records are immutable, so a timeout
+// is recorded only if the API server agrees; the cache can lag a terminal
+// status. A Task already gone keeps its cached state.
+func (r *EvalRunReconciler) confirmOverdueEvalTrialTask(ctx context.Context, task *corev1alpha1.Task, forceDeadline, now time.Time) (*corev1alpha1.Task, error) {
+	if evalTrialTaskTerminal(task) || now.Before(forceDeadline) {
+		return task, nil
+	}
+	fresh := &corev1alpha1.Task{}
+	if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(task), fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return task, nil
+		}
+		return nil, err
+	}
+	return fresh, nil
+}
+
 func evalTrialTaskTerminal(task *corev1alpha1.Task) bool {
 	switch task.Status.Phase {
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
