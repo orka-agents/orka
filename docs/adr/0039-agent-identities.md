@@ -1,0 +1,281 @@
+# 39. Give Agents an external identity, starting with Microsoft Entra
+
+Date: 2026-10-22, revised 2026-11-04
+
+## Status
+
+Proposed. Not implemented. Builds on ADR 0034 (Agent runtime ceilings) and
+ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
+credential broker", for agent identity tokens only, and "long-lived Entra OBO
+lifecycle management", for stage 4 only. Agent user accounts and native `ai`
+Agents stay out of scope.
+
+## Context
+
+ADR 0034 lets an Agent cap what a Task may make it do inside its runtime:
+tools, Bash, and turns. It says nothing about what the Agent reaches outside
+the cluster. Today an outbound Tool call authenticates as whatever its
+`OutboundAccessPolicy` resolves: a Secret, a ServiceAccount token exchange,
+the Task's transaction token, or the requesting person's Connection. None of
+these names the Agent. A downstream service or an identity administrator
+cannot tell which Agent acted, cannot grant one Agent a permission without
+granting it to every Agent that shares the credential, and cannot switch off
+one Agent.
+
+An external identity provider can supply that principal. Orka's model has to
+stay issuer-neutral, because operators run different providers, but it needs a
+concrete first issuer to be honest about. Microsoft Entra Agent ID is that
+first issuer
+([overview](https://learn.microsoft.com/en-us/entra/agent-id/agent-identities),
+[autonomous flow](https://learn.microsoft.com/en-us/entra/agent-id/autonomous-agent-authentication-authorization-flow),
+[on-behalf-of flow](https://learn.microsoft.com/en-us/entra/agent-id/agent-on-behalf-of-oauth-flow)):
+
+- An *agent identity* is a service principal with no credentials of its own.
+  Tokens issued for it carry it as the subject or the client, and Entra
+  sign-in logs record it. Its object ID and app ID are the same value.
+- An *agent identity blueprint* holds the credential (Microsoft recommends a
+  federated identity credential or a certificate, not a secret) and acquires
+  tokens for every agent identity created from it. Administrators can apply
+  Conditional Access to, disable, or revoke grants for all identities of one
+  blueprint at once. "No managed identity per agent" is therefore true, but
+  the blueprint still needs one credential.
+- Every token takes two requests. The blueprint authenticates with
+  `grant_type=client_credentials`, `scope=api://AzureADTokenExchange/.default`,
+  and `fmi_path=<agent identity client ID>`, and receives an exchange token.
+  For an app-only token, the exchange token is the `client_assertion` of a
+  second `client_credentials` request for the target's `/.default` scope. For
+  an on-behalf-of token, it is the client assertion of a `jwt-bearer` request
+  whose `assertion` is a user token whose audience is the blueprint's client
+  ID. A user token for any other audience is rejected.
+- App-only permissions are app role assignments or admin consent on the agent
+  identity. Delegated permissions are preauthorized through inheritable
+  permissions on the blueprint, after admin consent, because agent identities
+  cannot receive interactive consent.
+- Agent identities are single-tenant.
+
+Four facts about Orka today make a naive binding unsafe:
+
+1. **Nobody authorizes the use of an Agent.** Creating a Task authorizes the
+   Task, not the Agent it names. Workspace classes have a `use` check in the
+   API (`internal/api/workspace_class_authorization.go`) and in admission
+   (`internal/admission/workspace_class_use.go`); Agents have none. If an
+   Agent carried an identity, anyone who can create a Task in its namespace
+   would act as that identity.
+2. **The issuer credential is a master key.** With Entra, the caller chooses
+   `fmi_path`, so whoever can present the blueprint's credential can mint
+   tokens for any agent identity under it.
+3. **Agent editors could claim someone else's identity.** An identity
+   reference is just a string. Without a check, an Agent in one namespace
+   could name the identity provisioned for another team's Agent.
+4. **The direct adapter cannot express these flows, and should not.**
+   `DirectOutboundAccess` supports only `TokenExchange` and `JWTBearer` grants
+   and `None`, client-secret, or `PrivateKeyJWT` client authentication
+   (`api/v1alpha1/outboundaccesspolicy_types.go`). `fmi_path` is not a
+   reserved `additionalParameters` key, so stretching that adapter would hand
+   the choice of identity to whoever writes the policy.
+
+Orka also defines `gen_ai.agent.id` (`internal/tracing/genai/constants.go`)
+but does not emit it, so there is no stable Agent attribution to join with an
+issuer's logs.
+
+## Decision
+
+Land in four stages. Stages 1 and 2 are issuer-neutral. Stages 3 and 4 define
+issuer-neutral contracts and ship Entra as their only implementation. Stage 3
+requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
+
+### Stage 1: authorize the use of an Agent
+
+- Add the SubjectAccessReview verb `use` on `agents.core.orka.ai`, with the
+  Agent's name as the resource name, mirroring workspace classes. The API
+  checks the end user before it creates a Task; an admission webhook checks
+  `AdmissionRequest.UserInfo` for direct Kubernetes writes.
+- Orka's own creators (the API, gateways, trusted workers) hold `use` broadly,
+  as the controller already holds `use` on workspace classes, and must check
+  their own callers before naming an identity-bound Agent.
+- The check is mandatory for every Agent that declares an identity: such an
+  Agent is not Ready unless the webhook is serving, and a Task naming it fails
+  closed otherwise. For other Agents it stays opt-in behind a flag, because
+  turning it on breaks every caller that lacks a `use` grant.
+- A delegated child Task may name an identity-bound Agent only when it is the
+  parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
+  child must not borrow an identity its root requester was never checked
+  against.
+
+### Stage 2: bind an identity and attribute actions to it
+
+- Add `Agent.spec.identity`, which sets exactly one issuer-typed member. The
+  first is `entra.agentIdentityID`, the agent identity's client ID. Issuer
+  instance settings, such as the Entra tenant and blueprint, are controller
+  configuration, one instance per issuer type per Orka installation. A second
+  issuer adds a sibling member, not a new field shape.
+- Setting or changing the identity requires the SubjectAccessReview verb
+  `bind` on the virtual resource `agentidentities.core.orka.ai`, with the
+  issuer type as the subresource (for example `agentidentities/entra`) and the
+  identity ID as the resource name, in the Agent's namespace. Operators grant
+  it with a Role listing exact `resourceNames`. This is the pattern Kubernetes
+  uses for binding Roles, and it settles who may claim which identity without
+  a new CRD.
+- One identity maps to one Agent UID. A second Agent that claims an identity
+  already bound elsewhere reports `Ready=False`.
+- The Task binding freezes the identity next to the Agent UID and generation
+  that `AgentExecutionAgentRef` already pins. Editing the Agent does not change
+  the identity a bound Task uses.
+- Emit `gen_ai.agent.id` as the Agent UID, not its reusable name, on Task and
+  Tool-call spans, and record the issuer type and identity ID on the audit
+  record of every external effect made with it. Issuer logs and Orka records
+  then share a join key.
+- Until stage 3 ships, the identity is a declaration by an authorized Agent
+  editor, not a verified fact, and status and UI must say so.
+
+### Stage 3: the Agent acts as itself
+
+- Add a fourth `OutboundAccessPolicy` adapter, `agentIdentity`, exclusive with
+  `direct`, `gateway`, and `connection`. It names the target resource and the
+  output header, and selects a mode; this stage adds `self`. It never names an
+  identity: the identity always comes from the Task's frozen Agent binding,
+  not from the policy, the Tool, or the Task spec.
+- Only the controller implements the credential source, as with Connections,
+  whose source "exists only in the controller; worker Pods have no
+  implementation" (`internal/outboundaccess/resolver.go`). ACP Tasks reach it
+  through the controller's MCP broker (`internal/controller/acp_mcp_broker.go`).
+  Native `ai` workers and every other process fail closed.
+- The issuer contract is small: given the frozen identity, a mode, and a
+  target, return a token or fail closed. The controller authenticates to the
+  issuer with its own projected ServiceAccount token as a federated credential.
+  The issuer's trust names exactly the controller ServiceAccount's issuer,
+  subject, and audience. No other workload may run as that ServiceAccount, and
+  nothing that can create Pods or Jobs, such as the native `ai` worker
+  (`config/rbac/worker_role.yaml`), may do so in the controller's namespace.
+  This authenticates the controller as a workload; it attests nothing about
+  agent code or model behavior.
+- Entra implementation: the blueprint's federated identity credential trusts
+  the controller ServiceAccount, and the controller performs the two
+  app-only requests above.
+- Tokens are injected per Tool call. They never enter the ACP process tree,
+  the Task spec or status, the execution snapshot, events, logs, or metrics.
+  The cache is keyed by a digest of the identity, mode, resource, and policy
+  UID and generation, and an entry lives at most five minutes. Because nothing
+  else holds the token, disabling the identity at the issuer stops new calls
+  within that bound.
+- Reserve `fmi_path`, `user_id`, `username`, and
+  `user_federated_identity_credential` in `DirectOutboundAccess`
+  `additionalParameters`, so the direct adapter can never select an identity.
+- An identity is verified only after the controller has acquired a token for
+  it. With Entra, that proves the identity is a child of the configured
+  blueprint, which stage 2 cannot.
+
+### Stage 4: the Agent acts for its requester
+
+- Add the mode `delegated` to the `agentIdentity` adapter. The issued token
+  carries the requester as its subject and the Agent's identity as the client
+  or actor. The downstream service then enforces the requester's own
+  permissions, and the issuer enforces what was granted to that Agent.
+- The requester's proof is their own Connection (ADR 0033) for an issuer-typed
+  `ConnectorProvider`, linked through that provider's consent flow. The Task's
+  `spec.requestedBy` selects it, exactly as the `connection` adapter does.
+  ServiceAccount callers, Tasks without a verified requester, and delegated
+  child Tasks whose root requester differs fail closed.
+- Orka's Session or Task is the application session the token is bound to.
+  Before every exchange and every Tool call, the controller checks that the
+  Task is running, its Session is open, its binding still names this
+  identity, and the Connection is Ready. Ending the Task or Session, deleting
+  the Connection, or unbinding the identity stops new calls. A token already
+  issued is still valid at the issuer until it expires; because it never
+  leaves the controller, the residual exposure is the cache bound above. Orka
+  does not claim issuer-side per-session revocation, and does not rely on
+  Continuous Access Evaluation.
+- Delegated policies must also declare the operations they allow: target
+  hosts, HTTP methods, and path prefixes. The broker checks each request
+  against them before it injects a token and fails closed otherwise. Issuer
+  scopes are often too coarse to do this (see the Entra notes), and a model
+  can be steered, for example by a malicious document, into requests that sit
+  within the requester's rights but outside what they asked for. Neither the
+  model nor the Tool arguments can widen the list.
+- Entra implementation: the `ConnectorProvider` is a front-end Entra client
+  that requests the blueprint's custom scope, so the Connection holds a user
+  token whose audience is the blueprint. The blueprint's redirect URI only
+  records consent, so it cannot be that client. The controller performs the
+  two on-behalf-of requests above. Orka's GitHub dashboard sign-in cannot
+  supply this token; the requester must sign in through Entra.
+
+### Entra notes for operators
+
+These are properties of Azure, not of Orka, but they decide whether a
+deployment delivers the guarantees above.
+
+- **Azure Storage has one delegated scope, `user_impersonation`**
+  ([Storage authorization](https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-azure-active-directory)).
+  Entra can decide whether an Agent may reach Storage for a user at all, not
+  which containers or operations. Narrowing belongs to the stage 4 operation
+  list and to Storage's own RBAC.
+- **Azure RBAC grants are additive**
+  ([ABAC security](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-auth-abac-security)).
+  Granting a reader role with a condition does not cap a broader role the user
+  already holds. Shared Key, SAS, and ADLS ACLs bypass role conditions
+  entirely; disable Shared Key where delegated agent access must be bounded.
+- **Storage ABAC conditions see Entra attributes, not Orka state**
+  ([ABAC attributes](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-auth-abac-attributes)).
+  Principal attributes are Entra custom security attributes. Orka Agents,
+  Sessions, and arbitrary token claims are not condition inputs, so Orka
+  enforces the Agent and Session side before the call.
+- **Tenants.** Agent identities exist in one tenant, and a resource accepts
+  tokens from its own tenant. Each tenant needs its own blueprint
+  and agent identities.
+
+### Relationship to ADR 0034
+
+The ceiling and the identity bound different things and stay separate checks.
+The ceiling bounds what a Task may make the Agent do inside its runtime; issuer
+permissions bound what the identity may do outside it. Neither can be derived
+from the other: one lists tool names, the other app roles or scopes. An Agent
+owner who wants to limit which identity-backed resources a Task may reach can
+later add `ceiling.agentIdentityResources`, checked at binding like the rest of
+the ceiling; the stage 4 operation list is then checked against it.
+
+## Rejected alternatives
+
+- **A per-Agent ServiceAccount federated to its identity.** Entra agent
+  identities cannot hold credentials; only the blueprint can. A per-Agent
+  ServiceAccount is also mintable by anyone who can create a Pod naming it.
+- **The issuer credential in the runtime Pod or a sidecar**, as in the
+  Microsoft Entra SDK sidecar pattern. The runtime runs agent-controlled code,
+  and the blueprint credential impersonates every identity under it.
+- **Handing issued tokens to the runtime**, even short-lived delegated ones. A
+  prompt-injected agent can exfiltrate a bearer token, and the broker could no
+  longer check Session state or the operation list per call.
+- **Extending the direct adapter** with `client_credentials`, a ServiceAccount
+  client assertion, and `fmi_path` as a parameter. That turns impersonation
+  into a policy author's choice.
+- **A provider-neutral `AgentIdentityIssuer` CRD now.** One issuer does not
+  justify a new resource; controller configuration per issuer type is enough
+  until a second issuer has a concrete consumer.
+- **Deriving the ceiling from issuer permissions**, or the reverse. They do
+  not share a vocabulary.
+
+## Consequences
+
+- An Agent becomes a principal outside Orka. Identity administrators can
+  grant, scope, disable, and audit each Agent, and downstream services see
+  which Agent called, alone or for whom.
+- The controller becomes a credential broker for agent identity tokens, which
+  amends ADR 0011; on acceptance, 0011's status points here. A compromised
+  controller already exposes Connection tokens; it would now also expose every
+  agent identity under the installation's issuer credential, and, in stage 4,
+  delegated access for every linked requester. Stronger separation needs
+  separate issuer credentials, which means separate Orka installations.
+- ADR 0011 keeps provider specifics out of core. The adapter, the Agent field,
+  and the `bind` check are issuer-neutral; the Entra blueprint flows are the
+  one provider-specific implementation in core, behind that contract.
+- The issuer must reach the cluster's ServiceAccount issuer. AKS publishes it;
+  kind and other private clusters must publish their discovery document and
+  JWKS.
+- An issuer outage fails identity-backed Tool calls closed, with no fallback
+  to another credential.
+- Requiring `use` for all Agents is a breaking change and stays opt-in.
+- Not yet proven: Entra agent on-behalf-of tokens against Azure Storage in a
+  live tenant, and identity provisioning latency. Stage 4 needs that
+  integration proof before Orka documents it as supported.
+- Not covered: inbound tokens addressed to an agent identity, multi-tenant
+  blueprints, native `ai` Agents, and delegation to any Agent other than the
+  parent's own.
