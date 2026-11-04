@@ -442,8 +442,10 @@ without one until the storage client does.
   bounded batches, and `Describe` reports the retention and the result limit.
   SQLite measures receipt ages on the host's wall clock, which time
   synchronization can step back, so it keeps receipts for
-  `MinReceiptRetention` plus 15 minutes and assumes the host clock never
-  steps back further than that. After a larger step back, `ResolveOperation`
+  `MinReceiptRetention` plus 15 minutes and assumes cumulative clock regression
+  between pruning and every later resolution never exceeds that allowance,
+  including repeated steps, process restarts and host failovers. The allowance
+  does not reset at each step or restart. Beyond it, `ResolveOperation`
   could report an operation whose receipt was already pruned as aborted.
 - **Unknown outcomes.** When a write's outcome is unknown (`ErrOutcomeUnknown`,
   or a transport failure after the request was sent), the storage client

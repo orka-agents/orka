@@ -139,14 +139,18 @@ func TestAPrunedReceiptIsNotReportedAsAbortedAfterTheClockStepsBack(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, 1, removed)
 
-	// The host clock steps back by the largest step SQLite tolerates.
-	now = now.Add(-15 * time.Minute)
-	_, err = s.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
-		DatasetID: dataset, OperationID: envelope.OperationID, Method: "SaveResult",
-		RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
-	})
-	require.ErrorIs(t, err, storagev1.ErrOperationExpired,
-		"a receipt pruned before the clock stepped back is not taken as proof that nothing committed")
+	// Repeated backward steps consume one cumulative allowance, rather than
+	// resetting it. Exercise the entire allowance after the commit is pruned.
+	const step = 30 * time.Second
+	for regression := time.Duration(0); regression < receiptClockStepAllowance; regression += step {
+		now = now.Add(-step)
+		_, err = s.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
+			DatasetID: dataset, OperationID: envelope.OperationID, Method: "SaveResult",
+			RequestDigest: envelope.RequestDigest, IssuedAt: envelope.IssuedAt,
+		})
+		require.ErrorIs(t, err, storagev1.ErrOperationExpired,
+			"cumulative regression within the allowance must not turn a pruned commit into an abort")
+	}
 	require.ErrorIs(t, s.SaveResult(saveCtx, "ns", "task", []byte("first")), storagev1.ErrOperationExpired,
 		"a late retry is refused rather than applied again")
 }

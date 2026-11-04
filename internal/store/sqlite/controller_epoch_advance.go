@@ -46,6 +46,16 @@ func (s *Store) AdvanceControllerEpoch(
 		if installation != "" && installation != request.InstallationID {
 			return store.FencedErrorf("dataset belongs to installation %q, not %q", installation, request.InstallationID)
 		}
+		if request.AcknowledgedEpoch > 0 {
+			current, err := getControllerEpoch(ctx, tx, name)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if current.Epoch < request.AcknowledgedEpoch {
+				return fmt.Errorf("%w: dataset controller epoch %q is at %d, below acknowledged epoch %d",
+					storagev1.ErrNotReady, name, current.Epoch, request.AcknowledgedEpoch)
+			}
+		}
 		if err := advanceControllerEpochTx(ctx, tx, epoch, s.now()); err != nil {
 			return err
 		}
