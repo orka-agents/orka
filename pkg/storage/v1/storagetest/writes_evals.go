@@ -15,14 +15,14 @@ const (
 	evalRunUID  = "eval-run-uid"
 )
 
-func catalogEvalTrial(caseID string, trial int32, outcome string) *storagev1.EvalTrialRecord {
+func catalogEvalTrial(caseID, outcome string) *storagev1.EvalTrialRecord {
 	record := &storagev1.EvalTrialRecord{
 		SchemaVersion: storagev1.EvalTrialSchemaVersion,
 		Namespace:     workflowNamespace,
 		EvalRun:       evalRunName,
 		EvalRunUID:    evalRunUID,
 		CaseID:        caseID,
-		Trial:         trial,
+		Trial:         1,
 		TaskName:      "eval-" + caseID,
 		Outcome:       outcome,
 		Verdict:       "needs_changes",
@@ -49,23 +49,23 @@ func init() {
 		evalCase{
 			method: "CreateEvalTrial",
 			args: rebuiltArgs(func() []any {
-				return []any{catalogEvalTrial("case-a", 1, storagev1.EvalTrialOutcomePass)}
+				return []any{catalogEvalTrial("case-a", storagev1.EvalTrialOutcomePass)}
 			}),
 			observe: observeEvalTrials,
 		},
 		evalCase{
 			method: "DeleteEvalTrials",
 			setup: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.CreateEvalTrial(t.Context(), catalogEvalTrial("case-a", 1, storagev1.EvalTrialOutcomePass)))
+				require.NoError(t, p.CreateEvalTrial(t.Context(), catalogEvalTrial("case-a", storagev1.EvalTrialOutcomePass)))
 				require.NoError(t, p.CreateEvalTrial(t.Context(),
-					catalogEvalTrial("case-b", 1, storagev1.EvalTrialOutcomeInfraError)))
+					catalogEvalTrial("case-b", storagev1.EvalTrialOutcomeInfraError)))
 			},
 			args:    fixed(workflowNamespace, evalRunName),
 			observe: observeEvalTrials,
 			// Recording a trial again after the delete commits shows that a
 			// replay returns the delete's outcome without deleting again.
 			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
-				require.NoError(t, p.CreateEvalTrial(t.Context(), catalogEvalTrial("case-a", 1, storagev1.EvalTrialOutcomePass)))
+				require.NoError(t, p.CreateEvalTrial(t.Context(), catalogEvalTrial("case-a", storagev1.EvalTrialOutcomePass)))
 			},
 		},
 	)
