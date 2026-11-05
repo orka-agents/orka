@@ -366,6 +366,7 @@ spec:
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
             {{- end }}
+            - --store-sqlite-synchronous={{ .Values.store.sqliteSynchronous | default "normal" }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
             {{- with .Values.workers.sessionLoader }}
