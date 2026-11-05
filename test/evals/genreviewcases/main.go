@@ -88,16 +88,7 @@ func run(sourcePath, outPath, repo string, check bool) error {
 		return fmt.Errorf("%s: %w", sourcePath, err)
 	}
 	if repo == "" {
-		dir, err := os.MkdirTemp("", "orka-eval-fixtures-")
-		if err != nil {
-			return err
-		}
-		defer func() { _ = os.RemoveAll(dir) }()
-		// A bare mirror keeps every branch as a local ref.
-		if _, err := git("", "clone", "--quiet", "--mirror", source.RepoURL, dir); err != nil {
-			return err
-		}
-		repo = dir
+		repo = source.RepoURL
 	}
 	generated, err := Generate(source, repo)
 	if err != nil {
@@ -116,12 +107,23 @@ func run(sourcePath, outPath, repo string, check bool) error {
 	return os.WriteFile(outPath, generated, 0o644)
 }
 
-// Generate resolves every case against the repository at repo and returns
-// the validated JSONL document.
+// Generate resolves every case against a fresh mirror of repo, a URL or a
+// local clone, and returns the validated JSONL document.
 func Generate(source Source, repo string) ([]byte, error) {
 	if len(source.Cases) == 0 {
 		return nil, errors.New("source has no cases")
 	}
+	// A mirror has the refs and objects but none of a clone's local
+	// configuration or info/attributes, which could change how diffs render.
+	dir, err := os.MkdirTemp("", "orka-eval-fixtures-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	if _, err := git("", "clone", "--quiet", "--mirror", "--no-hardlinks", repo, dir); err != nil {
+		return nil, err
+	}
+	repo = dir
 	var buf bytes.Buffer
 	for i, sc := range source.Cases {
 		c, err := resolveCase(source, sc, repo)

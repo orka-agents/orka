@@ -555,7 +555,30 @@ func TestOverlapErrorNamesTheFileByPosition(t *testing.T) {
 		r.write(secret+"/a.go", "package a\n")
 	})
 	_, err := Generate(sourceFor("case/x", cleanReference), r.dir)
-	if err == nil || !strings.Contains(err.Error(), "overlaps another changed path") || strings.Contains(err.Error(), secret) {
+	if err == nil || !strings.Contains(err.Error(), "overlaps another changed path") ||
+		strings.Contains(err.Error(), secret) {
 		t.Fatalf("Generate error = %v", err)
+	}
+}
+
+// A clone's info/attributes can mark text as binary; generation reads a fresh
+// mirror, so local attributes never reach the diff.
+func TestGenerateIgnoresLocalAttributes(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() { r.write("a.go", "package a\n\nvar A = 1\n") })
+	r.write(".git/info/attributes", "*.go -diff\n")
+	out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := cases[0].Input.RepositoryMonitorReview.Files[0]; f.Additions != 2 || f.Patch == "" {
+		t.Fatalf("file = %+v, want the text diff", f)
 	}
 }
