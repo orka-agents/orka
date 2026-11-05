@@ -838,7 +838,7 @@ func TestReconnectRules(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Eventually(t, func() bool {
-		current, _ := env.store.AHPServerSeq(ctx, UserKey("https://issuer.example", "alice"))
+		current, _ := env.store.GetAHPServerSeq(ctx, UserKey("https://issuer.example", "alice"))
 		return current >= seq+7
 	}, 5*time.Second, 20*time.Millisecond)
 	late := env.connect(alice.Token)

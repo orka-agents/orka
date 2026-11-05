@@ -65,6 +65,7 @@ var stateFamilies = []stateFamily{
 	{"repository-monitors", runRepositoryMonitors},
 	{"usage", runUsage},
 	{"memories", runMemories},
+	{"ahp", runAHP},
 	{"sealed-snapshots", runSealedSnapshots},
 	{"sealed-native-sessions", runSealedNativeSessions},
 	{"session-turn-records", runSessionTurnRecords},

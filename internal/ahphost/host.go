@@ -390,7 +390,7 @@ func (h *Host) loadLocked(ctx context.Context, hub *userHub) error {
 	if hub.loaded {
 		return nil
 	}
-	seq, err := h.cfg.Store.AHPServerSeq(ctx, hub.key)
+	seq, err := h.cfg.Store.GetAHPServerSeq(ctx, hub.key)
 	if err != nil {
 		return err
 	}

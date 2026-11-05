@@ -2195,7 +2195,7 @@ func main() {
 			setupLog.Error(err, "invalid AHP workspace configuration")
 			os.Exit(1)
 		}
-		ahpHost, err = newAHPHost(sqliteStore, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig))
+		ahpHost, err = newAHPHost(appStorage, ahpTokenMaxTTL, api.AHPTokenOwnerCheck(oidcConfig))
 		if err != nil {
 			setupLog.Error(err, "unable to set up the AHP host")
 			os.Exit(1)
