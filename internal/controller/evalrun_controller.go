@@ -573,7 +573,11 @@ func (r *EvalRunReconciler) validateEvalTrialTask(run *corev1alpha1.EvalRun, mon
 	// Extra metadata is allowed for the Task path's own keys, but a parent
 	// Task marks a delegated child, which is granted messaging tools the
 	// rendered trial does not have.
-	if labels.ParentTaskName(task.Labels, task.Annotations) != "" {
+	// The runtime checks the label's presence, not its value, so an empty
+	// marker counts too.
+	_, parentLabel := task.Labels[labels.LabelParentTask]
+	_, parentAnnotation := task.Annotations[labels.AnnotationParentTaskName]
+	if parentLabel || parentAnnotation {
 		return fmt.Errorf("trial Task %s/%s is marked as a delegated child", task.Namespace, task.Name)
 	}
 	if task.Spec.Prompt != expected.Spec.Prompt ||
