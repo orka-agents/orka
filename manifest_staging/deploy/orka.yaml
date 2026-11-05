@@ -583,6 +583,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 - apiGroups:
@@ -1480,6 +1481,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---
@@ -1521,6 +1523,7 @@ rules:
   - core.orka.ai
   resources:
   - tasks/approvals
+  - tasks/cancel
   verbs:
   - update
 ---

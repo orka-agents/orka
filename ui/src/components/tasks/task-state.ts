@@ -28,6 +28,17 @@ export function isTaskDeleting(task: Task): boolean {
   return Boolean(task.metadata.deletionTimestamp)
 }
 
+/** A Pending or Running task that a person can still cancel. */
+export function isTaskCancellable(task: Task): boolean {
+  const phase = task.status?.phase ?? ''
+  return !isTaskDeleting(task) && (phase === '' || phase === 'Pending' || phase === 'Running')
+}
+
+/** A task whose cancellation was requested but that has not ended yet. */
+export function isTaskCancelling(task: Task): boolean {
+  return isTaskCancellable(task) && task.metadata.annotations?.['orka.ai/cancel-requested'] !== undefined
+}
+
 /** A scheduled (cron) Task whose future runs are suspended. */
 export function isScheduleSuspended(task: Task): boolean {
   return Boolean(task.spec.schedule) && task.spec.suspend === true

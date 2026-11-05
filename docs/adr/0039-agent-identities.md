@@ -251,7 +251,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   to every approval on a Task whose binding froze a Delegated policy
   (`actsForRequester`), judged from the write-once binding rather than the
   live Tool, so editing and restoring a Tool around an approval cannot
-  bypass it.
+  bypass it. Until built-in runtimes can ask for approval
+  ([#770](https://github.com/orka-agents/orka/issues/770)), Orka hides
+  write-class connector tools from them, and delegated mode runs only on
+  built-in runtimes, so delegated mode is read-only in practice.
 - The Connection must have been issued for the bound identity. Each issuer
   type defines the check, such as the user token's audience. Where an issuer
   addresses user tokens to each agent client, a requester links once per
@@ -259,9 +262,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   issuer. A mismatch fails closed.
 - Orka's Session or Task is the application session the token is bound to.
   Before every exchange and every Tool call, the controller checks that the
-  Task is running, its Session is open, its binding still names this
-  identity, and the Connection is Ready. Ending the Task or Session, deleting
-  the Connection, or unbinding the identity stops new calls. A token already
+  Task is running with no cancellation requested, its Session still exists,
+  its binding still names this identity, and the Connection is Ready.
+  Cancelling or deleting the Task, stopping the Session's turn (which cancels
+  its Task), deleting the Connection, or unbinding the identity stops new
+  calls. A token already
   issued is still valid at the issuer until it expires; because it never
   leaves the controller, the residual exposure is the cache bound above. Orka
   does not claim issuer-side per-session revocation, and does not rely on

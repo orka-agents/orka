@@ -385,7 +385,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	sessions := sqlite.NewStore(db, ":memory:")
 	for _, session := range []*store.SessionRecord{
 		{Namespace: testNS, Name: "open", SessionType: "task"},
-		{Namespace: testNS, Name: "cancelled", SessionType: "task", Cancelled: true},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
 			t.Fatal(err)
@@ -409,7 +408,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	objects := []client.Object{
 		task("running", nil),
 		task("in-open-session", withSession("open")),
-		task("in-cancelled-session", withSession("cancelled")),
+		task("cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
 		task("in-deleted-session", withSession("deleted")),
 		task("finished", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
 		task("cancel-requested", func(t *corev1alpha1.Task) {
@@ -428,14 +427,14 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
 	}
 	for name, want := range map[string]string{
-		"running":              "",
-		"in-open-session":      "",
-		"in-cancelled-session": "cancelled",
-		"in-deleted-session":   "deleted",
-		"finished":             "Succeeded",
-		"cancel-requested":     "cancellation",
-		"deleting":             "being deleted",
-		"gone":                 "gone",
+		"running":            "",
+		"in-open-session":    "",
+		"cancelled":          "Cancelled",
+		"in-deleted-session": "deleted",
+		"finished":           "Succeeded",
+		"cancel-requested":   "cancellation",
+		"deleting":           "being deleted",
+		"gone":               "gone",
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := check(context.Background(), binding(name))

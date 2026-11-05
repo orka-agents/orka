@@ -406,7 +406,7 @@ rules:
     resources: ["tasks/status"]
     verbs: ["get"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/approvals"]
+    resources: ["tasks/approvals", "tasks/cancel"]
     verbs: ["update"]
 
   # RepositoryMonitor permissions

@@ -417,6 +417,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if message, ok := requestedTaskCancellation(task); ok {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
+	if _, ok := requestedAgentTaskCancellation(task); ok {
+		return r.cancelRequestedAgentTask(ctx, task)
+	}
 
 	// Handle based on current phase
 	switch task.Status.Phase {
@@ -2714,9 +2717,9 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 
 // completeTask marks a task as completed without asserting that workload execution started.
 // requestedTaskCancellation returns the terminal message of a recorded
-// cancel_task request that this reconciler may complete. Agent Tasks and Tasks
-// with ACP execution are excluded: their terminal status needs the controller
-// epoch mutation guard, and the cancel endpoint refuses them.
+// cancel request that this reconciler may complete through the native
+// terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
+// are cancelled by cancelRequestedAgentTask under the controller epoch guard.
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||

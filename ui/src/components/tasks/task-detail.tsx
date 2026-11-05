@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { AlertTriangle, ArrowLeft, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, CircleStop, SearchX, ShieldCheck, Trash2 } from 'lucide-react'
 import { EmptyState } from '@/components/ui/empty-state'
 import { PageHeader } from '@/components/layout/page-header'
 import { TaskStatusBadge } from './task-status-badge'
@@ -21,6 +21,7 @@ import { TaskActivity } from './task-activity'
 import { TaskArtifactsPanel } from './task-artifacts-panel'
 import { TaskStatusDetails } from './task-status-details'
 import { TaskYaml } from './task-yaml'
+import { TaskCancelDialog } from './task-cancel-dialog'
 import { ViewSwitch } from './view-switch'
 import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
@@ -33,7 +34,7 @@ import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
-import { isTaskDeleting, isWaitingForApproval } from './task-state'
+import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
@@ -176,6 +177,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
+  const [cancelOpen, setCancelOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
   // switch or same-name/new-uid recreation drops a stale confirm so it can't
@@ -347,6 +349,16 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {isTaskCancelling(task) ? (
+            <Button variant="outline" size="sm" disabled title="Cancellation requested">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancelling…
+            </Button>
+          ) : isTaskCancellable(task) && !deleteArmed ? (
+            <Button variant="outline" size="sm" onClick={() => setCancelOpen(true)} title="Stop the task and keep its history">
+              <CircleStop className="mr-2 h-4 w-4" /> Cancel task
+            </Button>
+          ) : null}
+          <TaskCancelDialog taskName={task.metadata.name} open={cancelOpen} onOpenChange={setCancelOpen} />
           {isTaskDeleting(task) ? (
             // The API accepted the delete; finalizers are still running.
             <Button variant="destructive" size="sm" disabled title="Deletion in progress">

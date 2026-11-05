@@ -11,7 +11,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -326,22 +325,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 }
 
 func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTask(ctx context.Context, task *corev1alpha1.Task, reason string) error {
-	write := func(writeCtx context.Context) error {
-		if err := revokeTaskJobAuthority(writeCtx, r.ResultStore, store.TaskJobIdentity{
-			Namespace: task.Namespace, TaskUID: string(task.UID), JobUID: task.Status.JobUID,
-		}); err != nil {
-			return err
-		}
-		now := metav1.Now()
-		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
-		task.Status.CompletionTime = &now
-		task.Status.Message = reason
-		return r.Status().Update(writeCtx, task)
-	}
-	if task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0 {
-		return withACPTaskStatusGuard(ctx, r.DurableControlStore, r.ControllerEpochManager, write)
-	}
-	return write(ctx)
+	return cancelTaskStatus(ctx, r.Client, r.ResultStore, r.DurableControlStore, r.ControllerEpochManager, task, reason)
 }
 
 func repositoryMonitorImplementationJobID(taskName string) string {
