@@ -29,12 +29,15 @@ const (
 	// token, audienced to api://AzureADTokenExchange, is mounted.
 	DefaultTokenFile = "/var/run/secrets/orka.ai/agent-identity/token"
 
-	entraExchangeScope       = "api://AzureADTokenExchange/.default"
-	jwtBearerAssertionType   = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-	maxCachedTokenLifetime   = 5 * time.Minute
-	tokenExpirySafetyMargin  = time.Minute
-	maxTokenResponseBytes    = 1 << 20
-	defaultEntraHTTPDeadline = 15 * time.Second
+	entraExchangeScope = "api://AzureADTokenExchange/.default"
+	// entraVerificationResource is the resource an identity's own token is
+	// requested for when verifying it; the token is never used.
+	entraVerificationResource = "api://AzureADTokenExchange"
+	jwtBearerAssertionType    = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	maxCachedTokenLifetime    = 5 * time.Minute
+	tokenExpirySafetyMargin   = time.Minute
+	maxTokenResponseBytes     = 1 << 20
+	defaultEntraHTTPDeadline  = 15 * time.Second
 )
 
 // EntraIssuer acquires Entra agent identity tokens with the blueprint flow:
@@ -292,7 +295,11 @@ func (s *Source) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
 		if s.Entra == nil {
 			return errors.New("the Entra issuer is not configured on this controller")
 		}
-		_, err := s.Entra.ExchangeToken(ctx, id)
+		// The blueprint's exchange token alone does not prove the identity
+		// is usable: Entra still issues it for a disabled agent identity.
+		// The identity's own token does, and Entra issues it for this
+		// cloud-neutral resource whatever the identity has been granted.
+		_, err := s.Entra.AppToken(ctx, id, entraVerificationResource)
 		return err
 	default:
 		return fmt.Errorf("identity issuer %q is not supported", issuer)
