@@ -96,20 +96,56 @@ func runArtifacts(t *testing.T, newProvider ArtifactFactory) {
 		require.Equal(t, []byte("kept"), data, "a rejected write leaves the existing artifact")
 	})
 
-	t.Run("accepts the owning Task UID", func(t *testing.T) {
-		provider := newProvider(t)
-		ctx := t.Context()
-		owner := storagev1.ArtifactOwner{Namespace: "tenant-a", TaskName: "task", TaskUID: "task-uid-1"}
-		saveArtifact(t, provider, owner, "out.txt", "text/plain", []byte("v1"))
-		data, _, err := provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: owner, Filename: "out.txt"})
-		require.NoError(t, err)
-		require.Equal(t, []byte("v1"), data)
-		listed, err := provider.ListArtifacts(ctx, owner)
-		require.NoError(t, err)
-		require.Len(t, listed, 1)
-		require.NoError(t, provider.DeleteArtifacts(ctx, owner))
-		_, _, err = provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: owner, Filename: "out.txt"})
-		require.ErrorIs(t, err, storagev1.ErrNotFound)
+	t.Run("Task UID does not change artifact identity", func(t *testing.T) {
+		uids := []struct{ name, uid string }{
+			{name: "empty"},
+			{name: "first", uid: "task-uid-1"},
+			{name: "other", uid: "task-uid-2"},
+		}
+		for _, saved := range uids {
+			for _, requested := range uids {
+				t.Run(saved.name+"/"+requested.name, func(t *testing.T) {
+					provider := newProvider(t)
+					ctx := t.Context()
+					owner := storagev1.ArtifactOwner{Namespace: "tenant-a", TaskName: "task", TaskUID: saved.uid}
+					other := owner
+					other.TaskUID = requested.uid
+					saveArtifact(t, provider, owner, "out.txt", "text/plain", []byte("v1"))
+
+					data, contentType, err := provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: other, Filename: "out.txt"})
+					require.NoError(t, err, "Task UID is not part of the artifact key")
+					require.Equal(t, []byte("v1"), data)
+					require.Equal(t, "text/plain", contentType)
+					listed, err := provider.ListArtifacts(ctx, other)
+					require.NoError(t, err)
+					require.Len(t, listed, 1, "Task UID does not filter the artifact list")
+					require.Equal(t, "out.txt", listed[0].Filename)
+
+					saveArtifact(t, provider, other, "out.txt", "text/markdown", []byte("# v2"))
+					data, contentType, err = provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: owner, Filename: "out.txt"})
+					require.NoError(t, err)
+					require.Equal(t, []byte("# v2"), data, "changing Task UID replaces the same artifact")
+					require.Equal(t, "text/markdown", contentType)
+					listed, err = provider.ListArtifacts(ctx, owner)
+					require.NoError(t, err)
+					require.Len(t, listed, 1, "changing Task UID does not create another artifact")
+					require.Equal(t, "text/markdown", listed[0].ContentType)
+					require.EqualValues(t, len("# v2"), listed[0].Size)
+
+					saveArtifact(t, provider, owner, "second.txt", "text/plain", []byte("second"))
+					require.NoError(t, provider.DeleteArtifacts(ctx, other))
+					for _, lookup := range []storagev1.ArtifactOwner{owner, other} {
+						for _, filename := range []string{"out.txt", "second.txt"} {
+							_, _, err = provider.GetArtifact(ctx, storagev1.ArtifactKey{Owner: lookup, Filename: filename})
+							require.ErrorIs(t, err, storagev1.ErrNotFound, "Task UID does not restrict deletion")
+						}
+						listed, err = provider.ListArtifacts(ctx, lookup)
+						require.NoError(t, err)
+						require.Empty(t, listed)
+					}
+				})
+			}
+		}
 	})
 
 	t.Run("namespace and Task isolation", func(t *testing.T) {
