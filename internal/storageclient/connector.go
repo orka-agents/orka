@@ -603,7 +603,7 @@ func (c *Client) ConsumeConnectorConsent(ctx context.Context, nonce string) (sto
 	if sealed == nil || sealed.Nonce != nonce {
 		return store.ConnectorConsent{}, errors.New("connector consent provider returned another consent")
 	}
-	if !sealed.ExpiresAt.After(now) {
+	if !sealed.ExpiresAt.After(time.Now()) {
 		return store.ConnectorConsent{}, store.ErrNotFound
 	}
 	verifier, err := keys.open(sealed.VerifierNonce, sealed.VerifierCiphertext, connectorConsentAdditionalData(*sealed))
