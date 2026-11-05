@@ -225,6 +225,20 @@ bindings, transaction-token scope modes, workspace-class `use` checks, and Gatew
 identity checks retain their existing policies. See [API authorization](../reference/api-authorization.md)
 for every route's permissions, namespace precedence, and grant examples.
 
+### Agent use
+
+Creating a Task authorizes the Task, not the Agent it runs as. With
+`--agent-use-authorization-enabled` (Helm: `controller.agentUseAuthorization.enabled`),
+running work as an Agent also needs the `use` verb on that Agent, the way
+workspace classes already need it. The API checks its caller, and
+ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
+RepositoryMonitors, and GatewayBindings that newly name an Agent. Orka's own
+components (the controller, API, gateways, monitors, and workers) hold `use`
+broadly, because they create Tasks only for callers they have already checked.
+A parent Agent can still hand work only to the Agents its owner listed in
+`spec.coordination.allowedAgents`. The check is off by default, because turning
+it on denies every caller without a `use` grant.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,

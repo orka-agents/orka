@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Not implemented. Builds on ADR 0034 (Agent runtime ceilings) and
+Proposed. Stage 1 is implemented behind an opt-in flag; stages 2–4 are not. Builds on ADR 0034 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -87,15 +87,26 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 ### Stage 1: authorize the use of an Agent
 
 - Add the SubjectAccessReview verb `use` on `agents.core.orka.ai`, with the
-  Agent's name as the resource name, mirroring workspace classes. The API
-  checks the end user before it creates a Task; an admission webhook checks
-  `AdmissionRequest.UserInfo` for direct Kubernetes writes.
-- Orka's own creators (the API, gateways, trusted workers) hold `use` broadly,
-  as the controller already holds `use` on workspace classes, and must check
-  their own callers before naming an identity-bound Agent.
+  Agent's name as the resource name and the Agent's own namespace, mirroring
+  workspace classes. Every object that makes Orka run work as an Agent is
+  covered: a Task's `agentRef`, a RepositoryScan's analysis and patch Agents,
+  a RepositoryMonitor's role Agents, and a GatewayBinding's Agent. Only Agents
+  an object newly names are checked, so unrelated edits keep working.
+- The API checks its caller before it creates or edits such an object.
+  ValidatingAdmissionPolicies check direct Kubernetes writes with the CEL
+  authorizer, as the workspace-class policies do. A policy runs inside the
+  API server, so unlike a webhook it cannot be unavailable while still
+  admitting writes.
+- Orka's own creators (the controller, API, gateways, monitors, and workers)
+  hold `use` broadly, as the controller already holds `use` on workspace
+  classes, and must check their own callers before naming an identity-bound
+  Agent. Delegation between Agents stays bounded by the parent Agent's
+  `coordination.allowedAgents`.
 - The check is mandatory for every Agent that declares an identity: such an
-  Agent is not Ready unless the webhook is serving, and a Task naming it fails
-  closed otherwise. For other Agents it stays opt-in behind a flag, because
+  Agent is not Ready unless the policies are installed, and a Task naming it
+  fails closed otherwise. For other Agents it is opt-in, with
+  `--agent-use-authorization-enabled` and the `config/agent-use-policy`
+  policies (Helm: `controller.agentUseAuthorization.enabled`), because
   turning it on breaks every caller that lacks a `use` grant.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a

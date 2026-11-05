@@ -183,6 +183,9 @@ spec:
             - {{ printf "--connector-callback-base-url=%s" .callbackBaseUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- if dig "agentUseAuthorization" "enabled" false .Values.controller }}
+            - --agent-use-authorization-enabled=true
+            {{- end }}
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
             {{- end }}

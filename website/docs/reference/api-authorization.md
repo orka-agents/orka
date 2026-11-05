@@ -107,6 +107,17 @@ checkpoint name and the Task namespace. This includes forks that supply
 `executionCheckpoint`. The workspace-class grant is still required; permission
 to read a checkpoint or create Tasks does not grant checkpoint use.
 
+Agent `use` is an opt-in check, enabled with `--agent-use-authorization-enabled`
+(Helm: `controller.agentUseAuthorization.enabled`). When it is on, every
+authenticated identity, including OIDC and transaction-token callers, needs `use`
+on `agents` in `core.orka.ai`, with the Agent name and the Agent's namespace, to
+create a Task that names the Agent, or to create or edit a RepositoryScan or
+RepositoryMonitor so that it names the Agent. Agents an edited object already
+named are not checked again. OIDC callers are checked as the username Orka derives
+from the token (`preferred_username`, then `email`, `name`, and `sub`) and its
+groups, so bind Roles to that name. Permission to read, create, or edit an Agent
+does not grant `use`.
+
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
 

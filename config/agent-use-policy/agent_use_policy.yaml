@@ -1,0 +1,149 @@
+# Opt-in. Apply together with --agent-use-authorization-enabled on the
+# controller; see README.md.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: task-agent-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["tasks"]
+  validations:
+  - expression: >-
+      !has(object.spec.agentRef) ||
+      (oldObject != null && has(oldObject.spec.agentRef) && oldObject.spec.agentRef == object.spec.agentRef) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agentRef.?namespace.orValue(request.namespace)).name(object.spec.agentRef.name).check('use').allowed()
+    message: caller is not authorized to use the Task's Agent
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: task-agent-use.orka.ai
+spec:
+  policyName: task-agent-use.orka.ai
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: repositoryscan-agent-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["repositoryscans"]
+  validations:
+  - expression: >-
+      !has(object.spec.analysisAgentRef) ||
+      (oldObject != null && has(oldObject.spec.analysisAgentRef) && oldObject.spec.analysisAgentRef == object.spec.analysisAgentRef) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.analysisAgentRef.?namespace.orValue(request.namespace)).name(object.spec.analysisAgentRef.name).check('use').allowed()
+    message: caller is not authorized to use the analysis Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.patchAgentRef) ||
+      (oldObject != null && has(oldObject.spec.patchAgentRef) && oldObject.spec.patchAgentRef == object.spec.patchAgentRef) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.patchAgentRef.?namespace.orValue(request.namespace)).name(object.spec.patchAgentRef.name).check('use').allowed()
+    message: caller is not authorized to use the patch Agent
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: repositoryscan-agent-use.orka.ai
+spec:
+  policyName: repositoryscan-agent-use.orka.ai
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: repositorymonitor-agent-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["core.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["repositorymonitors"]
+  validations:
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.reviewer) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.reviewer) && oldObject.spec.agents.reviewer == object.spec.agents.reviewer) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.reviewer.?namespace.orValue(request.namespace)).name(object.spec.agents.reviewer.name).check('use').allowed()
+    message: caller is not authorized to use the reviewer Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.triager) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.triager) && oldObject.spec.agents.triager == object.spec.agents.triager) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.triager.?namespace.orValue(request.namespace)).name(object.spec.agents.triager.name).check('use').allowed()
+    message: caller is not authorized to use the triager Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.researcher) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.researcher) && oldObject.spec.agents.researcher == object.spec.agents.researcher) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.researcher.?namespace.orValue(request.namespace)).name(object.spec.agents.researcher.name).check('use').allowed()
+    message: caller is not authorized to use the researcher Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.planner) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.planner) && oldObject.spec.agents.planner == object.spec.agents.planner) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.planner.?namespace.orValue(request.namespace)).name(object.spec.agents.planner.name).check('use').allowed()
+    message: caller is not authorized to use the planner Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.repairer) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.repairer) && oldObject.spec.agents.repairer == object.spec.agents.repairer) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.repairer.?namespace.orValue(request.namespace)).name(object.spec.agents.repairer.name).check('use').allowed()
+    message: caller is not authorized to use the repairer Agent
+    reason: Forbidden
+  - expression: >-
+      !has(object.spec.agents) || !has(object.spec.agents.implementer) ||
+      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.implementer) && oldObject.spec.agents.implementer == object.spec.agents.implementer) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.implementer.?namespace.orValue(request.namespace)).name(object.spec.agents.implementer.name).check('use').allowed()
+    message: caller is not authorized to use the implementer Agent
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: repositorymonitor-agent-use.orka.ai
+spec:
+  policyName: repositorymonitor-agent-use.orka.ai
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gatewaybinding-agent-use.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["gateway.orka.ai"]
+      apiVersions: ["v1alpha1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["gatewaybindings"]
+  validations:
+  - expression: >-
+      !has(object.spec.agentRef) ||
+      (oldObject != null && has(oldObject.spec.agentRef) && oldObject.spec.agentRef == object.spec.agentRef) ||
+      authorizer.group('core.orka.ai').resource('agents').namespace(request.namespace).name(object.spec.agentRef.name).check('use').allowed()
+    message: caller is not authorized to use the bound Agent
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gatewaybinding-agent-use.orka.ai
+spec:
+  policyName: gatewaybinding-agent-use.orka.ai
+  validationActions: [Deny]
