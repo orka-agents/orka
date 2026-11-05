@@ -715,20 +715,18 @@ const (
 
 // EffectiveMaxDelegationAge returns how long a delegated policy lets an Agent
 // act for the requester under the controller's cap (DefaultMaxDelegationAgeCap
-// when limit is not positive), and whether the cap shortened the policy's own
-// maxDelegationAge.
-func EffectiveMaxDelegationAge(policy *corev1alpha1.OutboundAccessPolicy, limit time.Duration) (time.Duration, bool) {
+// when limit is not positive), and the age the policy itself asks for
+// (DefaultMaxDelegationAge when it sets none). The cap applies when the first
+// is shorter than the second.
+func EffectiveMaxDelegationAge(policy *corev1alpha1.OutboundAccessPolicy, limit time.Duration) (effective, requested time.Duration) {
 	if limit <= 0 {
 		limit = DefaultMaxDelegationAgeCap
 	}
-	age := DefaultMaxDelegationAge
+	requested = DefaultMaxDelegationAge
 	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil && identity.Delegated.MaxDelegationAge != nil {
-		age = identity.Delegated.MaxDelegationAge.Duration
+		requested = identity.Delegated.MaxDelegationAge.Duration
 	}
-	if age > limit {
-		return limit, true
-	}
-	return age, false
+	return min(requested, limit), requested
 }
 
 // resolveDelegation checks that the Agent may still act for the requester
