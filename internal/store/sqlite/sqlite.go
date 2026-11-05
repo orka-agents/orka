@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -972,7 +973,8 @@ func currentSchemaStatements() []string {
 	statements = append(statements, usageSchema()...)
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
-	return append(statements, connectorSchemaStatements()...)
+	statements = append(statements, connectorSchemaStatements()...)
+	return append(statements, operationReceiptSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
@@ -1011,6 +1013,14 @@ type Store struct {
 	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
 	// fence check's cleanup generation read and its Job revocation reads.
 	checkTaskDataFenceAfterGenerationRead func(context.Context)
+
+	// clock, when set by a test, replaces the provider clock that measures
+	// operation age and receipt retention.
+	clock func() time.Time
+
+	// writeState, when set by a test, replaces the dataset write state, which
+	// is always ready for an open SQLite store.
+	writeState func() storagev1.DatasetState
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
@@ -1063,6 +1073,9 @@ func (s *Store) Start(ctx context.Context) error {
 			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
+			if err := s.pruneExpiredOperationReceipts(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "Failed to prune expired operation receipts")
+			}
 		}
 	}
 }

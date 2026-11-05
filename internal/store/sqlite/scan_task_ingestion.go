@@ -95,6 +95,12 @@ func (s *Store) PreviewScanTaskIngestion(ctx context.Context, preview store.Scan
 // CommitScanTaskIngestion applies an ingestion computed against ExpectedRun
 // while the run and every recorded read are unchanged.
 func (s *Store) CommitScanTaskIngestion(ctx context.Context, commit store.ScanTaskIngestionCommit) (bool, error) {
+	return writeOperation(ctx, s, "CommitScanTaskIngestion", nil, func(ctx context.Context) (bool, error) {
+		return s.securityWriteStore(ctx).commitScanTaskIngestionWrite(ctx, commit)
+	})
+}
+
+func (s *Store) commitScanTaskIngestionWrite(ctx context.Context, commit store.ScanTaskIngestionCommit) (bool, error) {
 	ingestion := commit.Ingestion
 	if ingestion.Namespace == "" || ingestion.RepositoryScan == "" || ingestion.ScanRunID == "" ||
 		ingestion.TaskName == "" || ingestion.Stage == "" {
@@ -310,6 +316,12 @@ func (s *Store) runScanIngestionStep(ctx context.Context, step store.ScanIngesti
 }
 
 func (s *Store) CompleteScanTaskIngestion(ctx context.Context, task store.ScanTaskIdentity) error {
+	return writeOperationErr(ctx, s, "CompleteScanTaskIngestion", func(ctx context.Context) error {
+		return s.securityWriteStore(ctx).completeScanTaskIngestionWrite(ctx, task)
+	})
+}
+
+func (s *Store) completeScanTaskIngestionWrite(ctx context.Context, task store.ScanTaskIdentity) error {
 	result, err := s.securityDB().ExecContext(ctx, `UPDATE security_scan_task_ingestions SET completed = TRUE
 		WHERE namespace = ? AND scan_run_id = ? AND task_name = ? AND task_uid = ? AND repository_scan = ? AND stage = ? AND slice_id = ?`,
 		task.Namespace, task.ScanRunID, task.TaskName, task.TaskUID, task.RepositoryScan, task.Stage, task.SliceID)

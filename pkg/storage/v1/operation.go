@@ -136,7 +136,10 @@ func (r ResolveOperationRequest) Validate() error {
 // A successful write that changed nothing, such as a delete that found
 // nothing, is a committed outcome and gets a receipt too. A refusal commits
 // nothing and leaves no receipt. A receipt never holds plaintext protected
-// data.
+// data. A receipt may hold a sealed result, such as connector custody; when
+// that custody is removed (see [SealedConnectorCustodyStore]) the provider
+// clears the result, and a replay of the write returns ErrConflict without
+// running it again.
 //
 // A refusal settles only the attempt it answers. After an attempt of an
 // operation ended with an unknown outcome, the operation is settled only by a

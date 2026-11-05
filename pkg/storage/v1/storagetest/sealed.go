@@ -339,7 +339,8 @@ func newTurnFixture(t *testing.T, provider storagev1.StateProvider, name string)
 	require.NoError(t, provider.CreateSession(ctx, &storagev1.SessionRecord{Namespace: "tenant", Name: name, SessionType: "task"}))
 	uid := name + "-uid"
 	require.NoError(t, provider.BindSessionCleanupIdentity(ctx, "tenant", name, uid))
-	fence := controlFence(1, "controller")
+	// A turn step commits only under the dataset's current controller epoch.
+	fence := syncEpoch(t, provider, 1, "controller")
 	request := storagev1.CreateSessionTurnRecordRequest{
 		Namespace: "tenant", SessionName: name, Fence: fence,
 		Turn: storagev1.SessionTurn{

@@ -93,6 +93,13 @@ func TestProviderReceivesOnlySealedSnapshotsAndNativeSessions(t *testing.T) {
 	client := activatedClient(t, recorder, sealedTestKey)
 	ctx := t.Context()
 	plaintexts := make([][]byte, 0, 4)
+	// Session turn steps commit only under the dataset's controller epoch,
+	// which finalizationFixture's fence names.
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, recorder.SyncControllerEpochMirror(ctx, store.ControllerEpoch{
+		Name: store.DefaultControllerEpochName, Epoch: 1, HolderID: "controller",
+		RequestDigest: store.CanonicalBytesDigest([]byte("controller")), Version: 1, AcquiredAt: at, UpdatedAt: at,
+	}))
 
 	body := []byte(`{"prompt":"resolved prompt with a private skill: snapshot-plaintext-marker"}`)
 	plaintexts = append(plaintexts, body)

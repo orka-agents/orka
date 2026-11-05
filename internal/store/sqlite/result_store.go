@@ -13,6 +13,12 @@ import (
 
 // SaveResult inserts or replaces a task result.
 func (s *Store) SaveResult(ctx context.Context, namespace, taskName string, data []byte) error {
+	return writeOperationErr(ctx, s, "SaveResult", func(ctx context.Context) error {
+		return s.saveResultWrite(ctx, namespace, taskName, data)
+	})
+}
+
+func (s *Store) saveResultWrite(ctx context.Context, namespace, taskName string, data []byte) error {
 	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		return s.saveResultUnfenced(ctx, namespace, taskName, data)
 	})
@@ -43,12 +49,18 @@ func (s *Store) GetResult(ctx context.Context, namespace, taskName string) ([]by
 
 // DeleteResult removes a task result.
 func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "DeleteResult", func(ctx context.Context) error {
+		return s.deleteResultWrite(ctx, namespace, taskName)
+	})
+}
+
+func (s *Store) deleteResultWrite(ctx context.Context, namespace, taskName string) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := advanceTaskDataCleanupGeneration(ctx, tx, namespace, taskName); err != nil {
+	if err := advanceTaskDataCleanupGeneration(ctx, tx.Tx, namespace, taskName); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -68,6 +80,12 @@ func (s *Store) DeleteResult(ctx context.Context, namespace, taskName string) er
 
 // SavePromptResultReceipt inserts one immutable attempt-bound result receipt.
 func (s *Store) SavePromptResultReceipt(ctx context.Context, receipt store.PromptResultReceipt) error {
+	return writeOperationErr(ctx, s, "SavePromptResultReceipt", func(ctx context.Context) error {
+		return s.savePromptResultReceiptWrite(ctx, receipt)
+	})
+}
+
+func (s *Store) savePromptResultReceiptWrite(ctx context.Context, receipt store.PromptResultReceipt) error {
 	receipt.AttemptID = strings.TrimSpace(receipt.AttemptID)
 	receipt.Namespace = strings.TrimSpace(receipt.Namespace)
 	receipt.TaskName = strings.TrimSpace(receipt.TaskName)
@@ -119,7 +137,7 @@ func (s *Store) GetPromptResultReceipt(ctx context.Context, attemptID string) (*
 	if err := store.ValidateControlIdentifier("prompt result receipt attempt ID", attemptID); err != nil {
 		return nil, err
 	}
-	return getPromptResultReceipt(ctx, s.db, attemptID)
+	return getPromptResultReceipt(ctx, s.taskDataExecutor(ctx), attemptID)
 }
 
 func getPromptResultReceipt(ctx context.Context, q queryRower, attemptID string) (*store.PromptResultReceipt, error) {

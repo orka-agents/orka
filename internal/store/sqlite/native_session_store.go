@@ -128,12 +128,18 @@ func (s *Store) GetSealedNativeSession(ctx context.Context, namespace, name, uid
 // preserves monotonic native checkpoints and immutable named operation
 // outcomes. Old captures cannot replace newer conversation history.
 func (s *Store) SaveSealedNativeSession(ctx context.Context, request storagev1.SaveSealedNativeSessionRequest) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	return writeOperationErr(ctx, s, "SaveSealedNativeSession", func(ctx context.Context) error {
+		return s.saveSealedNativeSessionWrite(ctx, request)
+	})
+}
+
+func (s *Store) saveSealedNativeSessionWrite(ctx context.Context, request storagev1.SaveSealedNativeSessionRequest) error {
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := saveSealedNativeSessionTx(ctx, tx, request); err != nil {
+	if err := saveSealedNativeSessionTx(ctx, tx.Tx, request); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -255,6 +261,12 @@ func carrySealedNativeSessionTx(ctx context.Context, tx *sql.Tx, uid string, nat
 // It atomically reserves a new Session and stages the import. A caller cannot
 // replace even an empty Session owned by another call.
 func (s *Store) StageSealedNativeSessionImport(ctx context.Context, request storagev1.StageSealedNativeSessionImportRequest) (*store.NativeSessionImportReceipt, error) {
+	return writeOperation(ctx, s, "StageSealedNativeSessionImport", nil, func(ctx context.Context) (*store.NativeSessionImportReceipt, error) {
+		return s.stageSealedNativeSessionImportWrite(ctx, request)
+	})
+}
+
+func (s *Store) stageSealedNativeSessionImportWrite(ctx context.Context, request storagev1.StageSealedNativeSessionImportRequest) (*store.NativeSessionImportReceipt, error) {
 	record, receipt := request.Record, request.Receipt
 	if err := record.Validate(); err != nil {
 		return nil, err
@@ -273,7 +285,7 @@ func (s *Store) StageSealedNativeSessionImport(ctx context.Context, request stor
 		return nil, store.ValidationErrorf("native import creation time is required")
 	}
 	receipt.CreatedAt = receipt.CreatedAt.UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +329,7 @@ func (s *Store) StageSealedNativeSessionImport(ctx context.Context, request stor
 	if err != nil {
 		return nil, err
 	}
-	if err = writeSealedNativeSessionTx(ctx, tx, record); err != nil {
+	if err = writeSealedNativeSessionTx(ctx, tx.Tx, record); err != nil {
 		return nil, err
 	}
 	encoded, err = json.Marshal(receipt)

@@ -10,14 +10,21 @@ selection.
 ## Dataset metadata
 
 `store_dataset` contains exactly one canonical, nonzero UUID, an origin (`new` or
-`adopted`), and a bootstrap-completion flag. `PRAGMA user_version = 1` identifies
-this metadata layout. Opening a database still validates every table and index
-definition: a version marker alone cannot establish compatibility.
+`adopted`), a bootstrap-completion flag and the installation the dataset is
+bound to, empty until the first controller epoch advance.
+`PRAGMA user_version = 2` identifies this metadata layout. Opening a database
+still validates every table and index definition: a version marker alone cannot
+establish compatibility.
 
 Fresh schema creation, identity creation and version recording commit together.
 Exact supported historical layouts are backed up and upgraded under the existing
-process lock and one `BEGIN IMMEDIATE` transaction. The final 167-to-168 transition
-adds the metadata table and records an adopted identity. Missing or malformed
+process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
+adds the metadata table, the 168-to-169 transition adds operation receipts and
+the epoch advance columns, and the upgrade records an adopted identity. A store
+at an earlier schema version upgrades through numbered version steps under the
+same lock, backup and transaction: a version-1 store (the 159-object layout)
+gains the 168-to-169 objects and keeps its identity row, records and bootstrap
+state unchanged. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -262,8 +269,10 @@ the observable parts.
   revisions are additive. A change that adds such an obligation increments
   `storagev1.ContractRevision`, so startup validation can refuse an older
   provider with one precise reason instead of failing at the first missing
-  method; an optional family is announced as a capability instead. The
-  revision Orka requires for each part belongs to Orka, not to the contract.
+  method; an optional family is announced as a capability instead. Revision
+  2 requires operation receipts and controller epoch advancement on both
+  provider contracts. The revision Orka requires for each part belongs to
+  Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -336,12 +345,14 @@ writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `RequestDigest`, the method catalog (`LookupMethod`, `Methods`),
 `OperationReceiptStore`, `ControllerEpochAdvancer`, the errors
 `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
-`ErrClockSkew`, and the new `ProviderInfo` fields. Nothing enforces the rules
-yet: Orka does not attach envelopes, SQLite does not check them, providers
-must keep accepting writes without one, and the shared suite does not test
-them. They become provider obligations when the storage client attaches
-envelopes. The suite's write catalog (`storagetest`) then gains one case per
-write method.
+`ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
+`OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
+that carries an envelope when it commits. SQLite does, and the shared suite's
+write catalog (`storagetest`) runs the dataset, receipt, age, fence and
+resolution checks for every write method, the sealed families, Task data
+fences and conditional commands included.
+Orka does not attach envelopes yet, so providers must keep accepting writes
+without one until the storage client does.
 
 - **Method catalog.** Every provider method is a read, a write or an
   administrative method. Reads carry no envelope and need no stored receipt.
@@ -421,11 +432,23 @@ write method.
   envelope. A successful write that changed nothing is a
   committed outcome and gets a receipt, so a delayed duplicate cannot act
   later, for example by releasing a lock the same Task acquired again. A
-  receipt never holds plaintext protected data. A provider keeps receipts for
+  receipt never holds plaintext protected data. A receipt may hold a sealed
+  result, such as the connector credential, consent or completion a custody
+  write returns; deleting, shredding or tombstoning that Connection's custody,
+  or deleting its consents, clears those results in the same transaction, and
+  a replay of such a write then returns `ErrConflict` without running it
+  again. A provider keeps receipts for
   at least `MinReceiptRetention` (1 hour) on its own clock, which is longer
   than `MaxOperationAge` plus `MaxClockSkew`, so every retry it can still
   accept finds its receipt. `PruneOperationReceipts` removes older receipts in
   bounded batches, and `Describe` reports the retention and the result limit.
+  SQLite measures receipt ages on the host's wall clock, which time
+  synchronization can step back, so it keeps receipts for
+  `MinReceiptRetention` plus 15 minutes and assumes cumulative clock regression
+  between pruning and every later resolution never exceeds that allowance,
+  including repeated steps, process restarts and host failovers. The allowance
+  does not reset at each step or restart. Beyond it, `ResolveOperation`
+  could report an operation whose receipt was already pruned as aborted.
 - **Unknown outcomes.** When a write's outcome is unknown (`ErrOutcomeUnknown`,
   or a transport failure after the request was sent), the storage client
   retries the same envelope until its deadline and then calls
@@ -592,7 +615,17 @@ write method.
   it changes, as an outbox claim or a receipt deletion is; Session cleanup
   preparation has no natural key, because after completion it records a new
   intent. Session turn creation and finalization are recognized by the turn
-  key, and projection activation is idempotent by the state it changes.
+  key, and projection activation is idempotent by the state it changes. SQLite
+  also checks the fence each Session turn step carries against the dataset's
+  controller epoch when it commits.
+- **Execution event dedupe keys.** A repeated dedupe key returns the stored
+  event only for a request with the same Task, Session and tool call;
+  anything else returns `ErrDuplicateMismatch`, so a reused key is not
+  dropped silently. A field left empty on either side matches. The key is
+  scoped to the stream, so the stream needs no comparison. The type, content and summary may differ: competing outcomes
+  of one step, such as a completion and a failure, share one key so the first
+  durable outcome wins, and an event derived again after a restart may be
+  redacted differently.
 
 ### Rules reserved for later steps
 
@@ -886,7 +919,9 @@ grants. Its commit refusals come in a fixed order (`ErrConflict`,
 `ErrConnectorRetiredLimit`, `ErrConnectorCustodyTombstoned`), so callers keep
 the errors they branched on before. SQLite still truncates its write-ahead
 log after deleting custody, so a deleted record's sealed bytes do not outlive
-it in the log.
+it in the log. The truncation runs after the write's operation commits, on a
+replay too, and also removes the sealed results the removal cleared from
+operation receipts.
 
 SQLite's duplicate SQL control implementation, which tests use in place of
 the Kubernetes control store, finalizes turns itself and seals native state through the client's

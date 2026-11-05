@@ -392,16 +392,22 @@ type SealedConnectorCustodyStore interface {
 	// read for revocation: later writes return ErrConnectorCustodyTombstoned
 	// while the records stay readable. It is idempotent, and it drops
 	// tombstones older than ConnectorTombstoneRetention by the provider's
-	// clock.
+	// clock. It also clears the sealed results operation receipts hold for
+	// the Connection's custody, so a replay of a write that returned them
+	// returns ErrConflict.
 	TombstoneConnectorCustody(ctx context.Context, connectionUID string) error
 
 	// ShredConnectorCredential deletes the current custody while it is at
 	// expectedVersion, without a tombstone, so the person may consent again.
-	// A newer record returns ErrConflict and a missing one ErrNotFound.
+	// A newer record returns ErrConflict and a missing one ErrNotFound. A
+	// shred clears the sealed results operation receipts hold for the
+	// Connection's custody, as TombstoneConnectorCustody does.
 	ShredConnectorCredential(ctx context.Context, connectionUID string, expectedVersion int64) error
 
 	// DeleteConnectorCredential deletes current and retired custody and
-	// tombstones the Connection. Missing records succeed.
+	// tombstones the Connection. Missing records succeed. It clears the
+	// sealed results operation receipts hold for the Connection's custody,
+	// as TombstoneConnectorCustody does.
 	DeleteConnectorCredential(ctx context.Context, connectionUID string) error
 
 	// ListSealedConnectorCredentials returns every current custody record
@@ -458,7 +464,9 @@ type SealedConnectorConsentStore interface {
 	DeleteConnectorCompletion(ctx context.Context, nonce string) error
 
 	// DeleteConnectorConsentsForConnection drops every pending consent and
-	// parked completion of a Connection.
+	// parked completion of a Connection, and clears the sealed results
+	// operation receipts hold for its custody, as TombstoneConnectorCustody
+	// does.
 	DeleteConnectorConsentsForConnection(ctx context.Context, connectionUID string) error
 
 	// ListSealedConnectorConsents returns every pending consent, expired ones

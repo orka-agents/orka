@@ -2579,6 +2579,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, sqliteStore)
 	reopenStore := func() {
 		t.Helper()
 		if err := db.Close(); err != nil {
@@ -2594,6 +2595,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 		if err != nil {
 			t.Fatalf("reopen composite store: %v", err)
 		}
+		syncTestEpochMirror(t, kubeStore, sqliteStore)
 	}
 	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 		Namespace: "tenant-a", SessionName: "session-finalize", SessionUID: "session-finalize-uid",
@@ -2867,7 +2869,9 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if len(transcript) != 2 {
 		t.Fatalf("idempotent retry duplicated transcript: %d entries", len(transcript))
 	}
-	for _, table := range []string{"controller_epochs", "prompt_attempts", "session_controls", "branch_claims", "publications", "external_effects"} {
+	// controller_epochs holds only the mirror of the Kubernetes epoch that
+	// SQLite checks fences against; it never decides ownership.
+	for _, table := range []string{"prompt_attempts", "session_controls", "branch_claims", "publications", "external_effects"} {
 		var count int
 		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil { //nolint:gosec // fixed test-only table allowlist
 			t.Fatalf("count SQLite %s: %v", table, err)
@@ -2895,6 +2899,7 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, sqliteStore)
 	oldSHA := strings.Repeat("4", 40)
 	commitSHA := strings.Repeat("5", 40)
 	branch, err := kubeStore.CreateBranchClaim(ctx, &controlstore.BranchClaim{
@@ -3159,10 +3164,12 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	kubeStore, err = NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, sqlitestore.NewStore(reopened, databasePath)))
+	reopenedStore := sqlitestore.NewStore(reopened, databasePath)
+	kubeStore, err = NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, reopenedStore))
 	if err != nil {
 		t.Fatal(err)
 	}
+	syncTestEpochMirror(t, kubeStore, reopenedStore)
 	if deleted, err := kubeStore.ReclaimPromptAttempts(ctx, fixture.request); err != nil || deleted != 1 {
 		t.Fatalf("reclaim published Task after restart = %d, %v", deleted, err)
 	}

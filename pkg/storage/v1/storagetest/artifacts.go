@@ -201,7 +201,7 @@ func requireValidProviderInfo(t *testing.T, provider storagev1.ProviderDescriber
 	info, err := provider.Describe(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, storagev1.ContractVersion, info.ContractVersion)
-	require.GreaterOrEqual(t, info.ContractRevision, 1, "the contract revision")
+	require.GreaterOrEqual(t, info.ContractRevision, storagev1.ContractRevision, "the contract revision")
 	require.Contains(t, info.Contracts, contract)
 	require.NotEmpty(t, info.DatasetID)
 	require.True(t, storagev1.IsValidDatasetOrigin(info.DatasetOrigin), "dataset origin %q", info.DatasetOrigin)

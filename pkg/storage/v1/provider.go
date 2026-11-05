@@ -85,9 +85,10 @@
 // checks the envelope in the transaction that commits the write and records an
 // operation receipt with the change, so a retry returns the original outcome
 // and a delayed write from a replaced controller cannot commit
-// ([OperationReceiptStore], [ControllerEpochAdvancer]). Orka does not attach
-// envelopes yet, and until it does providers must accept writes without one
-// and need not implement those two interfaces.
+// ([OperationReceiptStore], [ControllerEpochAdvancer]). Both providers
+// implement those two interfaces and check every write that carries an
+// envelope. Orka does not attach envelopes yet, so until it does providers
+// must also accept writes without one.
 //
 // # Records and wire format
 //
@@ -113,8 +114,9 @@ const (
 	// so Orka can refuse a provider that is too old for a contract part with
 	// one precise reason instead of failing at the first missing method. An
 	// optional family is announced through [ProviderInfo.Capabilities]
-	// instead.
-	ContractRevision = 1
+	// instead. Revision 2 requires [OperationReceiptStore] and
+	// [ControllerEpochAdvancer] on both provider contracts.
+	ContractRevision = 2
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -160,6 +162,8 @@ type StateProvider interface {
 	SealedConnectorConsentStore
 
 	ControllerEpochMirror
+	ControllerEpochAdvancer
+	OperationReceiptStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -188,5 +192,7 @@ type StateProvider interface {
 type ArtifactProvider interface {
 	HealthChecker
 	ProviderDescriber
+	ControllerEpochAdvancer
+	OperationReceiptStore
 	ArtifactStore
 }

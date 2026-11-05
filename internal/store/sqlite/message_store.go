@@ -18,6 +18,12 @@ const initialMessageBatchCapacity = 32
 
 // SendMessage stores a new inter-agent message.
 func (s *Store) SendMessage(ctx context.Context, msg *store.Message) error {
+	return writeOperationErr(ctx, s, "SendMessage", func(ctx context.Context) error {
+		return s.sendMessageWrite(ctx, msg)
+	})
+}
+
+func (s *Store) sendMessageWrite(ctx context.Context, msg *store.Message) error {
 	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		return s.sendMessageUnfenced(ctx, msg)
 	})
@@ -36,6 +42,12 @@ func (s *Store) sendMessageUnfenced(ctx context.Context, msg *store.Message) err
 // parentTask scopes both direct and broadcast delivery to one coordinator family.
 // If markRead is true, messages are marked as read atomically.
 func (s *Store) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
+	return writeOperation(ctx, s, "GetMessages", nil, func(ctx context.Context) ([]store.Message, error) {
+		return s.getMessagesWrite(ctx, namespace, taskName, parentTask, markRead)
+	})
+}
+
+func (s *Store) getMessagesWrite(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	var messages []store.Message
 	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
 		var err error
@@ -128,6 +140,12 @@ func scanUnreadMessages(rows *sql.Rows, namespace string) ([]store.Message, erro
 
 // DeleteTaskMessages deletes all messages involving a task (sent or received).
 func (s *Store) DeleteTaskMessages(ctx context.Context, namespace, taskName string) error {
+	return writeOperationErr(ctx, s, "DeleteTaskMessages", func(ctx context.Context) error {
+		return s.deleteTaskMessagesWrite(ctx, namespace, taskName)
+	})
+}
+
+func (s *Store) deleteTaskMessagesWrite(ctx context.Context, namespace, taskName string) error {
 	return s.deleteTaskData(ctx, namespace, taskName,
 		`DELETE FROM messages WHERE namespace = ? AND (from_task = ? OR to_task = ?)`,
 		namespace, taskName, taskName,
@@ -136,6 +154,12 @@ func (s *Store) DeleteTaskMessages(ctx context.Context, namespace, taskName stri
 
 // DeleteParentMessages deletes all messages for children of a parent task.
 func (s *Store) DeleteParentMessages(ctx context.Context, namespace, parentTask string) error {
+	return writeOperationErr(ctx, s, "DeleteParentMessages", func(ctx context.Context) error {
+		return s.deleteParentMessagesWrite(ctx, namespace, parentTask)
+	})
+}
+
+func (s *Store) deleteParentMessagesWrite(ctx context.Context, namespace, parentTask string) error {
 	return s.deleteTaskData(ctx, namespace, parentTask,
 		`DELETE FROM messages WHERE namespace = ? AND parent_task = ?`,
 		namespace, parentTask,
