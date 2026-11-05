@@ -308,3 +308,76 @@ func TestParseCasesCapsDistinctTags(t *testing.T) {
 		t.Fatalf("ParseCases error = %v, want distinct tag limit", err)
 	}
 }
+
+// testCredential is credential-shaped, as the credential patterns match it.
+var testCredential = "ghp_" + strings.Repeat("a", 36)
+
+func TestSelectCasesRejectsInvalidSelectorsWithoutEchoingThem(t *testing.T) {
+	cases, err := ParseCases([]byte(encodeCase(t, validCaseObject())), reviewType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{testCredential, "", "-bad"} {
+		_, err := SelectCases(cases, []string{"nil-deref-1", id})
+		if err == nil || !strings.Contains(err.Error(), "cases.ids[1]") || (id != "" && strings.Contains(err.Error(), id)) {
+			t.Fatalf("SelectCases(%q) error = %v", id, err)
+		}
+	}
+	if _, err := SelectCases(cases, []string{"missing-1"}); err == nil || !strings.Contains(err.Error(), `"missing-1"`) {
+		t.Fatalf("SelectCases with a valid unknown id: %v", err)
+	}
+}
+
+func TestParseCaseRejectsCredentialRepoSegments(t *testing.T) {
+	for _, repoURL := range []string{
+		"https://github.com/" + testCredential + "/repo",
+		"https://github.com/owner/" + testCredential,
+	} {
+		object := validCaseObject()
+		reviewInput(object)["repoURL"] = repoURL
+		_, err := ParseCase([]byte(encodeCase(t, object)), reviewType)
+		if err == nil || !strings.Contains(err.Error(), "repoURL") || strings.Contains(err.Error(), testCredential) {
+			t.Fatalf("ParseCase(%s) error = %v", repoURL, err)
+		}
+	}
+}
+
+// A second JSON object after the case cannot skip the exact-key check, so a
+// credential-shaped unknown key in the first object is still redacted.
+func TestParseCaseChecksKeysBeforeTrailingData(t *testing.T) {
+	object := validCaseObject()
+	object[testCredential] = "x"
+	line := encodeCase(t, object) + ` {}`
+	_, err := ParseCase([]byte(line), reviewType)
+	if err == nil || strings.Contains(err.Error(), testCredential) {
+		t.Fatalf("ParseCase error = %v, want an error without the key", err)
+	}
+	_, err = ParseCase([]byte(encodeCase(t, validCaseObject())+` {}`), reviewType)
+	if err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("ParseCase with trailing data: %v", err)
+	}
+}
+
+func TestParseCaseRejectsNullRequiredFields(t *testing.T) {
+	for _, set := range []func(map[string]any){
+		func(o map[string]any) { file0(o)["additions"] = nil },
+		func(o map[string]any) { file0(o)["deletions"] = nil },
+		func(o map[string]any) { reviewInput(o)["headSHA"] = nil },
+		func(o map[string]any) { o["reference"] = nil },
+	} {
+		object := validCaseObject()
+		set(object)
+		if _, err := ParseCase([]byte(encodeCase(t, object)), reviewType); err == nil || !strings.Contains(err.Error(), "must not be null") {
+			t.Fatalf("ParseCase with a null required field: %v", err)
+		}
+	}
+}
+
+func TestParseCaseRejectsDuplicateReferenceLocations(t *testing.T) {
+	object := validCaseObject()
+	location := map[string]any{"file": "pkg/x.go", "startLine": 40, "endLine": 44}
+	object["reference"].(map[string]any)["locations"] = []any{location, location}
+	if _, err := ParseCase([]byte(encodeCase(t, object)), reviewType); err == nil || !strings.Contains(err.Error(), "repeats") {
+		t.Fatalf("ParseCase with duplicate locations: %v", err)
+	}
+}
