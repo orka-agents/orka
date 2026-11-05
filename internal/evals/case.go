@@ -367,8 +367,13 @@ func (r CaseReference) validate() error {
 	return nil
 }
 
-// validateFixtureRepoURL accepts only an anonymous https URL of a GitHub
-// repository: no credentials, port, query, fragment or extra path.
+// ValidateFixtureRepoURL accepts only an anonymous https URL of a GitHub
+// repository: no credentials, port, query, fragment or extra path. A rejected
+// URL is never echoed, since it may carry a credential.
+func ValidateFixtureRepoURL(raw string) error {
+	return validateFixtureRepoURL(raw)
+}
+
 func validateFixtureRepoURL(raw string) error {
 	// Never echo raw: a rejected URL may carry a credential.
 	invalid := errors.New("repoURL must be an anonymous https://github.com/<owner>/<repo> URL")

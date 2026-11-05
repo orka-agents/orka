@@ -70,34 +70,73 @@ func TestCommittedCasesMatchTheSource(t *testing.T) {
 	}
 }
 
+// testRepo is a scratch Git repository on branch main.
+type testRepo struct {
+	t   *testing.T
+	dir string
+}
+
+func newTestRepo(t *testing.T) testRepo {
+	t.Helper()
+	r := testRepo{t: t, dir: t.TempDir()}
+	r.run("init", "-q", "-b", "main")
+	r.run("config", "user.email", "fixtures@example.com")
+	r.run("config", "user.name", "fixtures")
+	r.run("config", "commit.gpgsign", "false")
+	return r
+}
+
+// run runs git in the repository and returns its trimmed output.
+func (r testRepo) run(args ...string) string {
+	r.t.Helper()
+	out, err := git(r.dir, args...)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return strings.TrimSpace(out)
+}
+
+func (r testRepo) write(name, content string) {
+	r.t.Helper()
+	path := filepath.Join(r.dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// commitCase commits the work tree on a new branch from main and returns
+// the branch head.
+func (r testRepo) commitCase(branch string, change func()) string {
+	r.t.Helper()
+	r.run("checkout", "-q", "-b", branch, "main")
+	change()
+	r.run("add", "-A")
+	r.run("commit", "-q", "--allow-empty", "-m", branch)
+	head := r.run("rev-parse", "HEAD")
+	r.run("checkout", "-q", "main")
+	return head
+}
+
+func sourceFor(branch string, reference evals.CaseReference) Source {
+	return Source{
+		RepoURL: "https://github.com/orka-agents/orka-eval-fixtures",
+		Cases:   []SourceCase{{ID: "x", Branch: branch, Title: "change", Reference: reference}},
+	}
+}
+
+var cleanReference = evals.CaseReference{Verdict: evals.ReferenceVerdictPassed}
+
 // fixtureRepo builds a repository whose branch case/x is one commit on main
 // that modifies, adds, renames and removes a file. main then moves on;
 // case/two-commits adds a second commit to case/x and case/root is a root
 // commit. It returns the repository and case/x's base and head.
 func fixtureRepo(t *testing.T) (repo, base, head string) {
 	t.Helper()
-	repo = t.TempDir()
-	run := func(args ...string) string {
-		t.Helper()
-		out, err := git(repo, args...)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	write := func(name, content string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, name)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	run("init", "-q", "-b", "main")
-	run("config", "user.email", "fixtures@example.com")
-	run("config", "user.name", "fixtures")
-	run("config", "commit.gpgsign", "false")
+	r := newTestRepo(t)
+	repo, run, write := r.dir, r.run, r.write
 	write("pkg/a.go", "package pkg\n\nfunc A() int {\n\treturn 1\n}\n")
 	write("pkg/old.go", "package pkg\n\n// Old stays the same when renamed.\nfunc Old() {}\n")
 	write("gone.txt", "bye\n")
@@ -206,5 +245,122 @@ func TestGenerateChecksReferencesAndCommits(t *testing.T) {
 	source.Cases[0].Branch = "case/root"
 	if _, err := Generate(source, repo); err == nil || !strings.Contains(err.Error(), "exactly one parent") {
 		t.Fatalf("Generate with a root commit: %v", err)
+	}
+}
+
+func TestGenerateKeepsPatchBytesAndLiteralPaths(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("pkg/a[1].go", "package pkg\n")
+	r.write("pkg/a1.go", "package pkg\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() {
+		// The bracketed name would match a1.go as a pathspec pattern, and the
+		// added lines end in whitespace a trim would drop.
+		r.write("pkg/a[1].go", "package pkg\n\nvar A = 1  \n\t\n")
+		r.write("pkg/a1.go", "package pkg\n\nvar B = 2\n")
+	})
+	out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := cases[0].Input.RepositoryMonitorReview.Files
+	if len(files) != 2 {
+		t.Fatalf("files = %+v", files)
+	}
+	for _, f := range files {
+		switch f.Filename {
+		case "pkg/a[1].go":
+			if f.Additions != 3 || f.Patch != "@@ -1 +1,4 @@\n package pkg\n+\n+var A = 1  \n+\t" {
+				t.Fatalf("bracketed file = %+v", f)
+			}
+		case "pkg/a1.go":
+			if f.Additions != 2 || strings.Contains(f.Patch, "var A") {
+				t.Fatalf("plain file = %+v", f)
+			}
+		default:
+			t.Fatalf("unexpected file %s", f.Filename)
+		}
+	}
+}
+
+func TestGenerateResolvesBranchesInOrdinaryClones(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	head := r.commitCase("case/x", func() { r.write("a.txt", "b\n") })
+	clone := filepath.Join(t.TempDir(), "clone")
+	if _, err := git("", "clone", "-q", r.dir, clone); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary clone has case/x only as origin/case/x.
+	if _, err := revParse(clone, "refs/heads/case/x"); err == nil {
+		t.Fatal("the clone unexpectedly has a local case/x")
+	}
+	out, err := Generate(sourceFor("case/x", cleanReference), clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), head) {
+		t.Fatalf("case does not pin %s: %s", head, out)
+	}
+	if _, err := Generate(sourceFor("case/missing", cleanReference), clone); err == nil {
+		t.Fatal("Generate resolved a missing branch")
+	}
+}
+
+func TestGenerateRejectsEmptyCommits(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/empty", func() {})
+	if _, err := Generate(sourceFor("case/empty", cleanReference), r.dir); err == nil ||
+		!strings.Contains(err.Error(), "changes nothing") {
+		t.Fatalf("Generate with an empty commit: %v", err)
+	}
+}
+
+func TestRunRejectsCredentialURLsBeforeGit(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "cases.yaml")
+	secret := "ghp_" + strings.Repeat("a", 36)
+	content := "repoURL: https://x:" + secret + "@github.com/orka-agents/orka-eval-fixtures\ncases: []\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(source, filepath.Join(dir, "out.jsonl"), "", false)
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "anonymous") {
+		t.Fatalf("run with a credential URL: %v", err)
+	}
+}
+
+func TestGitIgnoresCallerConfiguration(t *testing.T) {
+	env := gitEnv([]string{
+		"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_DIR=/x", "HOME=/h",
+	})
+	joined := strings.Join(env, "\n")
+	for _, dropped := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_DIR"} {
+		if strings.Contains(joined, dropped) {
+			t.Fatalf("%s survived: %v", dropped, env)
+		}
+	}
+	for _, kept := range []string{"PATH=/bin", "HOME=/h", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1"} {
+		if !strings.Contains(joined, kept) {
+			t.Fatalf("%s missing: %v", kept, env)
+		}
+	}
+	// A global extraHeader must not reach Git.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Authorization: Bearer leaked")
+	r := newTestRepo(t)
+	if out, err := git(r.dir, "config", "--get", "http.extraHeader"); err == nil || strings.TrimSpace(out) != "" {
+		t.Fatalf("git saw the caller's extraHeader: %q, %v", out, err)
 	}
 }

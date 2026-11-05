@@ -81,6 +81,11 @@ func run(sourcePath, outPath, repo string, check bool) error {
 	if err := yaml.UnmarshalStrict(raw, &source); err != nil {
 		return fmt.Errorf("%s: %w", sourcePath, err)
 	}
+	// Check the URL before Git sees it, so a credential pasted into it never
+	// reaches a clone or an error message.
+	if err := evals.ValidateFixtureRepoURL(source.RepoURL); err != nil {
+		return fmt.Errorf("%s: %w", sourcePath, err)
+	}
 	if repo == "" {
 		dir, err := os.MkdirTemp("", "orka-eval-fixtures-")
 		if err != nil {
@@ -136,7 +141,7 @@ func Generate(source Source, repo string) ([]byte, error) {
 }
 
 func resolveCase(source Source, sc SourceCase, repo string) (evals.Case, error) {
-	head, err := revParse(repo, "refs/heads/"+sc.Branch)
+	head, err := resolveBranch(repo, sc.Branch)
 	if err != nil {
 		return evals.Case{}, err
 	}
@@ -180,11 +185,17 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	if statusOut == "" {
+		return nil, errors.New("branch changes nothing")
+	}
 	fields := strings.Split(strings.TrimSuffix(statusOut, "\x00"), "\x00")
 	var files []evals.ReviewCaseFile
 	for i := 0; i < len(fields); {
 		code := fields[i]
 		i++
+		if code == "" {
+			return nil, errors.New("empty diff status")
+		}
 		file := evals.ReviewCaseFile{}
 		paths := []string{}
 		switch code[0] {
@@ -322,22 +333,65 @@ func gitDiff(repo, base, head, format string, paths []string) (string, error) {
 	return git(repo, args...)
 }
 
-func revParse(repo, ref string) (string, error) {
-	return git(repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+// resolveBranch finds a fixture branch as a local branch, as in the mirror
+// clone run makes, or as a remote-tracking branch, as in an ordinary clone.
+func resolveBranch(repo, branch string) (string, error) {
+	for _, ref := range []string{"refs/heads/" + branch, "refs/remotes/origin/" + branch} {
+		if sha, err := revParse(repo, ref); err == nil {
+			return sha, nil
+		}
+	}
+	return "", fmt.Errorf("branch %s is neither a local nor an origin branch", branch)
 }
 
+func revParse(repo, ref string) (string, error) {
+	out, err := git(repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return strings.TrimSpace(out), err
+}
+
+// git runs Git without the caller's configuration or credentials: no
+// global or system config, no inherited GIT_* overrides, no credential
+// helper and no prompt. The fixture repository is public and read
+// anonymously, and the output must not depend on local settings. Paths are
+// literal, never pathspec patterns. The output is returned unmodified.
 func git(dir string, args ...string) (string, error) {
+	args = append([]string{"-c", "credential.helper=", "--literal-pathspecs"}, args...)
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = filepath.Clean(dir)
 	}
-	// Never prompt: the fixture repository is public and read anonymously.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Env = gitEnv(os.Environ())
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		// Name only the subcommand: arguments can hold a repository URL.
+		return "", fmt.Errorf("git %s: %w: %s", gitSubcommand(args), err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return string(out), nil
+}
+
+// gitEnv drops every inherited GIT_* variable and points Git's global and
+// system configuration at nothing.
+func gitEnv(environ []string) []string {
+	env := make([]string, 0, len(environ)+4)
+	for _, kv := range environ {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
+}
+
+func gitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-c":
+			i++
+		case strings.HasPrefix(args[i], "-"):
+		default:
+			return args[i]
+		}
+	}
+	return ""
 }
