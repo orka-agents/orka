@@ -1218,6 +1218,11 @@ html[data-theme='dark'] .orka-band {
   text-decoration: none;
 }
 
+/* Keep the ring inside its cell, clear of the grid's clipping and adjacent cells. */
+.orka-feature:focus-visible {
+  outline-offset: -3px;
+}
+
 .orka-feature__icon {
   width: 2.25rem;
   height: 2.25rem;
