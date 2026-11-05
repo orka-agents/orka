@@ -507,3 +507,55 @@ func TestGenerateIgnoresLocalDiffSettings(t *testing.T) {
 		t.Fatalf("local diff settings changed the patch:\n%s\nvs\n%s", plain, tuned)
 	}
 }
+
+func TestGenerateIgnoresLocalFileOrder(t *testing.T) {
+	order := func(t *testing.T, orderFile bool) []string {
+		r := newTestRepo(t)
+		if orderFile {
+			r.write(".git/order", "z.txt\n")
+			r.run("config", "diff.orderFile", ".git/order")
+		}
+		r.write("a.txt", "a\n")
+		r.write("z.txt", "z\n")
+		r.run("add", "-A")
+		r.run("commit", "-q", "-m", "base")
+		r.commitCase("case/x", func() {
+			r.write("a.txt", "a2\n")
+			r.write("z.txt", "z2\n")
+		})
+		out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := cases[0].Input.RepositoryMonitorReview.Files
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			names = append(names, f.Filename)
+		}
+		return names
+	}
+	if plain, ordered := order(t, false), order(t, true); strings.Join(plain, ",") != "a.txt,z.txt" ||
+		strings.Join(ordered, ",") != strings.Join(plain, ",") {
+		t.Fatalf("file order = %v with diff.orderFile, %v without", ordered, plain)
+	}
+}
+
+func TestOverlapErrorNamesTheFileByPosition(t *testing.T) {
+	r := newTestRepo(t)
+	secret := "ghp_" + strings.Repeat("c", 36)
+	r.write(secret, "x\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() {
+		r.run("rm", "-q", secret)
+		r.write(secret+"/a.go", "package a\n")
+	})
+	_, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err == nil || !strings.Contains(err.Error(), "overlaps another changed path") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("Generate error = %v", err)
+	}
+}

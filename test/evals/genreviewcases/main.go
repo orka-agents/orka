@@ -238,11 +238,13 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 		// as when a file becomes a directory. Fail rather than attribute
 		// another path's changes to this file.
 		if records := strings.Count(strings.TrimSuffix(numstat, "\n"), "\n") + 1; numstat == "" || records != 1 {
-			return nil, fmt.Errorf("%s overlaps another changed path; give it its own case", file.Filename)
+			// Repository paths are validated only after generation, so the
+			// error names the file by position.
+			return nil, fmt.Errorf("changed file %d overlaps another changed path; give it its own case", len(files))
 		}
 		counts := strings.Fields(numstat)
 		if len(counts) < 2 {
-			return nil, fmt.Errorf("no numstat for %s", file.Filename)
+			return nil, fmt.Errorf("no numstat for changed file %d", len(files))
 		}
 		// Binary files report "-" and carry no patch.
 		if counts[0] != "-" {
@@ -344,9 +346,10 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 // pinned, so the output is the committed change whatever the clone's config.
 func gitDiff(repo, base, head string, paths []string, formats ...string) (string, error) {
 	// Pin every setting a clone's local config could change: the algorithm,
-	// the indent heuristic, inter-hunk context and relative paths.
+	// the indent heuristic, inter-hunk context, relative paths and file order.
 	args := append([]string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
-		"--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--no-relative"}, formats...)
+		"--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--no-relative",
+		"-O" + os.DevNull}, formats...)
 	args = append(args, base, head, "--")
 	return git(repo, append(args, paths...)...)
 }
