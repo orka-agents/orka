@@ -10,6 +10,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -173,6 +174,74 @@ func TestBuildPassesContainerTaskRuntimeClassAllowlistOnlyToAIWorkers(t *testing
 	}
 	if got, ok := findEnvVar(job.Spec.Template.Spec.Containers[0].Env, workerenv.ContainerTaskRuntimeClasses); !ok || got.Value != "" {
 		t.Fatalf("AI worker %s with an empty allowlist = %#v, found=%v; want it pinned to an empty value", workerenv.ContainerTaskRuntimeClasses, got, ok)
+	}
+}
+
+func TestBuildTellsContainerWorkersTheirTimeout(t *testing.T) {
+	spoofed := corev1.EnvVar{Name: workerenv.TimeoutSeconds, Value: "99999"}
+	spoofedDeadline := corev1.EnvVar{Name: workerenv.Deadline, Value: "2099-01-01T00:00:00Z"}
+	for _, tt := range []struct {
+		name    string
+		task    *corev1alpha1.Task
+		timeout *metav1.Duration
+		want    string
+	}{
+		{name: "managed worker", task: envSourceTestTask(corev1alpha1.TaskTypeContainer, "", spoofed, spoofedDeadline), timeout: &metav1.Duration{Duration: 90 * time.Second}, want: "90"},
+		{name: "custom image", task: envSourceTestTask(corev1alpha1.TaskTypeContainer, testBusyboxImage, spoofed, spoofedDeadline), timeout: &metav1.Duration{Duration: 30 * time.Minute}, want: "1800"},
+		{name: "no timeout", task: envSourceTestTask(corev1alpha1.TaskTypeContainer, testBusyboxImage, spoofed, spoofedDeadline)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.task.Spec.Timeout = tt.timeout
+			before := time.Now()
+			job, err := setupJobBuilder().Build(context.Background(), tt.task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			var values, deadlines []string
+			for _, envVar := range job.Spec.Template.Spec.Containers[0].Env {
+				switch envVar.Name {
+				case workerenv.TimeoutSeconds:
+					values = append(values, envVar.Value)
+				case workerenv.Deadline:
+					deadlines = append(deadlines, envVar.Value)
+				}
+			}
+			if tt.want == "" && len(values) != 0 || tt.want != "" && (len(values) != 1 || values[0] != tt.want) {
+				t.Fatalf("%s = %v, want %q set only by the controller", workerenv.TimeoutSeconds, values, tt.want)
+			}
+			if tt.want == "" {
+				if len(deadlines) != 0 {
+					t.Fatalf("%s = %v, want it removed without a timeout", workerenv.Deadline, deadlines)
+				}
+				return
+			}
+			if len(deadlines) != 1 {
+				t.Fatalf("%s = %v, want exactly one controller-owned value", workerenv.Deadline, deadlines)
+			}
+			deadline, err := time.Parse(time.RFC3339Nano, deadlines[0])
+			if err != nil {
+				t.Fatalf("%s = %q is not RFC 3339: %v", workerenv.Deadline, deadlines[0], err)
+			}
+			// The deadline is the build time plus the timeout, so startup time counts against it.
+			if expected := before.Add(tt.timeout.Duration); deadline.Before(expected.Add(-time.Second)) || deadline.After(expected.Add(5*time.Second)) {
+				t.Fatalf("%s = %v, want about %v", workerenv.Deadline, deadline, expected)
+			}
+		})
+	}
+}
+
+func TestContainerWorkerDeadlineUsesTheJobsWholeSeconds(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 750_000_000, time.UTC)
+	task := envSourceTestTask(corev1alpha1.TaskTypeContainer, testBusyboxImage)
+	task.Spec.Timeout = &metav1.Duration{Duration: 2900 * time.Millisecond}
+	// activeDeadlineSeconds and ORKA_TIMEOUT_SECONDS see 2s, and a persisted
+	// start time loses its 0.75s, so the deadline is 2s from the whole second.
+	if got, want := containerWorkerDeadline(task, JobBuildOptions{}, now), "2026-10-28T12:00:02Z"; got != want {
+		t.Fatalf("containerWorkerDeadline() = %q, want %q", got, want)
+	}
+	task.Spec.Timeout = &metav1.Duration{Duration: 500 * time.Millisecond}
+	if got := containerWorkerDeadline(task, JobBuildOptions{}, now); got != "" {
+		t.Fatalf("containerWorkerDeadline() = %q for a sub-second timeout, want none like ORKA_TIMEOUT_SECONDS", got)
 	}
 }
 

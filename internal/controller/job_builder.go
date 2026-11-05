@@ -964,6 +964,8 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 
 	if task.Spec.Type == corev1alpha1.TaskTypeContainer {
 		envVars = b.addWorkspaceEnvVars(envVars, task)
+		envVars = setControllerEnv(envVars, workerenv.TimeoutSeconds, containerWorkerTimeoutSeconds(task, opts))
+		envVars = setControllerEnv(envVars, workerenv.Deadline, containerWorkerDeadline(task, opts, time.Now()))
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ResolvedApprovals, opts.ResolvedApprovalsJSON)
 	frozenBindings := ""
@@ -1082,6 +1084,35 @@ func (b *JobBuilder) validateContainerTaskEnvSources(task *corev1alpha1.Task) er
 		)
 	}
 	return nil
+}
+
+// containerWorkerTimeoutSeconds tells a container worker its Job deadline, so
+// the worker can stop the command early enough to deliver partial output and
+// artifacts. Repository validation Jobs keep their frozen environment.
+func containerWorkerTimeoutSeconds(task *corev1alpha1.Task, opts JobBuildOptions) string {
+	if task.Spec.Timeout == nil || opts.RepositoryMonitorValidation || isRepositoryMonitorValidationTask(task) {
+		return ""
+	}
+	if seconds := int64(task.Spec.Timeout.Seconds()); seconds > 0 {
+		return strconv.FormatInt(seconds, 10)
+	}
+	return ""
+}
+
+// containerWorkerDeadline is when the Job deadline ends if the Job starts now.
+// The Job and the Task's own timeout start no earlier than this, so the worker
+// measuring its soft deadline from it is at worst slightly early, and the
+// image pull and clone before the worker ran count against the timeout.
+func containerWorkerDeadline(task *corev1alpha1.Task, opts JobBuildOptions, now time.Time) string {
+	seconds, err := strconv.ParseInt(containerWorkerTimeoutSeconds(task, opts), 10, 64)
+	if err != nil || seconds <= 0 {
+		return ""
+	}
+	// The Job deadline and ORKA_TIMEOUT_SECONDS use the whole seconds of the
+	// timeout, and the Task's recorded start loses its fraction of a second
+	// when persisted, so the worker's deadline is whole seconds from a
+	// truncated build time: never later than what the controller enforces.
+	return now.Truncate(time.Second).Add(time.Duration(seconds) * time.Second).UTC().Format(time.RFC3339Nano)
 }
 
 func appendTaskEnvVars(envVars []corev1.EnvVar, task *corev1alpha1.Task) []corev1.EnvVar {
