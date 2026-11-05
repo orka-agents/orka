@@ -94,7 +94,9 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		return claim, nil
 	}
 	agents := &corev1alpha1.AgentList{}
-	if err := reader.List(ctx, agents); err != nil {
+	// The controller watches one namespace and holds Agent RBAC only there,
+	// so identity ownership is decided within it.
+	if err := reader.List(ctx, agents, client.InNamespace(agent.Namespace)); err != nil {
 		return nil, fmt.Errorf("list Agents holding identity %s/%s: %w", issuer, id, err)
 	}
 	for i := range agents.Items {
@@ -118,7 +120,7 @@ func errIdentityClaimReleasing(claim *corev1alpha1.AgentIdentityClaim, declared 
 // activeIdentityTasks counts unfinished Tasks bound to this Agent as claim.
 func activeIdentityTasks(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent, claim corev1alpha1.AgentIdentityClaim) (int, error) {
 	tasks := &corev1alpha1.TaskList{}
-	if err := reader.List(ctx, tasks); err != nil {
+	if err := reader.List(ctx, tasks, client.InNamespace(agent.Namespace)); err != nil {
 		return 0, fmt.Errorf("list Tasks bound to identity %s/%s: %w", claim.Issuer, claim.ID, err)
 	}
 	count := 0
@@ -217,7 +219,7 @@ func (r *AgentReconciler) agentsSharingIdentity(ctx context.Context, obj client.
 		return nil
 	}
 	agents := &corev1alpha1.AgentList{}
-	if err := r.List(ctx, agents); err != nil {
+	if err := r.List(ctx, agents, client.InNamespace(changed.Namespace)); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to list Agents sharing an identity", "agent", changed.Name)
 		return nil
 	}
