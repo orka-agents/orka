@@ -108,6 +108,11 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		"Agent deleted":           nil,
 		"Agent recreated":         identityHolder("other-uid", true),
 		"claim moved or released": identityHolder("agent-uid", false),
+		"identity being released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Status.IdentityClaim.Releasing = true
+			return agent
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolver := resolverWith(agent)

@@ -27,6 +27,9 @@ type fakeEntra struct {
 	requests []url.Values
 	paths    []string
 	refuse   bool
+	// disabled refuses only the identity's own requests, as Entra does for
+	// a disabled agent identity while still issuing the blueprint's token.
+	disabled string
 }
 
 func (f *fakeEntra) handler(t *testing.T) http.HandlerFunc {
@@ -37,7 +40,7 @@ func (f *fakeEntra) handler(t *testing.T) http.HandlerFunc {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.PostForm)
 		f.paths = append(f.paths, r.URL.Path)
-		refuse := f.refuse
+		refuse := f.refuse || (f.disabled != "" && r.PostForm.Get("client_id") == f.disabled)
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if refuse {
@@ -175,7 +178,7 @@ func TestSourceRefusesAChangedIssuerInstanceAndOtherModes(t *testing.T) {
 	}
 }
 
-func TestSourceVerifyRequestsTheExchangeToken(t *testing.T) {
+func TestSourceVerifyRequestsTheIdentitysOwnToken(t *testing.T) {
 	fake := &fakeEntra{}
 	now := time.Now()
 	source := &Source{Config: configuredConfig(), Entra: newTestIssuer(t, fake, &now)}
@@ -184,8 +187,9 @@ func TestSourceVerifyRequestsTheExchangeToken(t *testing.T) {
 	if err := source.Verify(context.Background(), &agent); err != nil {
 		t.Fatal(err)
 	}
-	if fake.count() != 1 || fake.requests[0].Get("fmi_path") != strings.ToLower(testIdentity) {
-		t.Fatalf("verify requests = %v", fake.requests)
+	if fake.count() != 2 || fake.requests[0].Get("fmi_path") != strings.ToLower(testIdentity) ||
+		fake.requests[1].Get("client_id") != strings.ToLower(testIdentity) || fake.requests[1].Get("scope") != entraExchangeScope {
+		t.Fatalf("verify requests = %v, want the exchange token and the identity's own token", fake.requests)
 	}
 	fake.mu.Lock()
 	fake.refuse = true
@@ -193,5 +197,19 @@ func TestSourceVerifyRequestsTheExchangeToken(t *testing.T) {
 	now = now.Add(10 * time.Minute)
 	if err := source.Verify(context.Background(), &agent); err == nil {
 		t.Fatal("a refused identity must fail verification")
+	}
+}
+
+func TestSourceVerifyFailsForADisabledIdentity(t *testing.T) {
+	fake := &fakeEntra{disabled: strings.ToLower(testIdentity)}
+	now := time.Now()
+	source := &Source{Config: configuredConfig(), Entra: newTestIssuer(t, fake, &now)}
+	agent := identityAgent(now)
+	agent.ObjectMeta = metav1.ObjectMeta{Name: "a", Namespace: "team-a"}
+	if err := source.Verify(context.Background(), &agent); err == nil {
+		t.Fatal("an identity whose own token Entra refuses must fail verification")
+	}
+	if fake.count() != 2 || fake.requests[0].Get("client_id") != testBlueprint {
+		t.Fatalf("requests = %v, want the blueprint's exchange to succeed first", fake.requests)
 	}
 }

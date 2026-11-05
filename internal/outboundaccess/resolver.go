@@ -647,7 +647,10 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
 	}
 	// The bound Agent must still exist and hold the identity: deleting the
-	// Agent, or a claim that moved to another Agent, stops its Tasks' calls.
+	// Agent, a claim that moved to another Agent, or the owner removing the
+	// identity stops its Tasks' calls. A claim being released is still held,
+	// so no other Agent can take the identity while bound Tasks run, but it
+	// is no longer used.
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
@@ -655,6 +658,9 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
+	}
+	if live.Status.IdentityClaim.Releasing {
+		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
