@@ -46,6 +46,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/agentruntimepolicy"
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
@@ -146,7 +147,9 @@ type TaskReconciler struct {
 	ACPRuntimePoolCapacity corev1alpha1.RuntimePoolCapacitySpec
 	// ACPToolboxPolicy repeats the Agent toolbox admission rules at planning
 	// time so a Task never binds a RuntimePool it cannot host toolboxes in.
-	ACPToolboxPolicy            ACPToolboxPolicy
+	ACPToolboxPolicy ACPToolboxPolicy
+	// Identity configures external Agent identities (ADR 0039).
+	Identity                    agentidentity.Config
 	ACPRuntimeNamespace         string
 	EnforceNamespaceIsolation   bool
 	MaxTasksPerNamespace        int32

@@ -43,7 +43,7 @@ func authorizeAgentUse(
 	if userInfo != nil {
 		username = strings.TrimSpace(userInfo.Username)
 	}
-	logValues := []any{"username", username, "namespace", namespace, "agent", agentName, "objectKind", objectKind, "object", objectName}
+	logValues := []any{"user", username, "agentNamespace", namespace, "agentName", agentName, "objectKind", objectKind, "object", objectName}
 	if namespace == "" || username == "" || kubernetesClientsetIsNil(clientset) {
 		log.Info("agent use authorization unavailable", logValues...)
 		return agentUseForbidden(agentName)

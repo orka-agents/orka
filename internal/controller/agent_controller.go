@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/agentcontext"
+	"github.com/orka-agents/orka/internal/agentidentity"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -50,7 +51,16 @@ type AgentReconciler struct {
 	// ToolboxPolicy gates runtime.toolboxes at admission with the same rules
 	// Task planning applies.
 	ToolboxPolicy ACPToolboxPolicy
+	// Identity configures external Agent identities (ADR 0039).
+	Identity agentidentity.Config
 }
+
+const (
+	// conditionTypeIdentityVerified reports whether an Agent's identity has
+	// been verified with its issuer.
+	conditionTypeIdentityVerified = "IdentityVerified"
+	reasonIdentityDeclared        = "Declared"
+)
 
 const (
 	agentSoulConfigMapDependenciesField = "agent.soulConfigMapDependencies"
@@ -65,6 +75,9 @@ const (
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/status,verbs=get;update;patch
+// The API binds Agent identities only for callers it has checked for `bind`,
+// and writes them as the controller.
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agentidentities/entra,verbs=bind
 // +kubebuilder:rbac:groups=core.orka.ai,resources=agents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=list
 // +kubebuilder:rbac:groups=core.orka.ai,resources=providers,verbs=get
@@ -121,6 +134,9 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 // validateAgent validates the Agent's referenced resources exist and config is coherent.
 func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1.Agent) error {
+	if err := r.validateAgentIdentity(ctx, agent); err != nil {
+		return err
+	}
 	// Runtime and providerRef are mutually exclusive
 	if agent.Spec.Runtime != nil && agent.Spec.ProviderRef != nil {
 		return fmt.Errorf("runtime and providerRef are mutually exclusive")
@@ -510,6 +526,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
+	setAgentIdentityCondition(agent, now)
 
 	activeCount := activeTasks // capture for closure
 	lastUsed := agent.Status.LastUsed
@@ -521,6 +538,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		agent.Status.Ready = validationErr == nil
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
+		setAgentIdentityCondition(agent, now)
 		return r.Status().Update(ctx, agent)
 	}); err != nil {
 		return ctrl.Result{}, err
@@ -719,6 +737,9 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(predicate.Funcs{UpdateFunc: func(event.UpdateEvent) bool { return false }})).
 		// A Provider created or changed after the Agent can change its readiness.
 		Watches(&corev1alpha1.Provider{}, handler.EnqueueRequestsFromMapFunc(r.agentsForProvider)).
+		// Only one Agent may hold an identity, so a claimant appearing, changing,
+		// or going away changes the readiness of the others claiming it.
+		Watches(&corev1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.agentsSharingIdentity)).
 		Named("agent").
 		Complete(r)
 }

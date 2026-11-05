@@ -84,6 +84,10 @@ export const agentSpecSchema = z.object({
     approvalRequiredTools: z.array(z.string()).optional(),
   }).optional(),
   runtime: agentRuntimeSchema.optional(),
+  // Kept so editing an Agent never drops its identity binding.
+  identity: z.object({
+    entra: z.object({ agentIdentityID: z.string() }).strict().optional(),
+  }).strict().optional(),
 }).superRefine((spec, ctx) => {
   if (spec.soul && spec.runtime && 'runtimeRef' in spec.runtime) {
     ctx.addIssue({ code: 'custom', message: 'Soul is only supported by AI and built-in runtimes', path: ['soul'] })

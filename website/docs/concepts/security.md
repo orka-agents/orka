@@ -239,6 +239,20 @@ A parent Agent can still hand work only to the Agents its owner listed in
 `spec.coordination.allowedAgents`. The check is off by default, because turning
 it on denies every caller without a `use` grant.
 
+### Agent identities
+
+An Agent can name one external identity in `spec.identity`, starting with a
+Microsoft Entra agent identity (ADR 0039). Binding it requires `bind` on
+`agentidentities/<issuer>` for that exact ID, granted with a Role that lists
+`resourceNames`, so an Agent editor cannot claim another team's identity. One
+identity belongs to one Agent; a later Agent claiming it is not Ready. An
+identity-bound Agent also requires `--agent-use-authorization-enabled` and a
+`runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
+it is the parent's own Agent. Task bindings freeze the identity and the issuer
+instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
+`IdentityVerified` condition stays `False` with reason `Declared`: the identity
+is an authorized declaration, not yet proven with the issuer.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,

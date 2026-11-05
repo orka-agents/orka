@@ -60,6 +60,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	orkaadmission "github.com/orka-agents/orka/internal/admission"
 	"github.com/orka-agents/orka/internal/agenthost"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/api"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -237,6 +238,7 @@ func main() {
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
+	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -440,6 +442,12 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.StringVar(&agentIdentityEntraTenantID, "agent-identity-entra-tenant-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID"),
+		"Entra tenant ID of the agent identity blueprint that Agent.spec.identity.entra identities belong to.")
+	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
+		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
+		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
@@ -800,6 +808,16 @@ func main() {
 		os.Exit(1)
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
+	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
+		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
+			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+		}
+	}
+	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1686,6 +1704,7 @@ func main() {
 		},
 		ACPRuntimeNamespace:         acpRuntimeNamespace,
 		ACPToolboxPolicy:            acpToolboxPolicy,
+		Identity:                    agentIdentityConfig,
 		OutboundAccessResolver:      outboundAccessResolver,
 		BrokeredTransactionExchange: brokeredTransactionExchange,
 
@@ -1967,6 +1986,7 @@ func main() {
 		Scheme:        mgr.GetScheme(),
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
+		Identity:      agentIdentityConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)

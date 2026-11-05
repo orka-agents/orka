@@ -16,6 +16,10 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
     verbs: ["use"]
+  # The API binds Agent identities only for callers it has checked for bind.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agentidentities/entra"]
+    verbs: ["bind"]
   # Providers are operator-authored: the controller reads them and manages
   # their finalizer, never creates or deletes one.
   - apiGroups: ["core.orka.ai"]

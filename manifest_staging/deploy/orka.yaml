@@ -1167,6 +1167,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agents
   verbs:
   - create
@@ -3225,6 +3231,32 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - core.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - agents
+  validations:
+  - expression: |-
+      !has(object.spec.identity) || !has(object.spec.identity.entra) || (oldObject != null && has(oldObject.spec.identity) && has(oldObject.spec.identity.entra) && oldObject.spec.identity.entra.agentIdentityID.lowerAscii() == object.spec.identity.entra.agentIdentityID.lowerAscii()) || authorizer.group('core.orka.ai').resource('agentidentities').subresource('entra')
+
+        .namespace(request.namespace).name(object.spec.identity.entra.agentIdentityID.lowerAscii())
+        .check('bind').allowed()
+    message: caller is not authorized to bind the Agent's identity
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-agenthost-template-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3628,6 +3660,15 @@ metadata:
   name: orka-acp-workspace-lease-protection
 spec:
   policyName: orka-acp-workspace-lease-protection
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-agent-identity-bind.orka.ai
+spec:
+  policyName: orka-agent-identity-bind.orka.ai
   validationActions:
   - Deny
 ---

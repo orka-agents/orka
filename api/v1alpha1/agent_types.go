@@ -8,6 +8,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,6 +68,14 @@ type AgentSpec struct {
 	// When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
 	// +optional
 	Runtime *AgentCLIRuntime `json:"runtime,omitempty"`
+
+	// Identity binds this Agent to one external identity that its outbound
+	// calls can act as. Setting or changing it requires the `bind` verb on
+	// agentidentities/<issuer> for that identity. An identity-bound Agent must
+	// set runtime.ceiling.allowedTools, and Tasks using it require Agent `use`
+	// authorization on the controller.
+	// +optional
+	Identity *AgentIdentity `json:"identity,omitempty"`
 
 	// TTLAfterLastTask defines how long the agent persists after its last task completes.
 	// When set and no tasks are active, the agent is deleted after this duration.
@@ -261,6 +270,39 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 
 // BuiltInContractVersion returns the Agent's explicit built-in harness
 // protocol, or empty when absent. Callers must reject an absent contract.
+// AgentIdentityIssuerEntra names Microsoft Entra Agent ID identities.
+const AgentIdentityIssuerEntra = "entra"
+
+// AgentIdentity selects exactly one issuer-typed external identity.
+// +kubebuilder:validation:XValidation:rule="has(self.entra)",message="identity must set exactly one issuer"
+type AgentIdentity struct {
+	// Entra binds a Microsoft Entra Agent ID agent identity.
+	// +optional
+	Entra *EntraAgentIdentity `json:"entra,omitempty"`
+}
+
+// EntraAgentIdentity references one Entra agent identity under the blueprint
+// configured on the controller.
+type EntraAgentIdentity struct {
+	// AgentIdentityID is the agent identity's client (application) ID.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	AgentIdentityID string `json:"agentIdentityID"`
+}
+
+// IdentityRef returns the Agent's issuer type and identity ID. Identity IDs
+// compare case-insensitively, so the ID is lowercased.
+func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
+	if in == nil || in.Spec.Identity == nil || in.Spec.Identity.Entra == nil {
+		return "", "", false
+	}
+	id = strings.ToLower(strings.TrimSpace(in.Spec.Identity.Entra.AgentIdentityID))
+	if id == "" {
+		return "", "", false
+	}
+	return AgentIdentityIssuerEntra, id, true
+}
+
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""

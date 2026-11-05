@@ -80,6 +80,7 @@ func admitsAgentUse(
 	resource string,
 	grants *agentUseGrants,
 	object, oldObject map[string]any,
+	override ...authorizer.UnconditionalAuthorizer,
 ) bool {
 	t.Helper()
 	compiler, err := admissioncel.NewCompositedCompiler(environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()))
@@ -108,8 +109,12 @@ func admitsAgentUse(
 		VersionedOldObject: apiserveradmission.NewLazyObject(previous),
 	}
 	request := admissioncel.CreateAdmissionRequest(attributes, metav1.GroupVersionResource(gvr), metav1.GroupVersionKind(gvk))
+	var authz authorizer.UnconditionalAuthorizer = grants
+	if len(override) > 0 {
+		authz = override[0]
+	}
 	results, _, err := validations.ForInput(compiler.CreateContext(context.Background()), versioned, request,
-		admissioncel.OptionalVariableBindings{Authorizer: grants}, nil, celconfig.RuntimeCELCostBudget)
+		admissioncel.OptionalVariableBindings{Authorizer: authz}, nil, celconfig.RuntimeCELCostBudget)
 	require.NoError(t, err)
 	for _, result := range results {
 		require.NoError(t, result.Error)

@@ -1166,6 +1166,29 @@ spec:
                     - classRef
                     type: object
                 type: object
+              identity:
+                description: |-
+                  Identity binds this Agent to one external identity that its outbound
+                  calls can act as. Setting or changing it requires the `bind` verb on
+                  agentidentities/<issuer> for that identity. An identity-bound Agent must
+                  set runtime.ceiling.allowedTools, and Tasks using it require Agent `use`
+                  authorization on the controller.
+                properties:
+                  entra:
+                    description: Entra binds a Microsoft Entra Agent ID agent identity.
+                    properties:
+                      agentIdentityID:
+                        description: AgentIdentityID is the agent identity's client
+                          (application) ID.
+                        pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+                        type: string
+                    required:
+                    - agentIdentityID
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: identity must set exactly one issuer
+                  rule: has(self.entra)
               model:
                 description: |-
                   Model defines the LLM model configuration
