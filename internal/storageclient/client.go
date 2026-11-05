@@ -11,7 +11,8 @@
 // has already made safe to persist. It also owns the snapshot key: it seals
 // execution snapshots, native session state and connector custody before a
 // provider sees them and opens them after a provider returns them, so a
-// provider stores only sealed bytes and never holds the key.
+// provider stores only sealed bytes and never holds the key. The client also
+// records the execution-event store metrics, so every provider reports them.
 package storageclient
 
 import (
