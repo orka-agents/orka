@@ -55,6 +55,33 @@ func TestStorageErrorRetryHintsRequireKnownUncommittedOutcome(t *testing.T) {
 	}
 }
 
+type uncertainTaskDataAccessStore struct {
+	store.TaskDataAccessStore
+	calls int
+}
+
+func (s *uncertainTaskDataAccessStore) WithAuthorizedTaskDataAccess(
+	context.Context, string, string,
+	func(context.Context) ([]store.TaskJobIdentity, error), func(context.Context) error,
+) error {
+	s.calls++
+	return errors.Join(store.ErrOutcomeUnknown, store.ErrTaskDataCleanupChanged)
+}
+
+func TestTaskDataUnknownOutcomeTakesPriorityOverCleanupRetry(t *testing.T) {
+	backing := &uncertainTaskDataAccessStore{}
+	app := fiber.New(fiber.Config{ErrorHandler: customErrorHandler})
+	app.Get("/namespaces/:namespace/messages", func(c fiber.Ctx) error {
+		return withInternalTaskData(c, backing, "", func(context.Context) error { return nil }, func(context.Context) error { return nil })
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/namespaces/tenant/messages", nil))
+	require.NoError(t, err)
+	defer response.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusConflict, response.StatusCode)
+	require.Empty(t, response.Header.Get(fiber.HeaderRetryAfter))
+	require.Equal(t, 1, backing.calls, "an uncertain operation must not be reauthorized and repeated")
+}
+
 // unacceptedEventStore refuses execution events, as the storage client does
 // while the controller's fence is not open.
 type unacceptedEventStore struct {

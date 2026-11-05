@@ -749,10 +749,9 @@ func TestFencedTaskDataWritesRunUnderEnvelopes(t *testing.T) {
 	}
 }
 
-// A retry of a committed write whose Task data fence has since moved returns
-// the fence's refusal, not the stored outcome: the caller authorizes again.
-// The operation is settled, so it does not block the dataset.
-func TestFencedRetryAfterTheFenceMovedReturnsTheRefusal(t *testing.T) {
+// A committed write with an unreadable result must not become a fresh write
+// after reauthorization. Its outcome is settled, so it blocks no dataset.
+func TestFencedRetryAfterTheFenceMovedKeepsTheResultUnknown(t *testing.T) {
 	for name, tc := range map[string]struct {
 		step scriptedStep
 		want error
@@ -764,8 +763,8 @@ func TestFencedRetryAfterTheFenceMovedReturnsTheRefusal(t *testing.T) {
 			f := newLossyFixture(t)
 			f.lossy.plan("SaveResult", stepLose, tc.step, tc.step)
 			err := f.client.SaveResult(t.Context(), "tenant", "task", []byte("result"))
-			if !errors.Is(err, tc.want) || errors.Is(err, storagev1.ErrOutcomeUnknown) {
-				t.Fatalf("SaveResult error = %v, want %v and a known outcome", err, tc.want)
+			if !errors.Is(err, storagev1.ErrOutcomeUnknown) || errors.Is(err, tc.want) {
+				t.Fatalf("SaveResult error = %v, want only ErrOutcomeUnknown", err)
 			}
 			requireRetriedWithOneEnvelope(t, f, "SaveResult", 3)
 			if got, err := f.backend.GetResult(t.Context(), "tenant", "task"); err != nil || string(got) != "result" {
@@ -781,8 +780,8 @@ func TestFencedRetryAfterTheFenceMovedReturnsTheRefusal(t *testing.T) {
 // The same rule against the provider: a SaveResult under a Task data fence
 // commits, its response is lost, and the Job is revoked before the retry.
 // The provider checks the fence before it replays the receipt, so the write
-// returns ErrTaskJobRevoked, not the stored outcome, although it committed.
-func TestFencedRetryAfterRevocationReturnsTheProviderRefusal(t *testing.T) {
+// reports an unreadable result without inviting the caller to write again.
+func TestFencedRetryAfterRevocationKeepsTheResultUnknown(t *testing.T) {
 	f := newLossyFixture(t)
 	ctx := t.Context()
 	job := storagev1.TaskJobIdentity{Namespace: "tenant", TaskUID: "task-uid", JobUID: "job-uid"}
@@ -798,8 +797,8 @@ func TestFencedRetryAfterRevocationReturnsTheProviderRefusal(t *testing.T) {
 	}
 	f.lossy.plan("SaveResult", stepLoseThenRun)
 	err = f.client.SaveResult(storagev1.WithTaskDataFence(ctx, fence), "tenant", "task", []byte("result"))
-	if !errors.Is(err, storagev1.ErrTaskJobRevoked) || errors.Is(err, storagev1.ErrOutcomeUnknown) {
-		t.Fatalf("SaveResult error = %v, want ErrTaskJobRevoked and a known outcome", err)
+	if !errors.Is(err, storagev1.ErrOutcomeUnknown) || errors.Is(err, storagev1.ErrTaskJobRevoked) {
+		t.Fatalf("SaveResult error = %v, want only ErrOutcomeUnknown", err)
 	}
 	requireRetriedWithOneEnvelope(t, f, "SaveResult", 3)
 	if got, err := f.backend.GetResult(ctx, "tenant", "task"); err != nil || string(got) != "result" {
@@ -822,6 +821,52 @@ func TestRefusedReplayOfACommittedWriteIsUnknown(t *testing.T) {
 		t.Fatalf("SaveResult error = %v, want only ErrOutcomeUnknown", err)
 	}
 	requireRetriedWithOneEnvelope(t, f, "SaveResult", 3)
+}
+
+func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing.T) {
+	f := newLossyFixture(t)
+	for _, content := range []string{"one", "two"} {
+		if err := f.client.SendMessage(t.Context(), message(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.lossy.hooks["GetMessages"] = func() {
+		if err := f.client.DeleteResult(t.Context(), "tenant", "unrelated-task"); err != nil {
+			t.Errorf("advance the namespace cleanup fence: %v", err)
+		}
+	}
+	f.lossy.plan("GetMessages", stepLoseThenRun)
+	authorizations := 0
+	var consumed []store.Message
+	var err error
+	// Match the API's reauthorization loop and its conversion of provider
+	// errors to handler errors. A committed read must never become a new call.
+	for range 3 {
+		err = f.client.WithAuthorizedTaskDataAccess(t.Context(), "tenant", "", func(context.Context) ([]store.TaskJobIdentity, error) {
+			authorizations++
+			return nil, nil
+		}, func(ctx context.Context) error {
+			var callErr error
+			consumed, callErr = f.client.GetMessages(ctx, "tenant", "reader", "parent", true)
+			if callErr != nil {
+				return errors.New("handler converted the storage error")
+			}
+			return nil
+		})
+		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
+			break
+		}
+	}
+	if !errors.Is(err, store.ErrOutcomeUnknown) || errors.Is(err, store.ErrTaskDataCleanupChanged) {
+		t.Fatalf("consuming read = %v, want only ErrOutcomeUnknown", err)
+	}
+	if authorizations != 1 || len(consumed) != 0 {
+		t.Fatalf("authorizations=%d, messages=%d; the unreadable result must not trigger a new operation", authorizations, len(consumed))
+	}
+	requireRetriedWithOneEnvelope(t, f, "GetMessages", 3)
+	if f.client.UnresolvedOperations() != 0 {
+		t.Fatal("the committed operation must not block the dataset")
+	}
 }
 
 // A committed connector credential write whose sealed result the provider

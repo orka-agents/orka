@@ -51,11 +51,14 @@ func withInternalTaskData(c fiber.Ctx, backing any, taskName string, authorize, 
 			c.SetContext(fencedCtx)
 			return mutate(fencedCtx)
 		})
-		if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
+		if errors.Is(err, store.ErrOutcomeUnknown) || !errors.Is(err, store.ErrTaskDataCleanupChanged) {
 			break
 		}
 	}
 	if err != nil {
+		if errors.Is(err, store.ErrOutcomeUnknown) {
+			return temporaryStorageHTTPError(err)
+		}
 		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
 		}
