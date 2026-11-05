@@ -521,3 +521,79 @@ func TestErrorUnwrapsToTheInjectedOutcome(t *testing.T) {
 	require.False(t, errors.Is(err, storagev1.ErrOutcomeUnknown))
 	require.Equal(t, "storagefault: state.v1 GetResult: storage unavailable", err.Error())
 }
+
+// Provider-populated pointer fields are part of the response too. Losing it
+// cannot reveal a generated ID/timestamp to the caller, even after commit.
+func TestLostCreateMemoryResponseDoesNotPopulateCaller(t *testing.T) {
+	client, faults := newClient(t)
+	memory := &storagev1.Memory{Namespace: "tenant", Content: "synthetic memory", Tags: []string{"original"}}
+	fault := faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"CreateMemory"}}, Action: storagefault.LoseResponse()})
+	err := client.CreateMemory(t.Context(), memory)
+	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
+	require.Empty(t, memory.ID, "a lost response cannot disclose the provider-generated ID")
+	require.Empty(t, memory.Source)
+	require.True(t, memory.CreatedAt.IsZero())
+	require.True(t, memory.UpdatedAt.IsZero())
+	records, err := client.ListMemories(t.Context(), storagev1.MemoryFilter{Namespace: memory.Namespace})
+	require.NoError(t, err)
+	require.NotEmpty(t, records, "the provider committed while its response was lost")
+	require.NotEmpty(t, records[0].ID)
+	fault.Remove()
+	delivered := &storagev1.Memory{Namespace: "tenant", Content: "delivered memory"}
+	require.NoError(t, client.CreateMemory(t.Context(), delivered))
+	require.NotEmpty(t, delivered.ID, "a delivered response still publishes provider-populated fields")
+	require.False(t, delivered.CreatedAt.IsZero())
+}
+
+type mutatingMemoryProvider struct {
+	storagev1.StateProvider
+	calls int
+}
+
+func (p *mutatingMemoryProvider) CreateMemory(_ context.Context, memory *storagev1.Memory) error {
+	p.calls++
+	memory.ID = "provider-generated"
+	memory.Tags[0] = "provider-updated"
+	*memory.LastRecalledAt = memory.LastRecalledAt.Add(time.Hour)
+	return nil
+}
+
+type mutatingArtifactProvider struct{ storagev1.ArtifactProvider }
+
+func (*mutatingArtifactProvider) SaveArtifact(_ context.Context, request storagev1.SaveArtifactRequest) error {
+	request.Data[0] = 'z'
+	return nil
+}
+
+func TestLostResponseIsolatesNestedMutableArguments(t *testing.T) {
+	faults := storagefault.New()
+	provider := &mutatingMemoryProvider{}
+	wrapped := faults.WrapState(provider)
+	at := time.Date(2026, 1, 1, 1, 2, 3, 0, time.UTC)
+	tags := []string{"original"}
+	memory := &storagev1.Memory{Tags: tags, LastRecalledAt: &at}
+	fault := faults.Inject(storagefault.Fault{Action: storagefault.LoseResponse()})
+	requireInjected(t, wrapped.CreateMemory(t.Context(), memory), storagev1.ErrOutcomeUnknown)
+	require.Equal(t, 1, provider.calls)
+	require.Empty(t, memory.ID)
+	require.Equal(t, []string{"original"}, memory.Tags)
+	require.Equal(t, time.Date(2026, 1, 1, 1, 2, 3, 0, time.UTC), *memory.LastRecalledAt)
+	fault.Remove()
+	require.NoError(t, wrapped.CreateMemory(t.Context(), memory))
+	require.Equal(t, "provider-generated", memory.ID)
+	require.Equal(t, []string{"provider-updated"}, memory.Tags)
+	require.Equal(t, time.Date(2026, 1, 1, 2, 2, 3, 0, time.UTC), *memory.LastRecalledAt)
+	require.Same(t, &at, memory.LastRecalledAt, "healthy calls preserve retained pointer aliases")
+	require.Equal(t, time.Date(2026, 1, 1, 2, 2, 3, 0, time.UTC), at)
+	require.Equal(t, "provider-updated", tags[0], "healthy calls preserve retained slice aliases")
+
+	// A value request can carry mutable output surfaces as well.
+	artifacts := faults.WrapArtifacts(&mutatingArtifactProvider{})
+	request := storagev1.SaveArtifactRequest{Data: []byte("abc")}
+	fault = faults.Inject(storagefault.Fault{Action: storagefault.LoseResponse()})
+	requireInjected(t, artifacts.SaveArtifact(t.Context(), request), storagev1.ErrOutcomeUnknown)
+	require.Equal(t, []byte("abc"), request.Data)
+	fault.Remove()
+	require.NoError(t, artifacts.SaveArtifact(t.Context(), request))
+	require.Equal(t, []byte("zbc"), request.Data)
+}

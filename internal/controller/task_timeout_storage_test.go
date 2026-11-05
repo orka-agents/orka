@@ -95,3 +95,101 @@ func TestHandleRunningCompletesAJobThatSucceededBeforeTheTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestOverdueAutonomousTaskDefersOnAgentLookupFailure(t *testing.T) {
+	started := metav1.NewTime(time.Now().Add(-time.Minute))
+	completed := metav1.NewTime(started.Add(5 * time.Second))
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "autonomous-deadline", Namespace: "default", UID: "task-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI, Timeout: &metav1.Duration{Duration: 10 * time.Second},
+			AgentRef: &corev1alpha1.AgentReference{Name: "autonomous-agent"},
+		},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning, StartTime: &started, Iteration: 1,
+			JobName: "successful-iteration", JobUID: "job-uid",
+		},
+	}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: task.Spec.AgentRef.Name, Namespace: task.Namespace},
+		Spec:       corev1alpha1.AgentSpec{Coordination: &corev1alpha1.CoordinationConfig{Autonomous: true}},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: task.Namespace, UID: "job-uid"},
+		Status:     batchv1.JobStatus{Succeeded: 1, CompletionTime: &completed},
+	}
+	r := newUnitReconciler(newTestScheme(), task, agent, job)
+	lookupErr := apierrors.NewServiceUnavailable("temporary Agent lookup failure")
+	failed := false
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if _, isAgent := object.(*corev1alpha1.Agent); isAgent && !failed {
+				failed = true
+				return lookupErr
+			}
+			return c.Get(ctx, key, object, opts...)
+		},
+	})
+	_, err := r.handleRunning(t.Context(), task.DeepCopy())
+	require.ErrorIs(t, err, lookupErr)
+	current := &corev1alpha1.Task{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseRunning, current.Status.Phase)
+	require.Equal(t, task.Status.JobName, current.Status.JobName)
+	require.Equal(t, task.Status.Iteration, current.Status.Iteration)
+	_, err = r.handleRunning(t.Context(), current)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+	require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+	require.Equal(t, "task timed out", current.Status.Message)
+	require.Equal(t, task.Status.Iteration, current.Status.Iteration)
+}
+
+func TestOverdueTaskWithDeletedAgentStillTimesOutForNonqualifyingJob(t *testing.T) {
+	for _, state := range []string{"failed", "missing", "running", "completed late", "completion unknown", "replacement"} {
+		t.Run(state, func(t *testing.T) {
+			started := metav1.NewTime(time.Now().Add(-time.Minute))
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "deleted-agent", Namespace: "default", UID: "task-uid"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeAI, Timeout: &metav1.Duration{Duration: 10 * time.Second},
+					AgentRef: &corev1alpha1.AgentReference{Name: "deleted-agent"},
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseRunning, StartTime: &started, Iteration: 1,
+					JobName: "expired-job", JobUID: "job-uid",
+				},
+			}
+			job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: task.Namespace, UID: "job-uid"}}
+			switch state {
+			case "failed":
+				job.Status.Failed = 1
+			case "running":
+				job.Status.Active = 1
+			case "completed late":
+				job.Status.Succeeded = 1
+				completed := metav1.NewTime(started.Add(20 * time.Second))
+				job.Status.CompletionTime = &completed
+			case "completion unknown":
+				job.Status.Succeeded = 1
+			case "replacement":
+				job.UID = "replacement-uid"
+				job.Status.Succeeded = 1
+				completed := metav1.NewTime(started.Add(5 * time.Second))
+				job.Status.CompletionTime = &completed
+			}
+			r := newUnitReconciler(newTestScheme(), task)
+			if state != "missing" {
+				require.NoError(t, r.Create(t.Context(), job))
+			}
+			_, err := r.handleRunning(t.Context(), task.DeepCopy())
+			require.NoError(t, err)
+			current := &corev1alpha1.Task{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
+			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+			require.Equal(t, "task timed out", current.Status.Message)
+			require.NotNil(t, current.Status.CompletionTime)
+			require.Equal(t, task.Status.Iteration, current.Status.Iteration)
+		})
+	}
+}

@@ -75,11 +75,21 @@ func LoseResponse() Action {
 type loseResponseAction struct{}
 
 func (loseResponseAction) apply(ctx context.Context, method string, next func(context.Context) error) (bool, error) {
-	_ = next(ctx)
+	_ = next(context.WithValue(ctx, lostResponseContextKey{}, true))
 	if info, ok := storagev1.LookupMethod(method); ok && info.Kind == storagev1.MethodRead {
 		return true, fmt.Errorf("%w: the response to a read was lost", storagev1.ErrUnavailable)
 	}
 	return true, fmt.Errorf("%w: the response was lost after the request was sent", storagev1.ErrOutcomeUnknown)
+}
+
+// A lost response cannot expose provider mutations through request references.
+// This private marker lets generated wrappers isolate only those calls, while
+// delivered responses retain exact pointer/slice/map alias behavior.
+type lostResponseContextKey struct{}
+
+func responseWillBeLost(ctx context.Context) bool {
+	lost, _ := ctx.Value(lostResponseContextKey{}).(bool)
+	return lost
 }
 
 // abandoned is the outcome of a call whose context ended before it reached the
