@@ -5,6 +5,10 @@
 // public storage contract (pkg/storage/v1). Families that still carry
 // plaintext protected data or Go callbacks into a database transaction are
 // served through Embedded, which only the in-process SQLite store implements.
+//
+// The client applies Orka's redaction, payload sanitization and usage
+// attribution before any provider call, so providers store only content Orka
+// has already made safe to persist.
 package storageclient
 
 import (
@@ -19,21 +23,20 @@ import (
 // Embedded is the part of the application store that is not yet expressed in
 // the public provider contract. These families either receive plaintext
 // protected data (execution snapshots, native sessions, connector custody,
-// unredacted memory, turn finalization with native capture) or run Orka
-// callbacks inside a database transaction (task data transactions, scan
-// ingestion and memory proposal application). Only the in-process SQLite store
-// implements Embedded, and it must be the same store that serves both
-// contracts so transaction-scoped contexts reach every participating record.
+// turn finalization with native capture) or run Orka callbacks inside a
+// database transaction (task data transactions, scan ingestion and memory
+// proposal application). Only the in-process SQLite store implements
+// Embedded, and it must be the same store that serves both contracts so
+// transaction-scoped contexts reach every participating record.
 type Embedded interface {
 	store.AgentExecutionSnapshotStore
 	store.AgentExecutionSnapshotLifecycleStore
 	store.NativeSessionImportStore
 	store.ConnectorCredentialStore
 	store.ConnectorConsentStore
-	store.MemoryStore
-	store.MemoryProposalStore
 	store.SessionTurnPersistenceStore
 
+	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
 	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
 	WithAuthorizedTaskDataTransaction(
 		ctx context.Context,

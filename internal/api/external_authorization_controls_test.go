@@ -283,16 +283,23 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 	for _, link := range []string{"applied-memory-id", "source-proposal-id"} {
 		t.Run(link, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
-			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal", Status: "accepted"}
+			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal"}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
 			if link == "applied-memory-id" {
-				proposal.AppliedMemoryID = "protected"
+				// An accepted proposal that already names a memory exists only in
+				// retained rows: a new proposal cannot carry an apply outcome.
+				_, err := f.db.ExecContext(t.Context(), `UPDATE memory_proposals SET applied_memory_id = ? WHERE namespace = ? AND id = ?`,
+					"protected", "default", proposal.ID)
+				require.NoError(t, err)
 			} else {
 				memory, err := f.store.GetMemory(t.Context(), "default", "protected")
 				require.NoError(t, err)
 				memory.SourceProposalID = proposal.ID
 				require.NoError(t, f.store.UpdateMemory(t.Context(), memory))
 			}
-			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
 			permissions := make([]authorizationv1.ResourceAttributes, 0, 3)
 			permissions = append(permissions,
 				authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "reference"},

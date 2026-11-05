@@ -54,6 +54,7 @@ var stateFamilies = []stateFamily{
 	{"security", runSecurity},
 	{"repository-monitors", runRepositoryMonitors},
 	{"usage", runUsage},
+	{"memories", runMemories},
 	{"timestamps", runTimestamps},
 	{"concurrency", runConcurrency},
 	{"describe", runDescribe},
