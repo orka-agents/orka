@@ -269,8 +269,10 @@ the observable parts.
   revisions are additive. A change that adds such an obligation increments
   `storagev1.ContractRevision`, so startup validation can refuse an older
   provider with one precise reason instead of failing at the first missing
-  method; an optional family is announced as a capability instead. The
-  revision Orka requires for each part belongs to Orka, not to the contract.
+  method; an optional family is announced as a capability instead. Revision
+  2 requires operation receipts and controller epoch advancement on both
+  provider contracts. The revision Orka requires for each part belongs to
+  Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
