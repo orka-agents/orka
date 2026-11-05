@@ -1,8 +1,8 @@
-import React from 'react';
+import React, {useState} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import ThemedImage from '@theme/ThemedImage';
-import {ArrowRight} from 'lucide-react';
+import {ArrowRight, Pause, Play} from 'lucide-react';
 import InstallCommand from './InstallCommand';
 
 // Pods orbit the mascot on the sonar rings. Angles are fixed; the rings rotate.
@@ -21,8 +21,10 @@ function podPosition(angle) {
 }
 
 export default function HeroSection() {
+  const [paused, setPaused] = useState(false);
+
   return (
-    <section className="orka-hero">
+    <section className="orka-hero" data-paused={paused || undefined}>
       <div className="orka-container orka-hero__grid">
         <div className="orka-hero__copy">
           <p className="orka-eyebrow orka-reveal" style={{'--d': '0ms'}}>
@@ -50,6 +52,13 @@ export default function HeroSection() {
             </Link>
           </div>
           <InstallCommand className="orka-reveal" style={{'--d': '320ms'}} />
+          <button
+            type="button"
+            className="orka-hero__pause"
+            onClick={() => setPaused((value) => !value)}>
+            {paused ? <Play size={13} aria-hidden="true" /> : <Pause size={13} aria-hidden="true" />}
+            {paused ? 'Play animations' : 'Pause animations'}
+          </button>
         </div>
 
         <div className="orka-hero__visual">

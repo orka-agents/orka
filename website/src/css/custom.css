@@ -379,6 +379,11 @@ h1, h2, h3 {
   background-color: var(--orka-code-bg) !important;
 }
 
+/* Keep the pre's focus ring inside the rounded container's clipping boundary. */
+.theme-code-block pre:focus-visible {
+  outline-offset: -2px;
+}
+
 .theme-code-block [class*='codeBlockTitle'] {
   background: var(--orka-code-bg);
   border-bottom: 1px solid var(--orka-code-line);
@@ -481,6 +486,18 @@ html[data-theme='dark'] .footer--dark {
  * ===================================================================== */
 .orka-landing {
   overflow-x: clip;
+}
+
+.orka-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .orka-container {
@@ -824,6 +841,7 @@ html[data-theme='dark'] .orka-band {
   color: var(--orka-ink-2);
 }
 
+.orka-hero__pause,
 .orka-band__pause {
   display: inline-flex;
   align-items: center;
@@ -840,6 +858,7 @@ html[data-theme='dark'] .orka-band {
   transition: border-color 150ms var(--orka-ease), color 150ms var(--orka-ease);
 }
 
+.orka-hero__pause:hover,
 .orka-band__pause:hover {
   border-color: var(--orka-ink-3);
   color: var(--orka-ink);
@@ -847,6 +866,18 @@ html[data-theme='dark'] .orka-band {
 
 .orka-band__pause[hidden] {
   display: none;
+}
+
+.orka-hero__pause {
+  margin-top: 0;
+}
+
+/* Pause only the hero's repeating motion, so entrance reveals can finish. */
+.orka-hero[data-paused] .orka-orbit,
+.orka-hero[data-paused] .orka-sonar__ping,
+.orka-hero[data-paused] .orka-hero__mascot,
+.orka-hero[data-paused] .orka-live-dot::after {
+  animation-play-state: paused !important;
 }
 
 /* Paused: the scripted timeline stops, and so does every animation in the band. */
@@ -1390,6 +1421,10 @@ html[data-theme='dark'] .orka-band {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .orka-hero__pause {
+    display: none;
+  }
+
   .orka-landing *,
   .orka-landing *::before,
   .orka-landing *::after {

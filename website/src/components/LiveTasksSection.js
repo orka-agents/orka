@@ -150,6 +150,16 @@ export default function LiveTasksSection() {
           </button>
         </header>
 
+        <p className="orka-sr-only">
+          Example Task timeline: {TASKS.checkout.name} (AI) moves from Pending to Running,
+          requests approval to roll back checkout-service in production to v3.18.2,
+          receives approval, and succeeds. {TASKS.fix.name} and {TASKS.review.name} (agents),
+          and {TASKS.drift.name} (container), each move from Pending to Running to Succeeded.
+          {' '}{TASKS.notes.name} (agent) moves from Pending to Running and is still running
+          when the example ends. The terminal shows the same phase changes as
+          kubectl get tasks -w, with columns for name, type, phase, priority, and age.
+        </p>
+
         <div className="orka-band__grid" aria-hidden="true">
           <div className="orka-window">
             <div className="orka-window__bar">
