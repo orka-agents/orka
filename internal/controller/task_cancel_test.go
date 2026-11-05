@@ -158,3 +158,27 @@ func TestCancelRequestedAgentTask(t *testing.T) {
 		}
 	})
 }
+
+func TestRequestedCancellationMessageReadsTheLiveTask(t *testing.T) {
+	requested := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "requested", Namespace: testNS, UID: "requested-uid",
+		Annotations: map[string]string{labels.AnnotationCancelRequested: " cancelled by alice: wrong repository "},
+	}}
+	plain := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: testNS, UID: "plain-uid"}}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(requested, plain).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	// The dispatcher's copy predates the request.
+	stale := requested.DeepCopy()
+	stale.Annotations = nil
+	if got := d.requestedCancellationMessage(context.Background(), stale); got != "cancelled by alice: wrong repository" {
+		t.Fatalf("message = %q, want the live request", got)
+	}
+	if got := d.requestedCancellationMessage(context.Background(), plain); got != "" {
+		t.Fatalf("message = %q, want none without a request", got)
+	}
+	replaced := requested.DeepCopy()
+	replaced.UID = "older-uid"
+	if got := d.requestedCancellationMessage(context.Background(), replaced); got != "" {
+		t.Fatalf("message = %q, want none for a replaced Task", got)
+	}
+}

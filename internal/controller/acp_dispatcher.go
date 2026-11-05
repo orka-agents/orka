@@ -35,6 +35,7 @@ import (
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
 	v2eventjournal "github.com/orka-agents/orka/internal/harness/v2/eventjournal"
+	"github.com/orka-agents/orka/internal/labels"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
@@ -6854,6 +6855,21 @@ func (d *ACPDispatcher) finishNonSuccess(ctx context.Context, task *corev1alpha1
 	return d.finishNonSuccessWithCancellationReason(ctx, task, attemptID, fence, session, terminal, "")
 }
 
+// requestedCancellationMessage returns the recorded cancel request on the
+// live Task, which names who cancelled it and why, or "" when there is none.
+// The dispatcher's copy of the Task predates a request made during the run.
+func (d *ACPDispatcher) requestedCancellationMessage(ctx context.Context, task *corev1alpha1.Task) string {
+	reader := uncachedReader(d.APIReader, d.Client)
+	if reader == nil || task == nil {
+		return ""
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID {
+		return ""
+	}
+	return strings.TrimSpace(latest.Annotations[labels.AnnotationCancelRequested])
+}
+
 func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -6872,6 +6888,8 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 			operation = "timeout-cancelled"
 			reason = acpTaskTimeoutReason
 			message = acpTaskTimeoutCancellationSettledMessage
+		} else if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			message = requested
 		}
 		if err := d.transitionAttemptToCancelled(
 			ctx, attemptID, fence, operation, reason, message,
