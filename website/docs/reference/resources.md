@@ -77,7 +77,7 @@ spec:
 | `agentRef` | `ai`, `agent` | The [Agent](#agent) to use. |
 | `prompt` | `ai`, `agent` | What to do. |
 | `image`, `command`, `args` | `container` | The container to run. See [Container tasks](../guides/container-tasks.md). |
-| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. |
+| `env` | `ai`, `container` | Environment variables for the worker container. Coding-agent pools do not inherit them. A container Task's `valueFrom.secretKeyRef` and `valueFrom.configMapKeyRef` follow the `secretRef` policy; see [Container tasks](../guides/container-tasks.md#other-fields). |
 | `ai` | `ai` | Settings for a Task without an Agent, or overrides for one: `providerRef`, `model`, `systemPrompt`, `temperature`, `maxTokens`, `skills`, and `tools`. |
 | `workspace` | `agent`, `container` | The git repository to work in. See [Workspace](#workspace). |
 | `agentRuntime` | `agent` | Per-Task overrides of the Agent's runtime defaults: `maxTurns`, `allowedTools`, `disallowedTools`, and `allowBash`. |
