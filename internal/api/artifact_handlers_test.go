@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -31,14 +32,14 @@ import (
 // setupTestHandlersWithArtifactStore creates Handlers backed by an in-memory
 // SQLite store that implements ArtifactStore, plus any runtime objects for the
 // fake k8s client.
-func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fiber.App, *sqlite.Store) {
+func setupTestHandlersWithArtifactStore(objs ...runtime.Object) (*Handlers, *fiber.App, *storageclient.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, ArtifactStore: ss})
 
 	app := fiber.New()
@@ -328,7 +329,7 @@ func TestDownloadTaskArtifactStoreNotConfigured(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss}) // nil artifact store
 
 	app := fiber.New()

@@ -36,13 +36,14 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
-func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *sqlite.Store) {
+func setupTestInternalHandlers() (*InternalHandlers, *fiber.App, *storageclient.Client) {
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = batchv1.AddToScheme(scheme)
@@ -885,7 +886,7 @@ func TestGetSessionTranscript(t *testing.T) {
 
 type countingTranscriptSearchStore struct {
 	store.SessionStore
-	store.TaskDataTransactionStore
+	store.TaskDataAccessStore
 	calls       int
 	policyReads int
 	filters     []store.TranscriptSearchFilter
@@ -908,7 +909,7 @@ func (s *countingTranscriptSearchStore) SearchTranscript(
 func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	dataStore := sqlite.NewStore(db, ":memory:")
+	dataStore := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	for _, sessionName := range []string{"session-a", "session-b", "excluded"} {
 		require.NoError(t, dataStore.CreateSession(t.Context(), &store.SessionRecord{
 			Namespace: "default", Name: sessionName, SessionType: "task",
@@ -918,7 +919,7 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 		}}))
 	}
 
-	capture := &countingTranscriptSearchStore{SessionStore: dataStore, TaskDataTransactionStore: dataStore}
+	capture := &countingTranscriptSearchStore{SessionStore: dataStore, TaskDataAccessStore: dataStore}
 	results, err := searchAuthorizedTranscriptResults(t.Context(), capture, store.TranscriptSearchFilter{
 		Namespace: "default", Query: "needle", ExcludeSessionName: "excluded", Limit: 10,
 	}, map[string][]corev1alpha1.SessionReference{
@@ -935,7 +936,7 @@ func TestSearchAuthorizedTranscriptResultsUsesSingleBoundedQuery(t *testing.T) {
 
 func TestSearchTranscript(t *testing.T) {
 	h, app, ss := setupTestInternalHandlers()
-	capture := &countingTranscriptSearchStore{SessionStore: ss, TaskDataTransactionStore: ss}
+	capture := &countingTranscriptSearchStore{SessionStore: ss, TaskDataAccessStore: ss}
 	h.sessionStore = capture
 	app.Get("/internal/v1/sessions/:namespace/search", h.SearchTranscript)
 
@@ -1307,7 +1308,7 @@ func TestGetSessionTranscriptAppliesTaskCutoff(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	ctx := context.Background()
 	require.NoError(t, ss.CreateSession(ctx, &store.SessionRecord{
 		Namespace: defaultNamespace, Name: "gateway-session", SessionType: "gateway",

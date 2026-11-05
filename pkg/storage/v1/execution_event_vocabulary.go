@@ -11,6 +11,7 @@ const (
 	ExecutionEventTypeTaskStarted                   = "TaskStarted"
 	ExecutionEventTypeTaskSucceeded                 = "TaskSucceeded"
 	ExecutionEventTypeTaskFailed                    = "TaskFailed"
+	ExecutionEventTypeTaskCancellationRequested     = "TaskCancellationRequested"
 	ExecutionEventTypeTaskCancelled                 = "TaskCancelled"
 	ExecutionEventTypeWorkerStarted                 = "WorkerStarted"
 	ExecutionEventTypeWorkerCompleted               = "WorkerCompleted"
@@ -70,6 +71,7 @@ var executionEventTypes = []string{
 	ExecutionEventTypeTaskStarted,
 	ExecutionEventTypeTaskSucceeded,
 	ExecutionEventTypeTaskFailed,
+	ExecutionEventTypeTaskCancellationRequested,
 	ExecutionEventTypeTaskCancelled,
 	ExecutionEventTypeWorkerStarted,
 	ExecutionEventTypeWorkerCompleted,

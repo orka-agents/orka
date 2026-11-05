@@ -10,6 +10,7 @@ func TestExecutionEventTypeConstantsCoverTaxonomy(t *testing.T) {
 		ExecutionEventTypeTaskStarted,
 		ExecutionEventTypeTaskSucceeded,
 		ExecutionEventTypeTaskFailed,
+		ExecutionEventTypeTaskCancellationRequested,
 		ExecutionEventTypeTaskCancelled,
 		ExecutionEventTypeWorkerStarted,
 		ExecutionEventTypeWorkerCompleted,

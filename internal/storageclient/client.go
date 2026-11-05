@@ -2,9 +2,15 @@
 //
 // Every Orka consumer receives a Client rather than a concrete database. The
 // client composes a state.v1 provider and an artifacts.v1 provider from the
-// public storage contract (pkg/storage/v1). Families that still run Go
-// callbacks inside a database transaction are served through Embedded, which
-// only the in-process SQLite store implements.
+// public storage contract (pkg/storage/v1). Every application family is part
+// of that contract; Embedded only names the in-process SQLite store that
+// serves both contracts.
+//
+// Orka's callbacks run here, never in a provider: memory proposal application
+// authorizes the exact memory it would return, task data access authorizes a
+// caller against a cleanup fence, and scan ingestion validates and computes
+// its writes, each with no provider transaction open, before a conditional
+// provider command applies the result.
 //
 // The client applies Orka's redaction, payload sanitization and usage
 // attribution before any provider call, so providers store only content Orka
@@ -25,28 +31,12 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// Embedded is the part of the application store that is not yet expressed in
-// the public provider contract. These families run Orka callbacks inside a
-// database transaction (task data transactions, scan ingestion and memory
-// proposal application). Only the in-process SQLite store implements
-// Embedded, and it must be the same store that serves both contracts so
-// transaction-scoped contexts reach every participating record.
-type Embedded interface {
-	ApplyMemoryProposal(ctx context.Context, apply store.MemoryProposalApply) (*store.Memory, error)
-	WithTaskDataTransaction(ctx context.Context, fn func(context.Context) error) error
-	WithAuthorizedTaskDataTransaction(
-		ctx context.Context,
-		namespace, taskName string,
-		authorize func(context.Context) error,
-		fn func(context.Context) error,
-	) error
-	ApplyScanTaskIngestion(
-		ctx context.Context,
-		ingestion *store.ScanTaskIngestion,
-		validate func(*store.ScanRun) error,
-		apply func(store.SecurityStore, *store.ScanRun) error,
-	) (bool, error)
-}
+// Embedded is the part of the application store that is not expressed in
+// the public provider contract. Every application family is now part of that
+// contract, so Embedded has no methods. The store passed as Embedded must
+// still be the same store that serves both contracts, which keeps fenced
+// artifact writes on the store whose cleanup generations fence them.
+type Embedded any
 
 // Options selects the providers behind a Client.
 type Options struct {
@@ -54,14 +44,14 @@ type Options struct {
 	State storagev1.StateProvider
 	// Artifacts serves artifacts.v1.
 	Artifacts storagev1.ArtifactProvider
-	// Embedded serves the families outside the provider contract. It must be
+	// Embedded is the in-process store behind State and Artifacts. It must be
 	// the same store as State and Artifacts.
 	Embedded Embedded
 }
 
 // Client implements every application store interface Orka consumes. Its
-// method set is the union of the state, artifact and embedded families, plus
-// the plaintext views of the sealed families.
+// method set is the union of the state and artifact families, plus the
+// plaintext views of the sealed families.
 type Client struct {
 	storagev1.StateProvider
 	storagev1.ArtifactStore
@@ -74,12 +64,22 @@ type Client struct {
 	nativeSessionMaxBytes atomic.Int64
 }
 
-// ErrSplitEmbeddedStore rejects a client whose embedded families would not
-// share the transaction scope of the state and artifact records they touch.
+// The client implements Orka's side of each conditional protocol on top of
+// the provider contract, and still serves the whole contract itself.
+var (
+	_ store.MemoryProposalStore = (*Client)(nil)
+	_ store.TaskDataAccessStore = (*Client)(nil)
+	_ store.SecurityStore       = (*Client)(nil)
+	_ storagev1.StateProvider   = (*Client)(nil)
+)
+
+// ErrSplitEmbeddedStore rejects a client whose state, artifact and embedded
+// stores are not provably one store; fenced artifact writes must reach the
+// store whose cleanup generations fence them.
 var ErrSplitEmbeddedStore = errors.New("embedded storage families require state and artifacts on the same embedded store")
 
 // New composes a storage client. State, Artifacts and Embedded are required,
-// and while embedded families exist they must all be one store.
+// and they must all be one store.
 func New(options Options) (*Client, error) {
 	if isNilProvider(options.State) || isNilProvider(options.Artifacts) || isNilProvider(options.Embedded) {
 		return nil, store.ValidationErrorf("storage client requires state, artifact and embedded stores")
@@ -94,8 +94,7 @@ func New(options Options) (*Client, error) {
 	}, nil
 }
 
-// EmbeddedStore is the in-process store that serves both contracts and the
-// embedded families.
+// EmbeddedStore is the in-process store that serves both contracts.
 type EmbeddedStore interface {
 	storagev1.StateProvider
 	storagev1.ArtifactProvider
@@ -110,8 +109,8 @@ func NewEmbedded(backend EmbeddedStore) (*Client, error) {
 	return New(Options{State: backend, Artifacts: backend, Embedded: backend})
 }
 
-// HealthCheck verifies the selected provider. State, artifacts and the
-// embedded families share one store, so one check covers every binding.
+// HealthCheck verifies the selected provider. State and artifacts share one
+// store, so one check covers every binding.
 func (c *Client) HealthCheck(ctx context.Context) error {
 	return c.StateProvider.HealthCheck(ctx)
 }

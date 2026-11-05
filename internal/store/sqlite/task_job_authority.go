@@ -43,6 +43,12 @@ func (s *Store) DeleteTaskJobRevocations(ctx context.Context, namespace, taskNam
 }
 
 func (s *Store) CheckTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {
+	return s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		return s.checkTaskJobAuthority(ctx, identity)
+	})
+}
+
+func (s *Store) checkTaskJobAuthority(ctx context.Context, identity store.TaskJobIdentity) error {
 	if identity.Namespace == "" || identity.TaskUID == "" || identity.JobUID == "" {
 		return store.ValidationErrorf("task Job identity is incomplete")
 	}

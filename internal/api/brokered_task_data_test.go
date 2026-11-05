@@ -20,10 +20,9 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
-	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -60,7 +59,7 @@ func TestBrokeredDataSerializesWithPromptSettlement(t *testing.T) {
 			fixture := newBrokeredDataFixture(t, tool)
 			// A separate store instance proves this uses the durable Lease,
 			// rather than only the original store's in-process semaphore.
-			other, err := storekube.NewComposite(fixture.kube, "orka-system", storageclienttest.Client(t, fixture.data), storekube.WithAPIReader(fixture.kube))
+			other, err := storekube.NewComposite(fixture.kube, "orka-system", fixture.data, storekube.WithAPIReader(fixture.kube))
 			require.NoError(t, err)
 			attempts := 0
 			checkSettlementBlocked := func(ctx context.Context) error {
@@ -123,21 +122,27 @@ func TestBrokeredDataRechecksImmutableAuthority(t *testing.T) {
 }
 
 type brokeredDataProbe struct {
-	*sqlite.Store
+	*storageclient.Client
 	accesses          int
 	beforeTransaction func(context.Context) error
 	inTransaction     func(context.Context) error
 }
 
-func (s *brokeredDataProbe) WithAuthorizedTaskDataTransaction(ctx context.Context, namespace, taskName string, authorize, access func(context.Context) error) error {
-	return s.Store.WithAuthorizedTaskDataTransaction(ctx, namespace, taskName, func(authCtx context.Context) error {
-		if err := authorize(authCtx); err != nil {
-			return err
+func (s *brokeredDataProbe) WithAuthorizedTaskDataAccess(
+	ctx context.Context,
+	namespace, taskName string,
+	authorize func(context.Context) ([]store.TaskJobIdentity, error),
+	access func(context.Context) error,
+) error {
+	return s.Client.WithAuthorizedTaskDataAccess(ctx, namespace, taskName, func(authCtx context.Context) ([]store.TaskJobIdentity, error) {
+		jobs, err := authorize(authCtx)
+		if err != nil {
+			return nil, err
 		}
 		if s.beforeTransaction != nil {
-			return s.beforeTransaction(authCtx)
+			return jobs, s.beforeTransaction(authCtx)
 		}
-		return nil
+		return jobs, nil
 	}, func(txCtx context.Context) error {
 		if s.inTransaction != nil {
 			if err := s.inTransaction(txCtx); err != nil {
@@ -150,23 +155,23 @@ func (s *brokeredDataProbe) WithAuthorizedTaskDataTransaction(ctx context.Contex
 
 func (s *brokeredDataProbe) SendMessage(ctx context.Context, message *store.Message) error {
 	s.accesses++
-	return s.Store.SendMessage(ctx, message)
+	return s.Client.SendMessage(ctx, message)
 }
 
 func (s *brokeredDataProbe) GetMessages(ctx context.Context, namespace, taskName, parentTask string, markRead bool) ([]store.Message, error) {
 	s.accesses++
-	return s.Store.GetMessages(ctx, namespace, taskName, parentTask, markRead)
+	return s.Client.GetMessages(ctx, namespace, taskName, parentTask, markRead)
 }
 
 func (s *brokeredDataProbe) SearchTranscript(ctx context.Context, filter store.TranscriptSearchFilter) ([]store.TranscriptSearchResult, error) {
 	s.accesses++
-	return s.Store.SearchTranscript(ctx, filter)
+	return s.Client.SearchTranscript(ctx, filter)
 }
 
 type brokeredDataFixture struct {
 	task        *corev1alpha1.Task
 	kube        client.WithWatch
-	data        *sqlite.Store
+	data        *storageclient.Client
 	probe       *brokeredDataProbe
 	control     *storekube.Store
 	fence       store.ControllerEpochFence
@@ -198,14 +203,14 @@ func newBrokeredDataFixture(t *testing.T, tool tools.Tool) *brokeredDataFixture 
 			return c.Create(ctx, object, opts...)
 		},
 	}).Build()
-	control, err := storekube.NewComposite(kube, "orka-system", storageclienttest.Client(t, data), storekube.WithAPIReader(kube))
+	control, err := storekube.NewComposite(kube, "orka-system", data, storekube.WithAPIReader(kube))
 	require.NoError(t, err)
 	epoch, err := control.CompareAndSwapControllerEpoch(t.Context(), store.ControllerEpochCAS{
 		NewEpoch: 1, HolderID: "controller", RequestDigest: store.CanonicalBytesDigest([]byte("epoch")),
 	})
 	require.NoError(t, err)
 	fixture := &brokeredDataFixture{
-		task: task, kube: kube, data: data, probe: &brokeredDataProbe{Store: data}, control: control,
+		task: task, kube: kube, data: data, probe: &brokeredDataProbe{Client: data}, control: control,
 		fence: store.ControllerEpochFence{Name: epoch.Name, Epoch: epoch.Epoch, HolderID: epoch.HolderID},
 	}
 	request, profile := brokeredDataRequest(t, task, tool)

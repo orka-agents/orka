@@ -86,7 +86,7 @@ func workloadEvent(streamID, eventType string) *store.ExecutionEvent {
 
 // runStoreMetricWorkload sends appends and lists through every path that
 // records a store metric: each append method, deduplicated replays, appends
-// and lists inside a Task data transaction, refusals by the client and by the
+// and lists inside Task data access, refusals by the client and by the
 // provider, argument errors, and successful and failed lists.
 func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 	t.Helper()
@@ -105,7 +105,7 @@ func runStoreMetricWorkload(t *testing.T, client *storageclient.Client) {
 			&store.PlanState{Namespace: "tenant", TaskName: "c"})
 		require.NoError(t, err)
 	}
-	require.NoError(t, client.WithTaskDataTransaction(ctx, func(tx context.Context) error {
+	require.NoError(t, client.WithTaskDataAccess(ctx, "tenant", "d", func(tx context.Context) error {
 		if _, err := client.AppendExecutionEvent(tx, workloadEvent("d", events.ExecutionEventTypeModelMessage)); err != nil {
 			return err
 		}
@@ -348,4 +348,81 @@ func TestClientCountsAlreadySanitizedPayloadsOnce(t *testing.T) {
 			require.InDelta(t, tc.want, delta[redactions], 0)
 		})
 	}
+}
+
+// TestClientRecordsOneAppendAttemptPerGroupedEvent requires a grouped append
+// to record each of its events as one append attempt with the group's
+// outcome: an appended group counts every event as appended, and a group the
+// client or the provider refuses counts every event as failed, because the
+// provider commits a group in one transaction or not at all. A deduplicated
+// replay counts as appended, and an invalid deduplication key is not counted.
+func TestClientRecordsOneAppendAttemptPerGroupedEvent(t *testing.T) {
+	client := newEmbeddedClient(t)
+	ctx := t.Context()
+	group := func(entries ...*store.ExecutionEvent) []store.ExecutionEventAppend {
+		appends := make([]store.ExecutionEventAppend, len(entries))
+		for i, event := range entries {
+			appends[i] = store.ExecutionEventAppend{Event: event, DedupeKey: fmt.Sprintf("group-%d", i)}
+		}
+		return appends
+	}
+
+	appended := storeMetricDelta(t, func() {
+		_, err := client.AppendExecutionEventsIfAbsent(ctx, group(
+			workloadEvent("g", events.ExecutionEventTypeModelMessage),
+			workloadEvent("g", events.ExecutionEventTypeToolCallCompleted),
+		))
+		require.NoError(t, err)
+	})
+	require.Equal(t, map[string]float64{
+		`orka_execution_event_append_duration_seconds{event_type="ModelMessage",result="success",stream_type="task"}`:      1,
+		`orka_execution_event_append_duration_seconds{event_type="ToolCallCompleted",result="success",stream_type="task"}`: 1,
+		`orka_execution_events_appended_total{event_type="ModelMessage",stream_type="task"}`:                               1,
+		`orka_execution_events_appended_total{event_type="ToolCallCompleted",stream_type="task"}`:                          1,
+	}, appended)
+
+	refusedByClient := storeMetricDelta(t, func() {
+		_, err := client.AppendExecutionEventsIfAbsent(ctx, group(workloadEvent("h", events.ExecutionEventTypeModelMessage), nil))
+		require.ErrorIs(t, err, store.ErrValidation)
+	})
+	require.Equal(t, map[string]float64{
+		`orka_execution_event_append_duration_seconds{event_type="ModelMessage",result="error",stream_type="task"}`: 1,
+		`orka_execution_event_append_duration_seconds{event_type="unknown",result="error",stream_type="unknown"}`:   1,
+		`orka_execution_event_append_failures_total{event_type="ModelMessage",stream_type="task"}`:                  1,
+		`orka_execution_event_append_failures_total{event_type="unknown",stream_type="unknown"}`:                    1,
+	}, refusedByClient)
+
+	refusedByProvider := storeMetricDelta(t, func() {
+		_, err := client.AppendExecutionEventsIfAbsent(ctx, group(
+			workloadEvent("i", events.ExecutionEventTypeModelMessage),
+			workloadEvent("i", "NotAnEventType"),
+		))
+		require.ErrorIs(t, err, store.ErrValidation)
+	})
+	require.Equal(t, map[string]float64{
+		`orka_execution_event_append_duration_seconds{event_type="ModelMessage",result="error",stream_type="task"}`: 1,
+		`orka_execution_event_append_duration_seconds{event_type="unknown",result="error",stream_type="task"}`:      1,
+		`orka_execution_event_append_failures_total{event_type="ModelMessage",stream_type="task"}`:                  1,
+		`orka_execution_event_append_failures_total{event_type="unknown",stream_type="task"}`:                       1,
+	}, refusedByProvider)
+
+	replayed := storeMetricDelta(t, func() {
+		results, err := client.AppendExecutionEventsIfAbsent(ctx, group(
+			workloadEvent("g", events.ExecutionEventTypeModelMessage),
+			workloadEvent("g", events.ExecutionEventTypeToolCallCompleted),
+		))
+		require.NoError(t, err)
+		require.False(t, results[0].Appended)
+		require.False(t, results[1].Appended)
+	})
+	require.Equal(t, appended, replayed, "a deduplicated replay counts as an appended event")
+
+	invalidKey := storeMetricDelta(t, func() {
+		_, err := client.AppendExecutionEventsIfAbsent(ctx, []store.ExecutionEventAppend{
+			{Event: workloadEvent("j", events.ExecutionEventTypeModelMessage), DedupeKey: "key"},
+			{Event: workloadEvent("j", events.ExecutionEventTypeToolCallCompleted), DedupeKey: " "},
+		})
+		require.ErrorIs(t, err, store.ErrValidation)
+	})
+	require.Empty(t, invalidKey, "an invalid deduplication key is not an append attempt")
 }

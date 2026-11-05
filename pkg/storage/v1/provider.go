@@ -12,13 +12,16 @@
 //     their metadata together.
 //
 // Orka reaches every provider through its storage client. Provider methods
-// never receive Go callbacks; Kubernetes authority, authorization and
-// controller-side orchestration stay in Orka. Protected records, such as
-// execution snapshots, native session state and connector custody, reach a
-// provider only sealed. Some application families are not yet part of this
-// contract because they still run callbacks inside the embedded SQLite
-// store's transactions. Those families remain internal to Orka until their
-// provider shape is defined.
+// never receive Go callbacks and never hold a transaction open while Orka
+// works; Kubernetes authority, authorization and controller-side
+// orchestration stay in Orka. Where Orka must check something between a read
+// and a write, the contract splits the operation into a resolve step and a
+// conditional command that applies only while the resolved target and
+// version still match, and otherwise changes nothing and returns
+// [ErrPreconditionFailed]; the sealed families' commands, which name the
+// versions and digests Orka read, return [ErrConflict] instead.
+// Protected records, such as execution snapshots, native session state and
+// connector custody, reach a provider only sealed.
 //
 // # Execution semantics
 //
@@ -38,9 +41,10 @@
 //
 // A provider reports each refusal with the sentinel error that names it, so
 // callers can branch with errors.Is: [ErrNotFound], [ErrConflict] (including a
-// reused identifier), [ErrFenced], [ErrValidation] (including an invalid
-// cursor), [ErrTooLarge], [ErrCapacity], [ErrNotReady], or a family error such
-// as [ErrDuplicateMismatch] or [ErrGatewaySessionCleanupPending]. A provider that could not run an operation
+// reused identifier), [ErrFenced], [ErrPreconditionFailed], [ErrValidation]
+// (including an invalid cursor), [ErrTooLarge], [ErrCapacity], [ErrNotReady],
+// or a family error such as [ErrDuplicateMismatch], [ErrTaskDataCleanupChanged]
+// or [ErrGatewaySessionCleanupPending]. A provider that could not run an operation
 // returns [ErrUnavailable] only when nothing was committed. When a write may
 // have committed, it returns [ErrOutcomeUnknown], never success.
 //
@@ -120,8 +124,10 @@ type StateProvider interface {
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
+	TaskDataFenceStore
 
 	AtomicExecutionEventPlanStore
+	GroupedExecutionEventStore
 
 	GatewayEventStore
 	GatewayDeliveryStore

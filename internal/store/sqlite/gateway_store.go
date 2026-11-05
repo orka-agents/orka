@@ -449,6 +449,16 @@ func (s *Store) GetGatewayEventDuplicate(
 
 // GetGatewayEventForTask resolves durable gateway ownership for one linked Task identity.
 func (s *Store) GetGatewayEventForTask(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
+	var event *store.GatewayEvent
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		event, err = s.getGatewayEventForTaskUnfenced(ctx, namespace, taskName, taskUID)
+		return err
+	})
+	return event, err
+}
+
+func (s *Store) getGatewayEventForTaskUnfenced(ctx context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {
 	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskName) == "" || strings.TrimSpace(taskUID) == "" {
 		return nil, store.ValidationErrorf("namespace, taskName, and taskUID are required")
 	}

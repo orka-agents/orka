@@ -18,6 +18,7 @@ const (
 	ExecutionEventTypeTaskStarted                   = storagev1.ExecutionEventTypeTaskStarted
 	ExecutionEventTypeTaskSucceeded                 = storagev1.ExecutionEventTypeTaskSucceeded
 	ExecutionEventTypeTaskFailed                    = storagev1.ExecutionEventTypeTaskFailed
+	ExecutionEventTypeTaskCancellationRequested     = storagev1.ExecutionEventTypeTaskCancellationRequested
 	ExecutionEventTypeTaskCancelled                 = storagev1.ExecutionEventTypeTaskCancelled
 	ExecutionEventTypeWorkerStarted                 = storagev1.ExecutionEventTypeWorkerStarted
 	ExecutionEventTypeWorkerCompleted               = storagev1.ExecutionEventTypeWorkerCompleted

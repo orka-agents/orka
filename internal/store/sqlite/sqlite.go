@@ -976,8 +976,11 @@ func currentSchemaStatements() []string {
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db               *sql.DB
-	securityTx       *sql.Tx
+	db         *sql.DB
+	securityTx *sql.Tx
+	// securityClock, set on a scan ingestion's transaction-scoped store,
+	// supplies the times the security writes of one step assign.
+	securityClock    func() time.Time
 	dbPath           string
 	processLock      io.Closer
 	executionEventMu sync.Mutex
@@ -998,6 +1001,10 @@ type Store struct {
 	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
 	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
+
+	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
+	// fence check's cleanup generation read and its Job revocation reads.
+	checkTaskDataFenceAfterGenerationRead func(context.Context)
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
