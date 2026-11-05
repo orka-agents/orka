@@ -20,6 +20,7 @@ var catalogInterfaces = map[string]reflect.Type{
 	"ArtifactProvider":        reflect.TypeFor[storagev1.ArtifactProvider](),
 	"OperationReceiptStore":   reflect.TypeFor[storagev1.OperationReceiptStore](),
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
+	"DatasetBindingStore":     reflect.TypeFor[storagev1.DatasetBindingStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
@@ -90,15 +91,20 @@ func TestMethodCatalogKinds(t *testing.T) {
 		}
 	}
 	for name, kind := range map[string]storagev1.MethodKind{
-		"AdvanceControllerEpoch":    storagev1.MethodAdmin,
-		"SyncControllerEpochMirror": storagev1.MethodAdmin,
-		"ResolveOperation":          storagev1.MethodAdmin,
-		"PruneOperationReceipts":    storagev1.MethodAdmin,
-		"GetControllerEpochMirror":  storagev1.MethodRead,
-		"GetMessages":               storagev1.MethodWrite,
-		"IsLocked":                  storagev1.MethodWrite,
-		"Describe":                  storagev1.MethodRead,
-		"SaveArtifact":              storagev1.MethodWrite,
+		"AdvanceControllerEpoch":      storagev1.MethodAdmin,
+		"SyncControllerEpochMirror":   storagev1.MethodAdmin,
+		"ResolveOperation":            storagev1.MethodAdmin,
+		"PruneOperationReceipts":      storagev1.MethodAdmin,
+		"GetControllerEpochMirror":    storagev1.MethodRead,
+		"BindDataset":                 storagev1.MethodAdmin,
+		"DetachDatasetBinding":        storagev1.MethodAdmin,
+		"UpdateBindingKeyFingerprint": storagev1.MethodAdmin,
+		"CompleteDatasetBootstrap":    storagev1.MethodAdmin,
+		"GetDatasetBinding":           storagev1.MethodRead,
+		"GetMessages":                 storagev1.MethodWrite,
+		"IsLocked":                    storagev1.MethodWrite,
+		"Describe":                    storagev1.MethodRead,
+		"SaveArtifact":                storagev1.MethodWrite,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)
@@ -116,6 +122,14 @@ var classified = map[string]storagev1.CallClass{
 	"HealthCheck":               storagev1.CallControl,
 	"ResolveOperation":          storagev1.CallControl,
 	"SyncControllerEpochMirror": storagev1.CallControl,
+
+	// The dataset binding establishes and checks identity before a fence
+	// exists, so it never waits behind ordinary work.
+	"BindDataset":                 storagev1.CallControl,
+	"CompleteDatasetBootstrap":    storagev1.CallControl,
+	"DetachDatasetBinding":        storagev1.CallControl,
+	"GetDatasetBinding":           storagev1.CallControl,
+	"UpdateBindingKeyFingerprint": storagev1.CallControl,
 
 	"DeleteGatewayTaskCleanupReceipt":     storagev1.CallBackground,
 	"ListGatewaySessionCleanupCandidates": storagev1.CallBackground,

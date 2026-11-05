@@ -39,12 +39,15 @@ func (s *Store) AdvanceControllerEpoch(
 		if err := requireDataset(tx, request.DatasetID); err != nil {
 			return err
 		}
-		installation, err := readDatasetInstallation(ctx, tx)
+		binding, err := readDatasetBinding(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if installation != "" && installation != request.InstallationID {
-			return store.FencedErrorf("dataset belongs to installation %q, not %q", installation, request.InstallationID)
+		if binding.installation != "" && binding.installation != request.InstallationID {
+			return store.FencedErrorf("dataset belongs to installation %q, not %q", binding.installation, request.InstallationID)
+		}
+		if err := binding.refuseDetached(); err != nil {
+			return err
 		}
 		if request.AcknowledgedEpoch > 0 {
 			current, err := getControllerEpoch(ctx, tx, name)
@@ -56,12 +59,16 @@ func (s *Store) AdvanceControllerEpoch(
 					storagev1.ErrNotReady, name, current.Epoch, request.AcknowledgedEpoch)
 			}
 		}
-		if err := advanceControllerEpochTx(ctx, tx, epoch, s.now()); err != nil {
+		now := s.now()
+		if err := advanceControllerEpochTx(ctx, tx, epoch, now); err != nil {
 			return err
 		}
-		if installation == "" {
+		if binding.installation == "" {
+			// The dataset now belongs to this installation, which has not
+			// bound it itself: no record and switch generation 0.
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE store_dataset SET installation_id = ? WHERE singleton = 1`, request.InstallationID,
+				`UPDATE store_dataset SET installation_id = ?, bound_at_ns = ? WHERE singleton = 1`,
+				request.InstallationID, now.UnixNano(),
 			); err != nil {
 				return fmt.Errorf("bind dataset installation: %w", err)
 			}

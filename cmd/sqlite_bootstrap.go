@@ -42,7 +42,7 @@ func openControllerSQLiteStore(
 	if err := client.ActivateSnapshotKey(context.Background(), key); err != nil {
 		return nil, nil, nil, err
 	}
-	if err := s.CompleteDatasetBootstrap(); err != nil {
+	if err := s.CompleteDatasetBootstrap(context.Background(), info.ID); err != nil {
 		return nil, nil, nil, fmt.Errorf("complete SQLite dataset bootstrap: %w", err)
 	}
 	success = true

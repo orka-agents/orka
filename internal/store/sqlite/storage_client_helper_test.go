@@ -37,7 +37,11 @@ func activateSnapshotKey(t *testing.T, s *Store, key []byte) (*storageclient.Cli
 	if err := client.ActivateSnapshotKey(context.Background(), key); err != nil {
 		return nil, err
 	}
-	if err := s.CompleteDatasetBootstrap(); err != nil {
+	info, err := s.DatasetInfo()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.CompleteDatasetBootstrap(context.Background(), info.ID); err != nil {
 		return nil, err
 	}
 	s.SetNativeSessionFinalizationSealer(client)

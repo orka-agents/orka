@@ -287,6 +287,10 @@ func copyInfo(info storagev1.ProviderInfo) storagev1.ProviderInfo {
 		usage := *info.Usage
 		info.Usage = &usage
 	}
+	if info.Binding != nil {
+		binding := *info.Binding
+		info.Binding = &binding
+	}
 	return info
 }
 
