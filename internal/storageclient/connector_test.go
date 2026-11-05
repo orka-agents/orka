@@ -397,6 +397,25 @@ func (s *connectorTamperingStore) ConsumeSealedConnectorConsent(ctx context.Cont
 	return sealed, err
 }
 
+func TestConnectorConsentExpiringDuringConsumptionIsRefused(t *testing.T) {
+	backend := &connectorTamperingStore{Store: openSQLite(t)}
+	client := activatedClient(t, backend, sealedTestKey)
+	consent := connectorConsent("delayed-consent", "connection-uid")
+	consent.ExpiresAt = time.Now().Add(time.Second)
+	require.NoError(t, client.CreateConnectorConsent(t.Context(), consent))
+	consumed := false
+	backend.consent = func(*storagev1.SealedConnectorConsent) {
+		consumed = true
+		// The provider accepted a live consent, but its response arrives only
+		// after expiry. No verifier should escape the client at that point.
+		time.Sleep(time.Until(consent.ExpiresAt.Add(time.Millisecond)))
+	}
+	got, err := client.ConsumeConnectorConsent(t.Context(), consent.Nonce)
+	require.True(t, consumed, "the provider must have consumed the consent before expiry")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.Empty(t, got.CodeVerifier)
+}
+
 // TestClientRejectsModifiedConnectorRecords covers records a provider altered
 // or returned for another Connection: the client refuses them without
 // panicking and without echoing token material.
