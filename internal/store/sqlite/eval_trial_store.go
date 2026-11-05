@@ -67,7 +67,9 @@ func validateEvalTrialRecord(record *store.EvalTrialRecord) error {
 	return nil
 }
 
-// CreateEvalTrial records one completed trial.
+// CreateEvalTrial records one completed trial. It is a contract write: with a
+// write envelope it runs under the operation receipt and controller epoch
+// fence like every other state write.
 func (s *Store) CreateEvalTrial(ctx context.Context, record *store.EvalTrialRecord) error {
 	if err := validateEvalTrialRecord(record); err != nil {
 		return err
@@ -79,17 +81,30 @@ func (s *Store) CreateEvalTrial(ctx context.Context, record *store.EvalTrialReco
 	if len(encoded) > store.MaxEvalTrialRecordBytes {
 		return store.ValidationErrorf("eval trial record exceeds %d bytes", store.MaxEvalTrialRecordBytes)
 	}
-	_, err = s.db.ExecContext(ctx,
+	_, err = writeOperation(ctx, s, "CreateEvalTrial", nil, func(ctx context.Context) (noResult, error) {
+		return noResult{}, s.createEvalTrialWrite(ctx, record, encoded)
+	})
+	return err
+}
+
+func (s *Store) createEvalTrialWrite(ctx context.Context, record *store.EvalTrialRecord, encoded []byte) error {
+	executor := s.taskDataExecutor(ctx)
+	result, err := executor.ExecContext(ctx,
 		`INSERT INTO eval_trials (namespace, eval_run, eval_run_uid, case_id, trial, outcome, record_json, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(namespace, eval_run, eval_run_uid, case_id, trial) DO NOTHING`,
 		record.Namespace, record.EvalRun, record.EvalRunUID, record.CaseID, record.Trial, record.Outcome,
 		string(encoded), record.CompletedAt.UTC(),
 	)
-	if err == nil || !isSQLiteConstraintError(err) {
+	if err != nil {
 		return err
 	}
+	if inserted, err := result.RowsAffected(); err != nil || inserted == 1 {
+		return err
+	}
+	// The trial is already recorded: an identical repeat succeeds.
 	var existing string
-	err = s.db.QueryRowContext(ctx,
+	err = executor.QueryRowContext(ctx,
 		`SELECT record_json FROM eval_trials
 		 WHERE namespace = ? AND eval_run = ? AND eval_run_uid = ? AND case_id = ? AND trial = ?`,
 		record.Namespace, record.EvalRun, record.EvalRunUID, record.CaseID, record.Trial,
@@ -143,6 +158,9 @@ func (s *Store) ListEvalTrials(ctx context.Context, namespace, evalRun, evalRunU
 
 // DeleteEvalTrials deletes the records of every incarnation of an EvalRun.
 func (s *Store) DeleteEvalTrials(ctx context.Context, namespace, evalRun string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM eval_trials WHERE namespace = ? AND eval_run = ?`, namespace, evalRun)
-	return err
+	return writeOperationErr(ctx, s, "DeleteEvalTrials", func(ctx context.Context) error {
+		_, err := s.taskDataExecutor(ctx).ExecContext(ctx,
+			`DELETE FROM eval_trials WHERE namespace = ? AND eval_run = ?`, namespace, evalRun)
+		return err
+	})
 }

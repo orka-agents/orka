@@ -140,6 +140,11 @@ func TestRuntimeSessionLifecycleAndSafeDeletion(t *testing.T) {
 		{RuntimeSessionStateFinalizing, RuntimeSessionStateDeleting},
 		{RuntimeSessionStateIdle, RuntimeSessionStateDeleting},
 		{RuntimeSessionStateDeleting, RuntimeSessionStateDeleted},
+		// Transitions the ACP supervisor makes in workers/acp/supervisor.
+		{RuntimeSessionStatePromptRunning, RuntimeSessionStatePoisoned},
+		{RuntimeSessionStateCancelling, RuntimeSessionStateValidating},
+		{RuntimeSessionStateValidating, RuntimeSessionStatePublicationPrepared},
+		{RuntimeSessionStateDeleting, RuntimeSessionStatePoisoned},
 	}
 	for _, transition := range valid {
 		if err := ValidateRuntimeSessionTransition(transition[0], transition[1]); err != nil {

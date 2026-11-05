@@ -9,6 +9,7 @@ COPY cmd/orka-gateway-e2e-worker/ cmd/orka-gateway-e2e-worker/
 # The fixture invokes the real tool/client, including their worker dependencies.
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 COPY workers/common/ workers/common/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/orka-gateway-e2e-worker
