@@ -5,6 +5,14 @@
 // classifies as a write, so the write runs through the storage client's
 // operation runner. Reads and administrative methods are promoted from the
 // embedded provider unchanged.
+//
+// A write that takes a pointer to a record may write into it, such as an
+// assigned ID or a filled time. Every attempt of the operation must send the
+// request its digest covers, so each attempt gets a fresh copy of the
+// caller's record, and the caller's record receives the successful attempt's
+// copy only once the write has succeeded. The copy is shallow: a provider
+// writes back a record's own fields, never into the slices, maps or records
+// those fields refer to.
 package envelopegen
 
 import (
@@ -90,6 +98,9 @@ func Generate(pkg string) ([]byte, error) {
 	}
 	out.WriteString(")\n")
 	out.Write(body.Bytes())
+	if g.writesBack {
+		out.WriteString(writeBackHelpers)
+	}
 	formatted, err := format.Source(out.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("format generated decorators: %w", err)
@@ -97,13 +108,37 @@ func Generate(pkg string) ([]byte, error) {
 	return formatted, nil
 }
 
+// writeBackHelpers are the functions the decorators of writes that take a
+// pointer to a record use.
+const writeBackHelpers = `
+// attemptCopy returns a fresh copy of the record a write-back argument points
+// to, or nil for a nil argument, so every attempt of an operation sends the
+// caller's record as it was when the operation's digest was computed.
+func attemptCopy[T any](record *T) *T {
+	if record == nil {
+		return nil
+	}
+	fresh := *record
+	return &fresh
+}
+
+// writeBack gives the caller's record the copy the successful attempt wrote
+// into.
+func writeBack[T any](record, written *T) {
+	if record != nil && written != nil {
+		*record = *written
+	}
+}
+`
+
 func isStandard(importPath string) bool {
 	first, _, _ := strings.Cut(importPath, "/")
 	return !strings.Contains(first, ".")
 }
 
 type generator struct {
-	imports map[string]string // import path to its name in the file
+	imports    map[string]string // import path to its name in the file
+	writesBack bool              // some decorator method uses the write-back helpers
 }
 
 func (g *generator) qualifier(importPath string) (string, error) {
@@ -193,6 +228,7 @@ func (g *generator) method(out *bytes.Buffer, d decorator, method reflect.Method
 		return fmt.Errorf("the last result is not an error")
 	}
 	var params, names, callArgs []string
+	var writeBacks []int
 	fence := ""
 	for i := 1; i < fn.NumIn(); i++ {
 		in := fn.In(i)
@@ -209,6 +245,10 @@ func (g *generator) method(out *bytes.Buffer, d decorator, method reflect.Method
 			}
 			typeName = "..." + elem
 			callArg = name + "..."
+		} else if in.Kind() == reflect.Pointer && in.Elem().Kind() == reflect.Struct {
+			// A record the write may fill: each attempt gets its own copy.
+			callArg = fmt.Sprintf("c%d", i)
+			writeBacks = append(writeBacks, i)
 		}
 		params = append(params, name+" "+typeName)
 		names = append(names, name)
@@ -241,19 +281,65 @@ func (g *generator) method(out *bytes.Buffer, d decorator, method reflect.Method
 		strings.Join(append([]string{"ctx context.Context"}, params...), ", "))
 
 	out.WriteString("\n")
-	if len(results) == 0 {
-		fmt.Fprintf(out, "%s error {\n", signature)
-		fmt.Fprintf(out, "\treturn p.ops.run(ctx, %s, func(ctx context.Context) error {\n", writeCall)
-		fmt.Fprintf(out, "\t\treturn %s\n\t})\n}\n", call)
+	if len(writeBacks) == 0 {
+		if len(results) == 0 {
+			fmt.Fprintf(out, "%s error {\n", signature)
+			fmt.Fprintf(out, "\treturn p.ops.run(ctx, %s, func(ctx context.Context) error {\n", writeCall)
+			fmt.Fprintf(out, "\t\treturn %s\n\t})\n}\n", call)
+			return nil
+		}
+		fmt.Fprintf(out, "%s (%s, error) {\n", signature, strings.Join(results, ", "))
+		for i, result := range results {
+			fmt.Fprintf(out, "\tvar r%d %s\n", i, result)
+		}
+		fmt.Fprintf(out, "\terr := p.ops.run(ctx, %s, func(ctx context.Context) error {\n", writeCall)
+		fmt.Fprintf(out, "\t\tvar err error\n\t\t%s, err = %s\n\t\treturn err\n\t})\n", strings.Join(resultNames, ", "), call)
+		fmt.Fprintf(out, "\treturn %s, err\n}\n", strings.Join(resultNames, ", "))
 		return nil
 	}
-	fmt.Fprintf(out, "%s (%s, error) {\n", signature, strings.Join(results, ", "))
-	for i, result := range results {
-		fmt.Fprintf(out, "\tvar r%d %s\n", i, result)
+
+	// The digest covers the caller's records (a<i>), which no attempt writes
+	// into. Each attempt passes its own copy (c<i>); the copy of the attempt
+	// that succeeded (w<i>) is written back after the operation succeeds.
+	g.writesBack = true
+	if len(results) == 0 {
+		fmt.Fprintf(out, "%s error {\n", signature)
+	} else {
+		fmt.Fprintf(out, "%s (%s, error) {\n", signature, strings.Join(results, ", "))
+		for i, result := range results {
+			fmt.Fprintf(out, "\tvar r%d %s\n", i, result)
+		}
+	}
+	for _, i := range writeBacks {
+		typeName, err := g.typeString(fn.In(i))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "\tvar w%d %s\n", i, typeName)
 	}
 	fmt.Fprintf(out, "\terr := p.ops.run(ctx, %s, func(ctx context.Context) error {\n", writeCall)
-	fmt.Fprintf(out, "\t\tvar err error\n\t\t%s, err = %s\n\t\treturn err\n\t})\n", strings.Join(resultNames, ", "), call)
-	fmt.Fprintf(out, "\treturn %s, err\n}\n", strings.Join(resultNames, ", "))
+	for _, i := range writeBacks {
+		fmt.Fprintf(out, "\t\tc%d := attemptCopy(a%d)\n", i, i)
+	}
+	if len(results) == 0 {
+		fmt.Fprintf(out, "\t\tif err := %s; err != nil {\n\t\t\treturn err\n\t\t}\n", call)
+	} else {
+		fmt.Fprintf(out, "\t\tvar err error\n\t\t%s, err = %s\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n",
+			strings.Join(resultNames, ", "), call)
+	}
+	for _, i := range writeBacks {
+		fmt.Fprintf(out, "\t\tw%d = c%d\n", i, i)
+	}
+	out.WriteString("\t\treturn nil\n\t})\n\tif err == nil {\n")
+	for _, i := range writeBacks {
+		fmt.Fprintf(out, "\t\twriteBack(a%d, w%d)\n", i, i)
+	}
+	out.WriteString("\t}\n")
+	if len(results) == 0 {
+		out.WriteString("\treturn err\n}\n")
+	} else {
+		fmt.Fprintf(out, "\treturn %s, err\n}\n", strings.Join(resultNames, ", "))
+	}
 	return nil
 }
 
