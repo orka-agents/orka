@@ -116,6 +116,9 @@ func (c *Client) withTaskDataAccess(
 		return store.ErrOutcomeUnknown
 	}
 	if err != nil {
+		if errors.Is(err, store.ErrOutcomeUnknown) {
+			return err
+		}
 		// Callers may turn a refused fenced call into their own error. When
 		// the fence has moved, report that instead, so the caller authorizes
 		// again rather than surfacing the refusal as a failure.
