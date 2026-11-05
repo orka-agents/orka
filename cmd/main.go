@@ -1826,6 +1826,7 @@ func main() {
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
+		MaxDelegationAge:           agentIdentityMaxDelegationAge,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "OutboundAccessPolicy")
 		os.Exit(1)
