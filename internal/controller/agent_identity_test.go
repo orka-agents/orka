@@ -405,7 +405,32 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		return func(task *corev1alpha1.Task) { task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name} }
 	}
 	deleting := metav1.Now()
+	childOf := func(parent string) func(*corev1alpha1.Task) {
+		return func(task *corev1alpha1.Task) {
+			task.Labels = map[string]string{labels.LabelParentTask: parent}
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent,
+				UID: types.UID(parent + "-uid"), Controller: new(true),
+			}}
+		}
+	}
 	objects := []client.Object{
+		task("parent-running", nil),
+		task("parent-succeeded", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
+		task("parent-cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
+		task("parent-cancel-requested", func(t *corev1alpha1.Task) {
+			t.Annotations = map[string]string{labels.AnnotationCancelRequested: "stop"}
+		}),
+		task("child-of-running", childOf("parent-running")),
+		task("child-of-succeeded", childOf("parent-succeeded")),
+		task("child-of-cancelled", childOf("parent-cancelled")),
+		task("child-of-cancel-requested", childOf("parent-cancel-requested")),
+		task("child-of-gone", childOf("parent-gone")),
+		task("grandchild-of-cancelled", childOf("child-of-cancelled")),
+		task("child-of-replaced", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			t.OwnerReferences[0].UID = "an-older-parent-uid"
+		}),
 		task("running", nil),
 		task("in-open-session", withSession("open")),
 		task("cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
@@ -427,14 +452,21 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
 	}
 	for name, want := range map[string]string{
-		"running":            "",
-		"in-open-session":    "",
-		"cancelled":          "Cancelled",
-		"in-deleted-session": "deleted",
-		"finished":           "Succeeded",
-		"cancel-requested":   "cancellation",
-		"deleting":           "being deleted",
-		"gone":               "gone",
+		"running":                   "",
+		"in-open-session":           "",
+		"cancelled":                 "Cancelled",
+		"in-deleted-session":        "deleted",
+		"finished":                  "Succeeded",
+		"cancel-requested":          "cancellation",
+		"deleting":                  "being deleted",
+		"gone":                      "gone",
+		"child-of-running":          "",
+		"child-of-succeeded":        "",
+		"child-of-cancelled":        "was cancelled",
+		"child-of-cancel-requested": "cancellation of a Task it was delegated from",
+		"child-of-gone":             "is gone",
+		"grandchild-of-cancelled":   "was cancelled",
+		"child-of-replaced":         "was replaced",
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := check(context.Background(), binding(name))

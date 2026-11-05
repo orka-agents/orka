@@ -578,6 +578,9 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	}
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
+		if reason := r.unfrozenConnectionReason(ctx, policy.Namespace, providerName, requester); reason != "" {
+			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(reason)
+		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
 	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
@@ -620,6 +623,37 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	return credential, declared, nil
 }
 
+// unfrozenConnectionReason explains why a Task started without the
+// requester's Connection to a provider: their link was missing, expired, or
+// not Ready when the Task was bound. It reads only, and returns "" when it
+// cannot tell, so the caller keeps its generic refusal.
+func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) string {
+	if r.Reader == nil {
+		return ""
+	}
+	connections := &corev1alpha1.ConnectionList{}
+	if err := r.Reader.List(ctx, connections, client.InNamespace(namespace)); err != nil {
+		return ""
+	}
+	relink := fmt.Sprintf("link it with `orka connect %s` and run the Task again", provider)
+	for i := range connections.Items {
+		connection := &connections.Items[i]
+		if connection.Spec.ProviderRef.Name != provider || connection.Spec.Subject.Issuer != requester.Issuer ||
+			connection.Spec.Subject.Subject != requester.Subject {
+			continue
+		}
+		switch state := connection.Status.State; state {
+		case corev1alpha1.ConnectionStateExpired:
+			return fmt.Sprintf("the requester's link to %q expired before this Task started; %s", provider, relink)
+		case corev1alpha1.ConnectionStateReady:
+			return fmt.Sprintf("the requester's link to %q became Ready after this Task started; run the Task again", provider)
+		default:
+			return fmt.Sprintf("the requester's link to %q was not Ready (%s) when this Task started; %s", provider, state, relink)
+		}
+	}
+	return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
+}
+
 // credentialOutput returns the header and prefix an output selects, with the
 // Authorization: Bearer default.
 func credentialOutput(output *corev1alpha1.OutboundCredentialOutput) (string, string) {
@@ -657,7 +691,10 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
 	}
 	// The bound Agent must still exist and hold the identity: deleting the
-	// Agent, or a claim that moved to another Agent, stops its Tasks' calls.
+	// Agent, a claim that moved to another Agent, or the owner removing the
+	// identity stops its Tasks' calls. A claim being released is still held,
+	// so no other Agent can take the identity while bound Tasks run, but it
+	// is no longer used.
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
@@ -665,6 +702,9 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
+	}
+	if live.Status.IdentityClaim.Releasing {
+		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
