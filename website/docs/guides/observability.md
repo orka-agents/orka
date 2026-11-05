@@ -244,11 +244,13 @@ Tasks, so they cannot be filtered per Task.
 ```
 
 Each row lists at most five Task names, most recently observed first. A name is
-shown only when the caller could list that Task now; deleted Tasks drop out but
-keep their counts. Signals from a Gateway-owned Task count only for callers who
+shown only when the caller could list that Task now and it is still the Task
+that produced the signal; deleted Tasks, and Tasks recreated under the same
+name, drop out but keep their counts. Signals from a Gateway-owned Task count only for callers who
 can read that Gateway, the same check that guards the Task. Ownership recorded
 only in a Task's retained GatewayEvent counts too; a signal whose ownership
-cannot be verified stays out of the summary. Counts belong to
+cannot be verified, or names a Gateway without its UIDs, stays out of the
+summary and takes no Gateway slot. Counts belong to
 one namespace incarnation: if a namespace is deleted and recreated with the same
 name, the new one starts empty. Prometheus counts every signal.
 

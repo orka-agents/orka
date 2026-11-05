@@ -146,6 +146,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			Namespace: event.Namespace,
 			Task:      event.StreamID,
 		}
+		if writerTask != nil && writerTask.Name == event.StreamID {
+			signal.TaskUID = string(writerTask.UID)
+		}
 		// Without a verified namespace UID or Gateway owner the signal still
 		// counts in Prometheus but stays out of the summary.
 		owner, ownerErr := capabilityGapGatewayOwner(c.Context(), h.gatewayEventStore, writerTask)

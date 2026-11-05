@@ -117,7 +117,9 @@ var runtimes = []string{
 
 // GatewayOwner identifies the Gateway that owns a Task. The zero value means
 // the Task is not Gateway-owned. It is never a metric label; Summary uses it
-// to leave out signals the caller may not read.
+// to leave out signals the caller may not read. Only a complete owner, with
+// all four fields set, reaches the summary: Task metadata alone can claim a
+// Gateway name, and an unverified claim must not take an owner slot.
 type GatewayOwner struct {
 	Namespace    string
 	NamespaceUID string
@@ -139,8 +141,19 @@ type Signal struct {
 	// summary, so a recreated namespace never inherits earlier counts.
 	NamespaceUID string
 	Task         string
-	// Gateway is the Task's owning Gateway, if any.
+	// TaskUID is the UID of Task. A reference without one is not kept, so a
+	// later Task reusing the name is never listed for this signal.
+	TaskUID string
+	// Gateway is the Task's owning Gateway, if any. A signal whose Task
+	// claims a Gateway without a complete owner counts in Prometheus but not
+	// in the summary.
 	Gateway GatewayOwner
+}
+
+// TaskRef identifies one Task incarnation referenced by a summary row.
+type TaskRef struct {
+	Name string
+	UID  string
 }
 
 // SignalSummary is one aggregated row of a Summary.
@@ -151,6 +164,10 @@ type SignalSummary struct {
 	Tool     string   `json:"tool"`
 	Count    int64    `json:"count"`
 	Tasks    []string `json:"tasks,omitempty"`
+	// TaskRefs are the references behind Tasks, in the same order, so a
+	// caller can check that each name still belongs to the same Task. The
+	// same name can appear twice when a Task was recreated in the window.
+	TaskRefs []TaskRef `json:"-"`
 }
 
 // Summary aggregates one namespace's signals over the window.
@@ -171,11 +188,11 @@ type signalKey struct {
 	gateway                         GatewayOwner
 }
 
-// taskRef is a Task name and the Recorder sequence number of its latest
-// observation, which orders references across entries.
+// taskRef is a Task incarnation and the Recorder sequence number of its
+// latest observation, which orders references across entries.
 type taskRef struct {
-	name string
-	seq  uint64
+	TaskRef
+	seq uint64
 }
 
 type signalEntry struct {
@@ -285,12 +302,15 @@ func (r *Recorder) Record(s Signal) {
 	if len(validation.IsDNS1123Label(s.Namespace)) != 0 || strings.TrimSpace(s.NamespaceUID) == "" {
 		return
 	}
+	if s.Gateway != (GatewayOwner{}) && !s.Gateway.complete() {
+		return
+	}
 	// Callers may pass strings borrowed from a request buffer; the summary
 	// keeps its own copies.
 	namespace := namespaceKey{name: strings.Clone(s.Namespace), uid: strings.Clone(s.NamespaceUID)}
-	task := strings.Clone(s.Task)
-	if task != "" && len(validation.IsDNS1123Subdomain(task)) != 0 {
-		task = ""
+	task := TaskRef{Name: strings.Clone(s.Task), UID: strings.Clone(strings.TrimSpace(s.TaskUID))}
+	if task.Name == "" || task.UID == "" || len(validation.IsDNS1123Subdomain(task.Name)) != 0 {
+		task = TaskRef{}
 	}
 	key.gateway = GatewayOwner{
 		Namespace: strings.Clone(s.Gateway.Namespace), NamespaceUID: strings.Clone(s.Gateway.NamespaceUID),
@@ -328,9 +348,14 @@ func (r *Recorder) Record(s Signal) {
 		ns.signals[key] = entry
 	}
 	entry.count++
-	if task != "" {
-		entry.tasks = appendRecentTask(entry.tasks, taskRef{name: task, seq: r.seq})
+	if task != (TaskRef{}) {
+		entry.tasks = appendRecentTask(entry.tasks, taskRef{TaskRef: task, seq: r.seq})
 	}
+}
+
+func (o GatewayOwner) complete() bool {
+	return strings.TrimSpace(o.Namespace) != "" && strings.TrimSpace(o.NamespaceUID) != "" &&
+		strings.TrimSpace(o.Name) != "" && strings.TrimSpace(o.UID) != ""
 }
 
 // evictOldestGateway drops the least recently observed Gateway owner and its
@@ -430,9 +455,14 @@ func (r *Recorder) Summary(namespace, namespaceUID string, visible func(GatewayO
 
 	summary.Signals = make([]SignalSummary, 0, len(totals))
 	for key, total := range totals {
+		refs := newestTasks(total.tasks)
+		var names []string
+		for _, ref := range refs {
+			names = append(names, ref.Name)
+		}
 		summary.Signals = append(summary.Signals, SignalSummary{
 			Category: key.category, Reason: key.reason, Runtime: key.runtime, Tool: key.tool,
-			Count: total.count, Tasks: newestTasks(total.tasks),
+			Count: total.count, Tasks: names, TaskRefs: refs,
 		})
 	}
 	slices.SortFunc(summary.Signals, func(a, b SignalSummary) int {
@@ -471,7 +501,7 @@ func dayNumber(t time.Time) int64 {
 // appendRecentTask moves task to the end and keeps at most
 // MaxTaskRefsPerSignal references. task is the newest observation.
 func appendRecentTask(tasks []taskRef, task taskRef) []taskRef {
-	tasks = slices.DeleteFunc(tasks, func(existing taskRef) bool { return existing.name == task.name })
+	tasks = slices.DeleteFunc(tasks, func(existing taskRef) bool { return existing.TaskRef == task.TaskRef })
 	tasks = append(tasks, task)
 	if len(tasks) > MaxTaskRefsPerSignal {
 		tasks = slices.Delete(tasks, 0, len(tasks)-MaxTaskRefsPerSignal)
@@ -480,18 +510,18 @@ func appendRecentTask(tasks []taskRef, task taskRef) []taskRef {
 }
 
 // newestTasks merges references from several entries by observation order:
-// each name keeps its latest observation, the newest come first, and names
-// break ties. At most MaxTaskRefsPerSignal names are returned.
-func newestTasks(refs []taskRef) []string {
-	latest := make(map[string]uint64, len(refs))
+// each Task incarnation keeps its latest observation, the newest come first,
+// and names then UIDs break ties. At most MaxTaskRefsPerSignal are returned.
+func newestTasks(refs []taskRef) []TaskRef {
+	latest := make(map[TaskRef]uint64, len(refs))
 	for _, ref := range refs {
-		if seq, ok := latest[ref.name]; !ok || ref.seq > seq {
-			latest[ref.name] = ref.seq
+		if seq, ok := latest[ref.TaskRef]; !ok || ref.seq > seq {
+			latest[ref.TaskRef] = ref.seq
 		}
 	}
 	merged := make([]taskRef, 0, len(latest))
-	for name, seq := range latest {
-		merged = append(merged, taskRef{name: name, seq: seq})
+	for task, seq := range latest {
+		merged = append(merged, taskRef{TaskRef: task, seq: seq})
 	}
 	slices.SortFunc(merged, func(a, b taskRef) int {
 		if a.seq != b.seq {
@@ -500,14 +530,17 @@ func newestTasks(refs []taskRef) []string {
 			}
 			return 1
 		}
-		return strings.Compare(a.name, b.name)
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
+			return c
+		}
+		return strings.Compare(a.UID, b.UID)
 	})
-	names := make([]string, 0, min(len(merged), MaxTaskRefsPerSignal))
-	for _, ref := range merged[:min(len(merged), MaxTaskRefsPerSignal)] {
-		names = append(names, ref.name)
-	}
-	if len(names) == 0 {
+	if len(merged) == 0 {
 		return nil
 	}
-	return names
+	out := make([]TaskRef, 0, min(len(merged), MaxTaskRefsPerSignal))
+	for _, ref := range merged[:min(len(merged), MaxTaskRefsPerSignal)] {
+		out = append(out, ref.TaskRef)
+	}
+	return out
 }

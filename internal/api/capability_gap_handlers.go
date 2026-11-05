@@ -65,14 +65,14 @@ func (h *Handlers) GetCapabilityGaps(c fiber.Ctx) error {
 	}
 	summary := recorder.Summary(namespace, namespaceUID, func(owner capabilitygap.GatewayOwner) bool { return visibleGateways[owner] })
 	for i := range summary.Signals {
-		visible := make([]string, 0, len(summary.Signals[i].Tasks))
-		for _, name := range summary.Signals[i].Tasks {
-			ok, err := h.capabilityGapTaskVisible(c, namespace, name, gatewayAuthorizations)
+		visible := make([]string, 0, len(summary.Signals[i].TaskRefs))
+		for _, ref := range summary.Signals[i].TaskRefs {
+			ok, err := h.capabilityGapTaskVisible(c, namespace, ref, gatewayAuthorizations)
 			if err != nil {
 				return err
 			}
 			if ok {
-				visible = append(visible, name)
+				visible = append(visible, ref.Name)
 			}
 		}
 		summary.Signals[i].Tasks = visible
@@ -82,16 +82,20 @@ func (h *Handlers) GetCapabilityGaps(c fiber.Ctx) error {
 
 // capabilityGapTaskVisible applies the per-Task checks ListTasks applies, so
 // a Task reference appears only to callers who could list that Task. Deleted
-// Tasks are dropped; their counts remain.
+// Tasks are dropped, and so is a reference whose name now belongs to a
+// different Task; their counts remain.
 func (h *Handlers) capabilityGapTaskVisible(
-	c fiber.Ctx, namespace, name string, gatewayAuthorizations map[gatewayTaskAuthorizationKey]bool,
+	c fiber.Ctx, namespace string, ref capabilitygap.TaskRef, gatewayAuthorizations map[gatewayTaskAuthorizationKey]bool,
 ) (bool, error) {
 	task := &corev1alpha1.Task{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
+	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: ref.Name}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, fiber.NewError(fiber.StatusInternalServerError, "failed to load capability-gap Task reference")
+	}
+	if ref.UID == "" || string(task.UID) != ref.UID {
+		return false, nil
 	}
 	if h.contextTokenAuthorization.Enabled() {
 		allowed, err := h.contextTokenAllowsLoadedTask(c, capabilityGapTaskAction, task)

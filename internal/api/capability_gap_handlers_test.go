@@ -22,6 +22,7 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -201,14 +202,18 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, status, body)
 
 	recorder := installAPICapabilityGapRecorder(t, "web_fetch")
-	require.NoError(t, f.kube.Create(t.Context(), &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "visible-task", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: hostilePromptText},
-	}))
-	for _, task := range []string{"visible-task", "deleted-task"} {
+	for _, name := range []string{"visible-task", "recreated-task"} {
+		require.NoError(t, f.kube.Create(t.Context(), &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: hostilePromptText},
+		}))
+	}
+	// recreated-task now names a different Task than the one that produced
+	// its signal, so the new Task is not listed for it.
+	for task, uid := range map[string]string{"visible-task": "visible-task-uid", "deleted-task": "deleted-task-uid", "recreated-task": "earlier-task-uid"} {
 		recorder.Record(capabilitygap.Signal{
 			Category: capabilitygap.CategoryMissingTool, Reason: capabilitygap.ReasonToolDeniedByPolicy,
-			Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", NamespaceUID: "namespace-uid", Task: task,
+			Runtime: capabilitygap.RuntimeCodex, Tool: "web_fetch", Namespace: "default", NamespaceUID: "namespace-uid", Task: task, TaskUID: uid,
 		})
 	}
 	recorder.Record(capabilitygap.Signal{
@@ -228,8 +233,8 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, "default", summary.Namespace)
 	require.Len(t, summary.Signals, 1, body)
 	signal := summary.Signals[0]
-	require.Equal(t, int64(2), signal.Count, "deleted Tasks keep their counts")
-	require.Equal(t, []string{"visible-task"}, signal.Tasks, "only Tasks the caller can list are referenced")
+	require.Equal(t, int64(3), signal.Count, "deleted and recreated Tasks keep their counts")
+	require.Equal(t, []string{"visible-task"}, signal.Tasks, "only Tasks the caller can list, with their recorded UID, are referenced")
 	require.NotContains(t, body, "other-task")
 	require.NotContains(t, body, string(capabilitygap.ReasonMaxTurns), "a recreated namespace never sees earlier counts")
 	require.NotContains(t, body, hostilePromptText)
@@ -246,7 +251,7 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, body)
 	require.NoError(t, json.Unmarshal([]byte(body), &summary))
 	require.Len(t, summary.Signals, 1, body)
-	require.Equal(t, int64(2), summary.Signals[0].Count, "a hidden Gateway's signals are not counted")
+	require.Equal(t, int64(3), summary.Signals[0].Count, "a hidden Gateway's signals are not counted")
 
 	f.allowRoute(t, "GET /api/v1/capability-gaps", authorizationv1.ResourceAttributes{Namespace: "default", Group: gatewayv1alpha1.GroupVersion.Group,
 		Resource: "gateways", Verb: "get", Name: "private"})
@@ -254,7 +259,7 @@ func TestGetCapabilityGaps(t *testing.T) {
 	require.Equal(t, http.StatusOK, status, body)
 	require.NoError(t, json.Unmarshal([]byte(body), &summary))
 	require.Len(t, summary.Signals, 1, body)
-	require.Equal(t, int64(3), summary.Signals[0].Count, "a readable Gateway's signals are counted")
+	require.Equal(t, int64(4), summary.Signals[0].Count, "a readable Gateway's signals are counted")
 }
 
 func TestGetCapabilityGapsRejectsObjectConstrainedContextTokens(t *testing.T) {

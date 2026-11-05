@@ -328,7 +328,7 @@ func recordTaskCapabilityGap(
 	if task == nil || capabilitygap.Default() == nil {
 		return
 	}
-	signal.Namespace, signal.Task = task.Namespace, task.Name
+	signal.Namespace, signal.Task, signal.TaskUID = task.Namespace, task.Name, string(task.UID)
 	owner, ok, ownerErr := gatewayruntime.ResolveTaskOwner(ctx, events, task)
 	if ownerErr == nil && ok {
 		signal.Gateway = capabilitygap.GatewayOwner{
