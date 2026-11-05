@@ -111,6 +111,8 @@ type AgentIdentityBinding struct {
 	AgentName       string
 	AgentUID        string
 	AgentGeneration int64
+	TaskNamespace   string
+	TaskName        string
 	TaskUID         string
 	// DelegationStart is the root requester's last authenticated action in
 	// the Task chain; Delegated mode refuses calls past the delegation age.
@@ -303,6 +305,11 @@ type KubernetesResolver struct {
 	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
 	// records. Without it, records name no requester.
 	AuditPseudonymKey []byte
+	// DelegationLive checks, before every Delegated call, that the Task is
+	// still running and its Session still open, so cancelling the Task or
+	// closing the Session stops the Agent acting for the requester at once.
+	// Nil fails every Delegated call closed.
+	DelegationLive func(context.Context, AgentIdentityBinding) error
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -746,6 +753,13 @@ func (r *KubernetesResolver) resolveDelegation(
 	if binding.DelegationStart.IsZero() || now.After(binding.DelegationStart.Add(age)) {
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
 			"the delegation has expired; the requester must act again for the Agent to act for them")
+	}
+	if r.DelegationLive == nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
+			"delegated agent identity access requires the controller's Task and Session check")
+	}
+	if err := r.DelegationLive(ctx, *binding); err != nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("the delegation is no longer live: %w", err)
 	}
 	return r.resolveRequesterConnection(ctx, policy, req)
 }

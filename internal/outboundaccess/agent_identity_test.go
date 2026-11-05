@@ -211,7 +211,10 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 	resolver := func(spec corev1alpha1.OutboundAccessPolicySpec, connection *fakeConnectionSource, identity *fakeAgentIdentitySource) *KubernetesResolver {
 		reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(readyPolicy("agent", spec), acceptedProvider(), identityHolder("agent-uid", true)).Build()
-		return &KubernetesResolver{Reader: reader, Connections: connection, AgentIdentities: identity, Now: func() time.Time { return now }}
+		return &KubernetesResolver{
+			Reader: reader, Connections: connection, AgentIdentities: identity, Now: func() time.Time { return now },
+			DelegationLive: func(context.Context, AgentIdentityBinding) error { return nil },
+		}
 	}
 	connection := func() *fakeConnectionSource {
 		return &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "user-token", ConnectionUID: "uid-1", Generation: 2, Mode: "readOnly"}}
@@ -238,6 +241,8 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		spec    corev1alpha1.OutboundAccessPolicySpec
 		request func(*ResolveRequest)
 		cap     time.Duration
+		noLive  bool
+		live    error
 		want    string
 	}{
 		"runtime without managed egress":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.AgentIdentity.ManagedEgress = false }, want: "built-in RuntimePools"},
@@ -248,15 +253,25 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 			request: func(r *ResolveRequest) { r.AgentIdentity.DelegationStart = now.Add(-3 * time.Hour) },
 			cap:     2 * time.Hour, want: "expired",
 		},
-		"no verified requester":   {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
-		"no frozen Connection":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "frozen"},
-		"tool the provider lacks": {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
+		"no verified requester":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
+		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "frozen"},
+		"tool the provider lacks":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
+		"no liveness check":        {spec: delegatedPolicySpec(nil), noLive: true, want: "Task and Session check"},
+		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task's Session was cancelled"), want: "no longer live"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := resolver(tc.spec, connection(), &fakeAgentIdentitySource{token: "t"})
+			if tc.noLive {
+				r.DelegationLive = nil
+			} else if tc.live != nil {
+				live := tc.live
+				r.DelegationLive = func(context.Context, AgentIdentityBinding) error { return live }
+			}
 			r.MaxDelegationAge = tc.cap
 			request := delegatedRequest(now.Add(-time.Minute))
-			tc.request(&request)
+			if tc.request != nil {
+				tc.request(&request)
+			}
 			if _, err := r.Resolve(context.Background(), request); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Resolve() error = %v, want %q", err, tc.want)
 			}

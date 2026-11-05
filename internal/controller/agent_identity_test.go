@@ -20,6 +20,9 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 const testAgentIdentityID = "33333333-3333-3333-3333-33333333aaaa"
@@ -367,5 +370,86 @@ func TestClassificationActsForRequester(t *testing.T) {
 	}
 	if !classificationActsForRequester(map[string]connectorToolInfo{"gh": {}, "write_blob": {Delegated: true}}) {
 		t.Fatal("a Delegated Tool makes the binding act for the requester")
+	}
+}
+
+func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
+	db, err := sqlite.NewDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := sqlite.NewStore(db, ":memory:")
+	for _, session := range []*store.SessionRecord{
+		{Namespace: testNS, Name: "open", SessionType: "task"},
+		{Namespace: testNS, Name: "cancelled", SessionType: "task", Cancelled: true},
+	} {
+		if err := sessions.CreateSession(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task := func(name string, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, UID: types.UID(name + "-uid")},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+			Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+		}
+		if mutate != nil {
+			mutate(task)
+		}
+		return task
+	}
+	withSession := func(name string) func(*corev1alpha1.Task) {
+		return func(task *corev1alpha1.Task) { task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name} }
+	}
+	deleting := metav1.Now()
+	objects := []client.Object{
+		task("running", nil),
+		task("in-open-session", withSession("open")),
+		task("in-cancelled-session", withSession("cancelled")),
+		task("in-deleted-session", withSession("deleted")),
+		task("finished", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
+		task("cancel-requested", func(t *corev1alpha1.Task) {
+			t.Annotations = map[string]string{labels.AnnotationCancelRequested: "stop"}
+		}),
+		task("deleting", func(t *corev1alpha1.Task) {
+			t.DeletionTimestamp = &deleting
+			t.Finalizers = []string{"orka.ai/cleanup"}
+		}),
+	}
+	check := DelegationLiveness{
+		Reader:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build(),
+		Sessions: sessions,
+	}.Check
+	binding := func(name string) outboundaccess.AgentIdentityBinding {
+		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
+	}
+	for name, want := range map[string]string{
+		"running":              "",
+		"in-open-session":      "",
+		"in-cancelled-session": "cancelled",
+		"in-deleted-session":   "deleted",
+		"finished":             "Succeeded",
+		"cancel-requested":     "cancellation",
+		"deleting":             "being deleted",
+		"gone":                 "gone",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := check(context.Background(), binding(name))
+			if want == "" {
+				if err != nil {
+					t.Fatalf("Check() = %v, want live", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Check() = %v, want %q", err, want)
+			}
+		})
+	}
+	replaced := binding("running")
+	replaced.TaskUID = "earlier-uid"
+	if err := check(context.Background(), replaced); err == nil || !strings.Contains(err.Error(), "replaced") {
+		t.Fatalf("a recreated Task: %v", err)
 	}
 }

@@ -1393,6 +1393,9 @@ func main() {
 			os.Exit(1)
 		}
 		outboundAccessResolver.AuditPseudonymKey = auditKey
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: sqliteStore,
+		}.Check
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
