@@ -194,7 +194,9 @@ func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	hit := 0
 	for _, location := range locations {
 		for _, finding := range outcome.Result.Findings {
-			if finding.Line > 0 && strings.TrimSpace(finding.File) == location.File &&
+			// Paths match exactly, as production's changed-lines check
+			// compares them: a padded path names a different file.
+			if finding.Line > 0 && finding.File == location.File &&
 				finding.Line >= location.StartLine-g.Tolerance && finding.Line <= location.EndLine+g.Tolerance {
 				hit++
 				break
