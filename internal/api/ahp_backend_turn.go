@@ -319,6 +319,7 @@ func (b *ahpBackend) startTurn(ctx context.Context, principal ahphost.Principal,
 		return
 	}
 	unlock()
+	b.cancelIfClientCancelled(context.WithoutCancel(ctx), principal, turn, task)
 	sealRequesterStamp(ctx, b.h.client, task)
 
 	now := ahpNow(b)
@@ -412,6 +413,19 @@ func ahpSessionIdle(chat, now string) []ahptypes.StateAction {
 }
 
 func (t *ahpTurn) stop() { t.cancel() }
+
+// cancelIfClientCancelled cancels a turn's Task the client cancelled before
+// it existed: that cancel found nothing to stop. It marked the turn first,
+// and this reads the mark only after the Task exists, so either the cancel
+// finds the Task or this sees the mark.
+func (b *ahpBackend) cancelIfClientCancelled(ctx context.Context, principal ahphost.Principal, turn *ahpTurn, task *corev1alpha1.Task) {
+	turn.mu.Lock()
+	cancelled := turn.clientCancelled
+	turn.mu.Unlock()
+	if cancelled {
+		b.keepCancelling(ctx, principal, turn.session.Session, task.Namespace, task.Name)
+	}
+}
 
 func (t *ahpTurn) markCancelledByClient() {
 	t.mu.Lock()
