@@ -129,8 +129,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   it with a Role listing exact `resourceNames`. This is the pattern Kubernetes
   uses for binding Roles, and it settles who may claim which identity without
   a new CRD.
-- One identity maps to one Agent UID. A second Agent that claims an identity
-  already bound elsewhere reports `Ready=False`.
+- One identity maps to one Agent UID. The controller records the holder in
+  the Agent's `status.identityClaim`, granting a claim only when no other
+  Agent holds it; a second Agent naming the identity reports `Ready=False`.
+  An Agent that stops naming an identity keeps the claim until every Task
+  bound to it has finished, so two Agents never act as one identity at once.
 - The Task binding freezes the identity next to the Agent UID and generation
   that `AgentExecutionAgentRef` already pins, together with the issuer
   instance (for Entra, the tenant and blueprint). Editing the Agent or the

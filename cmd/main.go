@@ -1987,6 +1987,7 @@ func main() {
 		Mode:          mode,
 		ToolboxPolicy: acpToolboxPolicy,
 		Identity:      agentIdentityConfig,
+		APIReader:     mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)

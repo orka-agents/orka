@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -63,52 +64,108 @@ func TestAgentReconcileReportsDeclaredIdentity(t *testing.T) {
 	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != reasonIdentityDeclared {
 		t.Fatalf("IdentityVerified condition = %+v, want False/Declared until stage 3 verifies it", condition)
 	}
+	if claim := stored.Status.IdentityClaim; claim == nil || claim.Issuer != "entra" || claim.ID != testAgentIdentityID {
+		t.Fatalf("IdentityClaim = %+v, want the declared identity recorded", claim)
+	}
 }
 
-func TestAgentValidationRefusesUnusableIdentities(t *testing.T) {
+func claimedAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID}
+	return agent
+}
+
+func boundTask(name string, agent *corev1alpha1.Agent, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+	return &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		Status: corev1alpha1.TaskStatus{Phase: phase, AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
+			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
+			Agent: &corev1alpha1.AgentExecutionAgentRef{
+				Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: 1,
+				Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+			},
+		}},
+	}
+}
+
+func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	now := time.Now()
-	older, newer := identityBoundTestAgent("older", now.Add(-time.Hour)), identityBoundTestAgent("newer", now)
-
-	r := setupAgentReconciler(older, newer)
+	holder := claimedAgent(identityBoundTestAgent("holder", now))
+	older := identityBoundTestAgent("older", now.Add(-time.Hour))
+	r := setupAgentReconciler(holder, older)
 	r.Identity = testIdentityConfig()
-	if err := r.validateAgent(context.Background(), older); err != nil && strings.Contains(err.Error(), "identity") {
-		t.Fatalf("the first claimant must keep its identity: %v", err)
+
+	claim, err := r.reconcileIdentityClaim(context.Background(), older)
+	if claim != nil || err == nil || !strings.Contains(err.Error(), "already bound to Agent") {
+		t.Fatalf("an older Agent must not take over a held identity: claim=%v err=%v", claim, err)
 	}
-	if err := r.validateAgent(context.Background(), newer); err == nil || !strings.Contains(err.Error(), "already bound to Agent") {
-		t.Fatalf("second claimant: error = %v, want a duplicate-identity rejection", err)
+	claim, err = r.reconcileIdentityClaim(context.Background(), holder)
+	if err != nil || claim == nil || claim.ID != testAgentIdentityID {
+		t.Fatalf("the holder keeps its claim: claim=%v err=%v", claim, err)
 	}
 
-	unconfigured := setupAgentReconciler(older)
-	if err := unconfigured.validateAgent(context.Background(), older); err == nil || !strings.Contains(err.Error(), "not configured") {
-		t.Fatalf("controller without an issuer: error = %v", err)
+	fresh := identityBoundTestAgent("fresh", now)
+	r = setupAgentReconciler(fresh)
+	claim, err = r.reconcileIdentityClaim(context.Background(), fresh)
+	if err != nil || claim == nil {
+		t.Fatalf("an unheld identity is claimed: claim=%v err=%v", claim, err)
+	}
+}
+
+func TestIdentityClaimOutlivesTheSpecWhileTasksAreBound(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("holder", time.Now()))
+	agent.Spec.Identity = nil
+	running := boundTask("running", agent, corev1alpha1.TaskPhaseRunning)
+	r := setupAgentReconciler(agent, running)
+	claim, err := r.reconcileIdentityClaim(context.Background(), agent)
+	if err != nil || claim == nil {
+		t.Fatalf("a removed identity stays claimed while a bound Task runs: claim=%v err=%v", claim, err)
+	}
+
+	switched := claimedAgent(identityBoundTestAgent("holder", time.Now()))
+	switched.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+	r = setupAgentReconciler(switched, boundTask("running", switched, corev1alpha1.TaskPhaseRunning))
+	r.Identity = testIdentityConfig()
+	if _, err := r.reconcileIdentityClaim(context.Background(), switched); err == nil || !strings.Contains(err.Error(), "until 1 Tasks") {
+		t.Fatalf("switching identities waits for bound Tasks: err=%v", err)
+	}
+
+	finished := boundTask("finished", agent, corev1alpha1.TaskPhaseSucceeded)
+	r = setupAgentReconciler(agent, finished)
+	claim, err = r.reconcileIdentityClaim(context.Background(), agent)
+	if err != nil || claim != nil {
+		t.Fatalf("the claim is released once bound Tasks finish: claim=%v err=%v", claim, err)
 	}
 }
 
 func TestAgentsSharingIdentityRequeuesOtherClaimants(t *testing.T) {
 	now := time.Now()
-	older, newer := identityBoundTestAgent("older", now.Add(-time.Hour)), identityBoundTestAgent("newer", now)
+	holder := claimedAgent(identityBoundTestAgent("holder", now))
+	holder.Spec.Identity = nil
+	waiting := identityBoundTestAgent("waiting", now)
 	plain := baseAgent("plain")
-	r := setupAgentReconciler(older, newer, plain)
-	requests := r.agentsSharingIdentity(context.Background(), older)
-	if len(requests) != 1 || requests[0].Name != "newer" {
-		t.Fatalf("requests = %v, want only the other claimant", requests)
+	r := setupAgentReconciler(holder, waiting, plain)
+	requests := r.agentsSharingIdentity(context.Background(), holder)
+	if len(requests) != 1 || requests[0].Name != "waiting" {
+		t.Fatalf("requests = %v, want the Agent waiting for the held identity", requests)
 	}
 }
 
 func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	now := time.Now()
-	agent := identityBoundTestAgent("reviewer", now)
-	other := identityBoundTestAgent("other", now)
-	other.Spec.Identity = nil
-	parentOwn := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent-own", Namespace: testNS},
+	agent := claimedAgent(identityBoundTestAgent("reviewer", now))
+	unclaimed := identityBoundTestAgent("unclaimed", now)
+	unclaimed.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+	parentOwn := boundTask("parent-own", agent, corev1alpha1.TaskPhaseRunning)
+	recreated := agent.DeepCopy()
+	recreated.UID = "earlier-reviewer-uid"
+	parentRecreated := boundTask("parent-recreated", recreated, corev1alpha1.TaskPhaseRunning)
+	parentUnbound := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-unbound", Namespace: testNS},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 	}
-	parentOther := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "parent-other", Namespace: testNS},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "other"}},
-	}
-	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, other, parentOwn, parentOther).Build()
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).
+		WithObjects(agent, unclaimed, parentOwn, parentRecreated, parentUnbound).Build()
 	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
 
 	task := func(parent string) *corev1alpha1.Task {
@@ -124,14 +181,17 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		t.Fatalf("root Task identity = %+v, %v", ref, err)
 	}
 	if _, err := r.agentExecutionIdentity(context.Background(), task("parent-own"), agent); err != nil {
-		t.Fatalf("child of the same Agent: %v", err)
+		t.Fatalf("child of the same bound Agent: %v", err)
 	}
-	_, err = r.agentExecutionIdentity(context.Background(), task("parent-other"), agent)
-	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own Agent") {
-		t.Fatalf("child of another Agent: error = %v, want a permanent refusal", err)
+	for _, parent := range []string{"parent-recreated", "parent-unbound"} {
+		_, err = r.agentExecutionIdentity(context.Background(), task(parent), agent)
+		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
+			t.Fatalf("child of %s: error = %v, want a permanent refusal", parent, err)
+		}
 	}
-	if ref, err := r.agentExecutionIdentity(context.Background(), task("parent-other"), other); err != nil || ref != nil {
-		t.Fatalf("Agent without an identity: %+v, %v", ref, err)
+	_, err = r.agentExecutionIdentity(context.Background(), task(""), unclaimed)
+	if err == nil || isPermanentACPAgentConfigurationError(err) || !errors.Is(err, errIdentityClaimPending) {
+		t.Fatalf("Agent without its claim yet: error = %v, want a retryable wait", err)
 	}
 
 	r.Identity.AgentUseAuthorization = false

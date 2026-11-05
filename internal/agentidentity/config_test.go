@@ -93,17 +93,3 @@ func TestBindingRefFreezesIssuerInstance(t *testing.T) {
 		t.Fatalf("BindingRef() = %+v, want %+v", *ref, want)
 	}
 }
-
-func TestClaimantIsTheOldestLiveAgent(t *testing.T) {
-	now := time.Now()
-	older, newer := identityAgent("older", now.Add(-time.Hour)), identityAgent("newer", now)
-	newer.Spec.Identity.Entra.AgentIdentityID = strings.ToLower(testIdentity)
-	if owner := Claimant([]corev1alpha1.Agent{newer, older}, "entra", strings.ToLower(testIdentity)); owner == nil || owner.Name != "older" {
-		t.Fatalf("Claimant() = %v, want the older Agent; IDs compare case-insensitively", owner)
-	}
-	deleting := metav1.NewTime(now)
-	older.DeletionTimestamp = &deleting
-	if owner := Claimant([]corev1alpha1.Agent{newer, older}, "entra", strings.ToLower(testIdentity)); owner == nil || owner.Name != "newer" {
-		t.Fatalf("Claimant() = %v, want the live Agent once the older one is deleting", owner)
-	}
-}

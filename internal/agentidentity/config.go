@@ -97,21 +97,3 @@ func (c Config) BindingRef(agent *corev1alpha1.Agent) (*corev1alpha1.AgentExecut
 	instance, _ := c.Instance(issuer)
 	return &corev1alpha1.AgentExecutionIdentityRef{Issuer: issuer, ID: id, Instance: instance}, nil
 }
-
-// Claimant reports which of the Agents claiming one identity owns it: the
-// oldest, with the UID breaking ties. Every other claimant is refused.
-func Claimant(agents []corev1alpha1.Agent, issuer, id string) *corev1alpha1.Agent {
-	var owner *corev1alpha1.Agent
-	for i := range agents {
-		candidate := &agents[i]
-		candidateIssuer, candidateID, ok := candidate.IdentityRef()
-		if !ok || candidateIssuer != issuer || candidateID != id || !candidate.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if owner == nil || candidate.CreationTimestamp.Before(&owner.CreationTimestamp) ||
-			(candidate.CreationTimestamp.Equal(&owner.CreationTimestamp) && candidate.UID < owner.UID) {
-			owner = candidate
-		}
-	}
-	return owner
-}

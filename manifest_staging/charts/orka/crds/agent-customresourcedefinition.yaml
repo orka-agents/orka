@@ -1686,6 +1686,22 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              identityClaim:
+                description: |-
+                  IdentityClaim is the external identity this Agent holds. The controller
+                  grants a claim only when no other Agent holds it, and keeps it after the
+                  spec changes until every Task bound to it has finished.
+                properties:
+                  id:
+                    minLength: 1
+                    type: string
+                  issuer:
+                    minLength: 1
+                    type: string
+                required:
+                - id
+                - issuer
+                type: object
               lastUsed:
                 description: LastUsed is the timestamp of when this agent was last
                   used

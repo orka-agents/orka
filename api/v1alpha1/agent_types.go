@@ -495,6 +495,22 @@ type AgentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// IdentityClaim is the external identity this Agent holds. The controller
+	// grants a claim only when no other Agent holds it, and keeps it after the
+	// spec changes until every Task bound to it has finished.
+	// +optional
+	IdentityClaim *AgentIdentityClaim `json:"identityClaim,omitempty"`
+}
+
+// AgentIdentityClaim records an Agent's exclusive hold on one identity.
+type AgentIdentityClaim struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Issuer string `json:"issuer"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
 }
 
 // +kubebuilder:object:root=true

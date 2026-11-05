@@ -26,6 +26,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerpkg "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -53,6 +54,9 @@ type AgentReconciler struct {
 	ToolboxPolicy ACPToolboxPolicy
 	// Identity configures external Agent identities (ADR 0039).
 	Identity agentidentity.Config
+	// APIReader reads live state for identity claims, so two Agents never
+	// claim one identity from a stale cache.
+	APIReader client.Reader
 }
 
 const (
@@ -115,6 +119,10 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	// Validate the agent configuration
 	validationErr := r.validateAgent(ctx, agent)
+	claim, claimErr := r.reconcileIdentityClaim(ctx, agent)
+	if validationErr == nil && claimErr != nil {
+		validationErr = claimErr
+	}
 
 	// Count active tasks referencing this agent
 	activeTasks, err := r.countActiveTasks(ctx, agent)
@@ -129,7 +137,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Update status
-	return r.updateStatus(ctx, agent, activeTasks, validationErr)
+	return r.updateStatus(ctx, agent, activeTasks, validationErr, claim)
 }
 
 // validateAgent validates the Agent's referenced resources exist and config is coherent.
@@ -500,7 +508,7 @@ func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
-func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error) (ctrl.Result, error) {
+func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim) (ctrl.Result, error) {
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
@@ -527,6 +535,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
 	setAgentIdentityCondition(agent, now)
+	agent.Status.IdentityClaim = claim.DeepCopy()
 
 	activeCount := activeTasks // capture for closure
 	lastUsed := agent.Status.LastUsed
@@ -539,6 +548,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
 		setAgentIdentityCondition(agent, now)
+		agent.Status.IdentityClaim = claim.DeepCopy()
 		return r.Status().Update(ctx, agent)
 	}); err != nil {
 		return ctrl.Result{}, err
@@ -741,5 +751,8 @@ func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// or going away changes the readiness of the others claiming it.
 		Watches(&corev1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.agentsSharingIdentity)).
 		Named("agent").
+		// Identity claims are decided one Agent at a time; see
+		// reconcileIdentityClaim.
+		WithOptions(controllerpkg.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
