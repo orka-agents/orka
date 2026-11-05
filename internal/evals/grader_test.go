@@ -107,6 +107,7 @@ func TestLocalizationGrader(t *testing.T) {
 		{"outside tolerance", two, reviewOutcome("needs_changes", ReviewFinding{File: "pkg/x.go", Line: 48}), GradeFail, 0},
 		{"wrong file", two, reviewOutcome("needs_changes", ReviewFinding{File: "pkg/z.go", Line: 42}), GradeFail, 0},
 		{"file prefix is not a match", two, reviewOutcome("needs_changes", ReviewFinding{File: "x.go", Line: 42}), GradeFail, 0},
+		{"padded path is not a match", two, reviewOutcome("needs_changes", ReviewFinding{File: "pkg/x.go ", Line: 42}), GradeFail, 0},
 		{"no line", two, reviewOutcome("needs_changes", ReviewFinding{File: "pkg/x.go"}), GradeFail, 0},
 		{"every location", two, reviewOutcome("needs_changes",
 			ReviewFinding{File: "pkg/y.go", Line: 12},
