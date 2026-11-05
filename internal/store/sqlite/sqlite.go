@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -990,6 +991,11 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a reopen, the only way SQLite's serving database can restart, is
+	// visible as a new incarnation.
+	incarnation string
+
 	// nativeSessionSealer seals native state for the duplicate SQL control
 	// implementation's turn finalization. Production never installs it.
 	nativeSessionSealer store.NativeSessionFinalizationSealer
@@ -1012,6 +1018,7 @@ type Store struct {
 func NewStore(db *sql.DB, dbPath string) *Store {
 	s := &Store{db: db, dbPath: dbPath}
 	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
 	return s
 }
 
@@ -1031,6 +1038,7 @@ func OpenLockedStore(path string) (*Store, error) {
 	}
 	s := &Store{db: db, dbPath: path, processLock: lock}
 	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
 	return s, nil
 }
 

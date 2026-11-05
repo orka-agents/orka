@@ -163,9 +163,10 @@ type OperationReceiptStore interface {
 	// later, and returns that. Repeating it returns the same outcome for as
 	// long as the provider keeps that record. A receipt with a different method
 	// or request digest returns ErrDuplicateMismatch, and a request for another
-	// dataset returns ErrDatasetMismatch. While the dataset is not ready, such
-	// as while it is migrated or imported, it returns an outcome it already
-	// holds and otherwise returns ErrNotReady, recording nothing. Any
+	// dataset returns ErrDatasetMismatch. While the dataset is migrating or
+	// importing, it returns an outcome it already holds and otherwise returns
+	// ErrNotReady, recording nothing; an incompatible dataset returns
+	// ErrIncompatible. Any
 	// controller may call it, including one whose fence is stale, because it
 	// can only prevent a change.
 	//
