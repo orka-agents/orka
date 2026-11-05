@@ -1492,6 +1492,9 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			)
 			return result, handleErr, true
 		}
+		if result, err, handled := r.requireBoundIdentityClaim(ctx, task, existing); handled {
+			return result, err, true
+		}
 		return ctrl.Result{}, nil, false
 	}
 
@@ -1557,6 +1560,9 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			ctx, task, err, "bound execution verification failed after binding",
 		)
 		return result, handleErr, true
+	}
+	if result, err, handled := r.requireBoundIdentityClaim(ctx, task, binding); handled {
+		return result, err, true
 	}
 	return ctrl.Result{}, nil, false
 }

@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -197,5 +198,49 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	r.Identity.AgentUseAuthorization = false
 	if _, err := r.agentExecutionIdentity(context.Background(), task(""), agent); err == nil || !isPermanentACPAgentConfigurationError(err) {
 		t.Fatalf("use authorization off: error = %v, want a permanent refusal", err)
+	}
+}
+
+func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing.T) {
+	holder := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	released := identityBoundTestAgent("reviewer", time.Now())
+	for name, tc := range map[string]struct {
+		agent     *corev1alpha1.Agent
+		executing bool
+		wantFail  bool
+	}{
+		"claim held":                {agent: holder},
+		"claim released":            {agent: released, wantFail: true},
+		"Agent deleted":             {wantFail: true},
+		"already executing is left": {agent: released, executing: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			task := boundTask("work", holder, corev1alpha1.TaskPhasePending)
+			task.UID = "work-uid"
+			if tc.executing {
+				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
+			}
+			builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task)
+			if tc.agent != nil {
+				builder = builder.WithObjects(tc.agent)
+			}
+			r := &TaskReconciler{Client: builder.Build(), Identity: testIdentityConfig(), Recorder: record.NewFakeRecorder(8)}
+			_, err, handled := r.requireBoundIdentityClaim(context.Background(), task, task.Status.AgentExecutionBinding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handled != tc.wantFail {
+				t.Fatalf("handled = %v, want %v", handled, tc.wantFail)
+			}
+			if tc.wantFail {
+				stored := &corev1alpha1.Task{}
+				if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), stored); err != nil {
+					t.Fatal(err)
+				}
+				if stored.Status.Phase != corev1alpha1.TaskPhaseFailed {
+					t.Fatalf("phase = %q, want Failed before any identity use", stored.Status.Phase)
+				}
+			}
+		})
 	}
 }

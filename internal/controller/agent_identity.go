@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -213,4 +215,32 @@ func requireParentOwnsIdentityAgent(
 		return refuse
 	}
 	return nil
+}
+
+// requireBoundIdentityClaim re-checks, after the binding is persisted and
+// until the Task starts, that the Agent still holds the identity the binding
+// froze. A claim released between the binding decision and its write could
+// otherwise leave two Agents with Tasks acting as one identity; once the
+// binding is persisted, any later release sees it and keeps the claim.
+func (r *TaskReconciler) requireBoundIdentityClaim(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (ctrl.Result, error, bool) {
+	if task.Status.Execution != nil || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
+		return ctrl.Result{}, nil, false
+	}
+	frozen := binding.Agent
+	live := &corev1alpha1.Agent{}
+	err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Namespace: frozen.Namespace, Name: frozen.Name}, live)
+	if err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
+	}
+	if err == nil && live.UID == frozen.UID && identityClaimMatches(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
+		return ctrl.Result{}, nil, false
+	}
+	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"),
+		fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID))
+	return result, failErr, true
 }
