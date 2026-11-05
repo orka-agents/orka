@@ -242,6 +242,30 @@ func (b *ahpBackend) endTerminal(ctx context.Context, principal ahphost.Principa
 	if b.updateTerminals != nil {
 		_ = b.updateTerminals(ctx, principal)
 	}
+	b.removeWorkspaceAfterLastTerminal(ctx, principal)
+}
+
+// removeWorkspaceAfterLastTerminal removes the user's workspace, unless it
+// holds work, once their last terminal has ended and no session remains,
+// when no idle timeout is set. Disposing of the last session leaves the
+// workspace while a shell runs, and with no idle timeout nothing else would
+// remove it, or the credentials in it, after that shell ends.
+func (b *ahpBackend) removeWorkspaceAfterLastTerminal(ctx context.Context, principal ahphost.Principal) {
+	if !b.workspaces.enabled() || b.cfg.WorkspaceIdleTimeout > 0 {
+		return
+	}
+	// The lifecycle lock keeps a session or terminal from starting to use the
+	// workspace while this decides.
+	unlock := b.lockUser(principal.UserKey)
+	defer unlock()
+	if b.hasTerminals(principal.UserKey) {
+		return
+	}
+	sessions, err := b.store.ListAHPRecords(ctx, principal.UserKey, ahpRecordSession)
+	if err != nil || len(sessions) != 0 {
+		return
+	}
+	b.workspaces.removeUnlessHoldsWork(ctx, principal)
 }
 
 // DisposeTerminal stops a shell and every process it started, then frees its slot.
@@ -263,11 +287,15 @@ func (b *ahpBackend) DisposeTerminal(ctx context.Context, principal ahphost.Prin
 	}
 	b.mu.Lock()
 	key := ahpTerminalKey(principal.UserKey, channel)
-	if b.shells[key] == term {
+	current := b.shells[key] == term
+	if current {
 		delete(b.shells, key)
 		b.retireLocked(key)
 	}
 	b.mu.Unlock()
+	if current {
+		b.removeWorkspaceAfterLastTerminal(context.WithoutCancel(ctx), principal)
+	}
 	return nil
 }
 

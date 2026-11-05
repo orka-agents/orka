@@ -325,7 +325,9 @@ on their own machine. Agents never run in the workspace.
 
 The Pod's files are ephemeral: Orka rebuilds the checkouts when it starts again. It
 removes the Pod with the person's last session, and, with `--ahp-workspace-idle-timeout`
-(default `4h`, `0` turns it off), after that long without use. Either way the Pod is
+(default `4h`), after that long without use. With `0`, which turns the idle timeout off,
+it instead removes the Pod when the person's last shell ends after their last session
+has. Either way the Pod is
 removed only while no shell of its person runs (and, when idle, no turn) and nothing in
 it exists only there: no uncommitted or untracked files, no commits that any local ref
 or worktree reaches and no remote-tracking branch has (stashes and tags included), no

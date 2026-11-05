@@ -32,10 +32,13 @@ const (
 	closeGoingAway    = websocket.StatusGoingAway
 	closeSlowClient   = websocket.StatusTryAgainLater
 
-	maxFrameBytes               = 4 << 20
-	maxClientIDLength           = 256
-	maxURILength                = 2048
-	maxWatchesPerConnection     = 64
+	maxFrameBytes           = 4 << 20
+	maxClientIDLength       = 256
+	maxURILength            = 2048
+	maxWatchesPerConnection = 64
+	// maxInitialSubscriptions bounds the distinct channels an initialize or
+	// reconnect may name. Each is snapshotted under the user's hub lock.
+	maxInitialSubscriptions     = 256
 	defaultListLimit            = 100
 	maxListLimit                = 1000
 	writeTimeout                = 10 * time.Second
@@ -533,6 +536,26 @@ func validClientID(id string) bool {
 	return true
 }
 
+// distinctSubscriptions returns channels without repeats, in their first
+// order, and refuses more than maxInitialSubscriptions distinct channels, so one
+// frame cannot make the host snapshot a channel over and over under the hub
+// lock.
+func distinctSubscriptions(channels []string) ([]string, error) {
+	seen := make(map[string]bool, min(len(channels), maxInitialSubscriptions))
+	distinct := make([]string, 0, min(len(channels), maxInitialSubscriptions))
+	for _, channel := range channels {
+		if seen[channel] {
+			continue
+		}
+		if len(distinct) == maxInitialSubscriptions {
+			return nil, rpcErr(ahptypes.ErrorCodeInvalidParams, "at most %d distinct subscriptions are allowed", maxInitialSubscriptions)
+		}
+		seen[channel] = true
+		distinct = append(distinct, channel)
+	}
+	return distinct, nil
+}
+
 func validURI(uri string) bool {
 	if uri == "" || len(uri) > maxURILength || uri == rootChannel {
 		return false
@@ -552,6 +575,10 @@ func (c *conn) initialize(ctx context.Context, id, raw json.RawMessage) (any, er
 	}
 	if initialized, _, _ := c.state(); initialized {
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidRequest, "the connection is already initialized")
+	}
+	var err error
+	if params.InitialSubscriptions, err = distinctSubscriptions(params.InitialSubscriptions); err != nil {
+		return nil, err
 	}
 	c.host.sweepOnce(ctx, c.principal)
 	if !validClientID(params.ClientId) {
@@ -634,6 +661,10 @@ func (c *conn) reconnect(ctx context.Context, id, raw json.RawMessage) (any, err
 	}
 	if initialized, _, _ := c.state(); initialized {
 		return nil, rpcErr(ahptypes.ErrorCodeInvalidRequest, "the connection is already initialized")
+	}
+	var err error
+	if params.Subscriptions, err = distinctSubscriptions(params.Subscriptions); err != nil {
+		return nil, err
 	}
 	c.host.sweepOnce(ctx, c.principal)
 	record, err := c.host.cfg.Store.GetAHPClient(ctx, params.ClientId)

@@ -577,3 +577,80 @@ func TestAHPWorkspaceKeepAliveNeedsItsCommands(t *testing.T) {
 		}
 	}
 }
+
+// With no idle timeout, the end of a person's last shell after their last
+// session removes their workspace, as disposing of that session would have:
+// nothing else would. It does not while a shell or session remains, or when
+// the idle collector will.
+func TestAHPWorkspaceGoesWithTheLastShellWhenNoIdleTimeoutIsSet(t *testing.T) {
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	for name, tc := range map[string]struct {
+		idle     time.Duration
+		shell    bool
+		session  bool
+		decision bool
+	}{
+		"last shell and no session": {decision: true},
+		"another shell runs":        {shell: true},
+		"a session remains":         {session: true},
+		"the collector will decide": {idle: time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newAHPTestEnv(t)
+			env.backend.cfg.WorkspaceIdleTimeout = tc.idle
+			w := &ahpWorkspaces{b: env.backend, clientset: kubefake.NewClientset(), rest: &rest.Config{}, namespace: "orka-ahp-workspaces",
+				image: "example.com/git@sha256:" + ahpHash("x")}
+			env.backend.workspaces = w
+			var podReads atomic.Int32
+			env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok && key.Name == ahpWorkspacePodName(alice.UserKey) {
+						podReads.Add(1)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			if tc.shell {
+				env.backend.mu.Lock()
+				env.backend.shells[ahpTerminalKey(alice.UserKey, "ahp-terminal:/b")] = &ahpTerminal{}
+				env.backend.mu.Unlock()
+			}
+			if tc.session {
+				require.NoError(t, env.backend.putRecord(context.Background(), alice.UserKey, ahpRecordSession, ahpTestSession, ahpSession{}))
+			}
+			env.backend.removeWorkspaceAfterLastTerminal(context.Background(), alice)
+			require.Equal(t, tc.decision, podReads.Load() > 0, "whether the workspace was considered for removal")
+		})
+	}
+}
+
+// Disposing of the last terminal runs the same decision.
+func TestAHPDisposingTheLastTerminalConsidersTheWorkspace(t *testing.T) {
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice")}
+	reads := func(idle time.Duration) int32 {
+		env := newAHPTestEnv(t)
+		env.backend.cfg.WorkspaceIdleTimeout = idle
+		w := &ahpWorkspaces{b: env.backend, clientset: kubefake.NewClientset(), rest: &rest.Config{}, namespace: "orka-ahp-workspaces",
+			image: "example.com/git@sha256:" + ahpHash("x")}
+		env.backend.workspaces = w
+		var podReads atomic.Int32
+		env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Pod); ok && key.Name == ahpWorkspacePodName(alice.UserKey) {
+					podReads.Add(1)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		channel := "ahp-terminal:/a"
+		env.backend.mu.Lock()
+		env.backend.shells[ahpTerminalKey(alice.UserKey, channel)] = &ahpTerminal{ctx: ctx, channel: channel, cancel: cancel,
+			input: make(chan []byte, ahpTerminalInputQueue), pidFile: ahpTerminalPIDFile(alice.UserKey, channel)}
+		env.backend.mu.Unlock()
+		require.NoError(t, env.backend.DisposeTerminal(context.Background(), alice, channel))
+		return podReads.Load()
+	}
+	require.Greater(t, reads(0), reads(time.Hour), "with no idle timeout the workspace is considered once more")
+}

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -837,7 +838,7 @@ func TestReconnectRules(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Eventually(t, func() bool {
-		current, _ := env.store.AHPServerSeq(ctx, UserKey("https://issuer.example", "alice"))
+		current, _ := env.store.GetAHPServerSeq(ctx, UserKey("https://issuer.example", "alice"))
 		return current >= seq+7
 	}, 5*time.Second, 20*time.Millisecond)
 	late := env.connect(alice.Token)
@@ -964,4 +965,41 @@ func TestSessionURIsAreClaimedOneCreationAtATime(t *testing.T) {
 	again, ok := h.claimChannelURI("alice", "ahp-session:/one", false)
 	require.True(t, ok, "a finished creation frees the URI")
 	again()
+}
+
+// An initialize or reconnect that repeats a channel gets one snapshot of it,
+// and one naming too many distinct channels is refused before any snapshot.
+func TestInitialSubscriptionsAreDistinctAndBounded(t *testing.T) {
+	env := newTestEnv(t, store.AHPJournalLimits{})
+	alice := env.mint("alice")
+	ctx := ctx5(t)
+
+	repeated := make([]string, 10_000)
+	for i := range repeated {
+		repeated[i] = rootChannel
+	}
+	first := env.connect(alice.Token)
+	init, err := first.Initialize(ctx, "laptop", ahptypes.SupportedProtocolVersions(), repeated)
+	require.NoError(t, err)
+	require.Len(t, init.Snapshots, 1)
+	createSession(t, first, "ahp-session:/one")
+
+	again := env.connect(alice.Token)
+	result, err := again.Reconnect(ctx, "laptop", init.ServerSeq,
+		[]string{rootChannel, "ahp-session:/one", rootChannel, "ahp-session:/one"})
+	require.NoError(t, err)
+	snapshots, ok := result.Value.(*ahptypes.ReconnectSnapshotResult)
+	require.True(t, ok, "a gap with a root notification in it falls back to snapshots: %T", result.Value)
+	require.Len(t, snapshots.Snapshots, 2)
+
+	tooMany := make([]string, maxInitialSubscriptions+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("ahp-session:/s%d", i)
+	}
+	_, err = env.connect(alice.Token).Initialize(ctx, "desktop", ahptypes.SupportedProtocolVersions(), tooMany)
+	require.Equal(t, ahptypes.ErrorCodeInvalidParams, rpcCode(t, err))
+	_, err = env.connect(alice.Token).Reconnect(ctx, "laptop", init.ServerSeq, tooMany)
+	require.Equal(t, ahptypes.ErrorCodeInvalidParams, rpcCode(t, err))
+	_, err = env.connect(alice.Token).Initialize(ctx, "desktop", ahptypes.SupportedProtocolVersions(), tooMany[:maxInitialSubscriptions])
+	require.NoError(t, err, "unknown channels within the bound are skipped as before")
 }

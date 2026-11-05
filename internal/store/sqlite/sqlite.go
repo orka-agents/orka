@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/google/uuid"
+	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -38,8 +41,21 @@ func NewDB(path string) (*sql.DB, error) {
 	return newDB(path, false)
 }
 
+// sqliteDSN makes the driver write and read every time.Time in UTC. SQL
+// compares stored times as text, so one zone keeps those comparisons correct
+// and satisfies the storage contract's UTC rule whatever zone a caller used.
+// Rows written earlier in another zone are read back in UTC, but their stored
+// text keeps its offset, so SQL comparisons with them can still be wrong.
+func sqliteDSN(path string) string {
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + "_timezone=UTC"
+}
+
 func newDB(path string, allowMigration bool) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}
@@ -958,15 +974,22 @@ func currentSchemaStatements() []string {
 	statements = append(statements, agentExecutionSchemaStatements()...)
 	statements = append(statements, nativeSessionSchemaStatements()...)
 	statements = append(statements, connectorSchemaStatements()...)
+	statements = append(statements, operationReceiptSchemaStatements()...)
 	return append(statements, ahpSchemaStatements()...)
 }
 
 // Store implements both store.ResultStore and store.SessionStore.
 type Store struct {
-	db               *sql.DB
-	securityTx       *sql.Tx
-	dbPath           string
-	processLock      io.Closer
+	db         *sql.DB
+	securityTx *sql.Tx
+	// securityClock, set on a scan ingestion's transaction-scoped store,
+	// supplies the times the security writes of one step assign.
+	securityClock func() time.Time
+	dbPath        string
+	processLock   io.Closer
+	// ownsProcessLock is set for a store OpenLockedStore opened under the
+	// process lock, which an embedded dataset binding requires.
+	ownsProcessLock  bool
 	executionEventMu sync.Mutex
 	// pendingWALTruncate remembers a connector custody deletion whose log
 	// truncation found the log busy; the next custody operation finishes it.
@@ -974,12 +997,18 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
-	// snapshotCipher encrypts immutable agent execution snapshot bodies at
-	// rest. Snapshot persistence fails closed while it is nil.
-	snapshotCipher *AgentExecutionSnapshotCipher
+	// incarnation identifies this open of the database. Describe reports it,
+	// so a reopen, the only way SQLite's serving database can restart, is
+	// visible as a new incarnation.
+	incarnation string
 
-	// nativeSessionMaxBytes limits new bundles, not authenticated stored reads.
-	nativeSessionMaxBytes int
+	// requireWriteEnvelopes refuses a contract write without a write
+	// envelope. Production sets it; package tests may write without one.
+	requireWriteEnvelopes atomic.Bool
+
+	// nativeSessionSealer seals native state for the duplicate SQL control
+	// implementation's turn finalization. Production never installs it.
+	nativeSessionSealer store.NativeSessionFinalizationSealer
 
 	// applyMemoryProposalAfterAcceptedRead is a test hook used to coordinate
 	// multi-connection proposal-apply races after an accepted proposal is read.
@@ -988,13 +1017,26 @@ type Store struct {
 	// archiveMemoryProposalAfterActiveRead is a test hook used to coordinate
 	// multi-connection proposal-archive races after an active proposal is read.
 	archiveMemoryProposalAfterActiveRead func()
+
+	// checkTaskDataFenceAfterGenerationRead is a test hook called between a
+	// fence check's cleanup generation read and its Job revocation reads.
+	checkTaskDataFenceAfterGenerationRead func(context.Context)
+
+	// clock, when set by a test, replaces the provider clock that measures
+	// operation age and receipt retention.
+	clock func() time.Time
+
+	// writeState, when set by a test, replaces the dataset write state, which
+	// is always ready for an open SQLite store.
+	writeState func() storagev1.DatasetState
 }
 
 // NewStore creates a new Store backed by the given SQLite database.
 // The dbPath is the filesystem path to the database file (used for metrics and logging).
 func NewStore(db *sql.DB, dbPath string) *Store {
-	s := &Store{db: db, dbPath: dbPath, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
+	s := &Store{db: db, dbPath: dbPath}
 	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
 	return s
 }
 
@@ -1012,9 +1054,10 @@ func OpenLockedStore(path string) (*Store, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	store := &Store{db: db, dbPath: path, processLock: lock, nativeSessionMaxBytes: harnessv2.DefaultMaxNativeSessionBytes}
-	store.pendingWALTruncate.Store(true)
-	return store, nil
+	s := &Store{db: db, dbPath: path, processLock: lock, ownsProcessLock: true}
+	s.pendingWALTruncate.Store(true)
+	s.incarnation = uuid.NewString()
+	return s, nil
 }
 
 // Start runs background maintenance and blocks until ctx is cancelled,
@@ -1038,6 +1081,9 @@ func (s *Store) Start(ctx context.Context) error {
 			return s.close()
 		case <-ticker.C:
 			s.updateDBSizeMetric()
+			if err := s.pruneExpiredOperationReceipts(ctx); err != nil && ctx.Err() == nil {
+				logger.Error(err, "Failed to prune expired operation receipts")
+			}
 		}
 	}
 }

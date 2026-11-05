@@ -36,13 +36,14 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tools"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 type externalACPDispatchFixture struct {
 	ctx            context.Context
 	client         client.Client
 	controlStore   store.DurableControlStore
-	persistence    *sqlite.Store
+	persistence    *sealedTestStore
 	epochs         *ControllerEpochManager
 	reconciler     *TaskReconciler
 	dispatcher     *ACPDispatcher
@@ -380,19 +381,12 @@ func newExternalACPDispatchFixtureWithOptions(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "external-dispatch-test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x58}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	persistence := sealedStore(t, sqlite.NewStore(db, "external-dispatch-test"))
 	controlStore, err := storekube.NewComposite(kubeClient, defaultNS, persistence, storekube.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "external-dispatch-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(ctx)
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

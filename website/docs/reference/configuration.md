@@ -93,6 +93,8 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
+| `storage.bindings.state` / `storage.bindings.artifacts` | `sqlite` / `sqlite` | Backend for each storage contract: `sqlite` or a name in `storage.adapters`. See [Storage bindings](#storage-bindings). |
+| `storage.adapters` | `{}` | Storage adapters in the release namespace, keyed by name. |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 | `client.namespace` | Helm release namespace | Client ServiceAccount namespace; must match `controller.watchNamespace`. |
@@ -298,6 +300,43 @@ agent. Never set it in a cluster manifest.
 
 When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publisher, set the same value on the controller Deployment as well. The controller bounds each publisher-backed external-effect call and sizes the effect's ledger lease from this timeout plus a settlement margin; without the controller-side value, publisher operations are clamped to the default four-minute call bound. Brokered custom-Tool calls always keep the fixed four-minute clamp that their Tool descriptors were admitted under.
 
+### Storage bindings
+
+Orka stores application data under two contracts: `state` (Sessions, results,
+gateway and control records) and `artifacts` (artifact bytes and metadata).
+`storage.bindings` names the backend for each. With both on `sqlite` (the
+default) the controller keeps `--store-backend=sqlite` and `--store-path`.
+When a contract names an adapter, the chart renders the
+`<release>-storage` ConfigMap, passes it with `--storage-config`, and restarts
+the controller when it changes:
+
+```yaml
+storage:
+  bindings:
+    state: postgres
+    artifacts: postgres
+  adapters:
+    postgres:
+      serviceRef: {name: orka-storage-postgres, port: 8443}   # or url: https://...
+      tls:
+        serverName: orka-storage-postgres.orka-system.svc     # optional
+        caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+      clientAuth:
+        bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+```
+
+Each adapter sets exactly one of `serviceRef` and an `https://` `url`, and
+must be bound to at least one contract. Services and Secrets are in the
+release namespace. The controller reads the Secrets directly at startup; they
+are not mounted. A bearer token needs at least 32 visible ASCII characters.
+
+:::caution[SQLite only in this release]
+The controller cannot reach a storage adapter yet. With a contract bound to an
+adapter it reports `AdapterTransportUnavailable` and does not start, and it
+never falls back to SQLite. Keep both bindings on `sqlite`. The store volume is
+required either way.
+:::
+
 ### Helm CRD lifecycle
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
@@ -375,7 +414,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--ahp-turn-timeout` | `2h` | Timeout of each AHP turn's Task. Helm: `controller.ahp.turnTimeout` |
 | `--ahp-workspace-namespace` | `orka-ahp-workspaces` | Namespace for AHP users' workspace Pods: git checkouts of their projects and sessions, and their terminals. Helm: `controller.ahp.workspaceNamespace`. Env: `ORKA_AHP_WORKSPACE_NAMESPACE` |
 | `--ahp-workspace-image` | `""` | Digest-pinned image with `sh`, `git` and the common tools Orka's scripts run there (`cat`, `dirname`, `find`, `grep`, `head`, `ls`, `mkdir`, `mktemp`, `mv`, `readlink`, `rm`, `sed`, `sleep`, `stat`) for AHP workspaces. Empty disables workspaces and terminals. Helm: `controller.ahp.workspaceImage`. Env: `ORKA_AHP_WORKSPACE_IMAGE` |
-| `--ahp-workspace-idle-timeout` | `4h` | Remove an AHP workspace this long after its last use, while no shell or turn runs and nothing in it is unpushed. `0` keeps workspaces until their user's last session ends. Helm: `controller.ahp.workspaceIdleTimeout` |
+| `--ahp-workspace-idle-timeout` | `4h` | Remove an AHP workspace this long after its last use, while no shell or turn runs and nothing in it is unpushed. `0` keeps workspaces until their user's last session and shell end. Helm: `controller.ahp.workspaceIdleTimeout` |
 | `--ahp-workspace-connector-provider` | `""` | ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires `--connectors-enabled`. Helm: `controller.ahp.workspaceConnectorProvider`. Env: `ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER` |
 | `--connectors-allow-private-endpoints` | empty | **Local fixtures only.** Accept private, loopback, and cluster-local connector provider endpoints and, for Tools behind a connection-mode outbound access policy, private tool endpoints (HTTPS is still required), and let linked-account requests reach them over the same hardened transport (no proxy, verified TLS). A person's token would be sent to such an address, so the flag takes only the literal `i-understand-tokens-may-leave-the-cluster`, and the controller refuses to start with it unless `--connector-callback-base-url` is a plain-http `localhost` origin, which no production deployment has. The Live Connectors E2E uses it for its in-cluster fake provider. Env: `ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS` |
 | `--connector-callback-base-url` | `ORKA_CONNECTOR_CALLBACK_BASE_URL` env or `""` | Required with `--connectors-enabled`. Absolute https origin (scheme and host only, no path) the OAuth provider redirects back to; the provider must register exactly this origin plus `/api/v1/connections/callback`. Plain http is accepted only for `localhost`. Helm: `controller.connectors.callbackBaseUrl`. Sealed linked-account credentials live in the controller store, which the chart already requires to be persistent in every mode. |
@@ -471,8 +510,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--session-loader-image` | Digest-pinned BusyBox 1.37 multi-platform index | Session transcript fetcher image. Requires a SHA256 digest and BusyBox-compatible `sh`, `cat`, `wget`, `rm`, `mv`, and `sleep`; tag-only references fail startup. Helm: `workers.sessionLoader.image.repository` and `.digest`. No registry resolution is performed. |
-| `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
-| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |
+| `--store-backend` | `sqlite` | Payload/read-model backend when `--storage-config` is not set. Only `sqlite` is accepted, and it cannot be combined with `--storage-config`. ACP control authority remains Kubernetes CRDs and Leases. |
+| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file, used by every storage contract bound to `sqlite`. |
+| `--storage-config` | `""` | Storage configuration file binding each storage contract to `sqlite` or a storage adapter. Empty binds both contracts to SQLite at `--store-path`. See [Storage bindings](#storage-bindings). |
 | `--ai-worker-service-account-name` | `orka-ai-worker` | ServiceAccount name for AI worker Jobs and dynamically ensured worker RBAC |
 | `--vendor-worker-service-account-name` | `orka-vendor-worker` | ServiceAccount name for vendor/agent worker Jobs and dynamically ensured worker RBAC |
 | `--container-worker-service-account-name` | `orka-container-worker` | ServiceAccount name for container worker Jobs and dynamically ensured worker RBAC |

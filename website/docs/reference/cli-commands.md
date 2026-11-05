@@ -4185,6 +4185,7 @@ the filters, so "what did the agent say last?" is:
   TaskStarted
   TaskSucceeded
   TaskFailed
+  TaskCancellationRequested
   TaskCancelled
   WorkerStarted
   WorkerCompleted
@@ -5076,6 +5077,7 @@ the filters, so "what did the agent say last?" is:
   TaskStarted
   TaskSucceeded
   TaskFailed
+  TaskCancellationRequested
   TaskCancelled
   WorkerStarted
   WorkerCompleted
