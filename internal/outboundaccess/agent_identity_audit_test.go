@@ -21,6 +21,7 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 		Reader: reader, AuditLog: logger, AuditPseudonymKey: []byte(strings.Repeat("k", 32)), Now: func() time.Time { return now },
 		Connections:     &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "user-token", ConnectionUID: "uid-1", Mode: "readOnly"}},
 		AgentIdentities: &fakeAgentIdentitySource{token: "obo-token"},
+		DelegationLive:  func(context.Context, AgentIdentityBinding) error { return nil },
 	}
 
 	if _, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); err != nil {
