@@ -476,6 +476,9 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	if err != nil {
 		return nil, err
 	}
+	if identity != nil {
+		identity.ActsForRequester = classificationActsForRequester(frozenClassification)
+	}
 
 	binding := corev1alpha1.AgentExecutionBinding{
 		SchemaVersion:   1,

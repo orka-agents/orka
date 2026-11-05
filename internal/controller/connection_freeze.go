@@ -52,6 +52,9 @@ type connectorToolInfo struct {
 	// ToolUID is the Tool object read, so a Tool deleted and recreated with
 	// the same spec is still a different object to a running native Job.
 	ToolUID string
+	// Delegated marks a Tool behind an agentIdentity policy in Delegated
+	// mode, which acts for the requester through the Agent's identity.
+	Delegated bool
 	// Builtin marks an Orka built-in tool a ConnectorProvider declares. It
 	// has no policy: PolicyName is its BuiltinConnectionKey and the
 	// controller resolves the person's credential for it directly.
@@ -348,6 +351,7 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 			PolicyUID:        string(policy.UID),
 			PolicyGeneration: policy.Generation,
 			ToolUID:          string(tool.UID),
+			Delegated:        policy.Spec.AgentIdentity != nil,
 		}
 	}
 	return result, nil

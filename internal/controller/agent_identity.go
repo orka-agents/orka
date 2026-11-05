@@ -385,3 +385,15 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 
 // agentIdentityReleaseRecheck is how soon a releasing claim is checked again.
 const agentIdentityReleaseRecheck = 10 * time.Second
+
+// classificationActsForRequester reports whether a frozen connector
+// classification includes a Tool that acts for the requester through the
+// Agent's identity.
+func classificationActsForRequester(classified map[string]connectorToolInfo) bool {
+	for _, info := range classified {
+		if info.Delegated {
+			return true
+		}
+	}
+	return false
+}

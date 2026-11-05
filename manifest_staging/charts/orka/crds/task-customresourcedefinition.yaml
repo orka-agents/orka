@@ -2057,6 +2057,12 @@ spec:
                           Identity is the Agent's external identity frozen at binding. Editing the
                           Agent or the controller's issuer configuration does not change it.
                         properties:
+                          actsForRequester:
+                            description: |-
+                              ActsForRequester records that the binding froze an agentIdentity
+                              policy in Delegated mode, so the Task can act for its requester. Every
+                              approval on such a Task needs the requester.
+                            type: boolean
                           id:
                             description: ID is the identity's ID at the issuer.
                             minLength: 1

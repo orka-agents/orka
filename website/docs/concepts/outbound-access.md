@@ -97,8 +97,9 @@ spec:
   linked token whose audience is not the blueprint, so the requester must sign in through
   Entra, not through Orka's GitHub dashboard sign-in.
 - **What it may do** is exactly the provider's curated tool declarations, enforced as in
-  connection mode. Write tools always need approval, and only the requester can approve
-  them; anyone else allowed to decide approvals may still decline.
+  connection mode. Write tools always need approval. On a Task bound with a Delegated
+  policy, only the requester can approve any call; anyone else allowed to decide
+  approvals may still decline.
 - **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
   `--agent-identity-max-delegation-age`) after the root requester's last action in the
   Task chain, that is, creating the root Task or sending the Session message that started

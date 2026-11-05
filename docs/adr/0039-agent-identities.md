@@ -245,8 +245,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   requester can approve them: the approver must match the Task's
   `requestedBy` issuer and subject. Other authorized reviewers may deny but
   not approve, because the write acts as that person. Today any caller allowed
-  to update the Task can decide an approval, so this is a new rule for this
-  mode only.
+  to update the Task can decide an approval, so this is a new rule. It applies
+  to every approval on a Task whose binding froze a Delegated policy
+  (`actsForRequester`), judged from the write-once binding rather than the
+  live Tool, so editing and restoring a Tool around an approval cannot
+  bypass it.
 - The Connection must have been issued for the bound identity. Each issuer
   type defines the check, such as the user token's audience. Where an issuer
   addresses user tokens to each agent client, a requester links once per

@@ -159,7 +159,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
 	if decision == approvalDecisionApprove {
-		if err := h.requireRequesterApprovesDelegatedWrite(c.Context(), task, current.TargetTool, GetUserInfo(c)); err != nil {
+		if err := requireRequesterApprovesDelegatedWrite(task, GetUserInfo(c)); err != nil {
 			return err
 		}
 	}

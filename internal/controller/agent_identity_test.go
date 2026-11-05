@@ -360,3 +360,12 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 		t.Fatalf("a broken chain has no delegation start: %+v %v", binding, err)
 	}
 }
+
+func TestClassificationActsForRequester(t *testing.T) {
+	if classificationActsForRequester(map[string]connectorToolInfo{"gh": {PolicyName: "github-as-me"}}) {
+		t.Fatal("a connection-mode Tool does not act through the Agent's identity")
+	}
+	if !classificationActsForRequester(map[string]connectorToolInfo{"gh": {}, "write_blob": {Delegated: true}}) {
+		t.Fatal("a Delegated Tool makes the binding act for the requester")
+	}
+}

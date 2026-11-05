@@ -76,6 +76,12 @@ type AgentExecutionIdentityRef struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Instance string `json:"instance"`
+
+	// ActsForRequester records that the binding froze an agentIdentity
+	// policy in Delegated mode, so the Task can act for its requester. Every
+	// approval on such a Task needs the requester.
+	// +optional
+	ActsForRequester bool `json:"actsForRequester,omitempty"`
 }
 
 // AgentExecutionSnapshotRef links the immutable non-secret execution snapshot.
