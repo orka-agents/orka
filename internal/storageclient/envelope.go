@@ -195,7 +195,14 @@ func (o *operations) writeFence(ctx context.Context, contract string) (string, s
 // over the arguments as they are now, the issue time and the next sequence.
 // Every retry of that operation reuses the whole envelope and the same
 // arguments.
-func (o *operations) run(ctx context.Context, call writeCall, attempt func(context.Context) error) error {
+func (o *operations) run(ctx context.Context, call writeCall, attempt func(context.Context) error) (err error) {
+	defer func() {
+		if errors.Is(err, storagev1.ErrOutcomeUnknown) {
+			if unknown, ok := ctx.Value(taskDataOutcomeKey{}).(*atomic.Bool); ok {
+				unknown.Store(true)
+			}
+		}
+	}()
 	if _, ok := storagev1.WriteEnvelopeFrom(ctx); ok {
 		return attempt(ctx)
 	}
@@ -384,19 +391,15 @@ func (o *operations) resolve(
 // replay reads the result of a committed operation by attempting it again
 // with the same envelope. A replay is served whatever the current controller
 // epoch fence, but not past a Task data fence in the context that cleanup or
-// a Job revocation has moved since: that refusal is returned as it is, so
-// the caller authorizes again instead of reading the stored result. Any other
-// refusal leaves the result unreadable, and the write returns
-// ErrOutcomeUnknown rather than a refusal a caller could take for its own.
+// a Job revocation has moved since. Every refusal leaves the result unreadable,
+// so the write returns ErrOutcomeUnknown rather than a refusal that could
+// cause the caller to authorize again and repeat a committed operation.
 func (o *operations) replay(ctx context.Context, envelope storagev1.WriteEnvelope, attempt func(context.Context) error) error {
 	var err error
 	for retry := 0; ; retry++ {
 		err = attempt(storagev1.WithWriteEnvelope(ctx, envelope))
 		if err == nil {
 			return nil
-		}
-		if errors.Is(err, storagev1.ErrTaskDataCleanupChanged) || errors.Is(err, storagev1.ErrTaskJobRevoked) {
-			return fmt.Errorf("operation %s committed, but its Task data fence no longer holds: %w", envelope.OperationID, err)
 		}
 		if !errors.Is(err, storagev1.ErrUnavailable) && !errors.Is(err, storagev1.ErrOutcomeUnknown) {
 			break

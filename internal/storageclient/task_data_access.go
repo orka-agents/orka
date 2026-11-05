@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/orka-agents/orka/internal/store"
@@ -12,6 +13,8 @@ import (
 // releaseTaskDataFenceTimeout bounds removing a registration after the access
 // it was created for failed or was cancelled.
 const releaseTaskDataFenceTimeout = 5 * time.Second
+
+type taskDataOutcomeKey struct{}
 
 // WithAuthorizedTaskDataAccess implements store.TaskDataAccessStore. The
 // provider resolves the cleanup fence and Orka authorizes the caller against
@@ -60,6 +63,13 @@ func (c *Client) withTaskDataAccess(
 	if strings.TrimSpace(namespace) == "" {
 		return store.ValidationErrorf("task data access requires a namespace")
 	}
+	// An uncertain write stays uncertain even if the handler translates its
+	// error. Reauthorization must not turn it into a new operation.
+	unknownWrite, _ := ctx.Value(taskDataOutcomeKey{}).(*atomic.Bool)
+	if unknownWrite == nil {
+		unknownWrite = &atomic.Bool{}
+		ctx = context.WithValue(ctx, taskDataOutcomeKey{}, unknownWrite)
+	}
 	fence, registered, err := c.ResolveTaskDataFence(ctx, namespace, taskName)
 	if err != nil {
 		return err
@@ -101,7 +111,11 @@ func (c *Client) withTaskDataAccess(
 	if err := c.CheckTaskDataFence(ctx, fence); err != nil {
 		return err
 	}
-	if err := access(store.WithTaskDataFence(ctx, fence)); err != nil {
+	err = access(store.WithTaskDataFence(ctx, fence))
+	if unknownWrite.Load() {
+		return store.ErrOutcomeUnknown
+	}
+	if err != nil {
 		// Callers may turn a refused fenced call into their own error. When
 		// the fence has moved, report that instead, so the caller authorizes
 		// again rather than surfacing the refusal as a failure.
