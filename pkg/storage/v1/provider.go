@@ -122,10 +122,11 @@ const (
 	// so Orka can refuse a provider that is too old for a contract part with
 	// one precise reason instead of failing at the first missing method. An
 	// optional family is announced through [ProviderInfo.Capabilities]
-	// instead. Revision 2 added [DatasetBindingStore] and
-	// [ProviderInfo.Binding]. Revision 3 requires a valid [WriteEnvelope] on
-	// every write and [ErrValidation] when it is missing.
-	ContractRevision = 3
+	// instead. Revision 2 requires [OperationReceiptStore] and
+	// [ControllerEpochAdvancer] on both provider contracts. Revision 3 added
+	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
+	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
+	ContractRevision = 4
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
