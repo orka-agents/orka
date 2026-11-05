@@ -160,6 +160,10 @@ func TestEvalRunSpecIsImmutable(t *testing.T) {
 			s["subject"].(map[string]any)["repositoryMonitorReview"] = map[string]any{"monitorRef": map[string]any{"name": "other"}}
 		}, want: true},
 		{name: "cases", mutate: func(s map[string]any) { s["cases"].(map[string]any)["ids"] = []any{"a"} }, want: true},
+		{name: "empty ids added", mutate: func(s map[string]any) { s["cases"].(map[string]any)["ids"] = []any{} }},
+		{name: "configMapRef", mutate: func(s map[string]any) {
+			s["cases"].(map[string]any)["configMapRef"] = map[string]any{"name": "other", "key": "cases.jsonl"}
+		}, want: true},
 		{name: "trials", mutate: func(s map[string]any) { s["trials"] = int64(6) }, want: true},
 		{name: "graders", mutate: func(s map[string]any) { s["graders"] = []any{"verdict"} }, want: true},
 		{name: "maxConcurrentTrials", mutate: func(s map[string]any) { s["maxConcurrentTrials"] = int64(3) }, want: true},
@@ -183,9 +187,19 @@ func TestEvalRunSpecIsImmutable(t *testing.T) {
 }
 
 // TestEvalRunTypedRoundTripKeepsSpec proves a typed client can update an
-// EvalRun created from YAML: metav1.Duration writes "20m" back as "20m0s".
+// EvalRun created from YAML: metav1.Duration writes "20m" back as "20m0s",
+// and an explicit empty cases.ids is dropped by omitempty.
 func TestEvalRunTypedRoundTripKeepsSpec(t *testing.T) {
+	for name, ids := range map[string][]any{"no ids": nil, "empty ids": {}} {
+		t.Run(name, func(t *testing.T) { testEvalRunTypedRoundTrip(t, ids) })
+	}
+}
+
+func testEvalRunTypedRoundTrip(t *testing.T, ids []any) {
 	stored := validEvalRunSpec()
+	if ids != nil {
+		stored["cases"].(map[string]any)["ids"] = ids
+	}
 	raw, err := json.Marshal(stored)
 	if err != nil {
 		t.Fatal(err)
