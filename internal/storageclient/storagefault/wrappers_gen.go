@@ -12,6 +12,9 @@ import (
 func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "AcquireChatTurn", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.AcquireChatTurn(ctx, a1, a2, a3)
 		return err
 	})
@@ -46,6 +49,9 @@ func (p *stateProvider) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	var r0 *storagev1.GatewayEvent
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "AdmitGatewayEvent", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.AdmitGatewayEvent(ctx, a1)
 		return err
 	})
@@ -73,6 +79,9 @@ func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1
 func (p *stateProvider) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEvent", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.AppendExecutionEvent(ctx, a1)
 		return err
 	})
@@ -87,6 +96,9 @@ func (p *stateProvider) AppendExecutionEventIfAbsent(ctx context.Context, a1 *st
 	var r0 *storagev1.ExecutionEvent
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEventIfAbsent", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.AppendExecutionEventIfAbsent(ctx, a1, a2)
 		return err
 	})
@@ -102,6 +114,10 @@ func (p *stateProvider) AppendExecutionEventWithPlanIfAbsent(ctx context.Context
 	var r0 *storagev1.ExecutionEvent
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEventWithPlanIfAbsent", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+			a3 = cloneArgument(a3)
+		}
 		r0, r1, err = p.inner.AppendExecutionEventWithPlanIfAbsent(ctx, a1, a2, a3)
 		return err
 	})
@@ -116,6 +132,9 @@ func (p *stateProvider) AppendExecutionEventWithPlanIfAbsent(ctx context.Context
 func (p *stateProvider) AppendExecutionEventsIfAbsent(ctx context.Context, a1 []storagev1.ExecutionEventAppend) ([]storagev1.ExecutionEventAppendResult, error) {
 	var r0 []storagev1.ExecutionEventAppendResult
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEventsIfAbsent", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.AppendExecutionEventsIfAbsent(ctx, a1)
 		return err
 	})
@@ -128,6 +147,9 @@ func (p *stateProvider) AppendExecutionEventsIfAbsent(ctx context.Context, a1 []
 
 func (p *stateProvider) AppendMessages(ctx context.Context, a1 string, a2 string, a3 []storagev1.SessionMessage) error {
 	_, err := p.injector.call(ctx, p.contract, "AppendMessages", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
 		return p.inner.AppendMessages(ctx, a1, a2, a3)
 	})
 	return err
@@ -135,6 +157,9 @@ func (p *stateProvider) AppendMessages(ctx context.Context, a1 string, a2 string
 
 func (p *stateProvider) AppendMessagesWithLock(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 []storagev1.SessionMessage) error {
 	_, err := p.injector.call(ctx, p.contract, "AppendMessagesWithLock", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a5 = cloneArgument(a5)
+		}
 		return p.inner.AppendMessagesWithLock(ctx, a1, a2, a3, a4, a5)
 	})
 	return err
@@ -162,6 +187,9 @@ func (p *stateProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatase
 
 func (p *stateProvider) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	_, err := p.injector.call(ctx, p.contract, "BindPatchProposalPublicationEvidence", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.BindPatchProposalPublicationEvidence(ctx, a1)
 	})
 	return err
@@ -189,6 +217,9 @@ func (p *stateProvider) CancelWorkActions(ctx context.Context, a1 string, a2 str
 
 func (p *stateProvider) CheckTaskDataFence(ctx context.Context, a1 storagev1.TaskDataFence) error {
 	_, err := p.injector.call(ctx, p.contract, "CheckTaskDataFence", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CheckTaskDataFence(ctx, a1)
 	})
 	return err
@@ -243,6 +274,9 @@ func (p *stateProvider) ClaimOutboxProjectionRecords(ctx context.Context, a1 sto
 func (p *stateProvider) CommitMemoryProposalApplication(ctx context.Context, a1 storagev1.MemoryProposalApplication) (*storagev1.Memory, error) {
 	var r0 *storagev1.Memory
 	injected, err := p.injector.call(ctx, p.contract, "CommitMemoryProposalApplication", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CommitMemoryProposalApplication(ctx, a1)
 		return err
 	})
@@ -256,6 +290,9 @@ func (p *stateProvider) CommitMemoryProposalApplication(ctx context.Context, a1 
 func (p *stateProvider) CommitScanTaskIngestion(ctx context.Context, a1 storagev1.ScanTaskIngestionCommit) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "CommitScanTaskIngestion", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CommitScanTaskIngestion(ctx, a1)
 		return err
 	})
@@ -269,6 +306,9 @@ func (p *stateProvider) CommitScanTaskIngestion(ctx context.Context, a1 storagev
 func (p *stateProvider) CommitSealedConnectorCompletion(ctx context.Context, a1 storagev1.CommitSealedConnectorCompletionRequest) (*storagev1.SealedConnectorCredential, error) {
 	var r0 *storagev1.SealedConnectorCredential
 	injected, err := p.injector.call(ctx, p.contract, "CommitSealedConnectorCompletion", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CommitSealedConnectorCompletion(ctx, a1)
 		return err
 	})
@@ -282,6 +322,9 @@ func (p *stateProvider) CommitSealedConnectorCompletion(ctx context.Context, a1 
 func (p *stateProvider) CommitSealedSessionTurnFinalization(ctx context.Context, a1 storagev1.SealedSessionTurnFinalization) (*storagev1.SessionTurn, error) {
 	var r0 *storagev1.SessionTurn
 	injected, err := p.injector.call(ctx, p.contract, "CommitSealedSessionTurnFinalization", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CommitSealedSessionTurnFinalization(ctx, a1)
 		return err
 	})
@@ -294,6 +337,10 @@ func (p *stateProvider) CommitSealedSessionTurnFinalization(ctx context.Context,
 
 func (p *stateProvider) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
 	_, err := p.injector.call(ctx, p.contract, "CommitSessionTurn", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+			a4 = cloneArgument(a4)
+		}
 		return p.inner.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
 	})
 	return err
@@ -321,6 +368,9 @@ func (p *stateProvider) CompleteOutboxProjectionRecord(ctx context.Context, a1 s
 
 func (p *stateProvider) CompleteScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun) error {
 	_, err := p.injector.call(ctx, p.contract, "CompleteScanRunCancellation", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CompleteScanRunCancellation(ctx, a1)
 	})
 	return err
@@ -382,6 +432,9 @@ func (p *stateProvider) CountAgentExecutionSnapshotReferences(ctx context.Contex
 func (p *stateProvider) CountImplementationJobs(ctx context.Context, a1 storagev1.ImplementationJobFilter) (int, error) {
 	var r0 int
 	injected, err := p.injector.call(ctx, p.contract, "CountImplementationJobs", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CountImplementationJobs(ctx, a1)
 		return err
 	})
@@ -407,6 +460,9 @@ func (p *stateProvider) CountUnsettledOutboxProjections(ctx context.Context) (in
 
 func (p *stateProvider) CreateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateActionRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateActionRecord(ctx, a1)
 	})
 	return err
@@ -414,6 +470,9 @@ func (p *stateProvider) CreateActionRecord(ctx context.Context, a1 *storagev1.Ac
 
 func (p *stateProvider) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateCommandEvent", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateCommandEvent(ctx, a1)
 	})
 	return err
@@ -421,6 +480,9 @@ func (p *stateProvider) CreateCommandEvent(ctx context.Context, a1 *storagev1.Co
 
 func (p *stateProvider) CreateDroppedFinding(ctx context.Context, a1 *storagev1.DroppedFinding) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateDroppedFinding", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateDroppedFinding(ctx, a1)
 	})
 	return err
@@ -430,6 +492,9 @@ func (p *stateProvider) CreateGatewayDelivery(ctx context.Context, a1 *storagev1
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "CreateGatewayDelivery", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.CreateGatewayDelivery(ctx, a1)
 		return err
 	})
@@ -443,6 +508,9 @@ func (p *stateProvider) CreateGatewayDelivery(ctx context.Context, a1 *storagev1
 
 func (p *stateProvider) CreateGitHubMutationRecord(ctx context.Context, a1 *storagev1.GitHubMutationRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateGitHubMutationRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateGitHubMutationRecord(ctx, a1)
 	})
 	return err
@@ -450,6 +518,9 @@ func (p *stateProvider) CreateGitHubMutationRecord(ctx context.Context, a1 *stor
 
 func (p *stateProvider) CreateImplementationJob(ctx context.Context, a1 *storagev1.ImplementationJob) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateImplementationJob", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateImplementationJob(ctx, a1)
 	})
 	return err
@@ -457,6 +528,9 @@ func (p *stateProvider) CreateImplementationJob(ctx context.Context, a1 *storage
 
 func (p *stateProvider) CreateMemory(ctx context.Context, a1 *storagev1.Memory) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateMemory", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateMemory(ctx, a1)
 	})
 	return err
@@ -464,6 +538,9 @@ func (p *stateProvider) CreateMemory(ctx context.Context, a1 *storagev1.Memory) 
 
 func (p *stateProvider) CreateMemoryProposal(ctx context.Context, a1 *storagev1.MemoryProposal) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateMemoryProposal", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateMemoryProposal(ctx, a1)
 	})
 	return err
@@ -471,6 +548,9 @@ func (p *stateProvider) CreateMemoryProposal(ctx context.Context, a1 *storagev1.
 
 func (p *stateProvider) CreateMonitorEvent(ctx context.Context, a1 *storagev1.MonitorEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateMonitorEvent", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateMonitorEvent(ctx, a1)
 	})
 	return err
@@ -478,6 +558,9 @@ func (p *stateProvider) CreateMonitorEvent(ctx context.Context, a1 *storagev1.Mo
 
 func (p *stateProvider) CreateMonitorRun(ctx context.Context, a1 *storagev1.MonitorRun) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateMonitorRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateMonitorRun(ctx, a1)
 	})
 	return err
@@ -485,6 +568,9 @@ func (p *stateProvider) CreateMonitorRun(ctx context.Context, a1 *storagev1.Moni
 
 func (p *stateProvider) CreatePatchProposal(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	_, err := p.injector.call(ctx, p.contract, "CreatePatchProposal", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreatePatchProposal(ctx, a1)
 	})
 	return err
@@ -492,6 +578,9 @@ func (p *stateProvider) CreatePatchProposal(ctx context.Context, a1 *storagev1.P
 
 func (p *stateProvider) CreateRepairJob(ctx context.Context, a1 *storagev1.RepairJob) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateRepairJob", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateRepairJob(ctx, a1)
 	})
 	return err
@@ -499,6 +588,9 @@ func (p *stateProvider) CreateRepairJob(ctx context.Context, a1 *storagev1.Repai
 
 func (p *stateProvider) CreateReviewPublishRecord(ctx context.Context, a1 *storagev1.ReviewPublishRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateReviewPublishRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateReviewPublishRecord(ctx, a1)
 	})
 	return err
@@ -506,6 +598,9 @@ func (p *stateProvider) CreateReviewPublishRecord(ctx context.Context, a1 *stora
 
 func (p *stateProvider) CreateReviewRecord(ctx context.Context, a1 *storagev1.ReviewRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateReviewRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateReviewRecord(ctx, a1)
 	})
 	return err
@@ -513,6 +608,9 @@ func (p *stateProvider) CreateReviewRecord(ctx context.Context, a1 *storagev1.Re
 
 func (p *stateProvider) CreateScanRun(ctx context.Context, a1 *storagev1.ScanRun) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateScanRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateScanRun(ctx, a1)
 	})
 	return err
@@ -520,6 +618,9 @@ func (p *stateProvider) CreateScanRun(ctx context.Context, a1 *storagev1.ScanRun
 
 func (p *stateProvider) CreateSealedAgentExecutionSnapshot(ctx context.Context, a1 storagev1.SealedAgentExecutionSnapshot) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateSealedAgentExecutionSnapshot", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateSealedAgentExecutionSnapshot(ctx, a1)
 	})
 	return err
@@ -527,6 +628,9 @@ func (p *stateProvider) CreateSealedAgentExecutionSnapshot(ctx context.Context, 
 
 func (p *stateProvider) CreateSealedConnectorCompletion(ctx context.Context, a1 storagev1.CreateSealedConnectorCompletionRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateSealedConnectorCompletion", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateSealedConnectorCompletion(ctx, a1)
 	})
 	return err
@@ -534,6 +638,9 @@ func (p *stateProvider) CreateSealedConnectorCompletion(ctx context.Context, a1 
 
 func (p *stateProvider) CreateSealedConnectorConsent(ctx context.Context, a1 storagev1.CreateSealedConnectorConsentRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateSealedConnectorConsent", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateSealedConnectorConsent(ctx, a1)
 	})
 	return err
@@ -541,6 +648,9 @@ func (p *stateProvider) CreateSealedConnectorConsent(ctx context.Context, a1 sto
 
 func (p *stateProvider) CreateSession(ctx context.Context, a1 *storagev1.SessionRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateSession(ctx, a1)
 	})
 	return err
@@ -549,6 +659,9 @@ func (p *stateProvider) CreateSession(ctx context.Context, a1 *storagev1.Session
 func (p *stateProvider) CreateSessionTurnRecord(ctx context.Context, a1 storagev1.CreateSessionTurnRecordRequest) (*storagev1.SessionTurn, error) {
 	var r0 *storagev1.SessionTurn
 	injected, err := p.injector.call(ctx, p.contract, "CreateSessionTurnRecord", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.CreateSessionTurnRecord(ctx, a1)
 		return err
 	})
@@ -561,6 +674,9 @@ func (p *stateProvider) CreateSessionTurnRecord(ctx context.Context, a1 storagev
 
 func (p *stateProvider) CreateWorkAction(ctx context.Context, a1 *storagev1.WorkAction) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateWorkAction", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.CreateWorkAction(ctx, a1)
 	})
 	return err
@@ -709,6 +825,9 @@ func (p *stateProvider) EnqueueGatewayMessage(ctx context.Context, a1 storagev1.
 func (p *stateProvider) EnqueueOutboxProjectionRecord(ctx context.Context, a1 *storagev1.OutboxProjection, a2 storagev1.ControllerEpochFence) (*storagev1.OutboxProjection, error) {
 	var r0 *storagev1.OutboxProjection
 	injected, err := p.injector.call(ctx, p.contract, "EnqueueOutboxProjectionRecord", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.EnqueueOutboxProjectionRecord(ctx, a1, a2)
 		return err
 	})
@@ -737,6 +856,9 @@ func (p *stateProvider) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "ExpireGatewayEventWithDelivery", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.ExpireGatewayEventWithDelivery(ctx, a1)
 		return err
 	})
@@ -751,6 +873,9 @@ func (p *stateProvider) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 func (p *stateProvider) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, a1 string, a2 string, a3 string, a4 []string, a5 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "FreezeGatewayEventTaskRuntimeAllowedTools", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a4 = cloneArgument(a4)
+		}
 		r0, err = p.inner.FreezeGatewayEventTaskRuntimeAllowedTools(ctx, a1, a2, a3, a4, a5)
 		return err
 	})
@@ -868,6 +993,9 @@ func (p *stateProvider) GetGatewayEvent(ctx context.Context, a1 string, a2 strin
 func (p *stateProvider) GetGatewayEventDuplicate(ctx context.Context, a1 *storagev1.GatewayEvent, a2 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "GetGatewayEventDuplicate", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.GetGatewayEventDuplicate(ctx, a1, a2)
 		return err
 	})
@@ -972,6 +1100,9 @@ func (p *stateProvider) GetLatestExecutionEventSeq(ctx context.Context, a1 strin
 func (p *stateProvider) GetLatestExecutionEventSeqs(ctx context.Context, a1 string, a2 string, a3 []string) (map[string]int64, error) {
 	var r0 map[string]int64
 	injected, err := p.injector.call(ctx, p.contract, "GetLatestExecutionEventSeqs", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
 		r0, err = p.inner.GetLatestExecutionEventSeqs(ctx, a1, a2, a3)
 		return err
 	})
@@ -1512,6 +1643,9 @@ func (p *stateProvider) ListDroppedFindings(ctx context.Context, a1 storagev1.Dr
 func (p *stateProvider) ListExecutionEvents(ctx context.Context, a1 storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {
 	var r0 []storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "ListExecutionEvents", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ListExecutionEvents(ctx, a1)
 		return err
 	})
@@ -1540,6 +1674,9 @@ func (p *stateProvider) ListFindings(ctx context.Context, a1 storagev1.FindingFi
 func (p *stateProvider) ListGatewayDeliveries(ctx context.Context, a1 storagev1.GatewayDeliveryFilter) ([]storagev1.GatewayDelivery, error) {
 	var r0 []storagev1.GatewayDelivery
 	injected, err := p.injector.call(ctx, p.contract, "ListGatewayDeliveries", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ListGatewayDeliveries(ctx, a1)
 		return err
 	})
@@ -1553,6 +1690,9 @@ func (p *stateProvider) ListGatewayDeliveries(ctx context.Context, a1 storagev1.
 func (p *stateProvider) ListGatewayEvents(ctx context.Context, a1 storagev1.GatewayEventFilter) ([]storagev1.GatewayEvent, error) {
 	var r0 []storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "ListGatewayEvents", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ListGatewayEvents(ctx, a1)
 		return err
 	})
@@ -1608,6 +1748,9 @@ func (p *stateProvider) ListImplementationJobs(ctx context.Context, a1 storagev1
 	var r0 []storagev1.ImplementationJob
 	var r1 string
 	injected, err := p.injector.call(ctx, p.contract, "ListImplementationJobs", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.ListImplementationJobs(ctx, a1)
 		return err
 	})
@@ -1622,6 +1765,9 @@ func (p *stateProvider) ListImplementationJobs(ctx context.Context, a1 storagev1
 func (p *stateProvider) ListMemories(ctx context.Context, a1 storagev1.MemoryFilter) ([]storagev1.Memory, error) {
 	var r0 []storagev1.Memory
 	injected, err := p.injector.call(ctx, p.contract, "ListMemories", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ListMemories(ctx, a1)
 		return err
 	})
@@ -1885,6 +2031,9 @@ func (p *stateProvider) ListSessionCleanupIntents(ctx context.Context) ([]storag
 func (p *stateProvider) ListSessionCleanupTurns(ctx context.Context, a1 storagev1.SessionCleanupIntent) ([]storagev1.SessionTurn, error) {
 	var r0 []storagev1.SessionTurn
 	injected, err := p.injector.call(ctx, p.contract, "ListSessionCleanupTurns", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ListSessionCleanupTurns(ctx, a1)
 		return err
 	})
@@ -1899,6 +2048,9 @@ func (p *stateProvider) ListSessionExecutionEvents(ctx context.Context, a1 stora
 	var r0 []storagev1.SessionExecutionEvent
 	var r1 int64
 	injected, err := p.injector.call(ctx, p.contract, "ListSessionExecutionEvents", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.ListSessionExecutionEvents(ctx, a1)
 		return err
 	})
@@ -1927,6 +2079,9 @@ func (p *stateProvider) ListSessionsPage(ctx context.Context, a1 string, a2 *sto
 	var r0 []storagev1.SessionMetadata
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "ListSessionsPage", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
 		r0, r1, err = p.inner.ListSessionsPage(ctx, a1, a2, a3, a4)
 		return err
 	})
@@ -2008,6 +2163,9 @@ func (p *stateProvider) LoadTranscriptThrough(ctx context.Context, a1 string, a2
 func (p *stateProvider) LoadUsage(ctx context.Context, a1 storagev1.UsageFilter) (storagev1.UsageData, error) {
 	var r0 storagev1.UsageData
 	injected, err := p.injector.call(ctx, p.contract, "LoadUsage", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.LoadUsage(ctx, a1)
 		return err
 	})
@@ -2069,6 +2227,9 @@ func (p *stateProvider) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 func (p *stateProvider) PrepareSessionCleanup(ctx context.Context, a1 storagev1.SessionCleanupIntent) (*storagev1.SessionCleanupIntent, error) {
 	var r0 *storagev1.SessionCleanupIntent
 	injected, err := p.injector.call(ctx, p.contract, "PrepareSessionCleanup", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.PrepareSessionCleanup(ctx, a1)
 		return err
 	})
@@ -2082,6 +2243,9 @@ func (p *stateProvider) PrepareSessionCleanup(ctx context.Context, a1 storagev1.
 func (p *stateProvider) PreviewScanTaskIngestion(ctx context.Context, a1 storagev1.ScanIngestionPreview) ([]storagev1.ScanIngestionReadResult, error) {
 	var r0 []storagev1.ScanIngestionReadResult
 	injected, err := p.injector.call(ctx, p.contract, "PreviewScanTaskIngestion", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.PreviewScanTaskIngestion(ctx, a1)
 		return err
 	})
@@ -2096,6 +2260,9 @@ func (p *stateProvider) ProjectGatewayTerminal(ctx context.Context, a1 storagev1
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
 	injected, err := p.injector.call(ctx, p.contract, "ProjectGatewayTerminal", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, r1, err = p.inner.ProjectGatewayTerminal(ctx, a1)
 		return err
 	})
@@ -2143,6 +2310,9 @@ func (p *stateProvider) PruneUsage(ctx context.Context, a1 time.Time) error {
 func (p *stateProvider) PutSealedConnectorCredential(ctx context.Context, a1 storagev1.PutSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	var r0 *storagev1.SealedConnectorCredential
 	injected, err := p.injector.call(ctx, p.contract, "PutSealedConnectorCredential", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.PutSealedConnectorCredential(ctx, a1)
 		return err
 	})
@@ -2194,6 +2364,9 @@ func (p *stateProvider) ReadSessionTurnFinalizationBasis(ctx context.Context, a1
 
 func (p *stateProvider) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {
 	_, err := p.injector.call(ctx, p.contract, "RecordUsage", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.RecordUsage(ctx, a1)
 	})
 	return err
@@ -2201,6 +2374,9 @@ func (p *stateProvider) RecordUsage(ctx context.Context, a1 storagev1.UsageObser
 
 func (p *stateProvider) RecordUsagePullRequest(ctx context.Context, a1 storagev1.UsagePullRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "RecordUsagePullRequest", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.RecordUsagePullRequest(ctx, a1)
 	})
 	return err
@@ -2223,6 +2399,9 @@ func (p *stateProvider) RegisterTaskDataFence(ctx context.Context, a1 string, a2
 
 func (p *stateProvider) RegisterUsageTask(ctx context.Context, a1 storagev1.UsageTask) error {
 	_, err := p.injector.call(ctx, p.contract, "RegisterUsageTask", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.RegisterUsageTask(ctx, a1)
 	})
 	return err
@@ -2258,6 +2437,9 @@ func (p *stateProvider) ReleaseLockWithTokenUsage(ctx context.Context, a1 string
 
 func (p *stateProvider) ReleaseTaskDataFence(ctx context.Context, a1 storagev1.TaskDataFence) error {
 	_, err := p.injector.call(ctx, p.contract, "ReleaseTaskDataFence", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.ReleaseTaskDataFence(ctx, a1)
 	})
 	return err
@@ -2279,6 +2461,9 @@ func (p *stateProvider) RenewGatewayEventClaim(ctx context.Context, a1 string, a
 func (p *stateProvider) ReplaceSealedConnectorCredential(ctx context.Context, a1 storagev1.ReplaceSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	var r0 *storagev1.SealedConnectorCredential
 	injected, err := p.injector.call(ctx, p.contract, "ReplaceSealedConnectorCredential", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.ReplaceSealedConnectorCredential(ctx, a1)
 		return err
 	})
@@ -2291,6 +2476,9 @@ func (p *stateProvider) ReplaceSealedConnectorCredential(ctx context.Context, a1
 
 func (p *stateProvider) RequestScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun, a2 string) error {
 	_, err := p.injector.call(ctx, p.contract, "RequestScanRunCancellation", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.RequestScanRunCancellation(ctx, a1, a2)
 	})
 	return err
@@ -2352,6 +2540,9 @@ func (p *stateProvider) ResolveTaskDataFence(ctx context.Context, a1 string, a2 
 
 func (p *stateProvider) RetireSealedConnectorCredential(ctx context.Context, a1 storagev1.SealedRetiredConnectorCredential) error {
 	_, err := p.injector.call(ctx, p.contract, "RetireSealedConnectorCredential", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.RetireSealedConnectorCredential(ctx, a1)
 	})
 	return err
@@ -2393,6 +2584,9 @@ func (p *stateProvider) RevokeTaskJob(ctx context.Context, a1 storagev1.TaskJobI
 
 func (p *stateProvider) SavePlan(ctx context.Context, a1 string, a2 string, a3 *storagev1.PlanState) error {
 	_, err := p.injector.call(ctx, p.contract, "SavePlan", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
 		return p.inner.SavePlan(ctx, a1, a2, a3)
 	})
 	return err
@@ -2400,6 +2594,9 @@ func (p *stateProvider) SavePlan(ctx context.Context, a1 string, a2 string, a3 *
 
 func (p *stateProvider) SavePromptResultReceipt(ctx context.Context, a1 storagev1.PromptResultReceipt) error {
 	_, err := p.injector.call(ctx, p.contract, "SavePromptResultReceipt", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SavePromptResultReceipt(ctx, a1)
 	})
 	return err
@@ -2407,6 +2604,9 @@ func (p *stateProvider) SavePromptResultReceipt(ctx context.Context, a1 storagev
 
 func (p *stateProvider) SaveResult(ctx context.Context, a1 string, a2 string, a3 []uint8) error {
 	_, err := p.injector.call(ctx, p.contract, "SaveResult", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
 		return p.inner.SaveResult(ctx, a1, a2, a3)
 	})
 	return err
@@ -2414,6 +2614,9 @@ func (p *stateProvider) SaveResult(ctx context.Context, a1 string, a2 string, a3
 
 func (p *stateProvider) SaveSealedNativeSession(ctx context.Context, a1 storagev1.SaveSealedNativeSessionRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "SaveSealedNativeSession", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SaveSealedNativeSession(ctx, a1)
 	})
 	return err
@@ -2421,6 +2624,9 @@ func (p *stateProvider) SaveSealedNativeSession(ctx context.Context, a1 storagev
 
 func (p *stateProvider) SaveThreatModel(ctx context.Context, a1 *storagev1.ThreatModel) error {
 	_, err := p.injector.call(ctx, p.contract, "SaveThreatModel", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SaveThreatModel(ctx, a1)
 	})
 	return err
@@ -2428,6 +2634,9 @@ func (p *stateProvider) SaveThreatModel(ctx context.Context, a1 *storagev1.Threa
 
 func (p *stateProvider) SaveThreatModelIfVersion(ctx context.Context, a1 *storagev1.ThreatModel, a2 int64) error {
 	_, err := p.injector.call(ctx, p.contract, "SaveThreatModelIfVersion", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SaveThreatModelIfVersion(ctx, a1, a2)
 	})
 	return err
@@ -2443,6 +2652,9 @@ func (p *stateProvider) ScheduleGatewayDeliveryRetry(ctx context.Context, a1 str
 func (p *stateProvider) SearchTranscript(ctx context.Context, a1 storagev1.TranscriptSearchFilter) ([]storagev1.TranscriptSearchResult, error) {
 	var r0 []storagev1.TranscriptSearchResult
 	injected, err := p.injector.call(ctx, p.contract, "SearchTranscript", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.SearchTranscript(ctx, a1)
 		return err
 	})
@@ -2455,6 +2667,9 @@ func (p *stateProvider) SearchTranscript(ctx context.Context, a1 storagev1.Trans
 
 func (p *stateProvider) SendMessage(ctx context.Context, a1 *storagev1.Message) error {
 	_, err := p.injector.call(ctx, p.contract, "SendMessage", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SendMessage(ctx, a1)
 	})
 	return err
@@ -2477,6 +2692,9 @@ func (p *stateProvider) ShredConnectorCredential(ctx context.Context, a1 string,
 func (p *stateProvider) StageSealedNativeSessionImport(ctx context.Context, a1 storagev1.StageSealedNativeSessionImportRequest) (*storagev1.NativeSessionImportReceipt, error) {
 	var r0 *storagev1.NativeSessionImportReceipt
 	injected, err := p.injector.call(ctx, p.contract, "StageSealedNativeSessionImport", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		r0, err = p.inner.StageSealedNativeSessionImport(ctx, a1)
 		return err
 	})
@@ -2503,6 +2721,9 @@ func (p *stateProvider) TombstoneConnectorCustody(ctx context.Context, a1 string
 
 func (p *stateProvider) UpdateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateActionRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateActionRecord(ctx, a1)
 	})
 	return err
@@ -2523,6 +2744,9 @@ func (p *stateProvider) UpdateBindingKeyFingerprint(ctx context.Context, a1 stor
 
 func (p *stateProvider) UpdateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateCommandEvent", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateCommandEvent(ctx, a1)
 	})
 	return err
@@ -2537,6 +2761,9 @@ func (p *stateProvider) UpdateFindingState(ctx context.Context, a1 string, a2 st
 
 func (p *stateProvider) UpdateGitHubMutationRecord(ctx context.Context, a1 *storagev1.GitHubMutationRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateGitHubMutationRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateGitHubMutationRecord(ctx, a1)
 	})
 	return err
@@ -2544,6 +2771,9 @@ func (p *stateProvider) UpdateGitHubMutationRecord(ctx context.Context, a1 *stor
 
 func (p *stateProvider) UpdateImplementationJob(ctx context.Context, a1 *storagev1.ImplementationJob) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateImplementationJob", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateImplementationJob(ctx, a1)
 	})
 	return err
@@ -2551,6 +2781,9 @@ func (p *stateProvider) UpdateImplementationJob(ctx context.Context, a1 *storage
 
 func (p *stateProvider) UpdateMemory(ctx context.Context, a1 *storagev1.Memory) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateMemory", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateMemory(ctx, a1)
 	})
 	return err
@@ -2558,6 +2791,9 @@ func (p *stateProvider) UpdateMemory(ctx context.Context, a1 *storagev1.Memory) 
 
 func (p *stateProvider) UpdateMonitorRun(ctx context.Context, a1 *storagev1.MonitorRun) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateMonitorRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateMonitorRun(ctx, a1)
 	})
 	return err
@@ -2565,6 +2801,9 @@ func (p *stateProvider) UpdateMonitorRun(ctx context.Context, a1 *storagev1.Moni
 
 func (p *stateProvider) UpdatePatchProposal(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdatePatchProposal", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdatePatchProposal(ctx, a1)
 	})
 	return err
@@ -2572,6 +2811,9 @@ func (p *stateProvider) UpdatePatchProposal(ctx context.Context, a1 *storagev1.P
 
 func (p *stateProvider) UpdateRepairJob(ctx context.Context, a1 *storagev1.RepairJob) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateRepairJob", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateRepairJob(ctx, a1)
 	})
 	return err
@@ -2579,6 +2821,9 @@ func (p *stateProvider) UpdateRepairJob(ctx context.Context, a1 *storagev1.Repai
 
 func (p *stateProvider) UpdateReviewPublishRecord(ctx context.Context, a1 *storagev1.ReviewPublishRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateReviewPublishRecord", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateReviewPublishRecord(ctx, a1)
 	})
 	return err
@@ -2593,6 +2838,9 @@ func (p *stateProvider) UpdateReviewSliceStatus(ctx context.Context, a1 string, 
 
 func (p *stateProvider) UpdateScanRun(ctx context.Context, a1 *storagev1.ScanRun) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateScanRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateScanRun(ctx, a1)
 	})
 	return err
@@ -2614,6 +2862,9 @@ func (p *stateProvider) UpdateTokenCountsWithLock(ctx context.Context, a1 string
 
 func (p *stateProvider) UpdateWorkAction(ctx context.Context, a1 *storagev1.WorkAction) error {
 	_, err := p.injector.call(ctx, p.contract, "UpdateWorkAction", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpdateWorkAction(ctx, a1)
 	})
 	return err
@@ -2621,6 +2872,9 @@ func (p *stateProvider) UpdateWorkAction(ctx context.Context, a1 *storagev1.Work
 
 func (p *stateProvider) UpsertFinding(ctx context.Context, a1 *storagev1.Finding) error {
 	_, err := p.injector.call(ctx, p.contract, "UpsertFinding", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpsertFinding(ctx, a1)
 	})
 	return err
@@ -2628,6 +2882,9 @@ func (p *stateProvider) UpsertFinding(ctx context.Context, a1 *storagev1.Finding
 
 func (p *stateProvider) UpsertMonitorItem(ctx context.Context, a1 *storagev1.MonitorItem) error {
 	_, err := p.injector.call(ctx, p.contract, "UpsertMonitorItem", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpsertMonitorItem(ctx, a1)
 	})
 	return err
@@ -2635,6 +2892,9 @@ func (p *stateProvider) UpsertMonitorItem(ctx context.Context, a1 *storagev1.Mon
 
 func (p *stateProvider) UpsertObservedFinding(ctx context.Context, a1 *storagev1.Finding) error {
 	_, err := p.injector.call(ctx, p.contract, "UpsertObservedFinding", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpsertObservedFinding(ctx, a1)
 	})
 	return err
@@ -2642,6 +2902,9 @@ func (p *stateProvider) UpsertObservedFinding(ctx context.Context, a1 *storagev1
 
 func (p *stateProvider) UpsertRepositoryMonitor(ctx context.Context, a1 *storagev1.RepositoryMonitorRecord) error {
 	_, err := p.injector.call(ctx, p.contract, "UpsertRepositoryMonitor", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpsertRepositoryMonitor(ctx, a1)
 	})
 	return err
@@ -2649,6 +2912,9 @@ func (p *stateProvider) UpsertRepositoryMonitor(ctx context.Context, a1 *storage
 
 func (p *stateProvider) UpsertReviewSlice(ctx context.Context, a1 *storagev1.ReviewSlice) error {
 	_, err := p.injector.call(ctx, p.contract, "UpsertReviewSlice", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.UpsertReviewSlice(ctx, a1)
 	})
 	return err
@@ -2796,6 +3062,9 @@ func (p *artifactProvider) ResolveOperation(ctx context.Context, a1 storagev1.Re
 
 func (p *artifactProvider) SaveArtifact(ctx context.Context, a1 storagev1.SaveArtifactRequest) error {
 	_, err := p.injector.call(ctx, p.contract, "SaveArtifact", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.inner.SaveArtifact(ctx, a1)
 	})
 	return err
@@ -2851,6 +3120,9 @@ func (p *embeddedStore) ListArtifacts(ctx context.Context, a1 storagev1.Artifact
 
 func (p *embeddedStore) SaveArtifact(ctx context.Context, a1 storagev1.SaveArtifactRequest) error {
 	_, err := p.injector.call(ctx, storagev1.ArtifactsContract, "SaveArtifact", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
 		return p.store.SaveArtifact(ctx, a1)
 	})
 	return err
