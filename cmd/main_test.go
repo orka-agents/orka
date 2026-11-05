@@ -864,3 +864,21 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
 	}
 }
+
+func TestValidateBrowserLiveView(t *testing.T) {
+	if err := validateBrowserLiveView(true, ""); err == nil {
+		t.Fatal("live view without a browser worker image was accepted")
+	}
+	for _, tc := range []struct {
+		enabled bool
+		image   string
+	}{
+		{false, ""},
+		{false, "ghcr.io/orka-agents/orka/browser-worker:1.0.0"},
+		{true, "ghcr.io/orka-agents/orka/browser-worker:1.0.0"},
+	} {
+		if err := validateBrowserLiveView(tc.enabled, tc.image); err != nil {
+			t.Fatalf("validateBrowserLiveView(%v, %q) = %v", tc.enabled, tc.image, err)
+		}
+	}
+}

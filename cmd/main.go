@@ -144,6 +144,15 @@ func parseContainerTaskRuntimeClasses(raw string) ([]string, error) {
 	return names, nil
 }
 
+// validateBrowserLiveView requires the browser image with live view: only
+// that image's Chromium opens the DevTools port the worker screencasts.
+func validateBrowserLiveView(enabled bool, browserWorkerImage string) error {
+	if enabled && browserWorkerImage == "" {
+		return fmt.Errorf("--browser-live-view requires --browser-worker-image: only that image streams frames")
+	}
+	return nil
+}
+
 // parseBrowserWorkerImage requires a valid image reference, so the prompt never
 // sends agents to a name that cannot be pulled.
 func parseBrowserWorkerImage(raw string) (string, error) {
@@ -279,6 +288,7 @@ func main() {
 	var generalWorkerImage string
 	var containerTaskRuntimeClassesFlag string
 	var browserWorkerImage string
+	var browserLiveView bool
 	var sessionLoaderImage string
 	var aiWorkerServiceAccountName string
 	var vendorWorkerServiceAccountName string
@@ -477,6 +487,8 @@ func main() {
 		controller.DefaultGeneralWorkerImage, "Container image for general worker.")
 	flag.StringVar(&browserWorkerImage, "browser-worker-image", os.Getenv("ORKA_BROWSER_WORKER_IMAGE"),
 		"Orka browser worker image that the chat prompt points browser container tasks at. Empty leaves browser guidance out.")
+	flag.BoolVar(&browserLiveView, "browser-live-view", false,
+		"Show the dashboard a view-only screencast of running Tasks on --browser-worker-image. Frames stay in controller memory and are never stored.")
 	flag.StringVar(&containerTaskRuntimeClassesFlag, "container-task-runtime-classes",
 		os.Getenv("ORKA_CONTAINER_TASK_RUNTIME_CLASSES"),
 		"Comma-separated RuntimeClass names that create_container_task may request through execution.runtimeClassName. Empty refuses the field.")
@@ -861,6 +873,10 @@ func main() {
 		os.Exit(1)
 	}
 	if browserWorkerImage, err = parseBrowserWorkerImage(browserWorkerImage); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateBrowserLiveView(browserLiveView, browserWorkerImage); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -1622,6 +1638,7 @@ func main() {
 	jobBuilder.GeneralWorkerImage = generalWorkerImage
 	jobBuilder.ContainerTaskRuntimeClasses = containerTaskRuntimeClasses
 	jobBuilder.BrowserWorkerImage = browserWorkerImage
+	jobBuilder.BrowserLiveView = browserLiveView
 	jobBuilder.InitImage = sessionLoaderImage
 	jobBuilder.AIWorkerServiceAccountName = aiWorkerServiceAccountName
 	jobBuilder.ContainerWorkerServiceAccountName = containerWorkerServiceAccountName
@@ -2210,6 +2227,7 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		DashboardEnabled: dashboardEnabled,
+		LiveView:         api.LiveViewConfig{Enabled: browserLiveView, BrowserWorkerImage: browserWorkerImage},
 		Chat: api.ChatConfig{
 			LinkedAccounts:              chatLinkedAccounts,
 			ConnectorsEnabled:           connectorsEnabled,

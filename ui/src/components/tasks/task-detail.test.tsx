@@ -519,6 +519,47 @@ describe('TaskDetail', () => {
     await waitFor(() => expect(artifactRequests).toBe(2))
   })
 
+  it('shows the live view of a retry that started between two Task polls', async () => {
+    mockSearch.current = { tab: 'overview' }
+    let attempts = 1
+    let live = 404
+    let liveRequests = 0
+    let liveUID: string | null = null
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'shop', namespace: 'default', uid: 'uid-shop' },
+          spec: { type: 'container', image: 'browser-worker:test' },
+          status: { phase: 'Running', attempts },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/live', ({ request }) => {
+        liveRequests += 1
+        liveUID = new URL(request.url).searchParams.get('uid')
+        if (live === 404) return new HttpResponse(null, { status: 404 })
+        return new HttpResponse(new Blob(['jpeg'], { type: 'image/jpeg' }), {
+          status: 200,
+          headers: { 'Content-Type': 'image/jpeg', ETag: '"1"' },
+        })
+      }),
+    )
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    renderRaw(<QueryClientProvider client={client}><TaskDetail taskId="shop" /></QueryClientProvider>)
+    // The first attempt failed and the retry was Pending when the live view
+    // asked, though the page still showed Running: no live view.
+    await waitFor(() => expect(liveRequests).toBe(1))
+    await waitFor(() => expect(screen.queryByLabelText('Live view')).not.toBeInTheDocument())
+
+    // The retry runs; the next Task poll sees its attempt.
+    attempts = 2
+    live = 200
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['task'] })
+    })
+    expect(await screen.findByRole('img', { name: "What the Task's browser shows now" })).toBeInTheDocument()
+    expect(liveUID).toBe('uid-shop')
+  })
+
   it('shows activity as a trace or as raw events', async () => {
     const user = userEvent.setup()
     mockSearch.current = { tab: 'activity' }

@@ -49,6 +49,8 @@ type InternalHandlers struct {
 	memoryProposalStore     store.MemoryProposalStore
 	taskProvenanceProtected bool
 	connectorTools          ConnectorToolExecutionConfig
+	liveViewFrames          *LiveViewFrames
+	liveViewBrowserImage    string
 }
 
 // InternalHandlersConfig holds optional configuration for internal handlers.
@@ -65,6 +67,9 @@ type InternalHandlersConfig struct {
 	TaskProvenanceProtected bool
 	// ConnectorTools lets native workers run connector-backed tools here.
 	ConnectorTools ConnectorToolExecutionConfig
+	// LiveViewFrames, when set, accepts browser Task screencast frames.
+	LiveViewFrames       *LiveViewFrames
+	LiveViewBrowserImage string
 }
 
 // NewInternalHandlers creates a new InternalHandlers instance.
@@ -86,6 +91,8 @@ func NewInternalHandlers(rs store.ResultStore, ss store.SessionStore, ps store.P
 		h.gatewayService = configs[0].GatewayService
 		h.taskProvenanceProtected = configs[0].TaskProvenanceProtected
 		h.connectorTools = configs[0].ConnectorTools
+		h.liveViewFrames = configs[0].LiveViewFrames
+		h.liveViewBrowserImage = configs[0].LiveViewBrowserImage
 	}
 	return h
 }

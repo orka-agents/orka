@@ -127,6 +127,8 @@ type Handlers struct {
 	eventStreamHeartbeatEvery time.Duration
 	connectors                ConnectorConfig
 	completionLocks           *completionLocks
+	liveViewFrames            *LiveViewFrames
+	liveViewBrowserImage      string
 }
 
 // HandlersConfig holds configuration for creating Handlers.
@@ -154,6 +156,9 @@ type HandlersConfig struct {
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
 	Connectors                ConnectorConfig
+	// LiveViewFrames, when set, serves browser Task live view frames.
+	LiveViewFrames       *LiveViewFrames
+	LiveViewBrowserImage string
 }
 
 // NewHandlers creates a new Handlers instance
@@ -190,6 +195,8 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
 		connectors:                cfg.Connectors,
 		completionLocks:           newCompletionLocks(),
+		liveViewFrames:            cfg.LiveViewFrames,
+		liveViewBrowserImage:      cfg.LiveViewBrowserImage,
 	}
 }
 

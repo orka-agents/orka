@@ -173,6 +173,7 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts/:filename` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `GET` | `/api/v1/tasks/:id/live` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/sessions` | `core.orka.ai` | `sessions` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |

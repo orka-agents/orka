@@ -1,5 +1,6 @@
 import { isAutonomousAgent } from './agents'
 import { currentRuntimePool } from './runtimes'
+import { DEMO_BROWSER_IMAGE } from '../live-frames'
 import { digest } from '../shared'
 import { AGENTS, REPOS, type AgentKey, type PEOPLE, type RepoKey } from '../world'
 
@@ -753,6 +754,89 @@ const terraformDrift: Story = {
   outcome: { phase: 'Succeeded', result: 'terraform plan exited 0: no drift in the production workspace (4 resources refreshed).' },
 }
 
+// A browser Task on the Orka browser image: its live view is drawn by live-frames.ts.
+// The flow the demo's recorded live view came from (see live-frames.ts).
+const CHECKOUT_SMOKE_SCRIPT = [
+  'const { chromium } = require("playwright");',
+  'const SITE = "https://www.saucedemo.com";',
+  '',
+  '(async () => {',
+  '  const browser = await chromium.launch();',
+  '  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });',
+  '  const page = await context.newPage();',
+  '  const pause = (ms) => page.waitForTimeout(ms);',
+  '  const type = async (field, text) => {',
+  '    await page.getByPlaceholder(field).click();',
+  '    await page.getByPlaceholder(field).pressSequentially(text, { delay: 90 });',
+  '    await pause(300);',
+  '  };',
+  '',
+  '  // Sauce Labs\' public demo store; its login page lists this test account.',
+  '  await page.goto(SITE + "/");',
+  '  await pause(2000);',
+  '  await type("Username", "standard_user");',
+  '  await type("Password", "secret_sauce");',
+  '  await page.getByRole("button", { name: "Login" }).click();',
+  '  await page.waitForURL(SITE + "/inventory.html");',
+  '  await pause(2500);',
+  '  await page.locator(\'[data-test="product-sort-container"]\').selectOption("lohi");',
+  '  await pause(2000);',
+  '  await page.getByText("Sauce Labs Backpack").click();',
+  '  await pause(2500);',
+  '  await page.getByRole("button", { name: "Add to cart" }).click();',
+  '  await pause(1500);',
+  '  await page.getByRole("button", { name: "Back to products" }).click();',
+  '  await pause(1500);',
+  '  await page.locator(\'[data-test="add-to-cart-sauce-labs-bike-light"]\').click();',
+  '  await pause(1500);',
+  '  await page.locator(\'[data-test="shopping-cart-link"]\').click();',
+  '  await pause(2500);',
+  '  await page.getByRole("button", { name: "Checkout" }).click();',
+  '  await page.waitForURL(SITE + "/checkout-step-one.html");',
+  '  await pause(1000);',
+  '  await type("First Name", "Orka");',
+  '  await type("Last Name", "Smoke Test");',
+  '  await type("Zip/Postal Code", "98101");',
+  '  await pause(800);',
+  '  await page.getByRole("button", { name: "Continue" }).click();',
+  '  await page.waitForURL(SITE + "/checkout-step-two.html");',
+  '  await pause(1500);',
+  '',
+  '  // Stop here: this run prepares the order, it never finishes it.',
+  '  await page.getByRole("button", { name: "Finish" }).hover();',
+  '  const total = (await page.locator(\'[data-test="total-label"]\').innerText()).replace("Total: ", "");',
+  '  await page.screenshot({ path: "/tmp/artifacts/overview.png" });',
+  '  await pause(15000);',
+  '  await browser.close();',
+  '  console.log(JSON.stringify({',
+  '    version: 1, outcome: "decision_required", summary: "Checkout reached the overview page; the order was not finished.",',
+  '    data: { total, items: 2 }, artifacts: [{ filename: "overview.png", contentType: "image/png" }],',
+  '  }));',
+  '})().catch((err) => { console.error(err); process.exit(1); });',
+].join('\n')
+
+export const checkoutSmokeSpec = { image: DEMO_BROWSER_IMAGE, command: [] as string[], args: ['node', '-e', CHECKOUT_SMOKE_SCRIPT] }
+
+const checkoutSmoke = (timing?: StoryTiming): Story => ({
+  beats: [
+    ev(1, 'WorkerStarted', `Container worker started (${DEMO_BROWSER_IMAGE})`),
+    { gap: 4, logs: ['live view: streaming the browser to the dashboard'] },
+    { gap: 30, logs: ['signed in to https://www.saucedemo.com as standard_user', 'added "Sauce Labs Backpack" and "Sauce Labs Bike Light" to the cart'] },
+    { gap: 60, logs: ['filled the checkout form', 'reached the checkout overview page'] },
+    { gap: 30, logs: ['stopping before "Finish": this run prepares the order, it does not place it'] },
+    ev(2, 'WorkerCompleted', 'Container worker exited with code 0'),
+    resultSubmitted(260),
+  ],
+  outcome: {
+    phase: 'Succeeded',
+    result: structured({
+      version: 1, outcome: 'decision_required', summary: 'Checkout reached the overview page; the order was not finished.',
+      data: { total: '$43.18', items: 2 }, artifacts: [{ filename: 'overview.png', contentType: 'image/png' }],
+    }),
+  },
+  ...(timing && { timing }),
+})
+
 const migrateFailed: Story = {
   beats: [
     ev(1, 'WorkerStarted', 'Container migrate started (ghcr.io/northwind-labs/checkout-migrate:v42)'),
@@ -863,6 +947,7 @@ export const STORIES: Record<string, Story> = {
   'security-scan-checkout-t3y8u': securityScan,
   'fix-flaky-inventory-test-n8g5h': flakyFix,
   'terraform-drift-check-u5r1a': terraformDrift,
+  'storefront-checkout-smoke-g5h2w': checkoutSmoke({ kind: 'running', played: 2, remainingSec: 1200 }),
   'db-migrate-orders-v42-e2l9o': migrateFailed,
   'storefront-a11y-audit-c1z6b': a11yCancelled,
   'incident-summary-inc-512-v7s4q': inc512,
@@ -873,6 +958,7 @@ export const STORIES: Record<string, Story> = {
 export const CONTAINERS: Record<string, { image: string; command: string[]; args?: string[] }> = {
   'terraform-drift-check-u5r1a': { image: 'hashicorp/terraform:1.9.8', command: ['terraform', 'plan'], args: ['-detailed-exitcode', '-input=false', '-lock=false'] },
   'db-migrate-orders-v42-e2l9o': { image: 'ghcr.io/northwind-labs/checkout-migrate:v42', command: ['migrate', 'up'], args: ['--env', 'staging', '--to', '42'] },
+  'storefront-checkout-smoke-g5h2w': checkoutSmokeSpec,
 }
 
 /** Sessions the catalog's tasks append to, beyond the ones world.ts names on the seeds. */
@@ -946,6 +1032,8 @@ export interface AmbientTemplate {
   prompt: (n: number) => string
   story: (n: number) => Story
   createdBy: (typeof PEOPLE)[number] | 'gateway' | 'monitor' | 'schedule'
+  /** Container spec fields, such as the image, for container templates. */
+  specExtras?: { image: string; command: string[]; args?: string[] }
 }
 
 export const AMBIENT: AmbientTemplate[] = [
@@ -969,6 +1057,15 @@ export const AMBIENT: AmbientTemplate[] = [
     story: (n) => review('checkout', 1484 + n, 1291,
       [...tool('Bash', { command: 'go build ./... && go test ./internal/payments/...' }, { exitCode: 0 }, { summary: 'Bash: go build and test payments', done: 'Build and tests pass', secs: 14 })],
       { verdict: 'APPROVE', summary: 'Mechanical upgrade; the two renamed fields are updated and payment tests pass.', feedback: 'No blocking comments.', files: ['go.mod', 'go.sum', 'internal/payments/stripe.go'] }),
+  },
+  {
+    prefix: 'storefront-checkout-smoke',
+    type: 'container',
+    repo: 'storefront',
+    createdBy: 'monitor',
+    prompt: () => 'Smoke-test checkout on saucedemo.com: sign in with its public test account, put the backpack and bike light in the cart, fill in checkout, and stop on the overview page without finishing the order.',
+    story: () => checkoutSmoke(),
+    specExtras: checkoutSmokeSpec,
   },
   {
     prefix: 'terraform-drift-check',

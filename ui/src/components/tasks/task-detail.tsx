@@ -19,6 +19,7 @@ import { TaskSchedulePanel } from './task-schedule-panel'
 import { TaskOverview } from './task-overview'
 import { TaskActivity } from './task-activity'
 import { TaskArtifactsPanel } from './task-artifacts-panel'
+import { TaskLiveView } from './task-live-view'
 import { TaskStatusDetails } from './task-status-details'
 import { TaskYaml } from './task-yaml'
 import { ViewSwitch } from './view-switch'
@@ -418,7 +419,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsList>
         </div>
 
-        <TabsContent value="overview">
+        <TabsContent value="overview" className="space-y-4">
+          {task.spec.type === 'container' && (
+            // Keyed by identity and attempt, so another Task, one recreated
+            // under the same name, or a retry never inherits this one's frame or
+            // polling state. A retry's Pending gap can fall between two Task
+            // polls, and the live view's 404 then must not outlast the attempt.
+            <TaskLiveView
+              key={`${task.metadata.namespace}/${task.metadata.name}/${task.metadata.uid}/${task.status?.attempts ?? 0}`}
+              taskId={taskId}
+              uid={task.metadata.uid}
+              running={taskRunning}
+              paused={!following}
+            />
+          )}
           <TaskOverview
             task={task}
             events={taskEvents}

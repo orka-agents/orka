@@ -65,6 +65,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks/:id/result` | GET | Get task result |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
 | `/api/v1/tasks/:id/artifacts/:filename` | GET | Download a task artifact |
+| `/api/v1/tasks/:id/live` | GET | Latest live view frame of a running browser Task: `image/jpeg`, `204` before the first frame, `404` when the Task has no live view or, with `?uid=`, is not the Task with that UID |
 | `/api/v1/tasks/:id/plan` | GET | Get task plan |
 | `/api/v1/tasks/:id/children` | GET | Get child tasks |
 
