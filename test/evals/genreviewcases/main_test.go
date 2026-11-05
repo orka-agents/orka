@@ -344,15 +344,19 @@ func TestRunRejectsCredentialURLsBeforeGit(t *testing.T) {
 
 func TestGitIgnoresCallerConfiguration(t *testing.T) {
 	env := gitEnv([]string{
-		"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_DIR=/x", "HOME=/h",
+		"PATH=/bin", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_DIR=/x",
+		"HOME=/h", "CURL_HOME=/c", "XDG_CONFIG_HOME=/x",
 	})
 	joined := strings.Join(env, "\n")
-	for _, dropped := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_DIR"} {
+	// HOME holds ~/.netrc, which the HTTPS transport would use.
+	dropped := []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_DIR", "HOME=/h", "CURL_HOME", "XDG_CONFIG_HOME"}
+	for _, dropped := range dropped {
 		if strings.Contains(joined, dropped) {
 			t.Fatalf("%s survived: %v", dropped, env)
 		}
 	}
-	for _, kept := range []string{"PATH=/bin", "HOME=/h", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1"} {
+	kept := []string{"PATH=/bin", "HOME=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1"}
+	for _, kept := range kept {
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("%s missing: %v", kept, env)
 		}

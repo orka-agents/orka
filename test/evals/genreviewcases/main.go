@@ -379,15 +379,20 @@ func git(dir string, args ...string) (string, error) {
 }
 
 // gitEnv drops every inherited GIT_* variable and points Git's global and
-// system configuration at nothing.
+// system configuration at nothing. HOME points at nothing too, so the HTTPS
+// transport can't read the caller's ~/.netrc: a clone that needs credentials
+// fails here as it would in a credential-free trial.
 func gitEnv(environ []string) []string {
-	env := make([]string, 0, len(environ)+4)
+	env := make([]string, 0, len(environ)+5)
 	for _, kv := range environ {
-		if !strings.HasPrefix(kv, "GIT_") {
-			env = append(env, kv)
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "CURL_HOME" || name == "XDG_CONFIG_HOME" {
+			continue
 		}
+		env = append(env, kv)
 	}
-	return append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
+	return append(env, "HOME="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
 }
 
 func gitSubcommand(args []string) string {
