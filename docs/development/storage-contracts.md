@@ -1198,7 +1198,12 @@ Reads and administrative methods reach the provider unchanged.
   the client sends it unchanged and assigns no identity or time, so a caller
   that supplies a write envelope must stamp identity and time before
   computing its digest, and the client refuses a request that lacks them
-  with `ErrValidation`. No production caller supplies its own envelope.
+  with `ErrValidation`. The same holds for what the client would redact,
+  bound or otherwise prepare (memory and proposal text, gateway text and
+  metadata, threat models, usage names and execution events): a caller that
+  supplies a write envelope must send an already redacted and truncated
+  request, the client refuses one it would change, and one it would not
+  change is sent as it is. No production caller supplies its own envelope.
 - **Retries.** After `ErrUnavailable` (nothing committed) or
   `ErrOutcomeUnknown` (it may have), the client retries the same envelope with
   the same arguments, with backoff, for at most thirty seconds after that

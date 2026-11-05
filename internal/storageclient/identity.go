@@ -26,11 +26,26 @@ import (
 // client sends that request unchanged and assigns nothing. Such a caller
 // stamps the identities and times itself before computing the digest; a
 // request that lacks one is refused with ErrValidation rather than stored
-// without it.
+// without it. The same holds for what the client would redact, bound or
+// otherwise prepare (protect.go, gateway.go): a caller-owned request that
+// preparation would change is refused, and one it would not change is sent
+// as it is.
 
 // callerEnvelopeStampRule is why a caller-owned request that lacks a stamp is
 // refused.
 const callerEnvelopeStampRule = "a caller that supplies a write envelope must stamp identity and time before computing its digest"
+
+// callerEnvelopeProtectRule is why a caller-owned request that the client
+// would redact, bound or otherwise prepare is refused. The client sends a
+// caller-owned request unchanged, so it must already be in the form the
+// client would send.
+const callerEnvelopeProtectRule = "a caller that supplies a write envelope must send an already redacted and truncated request"
+
+// unprotected refuses a caller-owned request whose field the client would
+// change before storing it.
+func unprotected(method, field string) error {
+	return store.ValidationErrorf("%s: %s would be changed before storage: %s", method, field, callerEnvelopeProtectRule)
+}
 
 // callerOwnsEnvelope reports whether ctx already carries a write envelope, so
 // the client must not change the request it covers.

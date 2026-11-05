@@ -2,6 +2,7 @@ package storageclient
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -54,12 +55,66 @@ func sanitizeGatewayDelivery(delivery *store.GatewayDelivery) {
 	delivery.Metadata = sanitizeGatewayMetadata(delivery.Metadata)
 }
 
+// The protect helpers below sanitize gateway text as the functions above do.
+// A caller that supplies its own write envelope sends its request unchanged
+// (see identity.go): they return its value as it is when sanitizing would not
+// change it, and refuse it with ErrValidation when sanitizing would.
+
+func protectGatewayText(ctx context.Context, method, field, value string, limit int) (string, error) {
+	sanitized := sanitizeGatewayText(value, limit)
+	if sanitized != value && callerOwnsEnvelope(ctx) {
+		return "", unprotected(method, field)
+	}
+	return sanitized, nil
+}
+
+func protectGatewayMetadata(ctx context.Context, method, field string, metadata map[string]string) (map[string]string, error) {
+	sanitized := sanitizeGatewayMetadata(metadata)
+	if !callerOwnsEnvelope(ctx) {
+		return sanitized, nil
+	}
+	if !maps.Equal(sanitized, metadata) {
+		return nil, unprotected(method, field)
+	}
+	return metadata, nil
+}
+
+// protectGatewayDelivery sanitizes delivery in place, or leaves a
+// caller-owned delivery as it is and refuses one sanitizing would change.
+func protectGatewayDelivery(ctx context.Context, method string, delivery *store.GatewayDelivery) error {
+	if delivery == nil {
+		return nil
+	}
+	if !callerOwnsEnvelope(ctx) {
+		sanitizeGatewayDelivery(delivery)
+		return nil
+	}
+	if _, err := protectGatewayText(ctx, method, "the delivery's last error", delivery.LastError, gatewayReasonBytes); err != nil {
+		return err
+	}
+	if _, err := protectGatewayText(ctx, method, "the delivery's provider message ID", delivery.ProviderMessageID, gatewayIdentityBytes); err != nil {
+		return err
+	}
+	_, err := protectGatewayMetadata(ctx, method, "the delivery's metadata", delivery.Metadata)
+	return err
+}
+
 // AdmitGatewayEvent sanitizes the event's state message, sender display name
 // and metadata before admission.
 func (c *Client) AdmitGatewayEvent(ctx context.Context, admission store.GatewayEventAdmission) (*store.GatewayEvent, bool, error) {
-	admission.Event.StateMessage = sanitizeGatewayText(admission.Event.StateMessage, gatewayReasonBytes)
-	admission.Event.SenderDisplayName = sanitizeGatewayText(admission.Event.SenderDisplayName, gatewayIdentityBytes)
-	admission.Event.Metadata = sanitizeGatewayMetadata(admission.Event.Metadata)
+	const method = "AdmitGatewayEvent"
+	var err error
+	if admission.Event.StateMessage, err = protectGatewayText(ctx, method, "the event's state message",
+		admission.Event.StateMessage, gatewayReasonBytes); err != nil {
+		return nil, false, err
+	}
+	if admission.Event.SenderDisplayName, err = protectGatewayText(ctx, method, "the event's sender display name",
+		admission.Event.SenderDisplayName, gatewayIdentityBytes); err != nil {
+		return nil, false, err
+	}
+	if admission.Event.Metadata, err = protectGatewayMetadata(ctx, method, "the event's metadata", admission.Event.Metadata); err != nil {
+		return nil, false, err
+	}
 	return c.StateProvider.AdmitGatewayEvent(ctx, admission)
 }
 
@@ -78,13 +133,21 @@ func (c *Client) GetGatewayEventDuplicate(ctx context.Context, candidate *store.
 
 // RetryGatewayEvent sanitizes the retry reason.
 func (c *Client) RetryGatewayEvent(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	return c.StateProvider.RetryGatewayEvent(ctx, namespace, id, owner, sanitizeGatewayText(reason, gatewayReasonBytes), nextAttemptAt)
+	reason, err := protectGatewayText(ctx, "RetryGatewayEvent", "the reason", reason, gatewayReasonBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.RetryGatewayEvent(ctx, namespace, id, owner, reason, nextAttemptAt)
 }
 
 // ExpireGatewayEvent sanitizes the expiry reason, which also becomes the
 // visible transcript error.
 func (c *Client) ExpireGatewayEvent(ctx context.Context, namespace, id, owner, reason string, now time.Time) error {
-	return c.StateProvider.ExpireGatewayEvent(ctx, namespace, id, owner, sanitizeGatewayText(reason, gatewayReasonBytes), now)
+	reason, err := protectGatewayText(ctx, "ExpireGatewayEvent", "the reason", reason, gatewayReasonBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.ExpireGatewayEvent(ctx, namespace, id, owner, reason, now)
 }
 
 // ExpireGatewayEventWithDelivery sanitizes the expiry reason and the error
@@ -92,14 +155,24 @@ func (c *Client) ExpireGatewayEvent(ctx context.Context, namespace, id, owner, r
 func (c *Client) ExpireGatewayEventWithDelivery(
 	ctx context.Context, projection store.GatewayExpiryProjection,
 ) (*store.GatewayDelivery, bool, error) {
-	projection.Reason = sanitizeGatewayText(projection.Reason, gatewayReasonBytes)
-	sanitizeGatewayDelivery(&projection.Delivery)
+	const method = "ExpireGatewayEventWithDelivery"
+	var err error
+	if projection.Reason, err = protectGatewayText(ctx, method, "the reason", projection.Reason, gatewayReasonBytes); err != nil {
+		return nil, false, err
+	}
+	if err := protectGatewayDelivery(ctx, method, &projection.Delivery); err != nil {
+		return nil, false, err
+	}
 	return c.StateProvider.ExpireGatewayEventWithDelivery(ctx, projection)
 }
 
 // MarkExpiredGatewayEventDeadLettered sanitizes the dead-letter reason.
 func (c *Client) MarkExpiredGatewayEventDeadLettered(ctx context.Context, namespace, id, reason string, now time.Time) error {
-	return c.StateProvider.MarkExpiredGatewayEventDeadLettered(ctx, namespace, id, sanitizeGatewayText(reason, gatewayReasonBytes), now)
+	reason, err := protectGatewayText(ctx, "MarkExpiredGatewayEventDeadLettered", "the reason", reason, gatewayReasonBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.MarkExpiredGatewayEventDeadLettered(ctx, namespace, id, reason, now)
 }
 
 // ProjectGatewayTerminal sanitizes the final delivery and the metadata of the
@@ -107,34 +180,54 @@ func (c *Client) MarkExpiredGatewayEventDeadLettered(ctx context.Context, namesp
 func (c *Client) ProjectGatewayTerminal(
 	ctx context.Context, projection store.GatewayTerminalProjection,
 ) (*store.GatewayDelivery, bool, error) {
-	sanitizeGatewayDelivery(&projection.Delivery)
-	projection.Message.Metadata = sanitizeGatewayMetadata(projection.Message.Metadata)
+	const method = "ProjectGatewayTerminal"
+	if err := protectGatewayDelivery(ctx, method, &projection.Delivery); err != nil {
+		return nil, false, err
+	}
+	var err error
+	if projection.Message.Metadata, err = protectGatewayMetadata(ctx, method, "the message's metadata",
+		projection.Message.Metadata); err != nil {
+		return nil, false, err
+	}
 	return c.StateProvider.ProjectGatewayTerminal(ctx, projection)
 }
 
 // CreateGatewayDelivery sanitizes the delivery in place, so the caller's
 // record matches the stored one.
 func (c *Client) CreateGatewayDelivery(ctx context.Context, delivery *store.GatewayDelivery) (*store.GatewayDelivery, bool, error) {
-	sanitizeGatewayDelivery(delivery)
+	if err := protectGatewayDelivery(ctx, "CreateGatewayDelivery", delivery); err != nil {
+		return nil, false, err
+	}
 	return c.StateProvider.CreateGatewayDelivery(ctx, delivery)
 }
 
 // MarkGatewayDeliveryDelivered sanitizes the provider message ID.
 func (c *Client) MarkGatewayDeliveryDelivered(ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time) error {
-	return c.StateProvider.MarkGatewayDeliveryDelivered(ctx, namespace, id, owner,
-		sanitizeGatewayText(providerMessageID, gatewayIdentityBytes), now)
+	providerMessageID, err := protectGatewayText(ctx, "MarkGatewayDeliveryDelivered", "the provider message ID", providerMessageID, gatewayIdentityBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.MarkGatewayDeliveryDelivered(ctx, namespace, id, owner, providerMessageID, now)
 }
 
 // ScheduleGatewayDeliveryRetry sanitizes the retry reason.
 func (c *Client) ScheduleGatewayDeliveryRetry(ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time) error {
-	return c.StateProvider.ScheduleGatewayDeliveryRetry(ctx, namespace, id, owner, sanitizeGatewayText(reason, gatewayReasonBytes), nextAttemptAt)
+	reason, err := protectGatewayText(ctx, "ScheduleGatewayDeliveryRetry", "the reason", reason, gatewayReasonBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.ScheduleGatewayDeliveryRetry(ctx, namespace, id, owner, reason, nextAttemptAt)
 }
 
 // MarkGatewayDeliveryTerminal sanitizes the terminal reason.
 func (c *Client) MarkGatewayDeliveryTerminal(
 	ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time,
 ) error {
-	return c.StateProvider.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, sanitizeGatewayText(reason, gatewayReasonBytes), now)
+	reason, err := protectGatewayText(ctx, "MarkGatewayDeliveryTerminal", "the reason", reason, gatewayReasonBytes)
+	if err != nil {
+		return err
+	}
+	return c.StateProvider.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, reason, now)
 }
 
 // EnqueueGatewayMessage redacts the message text before the provider stores
@@ -146,7 +239,11 @@ func (c *Client) EnqueueGatewayMessage(ctx context.Context, request store.Gatewa
 	if len(request.Text) > protocol.MaxInterimTextBytes || !utf8.ValidString(request.Text) {
 		return nil, false, store.ValidationErrorf("gateway message text is invalid")
 	}
-	request.Text = protocol.SanitizeMessage(request.Text, 0)
+	sanitized := protocol.SanitizeMessage(request.Text, 0)
+	if sanitized != request.Text && callerOwnsEnvelope(ctx) {
+		return nil, false, unprotected("EnqueueGatewayMessage", "the message text")
+	}
+	request.Text = sanitized
 	if len(request.Text) > protocol.MaxInterimTextBytes || !utf8.ValidString(request.Text) {
 		return nil, false, store.ValidationErrorf("gateway message text is invalid after sanitization")
 	}
