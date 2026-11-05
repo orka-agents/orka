@@ -849,3 +849,42 @@ func TestResolveProviderReferencesNeedsARelayAgentHostTemplate(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateProviderSpecForwardingTools(t *testing.T) {
+	forwarding := func(mutate func(*corev1alpha1.ConnectorTool)) *corev1alpha1.ConnectorProvider {
+		provider := validProvider()
+		tool := corev1alpha1.ConnectorTool{
+			Name: "azure_arm", Class: corev1alpha1.ConnectorToolClassRead, Source: corev1alpha1.ConnectorToolSourceHTTP,
+			Description: "Azure Resource Manager",
+			HTTP: &corev1alpha1.ConnectorHTTPTool{
+				URL: "https://management.azure.com", Method: "GET",
+				Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+			},
+		}
+		if mutate != nil {
+			mutate(&tool)
+		}
+		provider.Spec.Tools = append(provider.Spec.Tools, tool)
+		return provider
+	}
+	if issue := ValidateProviderSpec(forwarding(nil), nil); issue != nil {
+		t.Fatalf("valid forwarding tool refused: %v", issue)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*corev1alpha1.ConnectorTool)
+		want   string
+	}{
+		"write":    {func(tool *corev1alpha1.ConnectorTool) { tool.Class = corev1alpha1.ConnectorToolClassWrite }, "must be class read"},
+		"path":     {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.URL = "https://management.azure.com/subscriptions" }, "origin with no path"},
+		"headers":  {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Headers = map[string]string{"Accept": "x"} }, "sets no headers"},
+		"protocol": {func(tool *corev1alpha1.ConnectorTool) { tool.HTTP.Forward.Protocol = "Other" }, "unsupported forwarding protocol"},
+		"parameters": {func(tool *corev1alpha1.ConnectorTool) {
+			tool.Parameters = &apiextensionsv1.JSON{Raw: []byte(`{"type":"object"}`)}
+		}, "declares no parameters"},
+	} {
+		issue := ValidateProviderSpec(forwarding(tc.mutate), nil)
+		if issue == nil || !strings.Contains(issue.Message, tc.want) {
+			t.Errorf("%s: issue = %v, want %q", name, issue, tc.want)
+		}
+	}
+}

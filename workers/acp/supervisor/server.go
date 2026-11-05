@@ -29,6 +29,7 @@ type Server struct {
 	mux                    *http.ServeMux
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
+	azureAuthority         azureGatewayAuthority
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
@@ -1234,6 +1235,11 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	azureEnvironment, err := s.attachAzureGateway(mcpProxy, request.MCPConfiguration, paths.Home)
+	if err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("Azure gateway setup", err)
+	}
+	maps.Copy(envValues, azureEnvironment)
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot

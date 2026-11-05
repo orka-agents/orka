@@ -498,6 +498,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
+		if descriptor.Forward != nil {
+			executor.AllowForwarding()
+		}
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}

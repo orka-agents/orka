@@ -149,6 +149,11 @@ type ToolBinding struct {
 	URL    string
 	Method string
 	Class  corev1alpha1.AgentRuntimeBrokeredToolClass
+	// Forward is the forwarding protocol of a forwarding Tool, or empty. A
+	// forwarding Tool matches only a forwarding declaration of the same
+	// protocol; its request method comes from the call, so the declared
+	// method is not compared.
+	Forward corev1alpha1.HTTPForwardProtocol
 	// Builtin marks an Orka built-in tool the controller executes itself.
 	// It matches only a Builtin declaration of the same name and class; a
 	// built-in carries no destination, headers, schema, or timeout to compare.
@@ -414,7 +419,14 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if toolMethod == "" {
 			toolMethod = http.MethodPost
 		}
-		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || toolMethod != method {
+		declaredForward := corev1alpha1.HTTPForwardProtocol("")
+		if candidate.HTTP.Forward != nil {
+			declaredForward = candidate.HTTP.Forward.Protocol
+		}
+		if declaredForward != tool.Forward {
+			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the forwarding declared by provider %q", name, provider.Name)
+		}
+		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || (tool.Forward == "" && toolMethod != method) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
 		}
 		if string(candidate.Class) != string(tool.Class) {

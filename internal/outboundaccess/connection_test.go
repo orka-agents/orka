@@ -571,3 +571,29 @@ func TestKubernetesResolverConnectionModeRefusesUnboundDestinationsFirst(t *test
 		t.Fatalf("credential source calls = %d, want none", source.calls)
 	}
 }
+
+func TestDeclaredConnectorToolMatchesForwarding(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{
+			URL: "https://management.azure.com", Method: "POST",
+			Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+		},
+	}}}}
+	binding := ToolBinding{
+		Name: "azure_arm", URL: "https://management.azure.com", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead,
+		Forward: corev1alpha1.HTTPForwardProtocolAzureResourceManager,
+	}
+	if _, err := DeclaredConnectorTool(provider, binding); err != nil {
+		t.Fatalf("a forwarding Tool must match its forwarding declaration: %v", err)
+	}
+	plain := binding
+	plain.Forward = ""
+	if _, err := DeclaredConnectorTool(provider, plain); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a plain Tool matched a forwarding declaration: %v", err)
+	}
+	provider.Spec.Tools[0].HTTP.Forward = nil
+	if _, err := DeclaredConnectorTool(provider, binding); err == nil || !strings.Contains(err.Error(), "forwarding") {
+		t.Fatalf("a forwarding Tool matched a plain declaration: %v", err)
+	}
+}

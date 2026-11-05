@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -745,9 +747,37 @@ func validateTools(provider *corev1alpha1.ConnectorProvider, knownBuiltin Builti
 			if issue := validateHTTPTool(tool.Name, *tool.HTTP); issue != nil {
 				return issue
 			}
+			if issue := validateForwardingTool(tool); issue != nil {
+				return issue
+			}
 		default:
 			return invalid(fmt.Sprintf("tool %q source must be Builtin or HTTP", tool.Name))
 		}
+	}
+	return nil
+}
+
+// validateForwardingTool keeps a forwarding tool to reads on one origin: its
+// arguments are the runtime's fixed request shape, so it declares none.
+func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
+	forward := tool.HTTP.Forward
+	if forward == nil {
+		return nil
+	}
+	if forward.Protocol != corev1alpha1.HTTPForwardProtocolAzureResourceManager {
+		return invalid(fmt.Sprintf("HTTP tool %q names an unsupported forwarding protocol", tool.Name))
+	}
+	if tool.Class != corev1alpha1.ConnectorToolClassRead {
+		return invalid(fmt.Sprintf("forwarding tool %q must be class read", tool.Name))
+	}
+	if tool.Parameters != nil && len(tool.Parameters.Raw) > 0 {
+		return invalid(fmt.Sprintf("forwarding tool %q declares no parameters", tool.Name))
+	}
+	if len(tool.HTTP.Headers) > 0 {
+		return invalid(fmt.Sprintf("forwarding tool %q sets no headers", tool.Name))
+	}
+	if origin, err := harnessv2.ForwardOrigin(tool.HTTP.URL); err != nil || strings.TrimSuffix(tool.HTTP.URL, "/") != origin {
+		return invalid(fmt.Sprintf("forwarding tool %q url must be a lowercase https origin with no path", tool.Name))
 	}
 	return nil
 }

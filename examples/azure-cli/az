@@ -1,0 +1,25 @@
+#!/bin/sh
+# Orka Azure CLI toolbox wrapper.
+#
+# In an Orka runtime that forwards Azure Resource Manager, the supervisor sets
+# IDENTITY_ENDPOINT and preselects its loopback cloud in AZURE_CONFIG_DIR. The
+# first az command of a session signs in through that endpoint, so the agent
+# never runs `az login` and never holds an Azure credential.
+set -u
+python=/opt/azure-cli/venv/bin/python
+# The Azure SDK has string escapes newer Pythons warn about; -I ignores
+# PYTHONWARNINGS, so the filter is passed on the command line.
+pyflags="-I -W ignore::SyntaxWarning"
+config_dir=${AZURE_CONFIG_DIR:-${HOME:-/tmp}/.azure}
+marker=$config_dir/.orka-signed-in
+case "${1:-}" in
+  login|logout|cloud|version|--version|-h|--help|help|"") ;;
+  *)
+    if [ -n "${IDENTITY_ENDPOINT:-}" ] && [ ! -e "$marker" ]; then
+      if "$python" $pyflags -m azure.cli login --identity --allow-no-subscriptions --output none >/dev/null 2>&1; then
+        : > "$marker"
+      fi
+    fi
+    ;;
+esac
+exec "$python" $pyflags -m azure.cli "$@"

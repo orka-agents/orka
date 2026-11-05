@@ -51,6 +51,9 @@ type MCPToolDescriptor struct {
 	Source           MCPToolSource   `json:"source"`
 	Effect           MCPToolEffect   `json:"effect"`
 	DefinitionDigest string          `json:"definitionDigest,omitempty"`
+	// Forward marks a forwarding Tool, which the runtime serves to a
+	// command-line client and never lists to the model.
+	Forward *MCPToolForward `json:"forward,omitempty"`
 }
 
 func (d MCPToolDescriptor) Validate() error {
@@ -93,6 +96,19 @@ func (d MCPToolDescriptor) Validate() error {
 		}
 	} else if len(bytes.TrimSpace(d.InputSchema)) != 0 {
 		return fmt.Errorf("provider-native tool %q must not carry an MCP input schema", d.Name)
+	}
+	if d.Forward != nil {
+		if d.Source != MCPToolSourceBrokeredCustom || d.Effect != MCPToolEffectReadOnly {
+			return fmt.Errorf("forwarding tool %q must be a read-only custom tool", d.Name)
+		}
+		if err := d.Forward.Validate(); err != nil {
+			return fmt.Errorf("forwarding tool %q: %w", d.Name, err)
+		}
+		got, gotErr := CanonicalJSON(d.InputSchema)
+		want, wantErr := CanonicalJSON(MCPForwardInputSchema)
+		if gotErr != nil || wantErr != nil || !bytes.Equal(got, want) {
+			return fmt.Errorf("forwarding tool %q must carry the fixed forwarding input schema", d.Name)
+		}
 	}
 	return nil
 }
@@ -373,6 +389,11 @@ func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, _ time.Time) (MCPTo
 	}
 	if c.Approval != nil {
 		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q must not carry runtime-supplied approval evidence", c.ToolName)
+	}
+	if descriptor.Forward != nil {
+		if _, err := DecodeMCPForwardRequest(c.Arguments); err != nil {
+			return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q: %w", c.ToolName, err)
+		}
 	}
 	return descriptor, nil
 }

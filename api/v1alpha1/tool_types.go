@@ -20,6 +20,10 @@ import (
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !(k.lowerAscii() in ['content-length','connection','transfer-encoding','upgrade','idempotency-key','last-event-id']))",message="remote MCP forbids protocol header overrides"
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().startsWith('mcp-') && !k.lowerAscii().startsWith('proxy-'))",message="remote MCP forbids MCP session and proxy header overrides"
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.remote) || !has(self.http) || !has(self.http.headers) || self.http.headers.all(k, !k.lowerAscii().matches('token|secret|password|credential|authorization|api[-_]?key|subscription[-_]?key'))",message="remote MCP credentials must use authSecretRef, not custom headers"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || !has(self.http.forward) || (has(self.brokeredToolClass) && self.brokeredToolClass == 'read')",message="a forwarding tool must declare brokeredToolClass read"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || !has(self.http.forward) || has(self.http.outboundAccessPolicyRef)",message="a forwarding tool takes its credential from an outbound access policy"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || !has(self.http.forward) || (!has(self.mcp) && !has(self.http.authSecretRef) && (!has(self.http.headers) || size(self.http.headers) == 0) && (!has(self.http.authInject) || self.http.authInject == 'header') && (!has(self.http.authBodyKey) || self.http.authBodyKey.size() == 0))",message="a forwarding tool sets no MCP backend, auth Secret, or headers"
+// +kubebuilder:validation:XValidation:rule="!has(self.http) || !has(self.http.forward) || (has(self.http.url) && self.http.url.matches('^https://[^/?#@{}]+/?$'))",message="a forwarding tool url must be an https origin with no path"
 type ToolSpec struct {
 	// Description is the tool description shown to the LLM
 	// +kubebuilder:validation:Required
@@ -97,6 +101,33 @@ type HTTPExecution struct {
 	// Only used when AuthInject=body
 	// +optional
 	AuthBodyKey string `json:"authBodyKey,omitempty"`
+
+	// Forward makes this Tool the route a command-line client in an ACP
+	// runtime uses, instead of a function the model calls. The runtime serves
+	// the client's protocol on loopback and sends each request through the
+	// broker to this Tool's origin, where the outbound access policy supplies
+	// the credential. The client never holds it. Only read requests (GET and
+	// HEAD) are forwarded, and the Tool is not listed to the model.
+	// +optional
+	Forward *HTTPForward `json:"forward,omitempty"`
+}
+
+// HTTPForwardProtocol names a client protocol an ACP runtime can serve for a
+// forwarding Tool.
+// +kubebuilder:validation:Enum=AzureResourceManager
+type HTTPForwardProtocol string
+
+const (
+	// HTTPForwardProtocolAzureResourceManager serves the Azure CLI (az): the
+	// runtime presents itself as an Azure cloud whose Resource Manager endpoint
+	// and managed identity are local, and forwards Resource Manager requests.
+	HTTPForwardProtocolAzureResourceManager HTTPForwardProtocol = "AzureResourceManager"
+)
+
+// HTTPForward configures a forwarding Tool or connector tool.
+type HTTPForward struct {
+	// Protocol is the client protocol the runtime serves.
+	Protocol HTTPForwardProtocol `json:"protocol"`
 }
 
 // LocalObjectReference selects an object in the same namespace.

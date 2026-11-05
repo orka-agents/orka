@@ -22,6 +22,7 @@ const sidebars = {
           items: [
             'guides/agents-skills-and-tools',
             'guides/toolboxes',
+            'guides/azure-cli',
             'concepts/remote-mcp',
             'guides/multi-agent-coordination',
             'guides/autonomous-tasks',

@@ -1,0 +1,69 @@
+# The Agent uses az as the person who asked: each person links their own
+# Azure account once with `orka connect azure`, and Azure RBAC on that person
+# decides what az can see. Use this file or as-agent.yaml, not both: both
+# declare the Tool azurearm.
+apiVersion: core.orka.ai/v1alpha1
+kind: ConnectorProvider
+metadata:
+  namespace: team-a
+  name: azure
+spec:
+  displayName: Azure
+  oauth:
+    authorizeURL: https://login.microsoftonline.com/<tenant ID>/oauth2/v2.0/authorize
+    tokenURL: https://login.microsoftonline.com/<tenant ID>/oauth2/v2.0/token
+    clientID: <app registration appId>
+    clientSecretRef: {name: azure-connector, key: client-secret}
+    clientAuthentication: ClientSecretPost
+    scopes:
+      read: ["https://management.azure.com/user_impersonation"]
+  tools:
+    - name: azurearm
+      class: read
+      source: HTTP
+      description: Azure Resource Manager reads for the Azure CLI.
+      http:
+        url: https://management.azure.com
+        forward:
+          protocol: AzureResourceManager
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  namespace: team-a
+  name: azure-as-person
+spec:
+  connection:
+    providerRef: {name: azure}
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Tool
+metadata:
+  namespace: team-a
+  name: azurearm
+spec:
+  description: Azure Resource Manager reads for the Azure CLI.
+  brokeredToolClass: read
+  http:
+    url: https://management.azure.com
+    forward:
+      protocol: AzureResourceManager
+    outboundAccessPolicyRef:
+      name: azure-as-person
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  namespace: team-a
+  name: azure-helper
+spec:
+  model:
+    name: <model>
+  runtime:
+    type: codex
+    contractVersion: orka.harness.v2
+    toolboxes:
+      - image: registry.example.com/tools/azure-cli@sha256:<digest>
+        mountPath: /opt/azure-cli
+        pathEntries: [bin]
+    defaultAllowedTools: [Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, azurearm]

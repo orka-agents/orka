@@ -112,6 +112,7 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 | [0034](0034-agent-runtime-ceilings.md) | Agent runtime ceilings bound what Tasks may request | Accepted |
 | [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
+| [0040](0040-forwarded-cli-requests.md) | Let command-line clients reach services through forwarding Tools, starting with the Azure CLI | Proposed |
 
 ### Agent hosts and the Agent Host Protocol
 
