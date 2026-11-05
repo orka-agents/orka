@@ -315,7 +315,9 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 	for i, location := range reference.Locations {
 		file, ok := byName[location.File]
 		if !ok {
-			return fmt.Errorf("reference location %d names %s, which the change does not touch", i, location.File)
+			// Never echo the path: it is not validated yet and may carry a
+			// credential. The index identifies the location.
+			return fmt.Errorf("reference location %d names a file the change does not touch", i)
 		}
 		added, err := addedLines(file.Patch)
 		if err != nil {
@@ -330,8 +332,8 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 			}
 		}
 		if !covered {
-			return fmt.Errorf("reference location %d (%s:%d-%d) covers no added line",
-				i, location.File, location.StartLine, location.EndLine)
+			return fmt.Errorf("reference location %d (lines %d-%d) covers no added line",
+				i, location.StartLine, location.EndLine)
 		}
 	}
 	return nil

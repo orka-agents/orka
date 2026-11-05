@@ -446,3 +446,20 @@ func TestGenerateIgnoresTextconvFilters(t *testing.T) {
 		t.Fatalf("patch = %q", patch)
 	}
 }
+
+func TestCheckReferenceNeverEchoesTheFile(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("b", 36)
+	files := []evals.ReviewCaseFile{{Filename: "a.go", Status: "modified", Patch: "@@ -1 +1 @@\n-a\n+b"}}
+	for _, location := range []evals.ReferenceLocation{
+		{File: secret + "/a.go", StartLine: 1, EndLine: 1},
+		{File: "a.go", StartLine: 5, EndLine: 6},
+	} {
+		reference := evals.CaseReference{
+			Verdict: evals.ReferenceVerdictNotPassed, Locations: []evals.ReferenceLocation{location},
+		}
+		err := checkReference(reference, files)
+		if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "a.go") {
+			t.Fatalf("checkReference(%s): %v", location.File, err)
+		}
+	}
+}
