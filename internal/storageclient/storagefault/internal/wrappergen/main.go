@@ -226,10 +226,27 @@ func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) 
 		resultList = "(" + strings.Join(resultTypes, ", ") + ")"
 	}
 
+	var mutable []string
+	for i := 1; i < signature.NumIn(); i++ {
+		if mutableArgument(signature.In(i)) {
+			mutable = append(mutable, fmt.Sprintf("a%d", i))
+		}
+	}
 	call := fmt.Sprintf("p.%s.%s(%s)", w.inner, method.Name, strings.Join(args, ", "))
 	fmt.Fprintf(out, "\nfunc (p *%s) %s(%s) %s {\n", w.typeName, method.Name, strings.Join(params, ", "), resultList)
+	isolate := func() {
+		if len(mutable) == 0 {
+			return
+		}
+		out.WriteString("\t\tif responseWillBeLost(ctx) {\n")
+		for _, name := range mutable {
+			fmt.Fprintf(out, "\t\t\t%s = cloneArgument(%s)\n", name, name)
+		}
+		out.WriteString("\t\t}\n")
+	}
 	if len(results) == 0 {
 		fmt.Fprintf(out, "\t_, err := p.injector.call(ctx, %s, %q, func(ctx context.Context) error {\n", w.contract(method.Name), method.Name)
+		isolate()
 		fmt.Fprintf(out, "\t\treturn %s\n\t})\n\treturn err\n}\n", call)
 		return nil
 	}
@@ -237,6 +254,7 @@ func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) 
 		fmt.Fprintf(out, "\tvar %s %s\n", result, resultTypes[i])
 	}
 	fmt.Fprintf(out, "\tinjected, err := p.injector.call(ctx, %s, %q, func(ctx context.Context) (err error) {\n", w.contract(method.Name), method.Name)
+	isolate()
 	fmt.Fprintf(out, "\t\t%s, err = %s\n\t\treturn err\n\t})\n", strings.Join(results, ", "), call)
 	// An injected outcome replaces the provider's, including any results the
 	// provider returned before its response was lost.
@@ -249,6 +267,24 @@ func (g *generator) method(out *bytes.Buffer, w wrapper, method reflect.Method) 
 	fmt.Fprintf(out, "\t\treturn %s, err\n\t}\n", strings.Join(zeros, ", "))
 	fmt.Fprintf(out, "\treturn %s, err\n}\n", strings.Join(results, ", "))
 	return nil
+}
+
+// mutableArgument includes references nested in value requests. Unexported
+// representation fields (notably time.Time) are not provider output surfaces.
+func mutableArgument(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
+		return true
+	case reflect.Array:
+		return mutableArgument(t.Elem())
+	case reflect.Struct:
+		for field := range t.Fields() {
+			if field.IsExported() && mutableArgument(field.Type) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // use records an import of the package named packageName and returns its
