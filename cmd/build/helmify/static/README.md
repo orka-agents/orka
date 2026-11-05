@@ -68,7 +68,7 @@ therefore fail rather than using a more privileged fallback.
 This also sets **controller-wide** context-token authorization to `enforce`,
 including for callers other than workers. Explicit `off` or `audit` conflicts
 fail chart rendering. Existing context-token callers must supply the scopes
-and transaction context their operations require; an upgrade can now return403
+and transaction context their operations require; an upgrade can now return HTTP 403
 for requests that previously relied on disabled or audit-only authorization.
 
 **This is not a workload sandbox or a complete credential-isolation claim.**
