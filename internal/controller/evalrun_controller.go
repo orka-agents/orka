@@ -574,6 +574,13 @@ func (r *EvalRunReconciler) validateEvalTrialTask(run *corev1alpha1.EvalRun, mon
 		!reflect.DeepEqual(repositoryMonitorComparableReviewTaskSpec(task.Spec), repositoryMonitorComparableReviewTaskSpec(expected.Spec)) {
 		return fmt.Errorf("trial Task %s/%s spec does not match the rendered trial", task.Namespace, task.Name)
 	}
+	// The run creates every trial after it froze the snapshot, and the
+	// snapshot invalidates the run if the image, model or prompt changes
+	// after that. A Task the API server created earlier may have run on any
+	// configuration, even with the same Agent generation.
+	if start := run.Status.StartTime; start != nil && task.CreationTimestamp.Before(start) {
+		return fmt.Errorf("trial Task %s/%s was created before the run froze its snapshot", task.Namespace, task.Name)
+	}
 	return validateEvalTrialBinding(run, task)
 }
 

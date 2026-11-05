@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
@@ -638,6 +639,42 @@ func TestEvalRunRejectsTrialBoundToAnotherReviewer(t *testing.T) {
 				t.Fatalf("phase = %q records = %d", got.Status.Phase, len(records))
 			}
 		})
+	}
+}
+
+// A Task with exactly the rendered trial spec, created before the run froze
+// its snapshot, may have run on another image, model or prompt; the run fails
+// instead of grading it.
+func TestEvalRunRejectsTrialCreatedBeforeTheSnapshot(t *testing.T) {
+	run := evalTestRun(1, 1)
+	caseLine := evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, caseLine)...)
+	cases, err := evals.ParseCases([]byte(caseLine), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := env.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: "monitor"}, monitor); err != nil {
+		t.Fatal(err)
+	}
+	early, err := buildEvalReviewTrialTask(env.run(), monitor, cases[0], 1, metav1.Duration{Duration: 20 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(env.run(), early, env.reconciler.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	started := env.now
+	env.now = started.Add(-time.Hour)
+	if err := env.client.Create(context.Background(), early); err != nil {
+		t.Fatal(err)
+	}
+	env.now = started
+	env.start()
+	env.reconcile()
+	got := env.run()
+	if got.Status.Phase != corev1alpha1.EvalRunPhaseFailed || evalCompletedCondition(got).Reason != evalRunReasonTrialTaskConflict {
+		t.Fatalf("phase = %q condition = %+v", got.Status.Phase, evalCompletedCondition(got))
 	}
 }
 
