@@ -33,6 +33,20 @@ func openSQLite(t *testing.T) *sqlite.Store {
 	return backend
 }
 
+func TestNewEmbeddedClientRejectsMissingBackend(t *testing.T) {
+	for name, backend := range map[string]storageclient.EmbeddedStore{
+		"nil":       nil,
+		"typed nil": (*sqlite.Store)(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, faults, err := storagefault.NewEmbeddedClient(backend)
+			require.ErrorIs(t, err, storagev1.ErrValidation)
+			require.Nil(t, client)
+			require.Nil(t, faults)
+		})
+	}
+}
+
 func newClient(t *testing.T) (*storageclient.Client, *storagefault.Injector) {
 	t.Helper()
 	client, faults, err := storagefault.NewEmbeddedClient(openSQLite(t))
