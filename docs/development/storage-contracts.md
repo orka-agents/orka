@@ -595,8 +595,18 @@ without one until the storage client does.
   acknowledged writes in a switch. `Describe` reports an `Incarnation` that
   changes when the database may have restarted or switched. After a change,
   Orka validates the dataset again and checks that the store still holds the
-  current epoch. After a switch of an `async-replicated` provider, it stops
-  all work until an operator acknowledges the switch.
+  current epoch. After a potentially lossy switch, an `async-replicated`
+  provider itself refuses new writes and missing-receipt resolution with
+  `ErrNotReady`, recording no abort, from the moment the new incarnation can
+  serve requests until an operator explicitly acknowledges that incarnation
+  after recovering or holding the affected work. The provider enforces this
+  gate atomically with write commits and missing-receipt checks; an Orka
+  `Describe` check, even immediately before resolution, cannot close the race.
+  A retained receipt may still return its known outcome. Acknowledgement
+  permits new work but does not prove that a pre-switch operation aborted:
+  a missing pre-switch outcome remains unknown unless independently recovered,
+  even after the gate opens. Orka stops affected work until recovery and never
+  repeats it as a new operation merely because the switch was acknowledged.
 - **Detection and recovery holds.** Orka detects missing or conflicting
   records at three levels. At the dataset level, a store's epoch is below its
   Kubernetes acknowledgement, or a periodic write watermark is below the value
