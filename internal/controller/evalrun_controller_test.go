@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -682,7 +683,11 @@ func TestEvalRunRejectsTrialCreatedBeforeTheSnapshot(t *testing.T) {
 // messaging tools, so a trial carrying one fails the run.
 func TestEvalRunRejectsTrialMarkedAsDelegatedChild(t *testing.T) {
 	for name, mark := range map[string]func(*corev1alpha1.Task){
-		"label": func(task *corev1alpha1.Task) { task.Labels[labels.LabelParentTask] = "coordinator" },
+		"label":       func(task *corev1alpha1.Task) { task.Labels[labels.LabelParentTask] = "coordinator" },
+		"empty label": func(task *corev1alpha1.Task) { task.Labels[labels.LabelParentTask] = "" },
+		"empty annotation": func(task *corev1alpha1.Task) {
+			metav1.SetMetaDataAnnotation(&task.ObjectMeta, labels.AnnotationParentTaskName, "")
+		},
 		"annotation": func(task *corev1alpha1.Task) {
 			metav1.SetMetaDataAnnotation(&task.ObjectMeta, labels.AnnotationParentTaskName, "coordinator")
 		},
@@ -1151,5 +1156,36 @@ func TestEvalRunRecordsSkippedReviewAsSkipped(t *testing.T) {
 		if grade.Grader == string(corev1alpha1.EvalGraderContract) && grade.Status != string(evals.GradeFail) {
 			t.Fatalf("contract grade = %+v; a skipped review did not review anything", grade)
 		}
+	}
+}
+
+// The grader sees a finding's path as the review wrote it, so a padded path
+// does not localize the defect.
+func TestEvalReviewOutcomeKeepsFindingPathsVerbatim(t *testing.T) {
+	run := evalTestRun(1, 1)
+	caseLine := evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed)
+	objects := evalTestObjects(run, caseLine)
+	monitor := objects[2].(*corev1alpha1.RepositoryMonitor)
+	cases, err := evals.ParseCases([]byte(caseLine), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := buildEvalReviewTrialTask(run, monitor, cases[0], 1, metav1.Duration{Duration: 20 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := bytes.Replace(evalTestReviewResult("needs_changes"), []byte(`"file":"pkg/x.go"`), []byte(`"file":"pkg/x.go "`), 1)
+	outcome := evalReviewOutcomeFromResult(raw, monitor, cases[0], task)
+	if outcome == nil || outcome.Result == nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	for _, finding := range outcome.Result.Findings {
+		if finding.File == "pkg/x.go" {
+			t.Fatalf("a padded path reached the grader trimmed: %+v", outcome.Result.Findings)
+		}
+	}
+	grade := evals.LocalizationGrader{Tolerance: evals.LocalizationLineTolerance}.Grade(cases[0], evals.TrialOutcome{RepositoryMonitorReview: outcome})
+	if grade.Status != evals.GradeFail {
+		t.Fatalf("localization = %+v, want a fail for a padded path", grade)
 	}
 }

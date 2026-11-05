@@ -227,7 +227,9 @@ func evalReviewOutcomeFromResult(raw []byte, monitor *corev1alpha1.RepositoryMon
 		TestsStatus:   strings.TrimSpace(review.Tests.Status),
 	}
 	for _, finding := range review.Findings {
-		result.Findings = append(result.Findings, evals.ReviewFinding{File: strings.TrimSpace(finding.File), Line: finding.Line})
+		// The path stays as the review wrote it: localization matches paths
+		// exactly, as production's changed-lines check does.
+		result.Findings = append(result.Findings, evals.ReviewFinding{File: finding.File, Line: finding.Line})
 	}
 	outcome := &evals.ReviewTrialOutcome{Result: result, Verdict: verdict, GateReason: gateReason}
 	if verdict == repositoryMonitorVerdictSkipped {
