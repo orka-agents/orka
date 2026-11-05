@@ -17,6 +17,7 @@ import (
 	"github.com/orka-agents/orka/internal/agentidentity"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -535,6 +536,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
 	setAgentIdentityCondition(agent, now)
+	observedClaim := agent.Status.IdentityClaim.DeepCopy()
 	agent.Status.IdentityClaim = claim.DeepCopy()
 
 	activeCount := activeTasks // capture for closure
@@ -548,6 +550,12 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
 		setAgentIdentityCondition(agent, now)
+		// The claim was decided from observedClaim; never write it over a
+		// claim that changed since.
+		if !apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, observedClaim) &&
+			!apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, claim) {
+			return fmt.Errorf("identity claim changed while it was being decided")
+		}
 		agent.Status.IdentityClaim = claim.DeepCopy()
 		return r.Status().Update(ctx, agent)
 	}); err != nil {

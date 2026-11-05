@@ -244,3 +244,17 @@ func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing
 		})
 	}
 }
+
+func TestIdentityClaimIsDecidedFromTheLiveAgentNotTheCache(t *testing.T) {
+	now := time.Now()
+	released := identityBoundTestAgent("released", now)
+	released.Spec.Identity = nil // live: no identity and no claim
+	newHolder := claimedAgent(identityBoundTestAgent("new-holder", now))
+	staleCopy := claimedAgent(released.DeepCopy()) // the cache still shows the old claim
+	inFlight := boundTask("in-flight", released, corev1alpha1.TaskPhaseRunning)
+	r := setupAgentReconciler(released, newHolder, inFlight)
+	claim, err := r.reconcileIdentityClaim(context.Background(), staleCopy)
+	if err != nil || claim != nil {
+		t.Fatalf("a stale cached claim must not be kept: claim=%v err=%v", claim, err)
+	}
+}

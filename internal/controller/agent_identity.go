@@ -42,8 +42,18 @@ func (r *AgentReconciler) validateAgentIdentity(_ context.Context, agent *corev1
 // at a time and read live state, so two Agents cannot claim at once.
 func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.AgentIdentityClaim, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
-	claim := agent.Status.IdentityClaim.DeepCopy()
-	issuer, id, declared := agent.IdentityRef()
+	// Start from the live claim: a cached copy can still show a claim this
+	// Agent already released to another Agent.
+	live := &corev1alpha1.Agent{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live); err != nil {
+		return agent.Status.IdentityClaim.DeepCopy(), fmt.Errorf("read the Agent's live identity claim: %w", err)
+	}
+	if live.UID != agent.UID {
+		return nil, fmt.Errorf("the Agent was replaced while its identity claim was being decided")
+	}
+	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
+	claim := live.Status.IdentityClaim.DeepCopy()
+	issuer, id, declared := live.IdentityRef()
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
 		bound, err := activeIdentityTasks(ctx, reader, agent, *claim)
 		if err != nil {
