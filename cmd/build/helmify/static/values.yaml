@@ -504,6 +504,13 @@ workers:
       tag: "0.0.0-dev"
       digest: ""
 
+  # Container Tasks that agents create with create_container_task.
+  containerTasks:
+    # RuntimeClasses an agent may request through execution.runtimeClassName,
+    # for example [gvisor, kata-qemu]. Each must exist in the cluster. Empty
+    # refuses the field.
+    runtimeClasses: []
+
   # Session transcript fetcher. Requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep.
   # Only SHA256 digest references are accepted by the controller.
   sessionLoader:

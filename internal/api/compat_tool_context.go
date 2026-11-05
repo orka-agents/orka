@@ -49,23 +49,24 @@ var anthropicCompatProxyToolContextProfile = compatProxyToolContextProfile{
 }
 
 type compatProxyToolContextConfig struct {
-	Client                    client.Client
-	AuthorizationReader       client.Reader
-	KubeClient                kubernetes.Interface
-	Namespace                 string
-	Provider                  ProviderResolutionInfo
-	WatchNamespace            string
-	EnforceNamespaceIsolation bool
-	ResultStore               store.ResultStore
-	GatewayEventStore         store.GatewayEventStore
-	GenerateTaskName          func() string
-	Profile                   compatProxyToolContextProfile
-	AuthContext               *ContextToken
-	AuthorizationConfig       ContextTokenAuthorizationConfig
-	UserInfo                  *UserInfo
-	LinkedAccounts            LinkedAccountsFactory
-	ConnectorsEnabled         bool
-	DashboardEnabled          bool
+	Client                      client.Client
+	AuthorizationReader         client.Reader
+	KubeClient                  kubernetes.Interface
+	Namespace                   string
+	Provider                    ProviderResolutionInfo
+	WatchNamespace              string
+	EnforceNamespaceIsolation   bool
+	ResultStore                 store.ResultStore
+	GatewayEventStore           store.GatewayEventStore
+	GenerateTaskName            func() string
+	Profile                     compatProxyToolContextProfile
+	AuthContext                 *ContextToken
+	AuthorizationConfig         ContextTokenAuthorizationConfig
+	UserInfo                    *UserInfo
+	LinkedAccounts              LinkedAccountsFactory
+	ConnectorsEnabled           bool
+	DashboardEnabled            bool
+	ContainerTaskRuntimeClasses []string
 }
 
 func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolContext {
@@ -73,24 +74,25 @@ func newCompatProxyToolContext(cfg compatProxyToolContextConfig) *tools.ToolCont
 	authorizationReader := uncachedReaderOr(cfg.AuthorizationReader, cfg.Client)
 	requester := requesterFromUserInfo(cfg.UserInfo)
 	toolCtx := &tools.ToolContext{
-		Client:                    cfg.Client,
-		PolicyReader:              authorizationReader,
-		Requester:                 requester,
-		LinkedAccounts:            scopedLinkedAccounts(cfg.LinkedAccounts, cfg.Namespace, requester, cfg.UserInfo, cfg.AuthorizationConfig),
-		AuthorizeConnectorRead:    connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig, cfg.ConnectorsEnabled),
-		DashboardEnabled:          cfg.DashboardEnabled,
-		CreatedTasks:              tools.NewCreatedTasks(),
-		KubeClient:                cfg.KubeClient,
-		Namespace:                 cfg.Namespace,
-		Tenant:                    cfg.Namespace,
-		Provider:                  cfg.Provider.Name,
-		ProviderNamespace:         cfg.Provider.Namespace,
-		ProviderType:              cfg.Provider.Type,
-		WatchNamespace:            cfg.WatchNamespace,
-		EnforceNamespaceIsolation: cfg.EnforceNamespaceIsolation,
-		ResultStore:               cfg.ResultStore,
-		GenerateTaskName:          cfg.GenerateTaskName,
-		TaskLabels:                func() map[string]string { return map[string]string{"orka.ai/source": cfg.Profile.SourceLabel} },
+		Client:                      cfg.Client,
+		PolicyReader:                authorizationReader,
+		Requester:                   requester,
+		LinkedAccounts:              scopedLinkedAccounts(cfg.LinkedAccounts, cfg.Namespace, requester, cfg.UserInfo, cfg.AuthorizationConfig),
+		AuthorizeConnectorRead:      connectorReadToolAuthorizer(cfg.UserInfo, cfg.AuthorizationConfig, cfg.ConnectorsEnabled),
+		DashboardEnabled:            cfg.DashboardEnabled,
+		ContainerTaskRuntimeClasses: cfg.ContainerTaskRuntimeClasses,
+		CreatedTasks:                tools.NewCreatedTasks(),
+		KubeClient:                  cfg.KubeClient,
+		Namespace:                   cfg.Namespace,
+		Tenant:                      cfg.Namespace,
+		Provider:                    cfg.Provider.Name,
+		ProviderNamespace:           cfg.Provider.Namespace,
+		ProviderType:                cfg.Provider.Type,
+		WatchNamespace:              cfg.WatchNamespace,
+		EnforceNamespaceIsolation:   cfg.EnforceNamespaceIsolation,
+		ResultStore:                 cfg.ResultStore,
+		GenerateTaskName:            cfg.GenerateTaskName,
+		TaskLabels:                  func() map[string]string { return map[string]string{"orka.ai/source": cfg.Profile.SourceLabel} },
 		AuthorizeAgentReference: func(ctx context.Context, agent *corev1alpha1.Agent) *tools.ChatToolError {
 			authorize := func(_ context.Context, agent *corev1alpha1.Agent) error {
 				return authorizeContextTokenAgentTaskReference(cfg.AuthContext, cfg.AuthorizationConfig, agent.Namespace, agent.Name)

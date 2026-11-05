@@ -88,6 +88,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.substrate.mcpToolsEnabled` | `false` | Enable in-tree native Substrate MCP Tool actors and actor pools. |
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
+| `workers.containerTasks.runtimeClasses` | `[]` | RuntimeClasses agents may request for container Tasks through `create_container_task`; renders `--container-task-runtime-classes`. |
 | `service.type` | `ClusterIP` | Service type |
 | `storage.bindings.state` / `storage.bindings.artifacts` | `sqlite` / `sqlite` | Backend for each storage contract: `sqlite` or a name in `storage.adapters`. See [Storage bindings](#storage-bindings). |
 | `storage.adapters` | `{}` | Storage adapters in the release namespace, keyed by name. |
@@ -495,6 +496,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-copilot-runtime-image` / `ORKA_ACP_COPILOT_RUNTIME_IMAGE` | unset | GitHub Copilot runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
+| `--container-task-runtime-classes` / `ORKA_CONTAINER_TASK_RUNTIME_CLASSES` | `""` | Comma-separated RuntimeClass names that `create_container_task` may set as `execution.runtimeClassName`. Empty refuses the field. Invalid names fail startup. |
 | `--session-loader-image` | Digest-pinned BusyBox 1.37 multi-platform index | Session transcript fetcher image. Requires a SHA256 digest and BusyBox-compatible `sh`, `cat`, `wget`, `rm`, `mv`, and `sleep`; tag-only references fail startup. Helm: `workers.sessionLoader.image.repository` and `.digest`. No registry resolution is performed. |
 | `--store-backend` | `sqlite` | Payload/read-model backend when `--storage-config` is not set. Only `sqlite` is accepted, and it cannot be combined with `--storage-config`. ACP control authority remains Kubernetes CRDs and Leases. |
 | `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file, used by every storage contract bound to `sqlite`. |

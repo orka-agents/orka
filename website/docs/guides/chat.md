@@ -139,7 +139,7 @@ Send `Accept: application/json` for a blocking JSON response:
 | Tool | Description |
 |------|-------------|
 | `create_ai_task` | Create an AI/LLM-powered task |
-| `create_container_task` | Create a container task for shell commands |
+| `create_container_task` | Create a container task for shell commands, with optional literal `env`, `resources`, `retryPolicy`, and an operator-allowed `execution.runtimeClassName`; see [the parameters](../reference/built-in-tools.md#create_container_task) |
 | `create_agent_task` | Create an ACP Task using an existing Agent configured with a built-in runtime or a ready external-v2 `runtimeRef`. |
 | `check_task_progress` | Get task phase/status conditions |
 | `fetch_task_output` | Get completed task result (truncated to 2K chars) |

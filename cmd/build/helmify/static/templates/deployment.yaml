@@ -372,6 +372,9 @@ spec:
             {{- end }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
+            {{- with dig "containerTasks" "runtimeClasses" list .Values.workers }}
+            - {{ printf "--container-task-runtime-classes=%s" (join "," .) | quote }}
+            {{- end }}
             {{- with .Values.workers.sessionLoader }}
             {{- $_ := required "workers.sessionLoader.image.digest is required" .image.digest }}
             - --session-loader-image={{ include "orka.imageRef" .image }}

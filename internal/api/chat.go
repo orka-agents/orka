@@ -74,18 +74,21 @@ type ChatConfig struct {
 	ConnectorsEnabled bool
 	// DashboardEnabled mirrors --dashboard-enabled, so linked-account
 	// guidance names the dashboard page only when this controller serves it.
-	DashboardEnabled       bool
-	Provider               string
-	Model                  string
-	MaxIterations          int
-	MaxDuration            time.Duration
-	ToolTimeout            time.Duration
-	MaxConcurrent          int
-	MaxTasksPerTurn        int
-	MaxSessionSize         int // bytes
-	MaxPrematureEndRetries int // re-prompts when the model emits text without the GOAL_STATE sentinel
-	RuntimeAvailability    ACPRuntimeAvailability
-	ExecutionMode          executionmode.Mode
+	DashboardEnabled bool
+	// ContainerTaskRuntimeClasses mirrors --container-task-runtime-classes:
+	// the RuntimeClasses create_container_task may request.
+	ContainerTaskRuntimeClasses []string
+	Provider                    string
+	Model                       string
+	MaxIterations               int
+	MaxDuration                 time.Duration
+	ToolTimeout                 time.Duration
+	MaxConcurrent               int
+	MaxTasksPerTurn             int
+	MaxSessionSize              int // bytes
+	MaxPrematureEndRetries      int // re-prompts when the model emits text without the GOAL_STATE sentinel
+	RuntimeAvailability         ACPRuntimeAvailability
+	ExecutionMode               executionmode.Mode
 	// LinkedAccounts builds the linked-account resolver for one signed-in
 	// person's chat turn; nil leaves built-in GitHub tools on their own
 	// credentials. The controller wires it when connectors are enabled.
@@ -473,6 +476,7 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 	executor.linkedAccounts = scopedLinkedAccounts(ch.config.LinkedAccounts, namespace, executor.requester, userInfo, ch.contextTokenAuthorization)
 	executor.authorizeConnectorRead = connectorReadToolAuthorizer(userInfo, ch.contextTokenAuthorization, ch.config.ConnectorsEnabled)
 	executor.dashboardEnabled = ch.config.DashboardEnabled
+	executor.containerTaskRuntimeClasses = ch.config.ContainerTaskRuntimeClasses
 	executor.createdTasks = chattools.NewCreatedTasks()
 	executor.SetExecutionMode(ch.config.ExecutionMode)
 	executor.provider = providerInfo.Name
