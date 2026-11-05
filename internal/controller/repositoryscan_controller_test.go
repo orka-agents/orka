@@ -38,6 +38,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	storepkg "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/workers/common"
@@ -6289,11 +6290,7 @@ func setupControllerSQLiteStore(t *testing.T) *storageclient.Client {
 	t.Cleanup(func() {
 		_ = db.Close()
 	})
-	storage, err := storageclient.NewEmbedded(sqlitestore.NewStore(db, ":memory:"))
-	if err != nil {
-		t.Fatalf("storageclient.NewEmbedded() error = %v", err)
-	}
-	return storage
+	return storageclienttest.NewEmbedded(t, sqlitestore.NewStore(db, ":memory:"))
 }
 func TestShouldAutoValidateFindingHonorsModeAndThresholds(t *testing.T) {
 	reconciler := &RepositoryScanReconciler{}

@@ -57,7 +57,7 @@ func withInternalTaskData(c fiber.Ctx, backing any, taskName string, authorize, 
 	}
 	if err != nil {
 		if errors.Is(err, store.ErrOutcomeUnknown) {
-			return fiber.NewError(fiber.StatusConflict, "storage write outcome is unknown; do not retry the request")
+			return temporaryStorageHTTPError(err)
 		}
 		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 			return fiberErr
@@ -67,6 +67,9 @@ func withInternalTaskData(c fiber.Ctx, backing any, taskName string, authorize, 
 		}
 		if errors.Is(err, store.ErrTaskJobRevoked) {
 			return fiber.NewError(fiber.StatusForbidden, "task Job is no longer active")
+		}
+		if temporary := temporaryStorageHTTPError(err); temporary != nil {
+			return temporary
 		}
 		logf.FromContext(ctx).Error(err, "internal task data access failed", "namespace", c.Params("namespace"))
 		return fiber.NewError(fiber.StatusInternalServerError, "task data access failed")

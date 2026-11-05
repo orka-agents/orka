@@ -477,7 +477,7 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
 			f.allowRoute(t, "POST "+path)
-			before := f.changes(t)
+			before, beforeReceipts := f.changes(t), f.receipts(t)
 			requestBody := `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 			if path == "/openai/v1/responses" {
 				requestBody = `{"model":"protected/fixture","store":false,"input":"hello"}`
@@ -500,7 +500,9 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 				require.Len(t, messages, 2)
 				require.Equal(t, "hello", messages[0].Content)
 			} else {
-				require.Equal(t, before+2, f.changes(t), "only usage start and completion should be retained")
+				receipts := f.receipts(t) - beforeReceipts
+				require.Equal(t, int64(2), receipts, "each retained write stores its operation receipt")
+				require.Equal(t, before+2+receipts, f.changes(t), "only usage start and completion should be retained")
 			}
 		})
 	}

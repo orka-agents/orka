@@ -11,7 +11,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
 
-	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -50,8 +50,7 @@ func TestTaskDataCommittedMessageLostReplyDoesNotReauthorize(t *testing.T) {
 			provider := &committedMessageLostReplyProvider{Store: backend, afterCommit: func() error {
 				return cleanup.DeleteResult(t.Context(), "tenant", "unrelated-task")
 			}}
-			appStorage, err := storageclient.NewEmbedded(provider)
-			require.NoError(t, err)
+			appStorage := storageclienttest.NewEmbedded(t, provider)
 			authorizations := 0
 			app := fiber.New()
 			app.Post("/namespaces/:namespace/messages", func(c fiber.Ctx) error {

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,9 +12,41 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
 )
+
+// priorReleaseStore stores the sealed writes of a storage client without the
+// client's write envelope, as the earlier releases whose layout a fixture
+// loads stored them. Those releases wrote without envelopes, and the store
+// refuses an envelope for a layout it cannot serve.
+type priorReleaseStore struct{ *Store }
+
+func (s priorReleaseStore) CreateSealedAgentExecutionSnapshot(_ context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
+	return s.Store.CreateSealedAgentExecutionSnapshot(context.Background(), snapshot)
+}
+
+func (s priorReleaseStore) PutSealedConnectorCredential(
+	_ context.Context, request storagev1.PutSealedConnectorCredentialRequest,
+) (*storagev1.SealedConnectorCredential, error) {
+	return s.Store.PutSealedConnectorCredential(context.Background(), request)
+}
+
+func (s priorReleaseStore) StageSealedNativeSessionImport(
+	_ context.Context, request storagev1.StageSealedNativeSessionImportRequest,
+) (*storagev1.NativeSessionImportReceipt, error) {
+	return s.Store.StageSealedNativeSessionImport(context.Background(), request)
+}
+
+// priorReleaseFence is the fence the client puts on the envelopes that
+// priorReleaseStore drops.
+type priorReleaseFence struct{}
+
+func (priorReleaseFence) WriteFence(context.Context, string) (string, storagev1.ControllerEpochFence, error) {
+	return "prior-release", storagev1.ControllerEpochFence{Name: storagev1.DefaultControllerEpochName, Epoch: 1, HolderID: "prior-release"}, nil
+}
 
 func loadPriorSchemaFixture(t *testing.T) string {
 	t.Helper()
@@ -22,7 +55,9 @@ func loadPriorSchemaFixture(t *testing.T) string {
 	s := NewStore(db, path)
 	// The storage client seals with the record formats earlier releases used;
 	// the pre-metadata layout has no bootstrap history to complete.
-	c := orkaClient(t, s)
+	prior := priorReleaseStore{Store: s}
+	c, err := storageclient.New(storageclient.Options{State: prior, Artifacts: prior, Embedded: prior, Fences: priorReleaseFence{}})
+	require.NoError(t, err)
 	require.NoError(t, c.ActivateSnapshotKey(t.Context(), testSnapshotKey))
 	body := []byte(`{"prompt":"retained encrypted prompt"}`)
 	require.NoError(t, c.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{
@@ -30,7 +65,7 @@ func loadPriorSchemaFixture(t *testing.T) string {
 	}))
 	require.NoError(t, c.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
 	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
-	_, err := c.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
+	_, err = c.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	return path

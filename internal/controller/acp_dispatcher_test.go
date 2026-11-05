@@ -44,6 +44,7 @@ import (
 	"github.com/orka-agents/orka/internal/tasktrace"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -1859,7 +1860,7 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

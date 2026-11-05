@@ -660,6 +660,9 @@ func (h *InternalHandlers) GetMessages(c fiber.Ctx) error {
 		var err error
 		messages, err = h.messageStore.GetMessages(ctx, namespace, taskName, parentTask, markRead)
 		if err != nil {
+			if temporary := temporaryStorageHTTPError(err); temporary != nil {
+				return temporary
+			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get messages: %v", err))
 		}
 		return nil

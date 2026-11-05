@@ -336,11 +336,12 @@ type turnFixture struct {
 func newTurnFixture(t *testing.T, provider storagev1.StateProvider, name string) turnFixture {
 	t.Helper()
 	ctx := t.Context()
+	// A turn step commits only under the dataset's current controller epoch.
+	// It is set before the first write, which carries it.
+	fence := syncEpoch(t, provider, 1, "controller")
 	require.NoError(t, provider.CreateSession(ctx, &storagev1.SessionRecord{Namespace: "tenant", Name: name, SessionType: "task"}))
 	uid := name + "-uid"
 	require.NoError(t, provider.BindSessionCleanupIdentity(ctx, "tenant", name, uid))
-	// A turn step commits only under the dataset's current controller epoch.
-	fence := syncEpoch(t, provider, 1, "controller")
 	request := storagev1.CreateSessionTurnRecordRequest{
 		Namespace: "tenant", SessionName: name, Fence: fence,
 		Turn: storagev1.SessionTurn{

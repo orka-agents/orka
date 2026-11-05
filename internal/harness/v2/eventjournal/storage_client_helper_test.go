@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -12,9 +13,6 @@ import (
 // production wires the journal. The client derives usage from journal events.
 func orkaEventStore(t *testing.T, db *sql.DB) *storageclient.Client {
 	t.Helper()
-	client, err := storageclient.NewEmbedded(sqlite.NewStore(db, "usage"))
-	if err != nil {
-		t.Fatalf("NewEmbedded: %v", err)
-	}
+	client := storageclienttest.NewEmbedded(t, sqlite.NewStore(db, "usage"))
 	return client
 }

@@ -130,6 +130,9 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 			if errors.Is(err, store.ErrValidation) {
 				return fiber.NewError(fiber.StatusBadRequest, err.Error())
 			}
+			if temporary := temporaryStorageHTTPError(err); temporary != nil {
+				return temporary
+			}
 			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append execution event: %v", err))
 		}
 		return nil

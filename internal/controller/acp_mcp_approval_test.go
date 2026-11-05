@@ -25,6 +25,7 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storesqlite "github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -129,11 +130,7 @@ func newMCPApprovalFixture(t *testing.T) *mcpApprovalFixture {
 // approval event store through; projections need its fenced task data access.
 func approvalStorageClient(t *testing.T, db *storesqlite.Store) *storageclient.Client {
 	t.Helper()
-	storage, err := storageclient.NewEmbedded(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return storage
+	return storageclienttest.NewEmbedded(t, db)
 }
 
 func (f *mcpApprovalFixture) start(request harnessv2.MCPBrokerCallRequest) <-chan *httptest.ResponseRecorder {

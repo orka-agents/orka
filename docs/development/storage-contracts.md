@@ -235,8 +235,9 @@ the observable parts.
   provider or the dataset is replaced. Neither commits anything.
 - **Write envelope.** `WriteEnvelope{DatasetID, Fence, OperationID,
   RequestDigest, IssuedAt, Sequence}` travels in the context
-  (`WithWriteEnvelope`, `WriteEnvelopeFrom`). Orka does not attach it yet and
-  providers must accept writes without one. The checks it carries, operation
+  (`WithWriteEnvelope`, `WriteEnvelopeFrom`). The storage client attaches it
+  to every write, and a provider refuses a write without one with
+  `ErrValidation`. The checks it carries, operation
   receipts and forward-only controller ownership are described in "Write
   envelopes, operation receipts and controller ownership" below. Only the
   outbox family takes a `ControllerEpochFence` today, as an explicit parameter
@@ -280,8 +281,10 @@ the observable parts.
   method; an optional family is announced as a capability instead. Revision
   2 requires operation receipts and controller epoch advancement on both
   provider contracts. Revision 3 added dataset binding (see "Installation
-  binding"). The revision Orka requires for each part belongs to Orka, not to
-  the contract.
+  binding"). Revision 4 requires a valid write envelope on every write and
+  `ErrValidation` when it is missing; revision 3 still required accepting
+  writes without one during the transition. The revision Orka requires for
+  each part belongs to Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -356,12 +359,14 @@ writing (#512 step 3). The types are in `pkg/storage/v1`: `WriteEnvelope`,
 `ErrDatasetMismatch`, `ErrOperationExpired`, `ErrOperationAborted` and
 `ErrClockSkew`, and the new `ProviderInfo` fields. Both providers implement
 `OperationReceiptStore` and `ControllerEpochAdvancer`, and check every write
-that carries an envelope when it commits. SQLite does, and the shared suite's
+when it commits. SQLite does, and the shared suite's
 write catalog (`storagetest`) runs the dataset, receipt, age, fence and
 resolution checks for every write method, the sealed families, Task data
 fences and conditional commands included.
-Orka does not attach envelopes yet, so providers must keep accepting writes
-without one until the storage client does.
+The storage client attaches an envelope to every write (see "Envelopes in the
+storage client" below), and a provider refuses a write without one with
+`ErrValidation`. Production SQLite does; SQLite's package tests may still
+write without one.
 
 - **Method catalog.** Every provider method is a read, a write or an
   administrative method. Reads carry no envelope and need no stored receipt.
@@ -492,8 +497,9 @@ without one until the storage client does.
   abort recorded by `ResolveOperation` atomic with respect to one another,
   for example by claiming the operation ID first, so an operation never both
   commits and aborts. `ErrOutcomeUnknown` is
-  neither success nor failure: an API handler answers 503 and a reconciler
-  requeues, and neither repeats the effect nor reports success. An operation
+  neither success nor failure: an API handler answers 409 without a retry hint
+  and tells the caller not to repeat the request, while a reconciler requeues
+  using its durable operation identity. Neither reports success. An operation
   ID names one operation instance and is never derived from a durable
   identity, so an aborted instance does not block a later one. A durable
   operation run again after a restart is a new operation. Its natural key, or
@@ -531,13 +537,11 @@ without one until the storage client does.
   dataset at switch generation 0 until it binds the dataset itself (see
   "Installation binding"). The advance
   waits for fenced writes in progress, and once it returns, no write with an
-  older fence commits, however long it was delayed. Today the controller
-  epoch manager syncs each mirror it is given with `SyncControllerEpochMirror`
-  and then opens one fence.
-  Once providers implement the advance, at takeover Orka acquires the epoch in
-  Kubernetes, reads the epoch each dataset acknowledged earlier, and then,
-  for each distinct dataset it is bound to:
-  1. advances the dataset with `AcknowledgedEpoch` set to that durable
+  older fence commits, however long it was delayed. At takeover Orka
+  acquires the epoch in Kubernetes. The full protocol, including acknowledgement
+  tracking, for each distinct dataset it is bound to is:
+  1. reads the last durable acknowledgement and advances the dataset with
+     `AcknowledgedEpoch` set to that
      acknowledgement. The provider checks its stored epoch against this floor
      atomically with the advance, before changing any epoch or installation.
      An absent epoch counts as zero. A lower stored epoch returns `ErrNotReady`
@@ -549,6 +553,13 @@ without one until the storage client does.
      status until an installation record exists;
   3. opens that dataset's fence for writes.
 
+  The controller epoch manager currently advances each
+  dataset with the exact record the compare-and-swap produced and the
+  ControllerEpoch UID, and refuses to open a dataset whose advance is
+  refused, then opens that dataset's fence. It leaves `AcknowledgedEpoch` zero:
+  persisting and reading dataset acknowledgements, supplying the floor, and
+  recovery holds remain future work.
+
   Each dataset's fence opens independently, and a write waits only for the
   fence of the contract that serves it (`MethodInfo.Contract`), so an
   artifacts outage at takeover does not stop state writes. This is safe
@@ -556,7 +567,9 @@ without one until the storage client does.
   own fence at commit. Until a store's own advance, the replaced controller's
   delayed writes can still commit there, but the successor does not write
   that store until then, so each store has one writing controller at a time.
-  Kubernetes-only mutations keep using the Kubernetes fence.
+  `CurrentFence`, which Kubernetes mutations and the explicit-fence store
+  methods use, opens with the state dataset's fence. Kubernetes-only
+  mutations keep using the Kubernetes fence.
 - **Single writer and schema migration.** A store refuses writes under any
   fence but its current one, and a dataset bound to one installation refuses
   another installation's advance. A schema change moves the dataset to
@@ -790,8 +803,13 @@ obligation; see "No cross-contract transactions" above.
 
 `pkg/storage/v1/storagetest` is the reusable behavioral suite. `RunState` and
 `RunArtifacts` exercise each provider family through the public interfaces.
-The SQLite provider runs it directly, and the storage client runs it over
-SQLite.
+The suite attaches a write envelope to every write it sends without one,
+naming the dataset `Describe` reports and the epoch the dataset holds, so a
+provider that refuses writes without an envelope passes it; the cases that
+test envelopes send their own. The SQLite provider runs it directly, refusing
+writes without an envelope as in production, and the storage client runs it
+over SQLite with `ProviderAttachesEnvelopes`, so the client attaches the
+envelopes.
 
 `internal/storageclient/storagefault` injects storage faults for Orka's own
 tests. It wraps a state provider, an artifact provider or the embedded store
@@ -1091,6 +1109,87 @@ SQLite. Every failure carries a stable reason for later status reporting:
 `InvalidConfiguration`, `SecretNotFound`, `SecretKeyMissing`, `InvalidSecret`,
 `SecretUnavailable` or `AdapterTransportUnavailable`.
 
+### Envelopes in the storage client
+
+Below the policy layer and the sealing step, so a digest covers exactly what
+the provider receives, the client runs every write through generated
+decorators of the two providers (`internal/storageclient/envelope_gen.go`, written by
+`go generate ./internal/storageclient` from the provider interfaces and the
+method catalog; `make generate` runs it and a test fails if it is stale).
+Reads and administrative methods reach the provider unchanged.
+
+- **Fence.** A write first waits for the fence of the dataset that serves its
+  contract. The controller epoch manager is the fence source: it opens a
+  contract's fence once that contract's dataset has advanced to the acquired
+  epoch. A write waits up to ten seconds for a fence source to be bound and
+  for that fence to open, and is then refused with `ErrNotReady`.
+- **Envelope.** The client creates one operation per write: the dataset ID
+  and fence the fence source gives, a new UUIDv7 operation ID, the digest of
+  the arguments as they are when the write is issued, the issue time and the
+  next sequence. A method that takes its own fence, such as the outbox
+  family, carries that fence in its envelope, so a caller holding a replaced
+  fence is still refused with `ErrFenced`. A context that already carries an
+  envelope belongs to a caller that owns the operation, such as the shared
+  suite, and the write runs once with it.
+- **Retries.** After `ErrUnavailable` (nothing committed) or
+  `ErrOutcomeUnknown` (it may have), the client retries the same envelope with
+  the same arguments, with backoff, for at most thirty seconds after that
+  first failure, and never once the operation is `MaxOperationAge` old, less
+  `MaxClockSkew`. Every retry runs under that bound, so a provider call that
+  stalls cannot hold the write past it; a retry the bound ends in flight may
+  have committed and goes to resolution. When the call's deadline comes
+  first, it ends the retries instead. A retry it ends returns the context
+  error without resolution, as any call its caller abandons does, so its
+  outcome is unknown to the caller, unless an earlier attempt's outcome was
+  already unknown: the client then resolves the operation, as above. The
+  first attempt runs under the call's deadline alone, so a long write is not
+  cut short. A replay of a committed operation returns its original result.
+  `ErrClockSkew` is returned as `ErrNotReady`.
+- **Resolution.** When retrying cannot settle an unknown outcome, or a later
+  attempt is refused, the client calls `ResolveOperation` once. A committed
+  operation is attempted once more to read its result as a replay. Any
+  refusal of that replay, including a moved Task data fence or a sealed
+  connector result cleared when its custody was removed, leaves the result
+  unreadable and the write returns `ErrOutcomeUnknown`. Task data access
+  preserves that uncertainty even if a handler translates the error, and
+  never substitutes a cleanup refusal that would trigger reauthorization
+  and a new operation. The API returns 409 without a retry hint. An aborted one
+  returns `ErrOperationAborted`, joined with the refusal when a
+  refusal ended the attempts, or with `ErrUnavailable` when only transient
+  failures did, because nothing committed and running it again is safe. An
+  error that leaves the outcome unknown matches only `ErrOutcomeUnknown`. An
+  operation the client cannot settle, because the store is
+  unreachable, returns `ErrOutcomeUnknown` and joins the dataset's unresolved
+  set: new writes to that dataset are refused with `ErrNotReady` while the
+  client keeps resolving the set in the background. An operation that
+  `ResolveOperation` finds too old to settle leaves the set with its outcome
+  permanently unknown; holding the affected work for recovery comes with the
+  recovery holds.
+- **Sealed writes and callback protocols.** The client seals a record, or
+  computes a conditional command, once per write, and every retry resends the
+  same request with the same envelope. A seal uses a fresh nonce, so a
+  resealed retry would have another digest and be refused with
+  `ErrDuplicateMismatch`. A retry the client makes after its own conflict,
+  such as a connector custody commit that lost a race, seals again and is a
+  new operation.
+- **Callers.** `store.IsTemporaryStorageError` matches `ErrNotReady`,
+  `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers `ErrNotReady` and
+  `ErrUnavailable` with 503 and a `Retry-After` hint, in its shared error
+  handler, the gateway ingress,
+  gateway store and internal task-data paths, the worker message and
+  execution event routes, and the memory routes. `ErrOutcomeUnknown` answers
+  409 without `Retry-After`: HTTP retries do not preserve the storage operation
+  ID, so resubmitting may consume a new message batch or create another
+  provider-assigned record. The response tells callers not to retry this
+  request; HTTP result recovery requires a future request-level idempotency
+  protocol. Task result collection
+  requeues the Task instead of completing it without its result, repository
+  monitor implementations retry an artifact the store has not accepted
+  instead of blocking, and gateway admission no longer reads a fenced write
+  as a Session ownership conflict.
+  The SQLite in-process store never returns `ErrUnavailable` or
+  `ErrOutcomeUnknown`; those paths matter once a provider runs out of process.
+
 ## Kubernetes control authority and retained SQL compatibility
 
 `store/kube.NewComposite` receives precisely `SessionTurnPersistenceStore`,
@@ -1141,7 +1240,7 @@ report a changed target with `ErrConflict`.
 | Operation | Protocol |
 | --- | --- |
 | Memory proposal application (`ApplyMemoryProposal`, `AuthorizeExistingMemory`) | `ResolveMemoryProposalApplication` returns the memory ID the application would return (the applied memory, or one already created from the proposal) and the proposal status and applied ID it read, but no memory content. Orka authorizes that exact memory for an external caller; a new memory is covered by the caller's create permission, and Orka builds and redacts it from the stored proposal. `CommitMemoryProposalApplication` applies only if the proposal still resolves to the same target. Competing applications create one memory: the losers' retries resolve, authorize and return the winner's memory. |
-| Task data access (`WithAuthorizedTaskDataAccess`, `WithTaskDataAccess`, which replace the task-data transaction methods) | `ResolveTaskDataFence` returns the namespace or Task cleanup generation. A Task is registered (`RegisterTaskDataFence`) only after a first successful authorization, and the registration is released when the access it was created for fails. Orka authorizes against live Kubernetes state, then sends the fence, with the authorized Job identities, in the context of each data call. Trusted controller access (`WithTaskDataAccess`) registers a Task only for the duration of the access, so it leaves nothing behind for a Task that may already be finalized. Every fence-checking method listed on `TaskDataFenceStore` refuses a moved generation with `ErrTaskDataCleanupChanged` or a revoked Job with `ErrTaskJobRevoked` in the same transaction as its own reads and writes. The calls of one access are separate operations: each either completes before an invalidating cleanup, which then removes its effect, or is refused, and callers retry with fresh authorization. A refused call that a caller turned into its own error is still reported as the fence error. A parent's request to cancel a child first commits a deduplicated `TaskCancellationRequested` execution event, bound to both Task UIDs, under the parent Job and cleanup fence. That commit orders cancellation against revocation: revocation before the intent refuses the action, while an intent committed first may finish publishing its Kubernetes annotation after revocation. Publication retains the child's UID and resourceVersion preconditions and never holds a provider transaction open. Evidence that must not be recorded in part, such as a recovered approval decision and its execution outcome, uses one grouped append (`AppendExecutionEventsIfAbsent`). |
+| Task data access (`WithAuthorizedTaskDataAccess`, `WithTaskDataAccess`, which replace the task-data transaction methods) | `ResolveTaskDataFence` returns the namespace or Task cleanup generation. A Task is registered (`RegisterTaskDataFence`) only after a first successful authorization, and the registration is released when the access it was created for fails. Orka authorizes against live Kubernetes state, then sends the fence, with the authorized Job identities, in the context of each data call. Trusted controller access (`WithTaskDataAccess`) registers a Task only for the duration of the access, so it leaves nothing behind for a Task that may already be finalized. Every fence-checking method listed on `TaskDataFenceStore` refuses a moved generation with `ErrTaskDataCleanupChanged` or a revoked Job with `ErrTaskJobRevoked` in the same transaction as its own reads and writes. The calls of one access are separate operations: each either completes before an invalidating cleanup, which then removes its effect, or is refused, and callers retry with fresh authorization. A definitely uncommitted refusal that a caller turned into its own error is still reported as the fence error. An uncertain write or an unreadable committed result remains `ErrOutcomeUnknown`, even after handler error translation or a joined cleanup error, and is never automatically repeated under fresh authorization. A parent's request to cancel a child first commits a deduplicated `TaskCancellationRequested` execution event, bound to both Task UIDs, under the parent Job and cleanup fence. That commit orders cancellation against revocation: revocation before the intent refuses the action, while an intent committed first may finish publishing its Kubernetes annotation after revocation. Publication retains the child's UID and resourceVersion preconditions and never holds a provider transaction open. Evidence that must not be recorded in part, such as a recovered approval decision and its execution outcome, uses one grouped append (`AppendExecutionEventsIfAbsent`). |
 | Scan Task ingestion (`SecurityStore.ApplyScanTaskIngestion`) | Orka reads the receipt and the run, validates the live RepositoryScan identity before applying and again before committing, and runs the application logic against a store that records its reads, with the results it saw, and its writes. A read of records an earlier recorded write may have changed is answered by `PreviewScanTaskIngestion`, which runs the steps so far with the provider's own write semantics and keeps nothing. `CommitScanTaskIngestion` applies the writes, the run update and the receipt in one transaction only while the stored run equals the run Orka read and every recorded read still returns what Orka saw, compared field by field with an empty list equal to an absent one and times compared as instants (`ScanRunsEqual`, `ScanIngestionReadsEqual`); a step's provider-assigned times come from the commit's time, so a preview and its commit agree. A changed run or read returns `ErrPreconditionFailed` with nothing changed, and the reconciler repeats the ingestion from fresh state. |
 
 Two callback-shaped interfaces stay in Orka because they are not storage

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -29,8 +30,7 @@ var sealedTestKey = []byte("orka-sealed-records-test-key-32b")
 
 func activatedClient(t *testing.T, backend storageclient.EmbeddedStore, key []byte) *storageclient.Client {
 	t.Helper()
-	client, err := storageclient.NewEmbedded(backend)
-	require.NoError(t, err)
+	client := storageclienttest.NewEmbedded(t, backend)
 	require.NoError(t, client.ActivateSnapshotKey(t.Context(), key))
 	return client
 }

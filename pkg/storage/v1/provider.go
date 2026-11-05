@@ -86,9 +86,9 @@
 // operation receipt with the change, so a retry returns the original outcome
 // and a delayed write from a replaced controller cannot commit
 // ([OperationReceiptStore], [ControllerEpochAdvancer]). Both providers
-// implement those two interfaces and check every write that carries an
-// envelope. Orka does not attach envelopes yet, so until it does providers
-// must also accept writes without one.
+// implement those two interfaces. Orka's storage client attaches an envelope
+// to every write, and a provider refuses a write without one with
+// [ErrValidation].
 //
 // # Installation binding
 //
@@ -124,8 +124,9 @@ const (
 	// optional family is announced through [ProviderInfo.Capabilities]
 	// instead. Revision 2 requires [OperationReceiptStore] and
 	// [ControllerEpochAdvancer] on both provider contracts. Revision 3 added
-	// [DatasetBindingStore] and [ProviderInfo.Binding].
-	ContractRevision = 3
+	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
+	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
+	ContractRevision = 4
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
