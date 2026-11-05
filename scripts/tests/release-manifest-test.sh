@@ -81,12 +81,17 @@ workers:
     image:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.0.1"
+  browser:
+    image:
+      repository: ghcr.io/orka-agents/orka/browser-worker
+      tag: "0.0.1"
 EOF_VALUES
 
 cat >"${test_root}/config/manager/manager.yaml" <<'EOF_MANAGER'
 args:
   - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.0.1
   - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.0.1
+  - --browser-worker-image=ghcr.io/orka-agents/orka/browser-worker:0.0.1
 EOF_MANAGER
 
 cat >"${test_root}/config/manager/kustomization.yaml" <<'EOF_KUSTOMIZATION'
@@ -101,13 +106,14 @@ EOF_KUSTOMIZATION
 grep -Fx 'VERSION ?= v9.8.7-rc.3' "${test_root}/Makefile" >/dev/null
 grep -Fx 'version: 9.8.7-rc.3' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
 grep -Fx 'appVersion: "v9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/Chart.yaml" >/dev/null
-test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 4
+test "$(grep -Fc 'tag: "9.8.7-rc.3"' "${test_root}/cmd/build/helmify/static/values.yaml")" -eq 5
 for provider in codex claude copilot opencode; do
   grep -Fx "    ${provider}Image: ghcr.io/orka-agents/orka/acp-${provider}-runtime:9.8.7-rc.3" \
     "${test_root}/cmd/build/helmify/static/values.yaml" >/dev/null
 done
 grep -Fq 'ghcr.io/orka-agents/orka/ai-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
 grep -Fq 'ghcr.io/orka-agents/orka/general-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
+grep -Fq 'ghcr.io/orka-agents/orka/browser-worker:9.8.7-rc.3' "${test_root}/config/manager/manager.yaml"
 test "$(grep -Fc 'newTag: 9.8.7-rc.3' "${test_root}/config/manager/kustomization.yaml")" -eq 1
 
 if (cd "${test_root}" && ./release update-version 9.8.7) >/dev/null 2>&1; then

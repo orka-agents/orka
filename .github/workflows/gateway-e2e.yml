@@ -54,6 +54,8 @@ jobs:
     env:
       E2E_EPHEMERAL_CLUSTER: "true"
       E2E_GATEWAY: "true"
+      # The gateway focus runs no browser specs.
+      E2E_BROWSER_WORKER: skip
       E2E_GO_TEST_TIMEOUT: 75m
       E2E_GINKGO_TIMEOUT: 70m
       E2E_GINKGO_GRACE_PERIOD: 2m

@@ -588,6 +588,30 @@ func TestRun_ShortTimeoutDeliversDespiteADetachedDescendant(t *testing.T) {
 	}
 }
 
+func TestRun_CreatesTheArtifactsDirectoryBeforeTheCommand(t *testing.T) {
+	const taskName = "artifacts-dir-task"
+	controller := &softDeadlineController{}
+	server := controller.serve(t, taskName)
+	t.Setenv(workerenv.ControllerURL, server.URL)
+	t.Setenv(workerenv.ResultEndpoint, "")
+	t.Setenv(workerenv.TaskName, taskName)
+	t.Setenv(workerenv.TaskNamespace, "default")
+	t.Setenv(workerenv.TimeoutSeconds, "")
+	t.Setenv("ORKA_ARTIFACTS_DIR", filepath.Join(t.TempDir(), "not", "created", "yet"))
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	// The redirect fails if the directory does not exist.
+	os.Args = []string{"worker", "sh", "-c", `printf shot > "$ORKA_ARTIFACTS_DIR/page.png" && echo saved`}
+	if err := run(); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if string(controller.artifacts["page.png"]) != "shot" {
+		t.Fatalf("artifacts = %v, want page.png uploaded", controller.artifacts)
+	}
+}
+
 // A leader that moves itself out of the process group must still be stopped
 // at the soft deadline, or Wait blocks until the Job deadline cancels delivery.
 // The leader already heads its own group, so it joins this process's group

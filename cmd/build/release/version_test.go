@@ -27,7 +27,8 @@ func versionFixture(t *testing.T) (string, map[string]string) {
 		"cmd/build/helmify/static/Chart.yaml":  "apiVersion: v2\nname: orka\nversion: 0.1.1\nappVersion: \"v0.1.1\"\n",
 		"cmd/build/helmify/static/values.yaml": values,
 		"config/manager/manager.yaml": "args:\n  - --ai-worker-image=ghcr.io/orka-agents/orka/ai-worker:0.1.1\n" +
-			"  - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1\n",
+			"  - --general-worker-image=ghcr.io/orka-agents/orka/general-worker:0.1.1\n" +
+			"  - --browser-worker-image=ghcr.io/orka-agents/orka/browser-worker:0.1.1\n",
 		"config/manager/kustomization.yaml": "images:\n  - name: controller\n" +
 			"    newName: ghcr.io/orka-agents/orka\n    newTag: 0.1.1\n",
 	}
@@ -181,7 +182,7 @@ func TestUpdateVersionStampsRepositoryDevelopmentInputs(t *testing.T) {
 					provider+"Image: "+imageRepository("acp-"+provider+"-runtime")+":"+version)
 			}
 		case "config/manager/manager.yaml":
-			for _, name := range []string{"ai-worker", "general-worker"} {
+			for _, name := range []string{"ai-worker", "general-worker", "browser-worker"} {
 				pattern := regexp.MustCompile(`(` + regexp.QuoteMeta(imageRepository(name)) + `:)[^\s]+`)
 				expected = pattern.ReplaceAllString(expected, `${1}`+version)
 			}

@@ -68,6 +68,43 @@ func TestJobBuilder_Build_NativeWorkerImagePullPolicies(t *testing.T) {
 	}
 }
 
+// The operator-configured browser worker image is a custom image to the Task,
+// but a mutable tag is pulled like the other worker images; any other custom
+// image keeps IfNotPresent.
+func TestJobBuilder_Build_BrowserWorkerImagePullPolicy(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	const tagged = "ghcr.io/orka-agents/orka/browser-worker:0.0.0-dev"
+	tests := []struct {
+		name       string
+		configured string
+		image      string
+		want       corev1.PullPolicy
+	}{
+		{name: "configured tag", configured: tagged, image: tagged, want: corev1.PullAlways},
+		{name: "configured digest", configured: "ghcr.io/orka-agents/orka/browser-worker@" + digest, image: "ghcr.io/orka-agents/orka/browser-worker@" + digest, want: corev1.PullIfNotPresent},
+		{name: "other custom image", configured: tagged, image: "docker.io/library/busybox:1.36", want: corev1.PullIfNotPresent},
+		{name: "same repository, other tag", configured: tagged, image: "ghcr.io/orka-agents/orka/browser-worker:v1.2.3", want: corev1.PullIfNotPresent},
+		{name: "not configured", image: tagged, want: corev1.PullIfNotPresent},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := setupJobBuilder()
+			builder.BrowserWorkerImage = tt.configured
+			task := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, Image: tt.image, Args: []string{"true"}},
+			}
+			job, err := builder.Build(context.Background(), task, nil, nil)
+			if err != nil {
+				t.Fatalf("Build() error = %v", err)
+			}
+			if got := job.Spec.Template.Spec.Containers[0].ImagePullPolicy; got != tt.want {
+				t.Errorf("ImagePullPolicy = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJobBuilder_Build_PlatformHelperImagePullPolicies(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	tests := []struct {

@@ -89,6 +89,22 @@ func TestParseContainerTaskRuntimeClasses(t *testing.T) {
 	}
 }
 
+func TestParseBrowserWorkerImage(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":    "",
+		"   ": "",
+		" ghcr.io/orka-agents/orka/browser-worker:0.4.0 ":  "ghcr.io/orka-agents/orka/browser-worker:0.4.0",
+		"browser-worker@sha256:" + strings.Repeat("a", 64): "browser-worker@sha256:" + strings.Repeat("a", 64),
+	} {
+		if got, err := parseBrowserWorkerImage(raw); err != nil || got != want {
+			t.Errorf("parseBrowserWorkerImage(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+	if _, err := parseBrowserWorkerImage("Not A Valid/Image::ref"); err == nil {
+		t.Error("parseBrowserWorkerImage accepted an invalid image reference")
+	}
+}
+
 func TestControllerHolderIDIsProcessIncarnationUnique(t *testing.T) {
 	first := controllerHolderIDForIncarnation("workstation", "first-process")
 	second := controllerHolderIDForIncarnation("workstation", "second-process")

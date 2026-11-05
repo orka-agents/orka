@@ -243,6 +243,7 @@ make ui-test-coverage   # Run UI tests with coverage
 make docker-build                       # Controller image
 make docker-build-ai-worker             # Native AI worker
 make docker-build-general-worker        # General worker
+make docker-build-browser-worker        # Browser worker (Playwright Chromium behind the general worker)
 make docker-build-acp-codex-runtime      # Immutable Codex ACP runtime
 make docker-build-acp-claude-runtime     # Immutable Claude ACP runtime
 make docker-build-acp-copilot-runtime    # Immutable GitHub Copilot ACP runtime
@@ -254,6 +255,7 @@ make docker-build-all
 make docker-push
 make docker-push-ai-worker
 make docker-push-general-worker
+make docker-push-browser-worker
 make docker-push-acp-codex-runtime
 make docker-push-acp-claude-runtime
 make docker-push-acp-copilot-runtime

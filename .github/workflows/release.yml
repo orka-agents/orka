@@ -281,6 +281,10 @@ jobs:
             image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
             context: .
+          - image: browser-worker
+            image_suffix: "/browser-worker"
+            dockerfile: workers/browser/Dockerfile
+            context: .
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
             dockerfile: workers/acp/images/codex/Dockerfile
@@ -401,6 +405,14 @@ jobs:
             image_suffix: "/general-worker"
             platform: linux/arm64
             platform_slug: linux-arm64
+          - image: browser-worker
+            image_suffix: "/browser-worker"
+            platform: linux/amd64
+            platform_slug: linux-amd64
+          - image: browser-worker
+            image_suffix: "/browser-worker"
+            platform: linux/arm64
+            platform_slug: linux-arm64
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
             platform: linux/amd64
@@ -498,6 +510,8 @@ jobs:
             image_suffix: "/ai-worker"
           - image: general-worker
             image_suffix: "/general-worker"
+          - image: browser-worker
+            image_suffix: "/browser-worker"
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
           - image: acp-claude-runtime

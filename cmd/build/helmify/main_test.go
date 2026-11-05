@@ -194,6 +194,30 @@ func TestStaticChartContainerTaskRuntimeClassesFlag(t *testing.T) {
 	}
 }
 
+func TestStaticChartBrowserWorkerImageFlag(t *testing.T) {
+	const flag = "--browser-worker-image="
+	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
+	if strings.Count(rendered, "- "+flag+"ghcr.io/orka-agents/orka/browser-worker:") != 1 {
+		t.Fatalf("the default chart must point the prompt at the browser worker image:\n%s", rendered)
+	}
+	digest := "sha256:" + strings.Repeat("2", 64)
+	rendered = requireHelmRender(t, "--show-only", "templates/deployment.yaml",
+		"--set-string", "workers.browser.image.digest="+digest)
+	if !strings.Contains(rendered, "- "+flag+"ghcr.io/orka-agents/orka/browser-worker@"+digest+"\n") {
+		t.Fatalf("a browser image digest must win over its tag:\n%s", rendered)
+	}
+	for _, args := range [][]string{
+		{"--set-string", "workers.browser.image.repository="},
+		// helm upgrade --reuse-values keeps older values without this map.
+		{"--set", "workers.browser=null"},
+	} {
+		rendered = requireHelmRender(t, append([]string{"--show-only", "templates/deployment.yaml"}, args...)...)
+		if strings.Contains(rendered, flag) {
+			t.Fatalf("%v must leave browser guidance out:\n%s", args, rendered)
+		}
+	}
+}
+
 func TestStaticChartConnectorsFlags(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/deployment.yaml")
 	if strings.Contains(rendered, "--connectors-enabled") || strings.Contains(rendered, "--connector-callback-base-url") {

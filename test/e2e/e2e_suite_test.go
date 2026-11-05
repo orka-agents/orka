@@ -39,6 +39,7 @@ var (
 	// Worker, ACP runtime, clean-room publisher, and focused fixture images used by the e2e cluster.
 	aiWorkerImage                = "ghcr.io/orka-agents/orka/ai-worker:latest"
 	generalWorkerImage           = "ghcr.io/orka-agents/orka/general-worker:latest"
+	browserWorkerImage           = "ghcr.io/orka-agents/orka/browser-worker:latest"
 	acpCodexRuntimeImage         = "ghcr.io/orka-agents/orka/acp-codex-runtime:e2e"
 	acpClaudeRuntimeImage        = "ghcr.io/orka-agents/orka/acp-claude-runtime:e2e"
 	acpCopilotRuntimeImage       = "ghcr.io/orka-agents/orka/acp-copilot-runtime:e2e"
@@ -51,6 +52,7 @@ var (
 	managerRef                   string
 	aiWorkerRef                  string
 	generalWorkerRef             string
+	browserWorkerRef             string
 	gatewayNativeWorkerRef       string
 	acpCodexRuntimeRef           string
 	acpClaudeRuntimeRef          string
@@ -119,6 +121,10 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish AI worker image")
 	generalWorkerRef, err = pushImageToLocalRegistry(registry, generalWorkerImage, "orka/general-worker:e2e")
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish general worker image")
+	if browserWorkerMode() != browserWorkerSkip {
+		browserWorkerRef, err = pushImageToLocalRegistry(registry, browserWorkerImage, "orka/browser-worker:e2e")
+		ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to publish browser worker image")
+	}
 	if gatewayE2EEnabled() {
 		gatewayNativeWorkerRef, err = pushImageToLocalRegistry(
 			registry, gatewayNativeWorkerImage, "orka/gateway-e2e-worker:e2e",
@@ -251,6 +257,7 @@ var _ = BeforeSuite(func() {
 		fmt.Sprintf("IMG=%s", managerRef),
 		fmt.Sprintf("AI_WORKER_IMG=%s", aiWorkerRef),
 		fmt.Sprintf("GENERAL_WORKER_IMG=%s", generalWorkerRef),
+		fmt.Sprintf("BROWSER_WORKER_IMG=%s", browserWorkerImageForDeploy()),
 		fmt.Sprintf("ACP_CODEX_RUNTIME_IMG=%s", acpCodexRuntimeRef),
 		fmt.Sprintf("ACP_CLAUDE_RUNTIME_IMG=%s", acpClaudeRuntimeRef),
 		fmt.Sprintf("ACP_COPILOT_RUNTIME_IMG=%s", acpCopilotRuntimeRef),
@@ -665,6 +672,11 @@ func e2eImageBuilds() []e2eImageBuild {
 		makeTarget("docker-build", "IMG", managerImage),
 		makeTarget("docker-build-ai-worker", "AI_WORKER_IMG", aiWorkerImage),
 		makeTarget("docker-build-general-worker", "GENERAL_WORKER_IMG", generalWorkerImage),
+	}
+	if browserWorkerMode() == browserWorkerBuild {
+		builds = append(builds, makeTarget("docker-build-browser-worker", "BROWSER_WORKER_IMG", browserWorkerImage))
+	}
+	builds = append(builds,
 		makeTarget("docker-build-acp-codex-runtime", "ACP_CODEX_RUNTIME_IMG", acpCodexRuntimeImage),
 		makeTarget("docker-build-acp-claude-runtime", "ACP_CLAUDE_RUNTIME_IMG", acpClaudeRuntimeImage),
 		makeTarget("docker-build-acp-copilot-runtime", "ACP_COPILOT_RUNTIME_IMG", acpCopilotRuntimeImage),
@@ -674,7 +686,7 @@ func e2eImageBuilds() []e2eImageBuild {
 		dockerBuild(fakeForgeImage, "test/fixtures/fakeforge/Dockerfile"),
 		dockerBuild(mockLLMCaptureImage, "test/fixtures/aimockcapture/Dockerfile"),
 		dockerBuild(aimockAuthorityImage, "test/fixtures/aimockauthority/Dockerfile"),
-	}
+	)
 	if gatewayE2EEnabled() {
 		builds = append(builds,
 			dockerBuild(gatewayReferenceAdapterImage, "cmd/orka-gateway-reference-adapter/Dockerfile"),
@@ -715,6 +727,34 @@ func buildE2EImages(builds []e2eImageBuild) {
 	_, _ = fmt.Fprintf(GinkgoWriter, "built %d images in %s with %d jobs\n",
 		len(builds), time.Since(start).Round(time.Second), jobs)
 	ExpectWithOffset(1, errors.Join(errs...)).NotTo(HaveOccurred(), "Failed to build Docker images")
+}
+
+// E2E_BROWSER_WORKER selects how the suite gets the browser worker image:
+// built here (the default), already in the local Docker daemon (a cached CI
+// build), or skipped, which skips the browser specs.
+const (
+	browserWorkerEnvVar   = "E2E_BROWSER_WORKER"
+	browserWorkerBuild    = "build"
+	browserWorkerPrebuilt = "prebuilt"
+	browserWorkerSkip     = "skip"
+)
+
+// browserWorkerImageForDeploy is what the controller advertises to chat; a
+// run that skips the browser image keeps the default reference.
+func browserWorkerImageForDeploy() string {
+	if browserWorkerRef != "" {
+		return browserWorkerRef
+	}
+	return browserWorkerImage
+}
+
+func browserWorkerMode() string {
+	switch mode := strings.TrimSpace(os.Getenv(browserWorkerEnvVar)); mode {
+	case browserWorkerPrebuilt, browserWorkerSkip:
+		return mode
+	default:
+		return browserWorkerBuild
+	}
 }
 
 func gatewayE2EEnabled() bool {

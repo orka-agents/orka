@@ -77,7 +77,8 @@ for repository in \
   ghcr.io/orka-agents/orka \
   ghcr.io/orka-agents/orka/workspace-publisher \
   ghcr.io/orka-agents/orka/ai-worker \
-  ghcr.io/orka-agents/orka/general-worker; do
+  ghcr.io/orka-agents/orka/general-worker \
+  ghcr.io/orka-agents/orka/browser-worker; do
   tag="$(image_tag "${values_path}" "${repository}")" || \
     die "expected exactly one tag for ${repository} in ${values_path}"
   [[ "${tag}" == "${expected_version}" ]] || \

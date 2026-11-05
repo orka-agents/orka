@@ -32,7 +32,7 @@ import json
 from pathlib import Path
 import sys
 
-roles = ("controller", "ai-worker", "general-worker", "acp-codex-runtime",
+roles = ("controller", "ai-worker", "general-worker", "browser-worker", "acp-codex-runtime",
          "acp-claude-runtime", "acp-copilot-runtime", "acp-opencode-runtime", "workspace-publisher")
 images = {role: "ghcr.io/orka-agents/orka" + ("" if role == "controller" else "/" + role)
           + "@sha256:" + format(index, "064x") for index, role in enumerate(roles, 1)}
@@ -56,7 +56,7 @@ jq -e '
   and .controller.agentExecutionSnapshot.existingSecret == "release-chart-snapshot"
   and .webhooks.tls.existingSecret == "release-chart-webhook"
   and (has("harnessV1") | not)
-  and ([.controller.image, .publisher.image, .workers.ai.image, .workers.general.image]
+  and ([.controller.image, .publisher.image, .workers.ai.image, .workers.general.image, .workers.browser.image]
     | all(.[]; .digest | test("^sha256:[a-f0-9]{64}$")))
   and ([.. | objects | keys[] | select(. == "token" or . == "controllerToken" or . == "capabilitySecret" or . == "secret")] | length == 0)
 ' "${test_root}/values.json" >/dev/null
@@ -67,7 +67,7 @@ helm package "${root}/cmd/build/helmify/static" --destination "${test_root}" >/d
 archives=("${test_root}"/orka-*.tgz)
 [[ "${#archives[@]}" == 1 ]] || fail "expected exactly one test chart archive"
 helm template orka "${archives[0]}" -n orka-system --values "${test_root}/values.json" >"${test_root}/render.yaml"
-for role in controller ai-worker general-worker acp-codex-runtime acp-claude-runtime acp-copilot-runtime acp-opencode-runtime workspace-publisher; do
+for role in controller ai-worker general-worker browser-worker acp-codex-runtime acp-claude-runtime acp-copilot-runtime acp-opencode-runtime workspace-publisher; do
   image_ref="$(jq -r --arg role "${role}" '.images[$role]' "${test_root}/candidate.json")"
   grep -F -- "${image_ref}" "${test_root}/render.yaml" >/dev/null || fail "render omitted ${role} digest"
 done
