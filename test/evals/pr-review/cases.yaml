@@ -147,6 +147,6 @@ cases:
     body: |
       Most of what we truncate is ASCII. When the prefix that fits is all
       ASCII, cut it directly; otherwise fall back to the rune walk. Adds
-      tests with a multi-byte character at the cut.
+      tests with a multi-byte character at the cut and with extreme limits.
     reference:
       verdict: passed
