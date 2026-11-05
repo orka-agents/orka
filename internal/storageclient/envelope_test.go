@@ -830,12 +830,13 @@ func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing
 			t.Fatal(err)
 		}
 	}
-	f.lossy.hooks["GetMessages"] = func() {
+	// A consuming read reaches the provider as ConsumeMessages.
+	f.lossy.hooks["ConsumeMessages"] = func() {
 		if err := f.client.DeleteResult(t.Context(), "tenant", "unrelated-task"); err != nil {
 			t.Errorf("advance the namespace cleanup fence: %v", err)
 		}
 	}
-	f.lossy.plan("GetMessages", stepLoseThenRun)
+	f.lossy.plan("ConsumeMessages", stepLoseThenRun)
 	authorizations := 0
 	var consumed []store.Message
 	var err error
@@ -863,7 +864,7 @@ func TestConsumingReadLostResponseAndNamespaceCleanupDoesNotReexecute(t *testing
 	if authorizations != 1 || len(consumed) != 0 {
 		t.Fatalf("authorizations=%d, messages=%d; the unreadable result must not trigger a new operation", authorizations, len(consumed))
 	}
-	requireRetriedWithOneEnvelope(t, f, "GetMessages", 3)
+	requireRetriedWithOneEnvelope(t, f, "ConsumeMessages", 3)
 	if f.client.UnresolvedOperations() != 0 {
 		t.Fatal("the committed operation must not block the dataset")
 	}
