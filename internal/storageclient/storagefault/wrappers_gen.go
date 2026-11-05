@@ -2301,6 +2301,22 @@ func (p *stateProvider) ListUsagePullRequestLinks(ctx context.Context, a1 string
 	return r0, err
 }
 
+func (p *stateProvider) ListUsageTasksInSessions(ctx context.Context, a1 string, a2 string, a3 []string, a4 int) ([]storagev1.UsageTask, error) {
+	var r0 []storagev1.UsageTask
+	injected, err := p.injector.call(ctx, p.contract, "ListUsageTasksInSessions", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a3 = cloneArgument(a3)
+		}
+		r0, err = p.inner.ListUsageTasksInSessions(ctx, a1, a2, a3, a4)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.UsageTask
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListWorkActions(ctx context.Context, a1 storagev1.WorkActionFilter) ([]storagev1.WorkAction, string, error) {
 	var r0 []storagev1.WorkAction
 	var r1 string
@@ -3149,22 +3165,6 @@ func (p *stateProvider) UpsertReviewSlice(ctx context.Context, a1 *storagev1.Rev
 		return p.inner.UpsertReviewSlice(ctx, a1)
 	})
 	return err
-}
-
-func (p *stateProvider) UsageTasksInSessions(ctx context.Context, a1 string, a2 string, a3 []string, a4 int) ([]storagev1.UsageTask, error) {
-	var r0 []storagev1.UsageTask
-	injected, err := p.injector.call(ctx, p.contract, "UsageTasksInSessions", func(ctx context.Context) (err error) {
-		if responseWillBeLost(ctx) {
-			a3 = cloneArgument(a3)
-		}
-		r0, err = p.inner.UsageTasksInSessions(ctx, a1, a2, a3, a4)
-		return err
-	})
-	if injected {
-		var z0 []storagev1.UsageTask
-		return z0, err
-	}
-	return r0, err
 }
 
 func (p *artifactProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1.AdvanceControllerEpochRequest) (storagev1.ControllerEpochMirrorState, error) {

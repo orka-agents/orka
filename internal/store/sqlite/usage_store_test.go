@@ -887,7 +887,7 @@ func TestUsageTasksInSessions(t *testing.T) {
 	for i := range 1500 {
 		names = append(names, fmt.Sprintf("ahp-absent-%d", i))
 	}
-	tasks, err := s.UsageTasksInSessions(ctx, "team", "", names, 100)
+	tasks, err := s.ListUsageTasksInSessions(ctx, "team", "", names, 100)
 	require.NoError(t, err)
 	found := make([]string, 0, len(tasks))
 	for _, task := range tasks {
@@ -899,17 +899,17 @@ func TestUsageTasksInSessions(t *testing.T) {
 	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
 		"team", "superstring", "superstring", at.UnixNano(), `{"namespace":"team","taskUID":"superstring","sessionName":"ahp-one-3","startedAt":5}`)
 	require.NoError(t, err)
-	tasks, err = s.UsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 100)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 100)
 	require.NoError(t, err)
 	require.Len(t, tasks, 3)
-	_, err = s.UsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 1)
+	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 1)
 	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
 	// An earlier namespace of the same name stays out.
 	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
 		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
 	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "new", TaskUID: "new-turn", TaskName: "new-turn",
 		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
-	tasks, err = s.UsageTasksInSessions(ctx, "uids", "new", []string{"ahp-one"}, 100)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "uids", "new", []string{"ahp-one"}, 100)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, "new-turn", tasks[0].TaskUID)

@@ -289,7 +289,7 @@ the observable parts.
   `ErrValidation` when it is missing; revision 3 still required accepting
   writes without one during the transition. Revision 5 adds the Agent Host
   Protocol family (`AHPStore`) to `state.v1`. Revision 6 adds
-  `UsageTasksInSessions` and the requester and AHP turn mark a usage Task
+  `ListUsageTasksInSessions` and the requester and AHP turn mark a usage Task
   keeps. The revision Orka requires for
   each part belongs to Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a

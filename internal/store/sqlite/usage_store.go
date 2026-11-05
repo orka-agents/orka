@@ -478,7 +478,7 @@ var usageSpace = func() string {
 	return space.String()
 }()
 
-func (s *Store) UsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
 	if len(sessions) == 0 {
 		return nil, nil
 	}

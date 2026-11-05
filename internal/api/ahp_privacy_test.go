@@ -667,9 +667,9 @@ type limitRecordingStore struct {
 	limits []int
 }
 
-func (s *limitRecordingStore) UsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+func (s *limitRecordingStore) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
 	s.limits = append(s.limits, limit)
-	return s.Store.UsageTasksInSessions(ctx, namespace, namespaceUID, sessions, limit)
+	return s.Store.ListUsageTasksInSessions(ctx, namespace, namespaceUID, sessions, limit)
 }
 
 // The lookup of a report's AHP session rows has one budget across all its

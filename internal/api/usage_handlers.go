@@ -380,7 +380,7 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 	// record limit does.
 	remaining := usageMaxRecords
 	for _, namespace := range slices.Sorted(maps.Keys(sessions)) {
-		rows, err := backend.UsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining)
+		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining)
 		if errors.Is(err, store.ErrUsageSelectionTooLarge) {
 			return fiber.NewError(fiber.StatusUnprocessableEntity, "usage selection exceeds 20000 retained records; narrow the date, team, repository, model, or asOf filters")
 		}
