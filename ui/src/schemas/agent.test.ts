@@ -54,9 +54,14 @@ describe('agentRuntimeSchema', () => {
       defaultAllowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
       defaultAllowBash: true,
       defaultReasoningEffort: 'max',
+      ceiling: { allowedTools: ['Read', 'Edit'], allowBash: false, maxTurns: 80 },
     }
     expect(builtInAgentRuntimeSchema.parse(runtime)).toEqual(runtime)
     expect(agentRuntimeSchema.parse(runtime)).toEqual(runtime)
+  })
+
+  it('rejects unknown ceiling fields', () => {
+    expect(() => agentRuntimeSchema.parse({ type: 'claude', ceiling: { allowedTools: [], delegateTo: [] } })).toThrow()
   })
 
   it('rejects removed, ambiguous, or malformed runtime selectors', () => {
