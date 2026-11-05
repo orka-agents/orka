@@ -29,8 +29,15 @@ const (
 	// token, audienced to api://AzureADTokenExchange, is mounted.
 	DefaultTokenFile = "/var/run/secrets/orka.ai/agent-identity/token"
 
-	entraExchangeScope       = "api://AzureADTokenExchange/.default"
-	jwtBearerAssertionType   = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	entraExchangeScope     = "api://AzureADTokenExchange/.default"
+	jwtBearerAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+	jwtBearerGrantType     = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+
+	formGrantType            = "grant_type"
+	formClientID             = "client_id"
+	formScope                = "scope"
+	formClientAssertionType  = "client_assertion_type"
+	formClientAssertion      = "client_assertion"
 	maxCachedTokenLifetime   = 5 * time.Minute
 	tokenExpirySafetyMargin  = time.Minute
 	maxTokenResponseBytes    = 1 << 20
@@ -88,12 +95,12 @@ func (i *EntraIssuer) ExchangeToken(ctx context.Context, identityID string) (str
 			return "", 0, err
 		}
 		return i.requestToken(ctx, "entra_exchange", url.Values{
-			"grant_type":            {"client_credentials"},
-			"client_id":             {strings.ToLower(i.Config.BlueprintClientID)},
-			"scope":                 {entraExchangeScope},
+			formGrantType:           {"client_credentials"},
+			formClientID:            {strings.ToLower(i.Config.BlueprintClientID)},
+			formScope:               {entraExchangeScope},
 			"fmi_path":              {identityID},
-			"client_assertion_type": {jwtBearerAssertionType},
-			"client_assertion":      {credential},
+			formClientAssertionType: {jwtBearerAssertionType},
+			formClientAssertion:     {credential},
 		})
 	})
 }
@@ -111,11 +118,41 @@ func (i *EntraIssuer) AppToken(ctx context.Context, identityID, resource string)
 			return "", 0, err
 		}
 		return i.requestToken(ctx, "entra_app", url.Values{
-			"grant_type":            {"client_credentials"},
-			"client_id":             {identityID},
-			"scope":                 {strings.TrimSuffix(resource, "/") + "/.default"},
-			"client_assertion_type": {jwtBearerAssertionType},
-			"client_assertion":      {exchange},
+			formGrantType:           {"client_credentials"},
+			formClientID:            {identityID},
+			formScope:               {strings.TrimSuffix(resource, "/") + "/.default"},
+			formClientAssertionType: {jwtBearerAssertionType},
+			formClientAssertion:     {exchange},
+		})
+	})
+}
+
+// OnBehalfOfToken returns a token for the agent identity acting for the user
+// whose token is userAssertion. The user token must be audienced to the
+// blueprint; Entra rejects any other.
+func (i *EntraIssuer) OnBehalfOfToken(ctx context.Context, identityID, resource, userAssertion string) (string, error) {
+	identityID = strings.ToLower(strings.TrimSpace(identityID))
+	resource = strings.TrimSpace(resource)
+	if resource == "" || strings.HasSuffix(resource, "/.default") {
+		return "", errors.New("an Entra resource without the /.default suffix is required")
+	}
+	if strings.TrimSpace(userAssertion) == "" {
+		return "", errors.New("an on-behalf-of exchange requires the requester's token")
+	}
+	user := sha256.Sum256([]byte(userAssertion))
+	return i.cached("obo\x00"+identityID+"\x00"+resource+"\x00"+hex.EncodeToString(user[:]), func() (string, time.Duration, error) {
+		exchange, err := i.ExchangeToken(ctx, identityID)
+		if err != nil {
+			return "", 0, err
+		}
+		return i.requestToken(ctx, "entra_obo", url.Values{
+			formGrantType:           {jwtBearerGrantType},
+			formClientID:            {identityID},
+			formScope:               {strings.TrimSuffix(resource, "/") + "/.default"},
+			formClientAssertionType: {jwtBearerAssertionType},
+			formClientAssertion:     {exchange},
+			"assertion":             {userAssertion},
+			"requested_token_use":   {"on_behalf_of"},
 		})
 	})
 }
@@ -264,15 +301,24 @@ func (s *Source) AgentIdentityToken(ctx context.Context, req outboundaccess.Agen
 	if instance != req.Identity.Instance {
 		return "", errors.New("the identity issuer configuration changed since the Task was bound; re-run the Task")
 	}
-	if req.Mode != corev1alpha1.OutboundAgentIdentityModeSelf {
-		return "", fmt.Errorf("agent identity mode %q is not supported", req.Mode)
-	}
 	switch req.Identity.Issuer {
 	case corev1alpha1.AgentIdentityIssuerEntra:
 		if s.Entra == nil {
 			return "", errors.New("the Entra issuer is not configured on this controller")
 		}
-		return s.Entra.AppToken(ctx, req.Identity.ID, req.Resource)
+		switch req.Mode {
+		case corev1alpha1.OutboundAgentIdentityModeSelf:
+			return s.Entra.AppToken(ctx, req.Identity.ID, req.Resource)
+		case corev1alpha1.OutboundAgentIdentityModeDelegated:
+			// Entra enforces both sides: the user's own rights at the
+			// resource, and what was granted to the agent identity.
+			if err := requireAudience(req.UserAssertion, s.Entra.Config.BlueprintClientID); err != nil {
+				return "", err
+			}
+			return s.Entra.OnBehalfOfToken(ctx, req.Identity.ID, req.Resource, req.UserAssertion)
+		default:
+			return "", fmt.Errorf("agent identity mode %q is not supported", req.Mode)
+		}
 	default:
 		return "", fmt.Errorf("identity issuer %q is not supported", req.Identity.Issuer)
 	}

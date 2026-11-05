@@ -327,3 +327,36 @@ func TestIdentityClaimIsDecidedFromTheLiveAgentNotTheCache(t *testing.T) {
 		t.Fatalf("a stale cached claim must not be kept: claim=%v err=%v", claim, err)
 	}
 }
+
+func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	rootCreated := metav1.NewTime(time.Now().Add(-30 * time.Minute).Truncate(time.Second))
+	root := boundTask("root", agent, corev1alpha1.TaskPhaseRunning)
+	root.CreationTimestamp = rootCreated
+	child := boundTask("child", agent, corev1alpha1.TaskPhaseRunning)
+	child.Labels = map[string]string{labels.LabelParentTask: "root"}
+	child.CreationTimestamp = metav1.Now()
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build()
+
+	binding, err := agentIdentityBindingFromTask(context.Background(), reader, child)
+	if err != nil || binding == nil {
+		t.Fatalf("binding = %+v, err = %v", binding, err)
+	}
+	if !binding.DelegationStart.Equal(rootCreated.Time) {
+		t.Fatalf("DelegationStart = %v, want the root Task's creation %v", binding.DelegationStart, rootCreated.Time)
+	}
+	if !binding.ManagedEgress || binding.AgentName != "reviewer" || binding.AgentUID != string(agent.UID) {
+		t.Fatalf("binding = %+v", binding)
+	}
+
+	workspace := child.DeepCopy()
+	workspace.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{}}
+	if binding, _ := agentIdentityBindingFromTask(context.Background(), reader, workspace); binding.ManagedEgress {
+		t.Fatal("a workspace-backed Task is not on a network Orka controls")
+	}
+	orphan := child.DeepCopy()
+	orphan.Labels[labels.LabelParentTask] = "gone"
+	if binding, err := agentIdentityBindingFromTask(context.Background(), reader, orphan); err != nil || !binding.DelegationStart.IsZero() {
+		t.Fatalf("a broken chain has no delegation start: %+v %v", binding, err)
+	}
+}

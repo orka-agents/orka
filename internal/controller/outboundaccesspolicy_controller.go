@@ -618,7 +618,8 @@ func outboundPolicyReferencesObject(policy *corev1alpha1.OutboundAccessPolicy, o
 			return matchService(&policy.Spec.Gateway.ServiceRef)
 		}
 	case *corev1alpha1.ConnectorProvider:
-		return policy.Spec.Connection != nil && namespace == policy.Namespace && policy.Spec.Connection.ProviderRef.Name == name
+		provider, ok := outboundaccess.ConnectionProviderName(policy)
+		return ok && namespace == policy.Namespace && provider == name
 	case *corev1.ServiceAccount:
 		if namespace != policy.Namespace {
 			return false

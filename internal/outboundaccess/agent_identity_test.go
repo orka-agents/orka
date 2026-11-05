@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -157,6 +158,106 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 				tc.request(&request)
 			}
 			if _, err := resolver.Resolve(context.Background(), request); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Resolve() error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func delegatedPolicySpec(age *metav1.Duration) corev1alpha1.OutboundAccessPolicySpec {
+	spec := agentIdentityPolicySpec()
+	spec.AgentIdentity.Mode = corev1alpha1.OutboundAgentIdentityModeDelegated
+	spec.AgentIdentity.Delegated = &corev1alpha1.DelegatedAgentIdentity{
+		ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}, MaxDelegationAge: age,
+	}
+	return spec
+}
+
+func delegatedRequest(started time.Time) ResolveRequest {
+	f := ResolveRequest{
+		Namespace: "tenant", PolicyName: "agent", TargetScheme: "https",
+		Requester:         &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"},
+		FrozenConnections: map[string]FrozenConnection{"agent": {UID: "uid-1", Generation: 2}},
+		Tool:              ToolBinding{Name: "gh_search", URL: "https://api.github.com/search/issues", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead},
+		AgentIdentity:     agentIdentityRequest().AgentIdentity,
+	}
+	f.AgentIdentity.DelegationStart = started
+	f.AgentIdentity.ManagedEgress = true
+	return f
+}
+
+func TestValidateSpecDelegatedAgentIdentity(t *testing.T) {
+	if issue := ValidateSpec(readyPolicy("agent", delegatedPolicySpec(nil))); issue != nil {
+		t.Fatalf("valid delegated policy: %v", issue)
+	}
+	missing := delegatedPolicySpec(nil)
+	missing.AgentIdentity.Delegated = nil
+	if issue := ValidateSpec(readyPolicy("agent", missing)); issue == nil {
+		t.Fatal("Delegated mode without delegated must be invalid")
+	}
+	stray := agentIdentityPolicySpec()
+	stray.AgentIdentity.Delegated = &corev1alpha1.DelegatedAgentIdentity{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}}
+	if issue := ValidateSpec(readyPolicy("agent", stray)); issue == nil {
+		t.Fatal("delegated with mode Self must be invalid")
+	}
+	if name, ok := ConnectionProviderName(readyPolicy("agent", delegatedPolicySpec(nil))); !ok || name != "github" {
+		t.Fatalf("ConnectionProviderName() = %q, %v", name, ok)
+	}
+}
+
+func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
+	scheme := resolverScheme(t)
+	now := time.Now()
+	resolver := func(spec corev1alpha1.OutboundAccessPolicySpec, connection *fakeConnectionSource, identity *fakeAgentIdentitySource) *KubernetesResolver {
+		reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(readyPolicy("agent", spec), acceptedProvider(), identityHolder("agent-uid", true)).Build()
+		return &KubernetesResolver{Reader: reader, Connections: connection, AgentIdentities: identity, Now: func() time.Time { return now }}
+	}
+	connection := func() *fakeConnectionSource {
+		return &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "user-token", ConnectionUID: "uid-1", Generation: 2, Mode: "readOnly"}}
+	}
+
+	t.Run("exchanges the requester's token for the Agent's", func(t *testing.T) {
+		identity := &fakeAgentIdentitySource{token: "obo-token"}
+		resolution, err := resolver(delegatedPolicySpec(nil), connection(), identity).Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolution.CredentialValue != "Bearer obo-token" || resolution.ConnectionUID != "uid-1" {
+			t.Fatalf("resolution = %#v", resolution)
+		}
+		if identity.request.UserAssertion != "user-token" || identity.request.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
+			t.Fatalf("token request = %+v", identity.request)
+		}
+		if len(resolution.SensitiveValues) != 2 {
+			t.Fatalf("both tokens must be redacted: %v", resolution.SensitiveValues)
+		}
+	})
+
+	for name, tc := range map[string]struct {
+		spec    corev1alpha1.OutboundAccessPolicySpec
+		request func(*ResolveRequest)
+		cap     time.Duration
+		want    string
+	}{
+		"runtime without managed egress":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.AgentIdentity.ManagedEgress = false }, want: "built-in RuntimePools"},
+		"delegation past the default age": {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.AgentIdentity.DelegationStart = now.Add(-2 * time.Hour) }, want: "expired"},
+		"delegation with no known start":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.AgentIdentity.DelegationStart = time.Time{} }, want: "expired"},
+		"policy age above the cap": {
+			spec:    delegatedPolicySpec(&metav1.Duration{Duration: 48 * time.Hour}),
+			request: func(r *ResolveRequest) { r.AgentIdentity.DelegationStart = now.Add(-3 * time.Hour) },
+			cap:     2 * time.Hour, want: "expired",
+		},
+		"no verified requester":   {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
+		"no frozen Connection":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "frozen"},
+		"tool the provider lacks": {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := resolver(tc.spec, connection(), &fakeAgentIdentitySource{token: "t"})
+			r.MaxDelegationAge = tc.cap
+			request := delegatedRequest(now.Add(-time.Minute))
+			tc.request(&request)
+			if _, err := r.Resolve(context.Background(), request); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Resolve() error = %v, want %q", err, tc.want)
 			}
 		})

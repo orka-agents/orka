@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stages 1–3 are implemented; stage 1 is opt-in. Identity use records and stage 4 are not. Builds on ADR 0034 (Agent runtime ceilings) and
+Proposed. Stages 1–4 are implemented; stage 1 is opt-in. Identity use records are not. Builds on ADR 0034 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -154,8 +154,8 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 
 - Add a fourth `OutboundAccessPolicy` adapter, `agentIdentity`, exclusive with
   `direct`, `gateway`, and `connection`. It selects a mode (this stage adds
-  `self`), carries the operation list described in stage 4, and holds the
-  target in one issuer-typed block, such as `entra.resource` for Entra. It
+  `Self`) and holds the target in one issuer-typed block, such as
+  `entra.resource` for Entra. It
   never names an identity: the identity always comes from the Task's frozen
   Agent binding, not from the policy, the Tool, or the Task spec.
 - Only the controller implements the credential source, as with Connections,
@@ -261,13 +261,17 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   leaves the controller, the residual exposure is the cache bound above. Orka
   does not claim issuer-side per-session revocation, and does not rely on
   Continuous Access Evaluation.
-- Delegated policies must also declare the operations they allow: target
-  hosts, HTTP methods, and path prefixes. The broker checks each request
-  against them before it injects a token and fails closed otherwise. Issuer
-  scopes are often too coarse to do this (see the Entra notes), and a model
-  can be steered, for example by a malicious document, into requests that sit
-  within the requester's rights but outside what they asked for. Neither the
-  model nor the Tool arguments can widen the list.
+- A delegated policy names the requester's `ConnectorProvider` in
+  `delegated.providerRef`, and that provider's curated tool declarations are
+  the only operations the delegated credential is released for: the exact
+  Tool URL, method, class, headers, timeout, and argument schema, enforced as
+  in connection mode, with the call's arguments judged against the schema
+  before any credential work. Issuer scopes are often too coarse to do this
+  (see the Entra notes), and a model can be steered, for example by a
+  malicious document, into requests that sit within the requester's rights but
+  outside what they asked for. Neither the model nor the Tool arguments can
+  widen the declarations. This replaces a separate host, method, and path list
+  in the policy: the provider's declarations are stricter and already exist.
 - Entra implementation: delegated everywhere Entra issues delegated tokens.
   The `ConnectorProvider` is a front-end Entra client that requests the
   blueprint's custom scope, so the Connection holds a user token whose audience
@@ -285,8 +289,8 @@ The GitHub mutation records in the controller store are the precedent instead.
 
 - The controller appends one immutable record per identity-backed call, reads
   and writes alike: Agent UID and generation, issuer type, issuer instance and
-  identity ID, mode, Task UID, policy UID and generation, the `allow` entry
-  that matched, outcome, request digest, and time. Records never contain
+  identity ID, mode, Task UID, policy UID and generation, the Tool that
+  was called, outcome, request digest, and time. Records never contain
   tokens, request bodies, or full URLs.
 - In delegated mode the requester is stored as a keyed (HMAC) pseudonym under
   a controller-held key, so records can be joined per person without exposing
@@ -320,8 +324,8 @@ deployment delivers the guarantees above.
 - **Azure Storage has one delegated scope, `user_impersonation`**
   ([Storage authorization](https://learn.microsoft.com/en-us/rest/api/storageservices/authorize-with-azure-active-directory)).
   Entra can decide whether an Agent may reach Storage for a user at all, not
-  which containers or operations. Narrowing belongs to the stage 4 operation
-  list and to Storage's own RBAC.
+  which containers or operations. Narrowing belongs to the provider's curated
+  tool declarations (stage 4) and to Storage's own RBAC.
 - **Azure RBAC grants are additive**
   ([ABAC security](https://learn.microsoft.com/en-us/azure/storage/blobs/storage-auth-abac-security)).
   Granting a reader role with a condition does not cap a broader role the user
@@ -398,23 +402,20 @@ fix above are placeholders until implementation.
    ```yaml
    # Stage 3: the Agent acts as itself.
    agentIdentity:
-     mode: self
-     header: Authorization
+     mode: Self
      entra:
        resource: https://graph.microsoft.com
    ---
    # Stage 4: the Agent acts for its requester, who has linked an Entra
    # Connection through a ConnectorProvider for the front-end client app.
    agentIdentity:
-     mode: delegated
-     maxDelegationAge: 1h
-     header: Authorization
+     mode: Delegated
+     delegated:
+       providerRef:
+         name: entra-blueprint-signin   # declares the curated Storage tools
+       maxDelegationAge: 1h
      entra:
        resource: https://storage.azure.com
-     allow:
-     - host: inventory.blob.core.windows.net
-       methods: [GET]
-       pathPrefixes: [/reports/]
    ```
 
 A second issuer reuses every step except the first two: it adds a sibling of
@@ -465,7 +466,7 @@ permissions bound what the identity may do outside it. Neither can be derived
 from the other: one lists tool names, the other app roles or scopes. An Agent
 owner who wants to limit which identity-backed resources a Task may reach can
 later add `ceiling.agentIdentityResources`, checked at binding like the rest of
-the ceiling; the stage 4 operation list is then checked against it.
+the ceiling; the provider's curated tools are then checked against it.
 
 ## Rejected alternatives
 
@@ -477,7 +478,7 @@ the ceiling; the stage 4 operation list is then checked against it.
   and the blueprint credential impersonates every identity under it.
 - **Handing issued tokens to the runtime**, even short-lived delegated ones. A
   prompt-injected agent can exfiltrate a bearer token, and the broker could no
-  longer check Session state or the operation list per call.
+  longer check Session state or the curated tool declarations per call.
 - **Extending the direct adapter** with `client_credentials`, a ServiceAccount
   client assertion, and `fmi_path` as a parameter. That turns impersonation
   into a policy author's choice.

@@ -27,6 +27,9 @@ const (
 	// OutboundAgentIdentityModeSelf issues a credential for the Agent acting
 	// as itself.
 	OutboundAgentIdentityModeSelf = "Self"
+	// OutboundAgentIdentityModeDelegated issues a credential for the Agent
+	// acting for the Task's requester.
+	OutboundAgentIdentityModeDelegated = "Delegated"
 )
 
 // OutboundAccessPolicySpec configures exactly one outbound credential or
@@ -59,12 +62,21 @@ type OutboundAccessPolicySpec struct {
 // AgentIdentityOutboundAccess selects how the Agent identity is used and the
 // issuer-typed target the credential is for.
 // +kubebuilder:validation:XValidation:rule="has(self.entra)",message="agentIdentity requires exactly one issuer target"
+// +kubebuilder:validation:XValidation:rule="(has(self.mode) && self.mode == 'Delegated') == has(self.delegated)",message="delegated is required with mode Delegated and allowed only then"
 type AgentIdentityOutboundAccess struct {
-	// Mode selects whether the Agent acts as itself.
-	// +kubebuilder:validation:Enum=Self
+	// Mode selects whether the Agent acts as itself (Self) or for the Task's
+	// requester (Delegated).
+	// +kubebuilder:validation:Enum=Self;Delegated
 	// +kubebuilder:default=Self
 	// +optional
 	Mode string `json:"mode,omitempty"`
+
+	// Delegated configures acting for the requester. The requester's own
+	// Connection to the named ConnectorProvider supplies the user grant, and
+	// that provider's curated tool declarations are the only operations the
+	// credential is released for, exactly as in connection mode.
+	// +optional
+	Delegated *DelegatedAgentIdentity `json:"delegated,omitempty"`
 
 	// Entra targets a resource protected by Microsoft Entra. The Agent's
 	// identity must be an Entra agent identity.
@@ -74,6 +86,22 @@ type AgentIdentityOutboundAccess struct {
 	// Output configures credential injection. Defaults to Authorization: Bearer.
 	// +optional
 	Output *OutboundCredentialOutput `json:"output,omitempty"`
+}
+
+// DelegatedAgentIdentity selects the requester's grant and how long it may be
+// used after the requester last acted.
+type DelegatedAgentIdentity struct {
+	// ProviderRef names the same-namespace ConnectorProvider whose Connections
+	// hold the requester's token for the identity's issuer. For Entra this is
+	// a front-end client that requests the blueprint's scope.
+	// +kubebuilder:validation:Required
+	ProviderRef LocalObjectReference `json:"providerRef"`
+
+	// MaxDelegationAge bounds how long after the root requester's last
+	// authenticated action in the Task chain the Agent may act for them.
+	// Defaults to one hour; the controller caps it.
+	// +optional
+	MaxDelegationAge *metav1.Duration `json:"maxDelegationAge,omitempty"`
 }
 
 // EntraOutboundTarget names the Entra-protected resource a token is for.

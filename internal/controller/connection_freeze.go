@@ -332,7 +332,8 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 			}
 			policies[policyName] = policy
 		}
-		if policy == nil || policy.Spec.Connection == nil {
+		provider, connectorBacked := outboundaccess.ConnectionProviderName(policy)
+		if !connectorBacked {
 			continue
 		}
 		specDigest, err := ConnectorToolDispatchDigest(tool.Spec, policy.Spec)
@@ -341,7 +342,7 @@ func classifyConnectorTools(ctx context.Context, reader client.Reader, registry 
 		}
 		result[name] = connectorToolInfo{
 			PolicyName:       policyName,
-			Provider:         policy.Spec.Connection.ProviderRef.Name,
+			Provider:         provider,
 			Class:            tool.Spec.BrokeredToolClass,
 			SpecDigest:       specDigest,
 			PolicyUID:        string(policy.UID),
@@ -1236,6 +1237,7 @@ func connectionReadyFor(connection *corev1alpha1.Connection, requester *corev1al
 // policies fail closed.
 func bindFrozenConnections(
 	ctx context.Context,
+	reader client.Reader,
 	snapshots store.AgentExecutionSnapshotStore,
 	task *corev1alpha1.Task,
 	executor *workerexecutor.ToolExecutor,
@@ -1245,7 +1247,11 @@ func bindFrozenConnections(
 	}
 	executor.SetRequester(task.Spec.RequestedBy)
 	executor.SetFrozenConnections(nil)
-	executor.SetAgentIdentity(agentIdentityBindingFromTask(task))
+	identity, err := agentIdentityBindingFromTask(ctx, reader, task)
+	if err != nil {
+		return err
+	}
+	executor.SetAgentIdentity(identity)
 	if snapshots == nil || task.Status.AgentExecutionBinding == nil {
 		return nil
 	}

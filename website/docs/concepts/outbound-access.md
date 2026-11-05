@@ -74,6 +74,39 @@ MCP broker; native `type: ai` workers fail closed. The Tool URL must be HTTPS wi
 template placeholders, and requests must go to the Tool's declared origin. Permissions are
 the agent identity's app roles in Entra. See [ADR 0039](https://github.com/orka-agents/orka/blob/main/docs/adr/0039-agent-identities.md).
 
+### Acting for the requester (Delegated)
+
+With `mode: Delegated`, the Agent acts for the Task's verified requester, and both sides
+are enforced: Entra issues an on-behalf-of token only for permissions granted to the agent
+identity, and the resource applies the requester's own rights.
+
+```yaml
+spec:
+  agentIdentity:
+    mode: Delegated
+    delegated:
+      providerRef:
+        name: entra-blueprint-signin
+      maxDelegationAge: 1h
+    entra:
+      resource: https://storage.azure.com
+```
+
+- **The requester's grant** is their own Connection to the named `ConnectorProvider`, an
+  Entra front-end client that requests the blueprint's scope. The controller refuses a
+  linked token whose audience is not the blueprint, so the requester must sign in through
+  Entra, not through Orka's GitHub dashboard sign-in.
+- **What it may do** is exactly the provider's curated tool declarations, enforced as in
+  connection mode. Write tools always need approval, and only the requester can approve
+  them; anyone else allowed to decide approvals may still decline.
+- **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
+  `--agent-identity-max-delegation-age`) after the root requester's last action in the
+  Task chain, that is, creating the root Task or sending the Session message that started
+  it. Child Tasks, retries, and woken agents do not extend it.
+- **Where:** only Tasks on built-in RuntimePools, whose Pods reach the network only
+  through Orka. External `runtimeRef` runtimes, workspace-backed sessions, and native
+  `type: ai` workers fail closed.
+
 ## Direct credential exchange
 
 ```yaml

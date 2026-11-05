@@ -302,17 +302,57 @@ func requireParentOwnsIdentityAgent(
 }
 
 // agentIdentityBindingFromTask returns the identity frozen into an ACP Task's
-// binding, for agentIdentity-mode outbound access.
-func agentIdentityBindingFromTask(task *corev1alpha1.Task) *outboundaccess.AgentIdentityBinding {
+// binding, for agentIdentity-mode outbound access, with what Delegated mode
+// needs: when the root requester last acted, and whether the Task runs where
+// Orka controls the network.
+func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*outboundaccess.AgentIdentityBinding, error) {
 	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil ||
 		task.Status.AgentExecutionBinding.Agent.Identity == nil {
-		return nil
+		return nil, nil
 	}
-	agent := task.Status.AgentExecutionBinding.Agent
+	binding := task.Status.AgentExecutionBinding
+	agent := binding.Agent
+	start, err := delegationStart(ctx, reader, task)
+	if err != nil {
+		return nil, err
+	}
+	workspaceBacked := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 	return &outboundaccess.AgentIdentityBinding{
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
 		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
+		DelegationStart: start,
+		ManagedEgress:   binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool && !workspaceBacked,
+	}, nil
+}
+
+// maxDelegationChainDepth bounds the parent walk to the root requester's Task.
+const maxDelegationChainDepth = 32
+
+// delegationStart returns when the root requester last acted in the Task
+// chain: the creation of the chain's root Task, which the requester created
+// directly or with a Session message. Child Tasks, retries, and agents woken
+// later never move it. A broken chain returns the zero time, which Delegated
+// mode refuses.
+func delegationStart(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (time.Time, error) {
+	current := task
+	for range maxDelegationChainDepth {
+		parentName := labels.ParentTaskName(current.Labels, current.Annotations)
+		if parentName == "" {
+			return current.CreationTimestamp.Time, nil
+		}
+		if reader == nil {
+			return time.Time{}, nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: parentName}, parent); err != nil {
+			if apierrors.IsNotFound(err) {
+				return time.Time{}, nil
+			}
+			return time.Time{}, fmt.Errorf("resolve the delegating Task chain: %w", err)
+		}
+		current = parent
 	}
+	return time.Time{}, nil
 }
 
 // requireBoundIdentityClaim re-checks, after the binding is persisted and

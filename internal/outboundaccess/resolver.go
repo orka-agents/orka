@@ -109,6 +109,13 @@ type AgentIdentityBinding struct {
 	AgentUID        string
 	AgentGeneration int64
 	TaskUID         string
+	// DelegationStart is the root requester's last authenticated action in
+	// the Task chain; Delegated mode refuses calls past the delegation age.
+	DelegationStart time.Time
+	// ManagedEgress reports that the Task runs on a built-in RuntimePool,
+	// whose Pods can reach the network only through Orka. Delegated mode
+	// refuses every other runtime.
+	ManagedEgress bool
 }
 
 // AgentIdentityTokenRequest asks the issuer for a credential for one frozen
@@ -120,6 +127,8 @@ type AgentIdentityTokenRequest struct {
 	// /.default scope is requested.
 	Resource string
 	Policy   PolicyIdentity
+	// UserAssertion is the requester's token, for Delegated mode only.
+	UserAssertion string
 }
 
 // AgentIdentityTokenSource issues Agent identity credentials. It exists only
@@ -280,6 +289,11 @@ type KubernetesResolver struct {
 	// AgentIdentities issues credentials for agentIdentity-mode policies. Nil
 	// means this process may not act as an Agent identity.
 	AgentIdentities AgentIdentityTokenSource
+	// MaxDelegationAge caps every delegated policy's maxDelegationAge.
+	// Zero means DefaultMaxDelegationAgeCap.
+	MaxDelegationAge time.Duration
+	// Now reports the current time; time.Now when nil.
+	Now func() time.Time
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -339,7 +353,7 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 			return Resolution{}, errors.New("credential-injecting outbound access cannot coexist with authSecretRef")
 		}
 	}
-	if _, frozen := req.FrozenConnections[policy.Name]; frozen && policy.Spec.Connection == nil {
+	if _, frozen := req.FrozenConnections[policy.Name]; frozen && !connectionBacked(policy) {
 		// The Task was dispatched under a person's Connection for this
 		// policy; a policy moved to another adapter since must not hand it
 		// a service credential or route instead.
@@ -500,74 +514,11 @@ func sameStaticHeaders(declared, actual map[string]string) bool {
 // precondition fails closed: no source in this process, no verified
 // requester, no frozen binding, or a source error all mean no credential.
 func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
-	if r.Connections == nil {
-		return Resolution{}, errors.New("connector-backed tools execute only in the controller")
-	}
-	requester := req.Requester
-	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
-		return Resolution{}, errors.New("connection outbound access requires a Task with a verified requester")
-	}
-	// The person's token is bound to the exact curated destination. A Tool
-	// that sends to an MCP actor endpoint, or whose URL is a template the
-	// call's arguments would rewrite, can never satisfy that, so it is
-	// refused before any credential work.
-	if req.MCPBacked {
-		return Resolution{}, errors.New("connection outbound access policies are not supported on MCP-backed tools")
-	}
-	if strings.Contains(req.Tool.URL, "{{") {
-		return Resolution{}, errors.New("connection outbound access requires a Tool URL without template placeholders")
-	}
-	frozen, ok := req.FrozenConnections[policy.Name]
-	if !ok || strings.TrimSpace(frozen.UID) == "" {
-		return Resolution{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
-	}
-	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
-		return Resolution{}, fmt.Errorf("connection outbound access policy %q changed since the task was dispatched; re-dispatch to use it", policy.Name)
-	}
-	if frozen.Provider != "" && frozen.Provider != policy.Spec.Connection.ProviderRef.Name {
-		return Resolution{}, fmt.Errorf("connection outbound access policy %q selects a different provider than the one frozen for it", policy.Name)
-	}
-	if req.Tool.Builtin {
-		return Resolution{}, errors.New("a built-in tool has no outbound access policy")
-	}
-	provider := &corev1alpha1.ConnectorProvider{}
-	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: policy.Spec.Connection.ProviderRef.Name}, provider); err != nil {
-		return Resolution{}, fmt.Errorf("resolve connector provider: %w", err)
-	}
-	declared, err := DeclaredConnectorTool(provider, req.Tool)
+	credential, declared, err := r.resolveRequesterConnection(ctx, policy, req)
 	if err != nil {
 		return Resolution{}, err
 	}
-	if err := connectors.ValidateToolArguments(declared.Parameters, req.Arguments); err != nil {
-		return Resolution{}, fmt.Errorf("connection credential request arguments rejected: %w", err)
-	}
-	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
-		Namespace: policy.Namespace,
-		Provider:  policy.Spec.Connection.ProviderRef.Name,
-		Issuer:    requester.Issuer,
-		Subject:   requester.Subject,
-		Frozen:    frozen,
-		Tool:      req.Tool,
-	})
-	if err != nil {
-		return Resolution{}, fmt.Errorf("resolve connection credential: %w", err)
-	}
-	if strings.TrimSpace(credential.AccessToken) == "" {
-		return Resolution{}, errors.New("connection credential source returned an empty credential")
-	}
-	if declared.Class == corev1alpha1.ConnectorToolClassWrite && credential.Mode != corev1alpha1.ConnectionModeReadWrite {
-		return Resolution{}, errors.New("connection is readOnly; write tools are not available")
-	}
-	header := defaultCredentialHeader
-	prefix := defaultCredentialPrefix
-	if output := policy.Spec.Connection.Output; output != nil {
-		if strings.TrimSpace(output.Header) != "" {
-			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
-		}
-		if output.Prefix != nil {
-			prefix = *output.Prefix
-		}
-	}
+	header, prefix := credentialOutput(policy.Spec.Connection.Output)
 	return Resolution{
 		Adapter:          AdapterConnection,
 		CredentialHeader: header,
@@ -576,6 +527,102 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		ConnectionUID:    credential.ConnectionUID,
 		Parameters:       declared.Parameters,
 	}, nil
+}
+
+// resolveRequesterConnection returns the Task requester's current credential
+// from their frozen Connection to the policy's ConnectorProvider, after
+// checking that the executing Tool is one the provider declares and that the
+// call's arguments fit its curated schema. Connection mode injects the
+// credential; agentIdentity in Delegated mode exchanges it.
+func (r *KubernetesResolver) resolveRequesterConnection(
+	ctx context.Context,
+	policy *corev1alpha1.OutboundAccessPolicy,
+	req ResolveRequest,
+) (ConnectionCredential, corev1alpha1.ConnectorTool, error) {
+	providerName, ok := ConnectionProviderName(policy)
+	if !ok {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("the policy does not draw on a ConnectorProvider")
+	}
+	if r.Connections == nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connector-backed tools execute only in the controller")
+	}
+	requester := req.Requester
+	if requester == nil || strings.TrimSpace(requester.Issuer) == "" || strings.TrimSpace(requester.Subject) == "" {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires a Task with a verified requester")
+	}
+	// The person's token is bound to the exact curated destination. A Tool
+	// that sends to an MCP actor endpoint, or whose URL is a template the
+	// call's arguments would rewrite, can never satisfy that, so it is
+	// refused before any credential work.
+	if req.MCPBacked {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection outbound access policies are not supported on MCP-backed tools")
+	}
+	if strings.Contains(req.Tool.URL, "{{") {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection outbound access requires a Tool URL without template placeholders")
+	}
+	frozen, ok := req.FrozenConnections[policy.Name]
+	if !ok || strings.TrimSpace(frozen.UID) == "" {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
+	}
+	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q changed since the task was dispatched; re-dispatch to use it", policy.Name)
+	}
+	if frozen.Provider != "" && frozen.Provider != providerName {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q selects a different provider than the one frozen for it", policy.Name)
+	}
+	if req.Tool.Builtin {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("a built-in tool has no outbound access policy")
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: policy.Namespace, Name: providerName}, provider); err != nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("resolve connector provider: %w", err)
+	}
+	declared, err := DeclaredConnectorTool(provider, req.Tool)
+	if err != nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, err
+	}
+	if err := connectors.ValidateToolArguments(declared.Parameters, req.Arguments); err != nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection credential request arguments rejected: %w", err)
+	}
+	credential, err := r.Connections.ResolveConnectionCredential(ctx, ConnectionCredentialRequest{
+		Namespace: policy.Namespace,
+		Provider:  providerName,
+		Issuer:    requester.Issuer,
+		Subject:   requester.Subject,
+		Frozen:    frozen,
+		Tool:      req.Tool,
+	})
+	if err != nil {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("resolve connection credential: %w", err)
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection credential source returned an empty credential")
+	}
+	if declared.Class == corev1alpha1.ConnectorToolClassWrite && credential.Mode != corev1alpha1.ConnectionModeReadWrite {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection is readOnly; write tools are not available")
+	}
+	return credential, declared, nil
+}
+
+// credentialOutput returns the header and prefix an output selects, with the
+// Authorization: Bearer default.
+func credentialOutput(output *corev1alpha1.OutboundCredentialOutput) (string, string) {
+	header := defaultCredentialHeader
+	prefix := defaultCredentialPrefix
+	if output != nil {
+		if strings.TrimSpace(output.Header) != "" {
+			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
+		}
+		if output.Prefix != nil {
+			prefix = *output.Prefix
+		}
+	}
+	return header, prefix
+}
+
+func connectionBacked(policy *corev1alpha1.OutboundAccessPolicy) bool {
+	_, ok := ConnectionProviderName(policy)
+	return ok
 }
 
 // injectsCredential reports whether the policy's adapter attaches a
@@ -618,34 +665,79 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if req.Tool.Builtin {
 		return Resolution{}, errors.New("a built-in tool has no outbound access policy")
 	}
-	token, err := r.AgentIdentities.AgentIdentityToken(ctx, AgentIdentityTokenRequest{
+	tokenRequest := AgentIdentityTokenRequest{
 		Identity: binding.Identity,
 		Mode:     AgentIdentityMode(identity),
 		Resource: identity.Entra.Resource,
 		Policy:   PolicyIdentity{UID: string(policy.UID), Generation: policy.Generation},
-	})
+	}
+	var connectionUID string
+	var parameters *apiextensionsv1.JSON
+	if tokenRequest.Mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
+		credential, declared, err := r.resolveDelegation(ctx, policy, req)
+		if err != nil {
+			return Resolution{}, err
+		}
+		tokenRequest.UserAssertion = credential.AccessToken
+		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
+	}
+	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
 	if err != nil {
 		return Resolution{}, fmt.Errorf("issue agent identity credential: %w", err)
 	}
 	if strings.TrimSpace(token) == "" {
 		return Resolution{}, errors.New("agent identity issuer returned an empty credential")
 	}
-	header := defaultCredentialHeader
-	prefix := defaultCredentialPrefix
-	if output := identity.Output; output != nil {
-		if strings.TrimSpace(output.Header) != "" {
-			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
-		}
-		if output.Prefix != nil {
-			prefix = *output.Prefix
-		}
-	}
+	header, prefix := credentialOutput(identity.Output)
 	return Resolution{
 		Adapter:          AdapterAgentIdentity,
 		CredentialHeader: header,
 		CredentialValue:  prefix + token,
-		SensitiveValues:  compactSensitiveValues([]string{token}),
+		SensitiveValues:  compactSensitiveValues([]string{token, tokenRequest.UserAssertion}),
+		ConnectionUID:    connectionUID,
+		Parameters:       parameters,
 	}, nil
+}
+
+// DefaultMaxDelegationAge is a delegated policy's age when it sets none, and
+// DefaultMaxDelegationAgeCap the controller's cap when it sets none.
+const (
+	DefaultMaxDelegationAge    = time.Hour
+	DefaultMaxDelegationAgeCap = 24 * time.Hour
+)
+
+// resolveDelegation checks that the Agent may still act for the requester
+// and returns the requester's credential for the exchange.
+func (r *KubernetesResolver) resolveDelegation(
+	ctx context.Context,
+	policy *corev1alpha1.OutboundAccessPolicy,
+	req ResolveRequest,
+) (ConnectionCredential, corev1alpha1.ConnectorTool, error) {
+	binding := req.AgentIdentity
+	if !binding.ManagedEgress {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
+			"delegated agent identity access runs only on built-in RuntimePools, whose network Orka controls")
+	}
+	age := DefaultMaxDelegationAge
+	if configured := policy.Spec.AgentIdentity.Delegated.MaxDelegationAge; configured != nil {
+		age = configured.Duration
+	}
+	limit := r.MaxDelegationAge
+	if limit <= 0 {
+		limit = DefaultMaxDelegationAgeCap
+	}
+	if age > limit {
+		age = limit
+	}
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	if binding.DelegationStart.IsZero() || now.After(binding.DelegationStart.Add(age)) {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
+			"the delegation has expired; the requester must act again for the Agent to act for them")
+	}
+	return r.resolveRequesterConnection(ctx, policy, req)
 }
 
 func (r *KubernetesResolver) exchanger() tokenexchange.Exchanger {
