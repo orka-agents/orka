@@ -570,6 +570,12 @@ func (r *EvalRunReconciler) validateEvalTrialTask(run *corev1alpha1.EvalRun, mon
 	if !evalMapContains(task.Labels, expected.Labels) || !evalMapContains(task.Annotations, expected.Annotations) {
 		return fmt.Errorf("trial Task %s/%s metadata does not match the rendered trial", task.Namespace, task.Name)
 	}
+	// Extra metadata is allowed for the Task path's own keys, but a parent
+	// Task marks a delegated child, which is granted messaging tools the
+	// rendered trial does not have.
+	if labels.ParentTaskName(task.Labels, task.Annotations) != "" {
+		return fmt.Errorf("trial Task %s/%s is marked as a delegated child", task.Namespace, task.Name)
+	}
 	if task.Spec.Prompt != expected.Spec.Prompt ||
 		!reflect.DeepEqual(repositoryMonitorComparableReviewTaskSpec(task.Spec), repositoryMonitorComparableReviewTaskSpec(expected.Spec)) {
 		return fmt.Errorf("trial Task %s/%s spec does not match the rendered trial", task.Namespace, task.Name)

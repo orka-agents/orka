@@ -678,6 +678,37 @@ func TestEvalRunRejectsTrialCreatedBeforeTheSnapshot(t *testing.T) {
 	}
 }
 
+// A parent-task label or annotation makes the runtime grant delegated-child
+// messaging tools, so a trial carrying one fails the run.
+func TestEvalRunRejectsTrialMarkedAsDelegatedChild(t *testing.T) {
+	for name, mark := range map[string]func(*corev1alpha1.Task){
+		"label": func(task *corev1alpha1.Task) { task.Labels[labels.LabelParentTask] = "coordinator" },
+		"annotation": func(task *corev1alpha1.Task) {
+			metav1.SetMetaDataAnnotation(&task.ObjectMeta, labels.AnnotationParentTaskName, "coordinator")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := evalTestRun(1, 1)
+			env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+			env.start()
+			env.reconcile()
+			tasks := env.trialTasks()
+			if len(tasks) != 1 {
+				t.Fatalf("trial Tasks = %d", len(tasks))
+			}
+			mark(&tasks[0])
+			if err := env.client.Update(context.Background(), &tasks[0]); err != nil {
+				t.Fatal(err)
+			}
+			env.reconcile()
+			got := env.run()
+			if got.Status.Phase != corev1alpha1.EvalRunPhaseFailed || evalCompletedCondition(got).Reason != evalRunReasonTrialTaskConflict {
+				t.Fatalf("phase = %q condition = %+v", got.Status.Phase, evalCompletedCondition(got))
+			}
+		})
+	}
+}
+
 func TestEvalRunTTLDeletesRunAndFinalizerDeletesRecords(t *testing.T) {
 	run := evalTestRun(1, 2)
 	ttl := int32(60)
