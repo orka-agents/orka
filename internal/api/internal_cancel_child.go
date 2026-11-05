@@ -181,8 +181,10 @@ func (h *InternalHandlers) recordChildCancellationIntent(ctx context.Context, pa
 		return "", err
 	}
 	var committed childCancellationIntent
+	// The event sanitizer may redact display text such as ChildName. The
+	// UID tuple is the authority bound by the dedupe key above.
 	if persisted == nil || json.Unmarshal(persisted.Content, &committed) != nil ||
-		committed.ParentUID != intent.ParentUID || committed.ChildUID != intent.ChildUID || committed.ChildName != intent.ChildName {
+		committed.ParentUID != intent.ParentUID || committed.ChildUID != intent.ChildUID {
 		return "", fmt.Errorf("invalid child cancellation intent")
 	}
 	return committed.Message, nil
