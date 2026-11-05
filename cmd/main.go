@@ -1386,6 +1386,11 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
+			Reader: mgr.GetAPIReader(), Sessions: sqliteStore,
+		}.Check
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)

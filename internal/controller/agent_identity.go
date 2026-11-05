@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,6 +21,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // errIdentityClaimPending marks a Task waiting for its Agent to hold the
@@ -319,7 +321,8 @@ func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, tas
 	workspaceBacked := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 	return &outboundaccess.AgentIdentityBinding{
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
-		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
+		AgentUID: string(agent.UID), AgentGeneration: agent.Generation,
+		TaskNamespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
 		DelegationStart: start,
 		ManagedEgress:   binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool && !workspaceBacked,
 	}, nil
@@ -396,4 +399,53 @@ func classificationActsForRequester(classified map[string]connectorToolInfo) boo
 		}
 	}
 	return false
+}
+
+// DelegationLiveness checks that a Delegated call's Task is still running and
+// its Session still open, reading both live.
+type DelegationLiveness struct {
+	Reader   client.Reader
+	Sessions store.SessionStore
+}
+
+// Check implements outboundaccess.KubernetesResolver.DelegationLive.
+func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.AgentIdentityBinding) error {
+	if d.Reader == nil {
+		return errors.New("no Task reader is configured")
+	}
+	task := &corev1alpha1.Task{}
+	if err := d.Reader.Get(ctx, types.NamespacedName{Namespace: binding.TaskNamespace, Name: binding.TaskName}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errors.New("the Task is gone")
+		}
+		return fmt.Errorf("read the Task: %w", err)
+	}
+	switch {
+	case string(task.UID) != binding.TaskUID:
+		return errors.New("the Task was replaced")
+	case !task.DeletionTimestamp.IsZero():
+		return errors.New("the Task is being deleted")
+	case isTerminalTaskPhase(task.Status.Phase):
+		return fmt.Errorf("the Task is %s", task.Status.Phase)
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
+		return errors.New("the Task's cancellation was requested")
+	}
+	if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
+		return nil
+	}
+	if d.Sessions == nil {
+		return errors.New("no Session store is configured")
+	}
+	session, err := d.Sessions.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errors.New("the Task's Session was deleted")
+		}
+		return fmt.Errorf("read the Task's Session: %w", err)
+	}
+	if session == nil || session.Cancelled {
+		return errors.New("the Task's Session was cancelled")
+	}
+	return nil
 }
