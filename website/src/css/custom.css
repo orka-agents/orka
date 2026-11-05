@@ -379,8 +379,9 @@ h1, h2, h3 {
   background-color: var(--orka-code-bg) !important;
 }
 
-/* Keep the pre's focus ring inside the rounded container's clipping boundary. */
-.theme-code-block pre:focus-visible {
+/* Keep focus rings on the dark code surface and inside any clipping boundary. */
+.theme-code-block pre:focus-visible,
+.orka-install__code:focus-visible {
   outline-offset: -2px;
 }
 

@@ -35,7 +35,11 @@ export default function InstallCommand({className, style}) {
           <span>{copied ? 'Copied' : 'Copy'}</span>
         </button>
       </div>
-      <pre className="orka-install__code">
+      <pre
+        className="orka-install__code"
+        tabIndex={0}
+        role="region"
+        aria-label="Helm installation commands">
         {COMMANDS.map((command) => (
           <span key={command}>
             <span className="orka-install__prompt" aria-hidden="true">
