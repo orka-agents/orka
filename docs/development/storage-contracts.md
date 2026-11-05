@@ -278,8 +278,10 @@ the observable parts.
   `storagev1.ContractRevision`, so startup validation can refuse an older
   provider with one precise reason instead of failing at the first missing
   method; an optional family is announced as a capability instead. Revision
-  2 added the dataset binding (see "Installation binding"). The
-  revision Orka requires for each part belongs to Orka, not to the contract.
+  2 requires operation receipts and controller epoch advancement on both
+  provider contracts. Revision 3 added dataset binding (see "Installation
+  binding"). The revision Orka requires for each part belongs to Orka, not to
+  the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -576,7 +578,11 @@ without one until the storage client does.
   covered by its digest, so a retry is judged at the original request time.
   The provider clock is used only for operation age and the clock-skew check,
   receipt and tombstone retention, `ObservedAt`, and informational times the
-  provider assigns when a caller leaves them zero. Orka estimates the clock
+  provider assigns when a caller leaves them zero, plus connector completion
+  expiry checked inside `CommitSealedConnectorCompletion` at commit time.
+  That expiry is a redemption deadline, not a controller-owned lease: both
+  the request time and the provider's current time must precede it, so a
+  stalled commit cannot redeem an expired completion. Orka estimates the clock
   offset from `ObservedAt` and refuses writes while it exceeds
   `MaxClockSkew`. Gateway claims, outbox claims and gateway message admission
   already carry the request time and lease they need; chat turns, Session
