@@ -64,3 +64,11 @@ the registered policy exposes after its own deny list.
   boundary for the ceiling itself.
 - Delegation targets, connector writes, and native `ai` Agents are not covered
   yet. They can extend the same `ceiling` object when needed.
+- Controllers older than this change cannot be rolled back to while any Agent
+  sets `runtime.ceiling`. Their runtime decoder rejects fields it does not
+  know, which is deliberate: an older controller that ignored the ceiling
+  would run the Agent without its limits. But it rejects the whole Agent list,
+  so the controller never becomes ready and nothing reconciles. Before rolling
+  back past this change, remove `runtime.ceiling` from every Agent, or roll
+  forward again. Failing only the affected Agent is tracked in
+  [#1035](https://github.com/orka-agents/orka/issues/1035).
