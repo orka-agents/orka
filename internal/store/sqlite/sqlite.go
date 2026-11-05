@@ -987,10 +987,6 @@ type Store struct {
 	// completed by this process's first custody operation.
 	pendingWALTruncate atomic.Bool
 
-	// connectorSealer seals connector custody with the storage client's
-	// snapshot key. Connector custody fails closed while it is nil.
-	connectorSealer store.ConnectorCustodySealer
-
 	// nativeSessionSealer seals native state for the duplicate SQL control
 	// implementation's turn finalization. Production never installs it.
 	nativeSessionSealer store.NativeSessionFinalizationSealer

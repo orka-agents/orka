@@ -8,8 +8,9 @@ import (
 
 // Protected records
 //
-// Execution snapshots and native session state are sealed by Orka before a
-// provider sees them. Orka owns the encryption key and the sealing format: it
+// Execution snapshots, native session state and connector custody (see
+// [SealedConnectorCustodyStore]) are sealed by Orka before a provider sees
+// them. Orka owns the encryption key and the sealing format: it
 // encrypts each record with AES-256-GCM under a fresh nonce and binds the
 // record's identity into the associated data. A provider stores the nonce and
 // ciphertext as opaque bytes, never holds the key and never receives the
