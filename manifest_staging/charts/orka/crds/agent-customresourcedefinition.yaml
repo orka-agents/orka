@@ -1698,6 +1698,12 @@ spec:
                   issuer:
                     minLength: 1
                     type: string
+                  releasing:
+                    description: |-
+                      Releasing marks a claim the Agent's spec no longer names. New Task
+                      bindings refuse it, and the controller releases it on a later pass once
+                      no unfinished Task is bound to it.
+                    type: boolean
                 required:
                 - id
                 - issuer

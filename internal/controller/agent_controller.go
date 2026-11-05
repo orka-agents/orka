@@ -138,7 +138,12 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Update status
-	return r.updateStatus(ctx, agent, activeTasks, validationErr, claim)
+	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim)
+	if err == nil && claim != nil && claim.Releasing && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReleaseRecheck) {
+		// The release finishes on a later pass, once bound Tasks are done.
+		result.RequeueAfter = agentIdentityReleaseRecheck
+	}
+	return result, err
 }
 
 // validateAgent validates the Agent's referenced resources exist and config is coherent.

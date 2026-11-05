@@ -511,6 +511,11 @@ type AgentIdentityClaim struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	ID string `json:"id"`
+	// Releasing marks a claim the Agent's spec no longer names. New Task
+	// bindings refuse it, and the controller releases it on a later pass once
+	// no unfinished Task is bound to it.
+	// +optional
+	Releasing bool `json:"releasing,omitempty"`
 }
 
 // +kubebuilder:object:root=true

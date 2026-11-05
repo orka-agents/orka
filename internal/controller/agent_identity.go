@@ -29,6 +29,12 @@ func identityClaimMatches(claim *corev1alpha1.AgentIdentityClaim, issuer, id str
 	return claim != nil && claim.Issuer == issuer && claim.ID == id
 }
 
+// identityClaimBindable reports whether new Task bindings may use the claim:
+// it must name the identity and not be on its way out.
+func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
+	return identityClaimMatches(claim, issuer, id) && !claim.Releasing
+}
+
 // validateAgentIdentity refuses an identity this controller cannot honor.
 // Ownership between Agents is decided by reconcileIdentityClaim.
 func (r *AgentReconciler) validateAgentIdentity(_ context.Context, agent *corev1alpha1.Agent) error {
@@ -36,10 +42,15 @@ func (r *AgentReconciler) validateAgentIdentity(_ context.Context, agent *corev1
 }
 
 // reconcileIdentityClaim decides the identity claim to record for the Agent.
-// A claim is granted only when no other Agent holds it, and a claim the spec
-// no longer names is kept until every Task bound to it has finished, so two
-// Agents never act as one identity at the same time. Agent reconciles run one
-// at a time and read live state, so two Agents cannot claim at once.
+// A claim is granted only when no other Agent holds it, so two Agents never
+// act as one identity at the same time. Agent reconciles run one at a time
+// and read live state, so two Agents cannot claim at once.
+//
+// A claim the spec no longer names is released in two passes. The first only
+// marks it releasing, which every new binding and every unstarted Task
+// re-checking after its binding refuses. A later pass releases it once a live
+// scan finds no unfinished Task bound to it: a binding that passed its check
+// before the mark was persisted before it, so that scan sees it.
 func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.AgentIdentityClaim, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
 	// Start from the live claim: a cached copy can still show a claim this
@@ -54,7 +65,15 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
 	claim := live.Status.IdentityClaim.DeepCopy()
 	issuer, id, declared := live.IdentityRef()
+	if claim != nil && identityClaimMatches(claim, issuer, id) {
+		// The spec names the held identity again; it is no longer leaving.
+		claim.Releasing = false
+	}
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
+		if !claim.Releasing {
+			claim.Releasing = true
+			return claim, errIdentityClaimReleasing(claim, declared)
+		}
 		bound, err := activeIdentityTasks(ctx, reader, agent, *claim)
 		if err != nil {
 			return claim, err
@@ -82,6 +101,15 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		}
 	}
 	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}, nil
+}
+
+// errIdentityClaimReleasing reports the first release pass. It is an error only
+// when the Agent now names another identity it cannot use yet.
+func errIdentityClaimReleasing(claim *corev1alpha1.AgentIdentityClaim, declared bool) error {
+	if !declared {
+		return nil
+	}
+	return fmt.Errorf("identity %s/%s is being released before this Agent can claim its new identity", claim.Issuer, claim.ID)
 }
 
 // activeIdentityTasks counts unfinished Tasks bound to this Agent as claim.
@@ -185,7 +213,7 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live); err != nil {
 		return nil, fmt.Errorf("resolve the Agent's identity claim: %w", err)
 	}
-	if live.UID != agent.UID || !identityClaimMatches(live.Status.IdentityClaim, issuer, id) {
+	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
@@ -247,10 +275,13 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
-	if err == nil && live.UID == frozen.UID && identityClaimMatches(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
+	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
 		return ctrl.Result{}, nil, false
 	}
 	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"),
 		fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID))
 	return result, failErr, true
 }
+
+// agentIdentityReleaseRecheck is how soon a releasing claim is checked again.
+const agentIdentityReleaseRecheck = 10 * time.Second

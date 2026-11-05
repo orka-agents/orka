@@ -113,29 +113,53 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	}
 }
 
-func TestIdentityClaimOutlivesTheSpecWhileTasksAreBound(t *testing.T) {
+func releasingAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, Releasing: true}
+	return agent
+}
+
+func TestIdentityClaimIsReleasedInTwoPasses(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("holder", time.Now()))
 	agent.Spec.Identity = nil
-	running := boundTask("running", agent, corev1alpha1.TaskPhaseRunning)
-	r := setupAgentReconciler(agent, running)
+	r := setupAgentReconciler(agent)
 	claim, err := r.reconcileIdentityClaim(context.Background(), agent)
-	if err != nil || claim == nil {
-		t.Fatalf("a removed identity stays claimed while a bound Task runs: claim=%v err=%v", claim, err)
+	if err != nil || claim == nil || !claim.Releasing {
+		t.Fatalf("the first pass only marks the claim releasing: claim=%+v err=%v", claim, err)
 	}
 
-	switched := claimedAgent(identityBoundTestAgent("holder", time.Now()))
+	releasing := releasingAgent(identityBoundTestAgent("holder", time.Now()))
+	releasing.Spec.Identity = nil
+	r = setupAgentReconciler(releasing, boundTask("running", releasing, corev1alpha1.TaskPhaseRunning))
+	if claim, err := r.reconcileIdentityClaim(context.Background(), releasing); err != nil || claim == nil {
+		t.Fatalf("a releasing claim stays while a bound Task runs: claim=%+v err=%v", claim, err)
+	}
+	r = setupAgentReconciler(releasing, boundTask("finished", releasing, corev1alpha1.TaskPhaseSucceeded))
+	if claim, err := r.reconcileIdentityClaim(context.Background(), releasing); err != nil || claim != nil {
+		t.Fatalf("the second pass releases once bound Tasks finish: claim=%+v err=%v", claim, err)
+	}
+
+	renamed := releasingAgent(identityBoundTestAgent("holder", time.Now()))
+	r = setupAgentReconciler(renamed)
+	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing {
+		t.Fatalf("naming the held identity again cancels the release: claim=%+v err=%v", claim, err)
+	}
+
+	switched := releasingAgent(identityBoundTestAgent("holder", time.Now()))
 	switched.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
 	r = setupAgentReconciler(switched, boundTask("running", switched, corev1alpha1.TaskPhaseRunning))
 	r.Identity = testIdentityConfig()
 	if _, err := r.reconcileIdentityClaim(context.Background(), switched); err == nil || !strings.Contains(err.Error(), "until 1 Tasks") {
 		t.Fatalf("switching identities waits for bound Tasks: err=%v", err)
 	}
+}
 
-	finished := boundTask("finished", agent, corev1alpha1.TaskPhaseSucceeded)
-	r = setupAgentReconciler(agent, finished)
-	claim, err = r.reconcileIdentityClaim(context.Background(), agent)
-	if err != nil || claim != nil {
-		t.Fatalf("the claim is released once bound Tasks finish: claim=%v err=%v", claim, err)
+func TestReleasingClaimsAcceptNoNewBindings(t *testing.T) {
+	agent := releasingAgent(identityBoundTestAgent("reviewer", time.Now()))
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	root := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: testNS}}
+	if _, err := r.agentExecutionIdentity(context.Background(), root, agent); !errors.Is(err, errIdentityClaimPending) {
+		t.Fatalf("binding against a releasing claim: error = %v, want a retryable wait", err)
 	}
 }
 
@@ -211,6 +235,7 @@ func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing
 	}{
 		"claim held":                {agent: holder},
 		"claim released":            {agent: released, wantFail: true},
+		"claim releasing":           {agent: releasingAgent(identityBoundTestAgent("reviewer", time.Now())), wantFail: true},
 		"Agent deleted":             {wantFail: true},
 		"already executing is left": {agent: released, executing: true},
 	} {
