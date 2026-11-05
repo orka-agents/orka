@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,23 +12,60 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	"github.com/stretchr/testify/require"
 )
+
+// priorReleaseStore stores the sealed writes of a storage client without the
+// client's write envelope, as the earlier releases whose layout a fixture
+// loads stored them. Those releases wrote without envelopes, and the store
+// refuses an envelope for a layout it cannot serve.
+type priorReleaseStore struct{ *Store }
+
+func (s priorReleaseStore) CreateSealedAgentExecutionSnapshot(_ context.Context, snapshot storagev1.SealedAgentExecutionSnapshot) error {
+	return s.Store.CreateSealedAgentExecutionSnapshot(context.Background(), snapshot)
+}
+
+func (s priorReleaseStore) PutSealedConnectorCredential(
+	_ context.Context, request storagev1.PutSealedConnectorCredentialRequest,
+) (*storagev1.SealedConnectorCredential, error) {
+	return s.Store.PutSealedConnectorCredential(context.Background(), request)
+}
+
+func (s priorReleaseStore) StageSealedNativeSessionImport(
+	_ context.Context, request storagev1.StageSealedNativeSessionImportRequest,
+) (*storagev1.NativeSessionImportReceipt, error) {
+	return s.Store.StageSealedNativeSessionImport(context.Background(), request)
+}
+
+// priorReleaseFence is the fence the client puts on the envelopes that
+// priorReleaseStore drops.
+type priorReleaseFence struct{}
+
+func (priorReleaseFence) WriteFence(context.Context, string) (string, storagev1.ControllerEpochFence, error) {
+	return "prior-release", storagev1.ControllerEpochFence{Name: storagev1.DefaultControllerEpochName, Epoch: 1, HolderID: "prior-release"}, nil
+}
 
 func loadPriorSchemaFixture(t *testing.T) string {
 	t.Helper()
 	path, db := historicalSchemaDB(t, "abd2c040")
 	seedMigrationRecords(t, db, path)
 	s := NewStore(db, path)
-	s.snapshotCipher = testSnapshotCipher(t) // Produce pre-metadata ciphertext with the original format.
+	// The storage client seals with the record formats earlier releases used;
+	// the pre-metadata layout has no bootstrap history to complete.
+	prior := priorReleaseStore{Store: s}
+	c, err := storageclient.New(storageclient.Options{State: prior, Artifacts: prior, Embedded: prior, Fences: priorReleaseFence{}})
+	require.NoError(t, err)
+	require.NoError(t, c.ActivateSnapshotKey(t.Context(), testSnapshotKey))
 	body := []byte(`{"prompt":"retained encrypted prompt"}`)
-	require.NoError(t, s.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{
+	require.NoError(t, c.PersistAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshot{
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
-	require.NoError(t, s.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	require.NoError(t, s.SaveArtifact(t.Context(), "fixture", "task", "proof.txt", "text/plain", []byte("retained artifact")))
-	_, err := s.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
+	require.NoError(t, c.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
+	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
+	_, err = c.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 	return path
@@ -78,12 +116,17 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables; every other table is unchanged.
+	// The upgrade drops the empty harness v1 tables and adds empty operation
+	// receipt and eval trial tables; every other table is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
 		delete(before, retired)
 	}
+	require.NotContains(t, before, "operation_receipts")
+	before["operation_receipts"] = nil
+	require.NotContains(t, before, "eval_trials")
+	before["eval_trials"] = nil
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -91,19 +134,19 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, info.ID)
 	require.False(t, info.CanBootstrapSnapshotKey)
-	require.Equal(t, withSchema169Tables(before), applicationRows(t, s.db))
+	require.Equal(t, before, applicationRows(t, s.db))
 	var version int
 	require.NoError(t, s.db.QueryRow(`PRAGMA user_version`).Scan(&version))
 	require.Equal(t, SchemaVersion, version)
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	c := activateTestKey(t, s)
 	body := []byte(`{"prompt":"retained encrypted prompt"}`)
-	snapshot, err := s.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)})
+	snapshot, err := c.GetAgentExecutionSnapshot(t.Context(), store.AgentExecutionSnapshotKey{TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body)})
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(body, snapshot.Body), "snapshot plaintext changed")
-	credential, err := s.GetConnectorCredential(t.Context(), testCredentialRef())
+	credential, err := c.GetConnectorCredential(t.Context(), testCredentialRef())
 	require.NoError(t, err)
 	require.True(t, credential.AccessToken == "fixture-token-not-a-credential", "connector plaintext changed")
-	data, contentType, err := s.GetArtifact(t.Context(), "fixture", "task", "proof.txt")
+	data, contentType, err := s.GetArtifact(t.Context(), store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt"})
 	require.NoError(t, err)
 	require.Equal(t, "retained artifact", string(data))
 	require.Equal(t, "text/plain", contentType)
@@ -119,7 +162,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	again, err := reopened.DatasetInfo()
 	require.NoError(t, err)
 	require.Equal(t, info, again)
-	require.NoError(t, reopened.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	activateTestKey(t, reopened)
 	data, err = reopened.GetResult(t.Context(), "fixture", "new-task")
 	require.NoError(t, err)
 	require.Equal(t, "new result", string(data))
@@ -144,7 +187,7 @@ func TestDatasetFreshAndInterruptedBootstrap(t *testing.T) {
 			again, err := s.DatasetInfo()
 			require.NoError(t, err)
 			require.Equal(t, first, again)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			activateTestKey(t, s)
 			complete, err := s.DatasetInfo()
 			require.NoError(t, err)
 			require.Equal(t, first.ID, complete.ID)
@@ -192,7 +235,7 @@ func TestDatasetMetadataSynchronizedBeforeStartupReturns(t *testing.T) {
 			info, err := s.DatasetInfo()
 			require.NoError(t, err)
 			requireCheckpointedDataset(t, path, info.ID, false)
-			require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+			activateTestKey(t, s)
 			requireCheckpointedDataset(t, path, info.ID, true)
 			var mode int
 			require.NoError(t, s.db.QueryRow(`PRAGMA synchronous`).Scan(&mode))
@@ -217,14 +260,15 @@ func TestDatasetCompletionCheckpointBusyFailsClosedAndRetries(t *testing.T) {
 	require.Zero(t, complete)
 	_, err = s.db.Exec(`PRAGMA busy_timeout=20`)
 	require.NoError(t, err)
-	err = s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t))
+	// Startup closes the store when completion fails, so consumers never
+	// receive a store whose bootstrap history is not synchronized.
+	_, err = activateSnapshotKey(t, s, testSnapshotKey)
 	require.ErrorContains(t, err, "checkpoint incomplete")
-	require.Nil(t, s.snapshotCipher, "consumers must not receive an activated store before synchronization")
 	requireCheckpointedDataset(t, s.dbPath, info.ID, false)
 	require.NoError(t, tx.Rollback())
 	// The first completion transaction committed. A retry must synchronize even
 	// when its read already observes bootstrap_complete=1.
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(testSnapshotCipher(t)))
+	activateTestKey(t, s)
 	requireCheckpointedDataset(t, s.dbPath, info.ID, true)
 }
 
@@ -248,17 +292,27 @@ func TestDatasetUnbootstrappedDataRequiresExistingKey(t *testing.T) {
 
 func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 	for name, statement := range map[string]string{
-		"newer":               fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion+1),
-		"unknown":             `PRAGMA user_version=2147483647`,
-		"negative":            `PRAGMA user_version=-1`,
-		"version reset":       `PRAGMA user_version=0`,
-		"missing table":       `DROP TABLE store_dataset`,
-		"missing identity":    `DELETE FROM store_dataset`,
-		"malformed identity":  `UPDATE store_dataset SET dataset_id='invalid'`,
-		"nil identity":        `UPDATE store_dataset SET dataset_id='00000000-0000-0000-0000-000000000000'`,
-		"bad origin":          `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET origin='unknown'`,
-		"bad bootstrap state": `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET bootstrap_complete=2`,
-		"extra identity":      `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
+		"newer":                         fmt.Sprintf(`PRAGMA user_version=%d`, SchemaVersion+1),
+		"version 1":                     `PRAGMA user_version=1`,
+		"version 2":                     `PRAGMA user_version=2`,
+		"unknown":                       `PRAGMA user_version=2147483647`,
+		"negative":                      `PRAGMA user_version=-1`,
+		"version reset":                 `PRAGMA user_version=0`,
+		"missing table":                 `DROP TABLE store_dataset`,
+		"missing identity":              `DELETE FROM store_dataset`,
+		"malformed identity":            `UPDATE store_dataset SET dataset_id='invalid'`,
+		"nil identity":                  `UPDATE store_dataset SET dataset_id='00000000-0000-0000-0000-000000000000'`,
+		"bad origin":                    `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET origin='unknown'`,
+		"bad bootstrap state":           `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET bootstrap_complete=2`,
+		"extra identity":                `PRAGMA ignore_check_constraints=ON; INSERT INTO store_dataset(singleton, dataset_id, origin, bootstrap_complete) VALUES(2,'22222222-2222-4222-8222-222222222222','new',0)`,
+		"bad binding state":             `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET installation_id='installation', record_uid='record', switch_generation=1, binding_state='claimed'`,
+		"bound without record":          `UPDATE store_dataset SET installation_id='installation', switch_generation=1, binding_state='bound'`,
+		"bound at generation 0":         `UPDATE store_dataset SET installation_id='installation', record_uid='record', binding_state='bound'`,
+		"detached without installation": `UPDATE store_dataset SET record_uid='record', switch_generation=1, binding_state='detached'`,
+		"unbound with a record":         `UPDATE store_dataset SET record_uid='record'`,
+		"unbound with a bind time":      `UPDATE store_dataset SET bound_at_ns=1`,
+		"negative bind time":            `PRAGMA ignore_check_constraints=ON; UPDATE store_dataset SET installation_id='installation', bound_at_ns=-1`,
+		"malformed installation":        `UPDATE store_dataset SET installation_id=' installation'`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := setupDiskStore(t)

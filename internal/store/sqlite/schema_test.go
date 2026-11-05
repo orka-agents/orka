@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,13 +117,9 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	legacy, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = legacy.Close() })
-	native := map[string]bool{}
-	for _, statement := range nativeSessionSchemaStatements() {
-		native[statement] = true
-	}
 	var preNative []string
 	for _, statement := range currentSchemaStatements() {
-		if !native[statement] {
+		if !slices.Contains(nativeSessionSchemaStatements(), statement) {
 			preNative = append(preNative, statement)
 		}
 	}
