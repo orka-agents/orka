@@ -3803,6 +3803,11 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	switch {
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
 		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
+		// A Cancelled phase is written after the cancel request, so this copy
+		// carries the request, which names who cancelled and why.
+		if requested := strings.TrimSpace(task.Annotations[labels.AnnotationCancelRequested]); requested != "" && task.DeletionTimestamp.IsZero() {
+			message = requested
+		}
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:

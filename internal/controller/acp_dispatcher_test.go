@@ -4545,6 +4545,13 @@ func TestACPDispatcherSettlesDeletingTaskBeforeClosedAdmissionAndWorkerCapacity(
 	}, corev1alpha1.TaskExecutionReason("Cancelled"), "task cancelled before runtime admission", true)
 }
 
+func TestACPDispatcherSettlesCancelledTaskBeforeRuntimePoolAdmissionWithItsRequest(t *testing.T) {
+	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+		task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", false)
+}
+
 func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	timeout := metav1.Duration{Duration: time.Minute}
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
