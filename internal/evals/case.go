@@ -183,7 +183,12 @@ func SelectCases(cases []Case, ids []string) ([]Case, error) {
 		return cases, nil
 	}
 	want := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
+	for i, id := range ids {
+		// A selector is not echoed unless it is a valid case id, which
+		// carries no credential.
+		if err := validateCaseID(id); err != nil {
+			return nil, fmt.Errorf("cases.ids[%d]: %w", i, err)
+		}
 		want[id] = struct{}{}
 	}
 	selected := make([]Case, 0, len(want))
@@ -212,16 +217,23 @@ func ParseCase(raw []byte, subject corev1alpha1.EvalSubjectType) (Case, error) {
 	if !utf8.Valid(raw) {
 		return c, errors.New("case is not valid UTF-8")
 	}
-	if err := checkExactKeys(raw, reflect.TypeFor[Case](), "case"); err != nil {
+	// Split off the first JSON value, so the key checks see exactly the
+	// object that is decoded and trailing data cannot skip them.
+	split := json.NewDecoder(bytes.NewReader(raw))
+	var object json.RawMessage
+	if err := split.Decode(&object); err != nil {
+		return c, fmt.Errorf("decode case: %w", err)
+	}
+	if _, err := split.Token(); !errors.Is(err, io.EOF) {
+		return c, errors.New("case has trailing data")
+	}
+	if err := checkExactKeys(object, reflect.TypeFor[Case](), "case"); err != nil {
 		return c, err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(bytes.NewReader(object))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&c); err != nil {
 		return c, fmt.Errorf("decode case: %w", err)
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return c, errors.New("case has trailing data")
 	}
 	if err := c.Validate(subject); err != nil {
 		return c, err
@@ -356,6 +368,7 @@ func (r CaseReference) validate() error {
 	if len(r.Locations) > MaxReferenceLocation {
 		return fmt.Errorf("at most %d locations are allowed", MaxReferenceLocation)
 	}
+	seen := make(map[ReferenceLocation]int, len(r.Locations))
 	for i, location := range r.Locations {
 		if !safeRepoPath(location.File) {
 			return fmt.Errorf("locations[%d].file must be a clean relative path without a credential", i)
@@ -363,6 +376,12 @@ func (r CaseReference) validate() error {
 		if location.StartLine < 1 || location.EndLine < location.StartLine || location.EndLine > MaxReferenceLine {
 			return fmt.Errorf("locations[%d] needs 1 <= startLine <= endLine <= %d", i, MaxReferenceLine)
 		}
+		// A repeated location would let one finding count twice toward
+		// localization's partial credit.
+		if first, dup := seen[location]; dup {
+			return fmt.Errorf("locations[%d] repeats locations[%d]", i, first)
+		}
+		seen[location] = i
 	}
 	return nil
 }
@@ -372,6 +391,9 @@ func (r CaseReference) validate() error {
 func validateFixtureRepoURL(raw string) error {
 	// Never echo raw: a rejected URL may carry a credential.
 	invalid := errors.New("repoURL must be an anonymous https://github.com/<owner>/<repo> URL")
+	if containsCredential(raw) {
+		return invalid
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil ||
 		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" {
@@ -420,9 +442,9 @@ func containsCredential(s string) bool {
 }
 
 // checkExactKeys rejects duplicate keys, keys that do not exactly match a
-// JSON field of t, and missing fields that lack omitempty. encoding/json would
+// JSON field of t, and missing or null fields that lack omitempty. encoding/json would
 // otherwise accept a case-folded key ("Verdict"), let a later duplicate
-// silently win, and read a missing count as zero.
+// silently win, and read a missing or null count as zero.
 func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -457,6 +479,10 @@ func checkExactKeys(raw []byte, t reflect.Type, at string) error {
 			var value json.RawMessage
 			if err := decoder.Decode(&value); err != nil {
 				return err
+			}
+			// encoding/json would read null as the zero value.
+			if field.required && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return fmt.Errorf("%s.%s must not be null", at, key)
 			}
 			if err := checkExactKeys(value, field.typ, at+"."+key); err != nil {
 				return err
