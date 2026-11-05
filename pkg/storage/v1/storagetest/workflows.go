@@ -1009,7 +1009,7 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		alice := &storagev1.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
 		for uid, session := range map[string]string{
 			"plain": "ahp-one", "padded": " ahp-one\t", "unicode-padded": "\u0085ahp-one\u3000", "longer": "ahp-one-2",
-			"other": "ahp-two", "prefixed": "x-ahp-one",
+			"other": "ahp-two", "prefixed": "x-ahp-one", "team": " team-session ",
 		} {
 			require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-1",
 				TaskUID: uid, TaskName: uid, SessionName: session, Phase: "Succeeded", StartedAt: at, Requester: alice, AHPTurn: true}))
@@ -1030,6 +1030,10 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 		tasks, err = p.UsageTasksInSessions(ctx, workflowNamespace, "", []string{"ahp-one"}, 100)
 		require.NoError(t, err)
 		require.Len(t, tasks, 4, "without a namespace UID, every namespace of the name counts")
+		tasks, err = p.UsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"team-session"}, 100)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1, "any session name is looked up, not only an AHP one")
+		require.Equal(t, "team", tasks[0].TaskUID)
 		_, err = p.UsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, 2)
 		require.ErrorIs(t, err, storagev1.ErrUsageSelectionTooLarge)
 	})

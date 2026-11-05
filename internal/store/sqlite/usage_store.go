@@ -499,7 +499,6 @@ func (s *Store) UsageTasksInSessions(ctx context.Context, namespace, namespaceUI
 	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx,
 		`SELECT data FROM usage_tasks
 		 WHERE namespace = ? AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
-		   AND COALESCE(json_extract(data, '$.sessionName'), '') LIKE '%ahp-%'
 		   AND TRIM(COALESCE(json_extract(data, '$.sessionName'), ''), ?) IN (SELECT value FROM json_each(?))`,
 		namespace, namespaceUID, namespaceUID, usageSpace, string(names))
 	if err != nil {
