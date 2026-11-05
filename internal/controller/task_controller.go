@@ -2859,11 +2859,11 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
 
-	// Collect available output before cleanup, but stop cancelled work even
+	// Collect available output before cleanup, but stop failed or cancelled work even
 	// when storage finalization must wait for recovery. Keep the Task
 	// nonterminal in Kubernetes so those writes are retried.
 	retryFinalization := func(err error) (ctrl.Result, error) {
-		if phase == corev1alpha1.TaskPhaseCancelled {
+		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
 			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, task)
 			err = errors.Join(err, cleanupErr)
 		}
