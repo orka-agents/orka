@@ -324,6 +324,14 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
+		// Stop requested work even when its bookkeeping cannot be written.
+		// Durable finalization remains pending until storage recovers.
+		if _, requested := requestedTaskCancellation(task); requested {
+			cancelled := task.DeepCopy()
+			cancelled.Status.Phase = corev1alpha1.TaskPhaseCancelled
+			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, cancelled)
+			err = errors.Join(err, cleanupErr)
+		}
 		return ctrl.Result{}, err
 	}
 	if tx := task.Spec.Transaction; tx != nil {
@@ -1811,23 +1819,29 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
 		deadline := task.Status.StartTime.Add(task.Spec.Timeout.Duration)
-		if elapsed > task.Spec.Timeout.Duration && !r.taskJobSucceededBy(ctx, task, deadline) {
-			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
-				return result, err
-			}
-			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+		if elapsed > task.Spec.Timeout.Duration {
+			succeeded, err := r.taskJobSucceededBy(ctx, task, deadline)
 			if err != nil {
-				log.Error(err, "failed to classify timed-out repository validation")
-				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
-					return r.failTask(ctx, task, err.Error())
-				}
 				return ctrl.Result{}, err
 			}
-			if validationCommandStarted {
-				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
+			if !succeeded {
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+					return result, err
+				}
+				log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+				validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+				if err != nil {
+					log.Error(err, "failed to classify timed-out repository validation")
+					if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+						return r.failTask(ctx, task, err.Error())
+					}
+					return ctrl.Result{}, err
+				}
+				if validationCommandStarted {
+					return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
+				}
+				return r.failTask(ctx, task, timedOutTaskMessage(task))
 			}
-			return r.failTask(ctx, task, timedOutTaskMessage(task))
 		}
 	}
 
@@ -2103,20 +2117,23 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 // the Job's outcome rather than a timeout. A Job that finished after the
 // deadline, or whose completion time is unknown, does not qualify. Nor does
 // an autonomous Task: its timeout ends the loop even after a successful
-// iteration. Any lookup failure reports false and leaves the timeout to apply
-// as before.
-func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) bool {
+// iteration. Lookup errors other than NotFound leave the outcome unsettled
+// until a later reconciliation can observe the Job.
+func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) (bool, error) {
 	if strings.TrimSpace(task.Status.JobName) == "" || r.isAutonomousTask(ctx, task) {
-		return false
+		return false, nil
 	}
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
-		return false
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
-		return false
+		return false, nil
 	}
-	return job.Status.Succeeded > 0 && job.Status.CompletionTime != nil && !job.Status.CompletionTime.After(deadline)
+	return job.Status.Succeeded > 0 && job.Status.CompletionTime != nil && !job.Status.CompletionTime.After(deadline), nil
 }
 
 // timedOutTaskMessage keeps the last published Pod waiting reason, such as an
@@ -2842,11 +2859,11 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
 
-	// Collect available output before cleanup, but stop cancelled work even
+	// Collect available output before cleanup, but stop failed or cancelled work even
 	// when storage finalization must wait for recovery. Keep the Task
 	// nonterminal in Kubernetes so those writes are retried.
 	retryFinalization := func(err error) (ctrl.Result, error) {
-		if phase == corev1alpha1.TaskPhaseCancelled {
+		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
 			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, task)
 			err = errors.Join(err, cleanupErr)
 		}

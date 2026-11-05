@@ -9,6 +9,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -116,6 +117,38 @@ func TestCancelChildTaskRecordsTheRequestForTheController(t *testing.T) {
 	require.Equal(t, "cancellation requested", decodeCancelResult(t, resp).Status)
 	require.Equal(t, "cancelled by parent task: wrong approach",
 		cancelChildTask(t, h, "my-child").Annotations[labels.AnnotationCancelRequested])
+}
+
+func TestCancelChildTaskAllowsSanitizedChildDisplayName(t *testing.T) {
+	h, post := setupCancelChildHandlers(t)
+	name := "sk-" + strings.Repeat("a", 20)
+	child := internalCallerAuthTaskObject(name, "sanitized-child-uid", "child-job", "my-task", "")
+	require.NoError(t, h.k8sClient.Create(t.Context(), child))
+	patches := 0
+	h.k8sClient = interceptor.NewClient(h.k8sClient.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, object client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			if patches == 1 {
+				return errors.New("temporary cancellation publication failure")
+			}
+			return c.Patch(ctx, object, patch, opts...)
+		},
+	})
+	path := "/internal/v1/tasks/default/my-task/children/" + name + "/cancel"
+	resp := post(path, map[string]string{"reason": "first reason"})
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	require.Equal(t, 1, patches, "sanitized display text must not invalidate the committed UID-bound intent")
+	requireNoCancelRequest(t, h, name, corev1alpha1.TaskPhaseRunning)
+	resp = post(path, map[string]string{"reason": "retry reason"})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, name, decodeCancelResult(t, resp).TaskName)
+	require.Equal(t, "cancelled by parent task: first reason", cancelChildTask(t, h, name).Annotations[labels.AnnotationCancelRequested])
+	intents := cancellationIntents(t, h)
+	require.Len(t, intents, 1)
+	var intent childCancellationIntent
+	require.NoError(t, json.Unmarshal(intents[0].Content, &intent))
+	require.Equal(t, "[REDACTED]", intent.ChildName)
+	require.Equal(t, string(child.UID), intent.ChildUID)
 }
 
 func TestCancelChildTaskLeavesTerminalChildUnchanged(t *testing.T) {
