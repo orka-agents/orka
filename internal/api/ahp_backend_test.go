@@ -556,6 +556,63 @@ func TestAHPBackendRetriesAFailedTurnCancel(t *testing.T) {
 	require.Eventually(t, cancelRequested, 5*time.Second, 20*time.Millisecond, "the cancellation is retried until it lands")
 }
 
+// A client cancel that comes while the turn's Task is being created finds no
+// Task to stop; the turn then cancels the Task it created.
+func TestAHPBackendCancelsATaskCreatedAfterTheClientCancelled(t *testing.T) {
+	env := newAHPTestEnv(t)
+	env.backend.cancelBackoff = wait.Backoff{Duration: 20 * time.Millisecond, Factor: 1, Steps: 50}
+	c := env.connect("alice")
+	ctx := ahpCtx(t)
+	chat := env.setUpSession(c, "allow-all")
+	alice := ahphost.Principal{UserKey: ahphost.UserKey("https://issuer.example", "alice"), Issuer: "https://issuer.example",
+		Subject: "alice", Username: "alice", Namespace: ahpTestNamespace}
+	// The cancel reads the Task before it exists, and finds nothing.
+	missed := make(chan struct{}, 1)
+	env.backend.h.apiReader = interceptor.NewClient(env.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			err := c.Get(ctx, key, obj, opts...)
+			if _, ok := obj.(*corev1alpha1.Task); ok && apierrors.IsNotFound(err) {
+				select {
+				case missed <- struct{}{}:
+				default:
+				}
+			}
+			return err
+		},
+	})
+	var cancelled atomic.Bool
+	env.onTaskCreate = func(*corev1alpha1.Task) error {
+		record := ahpSession{}
+		require.NoError(t, env.backend.getRecord(context.Background(), alice.UserKey, ahpRecordSession, ahpTestSession, &record))
+		require.Equal(t, "turn-1", record.ActiveTurn, "the turn is recorded before its Task is created")
+		env.backend.cancelTurn(context.Background(), alice, record, "turn-1")
+		select {
+		case <-missed:
+		case <-time.After(5 * time.Second):
+			t.Error("the cancel never looked for the Task")
+		}
+		cancelled.Store(true)
+		return nil
+	}
+	_, err := c.Dispatch(ctx, chat, ahptypes.StateAction{Value: &ahptypes.ChatTurnStartedAction{
+		Type: ahptypes.ActionTypeChatTurnStarted, TurnId: "turn-1", StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Message: ahptypes.Message{Text: "sleep", Origin: ahptypes.MessageOrigin{Kind: ahptypes.MessageKindUser}},
+	}})
+	require.NoError(t, err)
+	record := ahpSession{}
+	require.Eventually(t, func() bool {
+		return env.backend.getRecord(ctx, alice.UserKey, ahpRecordSession, ahpTestSession, &record) == nil && record.ActiveTask != ""
+	}, 5*time.Second, 20*time.Millisecond)
+	env.waitForTask(record.ActiveTask)
+	require.True(t, cancelled.Load())
+	require.Eventually(t, func() bool {
+		current := &corev1alpha1.Task{}
+		_ = env.kube.Get(context.Background(), types.NamespacedName{Namespace: ahpTestNamespace, Name: record.ActiveTask}, current)
+		_, ok := current.Annotations[labels.AnnotationCancelRequested]
+		return ok
+	}, 5*time.Second, 20*time.Millisecond, "the Task created after the cancel is cancelled")
+}
+
 func TestAHPBackendKeepsUsersApart(t *testing.T) {
 	env := newAHPTestEnv(t)
 	alice := env.connect("alice")

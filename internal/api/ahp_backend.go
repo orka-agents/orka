@@ -1009,10 +1009,11 @@ func (b *ahpBackend) DisposeSession(ctx context.Context, principal ahphost.Princ
 
 // cancelTask asks a Task to stop. A Task that is gone, being deleted or
 // already finished needs nothing; any other failure is returned, because the
-// Task may still be running.
+// Task may still be running. The Task is read from the API server: a cache
+// that has not seen a Task just created would report it gone.
 func (b *ahpBackend) cancelTask(ctx context.Context, principal ahphost.Principal, namespace, name string) error {
 	task := &corev1alpha1.Task{}
-	if err := b.h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
+	if err := b.h.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -1220,14 +1221,18 @@ func (b *ahpBackend) cancelTurn(ctx context.Context, principal ahphost.Principal
 	if record.ActiveTask == "" {
 		return
 	}
-	// The client already shows the turn cancelled: keep asking the Task to
-	// stop through a passing failure, off this action queue.
+	b.keepCancelling(ctx, principal, record.Session, record.Namespace, record.ActiveTask)
+}
+
+// keepCancelling asks a cancelled turn's Task to stop through a passing
+// failure, off the action queue: the client already shows the turn cancelled.
+func (b *ahpBackend) keepCancelling(ctx context.Context, principal ahphost.Principal, session, namespace, task string) {
 	go func() {
 		err := retry.OnError(b.cancelBackoff, func(error) bool { return true }, func() error {
-			return b.cancelTask(ctx, principal, record.Namespace, record.ActiveTask)
+			return b.cancelTask(ctx, principal, namespace, task)
 		})
 		if err != nil {
-			log.Error(err, "cancel AHP turn Task", "session", record.Session, "task", record.ActiveTask)
+			log.Error(err, "cancel AHP turn Task", "session", session, "task", task)
 		}
 	}()
 }
