@@ -2842,6 +2842,17 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
 
+	// Collect available output before cleanup, but stop cancelled work even
+	// when storage finalization must wait for recovery. Keep the Task
+	// nonterminal in Kubernetes so those writes are retried.
+	retryFinalization := func(err error) (ctrl.Result, error) {
+		if phase == corev1alpha1.TaskPhaseCancelled {
+			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, task)
+			err = errors.Join(err, cleanupErr)
+		}
+		return ctrl.Result{}, err
+	}
+
 	if s := trace.SpanFromContext(ctx); s.IsRecording() {
 		s.AddEvent("phase.transition", trace.WithAttributes(
 			attribute.String("task.phase", string(phase)),
@@ -2854,7 +2865,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		// A result the store has not accepted yet, or may have saved, is
 		// collected again on the next attempt rather than dropped.
 		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
-			return ctrl.Result{}, err
+			return retryFinalization(err)
 		}
 		// Continue anyway, result collection is best-effort
 	}
@@ -2868,7 +2879,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			// is appended again on the next attempt, before the lock is
 			// released; its stable message IDs make that safe.
 			if store.IsTemporaryStorageError(err) {
-				return ctrl.Result{}, err
+				return retryFinalization(err)
 			}
 			// Continue anyway
 		}
@@ -2887,7 +2898,7 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 			// than leaving the terminal Task holding the Session; a release
 			// that committed leaves no lock, so retrying it changes nothing.
 			if store.IsTemporaryStorageError(err) {
-				return ctrl.Result{}, err
+				return retryFinalization(err)
 			}
 		}
 	}

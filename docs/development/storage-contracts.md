@@ -279,15 +279,18 @@ the observable parts.
   `storagev1.ContractRevision`, so startup validation can refuse an older
   provider with one precise reason instead of failing at the first missing
   method; an optional family is announced as a capability instead. Revision
-  2 added the dataset binding (see "Installation binding"). Revision 3 requires
-  a valid write envelope on every write and `ErrValidation` when it is missing;
-  revision 2 still required accepting writes without one during the transition.
-  Revision 4 split the inbox read into `ListUnreadMessages` and
-  `ConsumeMessages`, made `SendMessage` write the assigned ID and creation
-  time back, and made every Session lease decision, and the claim check in
+  2 requires operation receipts and controller epoch advancement on both
+  provider contracts. Revision 3 added dataset binding (see "Installation
+  binding"). Revision 4 requires a valid write envelope on every write and
+  `ErrValidation` when it is missing; revision 3 still required accepting
+  writes without one during the transition. Revision 5 split the inbox
+  read into `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage`
+  write the assigned ID and creation time back, and made every Session
+  lease decision, and the claim check in
   `FreezeGatewayEventTaskRuntimeAllowedTools`, use the time the request
   carries (see "Messages, counters and chat turns" and "Lease clocks").
-  The revision Orka requires for each part belongs to Orka, not to the contract.
+  The revision Orka requires for each part belongs to Orka, not to the
+  contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -634,10 +637,15 @@ write without one.
 - **Provider clock and skew.** The provider clock is used only for operation
   age and the future-skew check, receipt and tombstone retention,
   `ObservedAt`, and informational times the provider assigns when a caller
-  leaves them zero. In SQLite the provider clock is the controller's, so the
-  two never differ. For a separate store, the storage client estimates the
-  offset from `ObservedAt` as `ObservedAt - (sent + received) / 2`, uncertain
-  by half the round trip, when the leader starts and every minute after
+  leaves them zero, plus connector completion expiry checked inside
+  `CommitSealedConnectorCompletion` at commit time. That expiry is a
+  redemption deadline, not a controller-owned lease: both the request time
+  and the provider's current time must precede it, so a stalled commit
+  cannot redeem an expired completion. In SQLite the provider clock is the
+  controller's, so the two never differ. For a separate store, the storage
+  client estimates the offset from `ObservedAt` as
+  `ObservedAt - (sent + received) / 2`, uncertain by half the round trip,
+  when the leader starts and every minute after
   (`ClockMonitor`). While the offset exceeds `MaxClockSkew` (30 seconds) even
   at the edge of that uncertainty, it refuses new writes to that dataset with
   `ErrNotReady` and logs it, and it resumes them when a later check finds the
@@ -652,6 +660,7 @@ write without one.
   | Chat turn reservations, Session locks, gateway and outbox claims, gateway message expiry | Controller, in the request |
   | Session mutation leases and prompt attempts | Controller, in Kubernetes |
   | Operation age, future skew, receipt and tombstone retention, `ObservedAt` | Provider |
+  | Connector completion expiry, at commit | Both: the request time and the provider's current time must precede it |
   | Creation times of messages, transcript messages, memories, proposals and dropped findings; execution event times | Controller, filled by the storage client |
   | Other record times a caller leaves zero, such as artifact, result, monitor and security times | Provider, informational only |
 - **Durability and lost writes.** A nil error means the change and its
