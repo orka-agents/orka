@@ -61,7 +61,7 @@ Four facts about Orka today make a naive binding unsafe:
    (`internal/admission/workspace_class_use.go`); Agents have none. If an
    Agent carried an identity, anyone who can create a Task in its namespace
    would act as that identity.
-2. **The issuer credential is a master key.** With Entra, the caller chooses
+2. **An installation-wide issuer credential is a master key.** With Entra, the caller chooses
    `fmi_path`, so whoever can present the blueprint's credential can mint
    tokens for any agent identity under it.
 3. **Agent editors could claim someone else's identity.** An identity
@@ -131,30 +131,44 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 ### Stage 3: the Agent acts as itself
 
 - Add a fourth `OutboundAccessPolicy` adapter, `agentIdentity`, exclusive with
-  `direct`, `gateway`, and `connection`. It names the target resource and the
-  output header, and selects a mode; this stage adds `self`. It never names an
-  identity: the identity always comes from the Task's frozen Agent binding,
-  not from the policy, the Tool, or the Task spec.
+  `direct`, `gateway`, and `connection`. It selects a mode (this stage adds
+  `self`), carries the operation list described in stage 4, and holds the
+  target in one issuer-typed block, such as `entra.resource` for Entra. It
+  never names an identity: the identity always comes from the Task's frozen
+  Agent binding, not from the policy, the Tool, or the Task spec.
 - Only the controller implements the credential source, as with Connections,
   whose source "exists only in the controller; worker Pods have no
   implementation" (`internal/outboundaccess/resolver.go`). ACP Tasks reach it
   through the controller's MCP broker (`internal/controller/acp_mcp_broker.go`).
   Native `ai` workers and every other process fail closed.
-- The issuer contract is small: given the frozen identity, a mode, and a
-  target, return a token or fail closed. The controller authenticates to the
-  issuer with its own projected ServiceAccount token as a federated credential.
-  The issuer's trust names exactly the controller ServiceAccount's issuer,
-  subject, and audience. No other workload may run as that ServiceAccount, and
-  nothing that can create Pods or Jobs, such as the native `ai` worker
-  (`config/rbac/worker_role.yaml`), may do so in the controller's namespace.
-  This authenticates the controller as a workload; it attests nothing about
-  agent code or model behavior.
-- Entra implementation: the blueprint's federated identity credential trusts
-  the controller ServiceAccount, and the controller performs the two
-  app-only requests above.
+- The issuer contract is small: given the frozen identity, a mode, the
+  issuer-typed target, and the outbound request, authorize that request or
+  fail closed. Each issuer type declares three properties, fixed in code
+  rather than configuration:
+  - **Output**: a bearer token in a header, or a signature over the request.
+    Only bearer issuers use the policy's `header`.
+  - **Credential model**: *installation-wide*, where one controller credential
+    can act as every identity under it, or *per-identity*, where each identity
+    has its own client credential. A per-identity credential is held in the
+    controller's sealed store, as Connection tokens are (ADR 0033). It is
+    attached to the identity binding, never stored on the Agent, and creating
+    or replacing it requires the same `bind` permission.
+  - **Delegated support**, used by stage 4.
+- For installation-wide issuers, the controller authenticates with its own
+  projected ServiceAccount token as a federated credential; a SPIFFE SVID from
+  an operator-run SPIRE server is an alternative source for the same
+  credential. The issuer's trust names exactly the controller's identity:
+  issuer, subject, and audience. No other workload may run as that
+  ServiceAccount, and nothing that can create Pods or Jobs, such as the native
+  `ai` worker (`config/rbac/worker_role.yaml`), may do so in the controller's
+  namespace. This authenticates the controller as a workload; it attests
+  nothing about agent code or model behavior.
+- Entra implementation: installation-wide, bearer output. The blueprint's
+  federated identity credential trusts the controller ServiceAccount, and the
+  controller performs the two app-only requests above.
 - Tokens are injected per Tool call. They never enter the ACP process tree,
   the Task spec or status, the execution snapshot, events, logs, or metrics.
-  The cache is keyed by a digest of the identity, mode, resource, and policy
+  The cache is keyed by a digest of the identity, mode, target, and policy
   UID and generation, and an entry lives at most five minutes. Because nothing
   else holds the token, disabling the identity at the issuer stops new calls
   within that bound.
@@ -167,15 +181,25 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 
 ### Stage 4: the Agent acts for its requester
 
-- Add the mode `delegated` to the `agentIdentity` adapter. The issued token
-  carries the requester as its subject and the Agent's identity as the client
-  or actor. The downstream service then enforces the requester's own
-  permissions, and the issuer enforces what was granted to that Agent.
+- Add the mode `delegated` to the `agentIdentity` adapter. Its guarantee is
+  that both sides are enforced: the downstream service enforces the
+  requester's own permissions, and the issuer or resource enforces what was
+  granted to that Agent. Each issuer type declares where it can deliver that:
+  everywhere, only for named resource types, or nowhere. The controller
+  refuses `delegated` for any other target and never falls back to a token
+  that names only the requester; a policy author who accepts that uses the
+  `connection` adapter instead, and the Agent then appears only in Orka's
+  records.
 - The requester's proof is their own Connection (ADR 0033) for an issuer-typed
   `ConnectorProvider`, linked through that provider's consent flow. The Task's
   `spec.requestedBy` selects it, exactly as the `connection` adapter does.
   ServiceAccount callers, Tasks without a verified requester, and delegated
   child Tasks whose root requester differs fail closed.
+- The Connection must have been issued for the bound identity. Each issuer
+  type defines the check, such as the user token's audience. Where an issuer
+  addresses user tokens to each agent client, a requester links once per
+  identity; where it addresses them to one installation-wide client, once per
+  issuer. A mismatch fails closed.
 - Orka's Session or Task is the application session the token is bound to.
   Before every exchange and every Tool call, the controller checks that the
   Task is running, its Session is open, its binding still names this
@@ -192,12 +216,14 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   can be steered, for example by a malicious document, into requests that sit
   within the requester's rights but outside what they asked for. Neither the
   model nor the Tool arguments can widen the list.
-- Entra implementation: the `ConnectorProvider` is a front-end Entra client
-  that requests the blueprint's custom scope, so the Connection holds a user
-  token whose audience is the blueprint. The blueprint's redirect URI only
-  records consent, so it cannot be that client. The controller performs the
-  two on-behalf-of requests above. Orka's GitHub dashboard sign-in cannot
-  supply this token; the requester must sign in through Entra.
+- Entra implementation: delegated everywhere Entra issues delegated tokens.
+  The `ConnectorProvider` is a front-end Entra client that requests the
+  blueprint's custom scope, so the Connection holds a user token whose audience
+  is the blueprint, which is also the identity check; requesters link once per
+  installation. The blueprint's redirect URI only records consent, so it
+  cannot be that client. The controller performs the two on-behalf-of requests
+  above. Orka's GitHub dashboard sign-in cannot supply this token; the
+  requester must sign in through Entra.
 
 ### Entra notes for operators
 
@@ -283,15 +309,17 @@ fix above are placeholders until implementation.
    # Stage 3: the Agent acts as itself.
    agentIdentity:
      mode: self
-     resource: https://graph.microsoft.com
      header: Authorization
+     entra:
+       resource: https://graph.microsoft.com
    ---
    # Stage 4: the Agent acts for its requester, who has linked an Entra
    # Connection through a ConnectorProvider for the front-end client app.
    agentIdentity:
      mode: delegated
-     resource: https://storage.azure.com
      header: Authorization
+     entra:
+       resource: https://storage.azure.com
      allow:
      - host: inventory.blob.core.windows.net
        methods: [GET]
@@ -299,8 +327,44 @@ fix above are placeholders until implementation.
    ```
 
 A second issuer reuses every step except the first two: it adds a sibling of
-`entra` under `Agent.spec.identity`, a matching `agentidentities/<issuer>`
-subresource, and its own controller configuration.
+`entra` under `Agent.spec.identity` and in the policy, a matching
+`agentidentities/<issuer>` subresource, and its own controller configuration.
+
+### Other issuers
+
+Not committed. These mappings show that the contract above does not assume
+Entra; each needs its own decision and integration proof before it ships.
+
+| Issuer | Agent principal | Credential model | Output | Delegated |
+| --- | --- | --- | --- | --- |
+| Microsoft Entra Agent ID | Agent identity | Installation-wide (blueprint) | Bearer | Everywhere |
+| Google Cloud | Per-Agent service account, impersonated after Workload Identity Federation | Installation-wide | Bearer | Nowhere; no documented on-behalf-of exchange for Google APIs |
+| AWS | Per-Agent IAM role assumed with `SourceIdentity` | Installation-wide (EKS Pod Identity or IRSA) | Request signature (SigV4) | Only services that honor identity-enhanced sessions |
+| Okta Cross App Access (ID-JAG) | Per-Agent OAuth client | Per-identity | Bearer | Applications that accept ID-JAG |
+| Keycloak | Per-Agent client | Per-identity | Bearer | To be verified; RFC 8693 delegation support is unconfirmed |
+
+- **Google Cloud.** Google's Agent Identity is tied to Google-hosted agent
+  runtimes, and external agents must federate
+  ([Agent Identity](https://docs.cloud.google.com/iam/docs/agent-identity-overview)).
+  Orka federates the controller and impersonates one service account per
+  Agent; Cloud Audit Logs record the impersonation.
+- **AWS.** AgentCore workload tokens are limited to AgentCore's own services
+  ([AgentCore Runtime auth](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html)),
+  so Orka assumes one IAM role per Agent. Delegated access uses
+  identity-enhanced role sessions
+  ([IAM Identity Center](https://docs.aws.amazon.com/singlesignon/latest/userguide/trustedidentitypropagation-identity-enhanced-iam-role-sessions.html)),
+  which only services such as S3 Access Grants evaluate. Its temporary
+  credentials sign requests, so it needs the request-signature output.
+- **Okta Cross App Access.** ID-JAG exchanges the requester's identity
+  assertion at the identity provider, then presents the result to the target
+  application's authorization server
+  ([Okta](https://support.okta.com/help/s/article/understanding-cross-app-access-with-okta-for-ai-agents)).
+  It needs two token endpoints and per-Agent client credentials, and may need
+  one Connection per identity.
+- **Keycloak.** A self-hosted issuer and the practical test issuer for kind
+  E2E, without a live cloud tenant.
+- **SPIFFE.** Not an issuer for downstream APIs. A SPIRE server can supply the
+  controller's own federated credential for installation-wide issuers.
 
 ### Relationship to ADR 0034
 
@@ -340,12 +404,15 @@ the ceiling; the stage 4 operation list is then checked against it.
 - The controller becomes a credential broker for agent identity tokens, which
   amends ADR 0011; on acceptance, 0011's status points here. A compromised
   controller already exposes Connection tokens; it would now also expose every
-  agent identity under the installation's issuer credential, and, in stage 4,
-  delegated access for every linked requester. Stronger separation needs
-  separate issuer credentials, which means separate Orka installations.
+  agent identity under an installation-wide issuer credential, and, in stage
+  4, delegated access for every linked requester. Per-identity issuers limit a
+  stolen credential to one identity, but the controller still holds them all.
+  Stronger separation needs separate issuer credentials, which means separate
+  Orka installations.
 - ADR 0011 keeps provider specifics out of core. The adapter, the Agent field,
-  and the `bind` check are issuer-neutral; the Entra blueprint flows are the
-  one provider-specific implementation in core, behind that contract.
+  the `bind` check, and the issuer properties are issuer-neutral; the Entra
+  blueprint flows are the one provider-specific implementation in core, behind
+  that contract.
 - The issuer must reach the cluster's ServiceAccount issuer. AKS publishes it;
   kind and other private clusters must publish their discovery document and
   JWKS.
