@@ -40,6 +40,28 @@ type deferredTaskFinalization struct {
 	ResultDigest  string                 `json:"resultDigest,omitempty"`
 }
 
+// stopTaskAfterUsageRetentionFailure preserves stop decisions while durable
+// usage bookkeeping is unavailable. The Task remains nonterminal for recovery.
+func (r *TaskReconciler) stopTaskAfterUsageRetentionFailure(ctx context.Context, task *corev1alpha1.Task, err error) error {
+	// Stop requested work even when its bookkeeping cannot be written.
+	// Durable finalization remains pending until storage recovers.
+	intent, lookupErr := r.loadDeferredTaskFinalization(ctx, task)
+	err = errors.Join(err, lookupErr)
+	if intent != nil && !isTerminalTaskPhase(task.Status.Phase) {
+		stopping := task.DeepCopy()
+		stopping.Status.Phase = intent.Phase
+		err = errors.Join(err, r.stopJobForDeferredFinalization(ctx, stopping, *intent))
+	} else if message, requested := requestedTaskCancellation(task); requested && lookupErr == nil {
+		cancelled := task.DeepCopy()
+		cancelled.Status.Phase = corev1alpha1.TaskPhaseCancelled
+		cleanupErr := r.stopJobForDeferredFinalization(ctx, cancelled, deferredTaskFinalization{
+			Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: message,
+		})
+		err = errors.Join(err, cleanupErr)
+	}
+	return err
+}
+
 // Persist output and the original decision before removing a Job whose
 // finalization is blocked on storage. Inactive failed Jobs retain their Pods.
 func (r *TaskReconciler) stopJobForDeferredFinalization(ctx context.Context, task *corev1alpha1.Task, intent deferredTaskFinalization) error {

@@ -324,23 +324,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
-		// Stop requested work even when its bookkeeping cannot be written.
-		// Durable finalization remains pending until storage recovers.
-		intent, lookupErr := r.loadDeferredTaskFinalization(ctx, task)
-		err = errors.Join(err, lookupErr)
-		if intent != nil && !isTerminalTaskPhase(task.Status.Phase) {
-			stopping := task.DeepCopy()
-			stopping.Status.Phase = intent.Phase
-			err = errors.Join(err, r.stopJobForDeferredFinalization(ctx, stopping, *intent))
-		} else if message, requested := requestedTaskCancellation(task); requested && lookupErr == nil {
-			cancelled := task.DeepCopy()
-			cancelled.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			cleanupErr := r.stopJobForDeferredFinalization(ctx, cancelled, deferredTaskFinalization{
-				Phase: corev1alpha1.TaskPhaseCancelled, OutcomePhase: corev1alpha1.TaskPhaseCancelled, Message: message,
-			})
-			err = errors.Join(err, cleanupErr)
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -424,7 +408,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if task.Status.Phase != corev1alpha1.TaskPhaseSucceeded && task.Status.Phase != corev1alpha1.TaskPhaseFailed && task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+	if !isTerminalTaskPhase(task.Status.Phase) {
 		intent, err := r.loadDeferredTaskFinalization(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
