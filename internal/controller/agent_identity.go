@@ -410,6 +410,42 @@ type DelegationLiveness struct {
 	Sessions store.SessionStore
 }
 
+// requireLiveAncestors refuses a delegated call from a child Task once any
+// Task above it in the delegation chain was cancelled, had its cancellation
+// requested, is being deleted, or is gone: stopping a parent stops every
+// child acting for the same requester. A parent that finished normally does
+// not stop its children.
+func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task
+	for range maxDelegationChainDepth {
+		parentName := labels.ParentTaskName(current.Labels, current.Annotations)
+		if parentName == "" {
+			return nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := d.Reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: parentName}, parent); err != nil {
+			if apierrors.IsNotFound(err) {
+				return errors.New("a Task it was delegated from is gone")
+			}
+			return fmt.Errorf("read the delegating Task: %w", err)
+		}
+		if owner := metav1.GetControllerOf(current); owner != nil && owner.UID != parent.UID {
+			return errors.New("a Task it was delegated from was replaced")
+		}
+		switch {
+		case !parent.DeletionTimestamp.IsZero():
+			return errors.New("a Task it was delegated from is being deleted")
+		case parent.Status.Phase == corev1alpha1.TaskPhaseCancelled:
+			return errors.New("a Task it was delegated from was cancelled")
+		}
+		if _, requested := parent.Annotations[labels.AnnotationCancelRequested]; requested {
+			return errors.New("the cancellation of a Task it was delegated from was requested")
+		}
+		current = parent
+	}
+	return errors.New("the delegating Task chain is too deep")
+}
+
 // Check implements outboundaccess.KubernetesResolver.DelegationLive.
 func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.AgentIdentityBinding) error {
 	if d.Reader == nil {
@@ -432,6 +468,9 @@ func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.Ag
 	}
 	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
 		return errors.New("the Task's cancellation was requested")
+	}
+	if err := d.requireLiveAncestors(ctx, task); err != nil {
+		return err
 	}
 	if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
 		return nil

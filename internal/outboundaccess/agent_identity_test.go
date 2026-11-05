@@ -108,6 +108,11 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		"Agent deleted":           nil,
 		"Agent recreated":         identityHolder("other-uid", true),
 		"claim moved or released": identityHolder("agent-uid", false),
+		"identity being released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Status.IdentityClaim.Releasing = true
+			return agent
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolver := resolverWith(agent)
@@ -254,7 +259,7 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 			cap:     2 * time.Hour, want: "expired",
 		},
 		"no verified requester":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
-		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "frozen"},
+		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "link to"},
 		"tool the provider lacks":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
 		"no liveness check":        {spec: delegatedPolicySpec(nil), noLive: true, want: "Task and Session check"},
 		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task's Session was cancelled"), want: "no longer live"},
