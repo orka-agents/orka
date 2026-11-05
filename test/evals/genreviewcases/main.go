@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -122,10 +123,12 @@ func Generate(source Source, repo string) ([]byte, error) {
 		return nil, errors.New("source has no cases")
 	}
 	var buf bytes.Buffer
-	for _, sc := range source.Cases {
+	for i, sc := range source.Cases {
 		c, err := resolveCase(source, sc, repo)
 		if err != nil {
-			return nil, fmt.Errorf("case %q: %w", sc.ID, err)
+			// Name the case by position: its id is not validated yet and may
+			// carry a credential.
+			return nil, fmt.Errorf("cases[%d]: %w", i, err)
 		}
 		encoder := json.NewEncoder(&buf)
 		// Patches are code; keep <, > and & readable.
@@ -152,7 +155,7 @@ func resolveCase(source Source, sc SourceCase, repo string) (evals.Case, error) 
 	}
 	commits := strings.Fields(parents)
 	if len(commits) != 2 {
-		return evals.Case{}, fmt.Errorf("branch %s must end in a commit with exactly one parent", sc.Branch)
+		return evals.Case{}, errors.New("branch must end in a commit with exactly one parent")
 	}
 	base := commits[1]
 	files, err := changedFiles(repo, base, head)
@@ -343,13 +346,20 @@ func gitDiff(repo, base, head, format string, paths []string) (string, error) {
 // resolveBranch finds a fixture branch as a local branch, as in the mirror
 // clone run makes, or as a remote-tracking branch, as in an ordinary clone.
 func resolveBranch(repo, branch string) (string, error) {
+	// A plain name only: revision syntax such as "main~1" or "x@{1}" would
+	// resolve to some other commit. Never echo a rejected value.
+	if !branchPattern.MatchString(branch) || strings.Contains(branch, "..") || strings.HasSuffix(branch, ".lock") {
+		return "", errors.New("branch must be a plain branch name")
+	}
 	for _, ref := range []string{"refs/heads/" + branch, "refs/remotes/origin/" + branch} {
 		if sha, err := revParse(repo, ref); err == nil {
 			return sha, nil
 		}
 	}
-	return "", fmt.Errorf("branch %s is neither a local nor an origin branch", branch)
+	return "", errors.New("branch is neither a local nor an origin branch")
 }
+
+var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$`)
 
 func revParse(repo, ref string) (string, error) {
 	out, err := git(repo, "rev-parse", "--verify", "--quiet", ref+"^{commit}")

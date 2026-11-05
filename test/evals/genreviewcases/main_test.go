@@ -406,3 +406,21 @@ func TestCheckReferenceIsBoundedByAddedLines(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGenerateResolvesOnlyPlainBranchNames(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() { r.write("a.txt", "b\n") })
+	secret := "sk-" + strings.Repeat("a", 24)
+	for _, branch := range []string{"case/x~1", "case/x^", "case/x@{0}", "case/x:a.txt", "case/../x", "-x", secret} {
+		_, err := Generate(sourceFor(branch, cleanReference), r.dir)
+		if err == nil {
+			t.Fatalf("Generate resolved branch %q", branch)
+		}
+		if strings.Contains(err.Error(), branch) {
+			t.Fatalf("error echoes the branch value: %v", err)
+		}
+	}
+}
