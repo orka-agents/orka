@@ -225,6 +225,50 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	}
 }
 
+type fakeIdentityVerifier struct{ err error }
+
+func (f fakeIdentityVerifier) Verify(context.Context, *corev1alpha1.Agent) error { return f.err }
+
+func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		wantStatus metav1.ConditionStatus
+		wantReason string
+		wantReady  bool
+	}{
+		"verified": {wantStatus: metav1.ConditionTrue, wantReason: reasonIdentityVerified, wantReady: true},
+		"refused":  {err: errors.New("AADSTS700016"), wantStatus: metav1.ConditionFalse, wantReason: reasonIdentityVerificationFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent := identityBoundTestAgent("reviewer", time.Now())
+			r := setupAgentReconciler()
+			r.Identity = testIdentityConfig()
+			r.IdentityVerifier = fakeIdentityVerifier{err: tc.err}
+			r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.RequeueAfter <= 0 || result.RequeueAfter > agentIdentityReverifyInterval {
+				t.Fatalf("RequeueAfter = %v, want re-verification within an hour", result.RequeueAfter)
+			}
+			stored := &corev1alpha1.Agent{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+				t.Fatal(err)
+			}
+			condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified)
+			if condition == nil || condition.Status != tc.wantStatus || condition.Reason != tc.wantReason {
+				t.Fatalf("IdentityVerified = %+v", condition)
+			}
+			// The runtime config here is minimal, so readiness is judged only
+			// by whether verification turned it false.
+			if !tc.wantReady && stored.Status.Ready {
+				t.Fatal("a refused identity must make the Agent not Ready")
+			}
+		})
+	}
+}
+
 func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing.T) {
 	holder := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	released := identityBoundTestAgent("reviewer", time.Now())

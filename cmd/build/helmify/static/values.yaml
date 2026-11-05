@@ -224,6 +224,13 @@ controller:
     entra:
       tenantID: ""
       blueprintClientID: ""
+      # Entra authority; empty means https://login.microsoftonline.com.
+      # Set a sovereign cloud's login URL here.
+      authority: ""
+      # When tenantID is set, the controller Pod mounts a projected
+      # ServiceAccount token audienced to api://AzureADTokenExchange. Give the
+      # blueprint a federated identity credential that trusts the controller
+      # ServiceAccount's subject and the cluster's OIDC issuer.
 
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.

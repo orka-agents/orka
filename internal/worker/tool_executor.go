@@ -113,6 +113,7 @@ type ToolExecutor struct {
 	authSecretValues            map[string]string
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
+	agentIdentity               *outboundaccess.AgentIdentityBinding
 	checkedPolicies             map[string]outboundaccess.PolicyIdentity
 	// sendGate, when set, is judged after every lookup and credential
 	// resolution and immediately before the request leaves the process.
@@ -148,6 +149,18 @@ func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
 
 // SetFrozenConnections records the Connection identities frozen into the
 // Task's execution snapshot, keyed by OutboundAccessPolicy name.
+// SetAgentIdentity binds the identity frozen into the executing Task's
+// binding for agentIdentity-mode outbound access. Nil makes those calls fail
+// closed.
+func (e *ToolExecutor) SetAgentIdentity(binding *outboundaccess.AgentIdentityBinding) {
+	if binding == nil {
+		e.agentIdentity = nil
+		return
+	}
+	copied := *binding
+	e.agentIdentity = &copied
+}
+
 func (e *ToolExecutor) SetFrozenConnections(frozen map[string]outboundaccess.FrozenConnection) {
 	if e == nil {
 		return
@@ -1012,6 +1025,19 @@ func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.To
 	return prepared, nil
 }
 
+// agentIdentityOriginError keeps an Agent identity credential on the Tool's
+// declared destination, never an origin a call's arguments chose.
+func agentIdentityOriginError(adapter string, tool *corev1alpha1.Tool, target *neturl.URL) error {
+	if adapter != outboundaccess.AdapterAgentIdentity {
+		return nil
+	}
+	declared, err := neturl.Parse(strings.TrimSpace(tool.Spec.HTTP.URL))
+	if err != nil || !sameHTTPOrigin(declared, target) {
+		return errors.New("agent identity credential request must target the declared tool origin")
+	}
+	return nil
+}
+
 func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage, prepared *preparedToolRequest) error {
 	if e.outboundResolver == nil {
 		return errors.New("outbound access policy is configured but the resolver is unavailable")
@@ -1059,18 +1085,22 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
-		Arguments: args,
-		MCPBacked: isMCPSubstrateActorTool(tool) || prepared.mcp,
+		Arguments:     args,
+		MCPBacked:     isMCPSubstrateActorTool(tool) || prepared.mcp,
+		AgentIdentity: e.agentIdentity,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve outbound access policy: %w", err)
 	}
 	prepared.redactionSecrets = compactToolSecrets(append(prepared.redactionSecrets, resolution.SensitiveValues...)...)
 	switch resolution.Adapter {
-	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection:
+	case outboundaccess.AdapterDirect, outboundaccess.AdapterConnection, outboundaccess.AdapterAgentIdentity:
 		prepared.direct = true
 		if prepared.request == nil || prepared.request.URL == nil || !strings.EqualFold(prepared.request.URL.Scheme, "https") {
 			return errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
+		}
+		if err := agentIdentityOriginError(resolution.Adapter, tool, prepared.request.URL); err != nil {
+			return err
 		}
 		if resolution.Adapter == outboundaccess.AdapterConnection {
 			prepared.connection = true

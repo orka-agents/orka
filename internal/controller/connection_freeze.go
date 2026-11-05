@@ -1245,6 +1245,7 @@ func bindFrozenConnections(
 	}
 	executor.SetRequester(task.Spec.RequestedBy)
 	executor.SetFrozenConnections(nil)
+	executor.SetAgentIdentity(agentIdentityBindingFromTask(task))
 	if snapshots == nil || task.Status.AgentExecutionBinding == nil {
 		return nil
 	}

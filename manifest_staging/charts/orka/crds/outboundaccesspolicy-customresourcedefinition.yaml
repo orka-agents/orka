@@ -53,6 +53,58 @@ spec:
               OutboundAccessPolicySpec configures exactly one outbound credential or
               routing adapter.
             properties:
+              agentIdentity:
+                description: |-
+                  AgentIdentity injects a credential issued for the executing Task's Agent
+                  identity, as frozen into the Task binding (ADR 0039). The policy never
+                  names an identity. Only the controller issues these credentials, so
+                  native worker Pods fail closed.
+                properties:
+                  entra:
+                    description: |-
+                      Entra targets a resource protected by Microsoft Entra. The Agent's
+                      identity must be an Entra agent identity.
+                    properties:
+                      resource:
+                        description: |-
+                          Resource is the target's application ID URI or resource URL, such as
+                          https://graph.microsoft.com. Orka requests the <resource>/.default scope.
+                        maxLength: 512
+                        minLength: 1
+                        pattern: ^(https://|api://)[^\s/]+(/[^\s]*)?$
+                        type: string
+                    required:
+                    - resource
+                    type: object
+                  mode:
+                    default: Self
+                    description: Mode selects whether the Agent acts as itself.
+                    enum:
+                    - Self
+                    type: string
+                  output:
+                    description: 'Output configures credential injection. Defaults
+                      to Authorization: Bearer.'
+                    properties:
+                      header:
+                        default: Authorization
+                        description: Header defaults to Authorization. Txn-Token is
+                          forbidden.
+                        type: string
+                      prefix:
+                        default: 'Bearer '
+                        description: Prefix defaults to "Bearer ". Set an explicit
+                          empty string for no prefix.
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: Txn-Token cannot be used as the resource credential
+                        output header
+                      rule: '!has(self.header) || self.header.lowerAscii() != ''txn-token'''
+                type: object
+                x-kubernetes-validations:
+                - message: agentIdentity requires exactly one issuer target
+                  rule: has(self.entra)
               connection:
                 description: |-
                   Connection injects the requesting person's linked-account credential for
@@ -456,7 +508,7 @@ spec:
                     && self.expectedIssuedTokenType.size() > 0)
                 - message: additionalParameters must not contain reserved OAuth fields
                   rule: '!has(self.additionalParameters) || self.additionalParameters.all(k,
-                    !(k.lowerAscii() in [''grant_type'',''subject_token'',''subject_token_type'',''actor_token'',''actor_token_type'',''assertion'',''scope'',''audience'',''resource'',''requested_token_type'',''client_id'',''client_secret'',''client_assertion'',''client_assertion_type'']))'
+                    !(k.lowerAscii() in [''grant_type'',''subject_token'',''subject_token_type'',''actor_token'',''actor_token_type'',''assertion'',''scope'',''audience'',''resource'',''requested_token_type'',''client_id'',''client_secret'',''client_assertion'',''client_assertion_type'',''fmi_path'',''user_id'',''username'',''user_federated_identity_credential'']))'
               gateway:
                 description: Gateway routes the original Tool request through a trusted
                   Kubernetes Service.
@@ -514,8 +566,9 @@ spec:
                 type: object
             type: object
             x-kubernetes-validations:
-            - message: exactly one of direct, gateway, or connection is required
-              rule: '[has(self.direct), has(self.gateway), has(self.connection)].filter(x,
+            - message: exactly one of direct, gateway, connection, or agentIdentity
+                is required
+              rule: '[has(self.direct), has(self.gateway), has(self.connection), has(self.agentIdentity)].filter(x,
                 x).size() == 1'
           status:
             description: OutboundAccessPolicyStatus contains only safe validation

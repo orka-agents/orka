@@ -58,6 +58,14 @@ type AgentReconciler struct {
 	// APIReader reads live state for identity claims, so two Agents never
 	// claim one identity from a stale cache.
 	APIReader client.Reader
+	// IdentityVerifier proves identities with their issuer. Nil leaves them
+	// declared but unverified.
+	IdentityVerifier AgentIdentityVerifier
+}
+
+// AgentIdentityVerifier proves an Agent's identity with its issuer.
+type AgentIdentityVerifier interface {
+	Verify(context.Context, *corev1alpha1.Agent) error
 }
 
 const (
@@ -124,6 +132,10 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if validationErr == nil && claimErr != nil {
 		validationErr = claimErr
 	}
+	identity := r.verifyAgentIdentity(ctx, agent, validationErr)
+	if validationErr == nil && identity.err != nil {
+		validationErr = identity.err
+	}
 
 	// Count active tasks referencing this agent
 	activeTasks, err := r.countActiveTasks(ctx, agent)
@@ -138,7 +150,11 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Update status
-	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim)
+	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim, identity)
+	if err == nil && identity.declared && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReverifyInterval) {
+		// Identities can be disabled or deleted at the issuer at any time.
+		result.RequeueAfter = agentIdentityReverifyInterval
+	}
 	if err == nil && claim != nil && claim.Releasing && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReleaseRecheck) {
 		// The release finishes on a later pass, once bound Tasks are done.
 		result.RequeueAfter = agentIdentityReleaseRecheck
@@ -514,7 +530,7 @@ func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
-func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim) (ctrl.Result, error) {
+func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim, identity agentIdentityState) (ctrl.Result, error) {
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
@@ -540,7 +556,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
-	setAgentIdentityCondition(agent, now)
+	setAgentIdentityCondition(agent, now, identity)
 	observedClaim := agent.Status.IdentityClaim.DeepCopy()
 	agent.Status.IdentityClaim = claim.DeepCopy()
 
@@ -554,7 +570,7 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 		agent.Status.Ready = validationErr == nil
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
-		setAgentIdentityCondition(agent, now)
+		setAgentIdentityCondition(agent, now, identity)
 		// The claim was decided from observedClaim; never write it over a
 		// claim that changed since.
 		if !apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, observedClaim) &&

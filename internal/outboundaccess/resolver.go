@@ -43,8 +43,14 @@ const (
 	// AdapterConnection injects a person's linked-account credential; the
 	// executor applies it exactly like a direct credential.
 	AdapterConnection = "connection"
-	schemeHTTP        = "http"
-	schemeHTTPS       = "https"
+	// AdapterAgentIdentity injects a credential issued for the Task's frozen
+	// Agent identity; the executor applies it exactly like a direct credential.
+	AdapterAgentIdentity = "agentIdentity"
+	schemeHTTP           = "http"
+	schemeHTTPS          = "https"
+
+	// defaultCredentialPrefix precedes an injected bearer credential.
+	defaultCredentialPrefix = "Bearer "
 
 	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
 	DefaultCredentialReadScope = "orka:secrets:credentials:read"
@@ -89,6 +95,38 @@ type ResolveRequest struct {
 	// rather than its declared URL; connection mode refuses it before any
 	// credential work.
 	MCPBacked bool
+	// AgentIdentity is the identity frozen into the executing Task's binding.
+	// agentIdentity-mode policies act as this identity and no other; nil
+	// fails them closed.
+	AgentIdentity *AgentIdentityBinding
+}
+
+// AgentIdentityBinding is the executing Task's frozen Agent identity.
+type AgentIdentityBinding struct {
+	Identity        corev1alpha1.AgentExecutionIdentityRef
+	AgentNamespace  string
+	AgentName       string
+	AgentUID        string
+	AgentGeneration int64
+	TaskUID         string
+}
+
+// AgentIdentityTokenRequest asks the issuer for a credential for one frozen
+// identity, mode, and target.
+type AgentIdentityTokenRequest struct {
+	Identity corev1alpha1.AgentExecutionIdentityRef
+	Mode     string
+	// Resource is the issuer-typed target, for Entra the resource whose
+	// /.default scope is requested.
+	Resource string
+	Policy   PolicyIdentity
+}
+
+// AgentIdentityTokenSource issues Agent identity credentials. It exists only
+// in the controller; worker Pods have no implementation and therefore fail
+// closed on agentIdentity-mode policies.
+type AgentIdentityTokenSource interface {
+	AgentIdentityToken(context.Context, AgentIdentityTokenRequest) (string, error)
 }
 
 // ToolBinding is the executing Tool's identity for connector checks.
@@ -239,6 +277,9 @@ type KubernetesResolver struct {
 	// policies. Nil means this process may not execute connector-backed
 	// tools.
 	Connections ConnectionCredentialSource
+	// AgentIdentities issues credentials for agentIdentity-mode policies. Nil
+	// means this process may not act as an Agent identity.
+	AgentIdentities AgentIdentityTokenSource
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -290,7 +331,7 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		}
 		req.TransactionToken = token
 	}
-	if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
+	if injectsCredential(policy) {
 		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
 			return Resolution{}, errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
@@ -309,6 +350,8 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		return r.resolveDirect(ctx, policy, req)
 	case policy.Spec.Connection != nil:
 		return r.resolveConnection(ctx, policy, req)
+	case policy.Spec.AgentIdentity != nil:
+		return r.resolveAgentIdentity(ctx, policy, req)
 	}
 	return r.resolveGateway(ctx, policy)
 }
@@ -516,7 +559,7 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		return Resolution{}, errors.New("connection is readOnly; write tools are not available")
 	}
 	header := defaultCredentialHeader
-	prefix := "Bearer "
+	prefix := defaultCredentialPrefix
 	if output := policy.Spec.Connection.Output; output != nil {
 		if strings.TrimSpace(output.Header) != "" {
 			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
@@ -532,6 +575,76 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		SensitiveValues:  compactSensitiveValues([]string{credential.AccessToken}),
 		ConnectionUID:    credential.ConnectionUID,
 		Parameters:       declared.Parameters,
+	}, nil
+}
+
+// injectsCredential reports whether the policy's adapter attaches a
+// credential to the Tool's own request, rather than routing it.
+func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
+	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
+}
+
+func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
+	if r.AgentIdentities == nil {
+		return Resolution{}, errors.New("agent identity credentials are issued only by the controller")
+	}
+	binding := req.AgentIdentity
+	if binding == nil || strings.TrimSpace(binding.Identity.ID) == "" {
+		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
+	}
+	// The bound Agent must still exist and hold the identity: deleting the
+	// Agent, or a claim that moved to another Agent, stops its Tasks' calls.
+	live := &corev1alpha1.Agent{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
+		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
+	}
+	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
+		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
+		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
+	}
+	identity := policy.Spec.AgentIdentity
+	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
+		return Resolution{}, fmt.Errorf("agent identity outbound access policy %q targets an issuer the Task's identity is not from", policy.Name)
+	}
+	// The credential is for one fixed destination. A Tool whose requests go
+	// elsewhere, or whose URL the call's arguments rewrite, could send it to
+	// a host the policy author never chose.
+	if req.MCPBacked {
+		return Resolution{}, errors.New("agent identity outbound access policies are not supported on MCP-backed tools")
+	}
+	if strings.Contains(req.Tool.URL, "{{") {
+		return Resolution{}, errors.New("agent identity outbound access requires a Tool URL without template placeholders")
+	}
+	if req.Tool.Builtin {
+		return Resolution{}, errors.New("a built-in tool has no outbound access policy")
+	}
+	token, err := r.AgentIdentities.AgentIdentityToken(ctx, AgentIdentityTokenRequest{
+		Identity: binding.Identity,
+		Mode:     AgentIdentityMode(identity),
+		Resource: identity.Entra.Resource,
+		Policy:   PolicyIdentity{UID: string(policy.UID), Generation: policy.Generation},
+	})
+	if err != nil {
+		return Resolution{}, fmt.Errorf("issue agent identity credential: %w", err)
+	}
+	if strings.TrimSpace(token) == "" {
+		return Resolution{}, errors.New("agent identity issuer returned an empty credential")
+	}
+	header := defaultCredentialHeader
+	prefix := defaultCredentialPrefix
+	if output := identity.Output; output != nil {
+		if strings.TrimSpace(output.Header) != "" {
+			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
+		}
+		if output.Prefix != nil {
+			prefix = *output.Prefix
+		}
+	}
+	return Resolution{
+		Adapter:          AdapterAgentIdentity,
+		CredentialHeader: header,
+		CredentialValue:  prefix + token,
+		SensitiveValues:  compactSensitiveValues([]string{token}),
 	}, nil
 }
 
@@ -604,7 +717,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 		return Resolution{}, fmt.Errorf("outbound resource token exchange failed: %w", err)
 	}
 	header := "Authorization"
-	prefix := "Bearer "
+	prefix := defaultCredentialPrefix
 	if direct.Output != nil {
 		if strings.TrimSpace(direct.Output.Header) != "" {
 			header = http.CanonicalHeaderKey(strings.TrimSpace(direct.Output.Header))

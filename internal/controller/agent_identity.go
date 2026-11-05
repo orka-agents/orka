@@ -19,6 +19,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
 // errIdentityClaimPending marks a Task waiting for its Agent to hold the
@@ -133,21 +134,66 @@ func activeIdentityTasks(ctx context.Context, reader client.Reader, agent *corev
 	return count, nil
 }
 
-// setAgentIdentityCondition reports that a declared identity is not yet
-// verified with its issuer, and clears the condition when there is none.
-func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time) {
-	if _, _, ok := agent.IdentityRef(); !ok {
+// agentIdentityReverifyInterval bounds how long a verified identity stays
+// trusted without asking its issuer again.
+const agentIdentityReverifyInterval = time.Hour
+
+const (
+	reasonIdentityVerified           = "Verified"
+	reasonIdentityVerificationFailed = "VerificationFailed"
+)
+
+// agentIdentityState is the outcome of verifying an Agent's identity.
+type agentIdentityState struct {
+	declared bool
+	verified bool
+	err      error
+}
+
+// verifyAgentIdentity asks the issuer to prove a declared identity. A
+// configuration that already failed validation is not sent to the issuer.
+func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1alpha1.Agent, validationErr error) agentIdentityState {
+	issuer, id, ok := agent.IdentityRef()
+	if !ok {
+		return agentIdentityState{}
+	}
+	state := agentIdentityState{declared: true}
+	if validationErr != nil || r.IdentityVerifier == nil {
+		return state
+	}
+	if err := r.IdentityVerifier.Verify(ctx, agent); err != nil {
+		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
+		return state
+	}
+	state.verified = true
+	return state
+}
+
+// setAgentIdentityCondition reports whether a declared identity is verified
+// with its issuer, and clears the condition when there is none.
+func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time, identity agentIdentityState) {
+	if !identity.declared {
 		meta.RemoveStatusCondition(&agent.Status.Conditions, conditionTypeIdentityVerified)
 		return
 	}
-	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+	condition := metav1.Condition{
 		Type:               conditionTypeIdentityVerified,
 		Status:             metav1.ConditionFalse,
 		Reason:             reasonIdentityDeclared,
 		Message:            "declared by an authorized Agent editor; not verified with the issuer",
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
-	})
+	}
+	switch {
+	case identity.err != nil:
+		condition.Reason = reasonIdentityVerificationFailed
+		condition.Message = identity.err.Error()
+	case identity.verified:
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = reasonIdentityVerified
+		condition.Message = "the issuer issued a token for this identity"
+	}
+	meta.SetStatusCondition(&agent.Status.Conditions, condition)
 }
 
 // agentsSharingIdentity re-validates every other Agent that declares or holds
@@ -253,6 +299,20 @@ func requireParentOwnsIdentityAgent(
 		return refuse
 	}
 	return nil
+}
+
+// agentIdentityBindingFromTask returns the identity frozen into an ACP Task's
+// binding, for agentIdentity-mode outbound access.
+func agentIdentityBindingFromTask(task *corev1alpha1.Task) *outboundaccess.AgentIdentityBinding {
+	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil ||
+		task.Status.AgentExecutionBinding.Agent.Identity == nil {
+		return nil
+	}
+	agent := task.Status.AgentExecutionBinding.Agent
+	return &outboundaccess.AgentIdentityBinding{
+		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
+		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
+	}
 }
 
 // requireBoundIdentityClaim re-checks, after the binding is persisted and

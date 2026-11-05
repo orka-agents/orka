@@ -32,3 +32,19 @@ func TestStaticChartAgentIdentityFlags(t *testing.T) {
 	require.Contains(t, deployment, `"--agent-identity-entra-tenant-id=11111111-1111-1111-1111-111111111111"`)
 	require.Contains(t, deployment, `"--agent-identity-entra-blueprint-client-id=22222222-2222-2222-2222-222222222222"`)
 }
+
+func TestStaticChartMountsTheAgentIdentityToken(t *testing.T) {
+	deployment, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml")
+	require.NoError(t, err, "%s", deployment)
+	require.NotContains(t, deployment, "agent-identity-token")
+
+	deployment, err = helmTemplateStaticChart(t,
+		"--set-string", "controller.agentIdentity.entra.tenantID=11111111-1111-1111-1111-111111111111",
+		"--set-string", "controller.agentIdentity.entra.blueprintClientID=22222222-2222-2222-2222-222222222222",
+		"--set-string", "controller.agentIdentity.entra.authority=https://login.microsoftonline.us",
+		"--show-only", "templates/deployment.yaml")
+	require.NoError(t, err, "%s", deployment)
+	require.Contains(t, deployment, "audience: api://AzureADTokenExchange")
+	require.Contains(t, deployment, "mountPath: /var/run/secrets/orka.ai/agent-identity")
+	require.Contains(t, deployment, `"--agent-identity-entra-authority=https://login.microsoftonline.us"`)
+}

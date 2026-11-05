@@ -23,11 +23,15 @@ const (
 	OutboundClientAuthSecretBasic   = "ClientSecretBasic"
 	OutboundClientAuthSecretPost    = "ClientSecretPost"
 	OutboundClientAuthPrivateKeyJWT = "PrivateKeyJWT"
+
+	// OutboundAgentIdentityModeSelf issues a credential for the Agent acting
+	// as itself.
+	OutboundAgentIdentityModeSelf = "Self"
 )
 
 // OutboundAccessPolicySpec configures exactly one outbound credential or
 // routing adapter.
-// +kubebuilder:validation:XValidation:rule="[has(self.direct), has(self.gateway), has(self.connection)].filter(x, x).size() == 1",message="exactly one of direct, gateway, or connection is required"
+// +kubebuilder:validation:XValidation:rule="[has(self.direct), has(self.gateway), has(self.connection), has(self.agentIdentity)].filter(x, x).size() == 1",message="exactly one of direct, gateway, connection, or agentIdentity is required"
 type OutboundAccessPolicySpec struct {
 	// Direct exchanges a resolved subject for a downstream resource credential.
 	// +optional
@@ -43,6 +47,44 @@ type OutboundAccessPolicySpec struct {
 	// fallback to any other credential.
 	// +optional
 	Connection *ConnectionOutboundAccess `json:"connection,omitempty"`
+
+	// AgentIdentity injects a credential issued for the executing Task's Agent
+	// identity, as frozen into the Task binding (ADR 0039). The policy never
+	// names an identity. Only the controller issues these credentials, so
+	// native worker Pods fail closed.
+	// +optional
+	AgentIdentity *AgentIdentityOutboundAccess `json:"agentIdentity,omitempty"`
+}
+
+// AgentIdentityOutboundAccess selects how the Agent identity is used and the
+// issuer-typed target the credential is for.
+// +kubebuilder:validation:XValidation:rule="has(self.entra)",message="agentIdentity requires exactly one issuer target"
+type AgentIdentityOutboundAccess struct {
+	// Mode selects whether the Agent acts as itself.
+	// +kubebuilder:validation:Enum=Self
+	// +kubebuilder:default=Self
+	// +optional
+	Mode string `json:"mode,omitempty"`
+
+	// Entra targets a resource protected by Microsoft Entra. The Agent's
+	// identity must be an Entra agent identity.
+	// +optional
+	Entra *EntraOutboundTarget `json:"entra,omitempty"`
+
+	// Output configures credential injection. Defaults to Authorization: Bearer.
+	// +optional
+	Output *OutboundCredentialOutput `json:"output,omitempty"`
+}
+
+// EntraOutboundTarget names the Entra-protected resource a token is for.
+type EntraOutboundTarget struct {
+	// Resource is the target's application ID URI or resource URL, such as
+	// https://graph.microsoft.com. Orka requests the <resource>/.default scope.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^(https://|api://)[^\s/]+(/[^\s]*)?$`
+	Resource string `json:"resource"`
 }
 
 // ConnectionOutboundAccess selects the per-person credential source.
@@ -63,7 +105,7 @@ type ConnectionOutboundAccess struct {
 // +kubebuilder:validation:XValidation:rule="self.grant != 'TokenExchange' || self.subject.source != 'SecretRef' || (has(self.subject.tokenType) && self.subject.tokenType.size() > 0)",message="SecretRef token exchange subjects require tokenType"
 // +kubebuilder:validation:XValidation:rule="self.grant != 'TokenExchange' || !has(self.actor) || self.actor.source != 'SecretRef' || (has(self.actor.tokenType) && self.actor.tokenType.size() > 0)",message="SecretRef token exchange actors require tokenType"
 // +kubebuilder:validation:XValidation:rule="self.grant != 'TokenExchange' || (has(self.expectedIssuedTokenType) && self.expectedIssuedTokenType.size() > 0)",message="TokenExchange requires expectedIssuedTokenType"
-// +kubebuilder:validation:XValidation:rule="!has(self.additionalParameters) || self.additionalParameters.all(k, !(k.lowerAscii() in ['grant_type','subject_token','subject_token_type','actor_token','actor_token_type','assertion','scope','audience','resource','requested_token_type','client_id','client_secret','client_assertion','client_assertion_type']))",message="additionalParameters must not contain reserved OAuth fields"
+// +kubebuilder:validation:XValidation:rule="!has(self.additionalParameters) || self.additionalParameters.all(k, !(k.lowerAscii() in ['grant_type','subject_token','subject_token_type','actor_token','actor_token_type','assertion','scope','audience','resource','requested_token_type','client_id','client_secret','client_assertion','client_assertion_type','fmi_path','user_id','username','user_federated_identity_credential']))",message="additionalParameters must not contain reserved OAuth fields"
 type DirectOutboundAccess struct {
 	// Grant selects RFC 8693 token exchange or RFC 7523 JWT bearer.
 	// +kubebuilder:validation:Enum=TokenExchange;JWTBearer

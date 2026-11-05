@@ -239,6 +239,7 @@ func main() {
 	var workspaceClassUseAdmissionEnabled bool
 	var agentUseAuthorizationEnabled bool
 	var agentIdentityEntraTenantID, agentIdentityEntraBlueprintClientID string
+	var agentIdentityEntraAuthority, agentIdentityTokenFile string
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -448,6 +449,12 @@ func main() {
 	flag.StringVar(&agentIdentityEntraBlueprintClientID, "agent-identity-entra-blueprint-client-id",
 		os.Getenv("ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID"),
 		"Client ID of the Entra agent identity blueprint. Set together with --agent-identity-entra-tenant-id.")
+	flag.StringVar(&agentIdentityEntraAuthority, "agent-identity-entra-authority",
+		envStringDefault("ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY", agentidentity.DefaultEntraAuthority),
+		"Entra authority URL used for agent identity tokens, for example a sovereign cloud's login endpoint.")
+	flag.StringVar(&agentIdentityTokenFile, "agent-identity-token-file",
+		envStringDefault("ORKA_AGENT_IDENTITY_TOKEN_FILE", agentidentity.DefaultTokenFile),
+		"Projected ServiceAccount token, audienced to api://AzureADTokenExchange, that the controller presents as the blueprint's federated credential.")
 	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
 		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
 		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
@@ -817,6 +824,21 @@ func main() {
 	if err := agentIdentityConfig.Validate(); err != nil {
 		setupLog.Error(err, "invalid agent identity configuration")
 		os.Exit(1)
+	}
+	var agentIdentitySource *agentidentity.Source
+	if agentIdentityConfig.Entra != nil {
+		if !strings.HasPrefix(agentIdentityEntraAuthority, "https://") {
+			setupLog.Error(fmt.Errorf("must be an https URL"), "invalid --agent-identity-entra-authority")
+			os.Exit(1)
+		}
+		agentIdentitySource = &agentidentity.Source{
+			Config: agentIdentityConfig,
+			Entra: &agentidentity.EntraIssuer{
+				Config:     *agentIdentityConfig.Entra,
+				Authority:  agentIdentityEntraAuthority,
+				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
+			},
+		}
 	}
 	mode, err := executionmode.Parse(controllerModeValue)
 	if err != nil {
@@ -1276,6 +1298,9 @@ func main() {
 		KubeClient: kubeClient,
 		Trust:      outboundAccessTrust,
 		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+	}
+	if agentIdentitySource != nil {
+		outboundAccessResolver.AgentIdentities = agentIdentitySource
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger
@@ -1988,6 +2013,12 @@ func main() {
 		ToolboxPolicy: acpToolboxPolicy,
 		Identity:      agentIdentityConfig,
 		APIReader:     mgr.GetAPIReader(),
+		IdentityVerifier: func() controller.AgentIdentityVerifier {
+			if agentIdentitySource == nil {
+				return nil
+			}
+			return agentIdentitySource
+		}(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Agent")
 		os.Exit(1)
@@ -2707,4 +2738,12 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// envStringDefault returns the trimmed environment value, or fallback when unset.
+func envStringDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

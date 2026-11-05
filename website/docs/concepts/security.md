@@ -253,8 +253,11 @@ identity-bound Agent also requires `--agent-use-authorization-enabled` and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
 it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
-`IdentityVerified` condition stays `False` with reason `Declared`: the identity
-is an authorized declaration, not yet proven with the issuer.
+`IdentityVerified` condition turns `True` once the controller has obtained a token
+for the identity from its issuer, and the controller asks again at least hourly; a
+refusal sets it `False` and makes the Agent not Ready. Tokens for the identity are
+issued only by the controller, through `agentIdentity`-mode outbound access
+policies, and never reach the runtime.
 
 ## Secret management
 

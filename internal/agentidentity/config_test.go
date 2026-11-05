@@ -23,7 +23,8 @@ func configuredConfig() Config {
 	return Config{Entra: &EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint}, AgentUseAuthorization: true}
 }
 
-func identityAgent(name string, created time.Time) corev1alpha1.Agent {
+func identityAgent(created time.Time) corev1alpha1.Agent {
+	const name = "a"
 	return corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a", UID: types.UID("uid-" + name), CreationTimestamp: metav1.NewTime(created)},
 		Spec: corev1alpha1.AgentSpec{
@@ -48,7 +49,7 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestValidateAgentRequirements(t *testing.T) {
-	agent := identityAgent("a", time.Now())
+	agent := identityAgent(time.Now())
 	if err := configuredConfig().ValidateAgent(&agent); err != nil {
 		t.Fatalf("valid identity Agent: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestValidateAgentRequirements(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			candidate := identityAgent("a", time.Now())
+			candidate := identityAgent(time.Now())
 			if tc.mutate != nil {
 				tc.mutate(&candidate)
 			}
@@ -81,7 +82,7 @@ func TestValidateAgentRequirements(t *testing.T) {
 }
 
 func TestBindingRefFreezesIssuerInstance(t *testing.T) {
-	agent := identityAgent("a", time.Now())
+	agent := identityAgent(time.Now())
 	ref, err := configuredConfig().BindingRef(&agent)
 	if err != nil {
 		t.Fatal(err)

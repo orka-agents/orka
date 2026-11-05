@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stages 1 and 2 are implemented; stage 1 is opt-in. Stages 3 and 4 are not. Builds on ADR 0034 (Agent runtime ceilings) and
+Proposed. Stages 1–3 are implemented; stage 1 is opt-in. Identity use records and stage 4 are not. Builds on ADR 0034 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`

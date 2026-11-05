@@ -349,10 +349,11 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("outbound access policy %q is not accepted with resolved references", ref.Name)
 			}
 		}
-		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil || policy.Spec.Connection != nil) {
+		if aitools.IsRemoteMCP(tool) && (policy.Spec.Gateway == nil || policy.Spec.Direct != nil ||
+			policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
 			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
 		}
-		if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
+		if policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
 				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
