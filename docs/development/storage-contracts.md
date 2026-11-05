@@ -95,7 +95,7 @@ Kubernetes authority remains separate from either boundary.
 | `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. Consume-and-mark-read behavior matters for future retry semantics. |
 | `SecurityStore` | Scan runs, ingestion receipts, slices, threat models, findings, dropped findings and patch proposals; state. | RepositoryScan reconciler and security APIs. Ingestion groups result application, run changes and receipt. Kubernetes RepositoryScan/Task identity remains authoritative. |
 | `RepositoryMonitorStore`, `tools.RepositoryValidationBindingStore` | Monitor snapshots/runs/items, actions, review/publication records, commands, implementation/repair jobs, GitHub mutation records and monitor events; state. | RepositoryMonitor reconciler, APIs and repository validation tools. The narrow binding interface uses monitor-event persistence; it is not a separate database. |
-| `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
+| `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes, each Task's requester and AHP turn mark, and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
 | `AHPStore` | Agent Host Protocol connection tokens (hashes only), client bindings, and each user's sequence, replay journal, channel states, session catalog and session backend records; state. | AHP host and its Orka session backend. Everything but tokens and clients is keyed by an opaque user key; a journal append is refused unless it continues the user's sequence. |
 | `TaskJobAuthorityStore`, `TaskDataFenceStore` | Job revocations and Task/namespace cleanup generations; state, also fencing colocated artifact writes. | Worker API and brokered tool access, Task finalization and cleanup. Authorization is checked against live Kubernetes identity with no store transaction open; each fenced data call then checks the cleanup generation and authorized Jobs in its own transaction. |
 | `ControllerEpochMirror` | A subordinate copy of the Kubernetes-acquired epoch for payload transaction fences; state. | Controller epoch manager and SQLite turn/outbox persistence. A mirror cannot elect or advance controller ownership. |
@@ -288,7 +288,9 @@ the observable parts.
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
   writes without one during the transition. Revision 5 adds the Agent Host
-  Protocol family (`AHPStore`) to `state.v1`. The revision Orka requires for
+  Protocol family (`AHPStore`) to `state.v1`. Revision 6 adds
+  `UsageTasksInSessions` and the requester and AHP turn mark a usage Task
+  keeps. The revision Orka requires for
   each part belongs to Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
