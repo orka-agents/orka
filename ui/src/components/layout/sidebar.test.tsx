@@ -72,9 +72,12 @@ describe('Sidebar', () => {
   it('active nav item has correct styling', () => {
     render(<Sidebar />)
     const dashboardLink = screen.getByText('Dashboard').closest('a')
-    expect(dashboardLink?.className).toContain('bg-primary')
+    expect(dashboardLink).toHaveAttribute('aria-current', 'page')
+    expect(dashboardLink?.className).toContain('bg-accent text-foreground')
     const tasksLink = screen.getByText('Tasks').closest('a')
-    expect(tasksLink?.className).not.toContain('bg-primary')
+    expect(tasksLink).not.toHaveAttribute('aria-current')
+    expect(tasksLink?.className).not.toContain('bg-accent text-foreground')
+    expect(tasksLink?.className).toContain('text-muted-foreground')
   })
 
   it('collapsed sidebar hides labels', () => {

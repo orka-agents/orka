@@ -693,6 +693,12 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 		message = e.Message
+	} else if temporary := temporaryStorageHTTPError(err); temporary != nil {
+		code = temporary.Code
+		message = temporary.Message
+	}
+	if code == fiber.StatusServiceUnavailable && len(c.Response().Header.Peek(fiber.HeaderRetryAfter)) == 0 {
+		c.Set(fiber.HeaderRetryAfter, serviceUnavailableRetryAfterSeconds)
 	}
 	// Every error body is JSON or the SPA page; neither may be sniffed.
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
