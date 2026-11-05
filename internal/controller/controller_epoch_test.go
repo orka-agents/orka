@@ -565,6 +565,7 @@ func controllerEpochFromTestCAS(change store.ControllerEpochCAS) *store.Controll
 
 type recordingEpochDataset struct {
 	datasetID string
+	state     storagev1.DatasetState
 
 	mu       sync.Mutex
 	requests []storagev1.AdvanceControllerEpochRequest
@@ -586,7 +587,7 @@ func (d *recordingEpochDataset) Describe(context.Context) (storagev1.ProviderInf
 		d.describeErrs = d.describeErrs[1:]
 		return storagev1.ProviderInfo{}, err
 	}
-	return storagev1.ProviderInfo{DatasetID: d.datasetID}, nil
+	return storagev1.ProviderInfo{DatasetID: d.datasetID, State: d.state}, nil
 }
 
 func (d *recordingEpochDataset) AdvanceControllerEpoch(

@@ -27,7 +27,7 @@ func TestFailedTaskStopsActiveJobDuringStorageOutage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			task := &corev1alpha1.Task{
 				ObjectMeta: metav1.ObjectMeta{Name: "failed-task", Namespace: "default", UID: "task-uid", Finalizers: []string{labels.TaskFinalizer}},
-				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+				Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer, RetryPolicy: &corev1alpha1.RetryPolicy{MaxRetries: 3}},
 				Status: corev1alpha1.TaskStatus{
 					Phase: corev1alpha1.TaskPhaseRunning, JobName: "failed-job", JobUID: "job-uid",
 				},
@@ -65,6 +65,8 @@ func TestFailedTaskStopsActiveJobDuringStorageOutage(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
 			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+			require.Equal(t, "pod unschedulable: no suitable node", current.Status.Message)
+			require.Equal(t, task.Status.Attempts, current.Status.Attempts)
 			require.NotNil(t, current.Status.ResultRef)
 			require.True(t, current.Status.ResultRef.Available)
 		})
