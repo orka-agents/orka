@@ -231,7 +231,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   root Task, or sending the Session message that started the current turn. A
   child Task, retry, or parked agent woken later does not reset it; only the
   requester acting again does. After it elapses, delegated calls fail closed
-  and the Task can ask the requester to continue.
+  and the Task can ask the requester to continue. A policy that asks for more
+  than the controller's maximum gets the maximum, and its `Accepted` condition
+  says so.
 - Delegated mode runs only where Orka controls the runtime's network. Built-in
   RuntimePool Pods deny all egress except DNS, the model provider proxy, and
   the controller, so identity-backed data can leave only through brokered
@@ -332,6 +334,12 @@ deployment delivers the guarantees above.
 - **Tenants.** Agent identities exist in one tenant, and a resource accepts
   tokens from its own tenant. Each tenant needs its own blueprint
   and agent identities.
+- **`offline_access` and linking.** Entra issues a refresh token only when
+  the front-end client requests `offline_access`, but it leaves that scope out
+  of the granted scopes it reports, so Orka refuses such a link with
+  `scopes_denied` ([#1030](https://github.com/orka-agents/orka/issues/1030)).
+  Until that is fixed, request only the blueprint's custom scope; the link then
+  lasts until its access token expires, and the requester links again.
 
 ### Configuring Entra Agent ID
 
