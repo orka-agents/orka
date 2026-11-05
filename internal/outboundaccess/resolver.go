@@ -569,6 +569,9 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	}
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
+		if reason := r.unfrozenConnectionReason(ctx, policy.Namespace, providerName, requester); reason != "" {
+			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(reason)
+		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
 	if frozen.PolicyUID != "" && (string(policy.UID) != frozen.PolicyUID || policy.Generation != frozen.PolicyGeneration) {
@@ -609,6 +612,37 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New("connection is readOnly; write tools are not available")
 	}
 	return credential, declared, nil
+}
+
+// unfrozenConnectionReason explains why a Task started without the
+// requester's Connection to a provider: their link was missing, expired, or
+// not Ready when the Task was bound. It reads only, and returns "" when it
+// cannot tell, so the caller keeps its generic refusal.
+func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) string {
+	if r.Reader == nil {
+		return ""
+	}
+	connections := &corev1alpha1.ConnectionList{}
+	if err := r.Reader.List(ctx, connections, client.InNamespace(namespace)); err != nil {
+		return ""
+	}
+	relink := fmt.Sprintf("link it with `orka connect %s` and run the Task again", provider)
+	for i := range connections.Items {
+		connection := &connections.Items[i]
+		if connection.Spec.ProviderRef.Name != provider || connection.Spec.Subject.Issuer != requester.Issuer ||
+			connection.Spec.Subject.Subject != requester.Subject {
+			continue
+		}
+		switch state := connection.Status.State; state {
+		case corev1alpha1.ConnectionStateExpired:
+			return fmt.Sprintf("the requester's link to %q expired before this Task started; %s", provider, relink)
+		case corev1alpha1.ConnectionStateReady:
+			return fmt.Sprintf("the requester's link to %q became Ready after this Task started; run the Task again", provider)
+		default:
+			return fmt.Sprintf("the requester's link to %q was not Ready (%s) when this Task started; %s", provider, state, relink)
+		}
+	}
+	return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
 }
 
 // credentialOutput returns the header and prefix an output selects, with the
