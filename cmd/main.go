@@ -506,7 +506,7 @@ func main() {
 	flag.StringVar(&ahpBackendConfig.WorkspaceImage, "ahp-workspace-image", os.Getenv("ORKA_AHP_WORKSPACE_IMAGE"),
 		"Digest-pinned image with sh, git and the common tools Orka's scripts run there (cat, dirname, find, grep, head, ls, mkdir, mktemp, mv, readlink, rm, sed, sleep, stat) for AHP workspaces. Empty disables workspaces and terminals.")
 	flag.DurationVar(&ahpBackendConfig.WorkspaceIdleTimeout, "ahp-workspace-idle-timeout", 4*time.Hour,
-		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session ends.")
+		"Remove an AHP workspace this long after its last use when no shell or turn runs and nothing in it is unpushed. Zero keeps workspaces until their user's last session and shell end.")
 	flag.StringVar(&ahpWorkspaceConnectorProvider, "ahp-workspace-connector-provider", os.Getenv("ORKA_AHP_WORKSPACE_CONNECTOR_PROVIDER"),
 		"ConnectorProvider, in each user's namespace, whose github.com links give that user's AHP workspace read access to their private repositories. Requires --connectors-enabled. Empty keeps workspaces to public repositories.")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),

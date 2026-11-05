@@ -286,7 +286,7 @@ controller:
     workspaceNamespace: orka-ahp-workspaces
     # Remove a workspace this long after its last use, while no shell or turn
     # runs and nothing in it is unpushed. 0 keeps workspaces until their
-    # user's last session ends.
+    # user's last session and shell end.
     workspaceIdleTimeout: 4h
     # ConnectorProvider, in each user's namespace, whose github.com links give
     # that user's workspace read access to their private repositories. Needs
