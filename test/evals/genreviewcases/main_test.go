@@ -582,3 +582,19 @@ func TestGenerateIgnoresLocalAttributes(t *testing.T) {
 		t.Fatalf("file = %+v, want the text diff", f)
 	}
 }
+
+func TestRunRefusesNonDirectoryRepoWithoutEchoingIt(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "cases.yaml")
+	content := "repoURL: https://github.com/orka-agents/orka-eval-fixtures\ncases: []\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret := "ghp_" + strings.Repeat("d", 36)
+	for _, repo := range []string{"https://x:" + secret + "@github.com/a/b", filepath.Join(dir, "missing-"+secret)} {
+		err := run(source, filepath.Join(dir, "out.jsonl"), repo, false)
+		if err == nil || !strings.Contains(err.Error(), "local directory") || strings.Contains(err.Error(), secret) {
+			t.Fatalf("run(-repo %q) error = %v", repo, err)
+		}
+	}
+}

@@ -41,7 +41,7 @@ go run ./test/evals/genreviewcases -check   # fail if cases.jsonl is stale
 The generator clones the fixture repository anonymously, pins each branch's
 last commit as the head and its parent as the base, renders every changed file
 the way the forge pull request files API does, and fails unless each reference
-location covers a line the change adds. Pass `-repo <clone>` to read a local clone instead; it is mirrored first, so its local Git settings never change the output.
+location covers a line the change adds. Pass `-repo <dir>` to read a local clone instead; it must be a directory, and it is mirrored first, so its local Git settings never change the output.
 
 ## Add a case
 

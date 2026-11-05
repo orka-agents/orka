@@ -89,6 +89,10 @@ func run(sourcePath, outPath, repo string, check bool) error {
 	}
 	if repo == "" {
 		repo = source.RepoURL
+	} else if info, err := os.Stat(repo); err != nil || !info.IsDir() {
+		// -repo is a local clone. A URL here would bypass the anonymous URL
+		// check above, so it is refused without being echoed.
+		return errors.New("-repo must be an existing local directory")
 	}
 	generated, err := Generate(source, repo)
 	if err != nil {
