@@ -240,6 +240,9 @@ func (m *ControllerEpochManager) openContract(
 			if err := store.ValidateControlIdentifier("dataset ID", info.DatasetID); err != nil {
 				return "", err
 			}
+			if info.State == storagev1.DatasetIncompatible {
+				return "", storagev1.ErrIncompatible
+			}
 			return info.DatasetID, nil
 		})
 	if err != nil {
@@ -345,10 +348,12 @@ func retryEpochStorageStep[T any](ctx context.Context, step string, call func(co
 // failed in a way retrying cannot fix: the dataset is bound to another
 // installation or holds a newer or conflicting epoch (ErrFenced, which also
 // matches ErrConflict), the binding names another dataset, the request is
-// invalid, or the installation record is missing.
+// invalid, the dataset schema is incompatible, or the installation record is
+// missing.
 func definiteEpochStorageError(err error) bool {
 	return errors.Is(err, store.ErrConflict) ||
 		errors.Is(err, storagev1.ErrDatasetMismatch) ||
+		errors.Is(err, storagev1.ErrIncompatible) ||
 		errors.Is(err, store.ErrValidation) ||
 		errors.Is(err, store.ErrNotFound)
 }
