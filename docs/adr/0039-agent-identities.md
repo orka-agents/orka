@@ -195,9 +195,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   `user_federated_identity_credential` in `DirectOutboundAccess`
   `additionalParameters`, so the direct adapter can never select an identity.
 - An identity is verified only after the controller has acquired a token for
-  it. With Entra, the blueprint's exchange token for the identity is enough,
-  and proves the identity is a child of the configured blueprint, which stage 2
-  cannot. The controller re-verifies when the Agent reconciles and at least
+  it. With Entra, the controller requests the blueprint's exchange token for
+  the identity, which proves the identity is a child of the configured
+  blueprint, which stage 2 cannot, and then the identity's own token, because
+  Entra still issues the exchange token for a disabled identity. The controller re-verifies when the Agent reconciles and at least
   hourly while Tasks are bound to it. A failure, for example an identity
   disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
   new calls; deleting the Agent fails identity-backed calls from Tasks still
@@ -230,7 +231,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   root requester's last authenticated action in the Task chain: creating the
   root Task, or sending the Session message that started the current turn. A
   child Task, retry, or parked agent woken later does not reset it; only the
-  requester acting again does. After it elapses, delegated calls fail closed
+  requester acting again does. Cancelling or deleting any Task in the chain
+  stops delegated calls from every Task below it; a parent that finished
+  normally does not. After it elapses, delegated calls fail closed
   and the Task can ask the requester to continue. A policy that asks for more
   than the controller's maximum gets the maximum, and its `Accepted` condition
   says so.
