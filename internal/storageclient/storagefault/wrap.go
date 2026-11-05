@@ -75,6 +75,10 @@ func (i *Injector) WrapEmbedded(store storageclient.EmbeddedStore) storageclient
 // calls; until then they fail with ErrSnapshotKeyNotActive before they reach
 // the injector.
 func NewEmbeddedClient(store storageclient.EmbeddedStore) (*storageclient.Client, *Injector, error) {
+	// Validate the backend before its wrapper can hide a nil value.
+	if _, err := storageclient.NewEmbedded(store); err != nil {
+		return nil, nil, err
+	}
 	injector := New()
 	client, err := storageclient.NewEmbedded(injector.WrapEmbedded(store))
 	if err != nil {
