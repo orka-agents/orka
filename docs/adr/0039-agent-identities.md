@@ -133,11 +133,13 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   the Agent's `status.identityClaim`, granting a claim only when no other
   Agent holds it; a second Agent naming the identity reports `Ready=False`.
   An Agent that stops naming an identity keeps the claim until every Task
-  bound to it has finished, so two Agents never act as one identity at once.
+  bound to it has finished, so two Agents never act as one identity at once,
+  but from that moment its bound Tasks' identity-backed calls are refused, as
+  cloud IAM revocation applies to running workloads at their next call.
 - The Task binding freezes the identity next to the Agent UID and generation
   that `AgentExecutionAgentRef` already pins, together with the issuer
   instance (for Entra, the tenant and blueprint). Editing the Agent or the
-  controller configuration does not change the identity a bound Task uses; a
+  controller configuration never moves a bound Task to another identity; a
   frozen issuer instance that no longer matches the controller's fails the
   call closed.
 - An Agent with an identity must set `ceiling.allowedTools` (ADR 0034). Every
