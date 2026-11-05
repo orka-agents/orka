@@ -27,11 +27,11 @@ describe('TaskCancelDialog', () => {
     )
     const onOpenChange = vi.fn()
     const user = userEvent.setup()
-    render(<TaskCancelDialog taskName="build" open onOpenChange={onOpenChange} />)
+    render(<TaskCancelDialog taskName="build" taskUID="build-uid" open onOpenChange={onOpenChange} />)
     await user.type(screen.getByLabelText(/Reason/), 'wrong repo')
     await user.click(screen.getByRole('button', { name: 'Cancel task' }))
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
-    expect(captured).toEqual({ body: { reason: 'wrong repo' }, namespace: 'team-a' })
+    expect(captured).toEqual({ body: { uid: 'build-uid', reason: 'wrong repo' }, namespace: 'team-a' })
   })
 
   it('shows a refusal and stays open', async () => {

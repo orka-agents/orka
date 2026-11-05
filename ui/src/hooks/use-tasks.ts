@@ -119,8 +119,10 @@ export function useCancelTask() {
   const queryClient = useQueryClient()
   const namespace = useUIStore((s) => s.namespace)
   return useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
-      api.post<TaskCancellation>(`/tasks/${id}/cancel`, reason ? { reason } : {}, { namespace }),
+    // uid pins the request to the task the person confirmed; a task
+    // recreated under the same name since then is refused (409).
+    mutationFn: ({ id, uid, reason }: { id: string; uid?: string; reason?: string }) =>
+      api.post<TaskCancellation>(`/tasks/${id}/cancel`, { ...(uid && { uid }), ...(reason && { reason }) }, { namespace }),
     onSuccess: (_result, { id }) => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['task', id, namespace] })

@@ -15,13 +15,16 @@ import { ApiError } from '@/lib/api-client'
 
 export interface TaskCancelDialogProps {
   taskName: string
+  // The UID of the task the person is confirming; sent so a task recreated
+  // under the same name is not cancelled instead.
+  taskUID?: string
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
 // TaskCancelDialog confirms stopping a running task. Unlike delete, cancel
 // keeps everything the task produced.
-export function TaskCancelDialog({ taskName, open, onOpenChange }: TaskCancelDialogProps) {
+export function TaskCancelDialog({ taskName, taskUID, open, onOpenChange }: TaskCancelDialogProps) {
   const cancel = useCancelTask()
   const [reason, setReason] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -39,7 +42,7 @@ export function TaskCancelDialog({ taskName, open, onOpenChange }: TaskCancelDia
     if (cancel.isPending) return
     setError(null)
     try {
-      const result = await cancel.mutateAsync({ id: taskName, reason: reason.trim() || undefined })
+      const result = await cancel.mutateAsync({ id: taskName, uid: taskUID, reason: reason.trim() || undefined })
       toast.success(result.requested ? `Cancellation requested for ${taskName}` : `${taskName} is already cancelling`)
       close(false)
     } catch (err) {

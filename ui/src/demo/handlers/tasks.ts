@@ -1126,7 +1126,8 @@ export const taskHandlers: RequestHandler[] = [
     if (TERMINAL.has(phase) || rec.schedule) {
       return apiError(409, `task cannot be cancelled: the task is ${phase}`)
     }
-    const body = (await request.json().catch(() => ({}))) as { reason?: string }
+    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
+    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
     const reason = body.reason?.trim()
     const message = reason ? `cancelled by demo-user: ${reason}` : 'cancelled by demo-user'
     cancelDemoTask(name, message)

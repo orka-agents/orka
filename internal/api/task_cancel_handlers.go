@@ -24,6 +24,9 @@ const maxCancelReasonLength = 500
 
 type cancelRequest struct {
 	Reason string `json:"reason"`
+	// UID, when set, is the Task the caller confirmed. A Task recreated under
+	// the same name since then is refused rather than cancelled.
+	UID string `json:"uid"`
 }
 
 // taskCancellation is the response for a cancel request.
@@ -56,7 +59,7 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "cancelTask", h.contextTokenAuthorization.TaskUpdateScopes); err != nil {
 		return err
 	}
-	reason, err := parseCancelReason(c)
+	request, err := parseCancelRequest(c)
 	if err != nil {
 		return err
 	}
@@ -67,7 +70,10 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
-	result, err := h.requestTaskCancellation(c, task, cancelMessage(GetUserInfo(c), reason))
+	if request.UID != "" && string(task.UID) != request.UID {
+		return fiber.NewError(fiber.StatusConflict, "the task was replaced since it was confirmed; reload it")
+	}
+	result, err := h.requestTaskCancellation(c, task, cancelMessage(GetUserInfo(c), request.Reason))
 	if err != nil {
 		return err
 	}
@@ -87,7 +93,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	if err := h.authorizeContextTokenAction(c, "cancelSession", h.contextTokenAuthorization.TaskUpdateScopes); err != nil {
 		return err
 	}
-	reason, err := parseCancelReason(c)
+	request, err := parseCancelRequest(c)
 	if err != nil {
 		return err
 	}
@@ -104,7 +110,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
 	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
-	message := cancelMessage(GetUserInfo(c), reason)
+	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != name || !cancellableTaskPhase(task.Status.Phase) {
@@ -190,20 +196,23 @@ func cancellableTaskPhase(phase corev1alpha1.TaskPhase) bool {
 	return phase == "" || phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning
 }
 
-func parseCancelReason(c fiber.Ctx) (string, error) {
+// parseCancelRequest reads the optional body, collapsing the reason to one
+// line.
+func parseCancelRequest(c fiber.Ctx) (cancelRequest, error) {
 	request := cancelRequest{}
 	if len(c.Body()) > 0 {
 		if err := c.Bind().JSON(&request); err != nil {
-			return "", fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+			return cancelRequest{}, fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 		}
 	}
-	reason := strings.Join(strings.FieldsFunc(request.Reason, func(r rune) bool {
+	request.Reason = strings.Join(strings.FieldsFunc(request.Reason, func(r rune) bool {
 		return unicode.IsSpace(r) || unicode.IsControl(r)
 	}), " ")
-	if len([]rune(reason)) > maxCancelReasonLength {
-		return "", fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("reason must be at most %d characters", maxCancelReasonLength))
+	if len([]rune(request.Reason)) > maxCancelReasonLength {
+		return cancelRequest{}, fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("reason must be at most %d characters", maxCancelReasonLength))
 	}
-	return reason, nil
+	request.UID = strings.TrimSpace(request.UID)
+	return request, nil
 }
 
 // cancelMessage names the authenticated caller, never a value from the

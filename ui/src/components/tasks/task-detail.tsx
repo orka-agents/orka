@@ -177,7 +177,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     setTabState({ override: tab, seen: search.tab })
     navigate({ to: '/tasks/$taskId', params: { taskId }, search: { tab }, replace: true })
   }
-  const [cancelOpen, setCancelOpen] = useState(false)
+  // Holds the namespace/uid/name identity the dialog was opened for, like the
+  // armed delete, so a namespace switch or same-name recreation closes it.
+  const [cancelFor, setCancelFor] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   // Scope the armed delete to the loaded task's namespace+uid+name; a namespace
   // switch or same-name/new-uid recreation drops a stale confirm so it can't
@@ -354,11 +356,16 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <CircleStop className="mr-2 h-4 w-4" /> Cancelling…
             </Button>
           ) : isTaskCancellable(task) && !deleteArmed ? (
-            <Button variant="outline" size="sm" onClick={() => setCancelOpen(true)} title="Stop the task and keep its history">
+            <Button variant="outline" size="sm" onClick={() => setCancelFor(deleteIdentity)} title="Stop the task and keep its history">
               <CircleStop className="mr-2 h-4 w-4" /> Cancel task
             </Button>
           ) : null}
-          <TaskCancelDialog taskName={task.metadata.name} open={cancelOpen} onOpenChange={setCancelOpen} />
+          <TaskCancelDialog
+            taskName={task.metadata.name}
+            taskUID={task.metadata.uid}
+            open={cancelFor === deleteIdentity}
+            onOpenChange={(open) => setCancelFor(open ? deleteIdentity : null)}
+          />
           {isTaskDeleting(task) ? (
             // The API accepted the delete; finalizers are still running.
             <Button variant="destructive" size="sm" disabled title="Deletion in progress">

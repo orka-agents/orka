@@ -94,7 +94,7 @@ func TestCancelTaskRefusesFinishedAndMissingTasks(t *testing.T) {
 	)
 	for name, want := range map[string]int{
 		"done": http.StatusConflict, "scheduled": http.StatusConflict, "cancelled": http.StatusOK,
-		"pending": http.StatusOK, "missing": http.StatusNotFound,
+		"missing": http.StatusNotFound,
 	} {
 		resp, body := postCancel(t, app, "/tasks/"+name+"/cancel", "")
 		if resp.StatusCode != want {
@@ -106,6 +106,15 @@ func TestCancelTaskRefusesFinishedAndMissingTasks(t *testing.T) {
 	}
 	if _, ok := cancelAnnotation(t, h, "cancelled"); ok {
 		t.Fatal("an already Cancelled Task needs no cancel request")
+	}
+	if resp, _ := postCancel(t, app, "/tasks/pending/cancel", `{"uid":"an-older-uid"}`); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a replaced Task: status = %d, want 409", resp.StatusCode)
+	}
+	if _, ok := cancelAnnotation(t, h, "pending"); ok {
+		t.Fatal("a Task replaced since confirmation must not be cancelled")
+	}
+	if resp, _ := postCancel(t, app, "/tasks/pending/cancel", `{"uid":"pending-uid"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the confirmed Task: status = %d, want 200", resp.StatusCode)
 	}
 	resp, _ := postCancel(t, app, "/tasks/pending/cancel", `{"reason":"`+strings.Repeat("x", maxCancelReasonLength+1)+`"}`)
 	if resp.StatusCode != http.StatusBadRequest {
