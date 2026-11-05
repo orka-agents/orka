@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -461,5 +462,48 @@ func TestCheckReferenceNeverEchoesTheFile(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "a.go") {
 			t.Fatalf("checkReference(%s): %v", location.File, err)
 		}
+	}
+}
+
+func TestGenerateIgnoresLocalDiffSettings(t *testing.T) {
+	lines := func(changed map[int]string) string {
+		var b strings.Builder
+		for i := 1; i <= 20; i++ {
+			if text, ok := changed[i]; ok {
+				b.WriteString(text + "\n")
+				continue
+			}
+			fmt.Fprintf(&b, "line %d\n", i)
+		}
+		return b.String()
+	}
+	build := func(t *testing.T, config ...string) string {
+		r := newTestRepo(t)
+		for i := 0; i+1 < len(config); i += 2 {
+			r.run("config", config[i], config[i+1])
+		}
+		r.write("a.txt", lines(nil))
+		r.run("add", "-A")
+		r.run("commit", "-q", "-m", "base")
+		// Two edits nine lines apart: separate hunks with default settings,
+		// one hunk if the clone's diff.interHunkContext were honored.
+		r.commitCase("case/x", func() { r.write("a.txt", lines(map[int]string{3: "three", 12: "twelve"})) })
+		out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cases[0].Input.RepositoryMonitorReview.Files[0].Patch
+	}
+	plain := build(t)
+	if strings.Count(plain, "\n@@ ")+1 != 2 {
+		t.Fatalf("expected two hunks:\n%s", plain)
+	}
+	if tuned := build(t, "diff.algorithm", "patience", "diff.indentHeuristic", "false",
+		"diff.interHunkContext", "10", "diff.relative", "true"); tuned != plain {
+		t.Fatalf("local diff settings changed the patch:\n%s\nvs\n%s", plain, tuned)
 	}
 }

@@ -340,10 +340,13 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 }
 
 // gitDiff runs one git diff from base to head, limited to paths. External
-// diff drivers and textconv filters stay off, so the output is the
-// committed change.
+// diff drivers and textconv filters stay off and the diff settings are
+// pinned, so the output is the committed change whatever the clone's config.
 func gitDiff(repo, base, head string, paths []string, formats ...string) (string, error) {
-	args := append([]string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M"}, formats...)
+	// Pin every setting a clone's local config could change: the algorithm,
+	// the indent heuristic, inter-hunk context and relative paths.
+	args := append([]string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
+		"--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--no-relative"}, formats...)
 	args = append(args, base, head, "--")
 	return git(repo, append(args, paths...)...)
 }
