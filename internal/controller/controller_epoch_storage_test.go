@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -154,6 +155,39 @@ func TestControllerEpochManagerStopsWhenADatasetRefusesTheAdvance(t *testing.T) 
 	}
 	if _, _, err := writeFenceWithin(manager, "other.v1", time.Second); err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("write fence of an unserved contract = %v, want an immediate error", err)
+	}
+}
+
+func TestControllerEpochManagerRejectsIncompatibleDatasets(t *testing.T) {
+	for _, source := range []string{"describe error", "describe state", "advance error"} {
+		t.Run(source, func(t *testing.T) {
+			authority, _ := newKubernetesControllerEpochAuthority(t)
+			dataset := newRecordingEpochDataset("incompatible-dataset")
+			incompatible := fmt.Errorf("unsupported schema: %w", storagev1.ErrIncompatible)
+			switch source {
+			case "describe error":
+				dataset.describeErrs = []error{incompatible}
+			case "describe state":
+				dataset.state = storagev1.DatasetIncompatible
+			case "advance error":
+				dataset.advanceErrs = []error{incompatible}
+			}
+			manager := NewControllerEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			if err := manager.Start(ctx); !errors.Is(err, storagev1.ErrIncompatible) {
+				t.Fatalf("Start error = %v, want ErrIncompatible", err)
+			}
+			if requests := dataset.advanceRequests(); len(requests) != 0 {
+				t.Fatalf("incompatible dataset advanced: %+v", requests)
+			}
+			if _, ok := manager.Current(); ok {
+				t.Fatal("CurrentFence opened for an incompatible state dataset")
+			}
+			if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 20*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("write fence error = %v, want it to remain closed", err)
+			}
+		})
 	}
 }
 
