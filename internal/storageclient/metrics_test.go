@@ -293,19 +293,32 @@ func (unavailableEventProvider) ListSessionExecutionEvents(
 // until its deadline, so the calls get a short one.
 func TestClientRecordsStoreMetricsForAnyProvider(t *testing.T) {
 	client := storageclienttest.NewEmbedded(t, unavailableEventProvider{Store: openSQLite(t)})
-	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
-	defer cancel()
 	delta := storeMetricDelta(t, func() {
-		_, err := client.AppendExecutionEvent(ctx, workloadEvent("a", events.ExecutionEventTypeTaskStarted))
+		for _, write := range []func(context.Context) error{
+			func(ctx context.Context) error {
+				_, err := client.AppendExecutionEvent(ctx, workloadEvent("a", events.ExecutionEventTypeTaskStarted))
+				return err
+			},
+			func(ctx context.Context) error {
+				_, _, err := client.AppendExecutionEventIfAbsent(ctx, workloadEvent("a", events.ExecutionEventTypeToolCallCompleted), "key")
+				return err
+			},
+			func(ctx context.Context) error {
+				_, _, err := client.AppendExecutionEventWithPlanIfAbsent(ctx, workloadEvent("a", events.ExecutionEventTypePlanUpdated), "key",
+					&store.PlanState{Namespace: "tenant", TaskName: "a"})
+				return err
+			},
+		} {
+			// Each unavailable write can exhaust its deadline. A later call
+			// needs its own context to reach the provider and record its error.
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			err := write(ctx)
+			cancel()
+			require.ErrorIs(t, err, store.ErrUnavailable)
+		}
+		_, err := client.ListExecutionEvents(t.Context(), store.ExecutionEventFilter{Namespace: "tenant"})
 		require.ErrorIs(t, err, store.ErrUnavailable)
-		_, _, err = client.AppendExecutionEventIfAbsent(ctx, workloadEvent("a", events.ExecutionEventTypeToolCallCompleted), "key")
-		require.ErrorIs(t, err, store.ErrUnavailable)
-		_, _, err = client.AppendExecutionEventWithPlanIfAbsent(ctx, workloadEvent("a", events.ExecutionEventTypePlanUpdated), "key",
-			&store.PlanState{Namespace: "tenant", TaskName: "a"})
-		require.ErrorIs(t, err, store.ErrUnavailable)
-		_, err = client.ListExecutionEvents(ctx, store.ExecutionEventFilter{Namespace: "tenant"})
-		require.ErrorIs(t, err, store.ErrUnavailable)
-		_, _, err = client.ListSessionExecutionEvents(ctx, store.SessionExecutionEventFilter{Namespace: "tenant", SessionName: "session"})
+		_, _, err = client.ListSessionExecutionEvents(t.Context(), store.SessionExecutionEventFilter{Namespace: "tenant", SessionName: "session"})
 		require.ErrorIs(t, err, store.ErrUnavailable)
 	})
 	require.Equal(t, map[string]float64{
