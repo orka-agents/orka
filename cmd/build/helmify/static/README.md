@@ -53,6 +53,38 @@ Runtime tags are resolved to digests at controller startup. This requires HTTPS
 access to a registry that allows anonymous pulls. Use digest references for
 private registries or installations without registry access from the controller.
 
+## Restricted AI worker permissions
+
+Set `workers.ai.rbacProfile: restricted` to replace the AI worker's Kubernetes
+role with read-only ConfigMap, Tool, OutboundAccessPolicy, Agent, AgentRuntime
+and Task lookups. The default profile and vendor/container workers are unchanged.
+The profile requires `rbac.create: true`. Unknown profile names fail rendering.
+
+Restricted workers receive no Secret access, Task or Agent writes, Job or
+ServiceAccount mutation, Pod access, port-forwarding or RBAC grants. Direct
+coordination writes, credential lookup and the Kubernetes `code_exec` backend
+therefore fail rather than using a more privileged fallback.
+
+This also sets **controller-wide** context-token authorization to `enforce`,
+including for callers other than workers. Explicit `off` or `audit` conflicts
+fail chart rendering. Existing context-token callers must supply the scopes
+and transaction context their operations require; an upgrade can now return403
+for requests that previously relied on disabled or audit-only authorization.
+
+**This is not a workload sandbox or a complete credential-isolation claim.**
+Kubernetes grants are additive: review every effective binding for the worker.
+Context tokens are separate issuer grants, not ServiceAccount identities;
+their scope/context checks do not intersect with the worker's Kubernetes role.
+A forwarded token with an explicit Task-create grant can still authorize a
+matching Task through the controller. Narrow those grants at the issuer.
+Allowed OIDC identities are also separate authority, unchanged by this profile.
+
+The profile does not prevent controller-supplied Secret environment variables
+or mounts, constrain every Task payload or external tool, or establish process,
+network or gateway-response isolation. Review those paths independently before
+putting credentials beside untrusted workers. It does not change Kustomize
+worker roles or remove permissions granted outside this chart.
+
 ## CRDs and Helm lifecycle
 
 - The chart packages core and shared workspace CRDs under `crds/`. Provider
