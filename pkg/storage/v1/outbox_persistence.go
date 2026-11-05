@@ -1,6 +1,8 @@
-package store
+package v1
 
-import "context"
+import (
+	"context"
+)
 
 // OutboxPersistenceStore is the SQLite-only outbox adapter used behind a
 // Kubernetes epoch fence. Its methods persist records but do not treat a
