@@ -4,6 +4,7 @@ import {Check, Copy} from 'lucide-react';
 
 const COMMANDS = [
   'helm repo add orka https://orka-agents.github.io/orka/charts',
+  'helm repo update orka',
   'helm install orka orka/orka -n orka-system --create-namespace --wait --timeout 10m',
 ];
 

@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import ThemedImage from '@theme/ThemedImage';
@@ -22,9 +22,21 @@ function podPosition(angle) {
 
 export default function HeroSection() {
   const [paused, setPaused] = useState(false);
+  const [offscreen, setOffscreen] = useState(false);
+  const heroRef = useRef(null);
+
+  // Returning on screen must preserve the visitor's manual pause choice.
+  useEffect(() => {
+    if (!heroRef.current || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver(
+      ([entry]) => setOffscreen(!entry.isIntersecting),
+    );
+    observer.observe(heroRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   return (
-    <section className="orka-hero" data-paused={paused || undefined}>
+    <section className="orka-hero" ref={heroRef} data-paused={paused || offscreen || undefined}>
       <div className="orka-container orka-hero__grid">
         <div className="orka-hero__copy">
           <p className="orka-eyebrow orka-reveal" style={{'--d': '0ms'}}>
