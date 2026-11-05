@@ -487,6 +487,11 @@ providerProxy:
 # Worker configuration
 workers:
   ai:
+    # default preserves current permissions; restricted grants read-only lookups.
+    # Restricted also enforces context-token authorization controller-wide:
+    # existing off/audit callers must satisfy their issuer grants. It does not
+    # narrow those grants or OIDC authority. See the chart README.
+    rbacProfile: default
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"
