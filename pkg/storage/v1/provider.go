@@ -59,6 +59,19 @@
 // CreatedAt and UpdatedAt, and the repository monitor times listed under
 // "Clock ownership" in docs/development/storage-contracts.md.
 //
+// # Write envelopes, operation receipts and controller ownership
+//
+// [LookupMethod] classifies every provider method as a read, a write or an
+// administrative method. Each write is one operation: a [WriteEnvelope] names
+// its dataset, the controller epoch fence it was issued under, its operation
+// ID, its [RequestDigest], when it was issued and its issue order. A provider
+// checks the envelope in the transaction that commits the write and records an
+// operation receipt with the change, so a retry returns the original outcome
+// and a delayed write from a replaced controller cannot commit
+// ([OperationReceiptStore], [ControllerEpochAdvancer]). Orka does not attach
+// envelopes yet, and until it does providers must accept writes without one
+// and need not implement those two interfaces.
+//
 // # Records and wire format
 //
 // The records in this package carry JSON tags for Orka's API, not a storage
