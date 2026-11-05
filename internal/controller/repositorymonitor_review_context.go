@@ -319,6 +319,9 @@ func repositoryMonitorReviewContextMarkUnreviewableOmissions(reviewContext repos
 // because the per-entry accounting is an estimate, and trims conservatively:
 // the last remaining patch goes first, then the last identity entry.
 func repositoryMonitorReviewContextTrimToBudget(reviewContext repositoryMonitorReviewContext, maxBytes int) repositoryMonitorReviewContext {
+	// Trimming rewrites entries in place, so work on a copy: callers such as
+	// the pure review Task builder pass a context they may render again.
+	reviewContext.Files = slices.Clone(reviewContext.Files)
 	for repositoryMonitorReviewContextEncodedSize(reviewContext) > maxBytes && len(reviewContext.Files) > 0 {
 		reviewContext.Truncated.Bytes = true
 		if i := repositoryMonitorReviewContextLastPatchIndex(reviewContext.Files); i >= 0 {
