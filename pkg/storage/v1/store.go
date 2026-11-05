@@ -173,7 +173,24 @@ type HealthChecker interface {
 	HealthCheck(ctx context.Context) error
 }
 
-// ResultStore handles task result persistence.
+// ResultStore handles Task result persistence. A result is identified by its
+// namespace and Task name.
+//
+// A whole result is replaced in issue order, not commit order. A write's order
+// stamp is the (Fence.Epoch, Sequence) pair of its [WriteEnvelope]: within
+// one controller, Sequence follows the order in which operations were issued,
+// and a later controller has a higher epoch. SaveResult replaces a stored
+// result only when its stamp is greater than the stored result's. A write
+// with a smaller or equal stamp still succeeds and leaves its operation
+// receipt, but changes nothing: a write issued after it has already replaced
+// the result, so it is ordered before that write. An older retry therefore
+// never overwrites a newer result, whichever commits last.
+//
+// DeleteResult removes the result with its stamp, so a later SaveResult
+// stores a new result whatever its stamp. A Task-scoped writer's
+// [TaskDataFence] refuses its writes after the Task's cleanup.
+//
+// Data larger than [MaxResultBytes] returns ErrTooLarge.
 type ResultStore interface {
 	SaveResult(ctx context.Context, namespace, taskName string, data []byte) error
 	GetResult(ctx context.Context, namespace, taskName string) ([]byte, error)
@@ -190,7 +207,9 @@ type PromptResultReceipt struct {
 	TaskName        string
 	OperationID     string
 	OperationDigest string
-	Data            []byte
+	// Data is the result. Data larger than MaxResultBytes returns
+	// ErrTooLarge.
+	Data []byte
 }
 
 // PromptResultReceiptStore persists attempt-bound result receipts before the
@@ -365,10 +384,16 @@ type PlanStore interface {
 
 // ArtifactStore handles task artifact persistence. Artifact operations never
 // share a transaction with state.v1 records.
+//
+// A file is replaced in issue order, as a result is (see [ResultStore]):
+// SaveArtifact replaces a stored file only when the write's order stamp, the
+// (Fence.Epoch, Sequence) of its [WriteEnvelope], is greater than the stored
+// file's. An older write succeeds without changing anything. DeleteArtifacts
+// removes the files with their stamps.
 type ArtifactStore interface {
 	// SaveArtifact stores an artifact, replacing an earlier file with the same
-	// filename for the same Task. Data larger than MaxArtifactBytes is rejected
-	// with ErrTooLarge.
+	// filename for the same Task when its order stamp is greater. Data larger
+	// than MaxArtifactBytes is rejected with ErrTooLarge.
 	SaveArtifact(ctx context.Context, request SaveArtifactRequest) error
 	// GetArtifact returns an artifact's data and content type, or ErrNotFound.
 	GetArtifact(ctx context.Context, key ArtifactKey) ([]byte, string, error)

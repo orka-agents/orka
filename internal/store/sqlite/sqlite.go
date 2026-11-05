@@ -122,11 +122,13 @@ func currentSchemaStatements() []string {
 			PRIMARY KEY (namespace, task_uid, job_uid)
 		)`,
 		`CREATE TABLE IF NOT EXISTS results (
-			namespace  TEXT NOT NULL,
-			task_name  TEXT NOT NULL,
-			data       BLOB NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			namespace   TEXT NOT NULL,
+			task_name   TEXT NOT NULL,
+			data        BLOB NOT NULL,
+			created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch INTEGER NOT NULL DEFAULT 0,
+			write_seq   INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name)
 		)`,
 		`CREATE TABLE IF NOT EXISTS prompt_result_receipts (
@@ -339,6 +341,8 @@ func currentSchemaStatements() []string {
 			size         INTEGER NOT NULL,
 			data         BLOB NOT NULL,
 			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			write_epoch  INTEGER NOT NULL DEFAULT 0,
+			write_seq    INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (namespace, task_name, filename)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_artifacts_task ON artifacts(namespace, task_name)`,

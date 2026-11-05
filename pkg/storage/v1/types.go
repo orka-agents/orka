@@ -61,6 +61,12 @@ type SessionMessage struct {
 // [ErrTooLarge].
 const MaxArtifactBytes = 10 << 20
 
+// MaxResultBytes is the largest Task result Orka stores, the same limit as the
+// worker result API. Every state.v1 provider accepts results, and prompt
+// result receipt data, up to this size and rejects larger ones with
+// [ErrTooLarge].
+const MaxResultBytes = 10 << 20
+
 // ArtifactOwner identifies the Task whose artifacts an operation addresses.
 // Requests are structs so the identity can grow, for example with the Job and
 // cleanup generation that let a provider refuse an old retry, without another

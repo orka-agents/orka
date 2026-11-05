@@ -64,7 +64,11 @@ func loadPriorSchemaFixture(t *testing.T) string {
 		TaskUID: "fixture-task-uid", Digest: store.CanonicalAgentExecutionSnapshotDigest(body), SchemaVersion: 1, Body: body,
 	}))
 	require.NoError(t, c.PutConnectorCredential(t.Context(), testCredentialRef(), store.ConnectorCredential{AccessToken: "fixture-token-not-a-credential"}))
-	require.NoError(t, s.SaveArtifact(t.Context(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "fixture", TaskName: "task"}, Filename: "proof.txt", ContentType: "text/plain", Data: []byte("retained artifact")}))
+	// Written through SQL that the historical layout accepts: the current
+	// store's statements only fit the current layout.
+	_, err = db.Exec(`INSERT INTO artifacts(namespace, task_name, filename, content_type, size, data) VALUES('fixture', 'task', 'proof.txt', 'text/plain', 17, ?)`,
+		[]byte("retained artifact"))
+	require.NoError(t, err)
 	_, err = c.StageNativeSessionImport(t.Context(), nativeImportFixture(t, "imported", "retained native history"))
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
@@ -116,8 +120,9 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables and adds an empty
-	// operation receipt table; every other table is unchanged.
+	// The upgrade drops the empty harness v1 tables, adds an empty operation
+	// receipt table and gives existing results and artifacts the write stamp
+	// (0, 0); every other value is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -125,6 +130,7 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	}
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
+	before = stampedApplicationRows(t, before)
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
@@ -293,6 +299,7 @@ func TestDatasetRejectsInvalidMetadataAndVersionsIntact(t *testing.T) {
 		"newer":                         fmt.Sprintf(`PRAGMA user_version=%d`, SchemaVersion+1),
 		"version 1":                     `PRAGMA user_version=1`,
 		"version 2":                     `PRAGMA user_version=2`,
+		"version 3":                     `PRAGMA user_version=3`,
 		"unknown":                       `PRAGMA user_version=2147483647`,
 		"negative":                      `PRAGMA user_version=-1`,
 		"version reset":                 `PRAGMA user_version=0`,
