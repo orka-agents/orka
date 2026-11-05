@@ -193,7 +193,11 @@ func (o *operations) writeFence(ctx context.Context, contract string) (string, s
 // run runs one write under a write envelope.
 //
 // A context that already carries an envelope belongs to a caller that owns
-// the operation, such as a provider test; the write runs once with it.
+// the operation, such as a provider test; the write runs once with it. That
+// caller owns the request too: the client sends it unchanged, assigning no
+// identity or time, so such a caller stamps them before computing the
+// envelope's digest, and the client refuses a request that lacks one with
+// ErrValidation (see identity.go).
 // Otherwise run waits for the fence of the dataset that serves the write,
 // refuses the write while an earlier write to that dataset has an unknown
 // outcome or while the dataset's clock is out of bounds (see CheckClocks),

@@ -192,6 +192,12 @@ func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 		return store.ValidationErrorf("memory is required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedMemory(memory); err != nil {
+			return err
+		}
+		return c.StateProvider.CreateMemory(ctx, memory)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	identifyMemory(memory, now)
 	return c.StateProvider.CreateMemory(ctx, memory)
@@ -219,6 +225,12 @@ func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.Memor
 	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
 	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
 	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedMemoryProposal(proposal); err != nil {
+			return err
+		}
+		return c.StateProvider.CreateMemoryProposal(ctx, proposal)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	identifyMemoryProposal(proposal, now)
 	return c.StateProvider.CreateMemoryProposal(ctx, proposal)

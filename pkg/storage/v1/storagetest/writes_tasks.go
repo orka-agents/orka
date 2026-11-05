@@ -118,7 +118,8 @@ func init() {
 		writeCase[storagev1.StateProvider]{
 			method: "SendMessage",
 			args: func(storagev1.ControllerEpochFence) []any {
-				return []any{&storagev1.Message{Namespace: "tenant", FromTask: "worker-a", ToTask: "worker-b", ParentTask: "parent", Content: "hello"}}
+				return []any{&storagev1.Message{Namespace: "tenant", FromTask: "worker-a", ToTask: "worker-b", ParentTask: "parent", Content: "hello",
+					CreatedAt: writeCaseCreated}}
 			},
 			observe: observeMessages,
 		},

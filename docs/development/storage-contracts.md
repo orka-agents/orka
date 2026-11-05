@@ -1194,7 +1194,11 @@ Reads and administrative methods reach the provider unchanged.
   family, carries that fence in its envelope, so a caller holding a replaced
   fence is still refused with `ErrFenced`. A context that already carries an
   envelope belongs to a caller that owns the operation, such as the shared
-  suite, and the write runs once with it.
+  suite, and the write runs once with it. That caller owns the request too:
+  the client sends it unchanged and assigns no identity or time, so a caller
+  that supplies a write envelope must stamp identity and time before
+  computing its digest, and the client refuses a request that lacks them
+  with `ErrValidation`. No production caller supplies its own envelope.
 - **Retries.** After `ErrUnavailable` (nothing committed) or
   `ErrOutcomeUnknown` (it may have), the client retries the same envelope with
   the same arguments, with backoff, for at most thirty seconds after that

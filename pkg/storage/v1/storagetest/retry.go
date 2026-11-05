@@ -235,13 +235,16 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 	t.Run("a replayed send returns the assigned ID without a second message", func(t *testing.T) {
 		provider, dataset := prepare(t)
 		ctx := t.Context()
+		// A caller that supplies its own envelope stamps the creation time
+		// before computing the digest.
 		sent := inboxMessage("hello")
+		sent.CreatedAt = writeCaseCreated
 		send := envelope(t, dataset, "SendMessage", sent)
 		sendCtx := storagev1.WithWriteEnvelope(ctx, send)
 		require.NoError(t, provider.SendMessage(sendCtx, sent))
 		require.NotZero(t, sent.ID, "the provider writes the assigned ID back")
-		require.False(t, sent.CreatedAt.IsZero(), "the provider writes the creation time back")
 		retry := inboxMessage("hello")
+		retry.CreatedAt = writeCaseCreated
 		require.NoError(t, provider.SendMessage(sendCtx, retry))
 		require.Equal(t, sent, retry, "the retry is given the original ID and time")
 
@@ -257,6 +260,13 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 	t.Run("a sent message keeps the caller's creation time", func(t *testing.T) {
 		provider, _ := prepare(t)
 		ctx := t.Context()
+		untimed := inboxMessage("untimed")
+		require.NoError(t, provider.SendMessage(ctx, untimed))
+		require.False(t, untimed.CreatedAt.IsZero(), "a send without a creation time gets one written back")
+		consumed, err := provider.ConsumeMessages(ctx, inboxRequest(0))
+		require.NoError(t, err)
+		require.Len(t, consumed, 1)
+
 		sent := inboxMessage("timed")
 		sent.CreatedAt = time.Date(2026, 8, 1, 12, 0, 0, 123456789, time.FixedZone("plus-two", 2*60*60))
 		require.NoError(t, provider.SendMessage(ctx, sent))

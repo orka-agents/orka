@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/orka-agents/orka/internal/store"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 // The methods in this file give a write the identities and record times a
@@ -19,6 +20,41 @@ import (
 // and no provider clock or ID generator decides what Orka stores. Record
 // times are the operation's IssuedAt. A provider still fills a value a caller
 // that bypasses the client leaves empty.
+//
+// A caller that supplies its own write envelope in the context owns the
+// operation, and the envelope's digest already covers its request, so the
+// client sends that request unchanged and assigns nothing. Such a caller
+// stamps the identities and times itself before computing the digest; a
+// request that lacks one is refused with ErrValidation rather than stored
+// without it.
+
+// callerEnvelopeStampRule is why a caller-owned request that lacks a stamp is
+// refused.
+const callerEnvelopeStampRule = "a caller that supplies a write envelope must stamp identity and time before computing its digest"
+
+// callerOwnsEnvelope reports whether ctx already carries a write envelope, so
+// the client must not change the request it covers.
+func callerOwnsEnvelope(ctx context.Context) bool {
+	_, ok := storagev1.WriteEnvelopeFrom(ctx)
+	return ok
+}
+
+// unstamped refuses a caller-owned request that lacks field.
+func unstamped(method, field string) error {
+	return store.ValidationErrorf("%s: %s is missing: %s", method, field, callerEnvelopeStampRule)
+}
+
+// requireStampedSessionMessages refuses caller-owned transcript messages
+// without an ID. A message with an ID may keep a zero timestamp, as the
+// client leaves it.
+func requireStampedSessionMessages(method string, messages []store.SessionMessage) error {
+	for i, message := range messages {
+		if message.ID == "" {
+			return unstamped(method, fmt.Sprintf("the ID of transcript message %d", i))
+		}
+	}
+	return nil
+}
 
 // GetMessages implements Orka's message store over the provider contract: a
 // consuming read is ConsumeMessages and a plain one ListUnreadMessages, each
@@ -33,6 +69,12 @@ func (c *Client) SendMessage(ctx context.Context, msg *store.Message) error {
 	if msg == nil {
 		return store.ValidationErrorf("message is required")
 	}
+	if callerOwnsEnvelope(ctx) {
+		if msg.CreatedAt.IsZero() {
+			return unstamped("SendMessage", "the message's creation time")
+		}
+		return c.StateProvider.SendMessage(ctx, msg)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = now
@@ -43,6 +85,12 @@ func (c *Client) SendMessage(ctx context.Context, msg *store.Message) error {
 // AppendMessages gives every transcript message without an ID or timestamp
 // one before appending them.
 func (c *Client) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedSessionMessages("AppendMessages", messages); err != nil {
+			return err
+		}
+		return c.StateProvider.AppendMessages(ctx, namespace, name, messages)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	identified, err := identifySessionMessages(messages, now)
 	if err != nil {
@@ -54,6 +102,12 @@ func (c *Client) AppendMessages(ctx context.Context, namespace, name string, mes
 // AppendMessagesWithLock gives every transcript message without an ID or
 // timestamp one before appending them under the owner's lock.
 func (c *Client) AppendMessagesWithLock(ctx context.Context, owner store.SessionOwnerWrite, messages []store.SessionMessage) error {
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedSessionMessages("AppendMessagesWithLock", messages); err != nil {
+			return err
+		}
+		return c.StateProvider.AppendMessagesWithLock(ctx, owner, messages)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	identified, err := identifySessionMessages(messages, now)
 	if err != nil {
@@ -65,6 +119,12 @@ func (c *Client) AppendMessagesWithLock(ctx context.Context, owner store.Session
 // CommitSessionTurn gives every turn message without an ID or timestamp one
 // before committing the turn.
 func (c *Client) CommitSessionTurn(ctx context.Context, request store.CommitSessionTurnRequest) error {
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedSessionMessages("CommitSessionTurn", request.Messages); err != nil {
+			return err
+		}
+		return c.StateProvider.CommitSessionTurn(ctx, request)
+	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	identified, err := identifySessionMessages(request.Messages, now)
 	if err != nil {
@@ -118,6 +178,20 @@ func identifyMemory(memory *store.Memory, now time.Time) {
 	}
 }
 
+// requireStampedMemory refuses a caller-owned memory that lacks what
+// identifyMemory would assign.
+func requireStampedMemory(memory *store.Memory) error {
+	switch {
+	case memory.ID == "":
+		return unstamped("CreateMemory", "the memory's ID")
+	case memory.CreatedAt.IsZero():
+		return unstamped("CreateMemory", "the memory's creation time")
+	case memory.UpdatedAt.IsZero():
+		return unstamped("CreateMemory", "the memory's update time")
+	}
+	return nil
+}
+
 // identifyMemoryProposal gives a proposal without an ID one in the mprop-
 // format, and zero creation and update times the operation's issue time.
 func identifyMemoryProposal(proposal *store.MemoryProposal, now time.Time) {
@@ -132,12 +206,35 @@ func identifyMemoryProposal(proposal *store.MemoryProposal, now time.Time) {
 	}
 }
 
+// requireStampedMemoryProposal refuses a caller-owned proposal that lacks
+// what identifyMemoryProposal would assign.
+func requireStampedMemoryProposal(proposal *store.MemoryProposal) error {
+	switch {
+	case proposal.ID == "":
+		return unstamped("CreateMemoryProposal", "the proposal's ID")
+	case proposal.CreatedAt.IsZero():
+		return unstamped("CreateMemoryProposal", "the proposal's creation time")
+	case proposal.UpdatedAt.IsZero():
+		return unstamped("CreateMemoryProposal", "the proposal's update time")
+	}
+	return nil
+}
+
 // CreateDroppedFinding gives a diagnostic without an ID or creation time one
 // before recording it. The ID hashes the diagnostic and its creation time, in
 // the drop_ format the provider would use.
 func (c *Client) CreateDroppedFinding(ctx context.Context, dropped *store.DroppedFinding) error {
 	if dropped == nil {
 		return store.ValidationErrorf("dropped finding is required")
+	}
+	if callerOwnsEnvelope(ctx) {
+		switch {
+		case dropped.ID == "":
+			return unstamped("CreateDroppedFinding", "the dropped finding's ID")
+		case dropped.CreatedAt.IsZero():
+			return unstamped("CreateDroppedFinding", "the dropped finding's creation time")
+		}
+		return c.StateProvider.CreateDroppedFinding(ctx, dropped)
 	}
 	ctx, now := c.ops.withIssueTime(ctx)
 	if dropped.CreatedAt.IsZero() {
