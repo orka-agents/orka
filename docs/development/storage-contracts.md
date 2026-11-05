@@ -481,7 +481,11 @@ write method.
   covered by its digest, so a retry is judged at the original request time.
   The provider clock is used only for operation age and the clock-skew check,
   receipt and tombstone retention, `ObservedAt`, and informational times the
-  provider assigns when a caller leaves them zero. Orka estimates the clock
+  provider assigns when a caller leaves them zero, plus connector completion
+  expiry checked inside `CommitSealedConnectorCompletion` at commit time.
+  That expiry is a redemption deadline, not a controller-owned lease: both
+  the request time and the provider's current time must precede it, so a
+  stalled commit cannot redeem an expired completion. Orka estimates the clock
   offset from `ObservedAt` and refuses writes while it exceeds
   `MaxClockSkew`. Gateway claims, outbox claims and gateway message admission
   already carry the request time and lease they need; chat turns, Session
