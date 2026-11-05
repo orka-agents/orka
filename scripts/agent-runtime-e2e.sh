@@ -9,6 +9,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${script_dir}/lib/redact.sh"
 # shellcheck source=scripts/lib/release-qualification-report.sh
 . "${script_dir}/lib/release-qualification-report.sh"
+# shellcheck source=scripts/lib/deployment-rollout.sh
+. "${script_dir}/lib/deployment-rollout.sh"
 
 usage() {
   cat <<'USAGE'
@@ -1588,9 +1590,11 @@ assert_deployment_digest() {
   local override="$2"
   shift 2
   local deployment_json container image selector pods_json count total pod pod_json replica_set replica_set_json
+  local rollout_timeout
   resource_exists -n "${orka_namespace}" get deployment "${deployment}" || \
     die "required Deployment/${deployment} was not found in ${orka_namespace}"
-  k -n "${orka_namespace}" rollout status deployment/"${deployment}" --timeout=5m >/dev/null
+  rollout_timeout="$(deployment_rollout_timeout k -n "${orka_namespace}" "${deployment}")"
+  k -n "${orka_namespace}" rollout status deployment/"${deployment}" --timeout="${rollout_timeout}" >/dev/null
   deployment_json="$(k -n "${orka_namespace}" get deployment "${deployment}" -o json)"
   jq -e '
     .spec.replicas == 1
@@ -3731,7 +3735,8 @@ for crd in tasks.core.orka.ai agents.core.orka.ai runtimepools.core.orka.ai prom
 done
 resource_exists -n "${orka_namespace}" get deployment "${controller_deployment}" || \
   die "controller Deployment/${controller_deployment} was not found"
-k -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout=5m >/dev/null
+controller_rollout_timeout="$(deployment_rollout_timeout k -n "${orka_namespace}" "${controller_deployment}")"
+k -n "${orka_namespace}" rollout status deployment/"${controller_deployment}" --timeout="${controller_rollout_timeout}" >/dev/null
 preflight_release_workloads
 
 read_repo_slug=""

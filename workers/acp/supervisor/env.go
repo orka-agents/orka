@@ -83,6 +83,8 @@ const (
 	EnvSessionBaseDir            = "ORKA_ACP_SESSION_BASE_DIR"
 	EnvDurableWorkspaceDir       = "ORKA_ACP_DURABLE_WORKSPACE_DIR"
 	EnvDurableWorkspaceKey       = "ORKA_ACP_DURABLE_WORKSPACE_KEY"
+	EnvMaxResidentSessions       = "ORKA_ACP_MAX_RESIDENT_SESSIONS"
+	EnvMaxConcurrentPrompts      = "ORKA_ACP_MAX_CONCURRENT_PROMPTS"
 	EnvFirstSessionUID           = "ORKA_ACP_FIRST_SESSION_UID"
 	EnvLastSessionUID            = "ORKA_ACP_LAST_SESSION_UID"
 	EnvSessionGID                = "ORKA_ACP_SESSION_GID"
@@ -215,6 +217,9 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	limits := defaultProtocolLimits()
 	limits.MaxNativeSessionBytes = nativeSessionMaxBytes
+	if err := applyCapacityFromEnv(&limits); err != nil {
+		return Config{}, err
+	}
 	durableWorkspaceKey := strings.TrimSpace(os.Getenv(EnvDurableWorkspaceKey))
 	if durableWorkspaceKey != "" {
 		// A stable data key belongs to one dedicated workspace. Enforce its
@@ -1120,6 +1125,39 @@ func defaultProtocolLimits() harnessv2.ProtocolLimits {
 		MaxPendingPermissions: 32, MaxWorkspaceDeltaBytes: defaultWorkspaceDeltaUploadBytes,
 		MaxNativeSessionBytes: harnessv2.DefaultMaxNativeSessionBytes,
 	}
+}
+
+// maxRuntimeCapacity matches the RuntimePool capacity API bound.
+const maxRuntimeCapacity = 1000
+
+// applyCapacityFromEnv adopts the RuntimePool's capacity. Unset values keep
+// the built-in limits so an older controller's Pods behave as before.
+func applyCapacityFromEnv(limits *harnessv2.ProtocolLimits) error {
+	sessions, err := optionalCapacityFromEnv(EnvMaxResidentSessions, limits.MaxResidentSessions)
+	if err != nil {
+		return err
+	}
+	prompts, err := optionalCapacityFromEnv(EnvMaxConcurrentPrompts, limits.MaxConcurrentPrompts)
+	if err != nil {
+		return err
+	}
+	if prompts > sessions {
+		return fmt.Errorf("%s cannot exceed %s", EnvMaxConcurrentPrompts, EnvMaxResidentSessions)
+	}
+	limits.MaxResidentSessions, limits.MaxConcurrentPrompts = sessions, prompts
+	return nil
+}
+
+func optionalCapacityFromEnv(name string, fallback uint32) (uint32, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > maxRuntimeCapacity {
+		return 0, fmt.Errorf("%s must be an integer from 1 to %d", name, maxRuntimeCapacity)
+	}
+	return uint32(value), nil
 }
 
 func nativeSessionMaxBytesFromEnv() (int, error) {

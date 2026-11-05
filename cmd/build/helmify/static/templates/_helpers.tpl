@@ -628,3 +628,120 @@ Create release-scoped static worker RoleBinding names.
 {{ printf "%s:%s" $repository $tag }}
 {{- end -}}
 {{- end }}
+
+{{/*
+Agent hosts are opt-in. Their Pods, volumes and Secrets
+live in a namespace the controller never shares with its watch or ACP runtime
+namespaces, and the orka-host-agent sidecar image must be immutable.
+*/}}
+{{- define "orka.agentHostsEnabled" -}}
+{{- if dig "agentHosts" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostNamespace" -}}
+{{- trim (toString (dig "agentHosts" "namespace" "" .Values.controller)) -}}
+{{- end }}
+
+{{/* Match the digest pin required by agenthost.ValidateTemplate. */}}
+{{- define "orka.validateAgentHostImage" -}}
+{{- if not (regexMatch `^[^@\s]+@sha256:[a-f0-9]{64}$` (toString .ref)) -}}
+{{- fail (printf "%s must be pinned by digest: <repository>@sha256:<digest>" .name) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostAgentImage" -}}
+{{- $image := trim (toString (dig "agentHosts" "agentImage" "" .Values.controller)) -}}
+{{- if not $image -}}
+{{- if not .Values.controller.image.digest -}}
+{{- fail "controller.agentHosts.agentImage must name a digest-pinned image, or controller.image.digest must pin the controller image it defaults to" -}}
+{{- end -}}
+{{- $image = include "orka.imageRef" .Values.controller.image -}}
+{{- end -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" "controller.agentHosts.agentImage" "ref" $image) -}}
+{{- $image -}}
+{{- end }}
+
+{{- define "orka.validateAgentHosts" -}}
+{{- if include "orka.agentHostsEnabled" . -}}
+{{- $namespace := include "orka.agentHostNamespace" . -}}
+{{- if not $namespace -}}
+{{- fail "controller.agentHosts.namespace is required when controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
+{{- if or (eq $namespace .Release.Namespace) (eq $namespace .Values.controller.acpRuntime.namespace) -}}
+{{- fail (printf "controller.agentHosts.namespace %q must differ from the Helm release namespace and controller.acpRuntime.namespace" $namespace) -}}
+{{- end -}}
+{{- $_ := include "orka.agentHostAgentImage" . -}}
+{{- end -}}
+{{- if include "orka.agentHostGitHubEnabled" . -}}
+{{- $github := include "orka.agentHostGitHub" . | fromYaml -}}
+{{- if not (include "orka.agentHostsEnabled" .) -}}
+{{- fail "controller.agentHosts.github.enabled requires controller.agentHosts.enabled=true" -}}
+{{- end -}}
+{{- if not (dig "connectors" "enabled" false .Values.controller) -}}
+{{- fail "controller.agentHosts.github.enabled requires controller.connectors.enabled=true: hosts are fed by people's GitHub links" -}}
+{{- end -}}
+{{- if not (trim (toString $github.clientID)) -}}
+{{- fail "controller.agentHosts.github.clientID is required: the GitHub App's client ID" -}}
+{{- end -}}
+{{- if eq (empty $github.clientSecret.existingSecret) (empty $github.clientSecret.value) -}}
+{{- fail "set exactly one of controller.agentHosts.github.clientSecret.existingSecret and .value" -}}
+{{- end -}}
+{{- $secret := toString $github.clientSecret.existingSecret -}}
+{{- if and $secret (not (regexMatch `^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$` $secret)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.existingSecret must be a Secret name" -}}
+{{- end -}}
+{{- if not (regexMatch `^[-._a-zA-Z0-9]{1,253}$` (toString $github.clientSecret.key)) -}}
+{{- fail "controller.agentHosts.github.clientSecret.key must be a Secret data key" -}}
+{{- end -}}
+{{- if not (regexMatch `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$` (toString $github.providerName)) -}}
+{{- fail "controller.agentHosts.github.providerName must be a lowercase name of at most 63 characters" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Without agent hosts the controller stops reconciling AgentHosts: their
+Pods keep running and their deletion never finishes. The CRD is checked
+first, so an upgrade from a release without it does not fail on the kind. */ -}}
+{{- if and .Release.IsUpgrade (not (include "orka.agentHostsEnabled" .)) -}}
+{{- if lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "agenthosts.core.orka.ai" -}}
+{{- $hosts := dig "items" list (lookup "core.orka.ai/v1alpha1" "AgentHost" .Release.Namespace "") -}}
+{{- if $hosts -}}
+{{- fail (printf "controller.agentHosts.enabled=false would leave %d AgentHost(s) in %s that nothing stops or cleans up; delete them, wait until they are gone, then upgrade" (len $hosts) .Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostGitHubEnabled" -}}
+{{- if dig "agentHosts" "github" "enabled" false .Values.controller -}}true{{- end -}}
+{{- end }}
+
+{{- define "orka.agentHostGitHubSecretName" -}}
+{{- $github := include "orka.agentHostGitHub" . | fromYaml -}}
+{{- default (printf "%s-github-app" (include "orka.fullname" .)) $github.clientSecret.existingSecret -}}
+{{- end }}
+
+{{/*
+The agent-host GitHub settings and template with the chart's defaults under
+them: an upgrade that reuses an older release's values has none of these
+maps, and must render as a fresh install would. The defaults match values.yaml.
+*/}}
+{{- define "orka.agentHostGitHub" -}}
+{{- $defaults := dict "providerName" "github" "displayName" "GitHub" "clientID" "" "clientSecret" (dict "existingSecret" "" "key" "clientSecret" "value" "") -}}
+{{- $set := dig "agentHosts" "github" dict .Values.controller -}}
+{{- toYaml (mergeOverwrite $defaults (deepCopy $set)) -}}
+{{- end }}
+
+{{- define "orka.agentHostTemplate" -}}
+{{- $resources := dict "requests" (dict "cpu" "250m" "memory" "1Gi") "limits" (dict "cpu" "4" "memory" "8Gi") -}}
+{{- $defaults := dict "name" "copilotd" "storage" "20Gi" "resources" $resources
+  "copilotdImage" "ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f"
+  "hostImage" "mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770" -}}
+{{- $set := dig "agentHosts" "template" dict .Values.controller -}}
+{{- $template := mergeOverwrite $defaults (deepCopy $set) -}}
+{{- range $name := list "copilotdImage" "hostImage" -}}
+{{- $_ := include "orka.validateAgentHostImage" (dict "name" (printf "controller.agentHosts.template.%s" $name) "ref" (get $template $name)) -}}
+{{- end -}}
+{{- toYaml $template -}}
+{{- end }}

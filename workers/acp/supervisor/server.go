@@ -280,8 +280,15 @@ type promptState struct {
 	finalAnswer         strings.Builder
 	finalAnswerSeen     bool
 	finalAnswerOverflow bool
-	settlement          *harnessv2.PromptSettlement
-	settlementDigest    string
+	lastMessage         strings.Builder
+	lastMessageID       string
+	lastMessageOverflow bool
+	// untagged holds text Codex sent without a message ID since the last
+	// named chunk, such as a /review result.
+	untagged         strings.Builder
+	untaggedOverflow bool
+	settlement       *harnessv2.PromptSettlement
+	settlementDigest string
 	// providerDrainTimedOut records that an admitted inference request was
 	// still in flight when the child settled and did not finish within the
 	// cancel grace, so the prompt's inference accounting is incomplete.
@@ -921,6 +928,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	state.runtime = runtimeSession
 	state.promptMutations = runtimeSession
+	setSessionState(state, descriptor.State)
 	state.descriptor = descriptor
 	state.paths = paths
 	state.baseline = baseline
@@ -1648,7 +1656,7 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 		s.mu.Unlock()
 		return
 	}
-	state.descriptor.State = harnessv2.RuntimeSessionStateDeleting
+	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
 	if state.mcpProxy != nil {
@@ -1688,7 +1696,7 @@ func (s *Server) failDrainCleanup(sessionID harnessv2.RuntimeSessionID, state *s
 		// The attempt has returned, so an authenticated delete or a fresh
 		// drain may retry cleanup. Keep admission closed and retain all
 		// session evidence until that retry proves retirement.
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		state.drainCleanupScheduled = false
 	}

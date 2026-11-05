@@ -112,6 +112,25 @@ How Orka accepts work from and returns work to external systems exactly once. Se
 | [0033](0033-user-connectors.md) | Per-user connectors for third-party services | Accepted, landing in stages |
 | [0039](0039-agent-identities.md) | Give Agents an external identity, starting with Microsoft Entra | Proposed |
 
+### Agent hosts and the Agent Host Protocol
+
+Long-lived, per-user agent hosts that clients such as the Copilot desktop app connect to,
+and serving the Agent Host Protocol from Orka itself.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0035](0035-agent-hosts.md) | Run per-user agent hosts as Orka-owned Pods, relay first | Proposed |
+| [0036](0036-agent-hosts-from-connections.md) | Provision agent hosts from GitHub Connections | Proposed |
+| [0037](0037-github-sign-in.md) | Sign people in with GitHub | Proposed |
+
+### Repository monitors
+
+How monitors review and repair pull requests.
+
+| # | Decision | Status |
+| --- | --- | --- |
+| [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
+
 ## Writing a new one
 
 Copy the shape of a recent record — [0028](0028-agent-sandbox-pvc-cold-resume.md) is a

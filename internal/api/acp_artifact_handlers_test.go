@@ -290,7 +290,11 @@ func performArtifactRequest(
 		httpRequest.Header.Set("Content-Type", request.MediaType)
 		httpRequest.ContentLength = request.ContentLength
 	}
-	response, err := app.Test(httpRequest, fiber.TestConfig{Timeout: 5 * time.Second})
+	// Each artifact operation is a durable write that fsyncs its files and
+	// directories several times. On a saturated host those syncs can take
+	// longer than the former 5s budget, so allow for that, while a hung handler
+	// still fails with a deadline error instead of an empty response.
+	response, err := app.Test(httpRequest, fiber.TestConfig{Timeout: 30 * time.Second, FailOnTimeout: true})
 	if err != nil {
 		t.Fatal(err)
 	}

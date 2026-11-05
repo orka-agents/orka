@@ -19,6 +19,10 @@ rules:
   - apiGroups: [core.orka.ai]
     resources: [tasks]
     verbs: [get]
+  # An AgentHost fed by a Connection must use the template its provider names.
+  - apiGroups: [core.orka.ai]
+    resources: [connections, connectorproviders]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

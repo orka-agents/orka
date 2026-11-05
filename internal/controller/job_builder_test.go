@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -739,6 +740,12 @@ func TestJobBuilder_Build_WithSession(t *testing.T) {
 		t.Fatal("Job should have init container for session fetch")
 	}
 	initContainer := job.Spec.Template.Spec.InitContainers[0]
+	if !regexp.MustCompile(`^.+@sha256:[0-9a-f]{64}$`).MatchString(initContainer.Image) {
+		t.Fatalf("session loader image must be digest-pinned, got %q", initContainer.Image)
+	}
+	if initContainer.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Fatalf("digest-pinned loader pull policy = %s, want IfNotPresent", initContainer.ImagePullPolicy)
+	}
 	if initContainer.Name != "fetch-session" {
 		t.Errorf("Init container name = %s, want fetch-session", initContainer.Name)
 	}

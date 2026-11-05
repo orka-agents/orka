@@ -8,6 +8,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -46,7 +47,8 @@ func (r *RuntimePoolReconciler) recordDrainedRuntimePoolTaskCleanup(
 			(task.Spec.SessionRef == nil && execution.RuntimeSessionProfileDigest == "")
 		if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
 			binding.RuntimeProfileDigest != active.ProfileDigest || !sessionProfileMatches ||
-			execution.RuntimeSessionSupervisorBootID != active.BootID || execution.AgentRuntimeName != "" || execution.AgentRuntimeUID != "" {
+			!runtimePoolTaskBootMatches(execution, types.UID(active.PodUID), active.RuntimeInstanceID, harnessv2.SupervisorBootID(active.BootID)) ||
+			execution.AgentRuntimeName != "" || execution.AgentRuntimeUID != "" {
 			return fmt.Errorf("%w: Task %s/%s lacks exact RuntimePool retirement authority", store.ErrConflict, task.Namespace, task.Name)
 		}
 		digest, err := canonicalAgentExecutionBindingDigest(*binding)

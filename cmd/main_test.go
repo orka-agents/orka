@@ -742,6 +742,74 @@ func TestLoadAgentExecutionSnapshotCipherAcceptsDeploymentKeyFormats(t *testing.
 	}
 }
 
+func TestValidateAgentHostConfig(t *testing.T) {
+	image := "registry.example/orka@sha256:" + strings.Repeat("a", 64)
+	reserved := []string{"orka-system", "orka-runtimes", "orka-controller"}
+	if err := validateAgentHostConfig(false, "", ""); err != nil {
+		t.Fatalf("disabled config rejected: %v", err)
+	}
+	if err := validateAgentHostConfig(true, "orka-agent-hosts", image, reserved...); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	for name, args := range map[string][2]string{
+		"no namespace":         {"", image},
+		"invalid namespace":    {"host_ns", image},
+		"namespace path":       {"hosts/one", image},
+		"watch namespace":      {"orka-system", image},
+		"runtime namespace":    {"orka-runtimes", image},
+		"controller namespace": {"orka-controller", image},
+		"no agent image":       {"orka-agent-hosts", ""},
+		"tagged image":         {"orka-agent-hosts", "registry.example/orka:latest"},
+	} {
+		if err := validateAgentHostConfig(true, args[0], args[1], reserved...); err == nil {
+			t.Errorf("%s: config accepted", name)
+		}
+	}
+}
+
+// Labels that become selectors, such as the controller Pods a host's
+// NetworkPolicy admits, must be valid Kubernetes labels.
+func TestParseExactLabels(t *testing.T) {
+	parsed, err := parseExactLabels(" orka.ai/network-role=controller , app=orka ")
+	if err != nil || len(parsed) != 2 || parsed["orka.ai/network-role"] != "controller" || parsed["app"] != "orka" {
+		t.Fatalf("labels = %v, %v", parsed, err)
+	}
+	for _, raw := range []string{
+		"", "role", "=controller", "role=", "role=a,role=b",
+		"role=not/a-label", "role=-leading", "bad key=value", "a/b/c=value", strings.Repeat("k", 64) + "=v",
+	} {
+		if parsed, err := parseExactLabels(raw); err == nil {
+			t.Errorf("parseExactLabels(%q) = %v, want an error", raw, parsed)
+		}
+	}
+}
+
+func TestAgentHostCacheOptionsAddsTheHostNamespace(t *testing.T) {
+	base := managerCacheOptions("orka-system", "orka-runtimes", "orka-system")
+	options := agentHostCacheOptions(base, "orka-agent-hosts")
+	objects := []client.Object{
+		&corev1.Pod{}, &corev1.Secret{}, &corev1.PersistentVolumeClaim{}, &networkingv1.NetworkPolicy{},
+	}
+	for _, object := range objects {
+		found := false
+		for candidate, byObject := range options.ByObject {
+			if reflect.TypeOf(candidate) != reflect.TypeOf(object) {
+				continue
+			}
+			found = true
+			if _, ok := byObject.Namespaces["orka-agent-hosts"]; !ok {
+				t.Errorf("%T cache omits the host namespace", object)
+			}
+			if _, ok := byObject.Namespaces["orka-system"]; !ok {
+				t.Errorf("%T cache lost the watch namespace", object)
+			}
+		}
+		if !found {
+			t.Errorf("%T has no cache entry", object)
+		}
+	}
+}
+
 func TestACPControlNamespace(t *testing.T) {
 	for _, namespace := range []string{"", "  "} {
 		if _, err := acpControlNamespace(namespace); err == nil {

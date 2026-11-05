@@ -14,6 +14,8 @@ was narrowed when the surfaces landed. Builds on the outbound-access split in
 `OutboundAccessPolicy` resolver, the ACP MCP broker, approvals, and the
 external-effect ledger. Proactive (event-driven) connectors and a remote MCP
 server backend with tool discovery are noted as follow-ups, not decided here.
+[ADR 0036](0036-agent-hosts-from-connections.md) (proposed) adds one exception to the
+custody rule, for access tokens that feed a person's own agent host.
 
 ## Context
 

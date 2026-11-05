@@ -56,6 +56,36 @@ describe('ConnectorsPage', () => {
     expect(posted).toBeUndefined()
   })
 
+  it('says before consent that an agent-host provider gives code access to the token', async () => {
+    useProviders([{ ...github, agentHost: true }, jira])
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('GitHub')).toBeInTheDocument())
+    expect(screen.getByTestId('connector-github-agent-host')).toHaveTextContent(/Copilot environment on Orka/)
+    expect(screen.queryByTestId('connector-jira-agent-host')).not.toBeInTheDocument()
+  })
+
+  it('shows the agent-host notice before opening consent when the provider changed under the page', async () => {
+    let served = false
+    server.use(
+      http.get(`${API}/connectors`, () => HttpResponse.json({ items: [{ ...github, agentHost: served }] })),
+      http.get(`${API}/connections`, () => HttpResponse.json({ items: [] })),
+      http.post(`${API}/connections`, () => HttpResponse.json({
+        connection: { ...linked, state: 'Pending', ready: false }, authorizeURL: 'https://github.com/login/oauth/authorize?state=s', agentHost: true,
+      })),
+    )
+    const open = vi.spyOn(connectors, 'openAuthorizeURL').mockImplementation(() => {})
+    render(<ConnectorsPage />)
+    await waitFor(() => expect(screen.getByText('GitHub')).toBeInTheDocument())
+    expect(screen.queryByTestId('connector-github-agent-host')).not.toBeInTheDocument()
+    served = true
+    fireEvent.click(screen.getByRole('button', { name: 'Connect (read only)' }))
+    await waitFor(() => expect(screen.getByTestId('connector-github-agent-host')).toBeInTheDocument())
+    expect(open).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect (read only)' }))
+    await waitFor(() => expect(open).toHaveBeenCalledWith('https://github.com/login/oauth/authorize?state=s'))
+    open.mockRestore()
+  })
+
   it('starts consent for a ready provider and sends the browser to the provider', async () => {
     useProviders([github])
     const open = vi.spyOn(connectors, 'openAuthorizeURL').mockImplementation(() => {})

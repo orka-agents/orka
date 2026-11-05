@@ -21,6 +21,7 @@ values are in [Configuration](configuration.md), and HTTP endpoints are in the
 | [RepositoryScan](#repositoryscan) | `core.orka.ai` | A repository to scan for security findings. |
 | [RepositoryMonitor](#repositorymonitor) | `core.orka.ai` | A repository whose pull requests and issues agents review, implement, and repair. |
 | [SubstrateActorPool](#substrateactorpool) | `core.orka.ai` | A pool of Agent Substrate actors for MCP Tools. |
+| AgentHostTemplate and AgentHost | `core.orka.ai` | An operator's definition of a long-lived, single-user agent host, and one user's host from it. See [Agent hosts](../operations/agent-hosts.md). |
 | AgentRuntime | `core.orka.ai` | An external agent runtime registration. See [Bring your own agent runtime](../guides/bring-your-own-agent-runtime.md). |
 | GatewayClass, Gateway, GatewayBinding | `gateway.orka.ai` | Connections to chat apps and other agents. See [Gateways](../guides/gateways.md) and the [Gateway API](gateway-api.md). |
 | ExecutionWorkspaceClass and related resources | `workspace.orka.ai` | Sandboxed execution workspaces from separately installed providers. See [Workspace providers](configuration.md#workspace-providers). |
@@ -133,6 +134,7 @@ workspace:
 | `prBaseBranch` | string | empty | Pull-request base branch. |
 | `prTitle` | string | prompt's first nonblank line | Exact pull-request title, up to 256 characters. Empty uses the default, which trims whitespace and truncates to 256 characters. An empty or whitespace-only prompt uses `Orka publication generation N`. Nonempty whitespace-only titles are rejected. |
 | `prBody` | string | publisher summary and Task namespace/name | Pull-request body, up to 32,768 characters. The publisher appends the publication generation and reconciliation markers to custom and default bodies. Reserved Orka reconciliation comments are rejected. |
+| `commitMessage` | string | `orka: apply agent task <name>` | Message of the commit that publishes the Task's changes, up to 4,000 bytes, ending in exactly one newline. Whitespace-only text, carriage returns, NUL, and secret-like text are rejected. Repository monitor repairs set it to the repair intent, the review findings being fixed, and an `Orka-Task` trailer. |
 | `createPR` | boolean | `false` | Reconcile a pull request only after verified branch publication. Requires `intent: write`. |
 
 The four credential references are distinct roles: `readCredentialRef` is source-read only,
@@ -795,14 +797,14 @@ spec:
 | `timeZone` | string | No | IANA time zone used by `schedule`. |
 | `historyDays` | int32 | No | How far back the initial scan should inspect repository history. |
 | `validationMode` | string | No | Validation aggressiveness: `off`, `light`, or `full`. Defaults to `light`. |
-| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. |
-| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults are mode-dependent. |
-| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults are mode-dependent. |
+| `validationMaxFindingsPerRun` | int32 | No | Maximum automatic validation tasks to enqueue per scan run in `light` mode. Defaults to the run's `maxFindingsPerRun` default, 25. |
+| `validationMinSeverity` | string | No | Minimum severity eligible for automatic validation. Defaults to `medium` in `light` mode and `low` in `full` mode. |
+| `validationMinConfidence` | string | No | Minimum confidence eligible for automatic validation. Defaults to `medium` in `light` mode and `low` in `full` mode. |
 | `customScanInstructionsRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive scanner instructions. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `falsePositivePolicyRef` | PolicyConfigMapKeyRef | No | Same-namespace ConfigMap key containing additive false-positive policy text. The ConfigMap must opt in with `orka.ai/security-policy: "true"` as a label or annotation. |
 | `analysisAgentRef` | AgentReference | Yes | Agent used for repository scan runs and threat model generation. |
 | `patchAgentRef` | AgentReference | No | Agent used for patch proposal runs. |
-| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. |
+| `maxFindingsPerRun` | int32 | No | Bounds accepted scan findings per run after validation and deterministic dropped-finding filters. Defaults to 25. |
 | `suspend` | bool | No | Pauses scheduled incremental scans while preserving the scan configuration. |
 
 `PolicyConfigMapKeyRef` uses `name` plus optional `key`; when `key` is omitted, Orka reads the `policy` key. Policy ConfigMap values are capped at 32 KiB and rejected if they look like they contain secrets, tokens, private keys, or credentials. Custom policy text is additive only; it cannot disable Orka's default evidence, no-secret, or finding-quality rules.
@@ -886,6 +888,7 @@ spec:
 | `targets.pullRequests.enabled` | bool | No | Enables pull request monitoring. Defaults to `true`; set `false` for an issue-only monitor. |
 | `targets.pullRequests.includeDrafts` | bool | No | Select draft pull requests for review when true. Defaults to false. |
 | `targets.pullRequests.maxPerRun` | int32 | No | Maximum selected PRs per run. Defaults to `20`; allowed range is `1` to `100`. |
+| `targets.pullRequests.includeLabels` | list | No | Restrict review, repair, and readiness statuses to pull requests with any of these labels. Pull requests with a `repair.includeLabels` or `repair.ciOnlyLabels` label are also included. Cannot be combined with issue implementation. |
 | `targets.issues.enabled` | bool | No | Enables issue inventory and the issue workflow. Defaults to `false`. |
 | `targets.issues.maxPerRun` | int32 | No | Maximum selected issues per run, `1` to `100`. |
 | `targets.issues.includeLabels` / `excludeLabels` | list | No | Restrict issue inventory to issues with any of these labels, or exclude issues with them. |
@@ -907,7 +910,13 @@ spec:
 | `repair.enabled` | bool | No | Enables automatic, bounded pull request repair. Requires `agents.repairer` and the publication credentials. |
 | `repair.maxRepairsPerPR` / `maxRepairsPerHead` | int32 | No | Repair limits. Default `5` per pull request and `2` per head. |
 | `repair.maxValidationRetries` | int32 | No | Validation retries for one repair job. Default `2`. |
+| `repair.allowForkPullRequests` | bool | No | Also repair pull requests from forks whose authors allow edits from maintainers, pushing to the fork's head branch. Defaults to `false`. |
+| `repair.includeLabels` | list | No | Limit automatic repair to pull requests with any of these labels. They are also reviewed, and each head is reviewed before it is repaired. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
+| `repair.ciOnlyLabels` | list | No | Repair only the CI that pull requests with any of these labels broke, without reviewing them. The account that added the label needs the label command permission. Cannot be combined with issue implementation. |
 | `review.requireGreenCI` | bool | No | Wait for green CI before selecting a pull request for review. |
+| `review.trigger` | string | No | `push` (default) reviews every new head, with a follow-up review of the new changes and open findings when the head builds on the last reviewed one. `open` reviews each pull request once; later heads need a `review` command, except pull requests automatic repair may fix. |
+| `review.blockingPriority` | string | No | Lowest open finding priority (`P0`–`P3`) that makes the verdict `needs_changes`. Defaults to `P1`. Findings outside a follow-up review's changes block only at `P1` or above. |
+| `review.exhaustive` | bool | No | Repeat a full review on the same head until a pass finds nothing new, at most three passes; only the last pass is published. Follow-up reviews run once. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
 | `review.publish.mode` | string | No | `summary_only` or `summary_with_inline_findings`. Inline comments are only attempted for changed RIGHT-side diff lines. |
@@ -916,7 +925,7 @@ spec:
 | `review.publish.postNeedsChanges` | bool | No | Post `needs_changes` reviews when true. Defaults to `true`. |
 | `review.publish.postNeedsHuman` | bool | No | Post `needs_human` reviews when true. Defaults to `true`. |
 | `review.publish.postSecuritySensitive` | bool | No | Allow public publishing of `security_sensitive` results. Defaults to `false`; sensitive findings are skipped by default. |
-| `review.publish.sameHeadPolicy` | string | No | Duplicate policy for the same monitor, PR, and head SHA. V1 only supports `skip`. |
+| `review.publish.sameHeadPolicy` | string | No | What a later review of an already-published PR head does. `skip` (default) leaves the published review as it is. `update` rewrites the published review's summary when the later review reaches a different verdict; its inline comments stay as first published. Orka publishes at most one review per head either way. |
 | `review.publish.inline.enabled` | bool | No | Enables inline GitHub review comments when `mode` is `summary_with_inline_findings`. |
 | `review.publish.inline.minPriority` | string | No | Lowest priority eligible for inline comments (`P0`-`P3`). Defaults to `P2`; lower-priority findings remain in the summary. |
 | `review.publish.inline.maxComments` | int32 | No | Max inline comments per GitHub review. Defaults to `10`, allowed range `0` to `50`. |
