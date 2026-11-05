@@ -23,6 +23,9 @@ func sanitizeGatewayText(value string, limit int) string {
 	value = redact.SensitiveText(strings.TrimSpace(value))
 	if limit > 0 && len(value) > limit {
 		value = value[:limit]
+		for len(value) > 0 && !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
 	}
 	return value
 }
