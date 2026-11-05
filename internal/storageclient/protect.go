@@ -184,13 +184,16 @@ func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 	return event
 }
 
-// CreateMemory redacts the memory content before storing it. The caller's
-// record receives the redacted content, as the stored copy does.
+// CreateMemory redacts the memory content before storing it, and gives a
+// memory without an ID or times one. The caller's record receives the
+// redacted content and the assigned identity, as the stored copy does.
 func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
 	}
 	memory.Content = redact.SensitiveText(memory.Content)
+	ctx, now := c.ops.withIssueTime(ctx)
+	identifyMemory(memory, now)
 	return c.StateProvider.CreateMemory(ctx, memory)
 }
 
@@ -204,7 +207,7 @@ func (c *Client) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 }
 
 // CreateMemoryProposal redacts every free-text proposal field before storing
-// the proposal.
+// the proposal, and gives a proposal without an ID or times one.
 func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.MemoryProposal) error {
 	if proposal == nil {
 		return store.ValidationErrorf("proposal is required")
@@ -216,6 +219,8 @@ func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.Memor
 	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
 	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
 	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
+	ctx, now := c.ops.withIssueTime(ctx)
+	identifyMemoryProposal(proposal, now)
 	return c.StateProvider.CreateMemoryProposal(ctx, proposal)
 }
 

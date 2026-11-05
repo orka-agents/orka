@@ -80,6 +80,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
@@ -1365,6 +1366,10 @@ func main() {
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
+		os.Exit(1)
+	}
+	if err := mgr.Add(&storageclient.ClockMonitor{Client: appStorage}); err != nil {
+		setupLog.Error(err, "unable to add the storage clock monitor")
 		os.Exit(1)
 	}
 	if usageRetention < 0 {

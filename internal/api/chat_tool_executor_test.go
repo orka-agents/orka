@@ -247,7 +247,7 @@ func (f *fakeSessionStore) ListSessions(_ context.Context, _ string) ([]store.Se
 func (f *fakeSessionStore) ListSessionsPage(_ context.Context, _ string, _ *store.SessionPageCursor, _ int, _ string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
-func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) error {
+func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string, _ time.Time) error {
 	if f.errOnDel != nil {
 		return f.errOnDel
 	}
@@ -257,9 +257,11 @@ func (f *fakeSessionStore) DeleteSession(_ context.Context, ns, name string) err
 	f.deleted[ns+"/"+name] = true
 	return nil
 }
-func (f *fakeSessionStore) AcquireLock(_ context.Context, _, _, _, _ string) error { return nil }
+func (f *fakeSessionStore) AcquireLock(_ context.Context, _, _, _, _ string, _ time.Time) error {
+	return nil
+}
 func (f *fakeSessionStore) ReleaseLock(_ context.Context, _, _, _, _ string) error { return nil }
-func (f *fakeSessionStore) IsLocked(_ context.Context, _, _, _, _ string) (bool, error) {
+func (f *fakeSessionStore) IsLocked(_ context.Context, _, _, _, _ string, _ time.Time) (bool, error) {
 	return false, nil
 }
 func (f *fakeSessionStore) AppendMessages(_ context.Context, _, _ string, _ []store.SessionMessage) error {

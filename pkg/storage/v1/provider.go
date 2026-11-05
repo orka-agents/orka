@@ -124,8 +124,14 @@ const (
 	// optional family is announced through [ProviderInfo.Capabilities]
 	// instead. Revision 2 added [DatasetBindingStore] and
 	// [ProviderInfo.Binding]. Revision 3 requires a valid [WriteEnvelope] on
-	// every write and [ErrValidation] when it is missing.
-	ContractRevision = 3
+	// every write and [ErrValidation] when it is missing. Revision 4 split the
+	// inbox read into [MessageStore.ListUnreadMessages] and
+	// [MessageStore.ConsumeMessages], bounded by [MaxMessageBatch], made
+	// [MessageStore.SendMessage] write the assigned ID and creation time back,
+	// and made every Session lease decision, and the claim check when
+	// freezing a gateway event's allowed tools, use the time the request
+	// carries.
+	ContractRevision = 4
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.

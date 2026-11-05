@@ -1243,7 +1243,9 @@ func (h *Handlers) DeleteSession(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
-	deleteSession := h.sessionStore.DeleteSession
+	deleteSession := func(ctx context.Context, namespace, name string) error {
+		return h.sessionStore.DeleteSession(ctx, namespace, name, time.Now().UTC())
+	}
 	if h.sessionManager != nil {
 		deleteSession = h.sessionManager.DeleteSession
 	}

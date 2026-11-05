@@ -210,12 +210,13 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 
 	t.Run("parallel chat turns admit one", func(t *testing.T) {
 		provider := newProvider(t)
-		expires := time.Now().UTC().Add(time.Hour)
 		created := make([]bool, concurrentCallers)
 		errs := runConcurrently(func(caller int) error {
 			session := &storagev1.SessionRecord{Namespace: "tenant-a", Name: "chat", SessionType: sessionsTypeChat}
 			var err error
-			created[caller], err = provider.AcquireChatTurn(t.Context(), session, fmt.Sprintf("turn-%d", caller), expires)
+			created[caller], err = provider.AcquireChatTurn(t.Context(), storagev1.AcquireChatTurnRequest{
+				Session: session, TurnID: fmt.Sprintf("turn-%d", caller), Now: leaseNow, ExpiresAt: leaseExpiry,
+			})
 			return err
 		})
 		winner := requireOneWinner(t, errs, storagev1.ErrConflict)
@@ -474,7 +475,7 @@ func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 			return err
 		}
 		current.Store(int64(i) + 1)
-		err := provider.DeleteSession(t.Context(), "tenant", name)
+		err := provider.DeleteSession(t.Context(), "tenant", name, leaseNow)
 		switch {
 		case err == nil:
 			deleted[i] = true
@@ -490,7 +491,7 @@ func lockDuringDelete(t *testing.T, provider storagev1.StateProvider) {
 			return nil
 		}
 		name := fmt.Sprintf("locked-%d", round-1)
-		err := provider.AcquireLock(t.Context(), "tenant", name, "task-"+name, "uid-"+name)
+		err := provider.AcquireLock(t.Context(), "tenant", name, "task-"+name, "uid-"+name, leaseNow)
 		switch {
 		case err == nil:
 			granted[round-1].Add(1)
