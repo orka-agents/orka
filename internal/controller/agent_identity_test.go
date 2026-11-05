@@ -9,13 +9,16 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
@@ -451,5 +454,45 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	replaced.TaskUID = "earlier-uid"
 	if err := check(context.Background(), replaced); err == nil || !strings.Contains(err.Error(), "replaced") {
 		t.Fatalf("a recreated Task: %v", err)
+	}
+}
+
+func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	// The Helm install grants the controller Agent and Task RBAC only in its
+	// watch namespace, so a cluster-scoped list is forbidden there.
+	namespaced := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			listOpts := &client.ListOptions{}
+			listOpts.ApplyOptions(opts)
+			if listOpts.Namespace == "" {
+				return apierrors.NewForbidden(schema.GroupResource{Group: "core.orka.ai", Resource: "agents"}, "", errors.New("cluster scope"))
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := &AgentReconciler{Client: namespaced, APIReader: namespaced, Identity: testIdentityConfig()}
+	claim, err := r.reconcileIdentityClaim(context.Background(), agent)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %+v, err = %v; identity lists must stay in the Agent's namespace", claim, err)
+	}
+	released := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	released.Spec.Identity = nil
+	releasedClient := interceptor.NewClient(fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(releasingAgent(released)).Build(),
+		interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			listOpts := &client.ListOptions{}
+			listOpts.ApplyOptions(opts)
+			if listOpts.Namespace == "" {
+				return errors.New("cluster-scoped list")
+			}
+			return c.List(ctx, list, opts...)
+		}})
+	r = &AgentReconciler{Client: releasedClient, APIReader: releasedClient}
+	if _, err := r.reconcileIdentityClaim(context.Background(), releasingAgent(released)); err != nil {
+		t.Fatalf("the bound-Task scan must stay in the Agent's namespace: %v", err)
+	}
+	if requests := r.agentsSharingIdentity(context.Background(), agent); requests != nil {
+		t.Fatalf("requests = %v", requests)
 	}
 }
