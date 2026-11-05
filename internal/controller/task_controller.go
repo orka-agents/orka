@@ -324,15 +324,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
-		// Stop requested work even when its bookkeeping cannot be written.
-		// Durable finalization remains pending until storage recovers.
-		if _, requested := requestedTaskCancellation(task); requested {
-			cancelled := task.DeepCopy()
-			cancelled.Status.Phase = corev1alpha1.TaskPhaseCancelled
-			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, cancelled)
-			err = errors.Join(err, cleanupErr)
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -416,6 +408,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	if !isTerminalTaskPhase(task.Status.Phase) {
+		intent, err := r.loadDeferredTaskFinalization(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if intent != nil {
+			return r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+		}
+	}
 	if message, ok := requestedTaskCancellation(task); ok {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
@@ -2120,7 +2121,7 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 // iteration. Lookup errors other than NotFound leave the outcome unsettled
 // until a later reconciliation can observe the Job.
 func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) (bool, error) {
-	if strings.TrimSpace(task.Status.JobName) == "" || r.isAutonomousTask(ctx, task) {
+	if strings.TrimSpace(task.Status.JobName) == "" {
 		return false, nil
 	}
 	job := &batchv1.Job{}
@@ -2133,7 +2134,11 @@ func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alp
 	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
 		return false, nil
 	}
-	return job.Status.Succeeded > 0 && job.Status.CompletionTime != nil && !job.Status.CompletionTime.After(deadline), nil
+	if job.Status.Succeeded == 0 || job.Status.CompletionTime == nil || job.Status.CompletionTime.After(deadline) {
+		return false, nil
+	}
+	autonomous, err := r.taskAutonomousMode(ctx, task)
+	return !autonomous && err == nil, err
 }
 
 // timedOutTaskMessage keeps the last published Pod waiting reason, such as an
@@ -2597,6 +2602,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if waitingForJob {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if err := r.cleanupDeferredTaskFinalization(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if !terminalEventRecorded {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -2864,7 +2872,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	// nonterminal in Kubernetes so those writes are retried.
 	retryFinalization := func(err error) (ctrl.Result, error) {
 		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
-			_, cleanupErr := r.cleanupTerminalTaskJob(ctx, task)
+			cleanupErr := r.stopJobForDeferredFinalization(ctx, task, deferredTaskFinalization{
+				Phase: phase, OutcomePhase: outcomePhase, Message: message, RecordOutcome: recordOutcome,
+			})
 			err = errors.Join(err, cleanupErr)
 		}
 		return ctrl.Result{}, err
@@ -2876,12 +2886,17 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		))
 	}
 
+	deferredIntent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
 		// A result the store has not accepted yet, or may have saved, is
 		// collected again on the next attempt rather than dropped.
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
+		if deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return retryFinalization(err)
 		}
 		// Continue anyway, result collection is best-effort
@@ -3182,34 +3197,25 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return nil
 	}
 
-	// No result yet — capture pod logs for tasks that actually created a Job.
-	// Some validation failures happen before Job creation; those terminal tasks should
-	// not produce noisy best-effort log collection errors for a non-existent Job.
-	stdoutResult := taskUsesStdoutResult(task)
-	if (task.Spec.Type != corev1alpha1.TaskTypeContainer && !stdoutResult) || r.KubeClient == nil || task.Status.JobName == "" {
-		return nil
+	// Prefer the durable snapshot after outage cleanup has removed the Pods.
+	// An intent with no chunks records that the workload had no output yet;
+	// recovery must not depend on logs from a Pod that never started.
+	intent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return err
 	}
-
 	var result []byte
-	if stdoutResult {
-		logs, err := r.readStdoutResultPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading stdout result pod logs: %w", err)
-		}
-		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
-		if decodeErr != nil {
-			return decodeErr
-		}
-		if !ok {
-			return nil
-		}
-		result = stdoutPayload
+	var available bool
+	if intent != nil {
+		result, available, err = r.deferredTaskResult(ctx, task, intent)
 	} else {
-		logs, err := r.readPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading pod logs: %w", err)
-		}
-		result = []byte(logs)
+		result, available, err = r.taskPodResult(ctx, task, false)
+	}
+	if err != nil {
+		return err
+	}
+	if !available {
+		return nil
 	}
 
 	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
@@ -4653,8 +4659,15 @@ func subjectsEqual(a, b []rbacv1.Subject) bool {
 
 // isAutonomousTask checks if this task has autonomous mode enabled via its agent.
 func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha1.Task) bool {
+	autonomous, _ := r.taskAutonomousMode(ctx, task)
+	return autonomous
+}
+
+// taskAutonomousMode preserves lookup errors when the mode affects a terminal
+// decision. Other callers retain the existing best-effort boolean behavior.
+func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if task.Spec.AgentRef == nil {
-		return false
+		return false, nil
 	}
 
 	agent := &corev1alpha1.Agent{}
@@ -4663,10 +4676,10 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 		agentNS = task.Spec.AgentRef.Namespace
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
-		return false
+		return false, err
 	}
 
-	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
+	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous, nil
 }
 
 func (r *TaskReconciler) pendingApprovalsForTask(ctx context.Context, task *corev1alpha1.Task) ([]approvals.Approval, error) {
