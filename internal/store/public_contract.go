@@ -113,6 +113,13 @@ type (
 	SessionCleanupCompletion                  = storagev1.SessionCleanupCompletion
 	SessionTurnCleanupReceipt                 = storagev1.SessionTurnCleanupReceipt
 	SessionSoulState                          = storagev1.SessionSoulState
+	AgentExecutionSnapshotKey                 = storagev1.AgentExecutionSnapshotKey
+	AgentExecutionSnapshotMetadata            = storagev1.AgentExecutionSnapshotMetadata
+	AgentExecutionSnapshotReferenceCounts     = storagev1.AgentExecutionSnapshotReferenceCounts
+	AgentExecutionSnapshotLifecycleStore      = storagev1.AgentExecutionSnapshotLifecycleStore
+	NativeSessionImportReceipt                = storagev1.NativeSessionImportReceipt
+	CreateSessionTurnRecordRequest            = storagev1.CreateSessionTurnRecordRequest
+	ActivateSessionTurnProjectionRequest      = storagev1.ActivateSessionTurnProjectionRequest
 	SessionSoulReader                         = storagev1.SessionSoulReader
 	SessionSoulWriter                         = storagev1.SessionSoulWriter
 	ValidationError                           = storagev1.ValidationError

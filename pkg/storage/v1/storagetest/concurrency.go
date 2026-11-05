@@ -117,6 +117,24 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, fmt.Sprintf("task-%d", winner), got.ActiveTask, "the stored Session is the winner's")
 	})
 
+	t.Run("parallel sealed snapshot creates of one key store one", func(t *testing.T) {
+		provider := newProvider(t)
+		sealed := make([]storagev1.SealedAgentExecutionSnapshot, concurrentCallers)
+		for caller := range concurrentCallers {
+			sealed[caller] = sealedSnapshot("task-contended", "contended")
+			sealed[caller].SchemaVersion = int32(caller + 1)
+			sealed[caller].Nonce = sealedBytes(fmt.Sprintf("nonce %d", caller))
+			sealed[caller].Ciphertext = sealedBytes(fmt.Sprintf("ciphertext %d", caller))
+		}
+		errs := runConcurrently(func(caller int) error {
+			return provider.CreateSealedAgentExecutionSnapshot(t.Context(), sealed[caller])
+		})
+		winner := requireOneWinner(t, errs, storagev1.ErrConflict)
+		got, err := provider.GetSealedAgentExecutionSnapshot(t.Context(), sealed[winner].Key)
+		require.NoError(t, err)
+		requireSameSealedSnapshot(t, sealed[winner], got)
+	})
+
 	t.Run("Session reads see one snapshot during appends", func(t *testing.T) {
 		provider := newProvider(t)
 		createSessionFixture(t, provider, "tenant-a", "busy", sessionsTypeTask, time.Now().UTC())

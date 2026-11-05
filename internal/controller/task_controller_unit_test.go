@@ -8779,7 +8779,7 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	controlStore, err := storekube.NewComposite(controlClient, "default", sealedStore(t, sqlite.NewStore(persistDB, "reclaim-test")))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -107,6 +107,11 @@ type StateProvider interface {
 	SessionLineageStore
 	SessionCleanupPersistenceStore
 
+	SessionTurnRecordStore
+	SealedNativeSessionStore
+	SealedAgentExecutionSnapshotStore
+	AgentExecutionSnapshotLifecycleStore
+
 	ControllerEpochMirror
 	OutboxPersistenceStore
 	OutboxBacklogReader
