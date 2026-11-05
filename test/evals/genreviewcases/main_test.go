@@ -598,3 +598,15 @@ func TestRunRefusesNonDirectoryRepoWithoutEchoingIt(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateRejectsInvalidUTF8(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.txt", "plain\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() { r.write("a.txt", "caf\xe9\n") })
+	_, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err == nil || !strings.Contains(err.Error(), "not valid UTF-8") {
+		t.Fatalf("Generate with an invalid UTF-8 patch: %v", err)
+	}
+}

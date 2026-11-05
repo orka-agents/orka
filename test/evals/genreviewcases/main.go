@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"sigs.k8s.io/yaml"
 
@@ -265,6 +266,12 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 				return nil, err
 			}
 			file.Patch = hunks(diff)
+		}
+		// encoding/json would replace invalid UTF-8 with U+FFFD, so the case
+		// would no longer match the commit. Name the file by position: its
+		// path is not validated yet.
+		if !utf8.ValidString(file.Filename) || !utf8.ValidString(file.PreviousFilename) || !utf8.ValidString(file.Patch) {
+			return nil, fmt.Errorf("changed file %d has a path or patch that is not valid UTF-8", len(files))
 		}
 		files = append(files, file)
 	}
