@@ -261,6 +261,39 @@ func TestExternalToolExecutorResourcePermissions(t *testing.T) {
 	}
 }
 
+func TestExternalToolExecutorContainerTaskSecretReferencesNeedSecretGet(t *testing.T) {
+	args := `{"namespace":"tool-target","image":"busybox","args":["sh","-c","true"],` +
+		`"secretRef":{"name":"browser-login"},` +
+		`"env":[{"name":"API_TOKEN","valueFrom":{"secretKeyRef":{"name":"api-token","key":"token"}}}]}`
+	for _, denied := range []string{"", "browser-login", "api-token"} {
+		t.Run("denied="+denied, func(t *testing.T) {
+			clientset, reviews := externalToolReviews(t, func(spec authorizationv1.SubjectAccessReviewSpec) (runtime.Object, error) {
+				a := spec.ResourceAttributes
+				if a.Resource == "secrets" {
+					return externalToolReview(a.Verb == "get" && a.Name != denied), nil
+				}
+				return externalToolReview(a.Verb == "create" && a.Resource == "tasks"), nil
+			})
+			executor, backend, _, _ := newExternalToolExecutor(clientset)
+			result := executeExternalTool(t, executor, "create_container_task", args)
+			if denied != "" {
+				require.False(t, result.Success, "created a Task naming Secret %s without get permission", denied)
+				require.Contains(t, result.Error, denied)
+				require.Zero(t, backend.writes)
+				return
+			}
+			require.True(t, result.Success, result.Error)
+			require.Equal(t, 1, backend.writes)
+			for _, name := range []string{"browser-login", "api-token"} {
+				want := authorizationv1.ResourceAttributes{Namespace: externalToolNamespace, Verb: "get", Resource: "secrets", Name: name}
+				require.True(t, slices.ContainsFunc(*reviews, func(spec authorizationv1.SubjectAccessReviewSpec) bool {
+					return reflect.DeepEqual(*spec.ResourceAttributes, want)
+				}), "missing get permission check for Secret %s", name)
+			}
+		})
+	}
+}
+
 func TestExternalToolExecutorCreateAgentPreflightsInitialTask(t *testing.T) {
 	for _, test := range []struct {
 		name, cleanupName               string
