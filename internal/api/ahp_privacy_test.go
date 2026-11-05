@@ -349,9 +349,15 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name", TaskName: "ahp-report", Requester: requester("bob")},
 		{Namespace: namespace, TaskUID: "ordinary-ahp-name-no-requester", TaskName: "ahp-report-2"},
 		{Namespace: namespace, TaskUID: "team", SessionName: "team-session"},
+		// Tasks a chat in an AHP session created: their rows name no
+		// session, but their usage does.
+		{Namespace: namespace, TaskUID: "chat-created-alice", TaskName: "report", Requester: requester("alice")},
+		{Namespace: namespace, TaskUID: "chat-created-no-requester", TaskName: "report-2"},
 	}
 	// Usage with no Task, as a chat's, names no requester.
 	observations := []store.UsageObservation{
+		{Namespace: namespace, TaskUID: "chat-created-alice", CounterID: "chat-created-alice", SessionName: "ahp-alice"},
+		{Namespace: namespace, TaskUID: "chat-created-no-requester", CounterID: "chat-created-no-requester", SessionName: "ahp-alice"},
 		{Namespace: namespace, CounterID: "chat-in-bobs", SessionName: "ahp-live"},
 		{Namespace: namespace, CounterID: "chat-in-gone", SessionName: "ahp-gone"},
 		{Namespace: namespace, CounterID: "chat-in-team", SessionName: "team-session"},
@@ -372,7 +378,7 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 	noOnes := map[string]bool{
 		"default/alice-legacy": true, "default/other-issuer": true, "default/legacy-in-bobs": true, "default/padded-legacy-in-bobs": true,
 		"default/unknown-sessionless-turn": true, "default/call-chat-in-bobs": true, "default/call-chat-in-gone": true,
-		"default/empty-requester": true,
+		"default/empty-requester": true, "default/chat-created-no-requester": true,
 	}
 	with := func(keys ...string) map[string]bool {
 		hidden := maps.Clone(noOnes)
@@ -382,12 +388,12 @@ func TestAHPUsageStaysTheRequestersAfterTaskCleanup(t *testing.T) {
 		return hidden
 	}
 	require.Equal(t, with("reused-bob"), hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"}))
-	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork"),
+	require.Equal(t, with("alice-turn", "reused-alice", "alice-before-bob", "alice-sessionless-fork", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "bob"}))
 	require.Empty(t, hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "system:serviceaccount:default:operator"}))
 	// A person the API server signs in itself carries no issuer and subject,
 	// so no AHP usage is theirs.
-	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork"),
+	require.Equal(t, with("alice-turn", "reused-alice", "reused-bob", "alice-before-bob", "alice-sessionless-fork", "chat-created-alice"),
 		hidden(&UserInfo{AuthType: AuthTypeTokenReview, Username: "alice@example.com"}))
 }
 

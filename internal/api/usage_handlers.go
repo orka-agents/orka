@@ -239,11 +239,20 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		linkedWorks[key] = append(linkedWorks[key], link.WorkID)
 	}
 	ui := GetUserInfo(c)
+	// A Task's row may name no AHP session while its usage does, as for a
+	// Task a chat in that session created: its observations show it is AHP
+	// usage.
+	ahpObserved := map[string]bool{}
+	for _, observation := range data.Observations {
+		if _, ahp := ahpSessionName(observation.SessionName); ahp && observation.TaskUID != "" {
+			ahpObserved[observation.Namespace+"/"+observation.TaskUID] = true
+		}
+	}
 	for _, task := range data.Tasks {
 		key := task.Namespace + "/" + task.TaskUID
 		known[key] = true
 		// A person sees AHP usage only when it names them as its requester.
-		if _, ahp := ahpSessionName(task.SessionName); ahpPerson(ui) && (ahp || task.AHPTurn) && ahpUsageHidden(ui, task.Requester) {
+		if _, ahp := ahpSessionName(task.SessionName); ahpPerson(ui) && (ahp || task.AHPTurn || ahpObserved[key]) && ahpUsageHidden(ui, task.Requester) {
 			data.HiddenTasks[key] = true
 			if task.WorkID != "" {
 				hiddenWorks[task.WorkID] = true
