@@ -116,8 +116,8 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	require.NoError(t, err)
 	before := applicationRows(t, raw)
 	require.NoError(t, raw.Close())
-	// The upgrade drops the empty harness v1 tables and adds an empty
-	// operation receipt table; every other table is unchanged.
+	// The upgrade drops the empty harness v1 tables and adds empty operation
+	// receipt and eval trial tables; every other table is unchanged.
 	for _, retired := range []string{"harness_v1_attempts", "runtime_sessions"} {
 		require.Contains(t, before, retired)
 		require.Empty(t, before[retired])
@@ -125,6 +125,8 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	}
 	require.NotContains(t, before, "operation_receipts")
 	before["operation_receipts"] = nil
+	require.NotContains(t, before, "eval_trials")
+	before["eval_trials"] = nil
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

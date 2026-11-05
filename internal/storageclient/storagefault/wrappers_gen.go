@@ -488,6 +488,16 @@ func (p *stateProvider) CreateDroppedFinding(ctx context.Context, a1 *storagev1.
 	return err
 }
 
+func (p *stateProvider) CreateEvalTrial(ctx context.Context, a1 *storagev1.EvalTrialRecord) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateEvalTrial", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateEvalTrial(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) CreateGatewayDelivery(ctx context.Context, a1 *storagev1.GatewayDelivery) (*storagev1.GatewayDelivery, bool, error) {
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
@@ -720,6 +730,13 @@ func (p *stateProvider) DeleteConnectorConsentsForConnection(ctx context.Context
 func (p *stateProvider) DeleteConnectorCredential(ctx context.Context, a1 string) error {
 	_, err := p.injector.call(ctx, p.contract, "DeleteConnectorCredential", func(ctx context.Context) error {
 		return p.inner.DeleteConnectorCredential(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) DeleteEvalTrials(ctx context.Context, a1 string, a2 string) error {
+	_, err := p.injector.call(ctx, p.contract, "DeleteEvalTrials", func(ctx context.Context) error {
+		return p.inner.DeleteEvalTrials(ctx, a1, a2)
 	})
 	return err
 }
@@ -1638,6 +1655,19 @@ func (p *stateProvider) ListDroppedFindings(ctx context.Context, a1 storagev1.Dr
 		return z0, z1, err
 	}
 	return r0, r1, err
+}
+
+func (p *stateProvider) ListEvalTrials(ctx context.Context, a1 string, a2 string, a3 string) ([]storagev1.EvalTrialRecord, error) {
+	var r0 []storagev1.EvalTrialRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListEvalTrials", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListEvalTrials(ctx, a1, a2, a3)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.EvalTrialRecord
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ListExecutionEvents(ctx context.Context, a1 storagev1.ExecutionEventFilter) ([]storagev1.ExecutionEvent, error) {

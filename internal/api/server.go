@@ -88,6 +88,7 @@ type ServerConfig struct {
 	MemoryProposalStore       store.MemoryProposalStore
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
+	EvalTrialStore            store.EvalTrialStore
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
@@ -175,6 +176,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		MemoryProposalStore:       config.MemoryProposalStore,
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
+		EvalTrialStore:            config.EvalTrialStore,
 		ExecutionEventStore:       config.ExecutionEventStore,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
@@ -478,6 +480,9 @@ func (s *Server) setupRoutes() {
 	api.Post("/monitors/repositories/:name/commands", s.handlers.CreateRepositoryMonitorCommandEvent)
 	api.Get("/monitors/commands", s.handlers.ListRepositoryMonitorCommandEvents)
 	api.Get("/monitors/commands/:id", s.handlers.GetRepositoryMonitorCommandEvent)
+
+	// Eval endpoints
+	api.Get("/evals/runs/:name/trials", s.handlers.ListEvalRunTrials)
 	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
 	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)
 	api.Get("/monitors/work-actions", s.handlers.ListRepositoryMonitorWorkActions)

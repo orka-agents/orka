@@ -423,6 +423,8 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 			rows := applicationRows(t, db)
 			require.NotContains(t, rows, "operation_receipts")
 			rows["operation_receipts"] = nil
+			require.NotContains(t, rows, "eval_trials")
+			rows["eval_trials"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -430,7 +432,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema170,
+					fingerprint:  schema171,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -491,7 +493,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -619,13 +621,15 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 			identity, err := readDataset(db)
 			require.NoError(t, err)
 			rows := applicationRows(t, db)
+			require.NotContains(t, rows, "eval_trials")
+			rows["eval_trials"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema170,
+					fingerprint:  schema171,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -717,10 +721,10 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	beforeRows := applicationRows(t, db)
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
-	steps := versionUpgrades()
-	require.Equal(t, 2, steps[len(steps)-1].from)
-	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps[len(steps)-1:]))
+	steps := versionUpgrades()[1:]
+	require.Equal(t, 2, steps[0].from)
+	steps[0].sql += `; SELECT no_such_function()`
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps))
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
 	require.NoError(t, err)
@@ -736,7 +740,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, datasetBinding{installation: "installation-a"}, binding)
@@ -848,4 +852,118 @@ func checkSQLiteIntegrity(t *testing.T, db *sql.DB) {
 	defer func() { _ = rows.Close() }()
 	require.False(t, rows.Next(), "foreign key violation")
 	require.NoError(t, rows.Err())
+}
+
+// schemaVersion3StoreDB returns a version 3 store, the installation binding
+// layout, built from a version 2 store through 169-to-170.sql. A bound store
+// carries a binding record.
+func schemaVersion3StoreDB(t *testing.T, origin string, complete bool, installation string) (string, *sql.DB) {
+	t.Helper()
+	path, db := schemaVersion2StoreDB(t, origin, complete, installation)
+	_, err := db.Exec(migration169To170 + `; PRAGMA user_version = 3`)
+	require.NoError(t, err)
+	if installation != "" {
+		_, err = db.Exec(`UPDATE store_dataset SET record_uid = 'record-a', switch_generation = 1,
+			binding_state = 'bound', bound_at_ns = 1 WHERE singleton = 1`)
+		require.NoError(t, err)
+	}
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	// A literal digest, independent of schema170, as in historicalSchemaDB.
+	require.Equal(t, "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7", schemaFingerprint(schema))
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	require.Equal(t, 3, version)
+	return path, db
+}
+
+// A version 3 store upgrades in place to the eval trial layout: it keeps its
+// identity row, binding, records and key bootstrap state, and gains an empty
+// eval_trials table that takes records. A second open is current and does not
+// back up again.
+func TestSchemaVersion3StoreUpgradesInPlace(t *testing.T) {
+	for _, state := range version2StoreStates {
+		t.Run(state.name, func(t *testing.T) {
+			path, db := schemaVersion3StoreDB(t, state.origin, state.complete, state.installation)
+			identity, err := readDataset(db)
+			require.NoError(t, err)
+			binding, err := readDatasetBinding(t.Context(), db)
+			require.NoError(t, err)
+			rows := applicationRows(t, db)
+			require.NotContains(t, rows, "eval_trials")
+			rows["eval_trials"] = nil
+			require.NoError(t, db.Close())
+
+			for attempt := range 2 {
+				s, err := OpenLockedStore(path)
+				require.NoError(t, err)
+				require.Equal(t, version1StoreState{
+					fingerprint:  schema171,
+					version:      SchemaVersion,
+					origin:       state.origin,
+					complete:     state.complete,
+					canBootstrap: state.canBootstrap,
+				}, readVersion1StoreState(t, s.db, path))
+				upgraded, err := readDataset(s.db)
+				require.NoError(t, err)
+				require.Equal(t, identity, upgraded)
+				upgradedBinding, err := readDatasetBinding(t.Context(), s.db)
+				require.NoError(t, err)
+				require.Equal(t, binding, upgradedBinding)
+				require.Equal(t, rows, applicationRows(t, s.db))
+				checkSQLiteIntegrity(t, s.db)
+				require.NoError(t, s.close())
+				backups := migrationBackups(t, path)
+				require.Len(t, backups, 1, "attempt %d", attempt)
+				backup := rawMigrationDB(t, backups[0])
+				backupSchema, err := readSchema(backup)
+				require.NoError(t, err)
+				require.Equal(t, schema170, schemaFingerprint(backupSchema))
+				backupVersion, err := readSchemaVersion(backup)
+				require.NoError(t, err)
+				require.Equal(t, 3, backupVersion)
+				require.NoError(t, backup.Close())
+			}
+
+			s, err := OpenLockedStore(path)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, s.close()) }()
+			record := evalTrialTestRecord("run", "run-uid", "case-a", 1, store.EvalTrialOutcomePass)
+			require.NoError(t, s.CreateEvalTrial(t.Context(), record))
+			records, err := s.ListEvalTrials(t.Context(), record.Namespace, "run", "run-uid")
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+		})
+	}
+}
+
+// A failed 170-to-171 step leaves the version 3 store unchanged, and the next
+// open upgrades it.
+func TestSchemaVersion3UpgradeFailureRollsBack(t *testing.T) {
+	path, db := schemaVersion3StoreDB(t, datasetOriginNew, true, "installation-a")
+	before, err := readDataset(db)
+	require.NoError(t, err)
+	beforeSchema := storedSchemaSQL(t, db)
+	beforeRows := applicationRows(t, db)
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	steps := versionUpgrades()[2:]
+	require.Equal(t, 3, steps[0].from)
+	steps[0].sql += `; SELECT no_such_function()`
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 3, schema170, steps))
+	require.NoError(t, conn.Close())
+	after, err := readDataset(db)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	version, err := readSchemaVersion(db)
+	require.NoError(t, err)
+	require.Equal(t, 3, version)
+	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
+	require.Equal(t, beforeRows, applicationRows(t, db))
+	require.NoError(t, db.Close())
+
+	s, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, s.close()) }()
+	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
 }

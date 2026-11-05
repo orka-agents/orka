@@ -270,6 +270,12 @@ func (p envelopedState) CreateDroppedFinding(ctx context.Context, a1 *storagev1.
 	})
 }
 
+func (p envelopedState) CreateEvalTrial(ctx context.Context, a1 *storagev1.EvalTrialRecord) error {
+	return p.ops.run(ctx, writeCall{method: "CreateEvalTrial", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateEvalTrial(ctx, a1)
+	})
+}
+
 func (p envelopedState) CreateGatewayDelivery(ctx context.Context, a1 *storagev1.GatewayDelivery) (*storagev1.GatewayDelivery, bool, error) {
 	var r0 *storagev1.GatewayDelivery
 	var r1 bool
@@ -420,6 +426,12 @@ func (p envelopedState) DeleteConnectorConsentsForConnection(ctx context.Context
 func (p envelopedState) DeleteConnectorCredential(ctx context.Context, a1 string) error {
 	return p.ops.run(ctx, writeCall{method: "DeleteConnectorCredential", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.DeleteConnectorCredential(ctx, a1)
+	})
+}
+
+func (p envelopedState) DeleteEvalTrials(ctx context.Context, a1 string, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteEvalTrials", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteEvalTrials(ctx, a1, a2)
 	})
 }
 

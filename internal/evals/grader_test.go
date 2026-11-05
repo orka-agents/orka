@@ -237,3 +237,50 @@ func TestGradeTrial(t *testing.T) {
 		t.Fatal("GradeTrial accepted a trial without an outcome")
 	}
 }
+
+func TestTrialPlanSpreadsTrialsAndHasStableDigest(t *testing.T) {
+	cases := []Case{{ID: "a"}, {ID: "b"}}
+	plan := TrialPlan(cases, 2)
+	want := []PlannedTrial{{"a", 1}, {"b", 1}, {"a", 2}, {"b", 2}}
+	if len(plan) != len(want) {
+		t.Fatalf("plan = %v", plan)
+	}
+	for i := range want {
+		if plan[i] != want[i] {
+			t.Fatalf("plan = %v, want %v", plan, want)
+		}
+	}
+	first, err := TrialPlanDigest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _ := TrialPlanDigest(TrialPlan([]Case{{ID: "a"}, {ID: "b"}}, 2))
+	reordered, _ := TrialPlanDigest(TrialPlan([]Case{{ID: "b"}, {ID: "a"}}, 2))
+	fewer, _ := TrialPlanDigest(TrialPlan(cases, 1))
+	if first != again || first == reordered || first == fewer {
+		t.Fatalf("digests: %s %s %s %s", first, again, reordered, fewer)
+	}
+}
+
+func TestGraderSetDigestIgnoresOrderAndTracksVersions(t *testing.T) {
+	registry := DefaultRegistry()
+	forward, err := registry.GraderSetDigest([]corev1alpha1.EvalGraderName{corev1alpha1.EvalGraderVerdict, corev1alpha1.EvalGraderContract})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse, _ := registry.GraderSetDigest([]corev1alpha1.EvalGraderName{corev1alpha1.EvalGraderContract, corev1alpha1.EvalGraderVerdict})
+	if forward != reverse {
+		t.Fatal("grader order changed the digest")
+	}
+	tolerance, _ := NewRegistry(VerdictGrader{}, LocalizationGrader{Tolerance: 5})
+	defaults, _ := NewRegistry(VerdictGrader{}, LocalizationGrader{Tolerance: LocalizationLineTolerance})
+	names := []corev1alpha1.EvalGraderName{corev1alpha1.EvalGraderLocalization}
+	a, _ := tolerance.GraderSetDigest(names)
+	b, _ := defaults.GraderSetDigest(names)
+	if a == b {
+		t.Fatal("a grader version change did not change the digest")
+	}
+	if _, err := registry.GraderSetDigest([]corev1alpha1.EvalGraderName{"judge"}); err == nil {
+		t.Fatal("an unknown grader was accepted")
+	}
+}

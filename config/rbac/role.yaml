@@ -164,6 +164,7 @@ rules:
   - connections/finalizers
   - connectorproviders/finalizers
   - controllerepochs/finalizers
+  - evalruns/finalizers
   - externaleffects/finalizers
   - outboundaccesspolicies/finalizers
   - promptattempts/finalizers
@@ -189,6 +190,7 @@ rules:
   - connections/status
   - connectorproviders/status
   - controllerepochs/status
+  - evalruns/status
   - externaleffects/status
   - outboundaccesspolicies/status
   - promptattempts/status
@@ -220,6 +222,17 @@ rules:
   resources:
   - connectorproviders
   verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - delete
   - get
   - list
   - patch
