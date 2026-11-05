@@ -23,7 +23,9 @@ const (
 	schema166 = "1bf39f576acdc853d6512b62e0c526734fdf4e8a972dc1435b881b609f9a0c36" // #732, abd2c040
 	schema167 = "01af383a41304d65579d5221976bf479c7e8561a4ec363ba41dcb5f4d571af6c" // #574, harness v1 tables removed
 	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133" // dataset identity
-	schema169 = "3f7260f77441a72a48bd82f23fd7b24e1b5252b700731588549c7a841f536731" // Agent Host Protocol store
+	schema169 = "4756d67c9c3850bd87286c81f4398f245163f5edb038cba38e0269d347dd09e2" // schema version 2: operation receipts and epoch advance
+	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
+	schema171 = "b8b8203b8bc017b8e7e76c18a7e00825313d3df720ec2de75b85728da81e97e4" // schema version 4: Agent Host Protocol store
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -48,6 +50,12 @@ var migration167To168 string
 //go:embed migrations/168-to-169.sql
 var migration168To169 string
 
+//go:embed migrations/169-to-170.sql
+var migration169To170 string
+
+//go:embed migrations/170-to-171.sql
+var migration170To171 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -63,6 +71,27 @@ func schemaMigrations() []schemaMigration {
 		{schema166, schema167, migration166To167, requireNoHarnessV1Records},
 		{schema167, schema168, migration167To168, nil},
 		{schema168, schema169, migration168To169, nil},
+		{schema169, schema170, migration169To170, nil},
+		{schema170, schema171, migration170To171, nil},
+	}
+}
+
+// versionUpgrade moves a store that already has a dataset identity from one
+// schema version to the next. Its layout and identity row are known exactly,
+// so it keeps the identity row and only changes the layout and user_version.
+type versionUpgrade struct {
+	from, to        int
+	fromLayout, sql string
+	toLayout        string
+}
+
+// versionUpgrades lists the steps between schema versions, in order. A store
+// at any listed version upgrades through every later step in one transaction.
+func versionUpgrades() []versionUpgrade {
+	return []versionUpgrade{
+		{from: 1, to: 2, fromLayout: schema168, sql: migration168To169, toLayout: schema169},
+		{from: 2, to: 3, fromLayout: schema169, sql: migration169To170, toLayout: schema170},
+		{from: 3, to: 4, fromLayout: schema170, sql: migration170To171, toLayout: schema171},
 	}
 }
 
@@ -115,22 +144,13 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	if err != nil {
 		return err
 	}
-	// Unversioned historical layouts (user_version = 0) take the chain below,
-	// which ends by inserting a new adopted identity. A schema version 1 store,
-	// written by the release that introduced dataset identity, already has an
-	// established store_dataset row and takes upgradeVersion1 instead. Every
-	// store this release writes has user_version = SchemaVersion (2).
-	//
-	// The next additive layout cannot just append a step to schemaMigrations:
-	// it must raise SchemaVersion again and add a version-2 path like
-	// upgradeVersion1, keeping the identity row and adding no rows. Test it
-	// from frozen version-2 stores in every dataset state, as
-	// TestOpenLockedStoreUpgradesSchemaVersion1Stores does for version 1.
-	if version == 1 {
-		return upgradeVersion1(ctx, conn, path, validationErr)
-	}
+	// A store this or an earlier release wrote has a nonzero user_version and
+	// an established store_dataset row. It upgrades only through the numbered
+	// steps in versionUpgrades, which keep that identity row. The chain below
+	// is for unversioned historical layouts (user_version = 0) only, and always
+	// records a new adopted identity.
 	if version != 0 {
-		return validationErr
+		return upgradeVersionedSchema(ctx, conn, path, version, validationErr)
 	}
 	schema, err := readSchema(conn)
 	if err != nil {
@@ -159,16 +179,36 @@ func upgradeSchema(db *sql.DB, path string, validationErr error) error {
 	return nil
 }
 
-// upgradeVersion1 adds the Agent Host Protocol tables to an exact schema
-// version 1 store. It keeps the store's identity row as it is, never calling
-// initializeDatasetRecord, and adds no rows, so DatasetInfo is unchanged apart
-// from SchemaVersion: an empty incomplete new store can still mint its key.
-func upgradeVersion1(ctx context.Context, conn *sql.Conn, path string, validationErr error) error {
+// upgradeVersionedSchema upgrades a store at schema version from to
+// SchemaVersion. It accepts only the exact layout recorded for that version,
+// and returns validationErr for any other version or layout.
+//
+// A version step keeps the store's identity row and adds no rows, so
+// DatasetInfo is unchanged apart from SchemaVersion: the same ID, and the same
+// CanBootstrapSnapshotKey for a store whose key bootstrap was interrupted. A
+// step must therefore never add rows, even implicitly as FTS5 does, or an
+// empty, unbootstrapped store could never mint its key. Upgrade tests start
+// from schemaVersion1StoreDB for every state in version1StoreStates, not from
+// a layout rebuilt from historical DDL, which has no identity row and takes
+// the adoption path instead.
+func upgradeVersionedSchema(ctx context.Context, conn *sql.Conn, path string, from int, validationErr error) error {
+	steps := versionUpgrades()
+	first := -1
+	for i, step := range steps {
+		if step.from == from {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return validationErr
+	}
 	schema, err := readSchema(conn)
 	if err != nil {
 		return err
 	}
-	if schemaFingerprint(schema) != schema168 {
+	source := schemaFingerprint(schema)
+	if source != steps[first].fromLayout {
 		return validationErr
 	}
 	backup, err := backupSchemaDatabase(ctx, conn, path)
@@ -176,47 +216,70 @@ func upgradeVersion1(ctx context.Context, conn *sql.Conn, path string, validatio
 		return fmt.Errorf("back up SQLite before upgrade: %w", err)
 	}
 	log.FromContext(ctx).WithName("sqlite-store").Info("Retained SQLite pre-upgrade backup", "path", backup)
-	if err := runVersion1Upgrade(ctx, conn); err != nil {
+	if err := runVersionUpgrades(ctx, conn, from, source, steps[first:]); err != nil {
 		return fmt.Errorf("upgrade SQLite (pre-upgrade backup %q): %w", backup, err)
 	}
 	return nil
 }
 
-func runVersion1Upgrade(ctx context.Context, conn *sql.Conn) error {
+// runVersionUpgrades applies steps, in one transaction, to a store at version
+// whose layout has fingerprint source, and records the last step's version.
+func runVersionUpgrades(ctx context.Context, conn *sql.Conn, version int, source string, steps []versionUpgrade) error {
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), `ROLLBACK`) }()
-	version, err := readSchemaVersion(conn)
+	current, err := readSchemaVersion(conn)
 	if err != nil {
 		return err
 	}
-	if version != 1 {
+	if current != version {
 		return fmt.Errorf("SQLite schema version changed after backup; refusing upgrade")
 	}
 	schema, err := readSchema(conn)
 	if err != nil {
 		return err
 	}
-	if schemaFingerprint(schema) != schema168 {
+	if schemaFingerprint(schema) != source {
 		return fmt.Errorf("SQLite schema changed after backup; refusing upgrade")
 	}
-	if _, err := readDataset(conn); err != nil {
+	identity, err := readDataset(conn)
+	if err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, migration168To169); err != nil {
-		return fmt.Errorf("apply SQLite transition %s: %w", schema168, err)
+	for _, step := range steps {
+		if step.from != version || step.fromLayout != source {
+			return fmt.Errorf("SQLite version upgrades do not continue from version %d", version)
+		}
+		if _, err := conn.ExecContext(ctx, step.sql); err != nil {
+			return fmt.Errorf("apply SQLite schema version %d upgrade: %w", step.to, err)
+		}
+		schema, err = readSchema(conn)
+		if err != nil {
+			return err
+		}
+		if schemaFingerprint(schema) != step.toLayout {
+			return fmt.Errorf("SQLite schema version %d upgrade produced an unexpected layout", step.to)
+		}
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", step.to)); err != nil {
+			return err
+		}
+		version, source = step.to, step.toLayout
 	}
-	if schema, err = readSchema(conn); err != nil {
-		return err
-	}
-	if schemaFingerprint(schema) != schema169 {
-		return fmt.Errorf("SQLite transition produced an unexpected layout")
+	if version != SchemaVersion {
+		return fmt.Errorf("SQLite version upgrades end at version %d, not %d", version, SchemaVersion)
 	}
 	if err := validateSchema(schema, currentSchemaStatements()); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+	upgraded, err := readDataset(conn)
+	if err != nil {
+		return err
+	}
+	if upgraded != identity {
+		return fmt.Errorf("SQLite schema upgrade changed the dataset identity")
+	}
+	if _, err := readDatasetBinding(ctx, conn); err != nil {
 		return err
 	}
 	if err := checkSchemaIntegrity(ctx, conn); err != nil {
@@ -269,7 +332,7 @@ func runSchemaMigrations(ctx context.Context, conn *sql.Conn, source string, ste
 	if err := validateSchema(schema, currentSchemaStatements()); err != nil {
 		return err
 	}
-	// Version-0 sources only; see upgradeSchema for version-1 stores.
+	// Version-0 sources only; see upgradeVersionedSchema for versioned stores.
 	if err := initializeDatasetRecord(conn, datasetOriginAdopted); err != nil {
 		return err
 	}
@@ -300,7 +363,7 @@ func backupSchemaDatabase(ctx context.Context, conn *sql.Conn, path string) (str
 	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, backup); err != nil {
 		return "", err
 	}
-	copyDB, err := sql.Open("sqlite", backup)
+	copyDB, err := sql.Open("sqlite", sqliteDSN(backup))
 	if err != nil {
 		return "", err
 	}

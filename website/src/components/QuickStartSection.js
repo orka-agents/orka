@@ -1,54 +1,52 @@
 import React from 'react';
 import Link from '@docusaurus/Link';
+import {ArrowRight} from 'lucide-react';
+
+const STEPS = [
+  {
+    title: 'Install with Helm',
+    body: 'One Helm command. The chart creates its namespaces, its encryption key, and its webhook certificate. Works on kind or minikube. No model API key needed yet.',
+    link: {to: '/docs/installation', label: 'Install Orka'},
+  },
+  {
+    title: 'Run your first AI task',
+    body: 'Connect to the API, add your Anthropic, OpenAI, or Azure OpenAI key as a Provider, and submit a Task.',
+    link: {to: '/docs/getting-started#your-first-task', label: 'Run your first task'},
+  },
+  {
+    title: 'Run a coding agent',
+    body: 'Connect your model gateway and let Codex or Claude Code review a repository from a warm pool.',
+    link: {to: '/docs/getting-started#running-a-coding-agent', label: 'Run a coding agent'},
+  },
+];
 
 export default function QuickStartSection() {
   return (
-    <section className="landing-section quickstart-section">
-      <h2 className="section-title">Quick start</h2>
-      <p className="section-subtitle">
-        From an empty cluster to a coding agent reviewing a real repository.
-      </p>
-      <div className="quickstart-grid">
-        <div className="quickstart-card">
-          <h3>1. Install with Helm</h3>
-          <p>
-            One Helm command. The chart creates its namespaces, its encryption
-            key, and its webhook certificate. Works on kind or minikube. No
-            model API key needed yet.
-          </p>
-          <p>
-            <Link to="/docs/installation">Install Orka</Link>
-          </p>
-        </div>
-        <div className="quickstart-card">
-          <h3>2. Run your first AI task</h3>
-          <p>
-            Connect to the API, add your Anthropic, OpenAI, or Azure OpenAI key
-            as a Provider, and submit a Task.
-          </p>
-          <p>
-            <Link to="/docs/getting-started#your-first-task">
-              Run your first task
-            </Link>
-          </p>
-        </div>
-        <div className="quickstart-card">
-          <h3>3. Run a coding agent</h3>
-          <p>
-            Connect your model gateway and let Codex or Claude Code review a
-            repository from a warm pool.
-          </p>
-          <p>
-            <Link to="/docs/getting-started#running-a-coding-agent">
-              Run a coding agent
-            </Link>
-          </p>
-        </div>
+    <section className="orka-section">
+      <div className="orka-container">
+        <header className="orka-section__head">
+          <p className="orka-kicker">Quick start</p>
+          <h2>From an empty cluster to a coding agent reviewing a real repository.</h2>
+        </header>
+        <ol className="orka-steps">
+          {STEPS.map((step, i) => (
+            <li key={step.title} className="orka-step">
+              <span className="orka-step__n" aria-hidden="true">
+                {i + 1}
+              </span>
+              <h3>{step.title}</h3>
+              <p>{step.body}</p>
+              <Link className="orka-text-link" to={step.link.to}>
+                {step.link.label} <ArrowRight size={16} aria-hidden="true" />
+              </Link>
+            </li>
+          ))}
+        </ol>
+        <p className="orka-section__note">
+          New here? Read <Link to="/docs">What is Orka?</Link> For development,{' '}
+          <Link to="/docs/build-from-source">build from source</Link>.
+        </p>
       </div>
-      <p className="section-subtitle">
-        New here? Read <Link to="/docs">What is Orka?</Link> For development,{' '}
-        <Link to="/docs/build-from-source">build from source</Link>.
-      </p>
     </section>
   );
 }

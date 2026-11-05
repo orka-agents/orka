@@ -555,7 +555,7 @@ func TestServer_SetupRoutes_InternalAPI(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 
 	config := ServerConfig{
 		Port:         8080,

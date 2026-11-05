@@ -1,76 +1,34 @@
--- Additive SQLite transition: 168-to-169.
--- Source layout: 282e6c3d07185a8a90b2b1da5b41bd40d147467e (#863, 159 objects), schema version 0 or 1.
--- Target definitions: Agent Host Protocol tokens, clients, journal, channel states, sessions and backend records (168 objects), schema version 2.
--- Frozen from the target's real schema statements; do not use mutable helpers.
+-- SQLite transition: 168-to-169 (schema version 1 to 2).
+-- Adds operation receipts, the epoch each controller epoch replaced and when
+-- it was advanced, and the installation a dataset is bound to. It adds no
+-- rows, so a store whose key bootstrap is unfinished can still finish it.
 -- Transaction and complete-layout validation are owned by the caller.
 
-CREATE TABLE IF NOT EXISTS ahp_tokens (
-			id          TEXT PRIMARY KEY,
-			token_hash  TEXT NOT NULL UNIQUE,
-			user_key    TEXT NOT NULL,
-			issuer      TEXT NOT NULL,
-			subject     TEXT NOT NULL,
-			username    TEXT NOT NULL,
-			namespace   TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			created_at  TIMESTAMP NOT NULL,
-			expires_at  TIMESTAMP NOT NULL,
-			revoked_at  TIMESTAMP
-		);
+CREATE TABLE IF NOT EXISTS operation_receipts (
+ operation_id TEXT PRIMARY KEY,
+ method TEXT NOT NULL,
+ request_digest TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('committed', 'aborted')),
+ fence_name TEXT NOT NULL,
+ fence_epoch INTEGER NOT NULL,
+ fence_holder TEXT NOT NULL,
+ issued_at_ns INTEGER NOT NULL,
+ recorded_at_ns INTEGER NOT NULL,
+ result BLOB,
+ custody_scope TEXT NOT NULL DEFAULT '',
+ result_cleared INTEGER NOT NULL DEFAULT 0 CHECK(result_cleared IN (0, 1))
+);
 
-CREATE INDEX IF NOT EXISTS idx_ahp_tokens_user
-			ON ahp_tokens(user_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_operation_receipts_recorded_at
+ ON operation_receipts(recorded_at_ns);
 
-CREATE TABLE IF NOT EXISTS ahp_clients (
-			client_id        TEXT PRIMARY KEY,
-			user_key         TEXT NOT NULL,
-			protocol_version TEXT NOT NULL,
-			dialect          TEXT NOT NULL,
-			created_at       TIMESTAMP NOT NULL,
-			updated_at       TIMESTAMP NOT NULL
-		);
+CREATE INDEX IF NOT EXISTS idx_operation_receipts_custody_scope
+ ON operation_receipts(custody_scope) WHERE custody_scope <> '';
 
-CREATE TABLE IF NOT EXISTS ahp_users (
-			user_key   TEXT PRIMARY KEY,
-			server_seq INTEGER NOT NULL,
-			updated_at TIMESTAMP NOT NULL
-		);
+ALTER TABLE controller_epochs ADD COLUMN previous_epoch INTEGER;
 
-CREATE TABLE IF NOT EXISTS ahp_journal (
-			user_key TEXT NOT NULL,
-			seq      INTEGER NOT NULL,
-			channel  TEXT NOT NULL,
-			envelope BLOB NOT NULL,
-			size     INTEGER NOT NULL,
-			PRIMARY KEY (user_key, seq)
-		);
+ALTER TABLE controller_epochs ADD COLUMN previous_holder_id TEXT;
 
-CREATE TABLE IF NOT EXISTS ahp_channel_states (
-			user_key TEXT NOT NULL,
-			channel  TEXT NOT NULL,
-			state    BLOB NOT NULL,
-			from_seq INTEGER NOT NULL,
-			PRIMARY KEY (user_key, channel)
-		);
+ALTER TABLE controller_epochs ADD COLUMN advanced_at TIMESTAMP;
 
-CREATE TABLE IF NOT EXISTS ahp_sessions (
-			user_key    TEXT NOT NULL,
-			session     TEXT NOT NULL,
-			backend     TEXT NOT NULL,
-			summary     BLOB NOT NULL,
-			created_at  TIMESTAMP NOT NULL,
-			modified_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, session)
-		);
-
-CREATE INDEX IF NOT EXISTS idx_ahp_sessions_modified
-			ON ahp_sessions(user_key, modified_at);
-
-CREATE TABLE IF NOT EXISTS ahp_records (
-			user_key   TEXT NOT NULL,
-			kind       TEXT NOT NULL,
-			key        TEXT NOT NULL,
-			value      BLOB NOT NULL,
-			updated_at TIMESTAMP NOT NULL,
-			PRIMARY KEY (user_key, kind, key)
-		);
+ALTER TABLE store_dataset ADD COLUMN installation_id TEXT NOT NULL DEFAULT '';

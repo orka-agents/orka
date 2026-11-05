@@ -1,6 +1,8 @@
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
+{{- include "orka.validateStorage" . }}
+{{- $storageConfigEnabled := include "orka.storageConfigEnabled" . -}}
 {{- include "orka.validateWebhooks" . }}
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
@@ -55,13 +57,17 @@ spec:
         {{- include "orka.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: controller
         orka.ai/network-role: controller
-      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce }}
+      {{- if or .Values.annotations .Values.publisher.auth.rolloutNonce $storageConfigEnabled }}
       annotations:
         {{- with .Values.annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- with .Values.publisher.auth.rolloutNonce }}
         orka.ai/publisher-auth-rollout-nonce: {{ . | quote }}
+        {{- end }}
+        {{- if $storageConfigEnabled }}
+        {{- /* The controller reads the storage configuration once at startup, so a change rolls it. */}}
+        orka.ai/storage-config-checksum: {{ include "orka.storageConfig" . | sha256sum | quote }}
         {{- end }}
       {{- end }}
     spec:
@@ -382,8 +388,15 @@ spec:
             - {{ printf "--outbound-access-trusted-token-endpoint-services=%s" (join "," .trustedTokenEndpointServices) | quote }}
             {{- end }}
             {{- end }}
+            {{- if $storageConfigEnabled }}
+            - --storage-config=/etc/orka/storage/storage.yaml
+            {{- if include "orka.storageUsesSQLite" . }}
+            - --store-path={{ .Values.store.path }}
+            {{- end }}
+            {{- else }}
             - --store-backend=sqlite
             - --store-path={{ .Values.store.path }}
+            {{- end }}
             - --ai-worker-image={{ include "orka.imageRef" .Values.workers.ai.image }}
             - --general-worker-image={{ include "orka.imageRef" .Values.workers.general.image }}
             {{- with .Values.workers.sessionLoader }}
@@ -542,6 +555,11 @@ spec:
             {{- end }}
             - name: store
               mountPath: /data
+            {{- if $storageConfigEnabled }}
+            - name: storage-config
+              mountPath: /etc/orka/storage
+              readOnly: true
+            {{- end }}
 
             - name: acp-artifact-capability
               mountPath: /var/run/orka/acp-artifacts
@@ -603,6 +621,14 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if $storageConfigEnabled }}
+        - name: storage-config
+          configMap:
+            name: {{ include "orka.storageConfigName" . }}
+            items:
+              - key: storage.yaml
+                path: storage.yaml
+        {{- end }}
         {{- if .Values.publisher.enabled }}
         - name: workspace-publisher-auth
           secret:

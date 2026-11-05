@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,9 +117,12 @@ func TestNewDBRejectsPreNativeSessionLayoutWithoutChangingData(t *testing.T) {
 	legacy, err := sql.Open("sqlite", path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = legacy.Close() })
-	statements := currentSchemaStatements()
-	later := len(nativeSessionSchemaStatements()) + len(connectorSchemaStatements()) + len(ahpSchemaStatements())
-	preNative := append(statements[:len(statements)-later], connectorSchemaStatements()...)
+	var preNative []string
+	for _, statement := range currentSchemaStatements() {
+		if !slices.Contains(nativeSessionSchemaStatements(), statement) {
+			preNative = append(preNative, statement)
+		}
+	}
 	for _, statement := range preNative {
 		_, err := legacy.Exec(statement)
 		require.NoError(t, err)

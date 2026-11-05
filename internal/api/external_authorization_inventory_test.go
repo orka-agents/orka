@@ -30,6 +30,7 @@ import (
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -230,7 +231,7 @@ type externalAuthorizationFixture struct {
 	server        *Server
 	kube          client.Client
 	clientset     *kubefake.Clientset
-	store         *sqlite.Store
+	store         *storageclient.Client
 	db            *sql.DB
 	user          authenticationv1.UserInfo
 	tokenReviews  int
@@ -330,7 +331,7 @@ func newExternalAuthorizationFixture(t *testing.T) *externalAuthorizationFixture
 	f.db, err = sqlite.NewDB(":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, f.db.Close()) })
-	f.store = sqlite.NewStore(f.db, ":memory:")
+	f.store = testStorageClient(sqlite.NewStore(f.db, ":memory:"))
 	require.NoError(t, f.store.CreateMemory(t.Context(), &store.Memory{ID: "protected", Namespace: "default", Content: "protected-content"}))
 	require.NoError(t, f.store.CreateMemoryProposal(t.Context(), &store.MemoryProposal{ID: "protected", Namespace: "default", Type: "memory", Title: "protected-content", Content: "protected-content"}))
 	f.server = NewServer(f.kube, nil, ServerConfig{
@@ -365,6 +366,15 @@ func (f *externalAuthorizationFixture) changes(t *testing.T) int64 {
 	t.Helper()
 	var count int64
 	require.NoError(t, f.db.QueryRowContext(t.Context(), "SELECT total_changes()").Scan(&count))
+	return count
+}
+
+// receipts counts operation receipts: every write through the storage client
+// stores one with its effect.
+func (f *externalAuthorizationFixture) receipts(t *testing.T) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, f.db.QueryRowContext(t.Context(), "SELECT count(*) FROM operation_receipts").Scan(&count))
 	return count
 }
 

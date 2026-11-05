@@ -11,15 +11,22 @@ import (
 )
 
 // SchemaVersion records the metadata layout. It never replaces validation of
-// every schema object; upgrades from versions zero and one require the locked
-// migration path. Version 2 adds the Agent Host Protocol tables.
-const SchemaVersion = 2
+// every schema object; every upgrade, from an unversioned layout or from an
+// earlier version, requires the locked migration path. Version 4 adds the
+// Agent Host Protocol tables.
+const SchemaVersion = 4
 
 const datasetSchema = `CREATE TABLE IF NOT EXISTS store_dataset (
  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
  dataset_id TEXT NOT NULL,
  origin TEXT NOT NULL CHECK(origin IN ('new', 'adopted')),
- bootstrap_complete INTEGER NOT NULL CHECK(bootstrap_complete IN (0, 1))
+ bootstrap_complete INTEGER NOT NULL CHECK(bootstrap_complete IN (0, 1)),
+ installation_id TEXT NOT NULL DEFAULT '',
+ record_uid TEXT NOT NULL DEFAULT '',
+ switch_generation INTEGER NOT NULL DEFAULT 0 CHECK(switch_generation >= 0),
+ key_fingerprint TEXT NOT NULL DEFAULT '',
+ binding_state TEXT NOT NULL DEFAULT '' CHECK(binding_state IN ('', 'bound', 'detached')),
+ bound_at_ns INTEGER NOT NULL DEFAULT 0 CHECK(bound_at_ns >= 0)
 )`
 
 // initializeSchema creates an empty database or checks the existing layout.
@@ -51,7 +58,10 @@ func initializeSchema(db *sql.DB) error {
 		if version != SchemaVersion {
 			return fmt.Errorf("unsupported SQLite schema: dataset metadata requires schema version %d", SchemaVersion)
 		}
-		_, err := readDataset(tx)
+		if _, err := readDataset(tx); err != nil {
+			return err
+		}
+		_, err := readDatasetBinding(context.Background(), tx)
 		return err
 	}
 	if version != 0 {
