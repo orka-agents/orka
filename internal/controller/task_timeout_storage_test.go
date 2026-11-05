@@ -145,8 +145,8 @@ func TestOverdueAutonomousTaskDefersOnAgentLookupFailure(t *testing.T) {
 	require.Equal(t, task.Status.Iteration, current.Status.Iteration)
 }
 
-func TestOverdueTaskWithDeletedAgentStillTimesOutForNonqualifyingJob(t *testing.T) {
-	for _, state := range []string{"failed", "missing", "running", "completed late", "completion unknown", "replacement"} {
+func TestOverdueTaskWithDeletedAgentRecordsJobOutcome(t *testing.T) {
+	for _, state := range []string{"failed", "missing", "running", "completed in time", "completed late", "completion unknown", "replacement"} {
 		t.Run(state, func(t *testing.T) {
 			started := metav1.NewTime(time.Now().Add(-time.Minute))
 			task := &corev1alpha1.Task{
@@ -166,6 +166,10 @@ func TestOverdueTaskWithDeletedAgentStillTimesOutForNonqualifyingJob(t *testing.
 				job.Status.Failed = 1
 			case "running":
 				job.Status.Active = 1
+			case "completed in time":
+				job.Status.Succeeded = 1
+				completed := metav1.NewTime(started.Add(5 * time.Second))
+				job.Status.CompletionTime = &completed
 			case "completed late":
 				job.Status.Succeeded = 1
 				completed := metav1.NewTime(started.Add(20 * time.Second))
@@ -186,8 +190,13 @@ func TestOverdueTaskWithDeletedAgentStillTimesOutForNonqualifyingJob(t *testing.
 			require.NoError(t, err)
 			current := &corev1alpha1.Task{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(task), current))
-			require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
-			require.Equal(t, "task timed out", current.Status.Message)
+			if state == "completed in time" {
+				require.Equal(t, corev1alpha1.TaskPhaseSucceeded, current.Status.Phase)
+				require.Equal(t, "task completed successfully", current.Status.Message)
+			} else {
+				require.Equal(t, corev1alpha1.TaskPhaseFailed, current.Status.Phase)
+				require.Equal(t, "task timed out", current.Status.Message)
+			}
 			require.NotNil(t, current.Status.CompletionTime)
 			require.Equal(t, task.Status.Iteration, current.Status.Iteration)
 		})

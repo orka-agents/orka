@@ -2118,8 +2118,8 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 // the Job's outcome rather than a timeout. A Job that finished after the
 // deadline, or whose completion time is unknown, does not qualify. Nor does
 // an autonomous Task: its timeout ends the loop even after a successful
-// iteration. Lookup errors other than NotFound leave the outcome unsettled
-// until a later reconciliation can observe the Job.
+// iteration. Transient Job or Agent lookup errors leave the outcome unsettled
+// until a later reconciliation can observe the required state.
 func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) (bool, error) {
 	if strings.TrimSpace(task.Status.JobName) == "" {
 		return false, nil
@@ -2138,6 +2138,10 @@ func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alp
 		return false, nil
 	}
 	autonomous, err := r.taskAutonomousMode(ctx, task)
+	if apierrors.IsNotFound(err) {
+		// Match normal Job completion when the Agent has been deleted.
+		return true, nil
+	}
 	return !autonomous && err == nil, err
 }
 
