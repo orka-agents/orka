@@ -357,9 +357,9 @@ func (s *Store) ListSealedNativeSessions(ctx context.Context, cursor string, lim
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT namespace,session_name,session_uid,record_digest,data_digest,source_operation_id,runtime_generation,message_count,through_message_id,nonce,ciphertext
 		FROM native_session_snapshots
-		WHERE ? = '' OR namespace > ? OR (namespace = ? AND session_name > ?)
+		WHERE (namespace, session_name) > (?, ?)
 		ORDER BY namespace ASC, session_name ASC
-		LIMIT ?`, cursor, afterNamespace, afterNamespace, afterName, limit)
+		LIMIT ?`, afterNamespace, afterName, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +383,7 @@ func (s *Store) ListSealedNativeSessions(ctx context.Context, cursor string, lim
 		last := page.Sessions[limit-1]
 		var more bool
 		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM native_session_snapshots
-			WHERE namespace > ? OR (namespace = ? AND session_name > ?))`, last.Namespace, last.Namespace, last.SessionName).Scan(&more); err != nil {
+			WHERE (namespace, session_name) > (?, ?))`, last.Namespace, last.SessionName).Scan(&more); err != nil {
 			return nil, err
 		}
 		if more {
