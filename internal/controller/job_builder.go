@@ -58,6 +58,8 @@ const (
 	// worker uploads as Task artifacts; workers default to /tmp/artifacts.
 	workerArtifactsDirEnv = "ORKA_ARTIFACTS_DIR"
 	skillsVolumeName      = "skills"
+	// taskCallbackTokenVolume holds a custom-image Pod's Orka-audience token.
+	taskCallbackTokenVolume = "orka-task-callback-token"
 )
 
 const (
@@ -209,6 +211,40 @@ func podShouldAutomountServiceAccountToken(task *corev1alpha1.Task) bool {
 	}
 
 	return taskUsesManagedOrkaWorker(task)
+}
+
+// taskUsesCallbackToken reports a custom-image container Task. Its Pod gets
+// no ServiceAccount token, which would also reach the Kubernetes API, so it
+// is given an Orka-audience token that only posts its own results, artifacts,
+// and events. Repository validation output is deliberately not collected.
+func taskUsesCallbackToken(task *corev1alpha1.Task, validationTask bool) bool {
+	return isUntrustedComputeTask(task) && !taskUsesManagedOrkaWorker(task) && !validationTask
+}
+
+func addTaskCallbackToken(job *batchv1.Job) {
+	spec := &job.Spec.Template.Spec
+	spec.Volumes = append(spec.Volumes, corev1.Volume{
+		Name: taskCallbackTokenVolume,
+		VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+				Audience:          workerenv.TaskCallbackTokenAudience,
+				ExpirationSeconds: new(int64(3600)),
+				Path:              path.Base(workerenv.TaskCallbackTokenFile),
+			}}},
+		}},
+	})
+	for i := range spec.Containers {
+		if spec.Containers[i].Name != workerContainerName {
+			continue
+		}
+		container := &spec.Containers[i]
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      taskCallbackTokenVolume,
+			MountPath: path.Dir(workerenv.TaskCallbackTokenFile),
+			ReadOnly:  true,
+		})
+		container.Env = setControllerEnv(container.Env, workerenv.ServiceAccountTokenPath, workerenv.TaskCallbackTokenFile)
+	}
 }
 
 func taskUsesManagedOrkaWorker(task *corev1alpha1.Task) bool {
@@ -583,6 +619,9 @@ func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Ta
 		delete(transactionTokenTask.Annotations, labels.AnnotationTransactionTokenSecret)
 	}
 	b.addTransactionTokenSecret(job, transactionTokenTask)
+	if taskUsesCallbackToken(task, validationTask) {
+		addTaskCallbackToken(job)
+	}
 
 	// Add workspace/home volumes for tasks that need a git workspace.
 	if taskNeedsWorkspace(task) {
