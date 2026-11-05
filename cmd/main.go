@@ -1386,6 +1386,14 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	if agentIdentitySource != nil {
+		auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+		if keyErr != nil {
+			setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+			os.Exit(1)
+		}
+		outboundAccessResolver.AuditPseudonymKey = auditKey
+	}
 	if err := mgr.Add(sqliteStore); err != nil {
 		setupLog.Error(err, "unable to add SQLite store as runnable")
 		os.Exit(1)
@@ -2715,6 +2723,10 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
+// requesters in agent identity use records.
+const agentIdentityAuditKeyInfo = "orka.agent-identity.audit-pseudonym.v1"
 
 // requesterStampKeyInfo is the HKDF label for the requester stamp key.
 const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"

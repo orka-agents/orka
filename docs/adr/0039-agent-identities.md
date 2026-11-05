@@ -4,7 +4,7 @@ Date: 2026-10-22, revised 2026-11-04
 
 ## Status
 
-Proposed. Stages 1–4 are implemented; stage 1 is opt-in. Identity use records are not. Builds on ADR 0034 (Agent runtime ceilings) and
+Proposed. Stages 1–4 and identity use records (as audit log entries) are implemented; stage 1 is opt-in. Builds on ADR 0034 (Agent runtime ceilings) and
 ADR 0033 (per-user connectors). Amends two ADR 0011 non-goals: "a central
 credential broker", for agent identity tokens only, and "long-lived Entra OBO
 lifecycle management", for stage 4 only. Agent user accounts and native `ai`
@@ -288,19 +288,22 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 
 `ExternalEffect` records are idempotency records for writes. They keep only
 digests, and Task cleanup removes them, so they cannot serve as attribution.
-The GitHub mutation records in the controller store are the precedent instead.
 
-- The controller appends one immutable record per identity-backed call, reads
-  and writes alike: Agent UID and generation, issuer type, issuer instance and
-  identity ID, mode, Task UID, policy UID and generation, the Tool that
-  was called, outcome, request digest, and time. Records never contain
-  tokens, request bodies, or full URLs.
-- In delegated mode the requester is stored as a keyed (HMAC) pseudonym under
-  a controller-held key, so records can be joined per person without exposing
-  who the person is to every reader.
-- Records outlive Task deletion. Retention is operator-configured, defaulting
-  to 90 days. Reading them requires its own permission, separate from Task
-  read.
+- The controller writes one record per identity-backed call, reads and writes
+  alike, issued or refused: Agent UID and generation, issuer type, issuer
+  instance and identity ID, mode, Task UID, policy UID and generation, the
+  Tool and method that were called, a digest of the Tool name and arguments,
+  outcome, and the refusal reason. Records never contain tokens, request
+  bodies, or full URLs.
+- In delegated mode the requester appears only as a keyed (HMAC-SHA-256)
+  pseudonym, under a key the controller derives from its snapshot key, so
+  records can be joined per person without naming them.
+- Records are structured log entries on the `agent-identity-audit` logger, so
+  they outlive Task deletion and the operator's log pipeline sets their
+  retention and who may read them. The controller's SQLite store would give
+  Orka-owned retention and a read permission of its own, but it needs a
+  schema version that another change already claims; a store-backed record
+  can follow that change without altering the record's fields.
 
 ### Implementation notes
 

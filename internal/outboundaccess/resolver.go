@@ -9,6 +9,7 @@ package outboundaccess
 import (
 	"bytes"
 	"context"
+
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-logr/logr"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -294,6 +297,12 @@ type KubernetesResolver struct {
 	MaxDelegationAge time.Duration
 	// Now reports the current time; time.Now when nil.
 	Now func() time.Time
+	// AuditLog receives identity use records; the agent-identity-audit
+	// logger when unset.
+	AuditLog logr.Logger
+	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
+	// records. Without it, records name no requester.
+	AuditPseudonymKey []byte
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -631,7 +640,8 @@ func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
 	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
 }
 
-func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
+func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (resolution Resolution, err error) {
+	defer func() { r.auditAgentIdentityUse(policy, req, AgentIdentityMode(policy.Spec.AgentIdentity), err) }()
 	if r.AgentIdentities == nil {
 		return Resolution{}, errors.New("agent identity credentials are issued only by the controller")
 	}
