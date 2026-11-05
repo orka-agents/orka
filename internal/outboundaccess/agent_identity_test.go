@@ -278,3 +278,26 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveMaxDelegationAge(t *testing.T) {
+	for name, tc := range map[string]struct {
+		age      *metav1.Duration
+		limit    time.Duration
+		want     time.Duration
+		wantCaps bool
+	}{
+		"default age":                {limit: 0, want: DefaultMaxDelegationAge},
+		"own age under the cap":      {age: &metav1.Duration{Duration: 2 * time.Hour}, want: 2 * time.Hour},
+		"own age over the default":   {age: &metav1.Duration{Duration: 48 * time.Hour}, want: DefaultMaxDelegationAgeCap, wantCaps: true},
+		"own age over a set cap":     {age: &metav1.Duration{Duration: 2 * time.Hour}, limit: time.Hour, want: time.Hour, wantCaps: true},
+		"default age over a set cap": {limit: 10 * time.Minute, want: 10 * time.Minute, wantCaps: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := delegatedPolicySpec(tc.age)
+			got, capped := EffectiveMaxDelegationAge(&corev1alpha1.OutboundAccessPolicy{Spec: spec}, tc.limit)
+			if got != tc.want || capped != tc.wantCaps {
+				t.Fatalf("EffectiveMaxDelegationAge() = %s, %t; want %s, %t", got, capped, tc.want, tc.wantCaps)
+			}
+		})
+	}
+}

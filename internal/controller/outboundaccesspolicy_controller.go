@@ -45,6 +45,9 @@ type OutboundAccessPolicyReconciler struct {
 	Scheme                     *runtime.Scheme
 	Trust                      outboundaccess.TrustConfig
 	AIWorkerServiceAccountName string
+	// MaxDelegationAge is the controller's cap on delegated agentIdentity
+	// policies (--agent-identity-max-delegation-age); zero means the default.
+	MaxDelegationAge time.Duration
 }
 
 const (
@@ -108,6 +111,12 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		resolved.Reason = outboundaccess.ReasonInvalidPolicy
 		resolved.Message = "References were not resolved because the policy is invalid"
 		return r.finishWithoutOutboundTokenRequestGrant(ctx, policy, accepted, resolved, nil)
+	}
+	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil {
+		if age, capped := outboundaccess.EffectiveMaxDelegationAge(policy, r.MaxDelegationAge); capped {
+			accepted.Message = fmt.Sprintf("Policy structure is valid; maxDelegationAge %s exceeds the controller's cap, so %s applies",
+				identity.Delegated.MaxDelegationAge.Duration, age)
+		}
 	}
 
 	issue, err := outboundaccess.ResolveReferences(ctx, r.referenceReader(), policy, r.Trust)

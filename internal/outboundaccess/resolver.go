@@ -723,6 +723,24 @@ const (
 	DefaultMaxDelegationAgeCap = 24 * time.Hour
 )
 
+// EffectiveMaxDelegationAge returns how long a delegated policy lets an Agent
+// act for the requester under the controller's cap (DefaultMaxDelegationAgeCap
+// when limit is not positive), and whether the cap shortened the policy's own
+// maxDelegationAge.
+func EffectiveMaxDelegationAge(policy *corev1alpha1.OutboundAccessPolicy, limit time.Duration) (time.Duration, bool) {
+	if limit <= 0 {
+		limit = DefaultMaxDelegationAgeCap
+	}
+	age := DefaultMaxDelegationAge
+	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil && identity.Delegated.MaxDelegationAge != nil {
+		age = identity.Delegated.MaxDelegationAge.Duration
+	}
+	if age > limit {
+		return limit, true
+	}
+	return age, false
+}
+
 // resolveDelegation checks that the Agent may still act for the requester
 // and returns the requester's credential for the exchange.
 func (r *KubernetesResolver) resolveDelegation(
@@ -735,17 +753,7 @@ func (r *KubernetesResolver) resolveDelegation(
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
 			"delegated agent identity access runs only on built-in RuntimePools, whose network Orka controls")
 	}
-	age := DefaultMaxDelegationAge
-	if configured := policy.Spec.AgentIdentity.Delegated.MaxDelegationAge; configured != nil {
-		age = configured.Duration
-	}
-	limit := r.MaxDelegationAge
-	if limit <= 0 {
-		limit = DefaultMaxDelegationAgeCap
-	}
-	if age > limit {
-		age = limit
-	}
+	age, _ := EffectiveMaxDelegationAge(policy, r.MaxDelegationAge)
 	now := time.Now()
 	if r.Now != nil {
 		now = r.Now()
