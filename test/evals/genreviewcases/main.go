@@ -231,6 +231,12 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A pathspec also matches everything under a directory of that name,
+		// as when a file becomes a directory. Fail rather than attribute
+		// another path's changes to this file.
+		if records := strings.Count(strings.TrimSuffix(numstat, "\n"), "\n") + 1; numstat == "" || records != 1 {
+			return nil, fmt.Errorf("%s overlaps another changed path; give it its own case", file.Filename)
+		}
 		counts := strings.Fields(numstat)
 		if len(counts) < 2 {
 			return nil, fmt.Errorf("no numstat for %s", file.Filename)
@@ -312,9 +318,10 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 		if err != nil {
 			return err
 		}
+		// Walk the added lines, not the range: the range is not bounded yet.
 		covered := false
-		for line := location.StartLine; line <= location.EndLine; line++ {
-			if added[line] {
+		for line := range added {
+			if line >= location.StartLine && line <= location.EndLine {
 				covered = true
 				break
 			}

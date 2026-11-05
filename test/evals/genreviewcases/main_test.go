@@ -7,10 +7,12 @@ MIT License - see LICENSE file for details.
 package main
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -362,5 +364,41 @@ func TestGitIgnoresCallerConfiguration(t *testing.T) {
 	r := newTestRepo(t)
 	if out, err := git(r.dir, "config", "--get", "http.extraHeader"); err == nil || strings.TrimSpace(out) != "" {
 		t.Fatalf("git saw the caller's extraHeader: %q, %v", out, err)
+	}
+}
+
+func TestGenerateRejectsAFileThatBecomesADirectory(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("config", "x\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() {
+		r.run("rm", "-q", "config")
+		r.write("config/defaults.go", "package config\n")
+	})
+	if _, err := Generate(sourceFor("case/x", cleanReference), r.dir); err == nil ||
+		!strings.Contains(err.Error(), "overlaps another changed path") {
+		t.Fatalf("Generate with a file replaced by a directory: %v", err)
+	}
+}
+
+func TestCheckReferenceIsBoundedByAddedLines(t *testing.T) {
+	files := []evals.ReviewCaseFile{{Filename: "a.go", Status: "modified", Patch: "@@ -1 +1 @@\n-a\n+b"}}
+	huge := evals.CaseReference{Verdict: evals.ReferenceVerdictNotPassed, Locations: []evals.ReferenceLocation{
+		{File: "a.go", StartLine: 2, EndLine: math.MaxInt64},
+	}}
+	done := make(chan error, 1)
+	go func() { done <- checkReference(huge, files) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a range past every added line was accepted")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("checkReference walked the reference range")
+	}
+	huge.Locations[0].StartLine = 1
+	if err := checkReference(huge, files); err != nil {
+		t.Fatal(err)
 	}
 }
