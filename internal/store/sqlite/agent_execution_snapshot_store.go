@@ -81,9 +81,9 @@ func (s *Store) ListSealedAgentExecutionSnapshots(ctx context.Context, cursor st
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT task_uid, digest, schema_version, nonce, ciphertext, created_at
 		FROM agent_execution_snapshots
-		WHERE ? = '' OR task_uid > ? OR (task_uid = ? AND digest > ?)
+		WHERE (task_uid, digest) > (?, ?)
 		ORDER BY task_uid ASC, digest ASC
-		LIMIT ?`, cursor, afterTaskUID, afterTaskUID, afterDigest, limit)
+		LIMIT ?`, afterTaskUID, afterDigest, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sealed agent execution snapshots: %w", err)
 	}
@@ -107,7 +107,7 @@ func (s *Store) ListSealedAgentExecutionSnapshots(ctx context.Context, cursor st
 		last := page.Snapshots[limit-1].Key
 		var more bool
 		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM agent_execution_snapshots
-			WHERE task_uid > ? OR (task_uid = ? AND digest > ?))`, last.TaskUID, last.TaskUID, last.Digest).Scan(&more); err != nil {
+			WHERE (task_uid, digest) > (?, ?))`, last.TaskUID, last.Digest).Scan(&more); err != nil {
 			return nil, fmt.Errorf("list sealed agent execution snapshots: %w", err)
 		}
 		if more {
