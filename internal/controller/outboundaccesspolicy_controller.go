@@ -113,9 +113,9 @@ func (r *OutboundAccessPolicyReconciler) Reconcile(ctx context.Context, req ctrl
 		return r.finishWithoutOutboundTokenRequestGrant(ctx, policy, accepted, resolved, nil)
 	}
 	if identity := policy.Spec.AgentIdentity; identity != nil && identity.Delegated != nil {
-		if age, capped := outboundaccess.EffectiveMaxDelegationAge(policy, r.MaxDelegationAge); capped {
+		if effective, requested := outboundaccess.EffectiveMaxDelegationAge(policy, r.MaxDelegationAge); effective < requested {
 			accepted.Message = fmt.Sprintf("Policy structure is valid; maxDelegationAge %s exceeds the controller's cap, so %s applies",
-				identity.Delegated.MaxDelegationAge.Duration, age)
+				requested, effective)
 		}
 	}
 

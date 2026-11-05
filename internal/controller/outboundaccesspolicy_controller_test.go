@@ -852,11 +852,13 @@ func TestOutboundAccessPolicyReconcilerReportsACappedDelegationAge(t *testing.T)
 		}
 	}
 	for name, tc := range map[string]struct {
-		age  time.Duration
+		age  *metav1.Duration
+		cap  time.Duration
 		want string
 	}{
-		"over the cap":   {age: 48 * time.Hour, want: "maxDelegationAge 48h0m0s exceeds the controller's cap, so 2h0m0s applies"},
-		"within the cap": {age: time.Hour, want: "Policy structure is valid"},
+		"over the cap":           {age: &metav1.Duration{Duration: 48 * time.Hour}, cap: 2 * time.Hour, want: "maxDelegationAge 48h0m0s exceeds the controller's cap, so 2h0m0s applies"},
+		"within the cap":         {age: &metav1.Duration{Duration: time.Hour}, cap: 2 * time.Hour, want: "Policy structure is valid"},
+		"default over a low cap": {cap: 10 * time.Minute, want: "maxDelegationAge 1h0m0s exceeds the controller's cap, so 10m0s applies"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			policy := &corev1alpha1.OutboundAccessPolicy{
@@ -865,13 +867,13 @@ func TestOutboundAccessPolicyReconcilerReportsACappedDelegationAge(t *testing.T)
 					Mode: corev1alpha1.OutboundAgentIdentityModeDelegated,
 					Delegated: &corev1alpha1.DelegatedAgentIdentity{
 						ProviderRef:      corev1alpha1.LocalObjectReference{Name: "entra-signin"},
-						MaxDelegationAge: &metav1.Duration{Duration: tc.age},
+						MaxDelegationAge: tc.age,
 					},
 					Entra: &corev1alpha1.EntraOutboundTarget{Resource: "https://graph.microsoft.com"},
 				}},
 			}
 			client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).WithStatusSubresource(policy).Build()
-			reconciler := &OutboundAccessPolicyReconciler{Client: client, APIReader: client, Scheme: scheme, MaxDelegationAge: 2 * time.Hour}
+			reconciler := &OutboundAccessPolicyReconciler{Client: client, APIReader: client, Scheme: scheme, MaxDelegationAge: tc.cap}
 			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "policy"}}); err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
