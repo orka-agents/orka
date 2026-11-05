@@ -574,6 +574,32 @@ func (r *EvalRunReconciler) validateEvalTrialTask(run *corev1alpha1.EvalRun, mon
 		!reflect.DeepEqual(repositoryMonitorComparableReviewTaskSpec(task.Spec), repositoryMonitorComparableReviewTaskSpec(expected.Spec)) {
 		return fmt.Errorf("trial Task %s/%s spec does not match the rendered trial", task.Namespace, task.Name)
 	}
+	return validateEvalTrialBinding(run, task)
+}
+
+// validateEvalTrialBinding checks that a bound trial ran on the reviewer the
+// snapshot froze. A Task with the rendered spec and metadata can still have
+// been bound and run earlier against another reviewer generation, and its
+// result must not count for this snapshot. An unbound Task is checked again
+// once it binds, before it is graded.
+func validateEvalTrialBinding(run *corev1alpha1.EvalRun, task *corev1alpha1.Task) error {
+	binding := task.Status.AgentExecutionBinding
+	if binding == nil {
+		return nil
+	}
+	frozen := run.Status.Snapshot.ReviewerAgent
+	if frozen == nil {
+		return fmt.Errorf("trial Task %s/%s is bound but the run froze no reviewer", task.Namespace, task.Name)
+	}
+	if binding.Task.UID != task.UID {
+		return fmt.Errorf("trial Task %s/%s binding belongs to another Task", task.Namespace, task.Name)
+	}
+	agent := binding.Agent
+	if agent == nil || agent.Namespace != task.Namespace || agent.Name != frozen.Name ||
+		agent.UID != frozen.UID || agent.Generation != frozen.Generation {
+		return fmt.Errorf("trial Task %s/%s is bound to a reviewer other than the frozen %s (generation %d)",
+			task.Namespace, task.Name, frozen.Name, frozen.Generation)
+	}
 	return nil
 }
 

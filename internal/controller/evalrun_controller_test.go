@@ -588,6 +588,59 @@ func TestEvalRunRejectsTaskItDidNotRender(t *testing.T) {
 	}
 }
 
+// A trial Task bound to another reviewer generation than the snapshot froze,
+// such as one that ran before the run started, fails the run instead of
+// counting; one bound to the frozen reviewer is graded.
+func TestEvalRunRejectsTrialBoundToAnotherReviewer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		agentUID   types.UID
+		generation int64
+		conflict   bool
+	}{
+		"older generation": {agentUID: "agent-uid", generation: 1, conflict: true},
+		"other agent":      {agentUID: "other-uid", generation: 2, conflict: true},
+		"frozen reviewer":  {agentUID: "agent-uid", generation: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := evalTestRun(1, 1)
+			env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed))...)
+			env.start()
+			env.reconcile()
+			tasks := env.trialTasks()
+			if len(tasks) != 1 {
+				t.Fatalf("trial Tasks = %d", len(tasks))
+			}
+			task := &tasks[0]
+			frozen := env.run().Status.Snapshot.ReviewerAgent
+			binding := testACPExecuteBindingForDispatcher()
+			binding.Task.UID = task.UID
+			binding.Agent = &corev1alpha1.AgentExecutionAgentRef{
+				Namespace: task.Namespace, Name: frozen.Name, UID: tc.agentUID, Generation: tc.generation,
+			}
+			task.Status.AgentExecutionBinding = binding
+			env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, evalTestReviewResult("passed"), true)
+			env.reconcile()
+			got := env.run()
+			records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "pr-review", "run-uid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.conflict {
+				if got.Status.Phase != corev1alpha1.EvalRunPhaseFailed || evalCompletedCondition(got).Reason != evalRunReasonTrialTaskConflict {
+					t.Fatalf("phase = %q condition = %+v", got.Status.Phase, evalCompletedCondition(got))
+				}
+				if len(records) != 0 {
+					t.Fatalf("a trial on another reviewer was recorded: %+v", records)
+				}
+				return
+			}
+			if got.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded || len(records) != 1 {
+				t.Fatalf("phase = %q records = %d", got.Status.Phase, len(records))
+			}
+		})
+	}
+}
+
 func TestEvalRunTTLDeletesRunAndFinalizerDeletesRecords(t *testing.T) {
 	run := evalTestRun(1, 2)
 	ttl := int32(60)
