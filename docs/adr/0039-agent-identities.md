@@ -133,11 +133,13 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   the Agent's `status.identityClaim`, granting a claim only when no other
   Agent holds it; a second Agent naming the identity reports `Ready=False`.
   An Agent that stops naming an identity keeps the claim until every Task
-  bound to it has finished, so two Agents never act as one identity at once.
+  bound to it has finished, so two Agents never act as one identity at once,
+  but from that moment its bound Tasks' identity-backed calls are refused, as
+  cloud IAM revocation applies to running workloads at their next call.
 - The Task binding freezes the identity next to the Agent UID and generation
   that `AgentExecutionAgentRef` already pins, together with the issuer
   instance (for Entra, the tenant and blueprint). Editing the Agent or the
-  controller configuration does not change the identity a bound Task uses; a
+  controller configuration never moves a bound Task to another identity; a
   frozen issuer instance that no longer matches the controller's fails the
   call closed.
 - An Agent with an identity must set `ceiling.allowedTools` (ADR 0034). Every
@@ -198,9 +200,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   `user_federated_identity_credential` in `DirectOutboundAccess`
   `additionalParameters`, so the direct adapter can never select an identity.
 - An identity is verified only after the controller has acquired a token for
-  it. With Entra, the blueprint's exchange token for the identity is enough,
-  and proves the identity is a child of the configured blueprint, which stage 2
-  cannot. The controller re-verifies when the Agent reconciles and at least
+  it. With Entra, the controller requests the blueprint's exchange token for
+  the identity, which proves the identity is a child of the configured
+  blueprint, which stage 2 cannot, and then the identity's own token, because
+  Entra still issues the exchange token for a disabled identity. The controller re-verifies when the Agent reconciles and at least
   hourly while Tasks are bound to it. A failure, for example an identity
   disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
   new calls; deleting the Agent fails identity-backed calls from Tasks still
@@ -233,7 +236,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   root requester's last authenticated action in the Task chain: creating the
   root Task, or sending the Session message that started the current turn. A
   child Task, retry, or parked agent woken later does not reset it; only the
-  requester acting again does. After it elapses, delegated calls fail closed
+  requester acting again does. Cancelling or deleting any Task in the chain
+  stops delegated calls from every Task below it; a parent that finished
+  normally does not. After it elapses, delegated calls fail closed
   and the Task can ask the requester to continue. A policy that asks for more
   than the controller's maximum gets the maximum, and its `Accepted` condition
   says so.
