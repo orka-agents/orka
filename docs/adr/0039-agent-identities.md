@@ -100,7 +100,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
-  against.
+  against. This blocks the common pattern where a coordinator hands work to a
+  different, identity-bound worker Agent. Lifting it needs a delegation
+  ceiling (which Agents a parent may hand work to), which is outside this ADR.
 
 ### Stage 2: bind an identity and attribute actions to it
 
@@ -119,12 +121,18 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 - One identity maps to one Agent UID. A second Agent that claims an identity
   already bound elsewhere reports `Ready=False`.
 - The Task binding freezes the identity next to the Agent UID and generation
-  that `AgentExecutionAgentRef` already pins. Editing the Agent does not change
-  the identity a bound Task uses.
+  that `AgentExecutionAgentRef` already pins, together with the issuer
+  instance (for Entra, the tenant and blueprint). Editing the Agent or the
+  controller configuration does not change the identity a bound Task uses; a
+  frozen issuer instance that no longer matches the controller's fails the
+  call closed.
+- An Agent with an identity must set `ceiling.allowedTools` (ADR 0034). Every
+  outbound channel a Task could use to carry identity-backed data onward,
+  such as a brokered fetch, an HTTP Tool, or a gateway reply, is then one the
+  Agent owner listed explicitly.
 - Emit `gen_ai.agent.id` as the Agent UID, not its reusable name, on Task and
-  Tool-call spans, and record the issuer type and identity ID on the audit
-  record of every external effect made with it. Issuer logs and Orka records
-  then share a join key.
+  Tool-call spans, and write an identity use record for every identity-backed
+  call (see below). Issuer logs and Orka records then share a join key.
 - Until stage 3 ships, the identity is a declaration by an authorized Agent
   editor, not a verified fact, and status and UI must say so.
 
@@ -176,8 +184,13 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   `user_federated_identity_credential` in `DirectOutboundAccess`
   `additionalParameters`, so the direct adapter can never select an identity.
 - An identity is verified only after the controller has acquired a token for
-  it. With Entra, that proves the identity is a child of the configured
-  blueprint, which stage 2 cannot.
+  it. With Entra, the blueprint's exchange token for the identity is enough,
+  and proves the identity is a child of the configured blueprint, which stage 2
+  cannot. The controller re-verifies when the Agent reconciles and at least
+  hourly while Tasks are bound to it. A failure, for example an identity
+  disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
+  new calls; deleting the Agent fails identity-backed calls from Tasks still
+  bound to it.
 
 ### Stage 4: the Agent acts for its requester
 
@@ -195,6 +208,31 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   `spec.requestedBy` selects it, exactly as the `connection` adapter does.
   ServiceAccount callers, Tasks without a verified requester, and delegated
   child Tasks whose root requester differs fail closed.
+- Only some Tasks have a requester who can delegate. API-created Tasks carry
+  the caller's verified `requestedBy`, and chat and delegated child Tasks
+  inherit it. Gateway Tasks carry a gateway-issued sender, which matches no
+  Connection until an explicit sender link exists (ADR 0033).
+  RepositoryMonitor and other controller-created Tasks carry none. The last
+  two therefore fail closed with no extra rule.
+- Delegation expires. Each delegated policy sets `maxDelegationAge`, default
+  one hour, with a controller-configured maximum. It is measured from the
+  root requester's last authenticated action in the Task chain: creating the
+  root Task, or sending the Session message that started the current turn. A
+  child Task, retry, or parked agent woken later does not reset it; only the
+  requester acting again does. After it elapses, delegated calls fail closed
+  and the Task can ask the requester to continue.
+- Delegated mode runs only where Orka controls the runtime's network. Built-in
+  RuntimePool Pods deny all egress except DNS, the model provider proxy, and
+  the controller, so identity-backed data can leave only through brokered
+  channels that the Agent ceiling bounds. External `runtimeRef` runtimes and
+  workspace-backed sessions are refused until their egress governance is
+  verified. This depends on the cluster enforcing NetworkPolicy.
+- Write-class calls in delegated mode always require approval, and only the
+  requester can approve them: the approver must match the Task's
+  `requestedBy` issuer and subject. Other authorized reviewers may deny but
+  not approve, because the write acts as that person. Today any caller allowed
+  to update the Task can decide an approval, so this is a new rule for this
+  mode only.
 - The Connection must have been issued for the bound identity. Each issuer
   type defines the check, such as the user token's audience. Where an issuer
   addresses user tokens to each agent client, a requester links once per
@@ -224,6 +262,41 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   cannot be that client. The controller performs the two on-behalf-of requests
   above. Orka's GitHub dashboard sign-in cannot supply this token; the
   requester must sign in through Entra.
+
+### Identity use records
+
+`ExternalEffect` records are idempotency records for writes. They keep only
+digests, and Task cleanup removes them, so they cannot serve as attribution.
+The GitHub mutation records in the controller store are the precedent instead.
+
+- The controller appends one immutable record per identity-backed call, reads
+  and writes alike: Agent UID and generation, issuer type, issuer instance and
+  identity ID, mode, Task UID, policy UID and generation, the `allow` entry
+  that matched, outcome, request digest, and time. Records never contain
+  tokens, request bodies, or full URLs.
+- In delegated mode the requester is stored as a keyed (HMAC) pseudonym under
+  a controller-held key, so records can be joined per person without exposing
+  who the person is to every reader.
+- Records outlive Task deletion. Retention is operator-configured, defaulting
+  to 90 days. Reading them requires its own permission, separate from Task
+  read.
+
+### Implementation notes
+
+- **Availability.** The broker and token cache run in the controller leader.
+  Failover loses only cached tokens, which are fetched again. Per-identity
+  credentials and use records live in the controller store, so they share its
+  single-writer availability until the storage HA work lands.
+- **Testing.** A fake issuer tests the contract and fail-closed paths; Keycloak
+  in kind covers a real token endpoint; an optional live-tenant lane, like the
+  existing GitHub OIDC lane, covers Entra. Stage 4 against Azure Storage needs
+  that live lane before it is documented as supported.
+- **Operations.** Metrics count issued, cached, refused, and failed calls per
+  issuer and reason, without identity IDs as labels. Issuer throttling and
+  outages fail calls closed, so alerts watch the failure rate.
+- **Rollout.** Each stage ships behind its own flag. The `use` check stays
+  opt-in for Agents without an identity, and existing `connection` policies
+  are unchanged.
 
 ### Entra notes for operators
 
@@ -300,6 +373,9 @@ fix above are placeholders until implementation.
      identity:
        entra:
          agentIdentityID: "<agent identity client ID>"
+     runtime:
+       ceiling:
+         allowedTools: [read_report, list_reports]   # required with an identity
    ```
 
 5. **A policy author** chooses how outbound calls use it. The policy names a
@@ -317,6 +393,7 @@ fix above are placeholders until implementation.
    # Connection through a ConnectorProvider for the front-end client app.
    agentIdentity:
      mode: delegated
+     maxDelegationAge: 1h
      header: Authorization
      entra:
        resource: https://storage.azure.com
@@ -422,6 +499,11 @@ the ceiling; the stage 4 operation list is then checked against it.
 - Not yet proven: Entra agent on-behalf-of tokens against Azure Storage in a
   live tenant, and identity provisioning latency. Stage 4 needs that
   integration proof before Orka documents it as supported.
+- One issuer instance per installation means one Entra tenant per Orka
+  installation. Serving several customer tenants needs several installations
+  until per-namespace issuer references are added; the frozen issuer instance
+  keeps that later change from affecting bound Tasks.
 - Not covered: inbound tokens addressed to an agent identity, multi-tenant
-  blueprints, native `ai` Agents, and delegation to any Agent other than the
+  blueprints, native `ai` Agents, delegated mode on external or
+  workspace-backed runtimes, and delegation to any Agent other than the
   parent's own.
