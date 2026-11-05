@@ -239,6 +239,9 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		linkedWorks[key] = append(linkedWorks[key], link.WorkID)
 	}
 	ui := GetUserInfo(c)
+	// The report's own records count against the budget the session lookup
+	// shares with them; the placeholders added below repeat observations.
+	loaded := len(data.Works) + len(data.Tasks) + len(data.Observations) + len(data.Links) + len(data.PullRequests)
 	ahpObserved := ahpObservedTasks(data.Observations)
 	for _, task := range data.Tasks {
 		key := task.Namespace + "/" + task.TaskUID
@@ -314,7 +317,7 @@ func (h *Handlers) filterUsageTaskAccess(c fiber.Ctx, data *store.UsageData, asO
 		}
 	}
 	if ahpPerson(ui) {
-		if err := h.addHiddenAHPSessionTasks(c, ui, data); err != nil {
+		if err := h.addHiddenAHPSessionTasks(c, ui, data, usageMaxRecords-loaded); err != nil {
 			return err
 		}
 	}
@@ -348,7 +351,7 @@ func ahpUsageTaskHidden(ui *UserInfo, task store.UsageTask, observed bool) bool 
 // as an operator's turn from before the report's period. A session's usage
 // counter spans its turns, so the report then credits nothing on it to a
 // visible Task: a gain on it may be such a Task's.
-func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *store.UsageData) error {
+func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *store.UsageData, remaining int) error {
 	backend, ok := h.executionEventStore.(store.UsageStore)
 	if !ok {
 		return nil
@@ -376,9 +379,9 @@ func (h *Handlers) addHiddenAHPSessionTasks(c fiber.Ctx, ui *UserInfo, data *sto
 		}
 		namespaceUIDs[observation.Namespace] = cmp.Or(namespaceUIDs[observation.Namespace], observation.NamespaceUID)
 	}
-	// One budget covers every team of the report, as the report's own
-	// record limit does.
-	remaining := usageMaxRecords
+	// remaining is what the report's record limit leaves: one budget covers
+	// every team of the report and the records it already loaded.
+	remaining = max(remaining, 0)
 	for _, namespace := range slices.Sorted(maps.Keys(sessions)) {
 		rows, err := backend.ListUsageTasksInSessions(c.Context(), namespace, namespaceUIDs[namespace], slices.Sorted(maps.Keys(sessions[namespace])), remaining)
 		if errors.Is(err, store.ErrUsageSelectionTooLarge) {

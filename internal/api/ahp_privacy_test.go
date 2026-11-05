@@ -702,5 +702,24 @@ func TestAHPUsageSessionLookupSharesOneBudgetAcrossTeams(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, response.Body.Close())
 	require.Equal(t, http.StatusOK, response.StatusCode)
-	require.Equal(t, []int{usageMaxRecords, usageMaxRecords - 3}, recording.limits)
+	require.Equal(t, []int{usageMaxRecords - 2, usageMaxRecords - 2 - 3}, recording.limits,
+		"the report's two records and each team's rows count against one budget")
+
+	// A report already at its record limit has no budget left for the lookup.
+	full := store.UsageData{Tasks: []store.UsageTask{{Namespace: "team-a", TaskUID: "mine", SessionName: "ahp-shared", StartedAt: start}}}
+	for i := range usageMaxRecords - 1 {
+		full.Observations = append(full.Observations, store.UsageObservation{Namespace: "team-a", CounterID: fmt.Sprint("other-", i),
+			SessionName: "team-session", ObservedAt: start})
+	}
+	recording.limits = nil
+	app = fiber.New()
+	app.Get("/", func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{AuthType: AuthTypeOIDC, Issuer: "https://issuer.example", Subject: "alice"})
+		return handlers.filterUsageTaskAccess(c, &full, start.Add(time.Hour))
+	})
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusUnprocessableEntity, response.StatusCode)
+	require.Equal(t, []int{0}, recording.limits)
 }
