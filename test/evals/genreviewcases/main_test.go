@@ -424,3 +424,25 @@ func TestGenerateResolvesOnlyPlainBranchNames(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateIgnoresTextconvFilters(t *testing.T) {
+	r := newTestRepo(t)
+	// A local textconv driver would rewrite the diff if Git ran it.
+	r.run("config", "diff.upper.textconv", "tr a-z A-Z <")
+	r.write(".gitattributes", "*.txt diff=upper\n")
+	r.write("a.txt", "a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	r.commitCase("case/x", func() { r.write("a.txt", "b\n") })
+	out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patch := cases[0].Input.RepositoryMonitorReview.Files[0].Patch; patch != "@@ -1 +1 @@\n-a\n+b" {
+		t.Fatalf("patch = %q", patch)
+	}
+}

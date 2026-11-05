@@ -184,7 +184,7 @@ func resolveCase(source Source, sc SourceCase, repo string) (evals.Case, error) 
 // changedFiles renders the diff from base to head like the forge pull request
 // files API: one entry per file, with hunks but no file headers.
 func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
-	statusOut, err := git(repo, "diff", "--no-color", "--no-ext-diff", "-M", "--name-status", "-z", base, head)
+	statusOut, err := gitDiff(repo, base, head, nil, "--name-status", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 			paths = append(paths, fields[i])
 			i++
 		}
-		numstat, err := gitDiff(repo, base, head, "--numstat", paths)
+		numstat, err := gitDiff(repo, base, head, paths, "--numstat")
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +252,7 @@ func changedFiles(repo, base, head string) ([]evals.ReviewCaseFile, error) {
 			if file.Deletions, err = strconv.Atoi(counts[1]); err != nil {
 				return nil, err
 			}
-			diff, err := gitDiff(repo, base, head, "-U3", paths)
+			diff, err := gitDiff(repo, base, head, paths, "-U3")
 			if err != nil {
 				return nil, err
 			}
@@ -337,10 +337,13 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 	return nil
 }
 
-// gitDiff runs one git diff from base to head, limited to paths.
-func gitDiff(repo, base, head, format string, paths []string) (string, error) {
-	args := append([]string{"diff", "--no-color", "--no-ext-diff", "-M", format, base, head, "--"}, paths...)
-	return git(repo, args...)
+// gitDiff runs one git diff from base to head, limited to paths. External
+// diff drivers and textconv filters stay off, so the output is the
+// committed change.
+func gitDiff(repo, base, head string, paths []string, formats ...string) (string, error) {
+	args := append([]string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M"}, formats...)
+	args = append(args, base, head, "--")
+	return git(repo, append(args, paths...)...)
 }
 
 // resolveBranch finds a fixture branch as a local branch, as in the mirror
