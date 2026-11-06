@@ -77,7 +77,8 @@ upgrading:
 - The controller creates the signing Secret in its namespace on first use. It needs the
   Secret `create` and `update` access the controller role already grants. Under the
   default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
-  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures. See
+  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures, and do not let
+  untrusted users create Tasks or Agents there, since a `secretRef` can mount it. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
 - With signing enabled but no usable key (the Secret cannot be read or holds a malformed
   key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a

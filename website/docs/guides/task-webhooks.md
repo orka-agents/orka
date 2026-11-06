@@ -224,3 +224,9 @@ that access, but under the default AI worker RBAC profile
 could read the private key. If receivers rely on signatures, install with
 `workers.ai.rbacProfile: restricted`, which grants the AI worker no Secret
 access, and restrict any other Secret readers in that namespace.
+
+The worker's RBAC is not the only path. A trusted Task's or Agent's `secretRef`
+mounts the named Secret from its own namespace into the worker, so anyone who
+can create Tasks or Agents in the release namespace can mount the signing key
+(and the controller's other Secrets there). Do not let untrusted users create
+Tasks or Agents in the release namespace.
