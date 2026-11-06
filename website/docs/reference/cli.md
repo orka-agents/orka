@@ -514,6 +514,8 @@ orka eval get pr-review-x7                             # phase, counts and per-g
 `--output-dir` writes the finished EvalRun, its trial records as JSONL, a
 Markdown summary with a table of failed trials, and the execution events of each
 failed trial under `events/`. Read those transcripts before trusting a score.
+`--wait` and `--output-dir` refuse a `ttlSecondsAfterFinished` below 300
+seconds, which could delete the run and its trial records before they are read.
 See `test/evals/pr-review/README.md` for the PR review cases.
 
 ## Usage and PR outcomes

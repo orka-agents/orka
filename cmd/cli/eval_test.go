@@ -281,3 +281,20 @@ func TestEvalRunFollowsTheRunNamespaceAndPagesEvents(t *testing.T) {
 		t.Fatalf("events file = %s, %v", raw, err)
 	}
 }
+
+func TestEvalRunRefusesAShortTTLWhenWaiting(t *testing.T) {
+	manifest := evalTestManifest + "  ttlSecondsAfterFinished: 0\n"
+	for _, args := range [][]string{{"--wait"}, {"--output-dir", t.TempDir()}} {
+		full := append([]string{"eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", "http://127.0.0.1:1", "--token", "tok"}, args...)
+		_, err := runEvalCommand(t, full...)
+		if err == nil || !strings.Contains(err.Error(), "ttlSecondsAfterFinished 0") {
+			t.Fatalf("eval run %v: %v", args, err)
+		}
+	}
+	// Without waiting, a short TTL is the caller's choice: the create is
+	// attempted (and fails here only because no server listens).
+	_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", "http://127.0.0.1:1", "--token", "tok")
+	if err == nil || strings.Contains(err.Error(), "ttlSecondsAfterFinished") {
+		t.Fatalf("eval run without --wait: %v", err)
+	}
+}

@@ -65,6 +65,11 @@ func newEvalRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if wait || output != "" {
+				if err := checkEvalRunTTLForWait(body); err != nil {
+					return err
+				}
+			}
 			c := newClientFromCmd(cmd)
 			ctx := cmd.Context()
 			run, err := createEvalRun(ctx, c, body)
@@ -154,6 +159,24 @@ func evalRunRequestFromFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s needs metadata.name or metadata.generateName", path)
 	}
 	return json.Marshal(manifest.evalRunRequest)
+}
+
+// evalRunMinWaitTTL is the shortest ttlSecondsAfterFinished --wait accepts:
+// the run and its trial records must outlive the poll that sees it finish.
+const evalRunMinWaitTTL = 300
+
+// checkEvalRunTTLForWait refuses a TTL that could delete the run and its
+// trial records before --wait reads them.
+func checkEvalRunTTLForWait(body []byte) error {
+	var request evalRunRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		return err
+	}
+	if ttl := request.Spec.TTLSecondsAfterFinished; ttl != nil && *ttl < evalRunMinWaitTTL {
+		return fmt.Errorf("ttlSecondsAfterFinished %d could delete the run before --wait reads it; use at least %d or leave it unset",
+			*ttl, evalRunMinWaitTTL)
+	}
+	return nil
 }
 
 func createEvalRun(ctx context.Context, c *client.Client, body []byte) (*corev1alpha1.EvalRun, error) {
