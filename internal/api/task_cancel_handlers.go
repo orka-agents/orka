@@ -58,6 +58,11 @@ type chatTurnStopper interface {
 
 var errTaskNotCancellable = errors.New("task cannot be cancelled")
 
+// errCancelTaskGone is the 404 for a Task deleted or replaced while it was
+// being cancelled. It is distinct from an authorization refusal answered as
+// 404, which a Session cancel must not skip.
+var errCancelTaskGone = fiber.NewError(fiber.StatusNotFound, "task not found")
+
 // CancelTask asks the controller to stop a Pending or Running Task. Unlike
 // delete, it keeps everything the Task produced. The controller ends the
 // Task as Cancelled; an Agent Task's run is stopped by the ACP dispatcher.
@@ -148,8 +153,8 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		cancelled, err := h.requestTaskCancellation(c, task, message)
 		if err != nil {
 			var fiberErr *fiber.Error
-			if errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict {
-				continue // finished meanwhile
+			if errors.Is(err, errCancelTaskGone) || (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict) {
+				continue // finished, deleted or replaced since the list
 			}
 			return err
 		}
@@ -213,7 +218,7 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	case errors.Is(err, errTaskNotCancellable):
 		return taskCancellation{}, fiber.NewError(fiber.StatusConflict, err.Error())
 	case apierrors.IsNotFound(err):
-		return taskCancellation{}, fiber.NewError(fiber.StatusNotFound, "task not found")
+		return taskCancellation{}, errCancelTaskGone
 	default:
 		return taskCancellation{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to cancel task: %v", err))
 	}

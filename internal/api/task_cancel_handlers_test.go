@@ -320,3 +320,42 @@ func TestStopActiveChatFencesAnIdleSession(t *testing.T) {
 	}
 	chat.finishActiveChatReservation(next, nil)
 }
+
+// phantomListReader lists Tasks that are gone or replaced by the time they
+// are read.
+type phantomListReader struct {
+	client.Reader
+	phantoms []corev1alpha1.Task
+}
+
+func (r phantomListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := r.Reader.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+		tasks.Items = append(append([]corev1alpha1.Task{}, r.phantoms...), tasks.Items...)
+	}
+	return nil
+}
+
+func TestCancelSessionSkipsTasksDeletedOrReplacedSinceTheList(t *testing.T) {
+	h, app := setupCancelTest(t, cancelTestTask("still-running", corev1alpha1.TaskPhaseRunning, "chat"))
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "chat", SessionType: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	replaced := cancelTestTask("still-running", corev1alpha1.TaskPhaseRunning, "chat")
+	replaced.UID = "an-older-uid"
+	h.apiReader = phantomListReader{Reader: h.client, phantoms: []corev1alpha1.Task{
+		*cancelTestTask("deleted", corev1alpha1.TaskPhaseRunning, "chat"), *replaced,
+	}}
+	resp, body := postCancel(t, app, "/sessions/chat/cancel", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if tasks, _ := body["tasks"].([]any); len(tasks) != 1 {
+		t.Fatalf("cancelled = %v, want only the Task that still exists", body["tasks"])
+	}
+	if got, _ := cancelAnnotation(t, h, "still-running"); got != "cancelled by alice" {
+		t.Fatalf("cancel request = %q, want the remaining Task cancelled", got)
+	}
+}
