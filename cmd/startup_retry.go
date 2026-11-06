@@ -73,6 +73,10 @@ func retryStartupStep[T any](
 			return result, err
 		case <-timer.C:
 		}
+		// Logging or scheduling can delay the wake-up past the deadline.
+		if ctx.Err() != nil || time.Now().After(retry.deadline) {
+			return result, err
+		}
 		delay = min(2*delay, retry.maxDelay)
 	}
 }

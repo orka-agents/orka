@@ -362,6 +362,26 @@ func TestRetryStartupStepStopsAtTheDeadline(t *testing.T) {
 	}
 }
 
+// A wake-up delayed past the deadline, here by a slow log write, must not
+// start another attempt that could block for a full dial timeout.
+func TestRetryStartupStepRechecksTheDeadlineAfterWaiting(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
+	slowLog := funcr.New(func(_, _ string) { time.Sleep(100 * time.Millisecond) }, funcr.Options{})
+	var calls int
+	retry := testStartupRetry(slowLog, 50*time.Millisecond, time.Millisecond, time.Millisecond)
+	_, err := retryStartupStep(context.Background(), retry, "Kubernetes API server", isTransientConnectError,
+		func() (ctrl.Manager, error) {
+			calls++
+			return nil, refused
+		})
+	if !errors.Is(err, refused) {
+		t.Fatalf("error = %v, want %v", err, refused)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1: no attempt may start after the deadline", calls)
+	}
+}
+
 func TestRetryStartupStepStopsWhenContextIsCancelled(t *testing.T) {
 	refused := &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	ctx, cancel := context.WithCancel(context.Background())
