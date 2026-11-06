@@ -1103,6 +1103,68 @@ func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
 	require.Len(t, preconditions, 1, "a mismatched uid never reaches Delete")
 }
 
+// A same-name replacement can publish its result before the cache sees it, so
+// the post-read UID check must read live: a stale cached Task that still
+// matches the requested UID must not let the replacement's output through.
+func TestTaskResultUIDFenceReadsLiveTask(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "replaced", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "replaced", []byte("replacement output")))
+	// The cached client still holds uid-replaced; the live reader already
+	// sees the replacement Task.
+	f.config.APIReader = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, task := obj.(*corev1alpha1.Task); task && key.Name == "replaced" {
+				obj.SetUID("uid-replacement")
+			}
+			return nil
+		},
+	})
+	f.server = NewServer(f.kube, nil, f.config)
+
+	status, body := f.request(t, http.MethodGet, "/api/v1/tasks/replaced/result?uid=uid-replaced", "")
+	require.Equal(t, http.StatusNotFound, status, body)
+	require.NotContains(t, body, "replacement output")
+}
+
+// A Streamable HTTP client may POST a chunked body without Content-Length.
+// The full middleware chain must let it reach the MCP handler's bounded body
+// reader, while other API routes keep requiring a Content-Length.
+func TestMCPAcceptsChunkedRequestThroughServer(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	chunked := func(path, body string) (int, string) {
+		t.Helper()
+		f.sequence++
+		request := httptest.NewRequest(http.MethodPost, path, io.MultiReader(strings.NewReader(body)))
+		request.ContentLength = 0
+		request.TransferEncoding = []string{"chunked"}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Accept", "application/json, text/event-stream")
+		request.Header.Set("Authorization", fmt.Sprintf("Bearer fixture-%s-%d", t.Name(), f.sequence))
+		response, err := f.server.app.Test(request, fiber.TestConfig{Timeout: time.Minute, FailOnTimeout: true})
+		require.NoError(t, err)
+		defer response.Body.Close() //nolint:errcheck
+		data, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		return response.StatusCode, string(data)
+	}
+
+	for _, path := range []string{mcpEndpointPath, "/MCP/"} {
+		status, body := chunked(path, mcpBody(t, "ping", nil))
+		require.Equal(t, http.StatusOK, status, "%s: %s", path, body)
+		require.Contains(t, body, `"result"`, path)
+	}
+	status, body := chunked("/api/v1/tasks", `{}`)
+	require.Equal(t, http.StatusLengthRequired, status, body)
+}
+
 // Browser Streamable HTTP clients send MCP headers after initialization; the
 // CORS preflight allows them only while the endpoint is enabled.
 func TestMCPCORSPreflightAllowsMCPHeaders(t *testing.T) {

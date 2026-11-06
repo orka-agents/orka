@@ -994,9 +994,11 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
 	}
 	// Results are stored by name. A UID-fenced read confirms the same Task
-	// still holds the name after the read, so the output is that Task's.
+	// still holds the name after the read, so the output is that Task's. The
+	// check reads live: the cache could still hold the original Task after a
+	// same-name replacement has published its result.
 	if c.Query(taskUIDQueryParam) != "" {
-		current, err := h.taskAccess().load(c, namespace, id)
+		current, err := h.taskAccess().loadLive(c, namespace, id)
 		if err != nil {
 			return err
 		}
