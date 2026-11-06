@@ -9,6 +9,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/valyala/fasthttp"
@@ -114,6 +116,8 @@ type mcpServer struct {
 	slots          chan struct{}
 	waitSlots      chan struct{}
 	allowedOrigins []string
+	// replayHeaders is the caller-header allow-list of REST replays.
+	replayHeaders []string
 	// resultWait bounds how long tasks/result waits for a Task to finish.
 	resultWait time.Duration
 }
@@ -151,6 +155,8 @@ type mcpCall struct {
 	params json.RawMessage
 	// sessionless is true when the request carries the 2026-07-28 _meta.
 	sessionless bool
+	// metaVersion is the _meta protocol version, when the request has one.
+	metaVersion string
 	// tasksExtension is true when the request's client capabilities declare
 	// the MCP Tasks extension.
 	tasksExtension bool
@@ -201,6 +207,7 @@ func newMCPServer(handler fasthttp.RequestHandler, cfg MCPServerConfig) *mcpServ
 		slots:          make(chan struct{}, maxConcurrent),
 		waitSlots:      make(chan struct{}, max(1, maxConcurrent/2)),
 		allowedOrigins: mcpAllowedOrigins(os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")),
+		replayHeaders:  mcpReplayHeaders(ContextTokenConfig{}),
 		resultWait:     mcpMaxWaitSeconds * time.Second,
 	}
 }
@@ -286,7 +293,10 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 
 	call := &mcpCall{c: c, method: request.Method, params: request.Params, permit: permit}
 	if err := call.readMeta(); err != nil {
-		return m.writeError(c, fiber.StatusOK, request.ID, err)
+		return m.writeError(c, call.errorStatus(err), request.ID, err)
+	}
+	if err := call.validateHeaders(); err != nil {
+		return m.writeError(c, call.errorStatus(err), request.ID, err)
 	}
 	result, err := m.dispatch(call)
 	if err != nil {
@@ -295,7 +305,7 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 			log.Error(err, "MCP request failed", "method", request.Method)
 			rpcErr = newMCPError(mcpCodeInternalError, "internal error")
 		}
-		return m.writeError(c, fiber.StatusOK, request.ID, rpcErr)
+		return m.writeError(c, call.errorStatus(rpcErr), request.ID, rpcErr)
 	}
 	if call.sessionless {
 		result = withResultType(result, "complete")
@@ -365,14 +375,11 @@ func (call *mcpCall) readMeta() *mcpError {
 		if err := json.Unmarshal(raw, &version); err != nil {
 			return newMCPError(mcpCodeInvalidParams, "invalid _meta protocol version")
 		}
-		if version >= mcpProtocolVersionSessionless {
-			if !slices.Contains(mcpSupportedProtocolVersions, version) {
-				return &mcpError{Code: mcpCodeUnsupportedVersion, Message: "unsupported protocol version", Data: map[string]any{
-					"supported": mcpSupportedProtocolVersions, "requested": version,
-				}}
-			}
-			call.sessionless = true
+		if !slices.Contains(mcpSupportedProtocolVersions, version) {
+			return mcpUnsupportedVersionError(version)
 		}
+		call.metaVersion = version
+		call.sessionless = version >= mcpProtocolVersionSessionless
 	}
 	if raw, ok := params.Meta[mcpMetaClientCapabilities]; ok {
 		var capabilities struct {
@@ -386,6 +393,130 @@ func (call *mcpCall) readMeta() *mcpError {
 		return newMCPError(mcpCodeInvalidParams, "missing _meta client capabilities")
 	}
 	return nil
+}
+
+func mcpUnsupportedVersionError(version string) *mcpError {
+	return &mcpError{Code: mcpCodeUnsupportedVersion, Message: "unsupported protocol version", Data: map[string]any{
+		"supported": mcpSupportedProtocolVersions, "requested": version,
+	}}
+}
+
+func mcpHeaderMismatch(message string) *mcpError {
+	return newMCPError(mcpCodeHeaderMismatch, "header mismatch: "+message)
+}
+
+// errorStatus is the HTTP status of a JSON-RPC error. Header, version, and
+// capability failures are 400, and a sessionless request for a method this
+// server does not implement is 404, as the 2026-07-28 transport requires.
+// Other errors keep 200, as the earlier revisions answer them.
+func (call *mcpCall) errorStatus(rpcErr *mcpError) int {
+	switch rpcErr.Code {
+	case mcpCodeHeaderMismatch, mcpCodeUnsupportedVersion:
+		return fiber.StatusBadRequest
+	case mcpCodeMissingCapabilities:
+		if call.sessionless {
+			return fiber.StatusBadRequest
+		}
+	case mcpCodeMethodNotFound:
+		if call.sessionless {
+			return fiber.StatusNotFound
+		}
+	}
+	return fiber.StatusOK
+}
+
+// mcpNamedMethods carry the Mcp-Name header, mirroring params.name or
+// params.uri.
+var mcpNamedMethods = []string{"tools/call", "resources/read", "prompts/get"}
+
+// validateHeaders enforces the Streamable HTTP request metadata rules: every
+// mirrored header must match the JSON-RPC body, and a sessionless request
+// must carry MCP-Protocol-Version, Mcp-Method, and, where it applies,
+// Mcp-Name. The server acts only on the body; the headers are validated so an
+// intermediary routing on them cannot be shown different values.
+func (call *mcpCall) validateHeaders() *mcpError {
+	request := &call.c.Request().Header
+	value := func(name string) (string, bool, *mcpError) {
+		raw := request.Peek(name)
+		if len(raw) == 0 {
+			return "", false, nil
+		}
+		for _, b := range raw {
+			if (b < 0x20 || b > 0x7e) && b != '\t' {
+				return "", true, mcpHeaderMismatch(name + " header contains invalid characters")
+			}
+		}
+		return string(raw), true, nil
+	}
+
+	version, hasVersion, err := value(mcpProtocolVersionHeader)
+	if err != nil {
+		return err
+	}
+	switch {
+	case call.sessionless && !hasVersion:
+		return mcpHeaderMismatch(mcpProtocolVersionHeader + " header is required")
+	case hasVersion && call.metaVersion != "" && version != call.metaVersion:
+		return mcpHeaderMismatch(mcpProtocolVersionHeader + " header does not match the request _meta protocol version")
+	case hasVersion && !slices.Contains(mcpSupportedProtocolVersions, version):
+		return mcpUnsupportedVersionError(version)
+	case hasVersion && !call.sessionless && version >= mcpProtocolVersionSessionless:
+		return mcpHeaderMismatch(mcpProtocolVersionHeader + " header names a protocol version the request _meta does not carry")
+	}
+
+	if _, hasMethod, err := value(mcpMethodHeader); err != nil {
+		return err
+	} else if call.sessionless && !hasMethod {
+		return mcpHeaderMismatch(mcpMethodHeader + " header is required")
+	}
+
+	name, hasName, err := value(mcpNameHeader)
+	if err != nil {
+		return err
+	}
+	var params struct {
+		Name *string `json:"name"`
+		URI  *string `json:"uri"`
+	}
+	if len(call.params) > 0 {
+		_ = json.Unmarshal(call.params, &params)
+	}
+	bodyName := params.Name
+	if bodyName == nil {
+		bodyName = params.URI
+	}
+	if !hasName {
+		if call.sessionless && bodyName != nil && slices.Contains(mcpNamedMethods, call.method) {
+			return mcpHeaderMismatch(mcpNameHeader + " header is required")
+		}
+		return nil
+	}
+	decoded, ok := decodeMCPHeaderValue(name)
+	if !ok {
+		return mcpHeaderMismatch(mcpNameHeader + " header has an invalid Base64 value")
+	}
+	if bodyName == nil || decoded != *bodyName {
+		return mcpHeaderMismatch(mcpNameHeader + " header does not match the request body")
+	}
+	return nil
+}
+
+// decodeMCPHeaderValue decodes the "=?base64?...?=" sentinel encoding of a
+// mirrored header value; any other value is literal.
+func decodeMCPHeaderValue(value string) (string, bool) {
+	encoded, ok := strings.CutPrefix(value, "=?base64?")
+	if !ok {
+		return value, true
+	}
+	encoded, ok = strings.CutSuffix(encoded, "?=")
+	if !ok {
+		return value, true
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || !utf8.Valid(decoded) {
+		return "", false
+	}
+	return string(decoded), true
 }
 
 func (m *mcpServer) dispatch(call *mcpCall) (any, error) {

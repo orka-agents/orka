@@ -36,6 +36,16 @@ opens no server-sent event stream; `GET /mcp` returns 405. It supports protocol
 versions `2025-03-26`, `2025-06-18`, `2025-11-25`, and the sessionless `2026-07-28`
 revision (`server/discover` and per-request `_meta`).
 
+Mirrored headers are validated against the JSON-RPC body and never used for
+authorization. A `2026-07-28` request must send `MCP-Protocol-Version` (equal to its
+`_meta` version), `Mcp-Method`, and, for `tools/call`, `Mcp-Name` (plain or
+`=?base64?…?=`); a missing or mismatched header is `400` with error `-32020`. An
+unsupported version is `400` with `-32022` and the supported list, and a method the
+server does not implement is `404` for a `2026-07-28` request. Any `Mcp-Session-Id`
+is ignored. The in-process REST replay forwards only your credential headers
+(`Authorization`, `x-api-key`, configured context-token headers) and request labels
+(`Host`, `User-Agent`, trace context); no other header you send reaches the REST route.
+
 ## Authenticate
 
 Use the same credentials as the REST API:
@@ -195,7 +205,9 @@ with the same name is a different MCP task, and the old ID reports "task not fou
 Result reads and cancellation carry the UID to the REST route (`?uid=`), so they never
 return or delete a later Task that reuses the name.
 MCP keeps no state of its own: every `tasks/*` call re-reads the Task with your
-credentials. `tasks/list` is not supported; use `list_tasks`.
+credentials, so a controller or API restart changes nothing. A finished task is never
+reported without its output because a result read failed: `tasks/get` and
+`tasks/result` return an error you can retry instead. `tasks/list` is not supported; use `list_tasks`.
 
 ## Output safety
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -26,27 +27,24 @@ import (
 // backstop against unexpectedly large Task objects or artifacts.
 const mcpRESTResponseLimit = 8 << 20
 
-// mcpReplayStrippedHeaders are request headers that describe the MCP
-// message rather than the caller. Content-Encoding goes with the body: the MCP
-// body was decoded before it was parsed, and the replay sends fresh JSON.
-// Credentials and every other caller header,
-// including configured context-token headers, are forwarded unchanged so the
-// replayed request authenticates exactly as the MCP request did.
-var mcpReplayStrippedHeaders = []string{
-	fiber.HeaderContentLength,
-	fiber.HeaderContentType,
-	fiber.HeaderContentEncoding,
-	fiber.HeaderAccept,
-	fiber.HeaderAcceptEncoding,
-	fiber.HeaderTransferEncoding,
-	fiber.HeaderConnection,
-	fiber.HeaderOrigin,
-	"Expect",
-	"Mcp-Session-Id",
-	mcpProtocolVersionHeader,
-	mcpMethodHeader,
-	mcpNameHeader,
-	"Last-Event-ID",
+// mcpReplayHeaders is the allow-list of caller headers a replayed REST
+// request carries: the credentials the authentication middleware reads
+// (Authorization, x-api-key, and every configured context-token header), plus
+// the Host, User-Agent, and trace context that only label the request. No
+// other caller header reaches the REST route, so nothing an MCP client sends
+// beside its credentials can steer the replay's authorization or identity.
+func mcpReplayHeaders(contextTokens ContextTokenConfig) []string {
+	headers := []string{
+		AuthHeader, XAPIKeyHeader, fiber.HeaderHost, fiber.HeaderUserAgent, "Traceparent", "Tracestate", "Baggage",
+	}
+	for _, profile := range contextTokens.Profiles {
+		for _, header := range profile.Headers {
+			if header.Name != "" && !slices.ContainsFunc(headers, func(name string) bool { return strings.EqualFold(name, header.Name) }) {
+				headers = append(headers, header.Name)
+			}
+		}
+	}
+	return headers
 }
 
 type mcpRESTResponse struct {
@@ -71,9 +69,14 @@ func (e *mcpRESTError) Error() string {
 func (m *mcpServer) rest(c fiber.Ctx, method, path string, query url.Values, body any) (mcpRESTResponse, error) {
 	request := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(request)
-	c.Request().Header.CopyTo(&request.Header)
-	for _, name := range mcpReplayStrippedHeaders {
-		request.Header.Del(name)
+	for _, name := range m.replayHeaders {
+		for _, value := range c.Request().Header.PeekAll(name) {
+			if strings.EqualFold(name, fiber.HeaderHost) {
+				request.Header.SetHostBytes(value)
+				continue
+			}
+			request.Header.AddBytesV(name, value)
+		}
 	}
 	uri := path
 	if encoded := query.Encode(); encoded != "" {

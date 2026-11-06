@@ -197,8 +197,12 @@ func (s mcpTaskState) extensionTaskFields(resultType string) map[string]any {
 }
 
 // terminalToolResult is the create_task result once the Task has finished:
-// its summary and a bounded, redacted prefix of its result text.
-func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) mcpToolResult {
+// its summary and a bounded, redacted prefix of its result text. A finished
+// state is final for the client, so a result read that fails transiently, or
+// finds the Task deleted or replaced, is an error the client can retry rather
+// than a terminal result without its output. Only a result the REST route
+// reports as absent is omitted.
+func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) (mcpToolResult, error) {
 	value := map[string]any{"task": state.summary(false)}
 	if state.response.Status.ResultRef != nil && state.response.Status.ResultRef.Available {
 		var response struct {
@@ -206,13 +210,19 @@ func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) mcpToolR
 		}
 		err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(state.response.Name, "result"),
 			mcpTaskUIDQuery(state.response.Namespace, string(state.response.UID)), nil, &response)
-		if err == nil {
+		var restErr *mcpRESTError
+		switch {
+		case err == nil:
 			value["result"] = mcpOutputChunk(response.Result, 0, mcpDefaultOutputBytes)
+		case errors.As(err, &restErr) && restErr.Status == fiber.StatusNotFound && restErr.Message != "task not found":
+			// The Task is current but its result is gone; report it without.
+		default:
+			return mcpToolResult{}, mcpTaskRPCError(err)
 		}
 	}
 	result := mcpStructuredResult(value)
 	result.IsError = state.status() != mcpStatusCompleted
-	return result
+	return result, nil
 }
 
 // mcpApprovalInputSchema is the elicitation form for one approval request.
@@ -292,7 +302,11 @@ func (m *mcpServer) getTask(call *mcpCall) (any, error) {
 	case mcpStatusInputRequired:
 		fields["inputRequests"] = state.inputRequests()
 	case mcpStatusCompleted:
-		fields["result"] = m.terminalToolResult(call.c, state)
+		result, err := m.terminalToolResult(call.c, state)
+		if err != nil {
+			return nil, err
+		}
+		fields["result"] = result
 	}
 	return fields, nil
 }
@@ -311,7 +325,10 @@ func (m *mcpServer) taskResult(call *mcpCall) (any, error) {
 	if !mcpTaskTerminal(state.response.Status.Phase) && state.status() != mcpStatusCancelled {
 		return nil, newMCPError(mcpCodeServerBusy, "task has not finished; poll tasks/get and request the result again")
 	}
-	result := m.terminalToolResult(call.c, state)
+	result, err := m.terminalToolResult(call.c, state)
+	if err != nil {
+		return nil, err
+	}
 	result.Meta = map[string]any{mcpMetaRelatedTask: map[string]any{"taskId": encodeMCPTaskID(ref.Namespace, ref.Name, ref.UID)}}
 	return result, nil
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -113,9 +114,26 @@ func mcpBody(t *testing.T, method string, params any) string {
 	return string(data)
 }
 
+// mcpRPC sends a request with the Streamable HTTP headers a conforming
+// client mirrors from the body: Mcp-Method always, MCP-Protocol-Version for a
+// _meta protocol version, and Mcp-Name for a tools/call name.
 func (f *externalAuthorizationFixture) mcpRPC(t *testing.T, method string, params any) mcpTestResponse {
 	t.Helper()
-	return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), nil)
+	return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), mcpMirroredHeaders(method, params))
+}
+
+func mcpMirroredHeaders(method string, params any) map[string]string {
+	headers := map[string]string{mcpMethodHeader: method}
+	values, _ := params.(map[string]any)
+	if meta, ok := values["_meta"].(map[string]any); ok {
+		if version, ok := meta[mcpMetaProtocolVersion].(string); ok {
+			headers[mcpProtocolVersionHeader] = version
+		}
+	}
+	if name, ok := values["name"].(string); ok && method == "tools/call" {
+		headers[mcpNameHeader] = name
+	}
+	return headers
 }
 
 func (f *externalAuthorizationFixture) mcpTool(t *testing.T, name string, args any) mcpTestToolResult {
@@ -1312,4 +1330,162 @@ func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
 	}
 	require.Empty(t, mcp.slots)
 	require.Empty(t, mcp.waitSlots)
+}
+
+// Streamable HTTP 2026-07-28: mirrored headers must be present on sessionless
+// requests and match the body; header, version, and capability failures are
+// 400, an unimplemented sessionless method is 404, and sessions are never
+// minted or echoed.
+func TestMCPSessionlessHeadersAreValidated(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	meta := map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}
+	listAgents := map[string]any{"name": mcpToolListAgents, "arguments": map[string]any{}, "_meta": meta}
+	send := func(method string, params any, edit func(map[string]string)) mcpTestResponse {
+		headers := mcpMirroredHeaders(method, params)
+		if edit != nil {
+			edit(headers)
+		}
+		return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), headers)
+	}
+
+	ok := send("tools/call", listAgents, func(h map[string]string) { h["Mcp-Session-Id"] = "stale-session" })
+	require.Equal(t, http.StatusOK, ok.status, ok.body)
+	require.Nil(t, ok.Error, ok.body)
+	require.Empty(t, ok.header.Get("Mcp-Session-Id"), "sessions are ignored, never echoed")
+	encoded := send("tools/call", listAgents, func(h map[string]string) {
+		h[mcpNameHeader] = "=?base64?" + base64.StdEncoding.EncodeToString([]byte(mcpToolListAgents)) + "?="
+	})
+	require.Nil(t, encoded.Error, "a Base64 sentinel Mcp-Name is decoded before comparison: %s", encoded.body)
+
+	for name, tc := range map[string]struct {
+		method string
+		params any
+		edit   func(map[string]string)
+		status int
+		code   int
+	}{
+		"missing protocol version header":  {"tools/call", listAgents, func(h map[string]string) { delete(h, mcpProtocolVersionHeader) }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"protocol version header differs":  {"tools/call", listAgents, func(h map[string]string) { h[mcpProtocolVersionHeader] = "2025-11-25" }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"missing Mcp-Method":               {"tools/call", listAgents, func(h map[string]string) { delete(h, mcpMethodHeader) }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"missing Mcp-Name":                 {"tools/call", listAgents, func(h map[string]string) { delete(h, mcpNameHeader) }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"Mcp-Name differs":                 {"tools/call", listAgents, func(h map[string]string) { h[mcpNameHeader] = mcpToolCreateTask }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"Mcp-Name bad Base64":              {"tools/call", listAgents, func(h map[string]string) { h[mcpNameHeader] = "=?base64?!!!?=" }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"Mcp-Name without a body name":     {"ping", map[string]any{"_meta": meta}, func(h map[string]string) { h[mcpNameHeader] = "anything" }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"legacy Mcp-Name differs":          {"tools/call", map[string]any{"name": mcpToolListAgents, "arguments": map[string]any{}}, func(h map[string]string) { h[mcpNameHeader] = mcpToolCreateTask }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"header claims a modern version":   {"ping", nil, func(h map[string]string) { h[mcpProtocolVersionHeader] = mcpProtocolVersionSessionless }, http.StatusBadRequest, mcpCodeHeaderMismatch},
+		"unsupported legacy header":        {"ping", nil, func(h map[string]string) { h[mcpProtocolVersionHeader] = "2024-11-05" }, http.StatusBadRequest, mcpCodeUnsupportedVersion},
+		"unsupported _meta version":        {"ping", map[string]any{"_meta": map[string]any{mcpMetaProtocolVersion: "1900-01-01", mcpMetaClientCapabilities: map[string]any{}}}, nil, http.StatusBadRequest, mcpCodeUnsupportedVersion},
+		"unimplemented sessionless method": {"resources/list", map[string]any{"_meta": meta}, nil, http.StatusNotFound, mcpCodeMethodNotFound},
+		"sessionless initialize":           {"initialize", map[string]any{"_meta": meta}, nil, http.StatusNotFound, mcpCodeMethodNotFound},
+		"sessionless missing capability":   {"tasks/update", map[string]any{"taskId": "x", "_meta": meta}, nil, http.StatusBadRequest, mcpCodeMissingCapabilities},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := send(tc.method, tc.params, tc.edit)
+			require.Equal(t, tc.status, response.status, response.body)
+			require.NotNil(t, response.Error, response.body)
+			require.Equal(t, tc.code, response.Error.Code, response.body)
+		})
+	}
+	unsupported := send("ping", nil, func(h map[string]string) { h[mcpProtocolVersionHeader] = "2024-11-05" })
+	require.Contains(t, unsupported.body, `"supported"`)
+
+	// Legacy clients keep their shapes: no required headers, 200 errors.
+	legacy := f.mcpRaw(t, http.MethodPost, mcpBody(t, "ping", nil), map[string]string{mcpProtocolVersionHeader: "2025-11-25"})
+	require.Equal(t, http.StatusOK, legacy.status, legacy.body)
+	require.Nil(t, legacy.Error, legacy.body)
+	missing := f.mcpRaw(t, http.MethodPost, mcpBody(t, "resources/list", nil), nil)
+	require.Equal(t, http.StatusOK, missing.status, missing.body)
+	require.Equal(t, mcpCodeMethodNotFound, missing.Error.Code)
+}
+
+// The REST replay carries only the allow-listed caller headers: credentials
+// (including configured context-token headers) and request labels. Nothing
+// else an MCP client sends reaches the REST route.
+func TestMCPReplayForwardsOnlyAllowListedHeaders(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	mcp := f.server.mcpServer
+	mcp.replayHeaders = mcpReplayHeaders(ContextTokenConfig{Profiles: []ContextTokenProfileConfig{{
+		Headers: []TokenHeaderConfig{{Name: "X-Context-Token"}},
+	}}})
+	next := mcp.handler
+	var replayed []http.Header
+	mcp.handler = func(ctx *fasthttp.RequestCtx) {
+		header := http.Header{}
+		for key, value := range ctx.Request.Header.All() {
+			header.Add(string(key), string(value))
+		}
+		replayed = append(replayed, header)
+		next(ctx)
+	}
+	headers := mcpMirroredHeaders("tools/call", map[string]any{"name": mcpToolListAgents})
+	maps.Copy(headers, map[string]string{
+		"X-Context-Token": "context-token-value", "Traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+		"User-Agent": "mcp-test", "Idempotency-Key": "replayed-key", "X-Orka-Tools": "disabled",
+		"X-Forwarded-For": "203.0.113.9", "X-Forwarded-User": "admin", "Impersonate-User": "admin",
+		"Mcp-Param-Region": "us", "Cookie": "session=abc", "Content-Encoding": "identity",
+	})
+	response := f.mcpRaw(t, http.MethodPost, mcpBody(t, "tools/call", map[string]any{"name": mcpToolListAgents, "arguments": map[string]any{}}), headers)
+	require.Nil(t, response.Error, response.body)
+	require.NotEmpty(t, replayed)
+	for _, header := range replayed {
+		require.True(t, strings.HasPrefix(header.Get("Authorization"), "Bearer fixture-"), header)
+		require.Equal(t, "context-token-value", header.Get("X-Context-Token"))
+		require.Equal(t, "mcp-test", header.Get("User-Agent"))
+		require.NotEmpty(t, header.Get("Traceparent"))
+		for _, name := range []string{
+			"Idempotency-Key", "X-Orka-Tools", "X-Forwarded-For", "X-Forwarded-User", "Impersonate-User", "Mcp-Param-Region",
+			"Cookie", "Content-Encoding", "Origin", mcpMethodHeader, mcpNameHeader, mcpProtocolVersionHeader,
+		} {
+			require.Empty(t, header.Values(name), "%s must not reach the REST route", name)
+		}
+	}
+}
+
+// A finished state is final for an MCP client, so tasks/get and tasks/result
+// never report one without the Task's output when the result read fails
+// transiently; they fail and the client retries. A result the REST route
+// reports as absent is reported without output.
+func TestMCPTerminalResultsAreNeverSilentlyDropped(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "finished", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "finished", []byte("the output")))
+	mcp := f.server.mcpServer
+	next := mcp.handler
+	failResults := true
+	mcp.handler = func(ctx *fasthttp.RequestCtx) {
+		if failResults && strings.HasSuffix(string(ctx.Path()), "/result") {
+			ctx.SetStatusCode(fiber.StatusServiceUnavailable)
+			ctx.SetBodyString(`{"error":{"message":"result store unavailable"}}`)
+			return
+		}
+		next(ctx)
+	}
+	taskID := encodeMCPTaskID("default", "finished", "uid-finished")
+
+	get := f.mcpRPC(t, "tasks/get", map[string]any{"taskId": taskID, "_meta": extensionMeta()})
+	require.NotNil(t, get.Error, "a completed task without its output is never reported: %s", get.body)
+	require.Equal(t, mcpCodeInternalError, get.Error.Code)
+	result := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": taskID})
+	require.NotNil(t, result.Error, result.body)
+
+	failResults = false
+	get = f.mcpRPC(t, "tasks/get", map[string]any{"taskId": taskID, "_meta": extensionMeta()})
+	require.Nil(t, get.Error, get.body)
+	require.Contains(t, get.body, "the output")
+
+	// The store lost the result: the Task is still reported, without output.
+	createMCPTestTask(t, f, "lost", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	lost := f.mcpRPC(t, "tasks/get", map[string]any{"taskId": encodeMCPTaskID("default", "lost", "uid-lost"), "_meta": extensionMeta()})
+	require.Nil(t, lost.Error, lost.body)
+	var task map[string]any
+	require.NoError(t, json.Unmarshal(lost.Result, &task))
+	requireExtensionDetailedTask(t, task)
+	require.Equal(t, mcpStatusCompleted, task["status"])
 }

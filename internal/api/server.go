@@ -554,6 +554,7 @@ func (s *Server) setupRoutes() {
 	if s.config.MCP.Enabled {
 		app := s.app
 		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
+		s.mcpServer.replayHeaders = mcpReplayHeaders(s.config.ContextTokens)
 		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
 		mcp.Post("", s.mcpServer.Handle)
 	}

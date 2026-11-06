@@ -33,8 +33,10 @@ an `input_required` state when a human must answer.
   `/auth/whoami`.
 - Every tool call and every `tasks/*` method is executed by building the public
   REST request it corresponds to and running it through the API server's own
-  Fiber handler in process, with the caller's original request headers minus the
-  MCP transport headers. The full middleware chain and the route's authorization
+  Fiber handler in process. The replay carries only an allow-list of the caller's
+  headers: the credentials authentication reads (`Authorization`, `x-api-key`, and
+  every configured context-token header) plus `Host`, `User-Agent`, and trace
+  context. The full middleware chain and the route's authorization
   run again; the MCP layer holds no Kubernetes client, store handle, or service
   identity, and adds no permission. Each tool documents the routes it replays,
   and tests require the same SubjectAccessReviews, in the same order, as the
