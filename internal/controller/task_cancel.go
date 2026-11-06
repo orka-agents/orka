@@ -90,12 +90,14 @@ func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *cor
 		if !ok {
 			return nil
 		}
-		if current.Status.Execution == nil && strings.TrimSpace(current.Labels[acpExecutionWorkspaceLinkLabel]) != "" {
-			// Cancelled while its class workspace was being admitted or
-			// attached: settle any attempt persisted before its status, and
-			// record the terminal execution a queued timeout records, so
-			// cleanup recognizes it and terminal settlement revokes the
-			// linked attachment.
+		if current.Status.Execution == nil {
+			// Cancelled before its execution status was projected, for
+			// example while its class workspace was being attached or after
+			// a status write that followed the PromptAttempt was lost: settle
+			// any attempt persisted before the status, which recovery never
+			// visits, and record the terminal execution a queued timeout
+			// records, so cleanup recognizes it and terminal settlement
+			// revokes a linked attachment.
 			attempt, err := r.settleUnprojectedACPAttempt(ctx, current, acpCancelledReason, requested, "cancelled-before-status")
 			if err != nil {
 				return err
