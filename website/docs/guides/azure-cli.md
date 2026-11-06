@@ -212,7 +212,7 @@ runs `az group list` as usual.
 | `(OrkaReadOnly)` | The command writes or acts on a resource. Only reads are forwarded. |
 | `(OrkaResourceNotForwarded)` | The command needs a service other than Resource Manager. |
 | `(OrkaNotAuthorized)` | No prompt is running, or the Task does not allow the forwarding Tool. |
-| `(OrkaConnectionRequired)` | The person who asked has no usable linked account: none, expired, or changed since the Task started. The message names the `orka connect` command; run it, then run the Task again. |
+| `(OrkaConnectionRequired)` | The person who asked has no usable linked account: none, expired, revoked, or changed since the Task started. The message names the `orka connect` command; run it, then run the Task again. |
 | `(OrkaToolRefused)` or `(OrkaBrokerError)` | The controller refused or could not complete the call: for example, the identity is disabled or the policy changed. For an agent identity, the `agent-identity-audit` log says why. |
 | `(AuthorizationFailed)` | Azure refused the identity. Give it a role on the scope you are reading. |
 | `Please run 'az login'` | The Agent's toolbox is not this wrapper, or the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |

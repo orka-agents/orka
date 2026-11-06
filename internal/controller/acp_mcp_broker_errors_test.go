@@ -329,9 +329,9 @@ func newMCPExecutionErrorTestBroker(
 // result instead of an opaque failed call.
 func TestACPMCPToolExecutionResultReportsAConnectionTheRequesterMustLink(t *testing.T) {
 	descriptor := harnessv2.MCPToolDescriptor{Name: "azure_arm", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly}
-	reason := "the requester has no link to \"azure\"; link it with `orka connect azure` and run the Task again"
-	err := &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: fmt.Errorf("resolve outbound access policy: %w",
-		&outboundaccess.ConnectionRequiredError{Reason: reason})}
+	refusal := &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotLinked, Provider: "azure", DisplayName: "Azure", Namespace: "team-a"}
+	reason := refusal.Error()
+	err := &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: fmt.Errorf("resolve outbound access policy: %w", refusal)}
 	result, resultErr := acpMCPToolExecutionResult(context.Background(), descriptor, "", err)
 	if resultErr != nil {
 		t.Fatalf("acpMCPToolExecutionResult() error = %v, want a tool result", resultErr)

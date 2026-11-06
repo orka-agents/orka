@@ -88,7 +88,8 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 			t.Fatalf("az account clear: %v\n%s", err, output)
 		}
 		output, err := run("group", "list")
-		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaNotAuthorized") {
+		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaNotAuthorized") ||
+			strings.Contains(output, "Please run 'az login'") {
 			t.Fatalf("az group list outside a prompt should explain the refusal: %v\n%s", err, output)
 		}
 	}
@@ -107,12 +108,12 @@ func checkAzNamesTheMissingLink(t *testing.T, fixture *azureGatewayFixture, run 
 	fixture.mu.Lock()
 	linked := fixture.respond
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
-		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"the requester has no link to \"azure\"; link it with ` +
-			"`orka connect azure`" + ` and run the Task again"}`)
+		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"Azure is not linked for the person who asked. They need to run ` +
+			"`orka connect azure -n team-a`" + `, then run this Task again."}`)
 	}
 	fixture.mu.Unlock()
 	output, err := run("group", "list")
-	if err == nil || !strings.Contains(output, "OrkaConnectionRequired") || !strings.Contains(output, "orka connect azure") {
+	if err == nil || !strings.Contains(output, "OrkaConnectionRequired") || !strings.Contains(output, "orka connect azure -n team-a") {
 		t.Fatalf("az group list without a link should name the fix: %v\n%s", err, output)
 	}
 	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {
@@ -120,7 +121,8 @@ func checkAzNamesTheMissingLink(t *testing.T, fixture *azureGatewayFixture, run 
 			t.Fatalf("az account clear: %v\n%s", err, output)
 		}
 		output, err := run("group", "list")
-		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaConnectionRequired") {
+		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaConnectionRequired") ||
+			strings.Contains(output, "az login") && !strings.Contains(output, "az login will not help") {
 			t.Fatalf("az sign-in without a link should name the fix: %v\n%s", err, output)
 		}
 	}

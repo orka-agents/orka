@@ -608,8 +608,9 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	}
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
-		if reason := r.unfrozenConnectionReason(ctx, policy.Namespace, providerName, requester); reason != "" {
-			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, &ConnectionRequiredError{Reason: reason}
+		if refusal := r.unfrozenConnectionRefusal(ctx, policy.Namespace, providerName, requester); refusal != nil {
+			r.describeConnectionRefusal(ctx, refusal, policy.Namespace, providerName, nil)
+			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, refusal
 		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
@@ -642,6 +643,9 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 		Tool:      req.Tool,
 	})
 	if err != nil {
+		if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
+			r.describeConnectionRefusal(ctx, refusal, policy.Namespace, providerName, provider)
+		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("resolve connection credential: %w", err)
 	}
 	if strings.TrimSpace(credential.AccessToken) == "" {
@@ -653,31 +657,20 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	return credential, declared, nil
 }
 
-// ConnectionRequiredError refuses a call that the requester fixes by
-// linking, re-linking, or running the Task again. Reason is built by Orka from
-// the provider name and the link's state, never from a credential or an
-// upstream response, so it can be shown to the agent and logged.
-type ConnectionRequiredError struct {
-	Reason string
-}
-
-func (e *ConnectionRequiredError) Error() string { return e.Reason }
-
-// unfrozenConnectionReason explains why the Task carries no Connection of
+// unfrozenConnectionRefusal explains why the Task carries no Connection of
 // the requester's for a provider, from the state of their links now: none,
 // several, or one that is expired, not Ready, or Ready but not bound (for
 // example consent or granted scopes that did not match the provider when the
-// Task was bound). It reads only, and returns "" when it cannot tell, so the
+// Task was bound). It reads only, and returns nil when it cannot tell, so the
 // caller keeps its generic refusal.
-func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) string {
+func (r *KubernetesResolver) unfrozenConnectionRefusal(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) *ConnectionRequiredError {
 	if r.Reader == nil {
-		return ""
+		return nil
 	}
 	connections := &corev1alpha1.ConnectionList{}
 	if err := r.Reader.List(ctx, connections, client.InNamespace(namespace)); err != nil {
-		return ""
+		return nil
 	}
-	relink := fmt.Sprintf("link it with `orka connect %s` and run the Task again", provider)
 	var links []*corev1alpha1.Connection
 	for i := range connections.Items {
 		connection := &connections.Items[i]
@@ -688,19 +681,35 @@ func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, names
 	}
 	switch {
 	case len(links) == 0:
-		return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
+		return &ConnectionRequiredError{Kind: ConnectionNotLinked}
 	case len(links) > 1:
-		return fmt.Sprintf("the requester has %d links to %q and none is bound while that is ambiguous; keep one and run the Task again",
-			len(links), provider)
+		return &ConnectionRequiredError{Kind: ConnectionAmbiguous, Links: len(links)}
 	}
 	switch state := links[0].Status.State; state {
 	case corev1alpha1.ConnectionStateExpired:
-		return fmt.Sprintf("the requester's link to %q is expired; %s", provider, relink)
+		return &ConnectionRequiredError{Kind: ConnectionExpired}
 	case corev1alpha1.ConnectionStateReady:
-		return fmt.Sprintf("the requester's link to %q is Ready but is not bound to this Task; "+
-			"check that its consent and granted scopes match the provider, then run the Task again", provider)
+		return &ConnectionRequiredError{Kind: ConnectionNotBound}
 	default:
-		return fmt.Sprintf("the requester's link to %q is not Ready (%s); %s", provider, state, relink)
+		return &ConnectionRequiredError{Kind: ConnectionNotReady, State: state}
+	}
+}
+
+// describeConnectionRefusal names the provider in a refusal so its message
+// gives the exact command. The display name is best effort: provider may be
+// nil, and a failed read leaves the resource name.
+func (r *KubernetesResolver) describeConnectionRefusal(
+	ctx context.Context, refusal *ConnectionRequiredError, namespace, providerName string, provider *corev1alpha1.ConnectorProvider,
+) {
+	refusal.Provider, refusal.Namespace = providerName, namespace
+	if provider == nil && r.Reader != nil {
+		candidate := &corev1alpha1.ConnectorProvider{}
+		if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: providerName}, candidate); err == nil {
+			provider = candidate
+		}
+	}
+	if provider != nil {
+		refusal.DisplayName = strings.TrimSpace(provider.Spec.DisplayName)
 	}
 }
 

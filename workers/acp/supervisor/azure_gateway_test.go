@@ -248,13 +248,13 @@ func TestAzureGatewayPassesUpstreamErrorsThrough(t *testing.T) {
 func TestAzureGatewayTellsTheAgentWhenThePersonMustLinkTheirAccount(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
-		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"the requester has no link to \"azure\"; link it with ` +
-			"`orka connect azure`" + ` and run the Task again"}`)
+		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"Azure is not linked for the person who asked. They need to run ` +
+			"`orka connect azure -n team-a`" + `, then run this Task again."}`)
 	}
 	token := fixture.token(t)
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions?api-version=1", http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaConnectionRequired") ||
-		!strings.Contains(body, "orka connect azure") {
+		!strings.Contains(body, "orka connect azure -n team-a") || !strings.Contains(body, "az login will not help") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
 	}
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {

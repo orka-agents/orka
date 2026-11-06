@@ -400,8 +400,10 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	if response.IsError {
 		if brokerErrorCode(response.Result) == harnessv2.MCPToolErrorCodeConnectionRequired {
+			// The broker's message already says who must do what; the agent
+			// should not retry or try to sign az in itself.
 			writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired",
-				"The person who asked has no usable linked Azure account: "+brokerErrorMessage(response.Result)+".")
+				brokerErrorMessage(response.Result)+". Retrying or running az login will not help.")
 			return
 		}
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")

@@ -181,16 +181,16 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 		req := base
 		req.FrozenConnections = nil
 		_, err := resolver.Resolve(context.Background(), req)
-		if err == nil || !strings.Contains(err.Error(), "the requester has no link to") || !strings.Contains(err.Error(), "orka connect") {
+		if err == nil || !strings.Contains(err.Error(), "github is not linked for the person who asked") || !strings.Contains(err.Error(), "`orka connect github -n tenant`") {
 			t.Fatalf("err = %v, want the missing link named", err)
 		}
 		if _, ok := errors.AsType[*ConnectionRequiredError](err); !ok {
 			t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
 		}
 		for state, want := range map[string]string{
-			corev1alpha1.ConnectionStateExpired: "is expired",
-			corev1alpha1.ConnectionStateReady:   "is Ready but is not bound to this Task",
-			"Revoked":                           "is not Ready (Revoked)",
+			corev1alpha1.ConnectionStateExpired: "has expired",
+			corev1alpha1.ConnectionStateReady:   "does not match what the provider requires now",
+			"Revoked":                           "is not ready (Revoked)",
 		} {
 			link := &corev1alpha1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "alice-github"},
@@ -216,7 +216,7 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			}
 		}
 		duplicated := &KubernetesResolver{Reader: newReader().WithObjects(duplicate("alice-github"), duplicate("alice-github-2")).Build(), Connections: source}
-		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to") {
+		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to github") {
 			t.Fatalf("duplicate links: err = %v, want them named", err)
 		}
 		other := &corev1alpha1.Connection{
@@ -228,7 +228,7 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady},
 		}
 		if _, err := (&KubernetesResolver{Reader: newReader().WithObjects(other).Build(), Connections: source}).Resolve(context.Background(), req); err == nil ||
-			!strings.Contains(err.Error(), "the requester has no link to") {
+			!strings.Contains(err.Error(), "is not linked for the person who asked") {
 			t.Fatalf("another person's link must not count: err = %v", err)
 		}
 		req.FrozenConnections = map[string]FrozenConnection{"other": {UID: "x"}}

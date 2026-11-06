@@ -120,7 +120,7 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	credential, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return outboundaccess.ConnectionCredential{}, &outboundaccess.ConnectionRequiredError{Reason: "connection holds no credential; the person must reconnect"}
+			return outboundaccess.ConnectionCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
@@ -193,7 +193,7 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	// frozen-binding check could pass against stale readiness.
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: name}, connection); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, &outboundaccess.ConnectionRequiredError{Reason: "the requester has no connection to this provider"}
+			return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotLinked}
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
@@ -202,16 +202,19 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 		return nil, errors.New("connection does not belong to the requester")
 	}
 	if !connection.DeletionTimestamp.IsZero() {
-		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection is being deleted"}
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionDeleting}
 	}
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
-		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection changed since the task was dispatched; re-dispatch to use it"}
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionChanged}
 	}
 	if !connectors.ConnectionLinked(connection) {
-		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection is not ready"}
+		if connection.Status.State == corev1alpha1.ConnectionStateExpired {
+			return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
+		}
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNotReady, State: connection.Status.State}
 	}
 	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
-		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection was re-linked since the task was dispatched; re-dispatch to use it"}
+		return nil, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	return connection, nil
 }
@@ -289,7 +292,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 		}
 		s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonExpired, corev1alpha1.ConnectionStateExpired,
 			"Access token expired and the provider issued no refresh token")
-		return store.ConnectorCredential{}, errors.New("connection credential expired and cannot be refreshed; the person must reconnect")
+		return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionExpired}
 	}
 	if s.OAuth == nil {
 		return store.ConnectorCredential{}, errors.New("connection credential refresh is not configured")
@@ -328,7 +331,7 @@ func (s *Source) refresh(ctx context.Context, connection *corev1alpha1.Connectio
 			}
 			s.markNotReady(ctx, connection, ref, current.Version, corev1alpha1.ConnectionReasonRevoked, corev1alpha1.ConnectionStateRevoked,
 				"The provider rejected the refresh token; the person must reconnect")
-			return store.ConnectorCredential{}, errors.New("connection was revoked by the provider; the person must reconnect")
+			return store.ConnectorCredential{}, &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRevoked}
 		}
 		logger.Info("connection refresh failed transiently", "reason", oauthReason(err))
 		return store.ConnectorCredential{}, errors.New("connection credential refresh failed")
@@ -505,7 +508,7 @@ func checkProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.C
 	// digest: client identity and endpoints, not tool destinations); a
 	// replaced provider or rotated client must never receive or use it.
 	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
-		return errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionClientChanged}
 	}
 	if !connectors.ConsentMatchesProvider(connection, provider) {
 		return errors.New("connector provider changed since consent; the person must consent again")
@@ -690,7 +693,7 @@ func oauthReason(err error) string {
 // produced.
 func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential store.ConnectorCredential) error {
 	if req.Frozen.GrantSequence <= 0 || credential.GrantSequence != req.Frozen.GrantSequence {
-		return &outboundaccess.ConnectionRequiredError{Reason: "connection was re-linked since the task was dispatched; re-dispatch to use it"}
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	return nil
 }

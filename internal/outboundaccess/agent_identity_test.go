@@ -374,7 +374,7 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 			cap:     2 * time.Hour, want: "expired",
 		},
 		"no verified requester":    {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Requester = nil }, want: "verified requester"},
-		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "link to"},
+		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "is not linked for the person who asked"},
 		"tool the provider lacks":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
 		"no liveness check":        {spec: delegatedPolicySpec(nil), noLive: true, want: "Task and Session check"},
 		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task is Cancelled"), want: "no longer live"},
