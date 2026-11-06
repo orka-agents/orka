@@ -210,14 +210,15 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	if !m.originAllowed(c.Get(fiber.HeaderOrigin)) {
 		return m.writeError(c, fiber.StatusForbidden, nil, newMCPError(mcpCodeInvalidRequest, "origin not allowed"))
 	}
-	// Read the whole body before taking a permit, so a stalled upload cannot
-	// hold one. The MCP request config bounds the read in size and time.
+	// Read the whole raw body before taking a permit, so a stalled upload
+	// cannot hold one. The MCP request config bounds the read in size and
+	// time. Decoding a Content-Encoding waits for the permit.
 	if c.Request().Header.ContentLength() > mcpMaxRequestBytes {
 		c.RequestCtx().SetConnectionClose()
 		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
 	}
-	body := c.Body()
-	if len(body) > mcpMaxRequestBytes {
+	if len(c.BodyRaw()) > mcpMaxRequestBytes {
+		c.RequestCtx().SetConnectionClose()
 		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
 	}
 	if !tryAcquire(m.slots) {
@@ -226,6 +227,10 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	}
 	defer func() { <-m.slots }()
 
+	body := c.Body()
+	if len(body) > mcpMaxRequestBytes {
+		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
+	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && trimmed[0] == '[' {
 		return m.writeError(c, fiber.StatusBadRequest, nil, newMCPError(mcpCodeInvalidRequest, "JSON-RPC batches are not supported"))

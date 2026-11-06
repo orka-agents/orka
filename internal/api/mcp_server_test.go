@@ -949,6 +949,22 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	defer response.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, response.StatusCode, "the stalled upload holds no permit")
 	require.NoError(t, stalled.Close())
+
+	// Decoding a Content-Encoding is work admitted by a permit: with every
+	// permit taken, a compressed body is refused before it is expanded.
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, err = writer.Write([]byte(strings.Repeat(" ", 2*mcpMaxRequestBytes)))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	mcp.slots <- struct{}{}
+	defer func() { <-mcp.slots }()
+	request := httptest.NewRequest(http.MethodPost, mcpEndpointPath, &compressed)
+	request.Header.Set("Content-Encoding", "gzip")
+	busy, err := app.Test(request)
+	require.NoError(t, err)
+	defer busy.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusTooManyRequests, busy.StatusCode)
 }
 
 // The replay decodes nothing: Content-Encoding describes the MCP body, which
