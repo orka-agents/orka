@@ -247,13 +247,13 @@ func TestParkedRuntimeReleasesOfDifferentGenerationsNeverEraseEachOther(t *testi
 	}
 	turn := func(name string, uid types.UID, generation uint64) (*corev1alpha1.Task, harnessv2.Fence) {
 		return &corev1alpha1.Task{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, UID: uid},
-				Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-" + name}},
-			}, harnessv2.Fence{
-				RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
-				RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControlDigestForDispatcher("parked-profile")),
-				ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-parked", RuntimeSessionGeneration: generation,
-			}
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, UID: uid},
+			Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-" + name}},
+		}, harnessv2.Fence{
+			RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+			RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControlDigestForDispatcher("parked-profile")),
+			ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-parked", RuntimeSessionGeneration: generation,
+		}
 	}
 	d := &ACPDispatcher{}
 	older, olderFence := turn("older", "11111111-1111-1111-1111-111111111111", 2)
