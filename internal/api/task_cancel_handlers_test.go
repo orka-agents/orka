@@ -158,6 +158,21 @@ func TestCancelSessionCancelsOnlyItsRunningTurn(t *testing.T) {
 	}
 }
 
+func TestCancelSessionHidesGatewayOwnedSessions(t *testing.T) {
+	h, app := setupCancelTest(t, cancelTestTask("gateway-turn", corev1alpha1.TaskPhaseRunning, "gateway-chat"))
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "gateway-chat", SessionType: store.SessionTypeGateway,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := postCancel(t, app, "/sessions/gateway-chat/cancel", ""); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a gateway-owned Session: status = %d, body = %v, want 404", resp.StatusCode, body)
+	}
+	if _, ok := cancelAnnotation(t, h, "gateway-turn"); ok {
+		t.Fatal("a gateway-owned Session's Task must not be cancelled through the Session API")
+	}
+}
+
 func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	chatTurn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
 	chatTurn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
