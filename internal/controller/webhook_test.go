@@ -758,3 +758,26 @@ func TestWebhookDeliveryNeverSendsAfterItsLeaseExpires(t *testing.T) {
 		t.Fatalf("delivery = %+v, want a pending retry", delivery)
 	}
 }
+
+// Status times serialize at whole seconds; the persisted lease must not end
+// before the in-process lease that bounds the send.
+func TestWebhookDeliveryPersistedLeaseNeverEndsEarly(t *testing.T) {
+	t.Parallel()
+	clock := &webhookTestClock{now: time.Unix(1_800_000_100, 700_000_000)}
+	receiver := newWebhookReceiver(t, http.StatusInternalServerError)
+	task := newWebhookTask(receiver.server.URL)
+	client := newWebhookTestClient(t, task)
+	notifier := newTestWebhookNotifier(t, newWebhookTestKeys(t), clock)
+	claimed := clock.now
+	writes := &failingResultWrites{SubResourceWriter: client.Status()}
+	if _, err := notifier.reconcileDelivery(context.Background(), writes, reloadWebhookTask(t, client, task)); err == nil {
+		t.Fatal("the result write was expected to fail, leaving only the claimed lease")
+	}
+	delivery := reloadWebhookTask(t, client, task).Status.WebhookDelivery
+	if delivery == nil || delivery.NextAttemptTime == nil {
+		t.Fatalf("no persisted lease: %+v", delivery)
+	}
+	if want := claimed.Add(notifier.attemptLease); delivery.NextAttemptTime.Before(&metav1.Time{Time: want}) {
+		t.Fatalf("persisted lease ends at %v, before the in-process lease at %v", delivery.NextAttemptTime.Time, want)
+	}
+}

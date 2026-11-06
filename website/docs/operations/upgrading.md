@@ -75,7 +75,12 @@ upgrading:
   against `/.well-known/orka/task-webhook-jwks.json`. See
   [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
 - The controller creates the signing Secret in its namespace on first use. It needs the
-  Secret `create` and `update` access the controller role already grants.
+  Secret `create` and `update` access the controller role already grants. Under the
+  default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
+  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures. See
+  [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
+  their deliveries are marked `Failed`; enabling signing later does not retry them.
 - Destinations are checked at connect time. A DNS failure, any non-public resolved
   address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
   a private address stops receiving notices. Use a Service in the Task's namespace for

@@ -165,8 +165,12 @@ status:
   delivery ID is never sent again, a new one carries the newer state, its
   attempts start over, and `superseded` counts the replaced notices.
   Supersession never shortens an existing backoff.
-- If no signing key is available, nothing is sent and no attempt is consumed;
-  the delivery stays `Pending` until a key is available.
+- If signing is enabled but no signing key is available yet (for example, the
+  Secret cannot be read or holds a malformed key), nothing is sent and no
+  attempt is consumed; the delivery stays `Pending` until a key is available.
+- If signing is disabled (`--task-webhook-signing-secret=""`), nothing is sent
+  and the delivery is marked `Failed` at once. Enabling signing later does not
+  retry notices that already failed this way.
 
 ## Signing keys and rotation
 
@@ -207,4 +211,16 @@ If a key is compromised, rotate and remove `previous` at once. Receivers that
 keep the old JWKS cached keep trusting the old key until they refetch.
 
 Setting `--task-webhook-signing-secret=""` disables signing. Since notices are
-never sent unsigned, that also stops webhook delivery.
+never sent unsigned, that also stops webhook delivery: notices for Tasks that
+finish while signing is disabled are marked `Failed` and are not retried after
+signing is enabled again.
+
+### Who can read the signing key
+
+Anyone who can read the signing Secret can forge notices. The controller needs
+that access, but under the default AI worker RBAC profile
+(`workers.ai.rbacProfile: default`) the AI worker service account can also
+`get` Secrets in the release namespace, including this one, so an AI Task there
+could read the private key. If receivers rely on signatures, install with
+`workers.ai.rbacProfile: restricted`, which grants the AI worker no Secret
+access, and restrict any other Secret readers in that namespace.

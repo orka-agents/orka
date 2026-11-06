@@ -117,7 +117,10 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	now = w.now()
 	attempt := delivery.Attempts + 1
 	claimedAt := metav1.NewTime(now)
-	lease := metav1.NewTime(now.Add(w.attemptLease))
+	// Status times are serialized at whole seconds. Round the persisted lease
+	// up so it never ends before leaseCtx: truncation would let another
+	// replica claim the next attempt while this one can still send.
+	lease := metav1.NewTime(ceilToSecond(now.Add(w.attemptLease)))
 	delivery.Attempts = attempt
 	delivery.LastAttemptTime = &claimedAt
 	delivery.NextAttemptTime = &lease
@@ -198,4 +201,12 @@ func (w *WebhookNotifier) recordSigningUnavailable(
 		}
 	}
 	return webhookSigningRetryInterval, nil
+}
+
+// ceilToSecond rounds t up to the next whole second.
+func ceilToSecond(t time.Time) time.Time {
+	if truncated := t.Truncate(time.Second); !truncated.Equal(t) {
+		return truncated.Add(time.Second)
+	}
+	return t
 }
