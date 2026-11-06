@@ -42,7 +42,9 @@ type Config struct {
 	// Entra is nil when no Entra issuer is configured.
 	Entra *EntraConfig
 	// AgentUseAuthorization mirrors --agent-use-authorization-enabled, which
-	// identity-bound Agents require.
+	// identity-bound Agents require. Setting it asserts that the agent-use
+	// ValidatingAdmissionPolicies are installed, which the Helm value does
+	// together with the flag; the controller does not detect them.
 	AgentUseAuthorization bool
 }
 

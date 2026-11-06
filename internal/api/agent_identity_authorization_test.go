@@ -15,15 +15,24 @@ import (
 )
 
 func identityBindClientset(allow bool) (*kubefake.Clientset, *[]authorizationv1.ResourceAttributes) {
+	clientset, seen, _ := identityBindClientsetWithSubjects(allow)
+	return clientset, seen
+}
+
+func identityBindClientsetWithSubjects(allow bool) (*kubefake.Clientset, *[]authorizationv1.ResourceAttributes, *[]authorizationv1.SubjectAccessReviewSpec) {
 	seen := &[]authorizationv1.ResourceAttributes{}
+	subjects := &[]authorizationv1.SubjectAccessReviewSpec{}
 	clientset := kubefake.NewClientset()
 	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
 		*seen = append(*seen, *review.Spec.ResourceAttributes)
+		subject := review.Spec
+		subject.ResourceAttributes = nil
+		*subjects = append(*subjects, subject)
 		review.Status.Allowed = allow
 		return true, review, nil
 	})
-	return clientset, seen
+	return clientset, seen, subjects
 }
 
 func identityBoundAgent(id string) *corev1alpha1.Agent {
@@ -62,4 +71,36 @@ func TestAgentIdentityBindSkipsUnchangedAndRemovedIdentities(t *testing.T) {
 	require.Empty(t, *seen)
 	requireForbidden(t, authorizeAgentIdentityBind(context.Background(), clientset, user,
 		identityBoundAgent("44444444-4444-4444-4444-444444444444"), bound))
+}
+
+func TestAgentIdentityBindReviewsTheSameSubjectAsAgentUse(t *testing.T) {
+	agent := identityBoundAgent("33333333-3333-3333-3333-33333333aaaa")
+	for name, tc := range map[string]struct {
+		user *UserInfo
+		want authorizationv1.SubjectAccessReviewSpec
+	}{
+		"Kubernetes username is kept exactly": {
+			user: &UserInfo{Username: " alice ", Groups: []string{"admins"}, AuthType: AuthTypeTokenReview},
+			want: authorizationv1.SubjectAccessReviewSpec{User: " alice ", Groups: []string{"admins"}, Extra: map[string]authorizationv1.ExtraValue{}},
+		},
+		"OIDC caller is its issuer and subject, not its display name": {
+			user: &UserInfo{Username: "Alice", Issuer: "https://issuer.example", Subject: "sub-1",
+				Groups: []string{"admins"}, AuthType: AuthTypeOIDC},
+			want: authorizationv1.SubjectAccessReviewSpec{User: "https://issuer.example#sub-1",
+				Groups: []string{"https://issuer.example#admins"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wantSpec, ok := agentUseReviewSubject(tc.user)
+			require.True(t, ok)
+			require.Equal(t, tc.want, wantSpec)
+			clientset, _, subjects := identityBindClientsetWithSubjects(true)
+			require.NoError(t, authorizeAgentIdentityBind(context.Background(), clientset, tc.user, agent, nil))
+			require.Equal(t, []authorizationv1.SubjectAccessReviewSpec{tc.want}, *subjects)
+		})
+	}
+	clientset, seen := identityBindClientset(true)
+	requireForbidden(t, authorizeAgentIdentityBind(context.Background(), clientset,
+		&UserInfo{Username: "Alice", AuthType: AuthTypeOIDC}, agent, nil)) // no issuer and subject: no reviewable identity
+	require.Empty(t, *seen)
 }

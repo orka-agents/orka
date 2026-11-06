@@ -248,8 +248,12 @@ Microsoft Entra agent identity (ADR 0039). Binding it requires `bind` on
 identity belongs to one Agent: the first Agent the controller grants it to
 records it in `status.identityClaim`, and any other Agent naming it is not Ready.
 An Agent that stops naming an identity keeps the claim until every Task bound to
-it has finished. An
-identity-bound Agent also requires `--agent-use-authorization-enabled` and a
+it has finished, and a deleted Agent's identity stays taken by its bound Tasks
+until they finish. A claim records when it was granted, is granted only while
+`--agent-use-authorization-enabled` is set, and binds only Tasks created at or
+after that time; create Tasks once the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
+`config/agent-use-policy` policies installed (the Helm value does both; the
+controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
 it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
