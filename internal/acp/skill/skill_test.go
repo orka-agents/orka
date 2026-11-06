@@ -234,3 +234,59 @@ func TestLoadValidatesSkillMarkdown(t *testing.T) {
 		t.Fatal("an invalid declared name must be rejected")
 	}
 }
+
+// TestFailuresWithholdCredentialShapedDiagnostics keeps image-controlled file
+// names and frontmatter keys that look like credentials out of the failure
+// line, which reaches stderr, the termination log, and resource status.
+func TestFailuresWithholdCredentialShapedDiagnostics(t *testing.T) {
+	// Split so the literal is not itself a credential-shaped string.
+	token := "gh" + "p_0123456789abcdefghijABCDEFGHIJ012345"
+	frontmatter := func(fields string) string {
+		return "---\n" + fields + "\n---\nBody.\n"
+	}
+	cases := map[string]struct {
+		files  map[string]string
+		reason string
+	}{
+		"file name": {files: map[string]string{
+			"SKILL.md":                     validMarkdown,
+			"references/" + token + ".bin": strings.Repeat("a", int(DefaultLimits().MaxFileBytes)+1),
+		}, reason: ReasonFileTooLarge},
+		"nested SKILL.md folder name": {files: map[string]string{
+			"SKILL.md":          validMarkdown,
+			token + "/SKILL.md": validMarkdown,
+		}, reason: ReasonUnsafeContent},
+		"frontmatter key": {files: map[string]string{
+			"SKILL.md": frontmatter("name: code-review\ndescription: d\n" + token + ": x"),
+		}, reason: ReasonInvalidFrontmatter},
+		"metadata key": {files: map[string]string{
+			"SKILL.md": frontmatter("name: code-review\ndescription: d\nmetadata:\n  " + token + ": [1]"),
+		}, reason: ReasonInvalidFrontmatter},
+		"duplicate key": {files: map[string]string{
+			"SKILL.md": frontmatter("name: code-review\ndescription: d\n" + token + ": a\n" + token + ": b"),
+		}, reason: ReasonInvalidFrontmatter},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeSkill(t, tc.files), "code-review", DefaultLimits())
+			requireReason(t, err, tc.reason)
+			var failure *toolbox.Failure
+			errors.As(err, &failure)
+			line := toolbox.FormatFailureLine(failure)
+			if strings.Contains(line, token) || strings.Contains(err.Error(), token) {
+				t.Fatalf("failure echoes the credential-shaped value: %s", line)
+			}
+			if failure.Message != withheldDiagnostic {
+				t.Fatalf("message = %q, want the withheld diagnostic", failure.Message)
+			}
+		})
+	}
+	// Ordinary diagnostics keep their detail.
+	_, err := Load(writeSkill(t, map[string]string{
+		"SKILL.md": frontmatter("name: code-review\ndescription: d\nallowed-tools: Bash(*)"),
+	}), "code-review", DefaultLimits())
+	requireReason(t, err, ReasonInvalidFrontmatter)
+	if !strings.Contains(err.Error(), `"allowed-tools"`) {
+		t.Fatalf("a benign diagnostic must keep its detail: %v", err)
+	}
+}

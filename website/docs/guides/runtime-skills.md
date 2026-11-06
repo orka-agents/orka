@@ -51,7 +51,7 @@ resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-
 | --- | --- | --- |
 | Claude | `$CLAUDE_CONFIG_DIR/skills/<name>/` (`~/.claude/skills`) | The SDK `skills` option lists exactly the Orka skills, so Claude Code hides every other skill and its `Skill` tool rejects them. `disableSkillShellExecution` is on. With a restricted tool policy, Orka adds `Skill` to the allowed tools; it only loads skill instructions. |
 | Codex | `$HOME/.agents/skills/<name>/` | Nothing: Codex always loads user skills. |
-| OpenCode | `$OPENCODE_CONFIG_DIR/skills/<name>/` | The `skill` permission allows exactly the Orka skill names and denies everything else, including OpenCode's built-in skills. |
+| OpenCode | `$OPENCODE_CONFIG_DIR/skills/<name>/` | The `skill` permission allows exactly the Orka skill names and denies everything else, including OpenCode's built-in skills. `external_directory` stays denied except for each Orka skill folder, so the `read` tool (when allowed) can open a skill's supporting files. |
 | Copilot | — | Not supported. Copilot CLI in ACP mode keeps loading repository skills (`.github/skills`, `.agents/skills`, `.claude/skills`) whatever its settings say, so enabling its `skill` tool would also hand the model untrusted repository skills. Agents are rejected at admission. |
 
 Codex discovers repository skills (`.agents/skills` in the workspace) on its own, with or

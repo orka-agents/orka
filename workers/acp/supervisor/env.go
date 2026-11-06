@@ -977,6 +977,25 @@ func openCodeSessionConfig(
 			skillPermissions[name] = openCodePermissionAllow
 		}
 		permissions["skill"] = skillPermissions
+		// The projected skills live outside the workspace, and a blanket
+		// external_directory deny in the config overrides OpenCode's own
+		// skill-folder allowance, so its read tool could load SKILL.md but
+		// not the skill's supporting files. Allow only each projected Orka
+		// skill folder and keep the wildcard deny. JSON object keys are
+		// sorted, so "*" precedes these absolute paths and OpenCode's
+		// last-match rule picks the narrower allow.
+		dir, err := nativeSkillsDir(providerKindOpencode, paths)
+		if err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("OpenCode skills folder %q must be absolute", dir)
+		}
+		externalDirectory := map[string]string{"*": openCodePermissionDeny}
+		for _, name := range skills {
+			externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
+		}
+		permissions["external_directory"] = externalDirectory
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny

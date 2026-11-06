@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -372,7 +373,7 @@ func TestClaudeSkillProjectionExposesOnlyOrkaSkills(t *testing.T) {
 }
 
 func TestOpenCodeSkillPermissionAllowsOnlyOrkaSkills(t *testing.T) {
-	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace"}
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
 	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
 	permission := func(t *testing.T, skills []harnessv2.RuntimeSkill) any {
 		t.Helper()
@@ -397,5 +398,120 @@ func TestOpenCodeSkillPermissionAllowsOnlyOrkaSkills(t *testing.T) {
 	if !ok || len(got) != 3 || got["*"] != openCodePermissionDeny ||
 		got["code-review"] != openCodePermissionAllow || got["release-notes"] != openCodePermissionAllow {
 		t.Fatalf("skill permission with skills = %#v", got)
+	}
+}
+
+// openCodeConfigRules returns one permission's rules in the order OpenCode
+// reads them from the config file (JSON object order), as its fromConfig
+// does: a string is a single "*" rule, an object is one rule per key.
+func openCodeConfigRules(t *testing.T, config []byte, permission string) [][2]string {
+	t.Helper()
+	var root struct {
+		Permission map[string]json.RawMessage `json:"permission"`
+	}
+	if err := json.Unmarshal(config, &root); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := root.Permission[permission]
+	if !ok {
+		t.Fatalf("permission %s is not configured", permission)
+	}
+	var action string
+	if json.Unmarshal(raw, &action) == nil {
+		return [][2]string{{"*", action}}
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	if _, err := decoder.Token(); err != nil {
+		t.Fatal(err)
+	}
+	var rules [][2]string
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := decoder.Token()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rules = append(rules, [2]string{key.(string), value.(string)})
+	}
+	return rules
+}
+
+// openCodeEvaluate mirrors OpenCode 1.19.0 Permission.evaluate: the last
+// rule whose wildcard matches wins. Configured rules follow OpenCode's
+// defaults, and the configured "*" rule always matches, so the defaults
+// never decide.
+func openCodeEvaluate(rules [][2]string, pattern string) string {
+	action := "ask"
+	for _, rule := range rules {
+		var expression strings.Builder
+		for _, r := range rule[0] {
+			switch r {
+			case '*':
+				expression.WriteString(".*")
+			case '?':
+				expression.WriteString(".")
+			default:
+				expression.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		if regexp.MustCompile("(?s)^" + expression.String() + "$").MatchString(pattern) {
+			action = rule[1]
+		}
+	}
+	return action
+}
+
+// TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders follows
+// OpenCode's read tool: a file outside the workspace asks external_directory
+// with the glob <parent folder>/*. A loaded skill's supporting files must be
+// readable while every other folder outside the workspace stays denied.
+func TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
+	config := func(t *testing.T, skills []harnessv2.RuntimeSkill) []byte {
+		t.Helper()
+		request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
+			ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{"Read"}},
+		}}
+		request.Profile.Skills = skills
+		data, err := openCodeSessionConfig("openai/gpt-test", testOpenCodeModelLimits(), harnessv2.WorkspaceIntentRead, request, paths, proxy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if rules := openCodeConfigRules(t, config(t, nil), "external_directory"); !slices.Equal(rules, [][2]string{{"*", openCodePermissionDeny}}) {
+		t.Fatalf("external_directory without skills = %v", rules)
+	}
+	data := config(t, supervisorTestSkills())
+	rules := openCodeConfigRules(t, data, "external_directory")
+	readGlob := func(file string) string { return filepath.Join(filepath.Dir(file), "*") }
+	skillsDir := "/sessions/private/xdg/config/opencode/skills"
+	for _, file := range []string{
+		skillsDir + "/code-review/SKILL.md",
+		skillsDir + "/code-review/references/guide.md",
+		skillsDir + "/release-notes/scripts/deep/check.sh",
+	} {
+		if got := openCodeEvaluate(rules, readGlob(file)); got != openCodePermissionAllow {
+			t.Errorf("reading %s after loading its skill = %s, want allow (rules %v)", file, got, rules)
+		}
+	}
+	for _, file := range []string{
+		skillsDir + "/README.md",
+		skillsDir + "/code-reviewer/SKILL.md",
+		skillsDir + "/builtin/SKILL.md",
+		"/sessions/private/xdg/config/opencode/opencode.json",
+		"/sessions/other/xdg/config/opencode/skills/code-review/SKILL.md",
+		"/etc/passwd",
+	} {
+		if got := openCodeEvaluate(rules, readGlob(file)); got != openCodePermissionDeny {
+			t.Errorf("reading %s = %s, want deny (rules %v)", file, got, rules)
+		}
+	}
+	if got := openCodeConfigRules(t, data, "read"); openCodeEvaluate(got, skillsDir+"/code-review/references/guide.md") != openCodePermissionAllow {
+		t.Fatalf("read permission must allow the skill's supporting files: %v", got)
 	}
 }

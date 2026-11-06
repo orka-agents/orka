@@ -75,8 +75,20 @@ type Tree struct {
 	Files []File
 }
 
+// withheldDiagnostic replaces a failure message that would echo
+// credential-shaped content from the image.
+const withheldDiagnostic = "skill diagnostic withheld because it appears to contain a secret or token"
+
+// failf builds a failure whose message reaches stderr, the termination log,
+// and Task and RuntimePool status. Messages can quote image-controlled file
+// names, frontmatter keys, and YAML errors, so a message that looks like it
+// carries a credential is replaced; the stable reason is always kept.
 func failf(reason, format string, args ...any) *toolbox.Failure {
-	return &toolbox.Failure{Reason: reason, Message: fmt.Sprintf(format, args...)}
+	message := fmt.Sprintf(format, args...)
+	if security.LooksLikeSecret(message) {
+		message = withheldDiagnostic
+	}
+	return &toolbox.Failure{Reason: reason, Message: message}
 }
 
 // allowedFrontmatterKeys are the Agent Skills specification fields that only
