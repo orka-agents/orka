@@ -128,8 +128,16 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	fresh := identityBoundTestAgent("fresh", now)
 	r = identityAgentReconciler(fresh)
 	claim, err = r.reconcileIdentityClaim(context.Background(), fresh)
-	if err != nil || claim == nil {
-		t.Fatalf("an unheld identity is claimed: claim=%v err=%v", claim, err)
+	requireGrantTimePending(t, "an unheld identity is claimed", claim, err)
+}
+
+// requireGrantTimePending fails unless the claim was granted and waits for the
+// grant time the API server records.
+func requireGrantTimePending(t *testing.T, name string, claim *corev1alpha1.AgentIdentityClaim, err error) {
+	t.Helper()
+	if claim == nil || claim.ID != testAgentIdentityID || claim.Releasing || claim.GrantedAt != nil ||
+		err == nil || !strings.Contains(err.Error(), "waits for the API server to record the grant time") {
+		t.Fatalf("%s: claim=%+v err=%v, want a granted claim waiting for its grant time", name, claim, err)
 	}
 }
 
@@ -161,10 +169,8 @@ func TestIdentityClaimIsReleasedInTwoPasses(t *testing.T) {
 
 	renamed := releasingAgent(identityBoundTestAgent("holder", time.Now()))
 	r = identityAgentReconciler(renamed)
-	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing ||
-		claim.GrantedAt == nil || !claim.GrantedAt.After(testClaimGrantedAt.Time) {
-		t.Fatalf("naming the held identity again cancels the release and grants it anew: claim=%+v err=%v", claim, err)
-	}
+	claim, err = r.reconcileIdentityClaim(context.Background(), renamed)
+	requireGrantTimePending(t, "naming the held identity again cancels the release and grants it anew", claim, err)
 
 	switched := releasingAgent(identityBoundTestAgent("holder", time.Now()))
 	switched.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
@@ -370,9 +376,7 @@ func TestIdentityClaimWaitsForADeletedHoldersTasks(t *testing.T) {
 	r = identityAgentReconciler(claimant, boundTask("done", deleted, corev1alpha1.TaskPhaseSucceeded),
 		boundTask("own", claimant, corev1alpha1.TaskPhaseRunning))
 	claim, err = r.reconcileIdentityClaim(context.Background(), claimant)
-	if err != nil || claim == nil || claim.ID != testAgentIdentityID {
-		t.Fatalf("finished Tasks and the claimant's own Tasks do not hold it: claim=%v err=%v", claim, err)
-	}
+	requireGrantTimePending(t, "finished Tasks and the claimant's own Tasks do not hold it", claim, err)
 }
 
 func TestIdentityAgentFailsEveryTaskTypeItCannotHonor(t *testing.T) {
@@ -468,9 +472,7 @@ func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
 	})
 	r := &AgentReconciler{Client: namespaced, APIReader: namespaced, Identity: testIdentityConfig()}
 	claim, err := r.reconcileIdentityClaim(context.Background(), agent)
-	if err != nil || claim == nil {
-		t.Fatalf("claim = %+v, err = %v; identity lists must stay in the Agent's namespace", claim, err)
-	}
+	requireGrantTimePending(t, "identity lists stay in the Agent's namespace", claim, err)
 	released := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	released.Spec.Identity = nil
 	releasedClient := interceptor.NewClient(fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(releasingAgent(released)).Build(),
@@ -602,11 +604,59 @@ func TestIdentityClaimsAreGrantedOnlyWhileAgentUseIsEnforced(t *testing.T) {
 		t.Fatalf("a held claim is released without the use check: claim=%+v err=%v", claim, err)
 	}
 
-	before := time.Now().Truncate(time.Second)
 	r = identityAgentReconciler(declared)
 	claim, err := r.reconcileIdentityClaim(context.Background(), declared)
-	if err != nil || claim == nil || claim.GrantedAt == nil || claim.GrantedAt.Time.Before(before) {
-		t.Fatalf("a granted claim records when: claim=%+v err=%v", claim, err)
+	requireGrantTimePending(t, "a claim is granted while the use check is enforced", claim, err)
+}
+
+func TestIdentityClaimGrantTimeComesFromTheAPIServer(t *testing.T) {
+	// The API server's clock runs an hour ahead of the controller's here, and
+	// its latest recorded write is the one that granted the claim.
+	serverWrite := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))
+	earlier := metav1.NewTime(serverWrite.Add(-time.Minute))
+	pending := identityBoundTestAgent("reviewer", time.Now())
+	pending.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID}
+	recorded := []metav1.ManagedFieldsEntry{
+		{Manager: "kubectl", Operation: metav1.ManagedFieldsOperationUpdate, Time: &earlier},
+		{Manager: "manager", Operation: metav1.ManagedFieldsOperationUpdate, Subresource: "status", Time: &serverWrite},
+	}
+	// serverReader returns the Agent with the managedFields the API server
+	// recorded.
+	serverReader := func(entries []metav1.ManagedFieldsEntry) client.Reader {
+		base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(pending).Build()
+		return interceptor.NewClient(base, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				err := c.Get(ctx, key, obj, opts...)
+				obj.SetManagedFields(entries)
+				return err
+			},
+		})
+	}
+	r := identityAgentReconciler(pending)
+	r.APIReader = serverReader(recorded)
+	claim, err := r.reconcileIdentityClaim(context.Background(), pending)
+	if err != nil || claim == nil || claim.GrantedAt == nil || !claim.GrantedAt.Equal(&serverWrite) {
+		t.Fatalf("claim=%+v err=%v, want the grant time the API server recorded (%s), not the controller's clock", claim, err, serverWrite)
+	}
+
+	// With no recorded write time the claim stays pending, so nothing binds.
+	r.APIReader = serverReader(nil)
+	claim, err = r.reconcileIdentityClaim(context.Background(), pending)
+	requireGrantTimePending(t, "no server write time", claim, err)
+
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(claimedAgent(identityBoundTestAgent("waiting", time.Now()))).Build()
+	waiting := &corev1alpha1.Agent{}
+	if err := kube.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: "waiting"}, waiting); err != nil {
+		t.Fatal(err)
+	}
+	waiting.Status.IdentityClaim.GrantedAt = nil
+	if err := kube.Update(context.Background(), waiting); err != nil {
+		t.Fatal(err)
+	}
+	tr := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	work := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: testNS, CreationTimestamp: metav1.Now()}}
+	if _, err := tr.agentExecutionIdentity(context.Background(), work, waiting); !errors.Is(err, errIdentityClaimPending) {
+		t.Fatalf("binding to a claim without its grant time: error = %v, want a retryable wait", err)
 	}
 }
 
