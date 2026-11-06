@@ -639,3 +639,36 @@ func TestRunKeepsCredentialsOutOfSourceAndCloneErrors(t *testing.T) {
 		t.Fatalf("run with a non-repository directory: %v", err)
 	}
 }
+
+func TestRunKeepsCallerPathsOutOfFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	secret := "ghp_" + strings.Repeat("f", 36)
+	missing := filepath.Join(dir, "missing-"+secret+".yaml")
+	err := run(missing, filepath.Join(dir, "out.jsonl"), "", false)
+	if err == nil || !strings.Contains(err.Error(), "read -source") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("run with a missing -source: %v", err)
+	}
+}
+
+func TestRunRefusesToOverwriteItsSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "cases.yaml")
+	content := "repoURL: https://github.com/orka-agents/orka-eval-fixtures\ncases: []\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.yaml")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, out := range []string{source, link, filepath.Join(dir, ".", "cases.yaml")} {
+		err := run(source, out, dir, false)
+		if err == nil || !strings.Contains(err.Error(), "must not be the -source file") {
+			t.Fatalf("run(-out %s) error = %v", out, err)
+		}
+	}
+	got, err := os.ReadFile(source)
+	if err != nil || string(got) != content {
+		t.Fatalf("source changed: %q, %v", got, err)
+	}
+}
