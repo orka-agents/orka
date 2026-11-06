@@ -303,15 +303,21 @@ func removedLinesByFile(files []ReviewCaseFile) map[string]map[int64]int64 {
 
 func removedLines(patch string) map[int64]int64 {
 	removed := map[int64]int64{}
-	var base, head int64
+	var base, head, baseLeft, headLeft int64
 	inHunk := false
 	for text := range strings.SplitSeq(patch, "\n") {
 		if strings.HasPrefix(text, "@@ ") {
-			oldStart, newStart, ok := parseHunkHeader(text)
+			// A hunk must use exactly the lines its header declares; a
+			// malformed patch credits nothing rather than mapping wrongly.
+			if inHunk && (baseLeft != 0 || headLeft != 0) {
+				return nil
+			}
+			header, ok := parseHunkHeader(text)
 			if !ok {
 				return nil
 			}
-			base, head, inHunk = oldStart, newStart, true
+			base, head = header.oldStart, header.newStart
+			baseLeft, headLeft, inHunk = header.oldCount, header.newCount, true
 			continue
 		}
 		if !inHunk {
@@ -321,33 +327,60 @@ func removedLines(patch string) map[int64]int64 {
 		case strings.HasPrefix(text, "-"):
 			removed[base] = head
 			base++
+			baseLeft--
 		case strings.HasPrefix(text, "+"):
 			head++
+			headLeft--
 		case strings.HasPrefix(text, `\`):
 		default:
 			base++
 			head++
+			baseLeft--
+			headLeft--
 		}
+		if baseLeft < 0 || headLeft < 0 {
+			return nil
+		}
+	}
+	if inHunk && (baseLeft != 0 || headLeft != 0) {
+		return nil
 	}
 	return removed
 }
 
-// parseHunkHeader reads the start lines of "@@ -a[,b] +c[,d] @@". A start of
-// 0 (an empty side) is treated as line 1.
-func parseHunkHeader(header string) (oldStart, newStart int64, ok bool) {
-	fields := strings.Fields(header)
+// hunkHeader is "@@ -oldStart,oldCount +newStart,newCount @@" with the start
+// lines adjusted to the first line of each side.
+type hunkHeader struct {
+	oldStart, oldCount, newStart, newCount int64
+}
+
+// parseHunkHeader reads a unified diff hunk header. A missing count means 1.
+// A side with count 0 names the line before the change, so its first line is
+// one later: "@@ -11,20 +10,0 @@" removes base lines 11-30 before head line
+// 11.
+func parseHunkHeader(text string) (hunkHeader, bool) {
+	fields := strings.Fields(text)
 	if len(fields) < 3 || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
-		return 0, 0, false
+		return hunkHeader{}, false
 	}
-	parse := func(field string) (int64, bool) {
-		start, _, _ := strings.Cut(field[1:], ",")
-		n, err := strconv.ParseInt(start, 10, 64)
-		if err != nil || n < 0 {
-			return 0, false
+	parse := func(field string) (start, count int64, ok bool) {
+		startText, countText, hasCount := strings.Cut(field[1:], ",")
+		start, err := strconv.ParseInt(startText, 10, 64)
+		if err != nil || start < 0 {
+			return 0, 0, false
 		}
-		return max(n, 1), true
+		count = 1
+		if hasCount {
+			if count, err = strconv.ParseInt(countText, 10, 64); err != nil || count < 0 {
+				return 0, 0, false
+			}
+		}
+		if count == 0 {
+			start++
+		}
+		return start, count, true
 	}
-	oldStart, okOld := parse(fields[1])
-	newStart, okNew := parse(fields[2])
-	return oldStart, newStart, okOld && okNew
+	oldStart, oldCount, okOld := parse(fields[1])
+	newStart, newCount, okNew := parse(fields[2])
+	return hunkHeader{oldStart: oldStart, oldCount: oldCount, newStart: newStart, newCount: newCount}, okOld && okNew
 }

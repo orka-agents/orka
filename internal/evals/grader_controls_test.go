@@ -39,8 +39,9 @@ const (
 )
 
 // controlDeletionPatch removes a cancellable wait and puts a plain sleep in
-// its place: lines 33-39 of the base become line 33 of the head.
-const controlDeletionPatch = "@@ -30,13 +30,9 @@ func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {\n" +
+// its place: lines 33-39 of the base become line 33 of the head. The hunk
+// uses exactly the 13 base and 7 head lines its header declares.
+const controlDeletionPatch = "@@ -30,13 +30,7 @@ func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {\n" +
 	" \t\tif attempt == attempts {\n" +
 	" \t\t\treturn err\n" +
 	" \t\t}\n" +
@@ -214,4 +215,48 @@ func TestGraderControlsExcludeInfraErrors(t *testing.T) {
 	if grade.Outcome != TrialInfraError || len(grade.Results) != 0 {
 		t.Fatalf("infra error graded as %+v", grade)
 	}
+}
+
+func TestRemovedLines(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		patch string
+		want  map[int64]int64
+	}{
+		{"control patch", controlDeletionPatch, map[int64]int64{33: 33, 34: 33, 35: 33, 36: 33, 37: 33, 38: 33, 39: 33}},
+		// A zero count names the line before the change.
+		{"zero-context deletion", "@@ -11,2 +10,0 @@\n-a\n-b", map[int64]int64{11: 11, 12: 11}},
+		{"deleted file", "@@ -1,2 +0,0 @@\n-a\n-b", map[int64]int64{1: 1, 2: 1}},
+		{"added file", "@@ -0,0 +1,2 @@\n+a\n+b", map[int64]int64{}},
+		{"missing counts", "@@ -5 +5 @@\n-a\n+b", map[int64]int64{5: 5}},
+		{"two hunks", "@@ -2,2 +2,1 @@\n a\n-b\n@@ -10,1 +9,2 @@\n-c\n+d\n+e", map[int64]int64{3: 3, 10: 9}},
+		{"no newline marker", "@@ -1,1 +1,1 @@\n-a\n\\ No newline at end of file\n+b", map[int64]int64{1: 1}},
+		{"body shorter than header", "@@ -1,3 +1,3 @@\n-a\n+b", nil},
+		{"body longer than header", "@@ -1,1 +1,1 @@\n-a\n-b\n+c", nil},
+		{"bad header", "@@ -x +1 @@\n-a", nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := removedLines(test.patch)
+			if len(got) != len(test.want) || (test.want == nil) != (got == nil) {
+				t.Fatalf("removedLines = %v, want %v", got, test.want)
+			}
+			for base, head := range test.want {
+				if got[base] != head {
+					t.Fatalf("removedLines = %v, want %v", got, test.want)
+				}
+			}
+		})
+	}
+}
+
+// A zero-context deletion maps to the line after the one its header names,
+// so a finding on it does not reach a reference that ends just in tolerance
+// of the earlier line.
+func TestLocalizationMapsZeroContextDeletionsAfterThePrecedingLine(t *testing.T) {
+	c := defectCase(ReferenceLocation{File: "a.go", StartLine: 6, EndLine: 7})
+	c.Input.RepositoryMonitorReview.Files = []ReviewCaseFile{{
+		Filename: "a.go", Status: "modified", Patch: "@@ -11,2 +10,0 @@\n-a\n-b", Deletions: 2,
+	}}
+	grade := LocalizationGrader{Tolerance: 3}.Grade(c, reviewOutcome("needs_changes", finding("a.go", 12)))
+	requireGrade(t, grade, GradeFail)
 }
