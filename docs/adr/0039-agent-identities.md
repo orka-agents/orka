@@ -117,10 +117,15 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   granted (`status.identityClaim.grantedAt`); claims are granted only while
   the check is enforced and are released when the controller runs without
   it; and a Task binds an identity only if it was created after the claim
-  was granted. Both times are recorded to the second, so a Task created in
-  the grant's own second, which may predate the grant, is refused too. A
-  claim that stops releasing, because the Agent names the identity again or
-  the check is back on, counts as granted at that moment. An older queued
+  was granted. The grant time comes from the API server's clock, like
+  creation times, never the controller's: a granted claim first carries no
+  grant time and binds nothing, and the controller then records the latest
+  write time the API server stamped on the Agent's `managedFields`, which is
+  no earlier than the write that granted it. Both times are recorded to the
+  second, so a Task created in the grant's own second, which may predate the
+  grant, is refused too. A claim that stops releasing, because the Agent
+  names the identity again or the check is back on, is granted again the
+  same way. An older queued
   Task fails closed and must be created again, as does a Task created
   together with a new identity-bound Agent before or as its claim was
   granted, so such Tasks are created once the Agent is Ready. A scheduled
