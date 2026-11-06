@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
 	"strings"
 	"time"
 
@@ -74,6 +75,35 @@ type TaskWaitReconciler struct {
 	TaskProvenanceProtected bool
 	// Now is overridable for tests.
 	Now func() time.Time
+
+	// created records the UID of each continuation this controller created
+	// and has not linked yet. It is the proof that lets a later reconcile
+	// link it without provenance admission after the linking status write
+	// kept losing races.
+	createdMu sync.Mutex
+	created   map[types.NamespacedName]types.UID
+}
+
+func (r *TaskWaitReconciler) rememberCreatedContinuation(continuation *corev1alpha1.Task) {
+	r.createdMu.Lock()
+	defer r.createdMu.Unlock()
+	if r.created == nil {
+		r.created = make(map[types.NamespacedName]types.UID)
+	}
+	r.created[client.ObjectKeyFromObject(continuation)] = continuation.UID
+}
+
+func (r *TaskWaitReconciler) createdContinuation(continuation *corev1alpha1.Task) bool {
+	r.createdMu.Lock()
+	defer r.createdMu.Unlock()
+	uid, ok := r.created[client.ObjectKeyFromObject(continuation)]
+	return ok && uid != "" && uid == continuation.UID
+}
+
+func (r *TaskWaitReconciler) forgetCreatedContinuation(namespace, name string) {
+	r.createdMu.Lock()
+	defer r.createdMu.Unlock()
+	delete(r.created, types.NamespacedName{Namespace: namespace, Name: name})
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;delete
@@ -423,9 +453,19 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 				"the continuation name is held by an unrelated Task")
 		}
 		if !r.TaskProvenanceProtected {
+			if r.createdContinuation(existing) {
+				// This controller created exactly this incarnation; an earlier
+				// reconcile lost every attempt to link it.
+				return r.markCreatedResumed(ctx, task, existing)
+			}
 			// Without provenance admission anyone who can create Tasks could
 			// forge the lineage annotation; linking it would hand that Task
-			// this one's authority. Fail closed.
+			// this one's authority. Fail closed, and delete the claimed
+			// continuation so that nothing runs unlinked, as cancellation does.
+			uid := existing.UID
+			if err := r.Delete(ctx, existing, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("delete unproven continuation task: %w", err)
+			}
 			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
 				"an existing continuation cannot be proven to be Orka's because Task provenance admission is disabled")
 		}
@@ -459,6 +499,7 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		}
 		return ctrl.Result{}, fmt.Errorf("create continuation task: %w", err)
 	}
+	r.rememberCreatedContinuation(continuation)
 	logf.FromContext(ctx).Info("Created continuation for parked task", "task", task.Name, "continuation", name, "kind", wait.Kind)
 	if err := r.ensureContinuationRequesterSealed(ctx, task, continuation); err != nil {
 		// Linking the continuation that now exists matters more than its
@@ -519,6 +560,7 @@ func (r *TaskWaitReconciler) linkContinuation(ctx context.Context, task, continu
 		return false, taskWaitRetry(done), err
 	}
 	metrics.RecordTaskWaitTransition(string(wait.Kind), string(corev1alpha1.TaskWaitStateResumed), taskWaitedFor(wait, now))
+	r.forgetCreatedContinuation(continuation.Namespace, continuation.Name)
 	// The UID is durable now; the continuation may be deleted like any Task.
 	if err := r.releaseContinuationLink(ctx, continuation.Namespace, continuation.Name); err != nil {
 		return true, ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil //nolint:nilerr // The continuation's own reconcile retries the release.
@@ -606,6 +648,9 @@ func (r *TaskWaitReconciler) finishWithoutResume(
 		return taskWaitRetry(done), err
 	}
 	metrics.RecordTaskWaitTransition(string(wait.Kind), string(state), taskWaitedFor(wait, now))
+	if name := strings.TrimSpace(wait.ContinuationTaskName); name != "" {
+		r.forgetCreatedContinuation(task.Namespace, name)
+	}
 	return ctrl.Result{}, nil
 }
 

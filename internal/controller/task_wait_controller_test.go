@@ -686,6 +686,9 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 	if wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
 		t.Fatalf("an unprovable continuation must never be linked, got %+v", wait)
 	}
+	if len(h.tasks()) != 1 {
+		t.Fatal("an unprovable continuation must be deleted so that nothing runs unlinked")
+	}
 }
 
 func TestTaskWaitIgnoresASameNamedReplacementChild(t *testing.T) {
@@ -952,6 +955,64 @@ func TestTaskWaitCancelsTheContinuationItCreatedWhenCancelledDuringALostLink(t *
 	for _, existing := range h.tasks() {
 		if existing.Name != "parked" && existing.DeletionTimestamp.IsZero() {
 			t.Fatalf("the continuation created for a cancelled wait must be deleted, found %s", existing.Name)
+		}
+	}
+}
+
+func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	h := newTaskWaitHarness(t, task)
+	created, conflicts := 0, 0
+	h.client = fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				created++
+				obj.SetUID(types.UID(fmt.Sprintf("created-uid-%d", created)))
+				return c.Create(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				// Concurrent writers win every link attempt of the reconcile
+				// that created the continuation.
+				if obj.GetName() == "parked" && created > 0 && conflicts < taskWaitLinkAttempts {
+					conflicts++
+					return apierrors.NewConflict(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, obj.GetName(), errors.New("modified"))
+				}
+				return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	h.r.Client, h.r.APIReader = h.client, h.client
+	h.r.TaskProvenanceProtected = false
+	if result := h.reconcile("parked"); result.RequeueAfter != taskWaitStepInterval {
+		t.Fatalf("exhausted link retries must requeue, got %+v", result)
+	}
+	if conflicts != taskWaitLinkAttempts {
+		t.Fatalf("expected %d lost link attempts, got %d", taskWaitLinkAttempts, conflicts)
+	}
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed || wait.ContinuationTaskUID != "created-uid-1" || created != 1 {
+		t.Fatalf("the continuation this controller created must be linked after retries ran out, got %+v (created %d)", wait, created)
+	}
+
+	// After a restart nothing proves the same Task was created here: an
+	// unlinked continuation is deleted and the wait abandoned instead.
+	restarted := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	restarted.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	restarted.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(restarted)
+	orphan := buildTaskContinuation(restarted, restarted.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
+	orphan.UID = "created-before-restart"
+	fresh := newTaskWaitHarness(t, restarted, orphan)
+	fresh.r.TaskProvenanceProtected = false
+	fresh.settle("parked")
+	if wait := fresh.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
+		t.Fatalf("an unproven continuation must not be linked after a restart, got %+v", wait)
+	}
+	for _, existing := range fresh.tasks() {
+		if existing.Name != "parked" && existing.DeletionTimestamp.IsZero() {
+			t.Fatalf("an unproven continuation must be deleted, found %s", existing.Name)
 		}
 	}
 }
