@@ -1,6 +1,7 @@
 package outboundaccess
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -206,6 +207,31 @@ func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
 	for _, other := range []string{pseudonym("https://issuer.example.test", " alice "), pseudonym(" https://issuer.example.test", "alice")} {
 		if other == base {
 			t.Fatal("distinct verified claims must not share a pseudonym")
+		}
+	}
+}
+
+// A resolver built like an AI worker's (no AuditLog, no identity source, no
+// process logger) still writes exactly one record for a refused call.
+func TestAgentIdentityRefusalWithoutAuditLogIsRecorded(t *testing.T) {
+	var output bytes.Buffer
+	previous := agentIdentityAuditOutput
+	agentIdentityAuditOutput = &output
+	t.Cleanup(func() { agentIdentityAuditOutput = previous })
+	reader := ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).
+		WithObjects(readyPolicy("agent", agentIdentityPolicySpec()), identityHolder("agent-uid", true)).Build()
+	resolver := &KubernetesResolver{Reader: reader}
+	if _, err := resolver.Resolve(context.Background(), agentIdentityRequest()); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused outside the controller")
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("records = %q, want exactly one", output.String())
+	}
+	for _, want := range []string{`"logger":"agent-identity-audit"`, `"outcome":"refused"`,
+		`"reason":"` + agentIdentityRefusalBinding + `"`, `"mode":"Self"`, `"taskUID":"task-uid"`} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("record lacks %s: %s", want, lines[0])
 		}
 	}
 }

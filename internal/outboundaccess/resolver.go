@@ -307,8 +307,9 @@ type KubernetesResolver struct {
 	// Now reports the current time; time.Now when nil.
 	Now func() time.Time
 	// AuditLog is the sink for identity use records, which are written on
-	// its agent-identity-audit child; the controller-runtime logger when
-	// unset. The controller passes a sink no diagnostic log level filters.
+	// its agent-identity-audit child. When unset, records go to stderr as
+	// JSON lines, so a process that configures no logger still writes them.
+	// The controller passes a sink no diagnostic log level filters.
 	AuditLog logr.Logger
 	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
 	// records. Without it, records name no requester.
