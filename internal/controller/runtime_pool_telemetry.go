@@ -10,6 +10,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// otlpEndpointSuffix names the OTEL_EXPORTER_OTLP_*_ENDPOINT settings.
+const otlpEndpointSuffix = "ENDPOINT"
+
 const (
 	runtimePoolTelemetryEndpointEnv        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	runtimePoolTelemetryTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
@@ -40,14 +43,14 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	env := []corev1.EnvVar{
 		{Name: "ORKA_ENABLE_TELEMETRY", Value: strconv.FormatBool(enabled)},
 	}
-	for _, suffix := range append([]string{"ENDPOINT"}, runtimePoolTelemetryScalarSuffixes...) {
+	for _, suffix := range append([]string{otlpEndpointSuffix}, runtimePoolTelemetryScalarSuffixes...) {
 		name := "OTEL_EXPORTER_OTLP_TRACES_" + suffix
 		value := strings.TrimSpace(getenv(name))
 		if value == "" {
 			value = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_" + suffix))
 			// Generic HTTP endpoints are base URLs; signal endpoints include the
 			// signal path. Preserve SDK semantics when projecting a generic URL.
-			if suffix == "ENDPOINT" {
+			if suffix == otlpEndpointSuffix {
 				name = runtimePoolTelemetryEndpointEnv
 			}
 		}
@@ -67,14 +70,14 @@ func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(strin
 	var env []corev1.EnvVar
 	if endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryMetricsEndpointEnv)); endpoint != "" {
 		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryMetricsEndpointEnv, endpoint)
-		if !isWorkerReachableOTLPEndpoint(endpoint) || !supervisorAcceptsOTLPSetting("ENDPOINT", value) {
+		if !isWorkerReachableOTLPEndpoint(endpoint) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
 			return nil
 		}
 		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryMetricsEndpointEnv, Value: value})
 	} else {
 		generic := strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
 		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryEndpointEnv, generic)
-		if !isWorkerReachableOTLPEndpoint(generic) || !supervisorAcceptsOTLPSetting("ENDPOINT", value) {
+		if !isWorkerReachableOTLPEndpoint(generic) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
 			return nil
 		}
 		if !slices.ContainsFunc(projected, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryEndpointEnv }) {
@@ -104,7 +107,7 @@ func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(strin
 // exporter settings check (workers/acp/supervisor/telemetry.go).
 func supervisorAcceptsOTLPSetting(suffix, value string) bool {
 	switch suffix {
-	case "ENDPOINT":
+	case otlpEndpointSuffix:
 		parsed, err := url.Parse(value)
 		return err == nil && parsed.Hostname() != "" && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" &&
 			(parsed.Scheme == urlSchemeHTTP || parsed.Scheme == urlSchemeHTTPS)

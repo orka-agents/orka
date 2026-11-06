@@ -23,6 +23,12 @@ import (
 	"github.com/orka-agents/orka/internal/tracing/genai"
 )
 
+// OTLP exporter protocols the supervisor accepts.
+const (
+	otlpProtocolGRPC         = "grpc"
+	otlpProtocolHTTPProtobuf = "http/protobuf"
+)
+
 const (
 	supervisorTelemetryTimeout    = 2 * time.Second
 	supervisorTelemetryTrueValue  = "true"
@@ -134,9 +140,9 @@ func newSupervisorTraceExporter(ctx context.Context) (sdktrace.SpanExporter, err
 	var exporter sdktrace.SpanExporter
 	var err error
 	switch supervisorSignalEnv("TRACES", "PROTOCOL") {
-	case "http/protobuf":
+	case otlpProtocolHTTPProtobuf:
 		exporter, err = otlptracehttp.New(ctx, otlptracehttp.WithHeaders(nil), otlptracehttp.WithTimeout(supervisorTelemetryTimeout))
-	case "", "grpc":
+	case "", otlpProtocolGRPC:
 		exporter, err = otlptracegrpc.New(ctx, otlptracegrpc.WithHeaders(nil), otlptracegrpc.WithTimeout(supervisorTelemetryTimeout))
 	default:
 		return nil, errors.New("unsupported supervisor telemetry protocol")
@@ -151,9 +157,9 @@ func newSupervisorMetricExporter(ctx context.Context) (sdkmetric.Exporter, error
 	var exporter sdkmetric.Exporter
 	var err error
 	switch supervisorSignalEnv("METRICS", "PROTOCOL") {
-	case "http/protobuf":
+	case otlpProtocolHTTPProtobuf:
 		exporter, err = otlpmetrichttp.New(ctx, otlpmetrichttp.WithHeaders(nil), otlpmetrichttp.WithTimeout(supervisorTelemetryTimeout))
-	case "", "grpc":
+	case "", otlpProtocolGRPC:
 		exporter, err = otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithHeaders(nil), otlpmetricgrpc.WithTimeout(supervisorTelemetryTimeout))
 	default:
 		return nil, errors.New("unsupported supervisor telemetry protocol")
@@ -242,7 +248,7 @@ func supervisorTelemetryEnvironmentSafe() bool {
 				return false
 			}
 		case "OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":
-			if value != "grpc" && value != "http/protobuf" {
+			if value != otlpProtocolGRPC && value != otlpProtocolHTTPProtobuf {
 				return false
 			}
 		case "OTEL_EXPORTER_OTLP_INSECURE", "OTEL_EXPORTER_OTLP_TRACES_INSECURE", "OTEL_EXPORTER_OTLP_METRICS_INSECURE":
