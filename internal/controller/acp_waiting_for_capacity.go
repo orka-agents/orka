@@ -34,7 +34,7 @@ func desiredWaitingForCapacityCondition(task *corev1alpha1.Task) *metav1.Conditi
 			execution.Reason == corev1alpha1.TaskExecutionReasonWaitingForCapacity &&
 			(execution.State == corev1alpha1.TaskExecutionStateQueued || execution.State == corev1alpha1.TaskExecutionStateReserved) {
 			condition.Status = metav1.ConditionTrue
-			condition.Reason = corev1alpha1.TaskWaitingForCapacityReasonRuntimePoolAtCapacity
+			condition.Reason = corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable
 			condition.Message = execution.Message
 			return condition
 		}

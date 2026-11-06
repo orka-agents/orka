@@ -67,8 +67,11 @@ const (
 	// bounded by the Task deadline.
 	TaskConditionWaitingForCapacity = "WaitingForCapacity"
 
-	// TaskWaitingForCapacityReasonRuntimePoolAtCapacity reports a full RuntimePool.
-	TaskWaitingForCapacityReasonRuntimePoolAtCapacity = "RuntimePoolAtCapacity"
+	// TaskWaitingForCapacityReasonRuntimeCapacityUnavailable reports runtime
+	// admission blocked by capacity: a full RuntimePool, a RuntimePool that is
+	// not admitting new sessions, or a runtime rate limit on prompt admission.
+	// The condition message carries the specific cause when it is known.
+	TaskWaitingForCapacityReasonRuntimeCapacityUnavailable = "RuntimeCapacityUnavailable"
 	// TaskWaitingForCapacityReasonWorkspaceCapacityUnavailable reports an
 	// execution-workspace pool or provider with no admission capacity.
 	TaskWaitingForCapacityReasonWorkspaceCapacityUnavailable = "WorkspaceCapacityUnavailable"

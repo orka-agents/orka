@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
@@ -36,7 +38,7 @@ func capacityTestTask() *corev1alpha1.Task {
 
 func TestDesiredWaitingForCapacityConditionMapsCapacityReasons(t *testing.T) {
 	pool := desiredWaitingForCapacityCondition(capacityTestTask())
-	if pool == nil || pool.Status != metav1.ConditionTrue || pool.Reason != corev1alpha1.TaskWaitingForCapacityReasonRuntimePoolAtCapacity {
+	if pool == nil || pool.Status != metav1.ConditionTrue || pool.Reason != corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable {
 		t.Fatalf("RuntimePool capacity must be reported, got %+v", pool)
 	}
 
@@ -63,7 +65,7 @@ func TestDesiredWaitingForCapacityConditionMapsCapacityReasons(t *testing.T) {
 		t.Fatal("a Task that never waited records nothing")
 	}
 	meta.SetStatusCondition(&running.Status.Conditions, metav1.Condition{
-		Type: corev1alpha1.TaskConditionWaitingForCapacity, Status: metav1.ConditionTrue, Reason: "RuntimePoolAtCapacity",
+		Type: corev1alpha1.TaskConditionWaitingForCapacity, Status: metav1.ConditionTrue, Reason: "RuntimeCapacityUnavailable",
 	})
 	if got := desiredWaitingForCapacityCondition(running); got == nil || got.Status != metav1.ConditionFalse ||
 		got.Reason != corev1alpha1.TaskWaitingForCapacityReasonCapacityAvailable {
@@ -75,7 +77,7 @@ func TestSyncACPWaitingForCapacityRecordsTransitionsOnce(t *testing.T) {
 	task := capacityTestTask()
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
 	r := &TaskReconciler{Client: c, APIReader: c}
-	before := metrics.CounterVecValue(metrics.WaitingForCapacityTotal, "task", corev1alpha1.TaskWaitingForCapacityReasonRuntimePoolAtCapacity)
+	before := metrics.CounterVecValue(metrics.WaitingForCapacityTotal, "task", corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable)
 	for range 2 {
 		current := &corev1alpha1.Task{}
 		if err := c.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
@@ -85,7 +87,7 @@ func TestSyncACPWaitingForCapacityRecordsTransitionsOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := metrics.CounterVecValue(metrics.WaitingForCapacityTotal, "task", corev1alpha1.TaskWaitingForCapacityReasonRuntimePoolAtCapacity); got != before+1 {
+	if got := metrics.CounterVecValue(metrics.WaitingForCapacityTotal, "task", corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable); got != before+1 {
 		t.Fatalf("metric = %v, want one transition", got-before)
 	}
 	current := &corev1alpha1.Task{}
@@ -109,5 +111,24 @@ func TestSyncACPWaitingForCapacityRecordsTransitionsOnce(t *testing.T) {
 	if condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.TaskConditionWaitingForCapacity); condition == nil ||
 		condition.Status != metav1.ConditionFalse {
 		t.Fatalf("admission must clear the condition, got %+v", condition)
+	}
+}
+
+func TestACPAdmissionRetryReasonTreatsANonAdmittingPoolAsACapacityWait(t *testing.T) {
+	for _, tc := range []struct {
+		cause   error
+		reason  corev1alpha1.TaskExecutionReason
+		message string
+	}{
+		{fmt.Errorf("%w: full", errACPRuntimePoolAtCapacity), corev1alpha1.TaskExecutionReasonWaitingForCapacity, "RuntimePool is at capacity; runtime admission will be retried"},
+		{fmt.Errorf("%w: draining", errACPRuntimePoolNotAdmitting), corev1alpha1.TaskExecutionReasonWaitingForCapacity, "RuntimePool is not admitting new sessions; runtime admission will be retried"},
+		{errors.New("lease contention"), corev1alpha1.TaskExecutionReasonAtCapacity, "runtime admission will be retried"},
+	} {
+		if got := acpAdmissionRetryReason(tc.cause); got != tc.reason {
+			t.Errorf("acpAdmissionRetryReason(%v) = %q, want %q", tc.cause, got, tc.reason)
+		}
+		if got := acpAdmissionRetryMessage(tc.cause); got != tc.message {
+			t.Errorf("acpAdmissionRetryMessage(%v) = %q, want %q", tc.cause, got, tc.message)
+		}
 	}
 }

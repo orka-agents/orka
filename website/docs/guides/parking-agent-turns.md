@@ -122,7 +122,7 @@ condition:
 
 | Condition reason | Cause |
 | --- | --- |
-| `RuntimePoolAtCapacity` | The RuntimePool is full or not admitting, or the runtime rate-limited prompt admission. |
+| `RuntimeCapacityUnavailable` | The RuntimePool is full or not admitting new sessions, or the runtime rate-limited prompt admission. The condition message names the cause when it is known. |
 | `WorkspaceCapacityUnavailable` | The execution-workspace pool or provider has no admission capacity. |
 | `CapacityAvailable` | (False) Capacity is no longer the blocking reason. |
 

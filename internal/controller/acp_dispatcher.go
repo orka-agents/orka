@@ -6083,7 +6083,7 @@ func (d *ACPDispatcher) requeuePreSubmissionTaskWithRuntimeBinding(
 		status.ControllerEpoch = fence.Epoch
 		applyRuntimeSessionBindingToExecution(status, runtimeBinding)
 		status.Reason = acpAdmissionRetryReason(cause)
-		status.Message = "runtime admission will be retried"
+		status.Message = acpAdmissionRetryMessage(cause)
 		status.LastTransitionTime = nowMeta()
 	})
 }
@@ -7131,12 +7131,30 @@ func (d *ACPDispatcher) requeueReservedTask(
 
 // acpAdmissionRetryReason distinguishes a retry caused only by exhausted
 // runtime capacity, which users see as WaitingForCapacity, from any other
-// bounded admission retry.
+// bounded admission retry. A RuntimePool that is not admitting new sessions
+// is a capacity wait too, as when the initial reservation is claimed.
 func acpAdmissionRetryReason(cause error) corev1alpha1.TaskExecutionReason {
-	if isACPRateLimitedClientError(cause) || errors.Is(cause, errACPRuntimePoolAtCapacity) {
+	if isACPRateLimitedClientError(cause) || errors.Is(cause, errACPRuntimePoolAtCapacity) ||
+		errors.Is(cause, errACPRuntimePoolNotAdmitting) {
 		return corev1alpha1.TaskExecutionReasonWaitingForCapacity
 	}
 	return corev1alpha1.TaskExecutionReasonAtCapacity
+}
+
+// acpAdmissionRetryMessage names the capacity cause of a bounded admission
+// retry without exposing the underlying runtime error.
+func acpAdmissionRetryMessage(cause error) string {
+	const retried = "runtime admission will be retried"
+	switch {
+	case errors.Is(cause, errACPRuntimePoolAtCapacity):
+		return "RuntimePool is at capacity; " + retried
+	case errors.Is(cause, errACPRuntimePoolNotAdmitting):
+		return "RuntimePool is not admitting new sessions; " + retried
+	case isACPRateLimitedClientError(cause):
+		return "runtime prompt admission was rate limited; " + retried
+	default:
+		return retried
+	}
 }
 
 func nowMeta() *metav1.Time {
