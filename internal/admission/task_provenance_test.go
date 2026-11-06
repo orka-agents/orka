@@ -299,6 +299,34 @@ func TestTaskProvenanceValidator_Update(t *testing.T) {
 			allowed: true,
 		},
 		{
+			name:     "untrusted removal of the continuation link finalizer denied",
+			user:     untrustedUsername,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:     "trusted worker removal of the continuation link finalizer denied",
+			user:     trustedWorkerUser,
+			oldTask:  withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask:  oldTask.DeepCopy(),
+			contains: labels.ContinuationLinkFinalizer,
+		},
+		{
+			name:    "controller removal of the continuation link finalizer allowed",
+			user:    trustedControllerUser,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: oldTask.DeepCopy(),
+			allowed: true,
+		},
+		{
+			name:    "untrusted update keeping the continuation link finalizer allowed",
+			user:    untrustedUsername,
+			oldTask: withContinuationLinkFinalizer(oldTask.DeepCopy()),
+			newTask: withImage(withContinuationLinkFinalizer(oldTask.DeepCopy()), "alpine"),
+			allowed: true,
+		},
+		{
 			name:    "status subresource without provenance changes allowed",
 			user:    untrustedUsername,
 			oldTask: oldTask,
@@ -550,5 +578,10 @@ func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alph
 		task.Spec.RequestedBy = &corev1alpha1.RequestedBy{}
 	}
 	task.Spec.RequestedBy.Subject = subject
+	return task
+}
+
+func withContinuationLinkFinalizer(task *corev1alpha1.Task) *corev1alpha1.Task {
+	task.Finalizers = append(task.Finalizers, labels.ContinuationLinkFinalizer)
 	return task
 }
