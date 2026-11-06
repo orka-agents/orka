@@ -111,9 +111,9 @@ type AgentIdentityBinding struct {
 	TaskNamespace   string
 	TaskName        string
 	TaskUID         string
-	// TaskCreated is the Task's creation time. Only a Task created at or
-	// after the claim was granted was checked for Agent use while the Agent
-	// named the identity.
+	// TaskCreated is the Task's creation time. Only a Task created after the
+	// claim was granted was checked for Agent use while the Agent named the
+	// identity.
 	TaskCreated time.Time
 	// DelegationStart is the root requester's last authenticated action in
 	// the Task chain; Delegated mode refuses calls past the delegation age.
@@ -705,8 +705,10 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	}
 	// A claim granted again, for example after it was released or Agent use
 	// authorization was re-enabled, covers only Tasks created since; an
-	// older Task's creation was never checked for this grant.
-	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || binding.TaskCreated.Before(grantedAt.Time) {
+	// older Task's creation was never checked for this grant. Both times
+	// have one-second precision, so a Task from the grant's own second may
+	// predate it and is refused too.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
 		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
 	}
 	identity := policy.Spec.AgentIdentity
