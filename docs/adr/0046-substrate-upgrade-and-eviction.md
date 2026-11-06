@@ -1,4 +1,4 @@
-# 40. Survive Agent Substrate 1.x upgrades and worker eviction
+# 46. Survive Agent Substrate 1.x upgrades and worker eviction
 
 Date: 2026-11-06
 
