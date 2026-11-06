@@ -330,6 +330,7 @@ var methodCatalog = map[string]MethodInfo{
 	"ListSessionsPage":                      stateRead(),
 	"ListTaskCounterObservations":           stateRead(),
 	"ListUsagePullRequestLinks":             stateRead(),
+	"ListUsageTasksInSessions":              stateRead(),
 	"ListWorkActions":                       stateRead(),
 	"LoadTranscript":                        stateRead(),
 	"LoadTranscriptThrough":                 stateRead(),

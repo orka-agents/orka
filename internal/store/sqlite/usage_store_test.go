@@ -7,8 +7,10 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/require"
 
@@ -865,4 +867,59 @@ func TestUsageLegacyPhaseHistoryKeepsItsOriginalVisibility(t *testing.T) {
 	require.NoError(t, s.RegisterUsageTask(t.Context(), legacy))
 	require.Equal(t, original, usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), asOf))
 	require.Equal(t, "Succeeded", usageReport(t, s, []string{"a"}, start, start.Add(time.Hour), time.Now().UTC()).Works[0].Tasks[0].Phase)
+}
+
+// Rows are found by session name as the controller reads it, without
+// surrounding space of any kind, and however many names are asked for.
+func TestUsageTasksInSessions(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	for uid, session := range map[string]string{
+		"plain": "ahp-one", "padded": " ahp-one\t", "longer": "ahp-one-2", "other": "ahp-two", "team": "team-session",
+		"unicode-padded": "\u0085ahp-one\u3000\u2029", "prefixed": "x-ahp-one",
+	} {
+		require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "team", TaskUID: uid, TaskName: uid, SessionName: session,
+			Phase: "Succeeded", StartedAt: at}))
+	}
+	names := make([]string, 0, 1501)
+	names = append(names, "ahp-one")
+	for i := range 1500 {
+		names = append(names, fmt.Sprintf("ahp-absent-%d", i))
+	}
+	tasks, err := s.ListUsageTasksInSessions(ctx, "team", "", names, 100)
+	require.NoError(t, err)
+	found := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		found = append(found, task.TaskUID)
+	}
+	require.ElementsMatch(t, []string{"plain", "padded", "unicode-padded"}, found)
+	// A row whose name merely holds a wanted one is not read: this one would
+	// not decode.
+	_, err = s.db.ExecContext(ctx, `INSERT INTO usage_tasks(namespace, task_uid, task_name, started_at, data) VALUES (?, ?, ?, ?, ?)`,
+		"team", "superstring", "superstring", at.UnixNano(), `{"namespace":"team","taskUID":"superstring","sessionName":"ahp-one-3","startedAt":5}`)
+	require.NoError(t, err)
+	tasks, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	_, err = s.ListUsageTasksInSessions(ctx, "team", "", []string{"ahp-one"}, 1)
+	require.ErrorIs(t, err, store.ErrUsageSelectionTooLarge)
+	// An earlier namespace of the same name stays out.
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "old", TaskUID: "old-turn", TaskName: "old-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	require.NoError(t, s.RegisterUsageTask(ctx, store.UsageTask{Namespace: "uids", NamespaceUID: "new", TaskUID: "new-turn", TaskName: "new-turn",
+		SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+	tasks, err = s.ListUsageTasksInSessions(ctx, "uids", "new", []string{"ahp-one"}, 100)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "new-turn", tasks[0].TaskUID)
+}
+
+// SQL trims a session name of exactly what strings.TrimSpace does.
+func TestUsageSpaceIsEveryUnicodeSpace(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) != strings.ContainsRune(usageSpace, r) {
+			t.Fatalf("U+%04X: unicode.IsSpace = %v, in usageSpace = %v", r, unicode.IsSpace(r), !unicode.IsSpace(r))
+		}
+	}
 }
