@@ -19,11 +19,24 @@ type fakeAgentIdentitySource struct {
 	token   string
 	err     error
 	request AgentIdentityTokenRequest
+	// during runs while the token is issued, as a slow exchange would let
+	// other writes land.
+	during func()
 }
 
 func (f *fakeAgentIdentitySource) AgentIdentityToken(_ context.Context, req AgentIdentityTokenRequest) (string, error) {
 	f.request = req
+	if f.during != nil {
+		f.during()
+	}
 	return f.token, f.err
+}
+
+// resolveOnlyConnectionSource cannot re-check a Connection.
+type resolveOnlyConnectionSource struct{ source *fakeConnectionSource }
+
+func (f resolveOnlyConnectionSource) ResolveConnectionCredential(ctx context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {
+	return f.source.ResolveConnectionCredential(ctx, req)
 }
 
 // endingConnectionSource ends the delegation while it refreshes the
@@ -278,6 +291,52 @@ func TestValidateSpecDelegatedAgentIdentity(t *testing.T) {
 	if name, ok := ConnectionProviderName(readyPolicy("agent", delegatedPolicySpec(nil))); !ok || name != "github" {
 		t.Fatalf("ConnectionProviderName() = %q, %v", name, ok)
 	}
+}
+
+// TestKubernetesResolverDelegatedRechecksTheRequesterLink covers a requester
+// who unlinks, or whose link is re-consented or stops being Ready, while the
+// on-behalf-of exchange runs: the issued credential is never returned.
+func TestKubernetesResolverDelegatedRechecksTheRequesterLink(t *testing.T) {
+	scheme := resolverScheme(t)
+	now := time.Now()
+	resolver := func(spec corev1alpha1.OutboundAccessPolicySpec, connection *fakeConnectionSource, identity *fakeAgentIdentitySource) *KubernetesResolver {
+		reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(readyPolicy("agent", spec), acceptedProvider(), identityHolder("agent-uid", true)).Build()
+		return &KubernetesResolver{
+			Reader: reader, Connections: connection, AgentIdentities: identity, Now: func() time.Time { return now },
+			DelegationLive: func(context.Context, AgentIdentityBinding) error { return nil },
+		}
+	}
+	connection := func() *fakeConnectionSource {
+		return &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "user-token", ConnectionUID: "uid-1", Generation: 2, Mode: "readOnly"}}
+	}
+
+	t.Run("refuses a credential whose requester unlinked during the exchange", func(t *testing.T) {
+		source := connection()
+		identity := &fakeAgentIdentitySource{token: "obo-token", during: func() {
+			source.liveErr = errors.New("the requester has no connection to this provider")
+		}}
+		resolution, err := resolver(delegatedPolicySpec(nil), source, identity).Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		if !errors.Is(err, ErrRequesterLinkChanged) {
+			t.Fatalf("Resolve() = %v, want the changed link refused", err)
+		}
+		if resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+			t.Fatalf("no credential may be returned: %#v", resolution)
+		}
+		if len(source.liveChecks) != 1 || source.liveChecks[0].Frozen.UID != source.request.Frozen.UID ||
+			source.liveChecks[0].Provider != source.request.Provider || source.liveChecks[0].Subject != source.request.Subject {
+			t.Fatalf("re-check = %+v, want the Connection the exchange used (%+v)", source.liveChecks, source.request)
+		}
+	})
+
+	t.Run("refuses when the source cannot re-check the Connection", func(t *testing.T) {
+		r := resolver(delegatedPolicySpec(nil), nil, &fakeAgentIdentitySource{token: "obo-token"})
+		r.Connections = resolveOnlyConnectionSource{connection()}
+		if _, err := r.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); !errors.Is(err, ErrRequesterLinkChanged) {
+			t.Fatalf("Resolve() = %v, want a fail-closed refusal", err)
+		}
+	})
+
 }
 
 func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {

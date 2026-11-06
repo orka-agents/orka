@@ -1134,6 +1134,39 @@ func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	}
 }
 
+// TestRequireLiveConnectionRechecksTheFrozenLink covers the Delegated
+// post-exchange re-check: it passes for the frozen, Ready link and refuses
+// once the link is being deleted, without reading custody.
+func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	custody := &countingCustody{Store: h.store}
+	h.source.Credentials = custody
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("live link: %v", err)
+	}
+	relinked := request
+	relinked.Frozen.GrantSequence++
+	if err := h.source.RequireLiveConnection(context.Background(), relinked); err == nil {
+		t.Fatal("a link re-consented since dispatch must be refused")
+	}
+	live := h.reload()
+	live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
+	if err := h.client.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("unlinked: err = %v, want refusal", err)
+	}
+	if custody.reads != 0 {
+		t.Fatalf("custody reads = %d, want none", custody.reads)
+	}
+}
+
 // countingCustody counts custody reads.
 type countingCustody struct {
 	*sqlite.Store
