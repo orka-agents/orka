@@ -220,18 +220,33 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			g.Expect(condition.Message).To(ContainSubstring(fmt.Sprintf("AADSTS%d", fakeentra.DisabledErrorCode)))
 		}, 2*time.Minute, time.Second).Should(Succeed())
 
-		probesBefore := len(fakeEntraState().Probes)
-		// The refusal reaches the model as a failed tool call; whatever the
-		// Task's outcome, the resource must not have been called.
-		runTask("e2e-identity-disabled", "[e2e:agent-identity-disabled]")
-		state := fakeEntraState()
-		Expect(state.Probes).To(HaveLen(probesBefore), "a disabled identity's call must never reach the resource")
-		Expect(state.Requests).To(ContainElement(fakeentra.Request{
-			Step: "app", ClientID: fakeEntraIdentity, Identity: fakeEntraIdentity, Scope: fakeEntraResource + "/.default",
+		before := fakeEntraState()
+		Expect(before.Requests).To(ContainElement(fakeentra.Request{
+			Step: "app", ClientID: fakeEntraIdentity, Identity: fakeEntraIdentity, Scope: fakeentra.ExchangeScope,
 			Error: "unauthorized_client", ErrorCode: fakeentra.DisabledErrorCode,
-		}), "the call must have been refused at the issuer")
+		}), "re-verification must have been refused at the issuer")
+		// The refusal reaches the model as a failed tool call; whatever the
+		// Task's outcome, the resource must not have been called. Once the
+		// issuer has refused the identity, Orka refuses the call itself, so
+		// no token is even requested for the resource.
+		runTask("e2e-identity-disabled", "[e2e:agent-identity-disabled]")
+		after := fakeEntraState()
+		Expect(after.Probes).To(HaveLen(len(before.Probes)), "a disabled identity's call must never reach the resource")
+		Expect(resourceTokenRequests(after)).To(Equal(resourceTokenRequests(before)),
+			"no token may be requested for the resource once the issuer refused the identity")
 	})
 })
+
+// resourceTokenRequests counts the token requests for the probe resource.
+func resourceTokenRequests(state fakeentra.State) int {
+	n := 0
+	for _, request := range state.Requests {
+		if request.Scope == fakeEntraResource+"/.default" {
+			n++
+		}
+	}
+	return n
+}
 
 func fakeEntraHost() string { return fmt.Sprintf("%s.%s.svc", fakeEntraName, namespace) }
 
