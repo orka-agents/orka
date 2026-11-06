@@ -65,6 +65,13 @@ func main() {
 		logger.Error("toolbox verification failed", "error", err)
 		os.Exit(1)
 	}
+	if err := supervisor.VerifySkills(cfg); err != nil {
+		// Skill failures use the same stable FAIL line, so the controller
+		// fails waiting Tasks with the skill reason instead of waiting.
+		supervisor.ReportToolboxFailure(err)
+		logger.Error("skill verification failed", "error", err)
+		os.Exit(1)
+	}
 	tracer, shutdownTelemetry, telemetryErr := supervisor.NewTelemetryFromEnv()
 	if telemetryErr != nil {
 		logger.Warn("supervisor telemetry unavailable")

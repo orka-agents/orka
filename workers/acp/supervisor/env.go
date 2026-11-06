@@ -95,6 +95,9 @@ const (
 	// EnvToolboxMountMethod names how the controller bound the toolboxes
 	// (copy or imageVolume). It is not part of the profile.
 	EnvToolboxMountMethod = "ORKA_ACP_TOOLBOX_MOUNT_METHOD"
+	// EnvSkills carries the frozen skill list as JSON. It is part of the
+	// runtime profile digest, so the controller and supervisor must agree.
+	EnvSkills = "ORKA_ACP_SKILLS"
 
 	openCodeProviderID          = "orka"
 	openCodeProviderEnvName     = "ORKA_OPENCODE_PROVIDER_TOKEN"
@@ -157,6 +160,10 @@ func LoadConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	skills, err := skillsFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	profile := harnessv2.RuntimeProfile{
 		ACPProfile:               harnessv2.ACPProfileV1,
 		ProviderKind:             providerKind,
@@ -171,6 +178,7 @@ func LoadConfigFromEnv() (Config, error) {
 		ProxyCredentialScope:     requiredEnv(EnvProxyCredentialScope),
 		ResourceClass:            envutil.String(EnvResourceClass, "standard"),
 		Toolboxes:                toolboxes,
+		Skills:                   skills,
 	}
 	providerBaseURL := envutil.String(EnvProviderProxyBaseURL, defaultProxyBaseURL())
 	modelOutputLimit := int64(0)
@@ -360,6 +368,7 @@ func LoadConfigFromEnv() (Config, error) {
 		E2EPromptWriteAmbiguityMarker: e2ePromptWriteAmbiguityMarker,
 		Toolboxes:                     harnessv2.CloneRuntimeToolboxes(toolboxes),
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
+		Skills:                        harnessv2.CloneRuntimeSkills(skills),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
 	if providerKind == providerKindFoundry {
@@ -380,6 +389,9 @@ func providerAdapterDigests(provider string) map[string]string {
 	}
 	return acp.BuiltInRuntimeAdapterDigests(provider)
 }
+
+// claudeSkillToolName is Claude Code's tool that loads a skill's instructions.
+const claudeSkillToolName = "Skill"
 
 // codexAgentModeOrkaExternal is the Orka-patched codex-acp agent mode whose
 // externalSandbox policy keeps the runtime Pod as the enforcement boundary.
@@ -579,10 +591,23 @@ func claudeSessionProjection(
 		// because this environment variable takes precedence over SDK options.
 		environment = map[string]string{"CLAUDE_CODE_EFFORT_LEVEL": "unset"}
 	}
+	skills := harnessv2.RuntimeSkillNames(request.Profile.Skills)
 	if !policy.unrestricted {
 		allowed, disallowed := providerNativePolicyLists(policy)
+		if len(skills) > 0 {
+			// The Skill tool only loads the instructions of the skills listed
+			// below; it can't run anything the policy doesn't already allow.
+			allowed = append(allowed, claudeSkillToolName)
+		}
 		options["tools"] = allowed
 		options["disallowedTools"] = disallowed
+	}
+	if len(skills) > 0 {
+		// Expose exactly the Orka skills: the SDK hides every other skill and
+		// its Skill tool rejects them. Inline shell execution in skills and
+		// slash commands from any source is turned off as well.
+		options["skills"] = skills
+		options["settings"] = map[string]any{"disableSkillShellExecution": true}
 	}
 	meta := acp.Meta{"claudeCode": map[string]any{"options": options}}
 	if systemPrompt := request.AgentConfiguration.SystemPrompt; systemPrompt != "" {
@@ -943,6 +968,15 @@ func openCodeSessionConfig(
 			"*.env.*":       openCodePermissionDeny,
 			"*.env.example": openCodePermissionAllow,
 		}
+	}
+	if skills := harnessv2.RuntimeSkillNames(request.Profile.Skills); len(skills) > 0 {
+		// OpenCode checks the skill permission with the skill name, so only
+		// the Orka skills are allowed; its built-in skills stay denied.
+		skillPermissions := map[string]string{"*": openCodePermissionDeny}
+		for _, name := range skills {
+			skillPermissions[name] = openCodePermissionAllow
+		}
+		permissions["skill"] = skillPermissions
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny

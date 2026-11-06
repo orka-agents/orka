@@ -63,6 +63,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.toolboxes.imagePullSecrets` | `[]` | Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound. Never mounted into containers. |
 | `controller.acpRuntime.toolboxes.nodeSelector` | `{}` | Node selector merged into runtime Pods that bind toolboxes. |
 | `controller.acpRuntime.toolboxes.mountMethod` | `copy` | `copy` (init-container copier, every Kubernetes version) or `imageVolume` (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+). |
+| `controller.acpRuntime.skills.enabled` | `false` | Let built-in Agents declare `runtime.skills`. Requires `toolboxes.enabled`; skills reuse its registry allowlist, pull secrets, node selector, and mount method. See [Runtime skills](../guides/runtime-skills.md). |
 | `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
 | `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
 | `providerProxy.egress` | `[]` | NetworkPolicy egress rules allowing the proxy to reach your gateway. Leave empty when `upstreamBaseURL` names an in-cluster Service; the chart then derives the rule from that Service at install time. Required for external gateways, named target ports, or offline renders. DNS access is always added. |
@@ -428,6 +429,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-toolbox-image-pull-secrets` | `ORKA_ACP_TOOLBOX_IMAGE_PULL_SECRETS` env or `""` | Comma-separated Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound |
 | `--acp-toolbox-node-selector` | `ORKA_ACP_TOOLBOX_NODE_SELECTOR` env or `""` | Comma-separated `key=value` node selector merged into runtime Pods that bind toolboxes |
 | `--acp-toolbox-mount-method` | `ORKA_ACP_TOOLBOX_MOUNT_METHOD` env or `copy` | `copy` or `imageVolume`. With `imageVolume` on an API server older than 1.36, toolbox Agents are rejected with `ToolboxUnavailable`; there is no silent fallback |
+| `--acp-skills-enabled` | `ORKA_ACP_SKILLS_ENABLED` env or `false` | Let built-in Agents declare `runtime.skills`. Requires `--acp-toolboxes-enabled`; see [Runtime skills](../guides/runtime-skills.md) |
 | `--controller-url` | `""` | Base URL workers use to reach the controller API (e.g., `http://orka-api.orka-system.svc:8080`). Required for worker result callbacks and session transcript fetching |
 | `--oidc-issuer` | `ORKA_OIDC_ISSUER` env or `""` | OIDC issuer URL for external API bearer token validation. Requires `--oidc-audience` when set |
 | `--oidc-audience` | `ORKA_OIDC_AUDIENCE` env or `""` | Expected OIDC audience for external API bearer tokens. Requires `--oidc-issuer` when set |

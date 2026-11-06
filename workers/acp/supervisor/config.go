@@ -131,6 +131,10 @@ type Config struct {
 	// imageVolume the files were never sanitized, so startup runs the
 	// unprivileged architecture check.
 	ToolboxMountMethod string
+	// Skills are the frozen profile skills bound read-only into this Pod at
+	// harnessv2.RuntimeSkillMountRoot/<name>. Each session receives a
+	// validated private copy in its runtime's native skills folder.
+	Skills []harnessv2.RuntimeSkill
 }
 
 func (c Config) Validate() error {

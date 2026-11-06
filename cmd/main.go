@@ -315,6 +315,7 @@ func main() {
 	var acpToolboxImagePullSecrets string
 	var acpToolboxNodeSelector string
 	var acpToolboxMountMethod string
+	var acpSkillsEnabled bool
 	var acpWorkspaceDispatchEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
@@ -574,6 +575,8 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&acpSkillsEnabled, "acp-skills-enabled", strings.EqualFold(os.Getenv("ORKA_ACP_SKILLS_ENABLED"), "true"),
+		"Allow built-in Agents to declare runtime.skills (Agent Skills read from digest-pinned images). Off by default; requires --acp-toolboxes-enabled, whose registry allowlist, pull secrets, node selector, and mount method skills reuse.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
@@ -1099,6 +1102,11 @@ func main() {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
 		os.Exit(1)
 	}
+	if acpSkillsEnabled && !acpToolboxesEnabled {
+		setupLog.Error(errors.New("--acp-skills-enabled requires --acp-toolboxes-enabled"), "invalid ACP skill configuration")
+		os.Exit(1)
+	}
+	acpToolboxPolicy.SkillsEnabled = acpSkillsEnabled
 	mgrOptions := ctrl.Options{
 		Scheme:                        scheme,
 		Metrics:                       metricsServerOptions,

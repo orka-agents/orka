@@ -139,6 +139,12 @@ controller:
       # imageVolume: mounts the toolbox image directly; needs Kubernetes 1.36+
       #       with containerd 2.2+ or CRI-O 1.33+ on the selected nodes.
       mountMethod: copy
+    # Skills: Agent Skills (Agent spec.runtime.skills) read from digest-pinned
+    # images and copied into each built-in runtime session's native skills
+    # folder. Off by default. Requires toolboxes.enabled; skills reuse its
+    # allowedRegistries, imagePullSecrets, nodeSelector, and mountMethod.
+    skills:
+      enabled: false
   # Provider-neutral external gateway plane.
   gateway:
     enabled: true

@@ -226,6 +226,38 @@ type RuntimePoolProfileSpec struct {
 	// +kubebuilder:validation:MaxItems=4
 	// +optional
 	Toolboxes []RuntimePoolToolbox `json:"toolboxes,omitempty"`
+
+	// Skills lists the Agent Skills bound read-only into the runtime Pod and
+	// projected into each session's native skills folder, in declared order.
+	// It is part of Digest. Absent means no skills and leaves the digest of
+	// pre-existing pools unchanged.
+	// +kubebuilder:validation:MaxItems=8
+	// +optional
+	Skills []RuntimePoolSkill `json:"skills,omitempty"`
+}
+
+// RuntimePoolSkill is the frozen projection of one Agent skill.
+type RuntimePoolSkill struct {
+	// Name is the skill folder name in the runtime's native skills folder.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]+(-[a-z0-9]+)*$`
+	Name string `json:"name"`
+
+	// Image is the digest-pinned skill image.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[^\s@:]+(:[0-9]{1,5})?(/[^\s@:]+)+@sha256:[a-f0-9]{64}$`
+	Image string `json:"image"`
+
+	// Path is the effective folder inside the image, after defaulting.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=9
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^/skills(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$`
+	Path string `json:"path"`
 }
 
 // RuntimePoolToolbox is the frozen projection of one Agent toolbox.

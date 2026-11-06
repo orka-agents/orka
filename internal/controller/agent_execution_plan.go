@@ -77,6 +77,9 @@ func (r *TaskReconciler) planAgentExecution(
 		if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, true); reason != "" {
 			return rejectAgentExecutionPlan(reason)
 		}
+		if reason := r.ACPToolboxPolicy.agentSkillPlanRejection(task, agent, true); reason != "" {
+			return rejectAgentExecutionPlan(reason)
+		}
 		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
 		if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, runtime); err != nil {
@@ -117,6 +120,9 @@ func (r *TaskReconciler) planAgentExecution(
 
 	contract := agent.BuiltInContractVersion()
 	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
+		return rejectAgentExecutionPlan(reason)
+	}
+	if reason := r.ACPToolboxPolicy.agentSkillPlanRejection(task, agent, false); reason != "" {
 		return rejectAgentExecutionPlan(reason)
 	}
 	switch contract {
