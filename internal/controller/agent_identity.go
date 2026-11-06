@@ -769,11 +769,13 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 
 // requireLiveSessions refuses once a Session the Task runs in is gone or
 // being deleted: its spec.sessionRef, or the chat Session the chat API
-// recorded in the orka.ai/chat-session label. A chat Session must also be the
-// incarnation the chat API pinned in orka.ai/chat-session-epoch when it
-// created the Task, so a chat deleted and recreated under its name does not
-// keep the Task acting for the requester; admission keeps both labels
-// immutable. It reads Session metadata only, never the transcript.
+// recorded in the orka.ai/chat-session label, looked up in the chat's
+// namespace from orka.ai/chat-session-namespace or else the Task's own. A
+// chat Session must also be the incarnation the chat API pinned in
+// orka.ai/chat-session-epoch when it created the Task, so a chat deleted and
+// recreated under its name does not keep the Task acting for the requester;
+// admission keeps the chat labels immutable. It reads Session metadata only,
+// never the transcript.
 func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
 	if task.Spec.SessionRef != nil {
 		if name := strings.TrimSpace(task.Spec.SessionRef.Name); name != "" {
@@ -789,11 +791,17 @@ func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev
 	if chat == "" {
 		return nil
 	}
+	// A chat may create Tasks in another namespace; its Session stays in the
+	// chat's own, which the chat API records.
+	chatNamespace := strings.TrimSpace(task.Labels[labels.LabelChatSessionNamespace])
+	if chatNamespace == "" {
+		chatNamespace = task.Namespace
+	}
 	reader, ok := d.Sessions.(store.SessionCreationReader)
 	if !ok {
 		return fmt.Errorf("the Session store cannot identify %s", subject)
 	}
-	createdAt, err := reader.GetSessionCreatedAt(ctx, task.Namespace, chat)
+	createdAt, err := reader.GetSessionCreatedAt(ctx, chatNamespace, chat)
 	if errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("%s was deleted", subject)
 	}
@@ -807,7 +815,7 @@ func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev
 	if labels.SessionEpoch(createdAt) != pinned {
 		return fmt.Errorf("%s was deleted and replaced", subject)
 	}
-	return d.requireNoSessionCleanup(ctx, task.Namespace, chat, subject)
+	return d.requireNoSessionCleanup(ctx, chatNamespace, chat, subject)
 }
 
 // sessionCleanupIntentReader reports whether a Session's deletion has
