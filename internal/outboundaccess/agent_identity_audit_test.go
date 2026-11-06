@@ -2,12 +2,15 @@ package outboundaccess
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr/funcr"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
 
 func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
@@ -41,7 +44,7 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 			t.Fatalf("issued record lacks %s: %s", want, issued)
 		}
 	}
-	if !strings.Contains(refused, `"outcome"="refused"`) || !strings.Contains(refused, "expired") {
+	if !strings.Contains(refused, `"outcome"="refused"`) || !strings.Contains(refused, `"reason"="delegation"`) {
 		t.Fatalf("refused record = %s", refused)
 	}
 	for _, line := range lines {
@@ -58,5 +61,131 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 	}
 	if pseudonym(issued) == "" || pseudonym(issued) != pseudonym(refused) {
 		t.Fatal("one requester must map to one stable pseudonym")
+	}
+}
+
+// auditedResolver returns a Delegated-mode resolver whose identity use
+// records are captured in lines.
+func auditedResolver(t *testing.T, now time.Time, source AgentIdentityTokenSource, lines *[]string) *KubernetesResolver {
+	t.Helper()
+	reader := ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).
+		WithObjects(readyPolicy("agent", delegatedPolicySpec(nil)), acceptedProvider(), identityHolder("agent-uid", true),
+			readyPolicy("plain", connectionPolicySpec("github"))).Build()
+	return &KubernetesResolver{
+		Reader: reader, AuditPseudonymKey: []byte(strings.Repeat("k", 32)), Now: func() time.Time { return now },
+		AuditLog:        funcr.New(func(_, args string) { *lines = append(*lines, args) }, funcr.Options{}),
+		Connections:     &fakeConnectionSource{credential: ConnectionCredential{AccessToken: "user-assertion-secret", ConnectionUID: "uid-1", Mode: "readOnly"}},
+		AgentIdentities: source,
+		DelegationLive:  func(context.Context, AgentIdentityBinding) error { return nil },
+	}
+}
+
+func TestAgentIdentityUseRecordsCarryOnlyAClassifiedReason(t *testing.T) {
+	now := time.Now()
+	for name, tc := range map[string]struct {
+		source  AgentIdentityTokenSource
+		request func(*ResolveRequest)
+		reason  string
+		leaks   []string
+	}{
+		"argument values in the validation error": {
+			source:  &fakeAgentIdentitySource{token: "t"},
+			request: func(r *ResolveRequest) { r.Arguments = []byte(`{"q":9007199254740993}`) },
+			reason:  agentIdentityRefusalDelegation, leaks: []string{"9007199254740993"},
+		},
+		"issuer error quoting the assertion": {
+			source: &fakeAgentIdentitySource{err: errors.New("AADSTS50013: assertion user-assertion-secret rejected")},
+			reason: agentIdentityRefusalIssuer, leaks: []string{"user-assertion-secret", "AADSTS50013"},
+		},
+		"empty credential": {source: &fakeAgentIdentitySource{}, reason: agentIdentityRefusalIssuer},
+		"MCP-backed Tool": {
+			source: &fakeAgentIdentitySource{token: "t"}, request: func(r *ResolveRequest) { r.MCPBacked = true },
+			reason: agentIdentityRefusalBinding, leaks: []string{"MCP"},
+		},
+		"canceled": {
+			source: &fakeAgentIdentitySource{err: context.Canceled},
+			reason: agentIdentityRefusalCanceled,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var lines []string
+			resolver := auditedResolver(t, now, tc.source, &lines)
+			request := delegatedRequest(now.Add(-time.Minute))
+			if tc.request != nil {
+				tc.request(&request)
+			}
+			_, err := resolver.Resolve(context.Background(), request)
+			if err == nil {
+				t.Fatal("Resolve() = nil error, want the call refused")
+			}
+			if len(lines) != 1 {
+				t.Fatalf("records = %d, want exactly one: %v", len(lines), lines)
+			}
+			if want := `"reason"="` + tc.reason + `"`; !strings.Contains(lines[0], want) {
+				t.Fatalf("record lacks %s: %s", want, lines[0])
+			}
+			for _, leak := range append(tc.leaks, err.Error()) {
+				if strings.Contains(lines[0], leak) {
+					t.Fatalf("record carries %q: %s", leak, lines[0])
+				}
+			}
+		})
+	}
+}
+
+func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
+	now := time.Now()
+	for name, mutate := range map[string]func(*ResolveRequest){
+		"plain http Tool":  func(r *ResolveRequest) { r.TargetScheme = "http" },
+		"authSecretRef":    func(r *ResolveRequest) { r.HasAuthSecretRef = true },
+		"policy changed":   func(r *ResolveRequest) { r.CheckedPolicy = &PolicyIdentity{UID: "other", Generation: 3} },
+		"stale generation": func(r *ResolveRequest) { r.CheckedPolicy = &PolicyIdentity{Generation: 1} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var lines []string
+			source := &fakeAgentIdentitySource{token: "t"}
+			resolver := auditedResolver(t, now, source, &lines)
+			request := delegatedRequest(now.Add(-time.Minute))
+			mutate(&request)
+			if _, err := resolver.Resolve(context.Background(), request); err == nil {
+				t.Fatal("Resolve() = nil error, want the call refused")
+			}
+			if len(lines) != 1 || !strings.Contains(lines[0], `"outcome"="refused"`) ||
+				!strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalPolicy+`"`) || !strings.Contains(lines[0], `"policyName"="agent"`) {
+				t.Fatalf("records = %v, want one policy refusal", lines)
+			}
+			if source.request.Identity.ID != "" {
+				t.Fatal("the issuer was asked for a credential")
+			}
+		})
+	}
+
+	t.Run("policies without an identity leave no record", func(t *testing.T) {
+		var lines []string
+		resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "t"}, &lines)
+		request := delegatedRequest(now.Add(-time.Minute))
+		request.PolicyName, request.TargetScheme = "plain", "http"
+		if _, err := resolver.Resolve(context.Background(), request); err == nil {
+			t.Fatal("Resolve() = nil error, want the call refused")
+		}
+		if len(lines) != 0 {
+			t.Fatalf("records = %v, want none", lines)
+		}
+	})
+}
+
+func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
+	resolver := &KubernetesResolver{AuditPseudonymKey: []byte(strings.Repeat("k", 32))}
+	pseudonym := func(issuer, subject string) string {
+		return resolver.requesterPseudonym(&corev1alpha1.RequestedBy{Issuer: issuer, Subject: subject})
+	}
+	base := pseudonym("https://issuer.example.test", "alice")
+	if base == "" || base != pseudonym("https://issuer.example.test", "alice") {
+		t.Fatal("one requester must map to one stable pseudonym")
+	}
+	for _, other := range []string{pseudonym("https://issuer.example.test", " alice "), pseudonym(" https://issuer.example.test", "alice")} {
+		if other == base {
+			t.Fatal("distinct verified claims must not share a pseudonym")
+		}
 	}
 }

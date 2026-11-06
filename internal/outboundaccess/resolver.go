@@ -9,7 +9,6 @@ package outboundaccess
 import (
 	"bytes"
 	"context"
-
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -299,8 +298,9 @@ type KubernetesResolver struct {
 	MaxDelegationAge time.Duration
 	// Now reports the current time; time.Now when nil.
 	Now func() time.Time
-	// AuditLog receives identity use records; the agent-identity-audit
-	// logger when unset.
+	// AuditLog is the sink for identity use records, which are written on
+	// its agent-identity-audit child; the controller-runtime logger when
+	// unset. The controller passes a sink no diagnostic log level filters.
 	AuditLog logr.Logger
 	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
 	// records. Without it, records name no requester.
@@ -316,7 +316,7 @@ type KubernetesResolver struct {
 }
 
 // Resolve returns a direct credential or trusted gateway dial target.
-func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (Resolution, error) {
+func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (resolution Resolution, err error) {
 	if r == nil || r.Reader == nil {
 		return Resolution{}, errors.New("outbound access resolver is not configured")
 	}
@@ -329,6 +329,9 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
 		return Resolution{}, fmt.Errorf("resolve outbound access policy: %w", err)
 	}
+	// One record per identity-backed call, issued or refused, including
+	// refusals before the identity is considered (ADR 0039).
+	defer r.auditAgentIdentityUse(policy, &req, &err)
 	if issue := ValidateSpec(policy); issue != nil {
 		return Resolution{}, issue
 	}
@@ -381,7 +384,8 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	case policy.Spec.Connection != nil:
 		return r.resolveConnection(ctx, policy, req)
 	case policy.Spec.AgentIdentity != nil:
-		return r.resolveAgentIdentity(ctx, policy, req)
+		resolution, err = r.resolveAgentIdentity(ctx, policy, req)
+		return resolution, refuseAgentIdentity(agentIdentityRefusalBinding, err)
 	}
 	return r.resolveGateway(ctx, policy)
 }
@@ -681,8 +685,7 @@ func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
 	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
 }
 
-func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (resolution Resolution, err error) {
-	defer func() { r.auditAgentIdentityUse(policy, req, AgentIdentityMode(policy.Spec.AgentIdentity), err) }()
+func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
 	if r.AgentIdentities == nil {
 		return Resolution{}, errors.New("agent identity credentials are issued only by the controller")
 	}
@@ -733,17 +736,17 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if tokenRequest.Mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
 		credential, declared, err := r.resolveDelegation(ctx, policy, req)
 		if err != nil {
-			return Resolution{}, err
+			return Resolution{}, refuseAgentIdentity(agentIdentityRefusalDelegation, err)
 		}
 		tokenRequest.UserAssertion = credential.AccessToken
 		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
 	}
 	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
 	if err != nil {
-		return Resolution{}, fmt.Errorf("issue agent identity credential: %w", err)
+		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, fmt.Errorf("issue agent identity credential: %w", err))
 	}
 	if strings.TrimSpace(token) == "" {
-		return Resolution{}, errors.New("agent identity issuer returned an empty credential")
+		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, errors.New("agent identity issuer returned an empty credential"))
 	}
 	header, prefix := credentialOutput(identity.Output)
 	return Resolution{

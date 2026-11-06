@@ -300,14 +300,17 @@ digests, and Task cleanup removes them, so they cannot serve as attribution.
   alike, issued or refused: Agent UID and generation, issuer type, issuer
   instance and identity ID, mode, Task UID, policy UID and generation, the
   Tool and method that were called, a digest of the Tool name and arguments,
-  outcome, and the refusal reason. Records never contain tokens, request
-  bodies, or full URLs.
+  outcome, and for a refusal a reason category (policy, binding, delegation,
+  issuer, or canceled). Records never contain tokens, request bodies, full
+  URLs, or error text, which can quote arguments or issuer responses.
 - In delegated mode the requester appears only as a keyed (HMAC-SHA-256)
   pseudonym, under a key the controller derives from its snapshot key, so
   records can be joined per person without naming them.
 - Records are structured log entries on the `agent-identity-audit` logger, so
   they outlive Task deletion and the operator's log pipeline sets their
-  retention and who may read them. The controller's SQLite store would give
+  retention and who may read them. That logger shares the controller log's
+  destination and format, but the diagnostic log level does not filter it and
+  it is never sampled. The controller's SQLite store would give
   Orka-owned retention and a read permission of its own, but it needs a
   schema version that another change already claims; a store-backed record
   can follow that change without altering the record's fields.
