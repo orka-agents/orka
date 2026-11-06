@@ -86,13 +86,14 @@ directly.
   digest and the session fence. It sends that capability with the pool's
   controller bearer.
 - The supervisor authenticates on headers alone before it upgrades the
-  connection or reads a body. It refuses every session state except `idle`,
-  `prompt_running`, and `poisoned`. Refused states include validation (when
-  the workspace is frozen), publication preparation, publishing, verification,
-  finalization, cancellation, and deletion.
+  connection or reads a body. It refuses every session state except `idle` and
+  `prompt_running`. Refused states include validation (when the workspace is
+  frozen), publication preparation, publishing, verification, finalization,
+  cancellation, poisoning, and deletion.
 - Commands, and the file helper for copies, run through the ACP exec helper.
-  They use the session's own non-root child UID and GID, empty supplementary
-  groups, resource limits, and parent-death fence. They start in the session
+  They use the session's own non-root child UID and GID, resource limits, and
+  parent-death fence. Their only supplementary group is the operation's tag
+  (below). They start in the session
   workspace with only the session's minimal environment. Operators never get
   the supervisor's identity or credentials.
 - Copies move exactly one regular file. Every path component is opened with
@@ -108,10 +109,15 @@ directly.
   group, session, or parent, or that killed the command first. The agent
   shares the UID but has no tag, so it is never touched. The tag grants no
   file access.
+- If termination cannot be proven, the supervisor fails closed. It poisons the
+  session and the pool. It also keeps the operation's registration, tag, and
+  concurrency slot, so no barrier, tag reuse, or new operation proceeds past
+  it.
 - Admission registers each operator operation on its session under the
-  supervisor lock, and re-checks the state after the process starts. Every
-  transition out of `idle`, `prompt_running`, or `poisoned` revokes and kills
-  the registered operations. Before the validation freeze and before session
+  supervisor lock, and re-checks the state after the process starts.
+  Registrations are removed only after the owning handler's proven cleanup.
+  Every transition out of `idle` or `prompt_running` revokes and kills the
+  registered operations. Before the validation freeze and before session
   deletion, a synchronous barrier does three things:
   - closes admission,
   - kills bound operations,

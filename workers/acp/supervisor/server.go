@@ -269,7 +269,7 @@ type sessionState struct {
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
 	// operators registers admitted operator processes (nil while starting).
 	// Leaving an operator-admitting state revokes and kills all of them.
-	operators   map[uint64]operatorProcess
+	operators   map[uint64]*operatorRegistration
 	operatorSeq uint64
 	// operatorsClosed is set by the freeze/deletion barrier and cleared when
 	// the session returns to an operator-admitting state.

@@ -27,15 +27,16 @@ const operatorTestToken = "operator-test-controller-token-0123456789abcdef"
 var operatorTestSecret = bytes.Repeat([]byte("c"), harnessv2.MinCapabilitySecretBytes)
 
 type fakeOperatorProcess struct {
-	stdinR  *io.PipeReader
-	stdinW  *io.PipeWriter
-	stdoutR *io.PipeReader
-	stdoutW *io.PipeWriter
-	exit    chan int
-	killed  atomic.Bool
-	mu      sync.Mutex
-	signals []string
-	once    sync.Once
+	stdinR     *io.PipeReader
+	stdinW     *io.PipeWriter
+	stdoutR    *io.PipeReader
+	stdoutW    *io.PipeWriter
+	exit       chan int
+	killed     atomic.Bool
+	mu         sync.Mutex
+	signals    []string
+	once       sync.Once
+	unkillable bool
 }
 
 func newFakeOperatorProcess() *fakeOperatorProcess {
@@ -55,7 +56,11 @@ func (p *fakeOperatorProcess) Stdin() io.WriteCloser       { return p.stdinW }
 func (p *fakeOperatorProcess) Stdout() io.ReadCloser       { return p.stdoutR }
 func (p *fakeOperatorProcess) Stderr() io.ReadCloser       { return nil }
 func (p *fakeOperatorProcess) Resize(uint16, uint16) error { return nil }
-func (p *fakeOperatorProcess) Kill()                       { p.killed.Store(true); p.finish(137) }
+func (p *fakeOperatorProcess) Kill() bool {
+	p.killed.Store(true)
+	p.finish(137)
+	return !p.unkillable
+}
 func (p *fakeOperatorProcess) Wait() (int, bool, error) {
 	code := <-p.exit
 	p.exit <- code
@@ -397,7 +402,7 @@ func TestOperatorExecIsKilledWhenTheSessionFreezes(t *testing.T) {
 			state := supervisor.sessions[sessionID]
 			bound := false
 			for _, registered := range state.operators {
-				bound = bound || registered != nil
+				bound = bound || registered.process != nil
 			}
 			if bound {
 				setSessionState(state, harnessv2.RuntimeSessionStateValidating)
@@ -413,10 +418,19 @@ func TestOperatorExecIsKilledWhenTheSessionFreezes(t *testing.T) {
 	if !process.killed.Load() || result.status.ExitCode == 0 {
 		t.Fatalf("operator process survived the session freeze: %+v", result.status)
 	}
-	supervisor.mu.Lock()
-	defer supervisor.mu.Unlock()
-	if len(supervisor.sessions[sessionID].operators) != 0 {
-		t.Fatal("operator registration leaked after revocation")
+	// The registration is removed only after the handler's proven cleanup.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		remaining := len(supervisor.sessions[sessionID].operators)
+		supervisor.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("operator registration leaked after revocation")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -495,19 +509,31 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	if !supervisor.bindOperatorProcess(bound, running) {
 		t.Fatal("bind failed")
 	}
-	// The pending launch finishes (and is refused) after the barrier starts.
+	// The bound operation's handler finishes once its process is killed.
+	go func() {
+		_, _, _ = running.Wait()
+		supervisor.finishOperation(&operatorLease{target: bound, process: running})
+	}()
+	// The pending launch completes after the barrier started; it must be
+	// refused and its registration must survive until its cleanup finished.
 	late := newFakeOperatorProcess()
+	lateFinished := make(chan struct{})
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		if supervisor.bindOperatorProcess(pending, late) {
 			t.Error("a launch completing during the barrier was bound")
 		}
-		late.Kill()
-		supervisor.releaseOperator(pending)
+		supervisor.finishOperation(&operatorLease{target: pending, process: late})
+		close(lateFinished)
 	}()
 	state := supervisor.sessions[sessionID]
 	if err := supervisor.quiesceOperators(state, 5*time.Second); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-lateFinished:
+	default:
+		t.Fatal("the barrier returned before an in-flight launch finished its cleanup")
 	}
 	if !running.killed.Load() || !late.killed.Load() {
 		t.Fatalf("barrier returned with live operator operations: running=%v late=%v", running.killed.Load(), late.killed.Load())
@@ -520,10 +546,46 @@ func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
 	setSessionState(state, harnessv2.RuntimeSessionStateValidating)
 	setSessionState(state, harnessv2.RuntimeSessionStateIdle)
 	supervisor.mu.Unlock()
-	if target, status, message := supervisor.operatorTargetFor(sessionID, metadata); status != 0 {
+	target, status, message := supervisor.operatorTargetFor(sessionID, metadata)
+	if status != 0 {
 		t.Fatalf("admission did not reopen: %d %s", status, message)
-	} else {
-		supervisor.releaseOperator(target)
+	}
+	supervisor.finishOperation(&operatorLease{target: target})
+}
+
+func TestOperatorUnprovenCleanupFailsClosed(t *testing.T) {
+	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
+	state := supervisor.sessions[sessionID]
+	state.drainCleanupScheduled = true
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	target, status, _ := supervisor.operatorTargetFor(sessionID, harnessv2.MutationMetadata{Fence: fence})
+	if status != 0 {
+		t.Fatal("admission failed")
+	}
+	process := newFakeOperatorProcess()
+	process.unkillable = true
+	if !supervisor.bindOperatorProcess(target, process) {
+		t.Fatal("bind failed")
+	}
+	slotReleased := false
+	tag, _ := supervisor.operatorState().allocateTag()
+	supervisor.finishOperation(&operatorLease{target: target, process: process, tag: tag, releaseSlot: func() { slotReleased = true }})
+	supervisor.mu.Lock()
+	registrations := len(state.operators)
+	poisoned := state.descriptor.State == harnessv2.RuntimeSessionStatePoisoned && supervisor.poisoned
+	supervisor.mu.Unlock()
+	if slotReleased || registrations != 1 || !poisoned {
+		t.Fatalf("unproven cleanup must poison and hold resources: slot=%v registrations=%d poisoned=%v", slotReleased, registrations, poisoned)
+	}
+	if _, held := supervisor.operatorState().tags[tag]; !held {
+		t.Fatal("the tag of an uncontained operation was released for reuse")
+	}
+	if err := supervisor.quiesceOperators(state, 50*time.Millisecond); err == nil {
+		t.Fatal("the barrier must fail closed while an operation is uncontained")
+	}
+	if _, status, _ := supervisor.operatorTargetFor(sessionID, harnessv2.MutationMetadata{Fence: fence}); status == 0 {
+		t.Fatal("a poisoned session must not admit operator access")
 	}
 }
 
