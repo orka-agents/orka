@@ -210,9 +210,11 @@ func acpTaskRequiresAuthoritativeAttemptDiscovery(task *corev1alpha1.Task) bool 
 		task.Status.Delivery.Outcome != corev1alpha1.TaskDeliveryOutcomeNotRequested {
 		return false
 	}
+	// A queued timeout, or a cancellation while the class workspace was being
+	// attached, ends the Task before its execution status was projected.
 	return execution.State == corev1alpha1.TaskExecutionStateCancelled &&
 		execution.Outcome == corev1alpha1.TaskExecutionOutcomeCancelled &&
-		execution.Reason == corev1alpha1.TaskExecutionReason("TaskTimeout") &&
+		(execution.Reason == corev1alpha1.TaskExecutionReason("TaskTimeout") || execution.Reason == acpCancelledReason) &&
 		execution.RuntimePoolName == "" && execution.RuntimePoolUID == "" &&
 		execution.AgentRuntimeName == "" && execution.AgentRuntimeUID == "" &&
 		execution.RuntimeInstanceID == "" && execution.RuntimeSessionUID == "" &&

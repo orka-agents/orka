@@ -301,11 +301,85 @@ func cancelTaskForTest(ctx context.Context, c client.Client, task *corev1alpha1.
 
 // Cancelling a class-backed Agent Task while its workspace attachment is
 // pending, before any execution status exists, still settles the attachment.
+// With artifact retirement enabled, completion and deletion recognize the
+// Task as ended before an attempt and finish.
 func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
 	ctx := context.Background()
+	r, task, workspaceKey, retirer := cancelTaskWithPendingClassWorkspace(t)
+	key := client.ObjectKeyFromObject(task)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+
+	// Completion retires artifact references and settles the workspace.
+	settled := false
+	for range 5 {
+		if err := r.Get(ctx, key, task); err != nil {
+			t.Fatal(err)
+		}
+		result, err := r.handleCompleted(ctx, task)
+		if err != nil {
+			t.Fatalf("handleCompleted: %v", err)
+		}
+		if result.RequeueAfter >= 30*time.Second {
+			t.Fatalf("handleCompleted requeue = %v, want completion to proceed", result.RequeueAfter)
+		}
+		err = r.Get(ctx, workspaceKey, workspace)
+		if apierrors.IsNotFound(err) || (err == nil && workspace.Spec.Attachment == nil) {
+			settled = true
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !settled {
+		t.Fatalf("workspace attachment = %+v, want it revoked", workspace.Spec.Attachment)
+	}
+	if len(retirer.calls) != 1 {
+		t.Fatalf("artifact retirement calls = %d, want one", len(retirer.calls))
+	}
+
+	// Deletion reclaims the (absent) attempts and releases the finalizer.
+	if err := r.Delete(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := r.Get(ctx, key, task); apierrors.IsNotFound(err) {
+			return
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.handleDeletion(ctx, task); err != nil {
+			t.Fatalf("handleDeletion: %v", err)
+		}
+	}
+	t.Fatalf("finalizers = %v, want the deleted Task released", task.Finalizers)
+}
+
+// cancelTaskWithPendingClassWorkspace cancels a class-backed Agent Task whose
+// workspace attachment is written but not yet acknowledged, with artifact
+// retirement enabled, and returns it Cancelled.
+func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1alpha1.Task, types.NamespacedName, *recordingIdentityRetirer) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
-	task := acpClassTestTask()
+	task := acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Finalizers = []string{labels.TaskFinalizer}
+	})
 	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controls := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controls, "controller")
+	done := make(chan error, 1)
+	go func() { done <- epochs.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	retirer := &recordingIdentityRetirer{}
+	r.DurableControlStore, r.ControllerEpochManager, r.ACPArtifactRetirer = controls, epochs, retirer
+
 	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
 	if err != nil {
 		t.Fatalf("resolve class: %v", err)
@@ -357,18 +431,10 @@ func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if task.Status.Phase != corev1alpha1.TaskPhaseCancelled || task.Status.Execution == nil ||
-		task.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled {
-		t.Fatalf("status = %+v, want Cancelled with a terminal execution record", task.Status)
+		task.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled || task.Status.Execution.Attempt != 0 ||
+		!acpTaskRequiresAuthoritativeAttemptDiscovery(task) {
+		t.Fatalf("status = %+v, want a Cancelled record cleanup recognizes as ended before an attempt", task.Status)
 	}
 
-	if _, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil {
-		t.Fatalf("settle: %v", err)
-	}
-	err = r.Get(ctx, workspaceKey, workspace)
-	if err == nil && workspace.Spec.Attachment != nil {
-		t.Fatalf("workspace attachment = %+v, want it revoked", workspace.Spec.Attachment)
-	}
-	if err != nil && !apierrors.IsNotFound(err) {
-		t.Fatal(err)
-	}
+	return r, task, workspaceKey, retirer
 }
