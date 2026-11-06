@@ -192,8 +192,13 @@ type MCPForwardResponse struct {
 // Tool returns. Everything else, including any Set-Cookie, is dropped.
 var ForwardResponseHeaders = []string{
 	"Content-Type", "Etag", "Location", "Azure-Asyncoperation", "Retry-After",
-	"X-Ms-Request-Id", "X-Ms-Correlation-Request-Id",
+	"X-Ms-Request-Id", "X-Ms-Correlation-Request-Id", ForwardHeadContentLength,
 }
+
+// ForwardHeadContentLength carries the upstream length of a HEAD response,
+// which has no body to measure. Other responses are measured where they are
+// served.
+const ForwardHeadContentLength = "Content-Length"
 
 func (r MCPForwardResponse) Validate() error {
 	if r.Status < 100 || r.Status > 599 {

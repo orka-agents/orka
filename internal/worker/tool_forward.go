@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -103,6 +104,12 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 	}
 	for _, name := range harnessv2.ForwardResponseHeaders {
 		value := strings.TrimSpace(resp.Header.Get(name))
+		if name == harnessv2.ForwardHeadContentLength {
+			value = ""
+			if prepared.request.Method == http.MethodHead && resp.ContentLength >= 0 {
+				value = strconv.FormatInt(resp.ContentLength, 10)
+			}
+		}
 		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
 			continue
 		}
@@ -117,6 +124,12 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		return "", err
+	}
+	// JSON escaping can grow the body past the broker's result bound even
+	// when the raw body fits; that is a controlled tool failure, not a
+	// broker error.
+	if len(encoded) > harnessv2.MaxMCPResultBytes {
+		return "", ToolExecutionError{Err: fmt.Errorf("forwarded response exceeds %d bytes once encoded", harnessv2.MaxMCPResultBytes)}
 	}
 	return string(encoded), nil
 }

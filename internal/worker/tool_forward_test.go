@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,5 +132,44 @@ func TestForwardingToolRefusals(t *testing.T) {
 	}
 	if requests != 0 {
 		t.Fatalf("refused calls sent %d requests", requests)
+	}
+}
+
+func TestForwardingToolRefusesAResultTooLargeOnceEncoded(t *testing.T) {
+	// "<" encodes as six bytes, so a body under the raw limit overflows the
+	// broker's result bound after JSON escaping.
+	body := strings.Repeat("<", 600<<10)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: agentIdentityResolver(), skipDirectPublicValidation: true}
+	executor.AllowForwarding()
+	_, err := executor.Execute(context.Background(), forwardingTestTool(server.URL), json.RawMessage(`{"method":"GET","path":"/subscriptions"}`))
+	if _, ok := errors.AsType[ToolExecutionError](err); !ok || !strings.Contains(err.Error(), "once encoded") {
+		t.Fatalf("Execute() error = %v, want a tool execution error", err)
+	}
+}
+
+func TestForwardingToolCarriesTheLengthOfAHeadResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "4")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte("body"))
+		}
+	}))
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: agentIdentityResolver(), skipDirectPublicValidation: true}
+	executor.AllowForwarding()
+	for method, want := range map[string]string{http.MethodHead: "4", http.MethodGet: ""} {
+		result, err := executor.Execute(context.Background(), forwardingTestTool(server.URL), json.RawMessage(`{"method":"`+method+`","path":"/subscriptions"}`))
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		response, err := harnessv2.DecodeMCPForwardResponse(json.RawMessage(result))
+		if err != nil || response.Headers["Content-Length"] != want {
+			t.Fatalf("%s: response = %#v, err = %v", method, response, err)
+		}
 	}
 }

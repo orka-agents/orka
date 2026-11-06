@@ -179,10 +179,13 @@ func (f *azureGatewayFixture) token(t *testing.T) string {
 func TestAzureGatewayForwardsResourceManagerReadsThroughTheBroker(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
-		body := `{"value":[{"id":"/subscriptions/s1"}],"nextLink":"https://management.azure.com/subscriptions?api-version=2022-12-01&$skiptoken=abc"}`
+		body := `{"value":[{"id":"/subscriptions/s1","tags":{"docs":"https://management.azure.com/keep-me"}}],"nextLink":"https://management.azure.com/subscriptions?api-version=2022-12-01&$skiptoken=abc"}`
 		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{
 			Status: http.StatusOK, Body: body,
-			Headers: map[string]string{"Content-Type": "application/json", "Location": "https://management.azure.com/operations/1"},
+			Headers: map[string]string{
+				"Content-Type": "application/json", "Location": "https://management.azure.com/operations/1",
+				"Azure-Asyncoperation": "https://elsewhere.example/operations/2",
+			},
 		})
 		return raw
 	}
@@ -191,8 +194,23 @@ func TestAzureGatewayForwardsResourceManagerReadsThroughTheBroker(t *testing.T) 
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
 	}
-	if strings.Contains(body, "management.azure.com") || !strings.Contains(body, fixture.base()+"/subscriptions?api-version=2022-12-01&$skiptoken=abc") {
+	var page struct {
+		Value []struct {
+			Tags map[string]string `json:"tags"`
+		} `json:"value"`
+		NextLink string `json:"nextLink"`
+	}
+	if err := json.Unmarshal([]byte(body), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.NextLink != fixture.base()+"/subscriptions?api-version=2022-12-01&$skiptoken=abc" {
 		t.Fatalf("nextLink was not pointed at the gateway: %s", body)
+	}
+	if len(page.Value) != 1 || page.Value[0].Tags["docs"] != "https://management.azure.com/keep-me" {
+		t.Fatalf("resource data was rewritten: %s", body)
+	}
+	if got := response.Header.Get("Azure-AsyncOperation"); got != "https://elsewhere.example/operations/2" {
+		t.Fatalf("a link to another host was rewritten: %q", got)
 	}
 	if got := response.Header.Get("Location"); got != fixture.base()+"/operations/1" {
 		t.Fatalf("Location = %q", got)
@@ -326,5 +344,18 @@ func TestAzureForwardingToolRefusesTwo(t *testing.T) {
 	authorization, _ := forwardingTestAuthorization(t, fence, time.Now().UTC(), 2)
 	if _, _, err := azureForwardingTool(authorization.Configuration()); err == nil {
 		t.Fatal("two Azure forwarding Tools were accepted")
+	}
+}
+
+func TestAzureGatewayHeadReportsTheUpstreamLength(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{Status: http.StatusOK, Headers: map[string]string{"Content-Length": "1234"}})
+		return raw
+	}
+	token := fixture.token(t)
+	response, _ := fixture.do(t, http.MethodHead, "/subscriptions/s1/resourcegroups/rg1", http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusOK || response.ContentLength != 1234 {
+		t.Fatalf("HEAD status = %d, length = %d", response.StatusCode, response.ContentLength)
 	}
 }

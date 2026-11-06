@@ -1033,6 +1033,12 @@ func ProviderAuthorityDigest(provider *corev1alpha1.ConnectorProvider) string {
 	slices.SortFunc(tools, func(a, b corev1alpha1.ConnectorTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, tool := range tools {
 		parts = append(parts, "tool", tool.Name, string(tool.Class), tool.HTTP.URL, tool.HTTP.Method, "parameters", canonicalSchema(tool.Parameters))
+		// A forwarding tool may reach any read path on its origin, not one
+		// endpoint, so turning a tool into one needs renewed consent. Tools
+		// without it keep their existing digest.
+		if tool.HTTP.Forward != nil {
+			parts = append(parts, "forward", string(tool.HTTP.Forward.Protocol))
+		}
 		headerNames := make([]string, 0, len(tool.HTTP.Headers))
 		for name := range tool.HTTP.Headers {
 			headerNames = append(headerNames, name)

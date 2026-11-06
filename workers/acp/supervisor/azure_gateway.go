@@ -19,6 +19,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -407,24 +408,80 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	for name, value := range forwarded.Headers {
-		w.Header().Set(name, g.rewrite(value))
+		if name == harnessv2.ForwardHeadContentLength {
+			continue
+		}
+		if name == "Location" || name == "Azure-Asyncoperation" {
+			value = g.rewriteLink(value)
+		}
+		w.Header().Set(name, value)
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	body := g.rewrite(forwarded.Body)
+	if r.Method == http.MethodHead {
+		// A HEAD answer has no body; it reports the length the service gave.
+		if length, err := strconv.ParseInt(forwarded.Headers[harnessv2.ForwardHeadContentLength], 10, 64); err == nil && length >= 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+		}
+		w.WriteHeader(forwarded.Status)
+		return
+	}
+	body := g.rewriteBody(forwarded.Body)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(forwarded.Status)
-	if r.Method != http.MethodHead {
-		_, _ = io.WriteString(w, body)
-	}
+	_, _ = io.WriteString(w, body)
 }
 
-// rewrite points links in a Resource Manager response, such as nextLink and
-// long-running operation URLs, at the gateway, so az keeps following them
-// through Orka instead of calling the service directly.
-func (g *azureGateway) rewrite(value string) string {
-	value = strings.ReplaceAll(value, g.origin, g.base)
-	escapedOrigin := strings.ReplaceAll(g.origin, "/", `\/`)
-	return strings.ReplaceAll(value, escapedOrigin, strings.ReplaceAll(g.base, "/", `\/`))
+// azureNextLinkFields are the paging fields Resource Manager responses use.
+var azureNextLinkFields = map[string]bool{"nextLink": true, "@odata.nextLink": true}
+
+// rewriteLink points one URL on the Tool's origin, such as a nextLink or a
+// long-running operation URL, at the gateway, so az keeps following it
+// through Orka instead of calling the service directly. Any other value,
+// including a URL on another host, is returned unchanged.
+func (g *azureGateway) rewriteLink(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User != nil || !strings.EqualFold(parsed.Scheme, providerProxyTLSScheme) ||
+		!strings.EqualFold("https://"+parsed.Host, g.origin) {
+		return value
+	}
+	rewritten := *parsed
+	rewritten.Scheme, rewritten.Host = providerProxyTLSScheme, strings.TrimPrefix(g.base, "https://")
+	return rewritten.String()
+}
+
+// rewriteBody rewrites only paging links in a JSON response. Resource data,
+// such as a tag or deployment output that happens to name the Resource
+// Manager origin, is returned exactly as the service sent it.
+func (g *azureGateway) rewriteBody(body string) string {
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var document any
+	if err := decoder.Decode(&document); err != nil || decoder.More() {
+		return body
+	}
+	object, ok := document.(map[string]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for field := range azureNextLinkFields {
+		link, ok := object[field].(string)
+		if !ok {
+			continue
+		}
+		if rewritten := g.rewriteLink(link); rewritten != link {
+			object[field] = rewritten
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return string(encoded)
 }
 
 func brokerErrorMessage(result json.RawMessage) string {

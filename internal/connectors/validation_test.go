@@ -888,3 +888,30 @@ func TestValidateProviderSpecForwardingTools(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderAuthorityDigestRenewsConsentForForwarding(t *testing.T) {
+	provider := validProvider()
+	provider.UID = "provider-uid"
+	before := ProviderAuthorityDigest(provider)
+	connection := &corev1alpha1.Connection{Status: corev1alpha1.ConnectionStatus{Consent: &corev1alpha1.ConnectionConsent{
+		ProviderUID: string(provider.UID), AuthorityDigest: before,
+	}}}
+	if !ConsentMatchesProvider(connection, provider) {
+		t.Fatal("consent must match the provider it was given for")
+	}
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.URL = "https://api.github.com"
+		}
+	}
+	plain := ProviderAuthorityDigest(provider)
+	connection.Status.Consent.AuthorityDigest = plain
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward = &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == plain || ConsentMatchesProvider(connection, provider) {
+		t.Fatal("turning a tool into a forwarding tool must need renewed consent")
+	}
+}
