@@ -50,9 +50,10 @@ type sessionCancellation struct {
 }
 
 // chatTurnStopper stops a chat Session's in-flight request without deleting
-// the Session, and reports whether one was running.
+// the Session, and reports whether one was running. The Session accepts no
+// next message until release is called.
 type chatTurnStopper interface {
-	stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, error)
+	stopActiveChat(ctx context.Context, namespace, sessionID string) (running bool, release func(), err error)
 }
 
 var errTaskNotCancellable = errors.New("task cannot be cancelled")
@@ -120,15 +121,18 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
 	if sessionType == store.SessionTypeChat && h.chatTurns != nil {
 		// Stop the chat request first so it starts no Task after the list
-		// below. It ends as a disconnected client's request does.
-		stopped, err := h.chatTurns.stopActiveChat(ctx, namespace, name)
+		// below. It ends as a disconnected client's request does, and the
+		// Session takes no next message until its Tasks are cancelled.
+		stopped, release, err := h.chatTurns.stopActiveChat(ctx, namespace, name)
 		if err != nil {
 			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat turn did not stop in time; retry")
 		}
+		defer release()
 		result.ChatTurnStopped = stopped
 	}
+	// Read live: the cache can miss a Task the stopped request just created.
 	tasks := &corev1alpha1.TaskList{}
-	if err := h.client.List(ctx, tasks, client.InNamespace(namespace)); err != nil {
+	if err := h.uncachedReader().List(ctx, tasks, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
@@ -171,7 +175,7 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	result := taskCancellation{Namespace: task.Namespace, Name: task.Name}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &corev1alpha1.Task{}
-		if err := h.client.Get(ctx, key, current); err != nil {
+		if err := h.uncachedReader().Get(ctx, key, current); err != nil {
 			return err
 		}
 		if current.UID != task.UID {

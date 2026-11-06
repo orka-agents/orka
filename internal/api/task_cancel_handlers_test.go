@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -229,6 +231,92 @@ func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	next, err := chat.reserveActiveChat("default", "conversation")
 	if err != nil {
 		t.Fatalf("next message: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+// staleCacheClient lists from a cache that has not seen the newest Tasks, and
+// runs onPatch before each patch.
+type staleCacheClient struct {
+	client.Client
+	onPatch func()
+}
+
+func (c staleCacheClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+		tasks.Items = nil
+	}
+	return nil
+}
+
+func (c staleCacheClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if c.onPatch != nil {
+		c.onPatch()
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+// A chat request that created a Task just before it was stopped: the Task is
+// found although the cache has not seen it, and no next message can start
+// until it is cancelled.
+func TestCancelSessionCancelsTheStoppedChatTurnsTaskBeforeTheNextMessage(t *testing.T) {
+	created := cancelTestTask("just-created", corev1alpha1.TaskPhasePending, "")
+	created.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	h, app := setupCancelTest(t, created)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	chat := &ChatHandler{}
+	h.chatTurns = chat
+	live := h.client
+	h.apiReader = live
+	var nextMessageErr error
+	h.client = staleCacheClient{Client: live, onPatch: func() {
+		next, err := chat.reserveActiveChat("default", "conversation")
+		if err == nil {
+			chat.finishActiveChatReservation(next, nil)
+		}
+		nextMessageErr = err
+	}}
+
+	reservation, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-reservation.cancelContext.Done()
+		chat.finishActiveChatReservation(reservation, nil)
+	}()
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK || body["chatTurnStopped"] != true {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if got, _ := cancelAnnotation(t, h, "just-created"); got != "cancelled by alice" {
+		t.Fatalf("cancel request = %q, want the Task the cache missed cancelled", got)
+	}
+	if !errors.Is(nextMessageErr, store.ErrConflict) {
+		t.Fatalf("next message while cancelling = %v, want it refused", nextMessageErr)
+	}
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message after the stop: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+func TestStopActiveChatFencesAnIdleSession(t *testing.T) {
+	chat := &ChatHandler{}
+	running, release, err := chat.stopActiveChat(context.Background(), "default", "conversation")
+	if err != nil || running {
+		t.Fatalf("stopActiveChat() = %v, %v; want an idle Session", running, err)
+	}
+	if _, err := chat.reserveActiveChat("default", "conversation"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("next message before release = %v, want it refused", err)
+	}
+	release()
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message after release: %v", err)
 	}
 	chat.finishActiveChatReservation(next, nil)
 }
