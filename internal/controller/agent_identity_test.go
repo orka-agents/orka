@@ -4,6 +4,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -709,8 +711,21 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		{Namespace: testNS, Name: "open", SessionType: "task"},
 		{Namespace: testNS, Name: "chat-open", SessionType: store.SessionTypeChat},
 		{Namespace: testNS, Name: "chat-reused", SessionType: store.SessionTypeChat, CreatedAt: time.Now().Add(-time.Hour)},
+		{Namespace: testNS, Name: "deleting", SessionType: "task"},
+		{Namespace: testNS, Name: "chat-deleting", SessionType: store.SessionTypeChat},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The requester deleted these Sessions; their records stay until
+	// runtime cleanup finishes, but delegated calls must stop at once.
+	for _, name := range []string{"deleting", "chat-deleting"} {
+		digest := sha256.Sum256([]byte("delete-" + name))
+		if _, err := sessions.PrepareSessionCleanup(context.Background(), store.SessionCleanupIntent{
+			Namespace: testNS, SessionName: name, OperationID: "delete-" + name,
+			OperationDigest: "sha256:" + hex.EncodeToString(digest[:]), PreparedAt: time.Now(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -721,7 +736,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		}
 		return labels.SessionEpoch(createdAt)
 	}
-	openEpoch, deletedEpoch := epoch("chat-open"), epoch("chat-reused")
+	openEpoch, deletedEpoch, deletingEpoch := epoch("chat-open"), epoch("chat-reused"), epoch("chat-deleting")
 	// The chat is deleted and a new one created under its name: Tasks of
 	// the first must not act for the requester through the second.
 	if err := sessions.DeleteSession(context.Background(), testNS, "chat-reused"); err != nil {
@@ -790,6 +805,10 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		task("in-deleted-chat", inChat("chat-deleted", openEpoch)),
 		task("in-recreated-chat", inChat("chat-reused", deletedEpoch)),
 		task("in-unpinned-chat", inChat("chat-open", "")),
+		task("in-deleting-session", withSession("deleting")),
+		task("in-deleting-chat", inChat("chat-deleting", deletingEpoch)),
+		task("parent-in-deleting-session", withSession("deleting")),
+		task("child-of-parent-in-deleting-session", childOf("parent-in-deleting-session")),
 		task("parent-in-recreated-chat", inChat("chat-reused", deletedEpoch)),
 		task("child-of-parent-in-recreated-chat", childOf("parent-in-recreated-chat")),
 		task("parent-in-deleted-session", withSession("deleted")),
@@ -828,32 +847,35 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
 	}
 	for name, want := range map[string]string{
-		"running":                            "",
-		"in-open-session":                    "",
-		"cancelled":                          "Cancelled",
-		"in-open-chat":                       "",
-		"in-deleted-chat":                    "Session was deleted",
-		"in-recreated-chat":                  "Session was deleted and replaced",
-		"in-unpinned-chat":                   "no pinned incarnation",
-		"child-of-parent-in-recreated-chat":  "Session of a Task it was delegated from was deleted and replaced",
-		"child-of-parent-in-deleted-session": "Session of a Task it was delegated from was deleted",
-		"child-of-parent-in-deleted-chat":    "Session of a Task it was delegated from was deleted",
-		"child-in-open-session-of-running":   "",
-		"orphan-of-running":                  "no UID pins",
-		"pinned-orphan-of-running":           "",
-		"fork-of-running":                    "no UID pins",
-		"in-deleted-session":                 "deleted",
-		"finished":                           "Succeeded",
-		"cancel-requested":                   "cancellation",
-		"deleting":                           "being deleted",
-		"gone":                               "gone",
-		"child-of-running":                   "",
-		"child-of-succeeded":                 "",
-		"child-of-cancelled":                 "was cancelled",
-		"child-of-cancel-requested":          "cancellation of a Task it was delegated from",
-		"child-of-gone":                      "is gone",
-		"grandchild-of-cancelled":            "was cancelled",
-		"child-of-replaced":                  "was replaced",
+		"running":                             "",
+		"in-open-session":                     "",
+		"cancelled":                           "Cancelled",
+		"in-open-chat":                        "",
+		"in-deleted-chat":                     "Session was deleted",
+		"in-recreated-chat":                   "Session was deleted and replaced",
+		"in-unpinned-chat":                    "no pinned incarnation",
+		"in-deleting-session":                 "Session is being deleted",
+		"in-deleting-chat":                    "Session is being deleted",
+		"child-of-parent-in-deleting-session": "Session of a Task it was delegated from is being deleted",
+		"child-of-parent-in-recreated-chat":   "Session of a Task it was delegated from was deleted and replaced",
+		"child-of-parent-in-deleted-session":  "Session of a Task it was delegated from was deleted",
+		"child-of-parent-in-deleted-chat":     "Session of a Task it was delegated from was deleted",
+		"child-in-open-session-of-running":    "",
+		"orphan-of-running":                   "no UID pins",
+		"pinned-orphan-of-running":            "",
+		"fork-of-running":                     "no UID pins",
+		"in-deleted-session":                  "deleted",
+		"finished":                            "Succeeded",
+		"cancel-requested":                    "cancellation",
+		"deleting":                            "being deleted",
+		"gone":                                "gone",
+		"child-of-running":                    "",
+		"child-of-succeeded":                  "",
+		"child-of-cancelled":                  "was cancelled",
+		"child-of-cancel-requested":           "cancellation of a Task it was delegated from",
+		"child-of-gone":                       "is gone",
+		"grandchild-of-cancelled":             "was cancelled",
+		"child-of-replaced":                   "was replaced",
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := check(context.Background(), binding(name))
