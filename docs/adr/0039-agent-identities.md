@@ -116,13 +116,16 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   checked for that identity. So a claim (stage 2) records when it was
   granted (`status.identityClaim.grantedAt`); claims are granted only while
   the check is enforced and are released when the controller runs without
-  it; and a Task binds an identity only if it was created at or after the
-  claim was granted, to the second the API server records. A claim that
-  stops releasing, because the Agent names the identity again or the check
-  is back on, counts as granted at that moment. An older queued Task fails
-  closed and must be created again, as does a Task created together with a
-  new identity-bound Agent before its claim was granted, so such Tasks are
-  created once the Agent is Ready.
+  it; and a Task binds an identity only if it was created after the claim
+  was granted. Both times are recorded to the second, so a Task created in
+  the grant's own second, which may predate the grant, is refused too. A
+  claim that stops releasing, because the Agent names the identity again or
+  the check is back on, counts as granted at that moment. An older queued
+  Task fails closed and must be created again, as does a Task created
+  together with a new identity-bound Agent before or as its claim was
+  granted, so such Tasks are created once the Agent is Ready. A scheduled
+  Task never binds itself, so its runs bind only if the scheduled Task was
+  also created after the grant; an older one must be re-created.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
