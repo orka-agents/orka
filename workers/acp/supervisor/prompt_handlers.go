@@ -1385,9 +1385,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
-	// Operator processes share the child UID, so runtime deletion also stops
-	// them; the barrier additionally refuses launches still in flight.
-	_ = s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
+	// No operator operation may run, or still be launching, when the session
+	// is torn down. An unfinished barrier fails deletion closed and keeps the
+	// session resources; the pool is replaced instead.
+	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		s.mu.Lock()
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced before deletion", nil, false)
+		return
+	}
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()

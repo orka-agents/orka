@@ -18,6 +18,9 @@ type procCredentials struct {
 	pid    int
 	uid    int
 	groups []int
+	// zombie is a terminated process awaiting reaping; it can never run
+	// again, so it does not count against containment.
+	zombie bool
 }
 
 func readProcCredentials(procRoot string) ([]procCredentials, bool) {
@@ -41,6 +44,10 @@ func readProcCredentials(procRoot string) ([]procCredentials, bool) {
 		process := procCredentials{pid: pid, uid: -1}
 		for line := range bytes.SplitSeq(data, []byte("\n")) {
 			switch {
+			case bytes.HasPrefix(line, []byte("State:")):
+				if fields := bytes.Fields(line[len("State:"):]); len(fields) > 0 {
+					process.zombie = fields[0][0] == 'Z' || fields[0][0] == 'X'
+				}
 			case bytes.HasPrefix(line, []byte("Uid:")):
 				if fields := bytes.Fields(line[len("Uid:"):]); len(fields) > 0 {
 					process.uid, _ = strconv.Atoi(string(fields[0]))
@@ -65,7 +72,7 @@ func taggedProcesses(procRoot string, uid, tag int) ([]int, bool) {
 	}
 	var tagged []int
 	for _, process := range processes {
-		if uid >= 0 && process.uid != uid {
+		if process.zombie || (uid >= 0 && process.uid != uid) {
 			continue
 		}
 		if slices.Contains(process.groups, tag) {

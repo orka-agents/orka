@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestTaggedProcessesMatchUIDAndSupplementaryTag(t *testing.T) {
@@ -30,6 +31,15 @@ func TestTaggedProcessesMatchUIDAndSupplementaryTag(t *testing.T) {
 	write("12", "20002", "61005")       // another UID can never be killed
 	write("13", "20001", "61006 61005") // multiple groups still match
 	write("self", "0", "")
+	// A terminated, unreaped process (for example the operation leader before
+	// its parent's Wait) no longer counts.
+	if err := os.MkdirAll(filepath.Join(root, "14"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "14", "status"),
+		[]byte("Name:\tsh\nState:\tZ (zombie)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t61005\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	tagged, ok := taggedProcesses(root, 20001, 61005)
 	if !ok {
 		t.Fatal("scan failed")
@@ -168,5 +178,25 @@ func TestOperatorTerminalCommandRunsThroughExecHelperAsRoot(t *testing.T) {
 	}
 	if got := strings.Fields(string(output)); !slices.Equal(got, []string{"24", "80", "23458"}) {
 		t.Fatalf("terminal output = %q", output)
+	}
+}
+
+// TestKillOperatorTagProvesContainmentBeforeReapAsRoot covers the cp path:
+// the helper exits on its own, and containment must be proven while its
+// zombie still awaits Wait.
+func TestKillOperatorTagProvesContainmentBeforeReapAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to assign supplementary groups")
+	}
+	const uid, tag = 23459, OperatorTagLastGID - 3
+	cmd := exec.Command("/bin/true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{tag}}}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Wait() }()
+	time.Sleep(200 * time.Millisecond) // exited, not yet reaped
+	if !KillOperatorTag(uid, tag) {
+		t.Fatal("an exited, unreaped operation must count as contained")
 	}
 }

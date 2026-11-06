@@ -105,7 +105,8 @@ directly.
   groups needs `CAP_SETGID`, and descendants inherit them, so the tag cannot
   be dropped. On timeout, disconnect, output limit, or revocation, the
   supervisor kills every process of the session UID that carries the tag, and
-  repeats until none remain. This reaches descendants that changed process
+  repeats until no live process carries it. Terminated processes waiting to be
+  reaped cannot run again, so they do not count. This reaches descendants that changed process
   group, session, or parent, or that killed the command first. The agent
   shares the UID but has no tag, so it is never touched. The tag grants no
   file access.
@@ -123,7 +124,8 @@ directly.
   - kills bound operations,
   - waits until in-flight launches have been refused and killed.
 
-  If the barrier cannot finish, the session and pool fail closed.
+  If the barrier cannot finish, the session and pool fail closed. Deletion is
+  refused and the session's resources are kept.
 - The WebSocket reader never blocks on child stdin. Up to 8 MiB is queued
   ahead of the command, end-of-input stays in order, and overflow terminates
   the command. Disconnects and control frames are always observed.
