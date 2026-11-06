@@ -776,6 +776,18 @@ func (h *Handlers) GetTask(c fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// taskUIDQueryParam optionally fences a Task route to one Task UID, so a
+// client that resolved a Task earlier never reaches a later Task that reuses
+// its name.
+const taskUIDQueryParam = "uid"
+
+// taskMatchesExpectedUID reports whether the request names no UID or the
+// loaded Task's UID.
+func taskMatchesExpectedUID(c fiber.Ctx, task *corev1alpha1.Task) bool {
+	expected := c.Query(taskUIDQueryParam)
+	return expected == "" || string(task.UID) == expected
+}
+
 // DeleteTask deletes a task
 func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	id := c.Params("id")
@@ -801,8 +813,17 @@ func (h *Handlers) DeleteTask(c fiber.Ctx) error {
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "deleteTask", task); err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
-	if err := h.client.Delete(ctx, task); err != nil {
+	// Delete exactly the Task that was authorized, never a later Task that
+	// reused its name in the meantime.
+	uid := task.UID
+	if err := h.client.Delete(ctx, task, client.Preconditions{UID: &uid}); err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to delete task: %v", err))
 	}
 
@@ -957,6 +978,9 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	if !taskMatchesExpectedUID(c, task) {
+		return fiber.NewError(fiber.StatusNotFound, "task not found")
+	}
 
 	if task.Status.ResultRef == nil || !task.Status.ResultRef.Available {
 		return fiber.NewError(fiber.StatusNotFound, "task has no result")
@@ -968,6 +992,17 @@ func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusNotFound, "result not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get result: %v", err))
+	}
+	// Results are stored by name. A UID-fenced read confirms the same Task
+	// still holds the name after the read, so the output is that Task's.
+	if c.Query(taskUIDQueryParam) != "" {
+		current, err := h.taskAccess().load(c, namespace, id)
+		if err != nil {
+			return err
+		}
+		if !taskMatchesExpectedUID(c, current) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
 	}
 
 	return c.JSON(fiber.Map{

@@ -27,12 +27,15 @@ import (
 const mcpRESTResponseLimit = 8 << 20
 
 // mcpReplayStrippedHeaders are request headers that describe the MCP
-// message rather than the caller. Credentials and every other caller header,
+// message rather than the caller. Content-Encoding goes with the body: the MCP
+// body was decoded before it was parsed, and the replay sends fresh JSON.
+// Credentials and every other caller header,
 // including configured context-token headers, are forwarded unchanged so the
 // replayed request authenticates exactly as the MCP request did.
 var mcpReplayStrippedHeaders = []string{
 	fiber.HeaderContentLength,
 	fiber.HeaderContentType,
+	fiber.HeaderContentEncoding,
 	fiber.HeaderAccept,
 	fiber.HeaderAcceptEncoding,
 	fiber.HeaderTransferEncoding,
@@ -40,9 +43,9 @@ var mcpReplayStrippedHeaders = []string{
 	fiber.HeaderOrigin,
 	"Expect",
 	"Mcp-Session-Id",
-	"Mcp-Protocol-Version",
+	mcpProtocolVersionHeader,
 	mcpMethodHeader,
-	"Mcp-Name",
+	mcpNameHeader,
 	"Last-Event-ID",
 }
 
@@ -164,6 +167,15 @@ func mcpNamespaceQuery(namespace string) url.Values {
 	if namespace != "" {
 		query.Set(toolNamespaceArg, namespace)
 	}
+	return query
+}
+
+// mcpTaskUIDQuery is the namespace query plus the UID fence of a Task the MCP
+// layer already resolved, so the REST route refuses a later Task that reuses
+// the name.
+func mcpTaskUIDQuery(namespace, uid string) url.Values {
+	query := mcpNamespaceQuery(namespace)
+	query.Set(taskUIDQueryParam, uid)
 	return query
 }
 

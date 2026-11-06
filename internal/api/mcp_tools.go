@@ -148,7 +148,7 @@ var (
 		"description": "Byte offset into the redacted output. Use nextOffset from a previous call to read more.",
 	}
 	mcpMaxBytesProperty = map[string]any{
-		"type": "integer", "minimum": 1, "maximum": mcpMaxOutputBytes, mcpSchemaDefault: mcpDefaultOutputBytes,
+		"type": "integer", "minimum": utf8.UTFMax, "maximum": mcpMaxOutputBytes, mcpSchemaDefault: mcpDefaultOutputBytes,
 		"description": "Maximum bytes of output to return.",
 	}
 )
@@ -1163,7 +1163,8 @@ func (a mcpOutputArgs) window() (int64, int64, error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	limit, err := a.MaxBytes.bounded("maxBytes", 1, mcpMaxOutputBytes, mcpDefaultOutputBytes)
+	// A window of at least one full UTF-8 character always advances.
+	limit, err := a.MaxBytes.bounded("maxBytes", utf8.UTFMax, mcpMaxOutputBytes, mcpDefaultOutputBytes)
 	return offset, limit, err
 }
 
@@ -1177,7 +1178,9 @@ func mcpOutputChunk(text string, offset, limit int64) map[string]any {
 		start++
 	}
 	end := min(start+limit, total)
-	for end < total && end > start && !utf8.RuneStart(redacted[end]) {
+	// Back off at most one partial character, so invalid UTF-8 (a run of
+	// continuation bytes) still yields a non-empty chunk and progress.
+	for back := 0; back < utf8.UTFMax-1 && end < total && end > start+1 && !utf8.RuneStart(redacted[end]); back++ {
 		end--
 	}
 	chunk := map[string]any{

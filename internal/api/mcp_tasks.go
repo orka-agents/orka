@@ -193,7 +193,8 @@ func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) mcpToolR
 		var response struct {
 			Result string `json:"result"`
 		}
-		err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(state.response.Name, "result"), mcpNamespaceQuery(state.response.Namespace), nil, &response)
+		err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(state.response.Name, "result"),
+			mcpTaskUIDQuery(state.response.Namespace, string(state.response.UID)), nil, &response)
 		if err == nil {
 			value["result"] = mcpOutputChunk(response.Result, 0, mcpDefaultOutputBytes)
 		}
@@ -386,7 +387,7 @@ func (m *mcpServer) updateTask(call *mcpCall) (any, error) {
 }
 
 // cancelTask deletes the Task through DELETE /api/v1/tasks/:id, the only
-// public cancellation route.
+// public cancellation route, fenced to the task ID's UID.
 func (m *mcpServer) cancelTask(call *mcpCall) (any, error) {
 	_, ref, err := decodeMCPTaskParams(call.params)
 	if err != nil {
@@ -399,7 +400,7 @@ func (m *mcpServer) cancelTask(call *mcpCall) (any, error) {
 	if mcpTaskTerminal(state.response.Status.Phase) {
 		return nil, newMCPError(mcpCodeInvalidParams, "task has already finished")
 	}
-	if _, err := m.rest(call.c, fiber.MethodDelete, mcpTaskPath(ref.Name), mcpNamespaceQuery(ref.Namespace), nil); err != nil {
+	if _, err := m.rest(call.c, fiber.MethodDelete, mcpTaskPath(ref.Name), mcpTaskUIDQuery(ref.Namespace, ref.UID), nil); err != nil {
 		return nil, mcpTaskRPCError(err)
 	}
 	if call.tasksExtension {

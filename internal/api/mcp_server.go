@@ -46,6 +46,8 @@ const (
 	mcpMetaRelatedTask        = "io.modelcontextprotocol/related-task"
 	mcpTasksExtension         = "io.modelcontextprotocol/tasks"
 	mcpMethodHeader           = "Mcp-Method"
+	mcpProtocolVersionHeader  = "Mcp-Protocol-Version"
+	mcpNameHeader             = "Mcp-Name"
 
 	// DefaultMCPMaxConcurrent bounds concurrent MCP requests per API replica,
 	// like --chat-max-concurrent bounds chat requests.
@@ -53,7 +55,19 @@ const (
 	// mcpMaxRequestBytes bounds one JSON-RPC message. Prompts are bounded
 	// separately; nothing an MCP client sends legitimately approaches this.
 	mcpMaxRequestBytes = 1 << 20
+	// mcpRequestReadTimeout bounds reading one MCP request, body included.
+	mcpRequestReadTimeout = 30 * time.Second
 )
+
+// mcpCORSHeaders are the Streamable HTTP request headers a browser client
+// sends; the CORS allow-list carries them when the endpoint is enabled.
+var mcpCORSHeaders = []string{mcpProtocolVersionHeader, mcpMethodHeader, mcpNameHeader}
+
+// isMCPEndpointPath matches the MCP route as Fiber routes it: case-insensitive
+// and with an optional trailing slash.
+func isMCPEndpointPath(path string) bool {
+	return strings.EqualFold(strings.TrimRight(path, "/"), mcpEndpointPath)
+}
 
 // JSON-RPC and MCP error codes.
 const (
@@ -196,16 +210,22 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	if !m.originAllowed(c.Get(fiber.HeaderOrigin)) {
 		return m.writeError(c, fiber.StatusForbidden, nil, newMCPError(mcpCodeInvalidRequest, "origin not allowed"))
 	}
+	// Read the whole body before taking a permit, so a stalled upload cannot
+	// hold one. The MCP request config bounds the read in size and time.
+	if c.Request().Header.ContentLength() > mcpMaxRequestBytes {
+		c.RequestCtx().SetConnectionClose()
+		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
+	}
+	body := c.Body()
+	if len(body) > mcpMaxRequestBytes {
+		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
+	}
 	if !tryAcquire(m.slots) {
 		c.Set(fiber.HeaderRetryAfter, "1")
 		return m.writeError(c, fiber.StatusTooManyRequests, nil, newMCPError(mcpCodeServerBusy, "too many concurrent MCP requests"))
 	}
 	defer func() { <-m.slots }()
 
-	body := c.Body()
-	if len(body) > mcpMaxRequestBytes {
-		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
-	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && trimmed[0] == '[' {
 		return m.writeError(c, fiber.StatusBadRequest, nil, newMCPError(mcpCodeInvalidRequest, "JSON-RPC batches are not supported"))

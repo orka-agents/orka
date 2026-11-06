@@ -52,7 +52,8 @@ kubectl -n orka-system port-forward svc/orka 8080:8080
 
 The endpoint does not implement MCP OAuth discovery; configure the header in your
 client. Requests with a browser `Origin` header must match `ORKA_CORS_ALLOWED_ORIGINS`
-when that allow-list is set.
+when that allow-list is set. With the endpoint enabled, the CORS allow-list also accepts
+the `Mcp-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` request headers.
 
 ## Configure your client
 
@@ -187,6 +188,8 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
 
 A task ID names the Task's namespace and name and pins its UID. A later Task created
 with the same name is a different MCP task, and the old ID reports "task not found".
+Result reads and cancellation carry the UID to the REST route (`?uid=`), so they never
+return or delete a later Task that reuses the name.
 MCP keeps no state of its own: every `tasks/*` call re-reads the Task with your
 credentials. `tasks/list` is not supported; use `list_tasks`.
 

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -903,4 +907,190 @@ func TestMCPTaskResultHoldsItsWaitPermitWhileInputIsRequired(t *testing.T) {
 	require.NotNil(t, result.response.Error, result.response.body)
 	require.Equal(t, mcpCodeServerBusy, result.response.Error.Code)
 	require.Empty(t, mcp.waitSlots)
+}
+
+// A stalled upload holds no concurrency permit: the body is read, bounded in
+// size and time by the MCP request config, before a permit is taken.
+func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
+	for _, path := range []string{mcpEndpointPath, "/MCP/", mcpEndpointPath + "?x=1"} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(fiber.MethodPost)
+		header.SetRequestURI(path)
+		header.SetHost("orka.example.com")
+		config := requestBodyConfig(&header)
+		require.Equal(t, mcpMaxRequestBytes, config.MaxRequestBodySize, path)
+		require.Equal(t, mcpRequestReadTimeout, config.ReadTimeout, path)
+	}
+
+	app := fiber.New(fiber.Config{StreamRequestBody: true})
+	app.Server().HeaderReceived = requestBodyConfig
+	mcp := newMCPServer(nil, MCPServerConfig{MaxConcurrent: 1})
+	app.Post(mcpEndpointPath, mcp.Handle)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	served := make(chan error, 1)
+	go func() { served <- app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() {
+		require.NoError(t, app.ShutdownWithTimeout(5*time.Second))
+		require.NoError(t, <-served)
+	})
+
+	// Send more than fasthttp's 8 KiB body prefetch, so the handler runs
+	// while the rest of the body is still outstanding.
+	stalled, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(stalled, "POST %s HTTP/1.1\r\nHost: orka\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n{%s",
+		mcpEndpointPath, 256<<10, strings.Repeat(" ", 16<<10))
+	require.NoError(t, err)
+	require.Never(t, func() bool { return len(mcp.slots) > 0 }, time.Second, 10*time.Millisecond)
+
+	response, err := http.Post("http://"+listener.Addr().String()+mcpEndpointPath, "application/json", strings.NewReader(mcpBody(t, "ping", nil)))
+	require.NoError(t, err)
+	defer response.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, response.StatusCode, "the stalled upload holds no permit")
+	require.NoError(t, stalled.Close())
+}
+
+// The replay decodes nothing: Content-Encoding describes the MCP body, which
+// was decoded before parsing, not the JSON the replay sends.
+func TestMCPReplayDropsContentEncoding(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	_, err := writer.Write([]byte(mcpBody(t, "tools/call", map[string]any{
+		"name": mcpToolCreateTask, "arguments": map[string]any{"agent": "protected", "prompt": "do it", "taskType": "agent", "name": "gzipped"},
+	})))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	response := f.mcpRaw(t, http.MethodPost, compressed.String(), map[string]string{"Content-Encoding": "gzip"})
+	require.Equal(t, http.StatusOK, response.status, response.body)
+	require.Nil(t, response.Error, response.body)
+	var result mcpTestToolResult
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	require.False(t, result.IsError, result.Content)
+	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "gzipped"}, &corev1alpha1.Task{}))
+}
+
+// Every maxBytes the schema allows advances through any content.
+func TestMCPOutputChunksAlwaysAdvance(t *testing.T) {
+	for _, text := range []string{"é" + strings.Repeat("x", 10), "𝄞𝄞𝄞", "a\x80\x80\x80\x80\x80\x80b", "\x80\x80\x80\x80\x80\x80\x80"} {
+		limit := int64(utf8.UTFMax)
+		offset := int64(0)
+		var collected strings.Builder
+		finished := false
+		for range len(text) + 1 {
+			chunk := mcpOutputChunk(text, offset, limit)
+			content := chunk["content"].(string)
+			collected.WriteString(content)
+			next, more := chunk["nextOffset"].(int64)
+			if !more {
+				finished = true
+				break
+			}
+			require.NotEmpty(t, content, "%q at %d", text, offset)
+			require.Greater(t, next, offset, "%q at %d", text, offset)
+			offset = next
+		}
+		require.True(t, finished, "%q", text)
+		if utf8.ValidString(text) {
+			require.Equal(t, text, collected.String())
+		}
+	}
+
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "accented", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "accented", []byte("é and more")))
+	tooSmall := f.mcpTool(t, mcpToolGetTaskResult, map[string]any{"name": "accented", "maxBytes": utf8.UTFMax - 1})
+	require.True(t, tooSmall.IsError)
+	require.Zero(t, mcpErrorStatus(t, tooSmall), "argument errors never reach the REST route")
+	smallest := f.mcpTool(t, mcpToolGetTaskResult, map[string]any{"name": "accented", "maxBytes": utf8.UTFMax})
+	require.False(t, smallest.IsError, smallest.Content)
+	require.NotEmpty(t, smallest.StructuredContent["content"])
+	require.Greater(t, smallest.StructuredContent["nextOffset"], float64(0))
+}
+
+// tasks/result and tasks/cancel fence their REST replays to the task ID's
+// UID, and the REST routes enforce it, so a Task that reuses the name between
+// the MCP layer's UID check and the replay is neither read nor deleted.
+func TestMCPTaskResultAndCancelAreUIDFenced(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	// Record Delete preconditions; the fake client does not enforce UIDs.
+	var preconditions []*metav1.Preconditions
+	f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			options := &client.DeleteOptions{}
+			options.ApplyOptions(opts)
+			preconditions = append(preconditions, options.Preconditions)
+			return c.Delete(ctx, obj, opts...)
+		},
+	})
+	f.config.APIReader = f.kube
+	f.server = NewServer(f.kube, nil, f.config)
+	mcp := f.server.mcpServer
+	next := mcp.handler
+	var replays []string
+	mcp.handler = func(ctx *fasthttp.RequestCtx) {
+		replays = append(replays, string(ctx.Method())+" "+string(ctx.RequestURI()))
+		next(ctx)
+	}
+
+	createMCPTestTask(t, f, "reused", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "reused", []byte("reused output")))
+	response := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "reused", "uid-reused")})
+	require.Nil(t, response.Error, response.body)
+	require.Contains(t, response.body, "reused output")
+	require.Contains(t, replays, "GET /api/v1/tasks/reused/result?namespace=default&uid=uid-reused")
+
+	createMCPTestTask(t, f, "running", corev1alpha1.TaskPhaseRunning)
+	response = f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": encodeMCPTaskID("default", "running", "uid-running")})
+	require.Nil(t, response.Error, response.body)
+	require.Contains(t, replays, "DELETE /api/v1/tasks/running?namespace=default&uid=uid-running")
+	require.Len(t, preconditions, 1)
+	require.NotNil(t, preconditions[0])
+	require.Equal(t, types.UID("uid-running"), *preconditions[0].UID, "the Delete itself is UID-preconditioned")
+
+	// REST enforcement: a mismatched uid is "task not found" and changes nothing.
+	status, body := f.request(t, http.MethodGet, "/api/v1/tasks/reused/result?uid=uid-original", "")
+	require.Equal(t, http.StatusNotFound, status, body)
+	require.NotContains(t, body, "reused output")
+	status, body = f.request(t, http.MethodGet, "/api/v1/tasks/reused/result", "")
+	require.Equal(t, http.StatusOK, status, "the uid fence is optional for REST clients: %s", body)
+	createMCPTestTask(t, f, "kept", corev1alpha1.TaskPhaseRunning)
+	status, body = f.request(t, http.MethodDelete, "/api/v1/tasks/kept?uid=uid-original", "")
+	require.Equal(t, http.StatusNotFound, status, body)
+	require.NoError(t, f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "kept"}, &corev1alpha1.Task{}))
+	require.Len(t, preconditions, 1, "a mismatched uid never reaches Delete")
+}
+
+// Browser Streamable HTTP clients send MCP headers after initialization; the
+// CORS preflight allows them only while the endpoint is enabled.
+func TestMCPCORSPreflightAllowsMCPHeaders(t *testing.T) {
+	preflight := func(server *Server) http.Header {
+		request := httptest.NewRequest(http.MethodOptions, mcpEndpointPath, nil)
+		request.Header.Set("Origin", "https://ide.example.com")
+		request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+		request.Header.Set("Access-Control-Request-Headers", "authorization, content-type, mcp-protocol-version, mcp-method, mcp-name")
+		response, err := server.app.Test(request)
+		require.NoError(t, err)
+		defer response.Body.Close() //nolint:errcheck
+		require.Equal(t, http.StatusNoContent, response.StatusCode)
+		return response.Header
+	}
+	f := newMCPFixture(t)
+	allowed := strings.ToLower(preflight(f.server).Get("Access-Control-Allow-Headers"))
+	for _, name := range mcpCORSHeaders {
+		require.Contains(t, allowed, strings.ToLower(name))
+	}
+
+	f.config.MCP.Enabled = false
+	allowed = strings.ToLower(preflight(NewServer(f.kube, nil, f.config)).Get("Access-Control-Allow-Headers"))
+	require.NotContains(t, allowed, "mcp-")
 }

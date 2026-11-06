@@ -232,6 +232,12 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	if strings.HasPrefix(path, "/internal/v2/acp/") {
 		return fasthttp.RequestConfig{MaxRequestBodySize: 1 << 20, ReadTimeout: 30 * time.Second}
 	}
+	// The MCP handler reads its body before taking a concurrency permit;
+	// bound that read so stalled uploads only cost their own connection.
+	var mcpURI fasthttp.URI
+	if mcpURI.Parse(header.Host(), header.RequestURI()) == nil && isMCPEndpointPath(string(mcpURI.PathOriginal())) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: mcpMaxRequestBytes, ReadTimeout: mcpRequestReadTimeout}
+	}
 	return fasthttp.RequestConfig{}
 }
 
@@ -283,10 +289,14 @@ func (s *Server) setupMiddleware() {
 	for i, o := range origins {
 		origins[i] = strings.TrimSpace(o)
 	}
+	allowHeaders := allowedCORSHeaders(s.config.ContextTokens)
+	if s.config.MCP.Enabled {
+		allowHeaders = append(allowHeaders, mcpCORSHeaders...)
+	}
 	s.app.Use(cors.New(cors.Config{
 		AllowOrigins: origins,
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowHeaders: allowedCORSHeaders(s.config.ContextTokens),
+		AllowHeaders: allowHeaders,
 	}))
 
 	// Logging middleware
