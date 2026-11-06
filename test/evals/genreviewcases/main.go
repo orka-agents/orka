@@ -27,6 +27,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,20 +76,22 @@ func main() {
 }
 
 func run(sourcePath, outPath, repo string, check bool) error {
+	// Errors name the flag, never the caller's path: a path is not validated
+	// and may carry a pasted credential.
 	raw, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return err
+		return fileError("read -source", err)
 	}
 	var source Source
 	if err := yaml.UnmarshalStrict(raw, &source); err != nil {
 		// The YAML error quotes unknown keys, which may be a pasted
 		// credential, so it is not passed on.
-		return fmt.Errorf("%s is not a valid case source: check for unknown, repeated or mistyped fields", sourcePath)
+		return errors.New("-source is not a valid case source: check for unknown, repeated or mistyped fields")
 	}
 	// Check the URL before Git sees it, so a credential pasted into it never
 	// reaches a clone or an error message.
 	if err := evals.ValidateFixtureRepoURL(source.RepoURL); err != nil {
-		return fmt.Errorf("%s: %w", sourcePath, err)
+		return fmt.Errorf("-source: %w", err)
 	}
 	if repo == "" {
 		repo = source.RepoURL
@@ -97,6 +100,14 @@ func run(sourcePath, outPath, repo string, check bool) error {
 		// check above, so it is refused without being echoed.
 		return errors.New("-repo must be an existing local directory")
 	}
+	if !check {
+		// Writing the output over the hand-written source would destroy it.
+		if same, err := sameFile(sourcePath, outPath); err != nil {
+			return fileError("check -out", err)
+		} else if same {
+			return errors.New("-out must not be the -source file")
+		}
+	}
 	generated, err := Generate(source, repo)
 	if err != nil {
 		return err
@@ -104,14 +115,42 @@ func run(sourcePath, outPath, repo string, check bool) error {
 	if check {
 		current, err := os.ReadFile(outPath)
 		if err != nil {
-			return err
+			return fileError("read -out", err)
 		}
 		if !bytes.Equal(current, generated) {
-			return fmt.Errorf("%s is stale; run go run ./test/evals/genreviewcases", outPath)
+			return errors.New("-out is stale; run go run ./test/evals/genreviewcases")
 		}
 		return nil
 	}
-	return os.WriteFile(outPath, generated, 0o644)
+	if err := os.WriteFile(outPath, generated, 0o644); err != nil {
+		return fileError("write -out", err)
+	}
+	return nil
+}
+
+// fileError reports a file operation without the path it was given.
+func fileError(op string, err error) error {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
+		return fmt.Errorf("%s: %w", op, pathErr.Err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// sameFile reports whether a and b name the same file. A b that does not
+// exist yet is a different file.
+func sameFile(a, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false, err
+	}
+	bInfo, err := os.Stat(b)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(aInfo, bInfo), nil
 }
 
 // Generate resolves every case against a fresh mirror of repo, a URL or a
