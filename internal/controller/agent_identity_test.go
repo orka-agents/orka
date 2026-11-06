@@ -214,11 +214,16 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 	}
 	scheduled := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: testNS, CreationTimestamp: metav1.NewTime(testClaimGrantedAt.Add(time.Second))},
 		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Schedule: "0 2 * * *",
 			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 	}
-	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled}
+	// A scheduled Task created before the grant was never checked for the
+	// identity, though its runs are new.
+	unchecked := scheduled.DeepCopy()
+	unchecked.Name = "nightly-unchecked"
+	unchecked.CreationTimestamp = testClaimGrantedAt
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled, unchecked}
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
 	for _, parent := range parents {
 		parent.UID = types.UID(parent.Name + "-uid")
@@ -260,6 +265,10 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		}
 	}
 
+	if _, err := r.agentExecutionIdentity(context.Background(), task("nightly-unchecked"), agent); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "re-create the scheduled Task") {
+		t.Fatalf("run of a scheduled Task created before the grant: error = %v, want a permanent refusal", err)
+	}
 	otherAgentRun := task("nightly")
 	otherAgentRun.Spec.AgentRef.Name = "other"
 	if _, err := r.agentExecutionIdentity(context.Background(), otherAgentRun, agent); err == nil ||
@@ -483,12 +492,18 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 	task := func(created time.Time) *corev1alpha1.Task {
 		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: testNS, CreationTimestamp: metav1.NewTime(created)}}
 	}
-	if _, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Time), agent); err != nil {
-		t.Fatalf("Task created in the grant's second: %v", err)
+	if _, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Add(time.Second)), agent); err != nil {
+		t.Fatalf("Task created the second after the grant: %v", err)
 	}
-	_, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Add(-time.Second)), agent)
-	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "create the Task again") {
-		t.Fatalf("Task created before the grant: error = %v, want a permanent refusal", err)
+	// Times have one-second precision, so a Task recorded in the grant's own
+	// second may predate it.
+	for name, created := range map[string]time.Time{
+		"in the grant's second": testClaimGrantedAt.Time, "before the grant": testClaimGrantedAt.Add(-time.Second),
+	} {
+		_, err := r.agentExecutionIdentity(context.Background(), task(created), agent)
+		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "create the Task again") {
+			t.Fatalf("Task created %s: error = %v, want a permanent refusal", name, err)
+		}
 	}
 
 	// A claim released and granted again after a bound Task was created no

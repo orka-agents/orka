@@ -30,11 +30,13 @@ func identityClaimMatches(claim *corev1alpha1.AgentIdentityClaim, issuer, id str
 	return claim != nil && claim.Issuer == issuer && claim.ID == id
 }
 
-// identityClaimCoversTask reports whether the Task was created at or after
+// identityClaimCoversTask reports whether the Task was created strictly after
 // the claim was granted. Only such a Task was checked for Agent use while the
 // Agent named the identity and the check was enforced (ADR 0039, stage 1).
+// Both times have one-second precision, so a Task created in the grant's
+// second may predate the grant and is refused.
 func identityClaimCoversTask(claim *corev1alpha1.AgentIdentityClaim, task *corev1alpha1.Task) bool {
-	return claim != nil && claim.GrantedAt != nil && !task.CreationTimestamp.Before(claim.GrantedAt)
+	return claim != nil && claim.GrantedAt != nil && task.CreationTimestamp.After(claim.GrantedAt.Time)
 }
 
 // identityClaimBindable reports whether new Task bindings may use the claim:
@@ -280,7 +282,7 @@ func (r *TaskReconciler) agentExecutionIdentity(
 		return nil, permanentACPAgentConfiguration(err)
 	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
-		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref); err != nil {
+		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref, live.Status.IdentityClaim); err != nil {
 			return nil, err
 		}
 	}
@@ -294,7 +296,8 @@ func (r *TaskReconciler) agentExecutionIdentity(
 // recreated under the same name. The parent must be the Task that controls
 // the child, not one recreated under its name. A scheduled run is not
 // delegation: it runs its scheduled Task's own Agent, which that Task's
-// creator was checked for, and its scheduled Task never binds.
+// creator was checked for. Its scheduled Task never binds, so the scheduled
+// Task itself must have been created after the claim was granted.
 func requireParentOwnsIdentityAgent(
 	ctx context.Context,
 	reader client.Reader,
@@ -302,6 +305,7 @@ func requireParentOwnsIdentityAgent(
 	parentName string,
 	agent *corev1alpha1.Agent,
 	ref *corev1alpha1.AgentExecutionIdentityRef,
+	claim *corev1alpha1.AgentIdentityClaim,
 ) error {
 	parent := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: parentName}, parent); err != nil {
@@ -318,11 +322,16 @@ func requireParentOwnsIdentityAgent(
 			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
 	if parent.Spec.Schedule != "" {
-		if parent.Spec.AgentRef != nil && task.Spec.AgentRef != nil && *parent.Spec.AgentRef == *task.Spec.AgentRef {
-			return nil
+		if parent.Spec.AgentRef == nil || task.Spec.AgentRef == nil || *parent.Spec.AgentRef != *task.Spec.AgentRef {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
 		}
-		return permanentACPAgentConfiguration(fmt.Errorf(
-			"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
+		if !identityClaimCoversTask(claim, parent) {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"scheduled Task %q was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; re-create the scheduled Task",
+				parent.Name, agent.Name, ref.Issuer, ref.ID))
+		}
+		return nil
 	}
 	binding := parent.Status.AgentExecutionBinding
 	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil ||
