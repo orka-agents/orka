@@ -244,6 +244,9 @@ func (r *RuntimePoolReconciler) deleteExternalCorePolicy(ctx context.Context, po
 
 func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Context, pool *corev1alpha1.RuntimePool, cfg runtimePoolConfig, w *workspacev1alpha1.ExecutionWorkspace) (bool, error) {
 	var frozenTargets []externalProcessIngressTarget
+	// Only an admitted NetworkPolicy shape is frozen intent that observed
+	// policy specs must match before deletion.
+	matchFrozenSpecs := w.Spec.Workload != nil
 	if w.Spec.Workload != nil {
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.Template.Namespace == "" {
 			return false, workspaceprovider.ErrStaleIdentity
@@ -251,15 +254,13 @@ func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Co
 		cfg.namespace = w.Spec.Workload.Runtime.Template.Namespace
 		// A gateway-enforced (egress allowlist) request never froze Pod peers,
 		// and Core grants its routed process no worker ingress. Its pool
-		// policies select no runtime Pod and were written from the current
-		// provider-proxy configuration. Only the NetworkPolicy shape carries
-		// frozen endpoint targets.
+		// policies select no runtime Pod and are not admission intent: they
+		// were last written from provider-proxy and controller settings that
+		// may since have changed or lost their credential. Core ownership of
+		// the deterministic names alone authorizes their deletion, so cleanup
+		// never depends on live configuration or credentials.
 		if runtime := w.Spec.Workload.Runtime; runtime.Egress != nil && runtime.NetworkPolicy == nil {
-			proxy, err := r.ProviderProxy.normalized()
-			if err != nil {
-				return false, err
-			}
-			cfg.providerProxy = proxy
+			matchFrozenSpecs = false
 		} else {
 			var err error
 			frozenTargets, err = externalFrozenIngressTargets(pool, runtime)
@@ -285,7 +286,7 @@ func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Co
 		if !externalCorePolicyOwned(pool, cfg, policy) {
 			continue
 		}
-		if w.Spec.Workload != nil && !reflect.DeepEqual(policy.Spec, expected.Spec) {
+		if matchFrozenSpecs && !reflect.DeepEqual(policy.Spec, expected.Spec) {
 			return false, workspaceprovider.ErrStaleIdentity
 		}
 		pending, err := r.deleteExternalCorePolicy(ctx, policy)
