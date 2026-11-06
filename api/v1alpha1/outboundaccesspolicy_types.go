@@ -83,7 +83,7 @@ type EntraOutboundTarget struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
-	// +kubebuilder:validation:Pattern=`^(https://|api://)[^\s/]+(/[^\s]*)?$`
+	// +kubebuilder:validation:Pattern=`^(https://|api://)[^\s/?#]+(/[^\s?#]*)?$`
 	Resource string `json:"resource"`
 }
 

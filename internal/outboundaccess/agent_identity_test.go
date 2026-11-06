@@ -55,6 +55,10 @@ func TestValidateSpecAgentIdentityMode(t *testing.T) {
 			a.Entra.Resource = "https://graph.microsoft.com/.default"
 		},
 		"plain http": func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "http://graph.microsoft.com" },
+		"query": func(a *corev1alpha1.AgentIdentityOutboundAccess) {
+			a.Entra.Resource = "https://graph.microsoft.com/?x=1"
+		},
+		"fragment": func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "api://orka-resource#part" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := agentIdentityPolicySpec()
