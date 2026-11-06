@@ -54,31 +54,24 @@ PY
   else
     (cd "${SUBSTRATE_DIR}" && bash hack/create-kind-cluster.sh) || return 1
   fi
-  (cd "${SUBSTRATE_DIR}" && bash hack/install-ate-kind.sh --deploy-ate-system) || return 1
-  substrate_configure_direct_egress || return 1
+  substrate_install_ate_system || return 1
   substrate_require_clean_upstream "${SUBSTRATE_DIR}"
 }
 
-# The pinned provider supports direct Actor egress through an empty gateway
-# address. Use it on this dedicated cluster so worker NetworkPolicies see the
-# actual destinations. Do not patch source or relax a shared gateway's access.
-substrate_configure_direct_egress() {
-  local patch
-  patch="$(kubectl -n ate-system get deployment ate-api-server -o json | jq -ce '
-    [.spec.template.spec.containers | to_entries[] | select(.value.name == "ate-api-server")] as $containers |
-    if ($containers | length) != 1 then error("expected exactly one ate-api-server container") else
-      $containers[0] as $container |
-      [$container.value.args | to_entries[] | select(.value | startswith("--egress-gateway-address="))] as $args |
-      if ($args | length) != 1 then error("expected exactly one native egress gateway argument") else
-        [
-          {op:"test", path:"/metadata/uid", value:.metadata.uid},
-          {op:"test", path:"/metadata/resourceVersion", value:.metadata.resourceVersion},
-          {op:"replace", path:("/spec/template/spec/containers/" + ($container.key | tostring) + "/args/" + ($args[0].key | tostring)), value:"--egress-gateway-address="}
-        ]
-      end
-    end
-  ')" || return 1
-  kubectl -n ate-system patch deployment ate-api-server --type=json -p "${patch}" >/dev/null || return 1
+# Install the pinned control plane with ate-setup. Authorization is always
+# enforced in v1: only the shared ate-client test identity is a bootstrap
+# owner, and Orka receives least-privilege access policies afterwards. Only
+# Orka's controller identity may reach Actors through the router. Egress
+# credential injection is off; Actors get no egress unless an EgressPolicy
+# allows it (v1 has no direct egress).
+substrate_install_ate_system() {
+  local orka_spiffe_id="spiffe://cluster.local/ns/${ORKA_NAMESPACE:-orka-system}/sa/${ORKA_CONTROLLER_SERVICE_ACCOUNT:-orka-controller-manager}"
+  (cd "${SUBSTRATE_DIR}" && go run ./cmd/ate-setup --kind --kind-cluster-name="${KIND_CLUSTER_NAME}" \
+    --kubeconfig="${KUBECONFIG}" --context="${KUBECTL_CONTEXT}" --no-dev-env --rollout-timeout=5m \
+    deploy ate-system \
+    --credential-provider='{"enabled":false}' \
+    --ateapi-authz-bootstrap-owners="system:serviceaccount:ate-system:ate-client" \
+    --ingress-allowed-spiffe-ids="${orka_spiffe_id}") || return 1
   kubectl -n ate-system rollout status deployment/ate-api-server --timeout=5m
 }
 

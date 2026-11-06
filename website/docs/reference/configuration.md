@@ -86,6 +86,9 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.executionWorkspace.dispatchEnabled` | `false` | Enable class-backed ACP dispatch through registered external providers. |
 | `controller.executionWorkspace.workerNamespaces` | `[]` | Grant core read-only Pod observation in native worker namespaces; provider mutation RBAC is separate. |
 | `controller.substrate.mcpToolsEnabled` | `false` | Enable in-tree native Substrate MCP Tool actors and actor pools. |
+| `controller.substrate.podCertificate.enabled` | `false` | Project the controller's Substrate pod-certificate identity and service trust bundle. Required for MCP Tools unless another podidentity-signed client certificate is configured; the router admits only allowlisted pod certificates. |
+| `providerProxy.substrateEgressGateway.enabled` | `false` | Admit the Agent Substrate v1 egress gateway Pods (`namespace`, `podLabels`) to the provider-auth-proxy. Substrate Actors reach the proxy only through that gateway. |
+| `controller.substrate.routerUrl` | `https://atenet-router.ate-system.svc:443` | Substrate router URL for Actor traffic. Must be `https`. |
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |

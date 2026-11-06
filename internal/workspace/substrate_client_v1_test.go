@@ -1,0 +1,194 @@
+package workspace
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	ateapipb "github.com/orka-agents/orka/internal/substratepb"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+)
+
+// stubSubstrateControl answers only the RPCs a test configures; any other call
+// panics through the nil embedded interface.
+type stubSubstrateControl struct {
+	ateapipb.ControlClient
+	actor    *ateapipb.Actor
+	template *ateapipb.ActorTemplate
+	resumes  int
+	deletes  []*ateapipb.DeleteActorRequest
+	suspends []*ateapipb.SuspendActorRequest
+}
+
+func (s *stubSubstrateControl) GetActor(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error) {
+	return s.actor, nil
+}
+
+func (s *stubSubstrateControl) GetActorTemplate(context.Context, *ateapipb.GetActorTemplateRequest, ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+	return s.template, nil
+}
+
+func (s *stubSubstrateControl) ResumeActor(context.Context, *ateapipb.ResumeActorRequest, ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
+	s.resumes++
+	return &ateapipb.ResumeActorResponse{Actor: s.actor}, nil
+}
+
+func (s *stubSubstrateControl) DeleteActor(_ context.Context, req *ateapipb.DeleteActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
+	s.deletes = append(s.deletes, req)
+	return &ateapipb.Actor{}, nil
+}
+
+func (s *stubSubstrateControl) SuspendActor(_ context.Context, req *ateapipb.SuspendActorRequest, _ ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
+	s.suspends = append(s.suspends, req)
+	return &ateapipb.SuspendActorResponse{Actor: s.actor}, nil
+}
+
+func goldenTemplate(mode ateapipb.GoldenSnapshotMode) *ateapipb.ActorTemplate {
+	return &ateapipb.ActorTemplate{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "mcp", Uid: "template-uid"},
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			PreferredFidelity:    ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			GoldenSnapshotConfig: &ateapipb.GoldenSnapshotConfig{Mode: mode},
+		},
+	}
+}
+
+func freshActor() *ateapipb.Actor {
+	return &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1", Uid: "actor-uid"},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "team-a", Name: "mcp"},
+		Status:        &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED},
+	}
+}
+
+func snapshot(generation int32, fidelity ateapipb.SnapshotFidelity, state ateapipb.SnapshotStorageState) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{
+		Uuid: fmt.Sprintf("snapshot-%d", generation), Generation: generation, Fidelity: fidelity,
+		ActorTemplateUid: fmt.Sprintf("template-uid-%d", generation),
+		DurableSnapshot: &ateapipb.SnapshotStorage{
+			State: state, Object: &ateapipb.ObjectSnapshot{SnapshotUri: fmt.Sprintf("s3://bucket/%d", generation)},
+		},
+	}
+}
+
+func TestSubstrateBootRequiresGoldenSnapshotsDisabled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate  func(*stubSubstrateControl)
+		allowed bool
+	}{
+		"golden disabled": {mutate: func(*stubSubstrateControl) {}, allowed: true},
+		"golden enabled": {mutate: func(s *stubSubstrateControl) {
+			s.template = goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED)
+		}},
+		"golden default enabled": {mutate: func(s *stubSubstrateControl) { s.template.SnapshotConfig = nil }},
+		"seeded from a tag": {mutate: func(s *stubSubstrateControl) {
+			s.actor.SourceTag = &ateapipb.ObjectRef{Atespace: "team-a", Name: "checkpoint"}
+		}},
+		"has guest state": {mutate: func(s *stubSubstrateControl) {
+			s.actor.Status.Snapshots = []*ateapipb.Snapshot{snapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED)}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubSubstrateControl{actor: freshActor(), template: goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED)}
+			tc.mutate(stub)
+			client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
+			_, err := client.ResumeActor(t.Context(), "actor-1", true)
+			if tc.allowed {
+				require.NoError(t, err)
+				require.Equal(t, 1, stub.resumes)
+				return
+			}
+			require.True(t, IsKind(err, ErrorKindFailedPrecondition), "error = %v", err)
+			require.Zero(t, stub.resumes, "a boot request must fail before resuming from a golden or prior snapshot")
+		})
+	}
+}
+
+func TestSubstrateResumeWithoutBootSkipsColdBootCheck(t *testing.T) {
+	stub := &stubSubstrateControl{actor: freshActor(), template: goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED)}
+	client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
+	_, err := client.ResumeActor(t.Context(), "actor-1", false)
+	require.NoError(t, err)
+	require.Equal(t, 1, stub.resumes)
+}
+
+func TestSubstrateActorSnapshotMapping(t *testing.T) {
+	actor := freshActor()
+	actor.Status.Snapshots = []*ateapipb.Snapshot{
+		snapshot(2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED),
+		snapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED),
+	}
+	converted := substrateActorFromProto(actor)
+	require.Equal(t, SubstrateSnapshotContentScopeData, converted.SnapshotScope, "the newest generation decides the scope")
+	require.Equal(t, "template-uid-2", converted.TemplateUID)
+	require.Equal(t, "s3://bucket/2", converted.LastSnapshot)
+	require.Empty(t, converted.InProgressSnapshot)
+
+	actor.Status.Snapshots = append(actor.Status.Snapshots,
+		snapshot(3, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING))
+	converted = substrateActorFromProto(actor)
+	require.Empty(t, converted.SnapshotScope, "ROOTFS is not data-only and must stay unclassified")
+	require.Equal(t, "snapshot-3", converted.InProgressSnapshot)
+	require.Empty(t, converted.LastSnapshot)
+
+	actor.Status.Snapshots[2].Fidelity = ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	require.Equal(t, SubstrateSnapshotContentScopeFull, substrateActorFromProto(actor).SnapshotScope)
+}
+
+func TestSubstrateBootedActorTemplateUIDComesFromImmutableTemplate(t *testing.T) {
+	actor := freshActor()
+	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+	actor.Status.WorkerAssignment = &ateapipb.WorkerAssignment{WorkerPod: "worker-0", WorkerPodUid: "pod-uid", WorkerPodIps: []string{"", "10.0.0.7"}}
+	stub := &stubSubstrateControl{actor: actor, template: goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED)}
+	client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
+	observed, err := client.GetActor(t.Context(), "actor-1")
+	require.NoError(t, err)
+	require.Equal(t, "template-uid", observed.TemplateUID)
+	require.Equal(t, "10.0.0.7", observed.PodIP)
+
+	// A never-placed Actor has no guest state and keeps an empty identity.
+	stub.actor = freshActor()
+	observed, err = client.GetActor(t.Context(), "actor-1")
+	require.NoError(t, err)
+	require.Empty(t, observed.TemplateUID)
+}
+
+func TestSubstrateDeleteAndSuspendUseNativeFences(t *testing.T) {
+	stub := &stubSubstrateControl{actor: freshActor()}
+	client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
+	require.NoError(t, client.DeleteActor(t.Context(), "actor-1", " actor-uid "))
+	require.Len(t, stub.deletes, 1)
+	require.Equal(t, "actor-uid", stub.deletes[0].GetOptions().GetUid())
+	_, err := client.SuspendActor(t.Context(), "actor-1")
+	require.NoError(t, err)
+	require.Equal(t, ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS, stub.suspends[0].GetOptions().GetMode())
+}
+
+func TestSubstrateWorkerFitsExactlyOne(t *testing.T) {
+	limits := &ateapipb.Resources{CpuMillicores: 1000, MemoryBytes: 1 << 30}
+	for name, tc := range map[string]struct {
+		capacity *ateapipb.WorkerResources
+		want     bool
+	}{
+		"sized for one":        {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, want: true},
+		"memory bounds to one": {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (1 << 30) + (64 << 20)}, want: true},
+		"actor count is one":   {capacity: &ateapipb.WorkerResources{Actors: 1, CpuMillicores: 8000, MemoryBytes: 8 << 30}, want: true},
+		"fits two":             {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 2000, MemoryBytes: 2 << 30}},
+		"too small":            {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 500, MemoryBytes: 1 << 30}},
+		"no actors":            {capacity: &ateapipb.WorkerResources{CpuMillicores: 1000, MemoryBytes: 1 << 30}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.want, substrateWorkerFitsExactlyOne(tc.capacity, limits))
+		})
+	}
+	require.False(t, substrateWorkerFitsExactlyOne(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: 1 << 30}, nil),
+		"a template without limits cannot be bounded")
+}
+
+func TestSubstrateWorkerRunsGVisor(t *testing.T) {
+	gvisor := &ateapipb.WorkerSandboxClass{SandboxClass: "gvisor"}
+	require.True(t, substrateWorkerRunsGVisor([]*ateapipb.WorkerSandboxClass{gvisor}))
+	require.False(t, substrateWorkerRunsGVisor(nil), "an unregistered worker reports no sandbox runtime")
+	require.False(t, substrateWorkerRunsGVisor([]*ateapipb.WorkerSandboxClass{gvisor, {SandboxClass: "microvm"}}))
+}

@@ -1,0 +1,236 @@
+package workspace
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	ateapipb "github.com/orka-agents/orka/internal/substratepb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+)
+
+func TestValidateSubstrateEgressRulesRejectsUnsafeHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rule SubstrateEgressRule
+	}{
+		{"bare wildcard", SubstrateEgressRule{Scheme: "https", Host: "*"}},
+		{"tld wildcard", SubstrateEgressRule{Scheme: "https", Host: "*.com"}},
+		{"inner wildcard", SubstrateEgressRule{Scheme: "https", Host: "api.*.example.com"}},
+		{"partial wildcard", SubstrateEgressRule{Scheme: "https", Host: "a*.example.com"}},
+		{"ipv4", SubstrateEgressRule{Scheme: "http", Host: "10.0.0.1"}},
+		{"ipv6", SubstrateEgressRule{Scheme: "http", Host: "::1"}},
+		{"cidr", SubstrateEgressRule{Scheme: "http", Host: "10.0.0.0/8"}},
+		{"url", SubstrateEgressRule{Scheme: "https", Host: "https://example.com"}},
+		{"path", SubstrateEgressRule{Scheme: "https", Host: "example.com/api"}},
+		{"host port", SubstrateEgressRule{Scheme: "https", Host: "example.com:443"}},
+		{"uppercase", SubstrateEgressRule{Scheme: "https", Host: "Example.com"}},
+		{"trailing dot", SubstrateEgressRule{Scheme: "https", Host: "example.com."}},
+		{"single label", SubstrateEgressRule{Scheme: "http", Host: "localhost"}},
+		{"numeric tld", SubstrateEgressRule{Scheme: "http", Host: "a.123"}},
+		{"long numeric tld", SubstrateEgressRule{Scheme: "http", Host: "a.12345678901234567890123"}},
+		{"dotted numeric name", SubstrateEgressRule{Scheme: "https", Host: "01.2.3.4"}},
+		{"numeric wildcard suffix", SubstrateEgressRule{Scheme: "tls", Host: "*.example.123", Ports: []int32{443}}},
+		{"bad scheme", SubstrateEgressRule{Scheme: "ftp", Host: "example.com"}},
+		{"tls without ports", SubstrateEgressRule{Scheme: "tls", Host: "example.com"}},
+		{"port zero", SubstrateEgressRule{Scheme: "https", Host: "example.com", Ports: []int32{0}}},
+		{"port too high", SubstrateEgressRule{Scheme: "https", Host: "example.com", Ports: []int32{70000}}},
+		{"repeated port", SubstrateEgressRule{Scheme: "https", Host: "example.com", Ports: []int32{443, 443}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{tc.rule}); err == nil {
+				t.Fatalf("ValidateSubstrateEgressRules(%+v) succeeded, want rejection", tc.rule)
+			}
+		})
+	}
+}
+
+func TestValidateSubstrateEgressRulesRejectsOverlappingOrigins(t *testing.T) {
+	err := ValidateSubstrateEgressRules([]SubstrateEgressRule{
+		{Scheme: "https", Host: "api.example.com"},
+		{Scheme: "tls", Host: "api.example.com", Ports: []int32{443}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "more than one rule") {
+		t.Fatalf("overlapping origins error = %v", err)
+	}
+}
+
+func TestCompileSubstrateActorEgressPolicy(t *testing.T) {
+	policy, err := CompileSubstrateActorEgressPolicy("tools", []SubstrateEgressRule{
+		{Scheme: "tls", Host: "*.example.com", Ports: []int32{8443, 443}},
+		{Scheme: "https", Host: "api.github.com"},
+		{Scheme: "http", Host: "mirror.example.org"},
+	})
+	if err != nil {
+		t.Fatalf("CompileSubstrateActorEgressPolicy() error = %v", err)
+	}
+	if policy.GetMetadata().GetAtespace() != "tools" || policy.GetMetadata().GetName() != "default" {
+		t.Fatalf("metadata = %v", policy.GetMetadata())
+	}
+	if len(policy.GetRules()) != 3 {
+		t.Fatalf("rules = %v", policy.GetRules())
+	}
+	tlsRule := policy.GetRules()[0].GetTlsPassthrough()
+	if tlsRule == nil || tlsRule.GetHostnames()[0] != "*.example.com" || tlsRule.GetPorts().GetNumbers()[0] != 443 || tlsRule.GetPorts().GetNumbers()[1] != 8443 {
+		t.Fatalf("tls rule = %v", policy.GetRules()[0])
+	}
+	if https := policy.GetRules()[1].GetHttps(); https == nil || https.GetHostnames()[0] != "api.github.com" || https.GetPorts().GetNumbers()[0] != 443 || https.GetEffects() != nil {
+		t.Fatalf("https rule = %v", policy.GetRules()[1])
+	}
+	if http := policy.GetRules()[2].GetHttp(); http == nil || http.GetPorts().GetNumbers()[0] != 80 {
+		t.Fatalf("http rule = %v", policy.GetRules()[2])
+	}
+}
+
+func TestCompileSubstrateActorEgressPolicyEmptyDeniesAll(t *testing.T) {
+	policy, err := CompileSubstrateActorEgressPolicy("tools", nil)
+	if err != nil {
+		t.Fatalf("CompileSubstrateActorEgressPolicy() error = %v", err)
+	}
+	if len(policy.GetRules()) != 0 || policy.GetMetadata().GetName() != "default" {
+		t.Fatalf("empty allowlist policy = %v, want deny-all", policy)
+	}
+}
+
+type fakeEgressControl struct {
+	policy      *ateapipb.EgressPolicy
+	getErr      error
+	writeErrs   []error
+	creates     int
+	updates     int
+	lastUpdate  *ateapipb.UpdateActorEgressPolicyRequest
+	actorRefs   []*ateapipb.ObjectRef
+	nextVersion int64
+}
+
+func (f *fakeEgressControl) GetActorEgressPolicy(_ context.Context, in *ateapipb.GetActorEgressPolicyRequest, _ ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.actorRefs = append(f.actorRefs, in.GetActor())
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if f.policy == nil {
+		return nil, status.Error(codes.NotFound, "no policy")
+	}
+	return proto.CloneOf(f.policy), nil
+}
+
+func (f *fakeEgressControl) popWriteErr() error {
+	if len(f.writeErrs) == 0 {
+		return nil
+	}
+	err := f.writeErrs[0]
+	f.writeErrs = f.writeErrs[1:]
+	return err
+}
+
+func (f *fakeEgressControl) CreateActorEgressPolicy(_ context.Context, in *ateapipb.CreateActorEgressPolicyRequest, _ ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.creates++
+	if err := f.popWriteErr(); err != nil {
+		return nil, err
+	}
+	f.nextVersion++
+	f.policy = proto.CloneOf(in.GetEgressPolicy())
+	f.policy.Metadata.Uid, f.policy.Metadata.Version = "uid-1", f.nextVersion
+	return proto.CloneOf(f.policy), nil
+}
+
+func (f *fakeEgressControl) UpdateActorEgressPolicy(_ context.Context, in *ateapipb.UpdateActorEgressPolicyRequest, _ ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
+	f.updates++
+	f.lastUpdate = proto.CloneOf(in)
+	if err := f.popWriteErr(); err != nil {
+		return nil, err
+	}
+	if in.GetEgressPolicy().GetMetadata().GetVersion() != f.policy.GetMetadata().GetVersion() {
+		return nil, status.Error(codes.Aborted, "version mismatch")
+	}
+	f.nextVersion++
+	f.policy = proto.CloneOf(in.GetEgressPolicy())
+	f.policy.Metadata.Version = f.nextVersion
+	return proto.CloneOf(f.policy), nil
+}
+
+func TestEnsureSubstrateActorEgressPolicyCreatesAndVerifies(t *testing.T) {
+	control := &fakeEgressControl{}
+	rules := []SubstrateEgressRule{{Scheme: "https", Host: "api.github.com"}}
+	if err := ensureSubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", rules); err != nil {
+		t.Fatalf("ensure error = %v", err)
+	}
+	if control.creates != 1 || control.updates != 0 || len(control.actorRefs) != 2 {
+		t.Fatalf("creates=%d updates=%d gets=%d, want create then verifying read", control.creates, control.updates, len(control.actorRefs))
+	}
+	if ref := control.actorRefs[0]; ref.GetName() != "mcp-1" || ref.GetAtespace() != "tools" {
+		t.Fatalf("actor ref = %v", ref)
+	}
+	// Idempotent: a matching policy is not rewritten.
+	if err := ensureSubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", rules); err != nil || control.creates != 1 || control.updates != 0 {
+		t.Fatalf("second ensure err=%v creates=%d updates=%d", err, control.creates, control.updates)
+	}
+}
+
+func TestEnsureSubstrateActorEgressPolicyUpdatesWithPreconditionsAndRetriesAborted(t *testing.T) {
+	existing, _ := CompileSubstrateActorEgressPolicy("tools", []SubstrateEgressRule{{Scheme: "https", Host: "old.example.com"}})
+	existing.Metadata.Uid, existing.Metadata.Version = "uid-7", 4
+	control := &fakeEgressControl{policy: existing, nextVersion: 4, writeErrs: []error{status.Error(codes.Aborted, "conflict")}}
+	if err := ensureSubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", nil); err != nil {
+		t.Fatalf("ensure error = %v", err)
+	}
+	if control.updates != 2 {
+		t.Fatalf("updates = %d, want an Aborted retry", control.updates)
+	}
+	if md := control.lastUpdate.GetEgressPolicy().GetMetadata(); md.GetUid() != "uid-7" || md.GetVersion() != 4 {
+		t.Fatalf("update preconditions = %v", md)
+	}
+	if len(control.policy.GetRules()) != 0 {
+		t.Fatalf("policy rules = %v, want deny-all", control.policy.GetRules())
+	}
+}
+
+func TestEnsureSubstrateActorEgressPolicyFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		control *fakeEgressControl
+		actorID string
+		rules   []SubstrateEgressRule
+	}{
+		{"unqualified actor", &fakeEgressControl{}, "mcp-1", nil},
+		{"invalid rule", &fakeEgressControl{}, "mcp-1.tools", []SubstrateEgressRule{{Scheme: "https", Host: "*"}}},
+		{"get unavailable", &fakeEgressControl{getErr: status.Error(codes.Unavailable, "down")}, "mcp-1.tools", nil},
+		{"create rejected", &fakeEgressControl{writeErrs: []error{status.Error(codes.InvalidArgument, "bad")}}, "mcp-1.tools", nil},
+		{"never converges", &fakeEgressControl{writeErrs: []error{
+			status.Error(codes.Aborted, "1"), status.Error(codes.Aborted, "2"), status.Error(codes.Aborted, "3"),
+			status.Error(codes.Aborted, "4"), status.Error(codes.Aborted, "5"),
+		}}, "mcp-1.tools", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ensureSubstrateActorEgressPolicy(context.Background(), tc.control, tc.actorID, tc.rules)
+			if err == nil {
+				t.Fatal("ensure succeeded, want fail-closed error")
+			}
+			if _, ok := errors.AsType[*Error](err); !ok {
+				t.Fatalf("error %T is not a workspace error", err)
+			}
+		})
+	}
+}
+
+func TestValidateSubstrateEgressRulesRejectsWildcardOverrides(t *testing.T) {
+	wildcard := SubstrateEgressRule{Scheme: "tls", Host: "*.example.com", Ports: []int32{443}}
+	if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{wildcard, {Scheme: "https", Host: "api.example.com"}}); err == nil ||
+		!strings.Contains(err.Error(), "overrides") {
+		t.Fatalf("exact rule overriding a wildcard's scheme error = %v", err)
+	}
+	for name, exact := range map[string]SubstrateEgressRule{
+		"same scheme":   {Scheme: "tls", Host: "api.example.com", Ports: []int32{443}},
+		"other port":    {Scheme: "https", Host: "api.example.com", Ports: []int32{8443}},
+		"deeper name":   {Scheme: "https", Host: "a.b.example.com"},
+		"numeric label": {Scheme: "https", Host: "123.example.com", Ports: []int32{8443}},
+	} {
+		if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{wildcard, exact}); err != nil {
+			t.Fatalf("%s: unexpected rejection: %v", name, err)
+		}
+	}
+}

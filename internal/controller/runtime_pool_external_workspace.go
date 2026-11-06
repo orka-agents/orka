@@ -45,6 +45,9 @@ type externalRuntimeInstanceEvidence struct {
 	NativeProcess bool                               `json:"nativeProcess,omitempty"`
 	RuntimeUID    types.UID                          `json:"runtimeUID,omitempty"`
 	Endpoint      string                             `json:"endpoint,omitempty"`
+	// RouterTarget binds a routed native process. Its Endpoint is then Core's
+	// configured Substrate router, never a provider-chosen authority.
+	RouterTarget string `json:"routerTarget,omitempty"`
 }
 
 func runtimePoolHasExternalWorkspace(pool *corev1alpha1.RuntimePool) bool {
@@ -198,7 +201,14 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 	if err != nil {
 		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "external workload failed independent materialization verification")
 	}
-	if w.Status.Allocation.Startup.Process != nil {
+	if externalStartupRouterTarget(w.Status.Allocation.Startup) != "" {
+		// A routed process has no worker Pod ingress to grant: Core reaches it
+		// only through the configured router, and its own egress leaves through
+		// the backend gateway under the admitted allowlist.
+		if _, err := r.SubstrateRouter.pinnedEndpoint(w.Status.Allocation.Startup.Endpoint); err != nil {
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "routed startup is not reachable through the configured Substrate router")
+		}
+	} else if w.Status.Allocation.Startup.Process != nil {
 		if err := r.ensureExternalProcessIngress(ctx, pool, cfg, w); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -287,6 +297,10 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		return ctrl.Result{}, fmt.Errorf("workspace provider does not support every frozen runtime requirement")
 	}
 	nativeProcess := slices.Contains(required, workspacev1alpha1.WorkspaceFeatureNativeProcess)
+	egressAllowlist, err := externalRuntimeUsesEgressAllowlist(registration, nativeProcess, w.Spec.Workload)
+	if err != nil {
+		return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime network shape is not admitted: "+err.Error())
+	}
 	publicKey, err := harnessv2.CredentialBootstrapPublicKey(auth.Data[runtimePoolBootstrapSigningSeedKey])
 	if err != nil {
 		return ctrl.Result{}, err
@@ -320,23 +334,34 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 		ParametersRef: pool.Spec.ExecutionWorkspace.ParametersRef, ParametersBinding: pool.Spec.ExecutionWorkspace.ParametersBinding,
 		Runtime: &workspacev1alpha1.RuntimeWorkload{BootstrapPort: bootstrapPort, PoolBinding: workspacev1alpha1.ImmutableObjectBinding{Name: pool.Name, UID: pool.UID, Generation: pool.Generation, ProfileHash: pool.Spec.Runtime.Profile.Digest}, ClassBinding: w.Spec.ClassBinding, Protocol: harnessv2.ProtocolVersion, ContainerName: container.Name, Template: template},
 	}
-	network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
-	if nativeProcess {
-		// Native infrastructure/router ingress is operator-managed. Freeze only
-		// runtime egress here; Pod ingress rules do not describe that topology.
-		network.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}
-	}
-	// Only Core's generated permissions are admission intent. Public labels
-	// on observed policies cannot authorize additional connectivity.
-	policies := r.runtimePoolNetworkPolicies(cfg)
-	slices.SortFunc(policies, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
-	for _, p := range policies {
-		if !nativeProcess {
-			network.Ingress = append(network.Ingress, p.Spec.Ingress...)
+	if egressAllowlist {
+		// A gateway-enforced backend has no Pod network to describe: its
+		// runtime reaches only the allowlisted host names, and Core's routed
+		// supervisor calls enter through the backend router.
+		egress, err := r.externalRuntimeEgress(cfg)
+		if err != nil {
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded, err.Error())
 		}
-		network.Egress = append(network.Egress, p.Spec.Egress...)
+		request.Runtime.Egress = egress
+	} else {
+		network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
+		if nativeProcess {
+			// Native infrastructure/router ingress is operator-managed. Freeze only
+			// runtime egress here; Pod ingress rules do not describe that topology.
+			network.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeEgress}
+		}
+		// Only Core's generated permissions are admission intent. Public labels
+		// on observed policies cannot authorize additional connectivity.
+		policies := r.runtimePoolNetworkPolicies(cfg)
+		slices.SortFunc(policies, func(a, b networkingv1.NetworkPolicy) int { return strings.Compare(a.Name, b.Name) })
+		for _, p := range policies {
+			if !nativeProcess {
+				network.Ingress = append(network.Ingress, p.Spec.Ingress...)
+			}
+			network.Egress = append(network.Egress, p.Spec.Egress...)
+		}
+		request.Runtime.NetworkPolicy = network
 	}
-	request.Runtime.NetworkPolicy = network
 	request.Runtime.RequiredFeatures = required
 	if w.Spec.Workload != nil {
 		request.Sequence = w.Spec.Workload.Sequence + 1
@@ -461,6 +486,13 @@ func (r *RuntimePoolReconciler) attestExternalWorkspaceStartup(ctx context.Conte
 	reader := uncachedReader(r.APIReader, r.Client)
 	if evidence.Process != nil {
 		process := evidence.Process
+		// A routed process is reachable only through the backend router and is
+		// confined only by the gateway allowlist; a direct process keeps the
+		// NetworkPolicy shape (validated with its frozen ingress targets).
+		// Neither may be mistaken for the other.
+		if (process.RouterTarget != "") != (request.Runtime.Egress != nil) {
+			return nil, fmt.Errorf("native startup routing does not match the admitted runtime network shape")
+		}
 		worker := &corev1.Pod{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: process.Worker.Namespace, Name: process.Worker.Name}, worker); err != nil {
 			return nil, err
@@ -643,7 +675,13 @@ func (r *RuntimePoolReconciler) seedExternalNativeCredentials(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	transport := r.HTTPClient
+	transport, err := externalStartupHTTPClient(r.SubstrateRouter, evidence, runtimePoolProbeTimeout)
+	if err != nil {
+		return false, err
+	}
+	if transport == nil {
+		transport = r.HTTPClient
+	}
 	if transport == nil {
 		transport = &http.Client{Timeout: runtimePoolProbeTimeout, Transport: harnessv2.NewProxylessTransport()}
 	}
@@ -744,7 +782,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime credentials are unavailable for drain")
 				}
-				probe, err := r.supervisorClientForPool(pool).Probe(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey])
+				probe, err := r.externalStartupSupervisorClient(pool, a.Startup).Probe(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey])
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "authenticated runtime drain is unavailable")
 				}
@@ -753,7 +791,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
 				}
 				if !probe.Status.Drain.Requested {
-					if err := r.supervisorClientForPool(pool).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, "workspace_retirement"); err != nil {
+					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, "workspace_retirement"); err != nil {
 						return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "authenticated runtime drain request is unavailable")
 					}
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "waiting for authenticated drain settlement")
@@ -956,6 +994,9 @@ func externalRuntimeEvidence(pool *corev1alpha1.RuntimePool) (*externalRuntimeIn
 	if binding.WorkspaceUID == "" || binding.Sequence < 1 || !binding.Identity.Valid() || binding.Pod.Namespace == "" || binding.Pod.Name == "" || binding.Pod.UID == "" {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}
+	if binding.RouterTarget != "" && (!binding.NativeProcess || binding.Endpoint == "") {
+		return nil, workspaceprovider.ErrStaleIdentity
+	}
 	if binding.NativeProcess && binding.RuntimeUID == "" {
 		// Old evidence can retain its exact already-admitted fence for cleanup.
 		binding.RuntimeUID = types.UID(binding.Identity.InstanceID)
@@ -974,6 +1015,7 @@ func (r *RuntimePoolReconciler) bindExternalRuntimeInstanceEvidence(ctx context.
 		}
 		binding.Pod = a.Startup.Process.Worker
 		binding.NativeProcess = true
+		binding.RouterTarget = a.Startup.Process.RouterTarget
 	} else {
 		binding.Pod = *a.Startup.Pod
 	}
@@ -1053,6 +1095,7 @@ func runtimePoolWorkspaceBoundStartupPod(ctx context.Context, reader client.Read
 	a := w.Status.Allocation
 	if evidence == nil || evidence.Endpoint == "" || active == nil || w.Spec.Workload == nil || a == nil || a.Startup == nil ||
 		evidence.WorkspaceUID != w.UID || evidence.Sequence != a.Sequence || evidence.Identity != a.Identity || evidence.Endpoint != a.Startup.Endpoint ||
+		evidence.RouterTarget != externalStartupRouterTarget(a.Startup) ||
 		a.Identity.RequestRevision != w.Spec.Workload.Revision || w.Status.ObservedGeneration != w.Generation {
 		return nil, workspaceprovider.ErrStaleIdentity
 	}

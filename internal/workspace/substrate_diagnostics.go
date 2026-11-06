@@ -71,14 +71,17 @@ func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName st
 		check("template", false, "native ActorTemplate is unavailable; Kubernetes ActorTemplate CRDs are not used")
 		return report
 	}
-	check("gvisor", template.GetSandboxConfig().GetSandboxClass() == ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR && template.GetSandboxConfig().GetConfigName() != "", "ACP requires an explicit gVisor sandboxConfig")
-	check("snapshot-storage", template.GetSnapshotsConfig().GetStorageLocation() != "", "ACP requires snapshot storage; derived templates enforce Data/Data/ColdBoot")
+	snapshot := template.GetSnapshotConfig()
+	check("data-only-snapshots", snapshot.GetPreferredFidelity() == ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES &&
+		snapshot.GetGoldenSnapshotConfig().GetMode() == ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED,
+		"ACP requires snapshotConfig preferredFidelity VOLUMES with golden snapshots disabled, so process memory is never captured or restored")
 	selector := template.GetWorkerSelector().GetMatchLabels()
 	check("placement", len(selector) != 0, "ACP requires an explicit selector identifying one WorkerPool")
+	limits := template.GetResources().GetLimits()
 	pages := substratePages{}
 	count := 0
 	for {
-		workers, err := api.Control.ListWorkers(ctx, &ateapipb.ListWorkersRequest{PageSize: 1000, PageToken: pages.token})
+		workers, err := api.Control.ListWorkers(ctx, &ateapipb.ListWorkersRequest{Options: pages.options()})
 		if err != nil {
 			check("workers", false, "native worker inventory is unavailable")
 			return report
@@ -88,7 +91,9 @@ func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName st
 			for key, value := range selector {
 				matches = matches && worker.GetLabels()[key] == value
 			}
-			if matches && worker.GetStatus().GetCapacity().GetActors() == 1 && worker.GetStatus().GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE {
+			workerStatus := worker.GetStatus()
+			if matches && workerStatus.GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
+				substrateWorkerRunsGVisor(workerStatus.GetSandboxClasses()) && substrateWorkerFitsExactlyOne(workerStatus.GetCapacity(), limits) {
 				count++
 			}
 		}
@@ -101,6 +106,31 @@ func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName st
 			break
 		}
 	}
-	check("workers", count > 0, fmt.Sprintf("%d matching workers have capacity for exactly one Actor; worker Pods are separate from Actor scale-to-zero", count))
+	check("workers", count > 0, fmt.Sprintf("%d matching active gVisor workers are sized for exactly one template-sized Actor; worker Pods are separate from Actor scale-to-zero", count))
 	return report
+}
+
+// Substrate v1 workers report the gVisor class through their registered
+// sandbox runtimes; templates no longer carry a sandbox class.
+func substrateWorkerRunsGVisor(classes []*ateapipb.WorkerSandboxClass) bool {
+	if len(classes) == 0 {
+		return false
+	}
+	for _, class := range classes {
+		if class.GetSandboxClass() != "gvisor" {
+			return false
+		}
+	}
+	return true
+}
+
+// Upstream workers accept up to --max-actors Actors, which no WorkerPool field
+// sets. Placement books template limits against worker capacity, so a worker
+// whose CPU or memory cannot hold a second template-sized Actor hosts one.
+func substrateWorkerFitsExactlyOne(capacity *ateapipb.WorkerResources, limits *ateapipb.Resources) bool {
+	cpu, memory := limits.GetCpuMillicores(), limits.GetMemoryBytes()
+	if cpu <= 0 || memory <= 0 || capacity.GetActors() < 1 || capacity.GetCpuMillicores() < cpu || capacity.GetMemoryBytes() < memory {
+		return false
+	}
+	return capacity.GetActors() == 1 || capacity.GetCpuMillicores() < 2*cpu || capacity.GetMemoryBytes() < 2*memory
 }

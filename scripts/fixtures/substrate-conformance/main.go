@@ -48,7 +48,7 @@ func run() error {
 	cfg := workspace.SubstrateConfig{
 		APIEndpoint: "api.ate-system.svc:443", APICAFile: "/run/substrate-server/trust-bundle.pem",
 		APICertFile: credentialBundle, APIKeyFile: credentialBundle, Atespace: conformanceAtespace,
-		RouterURL: "http://atenet-router.ate-system.svc", ActorDNSSuffix: "actors.resources.substrate.ate.dev",
+		RouterURL:      "https://atenet-router.ate-system.svc:443",
 		BootstrapToken: strings.TrimSpace(string(data)), HandoffToken: token,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
