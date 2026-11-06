@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ func setupEvalTrialHandlers(t *testing.T) (*fiber.App, *sqlite.Store) {
 		}
 		return c.Next()
 	})
+	app.Post("/evals/runs", handlers.CreateEvalRun)
+	app.Get("/evals/runs/:name", handlers.GetEvalRun)
 	app.Get("/evals/runs/:name/trials", handlers.ListEvalRunTrials)
 	return app, trialStore
 }
@@ -120,4 +123,86 @@ func TestListEvalRunTrialsErrors(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.JSONEq(t, `{"items":[]}`, readRespBody(t, resp))
+}
+
+func evalRunRequestBody(t *testing.T, metadata map[string]any) *strings.Reader {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"metadata": metadata,
+		"spec": map[string]any{
+			"subject": map[string]any{
+				"type":                    "repositoryMonitorReview",
+				"repositoryMonitorReview": map[string]any{"monitorRef": map[string]any{"name": "monitor"}},
+			},
+			"cases":   map[string]any{"configMapRef": map[string]any{"name": "cases", "key": "cases.jsonl"}},
+			"trials":  3,
+			"graders": []string{"verdict", "contract"},
+		},
+	})
+	require.NoError(t, err)
+	return strings.NewReader(string(raw))
+}
+
+func postEvalRun(t *testing.T, app *fiber.App, body *strings.Reader, headers map[string]string) *http.Response {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/evals/runs", body)
+	req.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	return resp
+}
+
+func TestCreateAndGetEvalRun(t *testing.T) {
+	app, _ := setupEvalTrialHandlers(t)
+
+	resp := postEvalRun(t, app, evalRunRequestBody(t, map[string]any{"name": "nightly", "namespace": "demo"}), nil)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var created corev1alpha1.EvalRun
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	require.Equal(t, "nightly", created.Name)
+	require.Equal(t, "demo", created.Namespace)
+	require.EqualValues(t, 3, created.Spec.Trials)
+
+	resp = postEvalRun(t, app, evalRunRequestBody(t, map[string]any{"name": "nightly", "namespace": "demo"}), nil)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+
+	resp = postEvalRun(t, app, evalRunRequestBody(t, map[string]any{"generateName": "pr-review-", "namespace": "demo"}), nil)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var generated corev1alpha1.EvalRun
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&generated))
+	require.True(t, strings.HasPrefix(generated.Name, "pr-review-") && len(generated.Name) > len("pr-review-"), generated.Name)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/evals/runs/nightly?namespace=demo", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var got corev1alpha1.EvalRun
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	require.Equal(t, created.Spec, got.Spec)
+}
+
+func TestCreateAndGetEvalRunErrors(t *testing.T) {
+	app, _ := setupEvalTrialHandlers(t)
+
+	resp := postEvalRun(t, app, evalRunRequestBody(t, map[string]any{"namespace": "demo"}), nil)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	resp = postEvalRun(t, app, strings.NewReader("{"), nil)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	resp = postEvalRun(t, app, evalRunRequestBody(t, map[string]any{"name": "token", "namespace": "demo"}),
+		map[string]string{"X-Test-Context-Token": "1"})
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/evals/runs/missing?namespace=demo", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	req := httptest.NewRequest(http.MethodGet, "/evals/runs/pr-review?namespace=demo", nil)
+	req.Header.Set("X-Test-Context-Token", "1")
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 }

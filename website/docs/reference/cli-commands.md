@@ -31,6 +31,7 @@ Available Commands:
   connect       Link one of your accounts to a connector provider
   connection    Manage your linked accounts
   dashboard     Open the Orka dashboard in your browser, signed in
+  eval          Run and inspect capability evals (EvalRuns)
   gateway       Inspect generic gateway resources and durable event delivery
   help          Help about any command
   host          See and manage your agent host for the Copilot app
@@ -756,6 +757,78 @@ Flags:
       --no-open                  Print the dashboard URL without opening a browser
       --service-account string   ServiceAccount name (default "default")
       --show-token               Print the dashboard URL with the token in it instead of <redacted>; use only in a trusted terminal
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval`
+
+```text
+Run and inspect capability evals (EvalRuns)
+
+Usage:
+  orka eval [command]
+
+Available Commands:
+  get         Show an EvalRun's phase, counts and results
+  run         Create an EvalRun, optionally wait for it, and save its results
+
+Flags:
+  -h, --help   help for eval
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka eval [command] --help" for more information about a command.
+```
+
+## `orka eval get`
+
+```text
+Show an EvalRun's phase, counts and results
+
+Usage:
+  orka eval get <name> [flags]
+
+Flags:
+  -h, --help   help for get
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval run`
+
+```text
+Create an EvalRun from a manifest (YAML or JSON with metadata and spec). The cases ConfigMap and RepositoryMonitor it references must already exist, and the controller must run with --enable-evals.
+
+With --wait the command polls until the run finishes, prints its results, and fails unless the run Succeeded; it refuses a ttlSecondsAfterFinished below 300. --output-dir <dir> implies --wait, refuses any ttlSecondsAfterFinished, and writes evalrun.json, trials.jsonl, summary.md and the events of every failed trial under events/.
+
+Usage:
+  orka eval run -f <evalrun.yaml> [flags]
+
+Flags:
+  -f, --filename string     EvalRun manifest (YAML or JSON)
+  -h, --help                help for run
+      --output-dir string   Write the run, trial records, a summary and failed-trial events here (implies --wait)
+      --timeout duration    How long --wait waits (default 2h0m0s)
+      --wait                Wait for the run to finish and print its results
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -24,6 +24,7 @@ rules:
   - repositoryscans
   - repositoryscans/slices
   - repositorymonitors
+  - evalruns
   - monitorcommands
   - monitoractions
   - monitorworkactions

@@ -74,6 +74,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newSecretCmd())
 	cmd.AddCommand(newSecurityCmd())
 	cmd.AddCommand(newMonitorCmd())
+	cmd.AddCommand(newEvalCmd())
 	cmd.AddCommand(newUsageCmd())
 	cmd.AddCommand(newMemoryCmd())
 	cmd.AddCommand(newAuthCmd())

@@ -722,6 +722,15 @@ rules:
   - update
   - patch
   - delete
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - get
+  - list
+  - create
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -747,6 +756,7 @@ rules:
   - repositoryscans
   - repositoryscans/slices
   - repositorymonitors
+  - evalruns
   - monitorcommands
   - monitoractions
   - monitorworkactions
@@ -1134,6 +1144,7 @@ rules:
   - branchclaims
   - connections
   - controllerepochs
+  - evalruns
   - externaleffects
   - promptattempts
   - providers
@@ -1222,17 +1233,6 @@ rules:
   resources:
   - connectorproviders
   verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - evalruns
-  verbs:
-  - delete
   - get
   - list
   - patch
