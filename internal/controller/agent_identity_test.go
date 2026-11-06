@@ -23,7 +23,6 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
-	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -282,6 +281,18 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		}
 	}
 
+	// An API fork names its source as parent but is not controlled by it, so
+	// it never binds the source's identity: the requester creates a new Task.
+	fork := task("parent-own")
+	fork.OwnerReferences = nil
+	fork.Annotations = map[string]string{
+		labels.AnnotationParentTaskName: "parent-own", labels.AnnotationForkSourceTask: "parent-own",
+	}
+	if _, err := r.agentExecutionIdentity(context.Background(), fork, agent); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "a fork does not carry") {
+		t.Fatalf("fork of an identity-bound Task: error = %v, want a permanent refusal naming the fork", err)
+	}
+
 	_, err = r.agentExecutionIdentity(context.Background(), task(""), unclaimed)
 	if err == nil || isPermanentACPAgentConfigurationError(err) || !errors.Is(err, errIdentityClaimPending) {
 		t.Fatalf("Agent without its claim yet: error = %v, want a retryable wait", err)
@@ -526,16 +537,6 @@ func delegationTestTask(name string, created time.Time, mutate func(*corev1alpha
 	return task
 }
 
-// sealDelegationTestTask seals the requester stamp, and the delegation root
-// stamp when root is set, for the Task's current UID and requester.
-func sealDelegationTestTask(task *corev1alpha1.Task, root bool) {
-	requester := task.Spec.RequestedBy
-	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testRequesterStampKey, task.UID, requester.Issuer, requester.Subject)
-	if root {
-		task.Annotations[labels.AnnotationDelegationRootStamp] = connectors.DelegationRootStamp(testRequesterStampKey, task.UID, requester.Issuer, requester.Subject)
-	}
-}
-
 func delegatedFrom(parent string, pinned bool) func(*corev1alpha1.Task) {
 	return func(task *corev1alpha1.Task) {
 		task.Labels = map[string]string{labels.LabelParentTask: parent}
@@ -550,15 +551,11 @@ func delegatedFrom(parent string, pinned bool) func(*corev1alpha1.Task) {
 }
 
 func TestDelegationStartFollowsOnlyProvenLineage(t *testing.T) {
-	SetRequesterStampKey(testRequesterStampKey)
 	now := time.Now().Truncate(time.Second)
 	rootCreated, childCreated, forkCreated := now.Add(-3*time.Hour), now.Add(-2*time.Hour), now.Add(-time.Minute)
 	root := delegationTestTask("root", rootCreated, nil)
-	sealDelegationTestTask(root, true)
 	child := delegationTestTask("child", childCreated, delegatedFrom("root", true))
-	sealDelegationTestTask(child, false)
 	recreated := delegationTestTask("recreated", now.Add(-time.Hour), nil)
-	sealDelegationTestTask(recreated, true)
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child, recreated).Build()
 
 	tests := map[string]struct {
@@ -576,21 +573,11 @@ func TestDelegationStartFollowsOnlyProvenLineage(t *testing.T) {
 			}),
 			want: rootCreated,
 		},
-		"a fork the requester made starts a new delegation": {
-			task: func() *corev1alpha1.Task {
-				fork := delegationTestTask("fork", forkCreated, delegatedFrom("child", false))
-				fork.Annotations[labels.AnnotationForkSourceTask] = "child"
-				sealDelegationTestTask(fork, true)
-				return fork
-			}(),
-			want: forkCreated,
-		},
-		"a fork without the root stamp cannot be traced": {
-			task: func() *corev1alpha1.Task {
-				fork := delegationTestTask("legacy-fork", forkCreated, delegatedFrom("child", false))
-				sealDelegationTestTask(fork, false)
-				return fork
-			}(),
+		"a fork names its source without a UID pin and cannot be traced": {
+			task: delegationTestTask("fork", forkCreated, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", false)(task)
+				task.Annotations[labels.AnnotationForkSourceTask] = "child"
+			}),
 		},
 		"an orphaned child cannot be traced": {
 			task: delegationTestTask("orphan", now, delegatedFrom("child", false)),
@@ -606,14 +593,6 @@ func TestDelegationStartFollowsOnlyProvenLineage(t *testing.T) {
 				delegatedFrom("child", true)(task)
 				task.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "mallory"}
 			}),
-		},
-		"a root stamp sealed for another Task": {
-			task: func() *corev1alpha1.Task {
-				fork := delegationTestTask("copied", forkCreated, delegatedFrom("child", false))
-				sealDelegationTestTask(fork, false)
-				fork.Annotations[labels.AnnotationDelegationRootStamp] = root.Annotations[labels.AnnotationDelegationRootStamp]
-				return fork
-			}(),
 		},
 	}
 	for name, tc := range tests {
@@ -671,12 +650,8 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		return func(task *corev1alpha1.Task) { task.Labels = map[string]string{labels.LabelChatSession: name} }
 	}
 	deleting := metav1.Now()
-	SetRequesterStampKey(testRequesterStampKey)
-	fork := delegationTestTask("fork-of-cancelled", time.Now(), delegatedFrom("parent-cancelled", false))
-	fork.Annotations[labels.AnnotationForkSourceTask] = "parent-cancelled"
-	sealDelegationTestTask(fork, true)
-	legacyFork := delegationTestTask("legacy-fork-of-cancelled", time.Now(), delegatedFrom("parent-cancelled", false))
-	sealDelegationTestTask(legacyFork, false)
+	fork := delegationTestTask("fork-of-running", time.Now(), delegatedFrom("parent-running", false))
+	fork.Annotations[labels.AnnotationForkSourceTask] = "parent-running"
 	childOf := func(parent string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) {
 			task.Labels = map[string]string{labels.LabelParentTask: parent}
@@ -726,7 +701,6 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 			t.Annotations = map[string]string{labels.AnnotationParentTaskUID: "parent-running-uid"}
 		}),
 		fork,
-		legacyFork,
 		task("in-deleted-session", withSession("deleted")),
 		task("finished", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
 		task("cancel-requested", func(t *corev1alpha1.Task) {
@@ -755,8 +729,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		"child-in-open-session-of-running":   "",
 		"orphan-of-running":                  "no UID pins",
 		"pinned-orphan-of-running":           "",
-		"fork-of-cancelled":                  "",
-		"legacy-fork-of-cancelled":           "no UID pins",
+		"fork-of-running":                    "no UID pins",
 		"in-deleted-session":                 "deleted",
 		"finished":                           "Succeeded",
 		"cancel-requested":                   "cancellation",

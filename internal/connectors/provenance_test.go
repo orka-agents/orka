@@ -40,23 +40,6 @@ func TestRequesterStampBindsUIDAndRequester(t *testing.T) {
 	if !RequesterStampValid(key, task) {
 		t.Fatal("a sealed stamp must verify")
 	}
-	if !DelegationRootStampValid(key, task) {
-		t.Fatal("the API seals the requester's own Task as a delegation root")
-	}
-	inherited := task.DeepCopy()
-	delete(inherited.Annotations, labels.AnnotationDelegationRootStamp)
-	if DelegationRootStampValid(key, inherited) {
-		t.Fatal("a Task sealed without the root stamp is not a delegation root")
-	}
-	moved := task.DeepCopy()
-	moved.UID = "other-uid"
-	moved.Annotations[labels.AnnotationRequestedByStamp] = RequesterStamp(key, moved.UID, requester.Issuer, requester.Subject)
-	if DelegationRootStampValid(key, moved) {
-		t.Fatal("a root stamp copied onto another Task must not verify")
-	}
-	if DelegationRootStamp(key, task.UID, requester.Issuer, requester.Subject) == task.Annotations[labels.AnnotationRequestedByStamp] {
-		t.Fatal("the root stamp must not equal the requester stamp")
-	}
 	stamp := task.Annotations[labels.AnnotationRequestedByStamp]
 	for name, mutate := range map[string]func(*corev1alpha1.Task){
 		"other uid":       func(x *corev1alpha1.Task) { x.UID = "other-uid" },

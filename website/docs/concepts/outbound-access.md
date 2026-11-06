@@ -103,12 +103,13 @@ spec:
   approvals may still decline.
 - **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
   `--agent-identity-max-delegation-age`) after the root requester's last action in the
-  Task chain, that is, creating the root Task, forking a Task, or sending the Session
-  message that started it. Child Tasks, retries, and woken agents do not extend it, and a
-  child whose link to its parent no immutable UID proves, such as one Kubernetes
-  orphaned, fails closed. Calls also stop at once when the Task is cancelled, deleted, or
-  finished, or when its Session, or that of any Task it was delegated from, is deleted:
-  the controller checks both live before every call.
+  Task chain, that is, creating the root Task or sending the Session message that started
+  it. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
+  its parent no immutable UID proves, such as one Kubernetes orphaned, fails closed. A
+  fork of an identity-bound Task does not carry the identity; create a new Task instead.
+  Calls also stop at once when the Task is cancelled, deleted, or finished, or when its
+  Session, or that of any Task it was delegated from, is deleted: the controller checks
+  both live before every call.
 - **Where:** only Tasks on built-in RuntimePools, whose Pods reach the network only
   through Orka. External `runtimeRef` runtimes, workspace-backed sessions, and native
   `type: ai` workers fail closed.

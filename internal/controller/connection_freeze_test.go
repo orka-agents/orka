@@ -376,9 +376,6 @@ func TestACPChildTaskSealerSealsOwnedChildren(t *testing.T) {
 		if !connectors.RequesterStampValid(testRequesterStampKey, sealed) {
 			t.Fatalf("%s must verify after sealing", task.Name)
 		}
-		if connectors.DelegationRootStampValid(testRequesterStampKey, sealed) {
-			t.Fatalf("%s inherits its parent's delegation and must not be sealed as a delegation root", task.Name)
-		}
 	}
 	if !fenceOnce.Load() {
 		t.Fatal("the fenced child must have hit the conflict once")

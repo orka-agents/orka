@@ -273,14 +273,16 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 - Delegation expires. Each delegated policy sets `maxDelegationAge`, default
   one hour, with a controller-configured maximum. It is measured from the
   root requester's last authenticated action in the Task chain: creating the
-  root Task, forking a Task, or sending the Session message that started the
-  current turn. A child Task, retry, or parked agent woken later does not
-  reset it; only the requester acting again does. Cancelling or deleting any
-  Task in the chain stops delegated calls from every Task below it; a parent
-  that finished normally does not. A parent link no immutable UID proves
-  fails closed. After it elapses, delegated calls fail closed and the Task
-  can ask the requester to continue. A policy that asks for more than the
-  controller's maximum gets the maximum, and its `Accepted` condition says so.
+  root Task, or sending the Session message that started the current turn. A
+  child Task, retry, or parked agent woken later does not reset it; only the
+  requester acting again does. Cancelling or deleting any Task in the chain
+  stops delegated calls from every Task below it; a parent that finished
+  normally does not. A parent link no immutable UID proves fails closed. A
+  fork of an identity-bound Task does not carry the identity, because its
+  source does not control it; the requester creates a new Task. After it
+  elapses, delegated calls fail closed and the Task can ask the requester to
+  continue. A policy that asks for more than the controller's maximum gets the
+  maximum, and its `Accepted` condition says so.
 - Delegated mode runs only where Orka controls the runtime's network. Built-in
   RuntimePool Pods deny all egress except cluster DNS, the model provider
   proxy, and the controller, so identity-backed data cannot reach an

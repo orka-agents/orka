@@ -19,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -362,6 +361,12 @@ func requireParentOwnsIdentityAgent(
 	recorded := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
 	if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
 		owner.Name != parentName || owner.UID != parent.UID || (recorded != "" && recorded != string(parent.UID)) {
+		if owner == nil && strings.TrimSpace(task.Annotations[labels.AnnotationForkSourceTask]) != "" {
+			// The message only explains the refusal; the decision above
+			// never depends on the fork annotation.
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a fork does not carry its source Task's identity-bound Agent %q; create a new Task to use it", agent.Name))
+		}
 		return permanentACPAgentConfiguration(fmt.Errorf(
 			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
@@ -411,11 +416,11 @@ func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, tas
 // maxDelegationChainDepth bounds the parent walk to the root requester's Task.
 const maxDelegationChainDepth = 32
 
-// delegationStart returns when the requester last acted in the Task chain:
-// the creation of the nearest Task they created with their own authenticated
-// request (a delegation root stamp), or of the chain's root. Child Tasks,
-// retries, and agents woken later never move it; a fork the requester made
-// does. A chain that cannot be proven, or that passes through a Task acting
+// delegationStart returns when the root requester last acted in the Task
+// chain: the creation of the chain's root Task, which the requester created
+// directly or with a Session message. Child Tasks, retries, and agents woken
+// later never move it. A chain that cannot be proven (including a fork, which
+// names its source without a UID pin), or that passes through a Task acting
 // for another requester, returns the zero time, which Delegated mode refuses.
 func delegationStart(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (time.Time, error) {
 	current := task
@@ -423,7 +428,7 @@ func delegationStart(ctx context.Context, reader client.Reader, task *corev1alph
 		if !sameRequester(current.Spec.RequestedBy, task.Spec.RequestedBy) {
 			return time.Time{}, nil
 		}
-		if !namesDelegatingTask(current) || connectors.DelegationRootStampValid(requesterStampKey, current) {
+		if !namesDelegatingTask(current) {
 			return current.CreationTimestamp.Time, nil
 		}
 		if reader == nil {
@@ -565,9 +570,8 @@ type DelegationLiveness struct {
 // Task above it in the delegation chain was cancelled, had its cancellation
 // requested, is being deleted, is gone, or had its Session deleted: stopping
 // a parent stops every child acting for the same requester. A parent that
-// finished normally does not stop its children. The walk ends at a Task the
-// requester created themselves without a UID pin to the Task it names, such
-// as a fork, which acts independently of its source.
+// finished normally does not stop its children. A link no UID proves, such
+// as a fork's or an orphaned child's, fails closed.
 func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *corev1alpha1.Task) error {
 	current := task
 	for range maxDelegationChainDepth {
@@ -575,9 +579,6 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 			return nil
 		}
 		parent, err := delegatingTask(ctx, d.Reader, current)
-		if errors.Is(err, errDelegationChainBroken) && independentDelegationRoot(current) {
-			return nil
-		}
 		if err != nil {
 			return err
 		}
@@ -596,15 +597,6 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 		current = parent
 	}
 	return errors.New("the delegating Task chain is too deep")
-}
-
-// independentDelegationRoot reports whether a Task names a Task it was
-// delegated from without pinning its UID, yet its requester created it with
-// their own authenticated request: a fork, not an orphaned child.
-func independentDelegationRoot(task *corev1alpha1.Task) bool {
-	return strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID]) == "" &&
-		taskControllerOwner(task) == nil &&
-		connectors.DelegationRootStampValid(requesterStampKey, task)
 }
 
 // requireLiveSessions refuses once a Session the Task runs in is gone: its
