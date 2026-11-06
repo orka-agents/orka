@@ -339,3 +339,100 @@ func TestOperatorTagContainmentRefusesATaggedProcessOfAnotherUID(t *testing.T) {
 		t.Fatal("containment was proven while a tagged process of another UID is live")
 	}
 }
+
+// startOperatorKillVictim starts a real process standing in for an unrelated
+// process that reused a scanned operator PID, and lists it in a fake /proc as
+// a tagged operator process.
+func startOperatorKillVictim(t *testing.T, procRoot string, uid, tag int) *exec.Cmd {
+	t.Helper()
+	victim := exec.Command("sleep", "30")
+	if err := victim.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = victim.Process.Kill()
+		_, _ = victim.Process.Wait()
+	})
+	writeFakeOperatorStatus(t, procRoot, victim.Process.Pid, uid, strconv.Itoa(tag))
+	return victim
+}
+
+func writeFakeOperatorStatus(t *testing.T, procRoot string, pid, uid int, groups string) {
+	t.Helper()
+	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.Itoa(uid)
+	status := "Name:\tsleep\nState:\tS (sleeping)\nUid:\t" + id + "\t" + id + "\t" + id + "\t" + id + "\nGroups:\t" + groups + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireOperatorVictimAlive checks the real process state: a killed child
+// stays a zombie until reaped, and signal 0 still succeeds on a zombie.
+func requireOperatorVictimAlive(t *testing.T, victim *exec.Cmd) {
+	t.Helper()
+	time.Sleep(20 * time.Millisecond)
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(victim.Process.Pid), "status"))
+	if err != nil || parseProcCredentials(victim.Process.Pid, data).zombie {
+		t.Fatalf("an unrelated process was killed: %v", err)
+	}
+}
+
+// A scanned operator PID can exit and be reused by an unrelated process
+// before the root supervisor signals it. The process must be re-verified
+// after it is pinned, and an unrelated successor never signaled.
+func TestKillOperatorTagNeverSignalsAProcessThatReusedAScannedPID(t *testing.T) {
+	const uid, tag = 20001, 61011
+	procRoot := t.TempDir()
+	victim := startOperatorKillVictim(t, procRoot, uid, tag)
+	t.Cleanup(func() { operatorTagScannedHook = nil })
+	operatorTagScannedHook = func() {
+		// The tagged process exited; its PID now belongs to an unrelated
+		// process of another UID without the tag.
+		writeFakeOperatorStatus(t, procRoot, victim.Process.Pid, 0, "")
+	}
+	killOperatorTag(procRoot, uid, tag, 3, time.Millisecond)
+	operatorTagScannedHook = nil
+	requireOperatorVictimAlive(t, victim)
+}
+
+// Without pidfds a process is never signaled by bare PID; containment stays
+// unproven instead.
+func TestKillOperatorTagRefusesToSignalWithoutPidfds(t *testing.T) {
+	const uid, tag = 20001, 61012
+	procRoot := t.TempDir()
+	victim := startOperatorKillVictim(t, procRoot, uid, tag)
+	previous := pidfdOpen
+	t.Cleanup(func() { pidfdOpen = previous })
+	pidfdOpen = func(int, int) (int, error) { return -1, syscall.ENOSYS }
+	if killOperatorTag(procRoot, uid, tag, 3, time.Millisecond) {
+		t.Fatal("containment was proven without signaling a live tagged process")
+	}
+	requireOperatorVictimAlive(t, victim)
+}
+
+// A process that still carries the tag after it is pinned is killed through
+// its pidfd.
+func TestKillOperatorTagSignalsAVerifiedProcessThroughItsPidfd(t *testing.T) {
+	const uid, tag = 20001, 61013
+	procRoot := t.TempDir()
+	victim := startOperatorKillVictim(t, procRoot, uid, tag)
+	exited := make(chan struct{})
+	go func() {
+		_, _ = victim.Process.Wait()
+		// Once reaped, the fake process table no longer lists it.
+		_ = os.RemoveAll(filepath.Join(procRoot, strconv.Itoa(victim.Process.Pid)))
+		close(exited)
+	}()
+	if !killOperatorTag(procRoot, uid, tag, 200, 5*time.Millisecond) {
+		t.Fatal("a verified tagged process was not contained")
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the verified process was not killed")
+	}
+}

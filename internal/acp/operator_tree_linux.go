@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const operatorTagKillRounds = 200
@@ -232,11 +234,51 @@ func killOperatorTag(procRoot string, uid, tag, rounds int, interval time.Durati
 			}
 		default:
 			clean = 0
+			operatorTagScanned()
 			for _, pid := range scan.own {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+				killOperatorTagProcess(procRoot, pid, uid, tag)
 			}
 		}
 		time.Sleep(interval)
 	}
 	return false
+}
+
+// operatorTagScannedHook runs after a scan found tagged processes and before
+// they are signaled. Tests use it to replace a process in between.
+var operatorTagScannedHook func()
+
+func operatorTagScanned() {
+	if hook := operatorTagScannedHook; hook != nil {
+		hook()
+	}
+}
+
+// pidfdOpen is replaceable in tests that simulate a kernel without pidfds.
+var pidfdOpen = unix.PidfdOpen
+
+// killOperatorTagProcess SIGKILLs pid only if it is still a process of the
+// operation. A scanned PID can exit and be reused by an unrelated process,
+// possibly of another UID, before the root supervisor signals it, so the
+// process is pinned with a pidfd first and its UID and tag are re-read only
+// after that. While the pinned process lives, /proc/<pid> describes it; if it
+// exits, the re-read can only describe a successor, and pidfd_send_signal
+// then fails with ESRCH instead of reaching that successor. Without pidfds
+// the process is never signaled by bare PID: it stays alive, so the next scan
+// finds it and containment remains unproven.
+func killOperatorTagProcess(procRoot string, pid, uid, tag int) {
+	pidfd, err := pidfdOpen(pid, 0)
+	if err != nil {
+		return
+	}
+	defer unix.Close(pidfd) //nolint:errcheck
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
+	if err != nil {
+		return
+	}
+	process := parseProcCredentials(pid, data)
+	if !process.complete || process.uid != uid || !slices.Contains(process.groups, tag) {
+		return
+	}
+	_ = unix.PidfdSendSignal(pidfd, unix.SIGKILL, nil, 0)
 }
