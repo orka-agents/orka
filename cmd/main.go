@@ -2261,7 +2261,7 @@ func main() {
 				// Children the broker creates for this Task inherit its
 				// verified requester only through this seal.
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
-				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
+				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName, AgentUID: task.AgentUID,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
 				Tenant: request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,

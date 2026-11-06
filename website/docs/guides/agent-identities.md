@@ -60,6 +60,10 @@ delegated Tools can only read.
   **Agent ID Administrator** role, and an `az` session for that tenant.
 - Orka installed with Helm in the namespace `team-a`, with built-in RuntimePools.
   A release reconciles only its own namespace, so everything below lives there.
+- The `baseline` Pod Security profile enforced on that namespace
+  (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`), so no
+  privileged or `hostPath` Pod can read the controller's blueprint credential
+  from its node.
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
   - Entra sign-in configured for Orka (step 8);
