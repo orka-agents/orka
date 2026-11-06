@@ -167,17 +167,24 @@ func TestEvalRunCreatesWithoutWaiting(t *testing.T) {
 }
 
 func TestEvalRunRejectsInvalidManifests(t *testing.T) {
-	for name, manifest := range map[string]string{
-		"other kind":     strings.Replace(evalTestManifest, "kind: EvalRun", "kind: Task", 1),
-		"other version":  strings.Replace(evalTestManifest, "core.orka.ai/v1alpha1", "core.orka.ai/v1", 1),
-		"no name":        strings.Replace(evalTestManifest, "generateName: pr-review-", "labels: {a: b}", 1),
-		"unknown field":  evalTestManifest + "extra: true\n",
-		"not a manifest": "{",
+	// Validation happens before any request: a contacted server fails the
+	// test, so an error from the network cannot stand in for the check.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("an invalid manifest reached the server: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	for name, test := range map[string]struct{ manifest, want string }{
+		"other kind":     {strings.Replace(evalTestManifest, "kind: EvalRun", "kind: Task", 1), "is a Task, not an EvalRun"},
+		"other version":  {strings.Replace(evalTestManifest, "core.orka.ai/v1alpha1", "core.orka.ai/v1", 1), "has apiVersion core.orka.ai/v1"},
+		"no name":        {strings.Replace(evalTestManifest, "generateName: pr-review-", "labels: {a: b}", 1), "needs metadata.name or metadata.generateName"},
+		"unknown field":  {evalTestManifest + "extra: true\n", "unknown field"},
+		"not a manifest": {"{", "parse "},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", "http://127.0.0.1:1",
-				"--token", "tok"); err == nil {
-				t.Fatal("Execute() succeeded")
+			_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, test.manifest), "--server", srv.URL, "--token", "tok")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, test.want)
 			}
 		})
 	}

@@ -54,8 +54,9 @@ func newEvalRunCmd() *cobra.Command {
 		Long: "Create an EvalRun from a manifest (YAML or JSON with metadata and spec). The cases ConfigMap and " +
 			"RepositoryMonitor it references must already exist, and the controller must run with --enable-evals.\n\n" +
 			"With --wait the command polls until the run finishes, prints its results, and fails unless the run " +
-			"Succeeded. --output <dir> implies --wait and writes evalrun.json, trials.jsonl, summary.md and the " +
-			"events of every failed trial under events/.",
+			"Succeeded; it refuses a ttlSecondsAfterFinished below 300. --output-dir <dir> implies --wait, refuses " +
+			"any ttlSecondsAfterFinished, and writes evalrun.json, trials.jsonl, summary.md and the events of every " +
+			"failed trial under events/.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if file == "" {

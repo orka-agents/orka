@@ -818,7 +818,7 @@ Global Flags:
 ```text
 Create an EvalRun from a manifest (YAML or JSON with metadata and spec). The cases ConfigMap and RepositoryMonitor it references must already exist, and the controller must run with --enable-evals.
 
-With --wait the command polls until the run finishes, prints its results, and fails unless the run Succeeded. --output <dir> implies --wait and writes evalrun.json, trials.jsonl, summary.md and the events of every failed trial under events/.
+With --wait the command polls until the run finishes, prints its results, and fails unless the run Succeeded; it refuses a ttlSecondsAfterFinished below 300. --output-dir <dir> implies --wait, refuses any ttlSecondsAfterFinished, and writes evalrun.json, trials.jsonl, summary.md and the events of every failed trial under events/.
 
 Usage:
   orka eval run -f <evalrun.yaml> [flags]
