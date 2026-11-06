@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -221,5 +222,62 @@ func TestEvalRunOutputRefusesTaskNamesThatEscape(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, "settings.json")); err == nil {
 		t.Fatal("a Task name wrote outside --output-dir")
+	}
+}
+
+// The manifest's namespace differs from the CLI's: every request after the
+// create targets the run's namespace, and a failed trial's events are read
+// across pages.
+func TestEvalRunFollowsTheRunNamespaceAndPagesEvents(t *testing.T) {
+	var mu sync.Mutex
+	var wrongNamespace []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Query().Get("namespace") != "team-b" {
+			mu.Lock()
+			wrongNamespace = append(wrongNamespace, r.URL.Path+"?"+r.URL.RawQuery)
+			mu.Unlock()
+		}
+		switch r.URL.Path {
+		case "/api/v1/evals/runs":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-b"}}`))
+		case "/api/v1/evals/runs/r":
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-b"},"status":{"phase":"Succeeded"}}`))
+		case "/api/v1/evals/runs/r/trials":
+			_, _ = w.Write([]byte(`{"caseID":"c","trial":1,"taskName":"eval-c","outcome":"fail"}` + "\n"))
+		case "/api/v1/tasks/eval-c/events":
+			switch r.URL.Query().Get("after") {
+			case "0":
+				_, _ = w.Write([]byte(`{"latestSeq":3,"events":[{"seq":1,"type":"ModelRequestStarted"},{"seq":2,"type":"ModelMessage"}]}`))
+			case "2":
+				_, _ = w.Write([]byte(`{"latestSeq":3,"events":[{"seq":3,"type":"TaskFailed"}]}`))
+			default:
+				t.Errorf("unexpected after=%q", r.URL.Query().Get("after"))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	manifest := strings.Replace(evalTestManifest, "generateName: pr-review-", "generateName: pr-review-\n  namespace: team-b", 1)
+	dir := filepath.Join(t.TempDir(), "out")
+	out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", srv.URL,
+		"--token", "tok", "--namespace", "team-a", "--output-dir", dir)
+	if err != nil {
+		t.Fatalf("Execute() error: %v\n%s", err, out)
+	}
+	if len(wrongNamespace) > 0 {
+		t.Fatalf("requests outside the run's namespace: %v", wrongNamespace)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "events", "eval-c.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.Unmarshal(raw, &events); err != nil || len(events.Events) != 3 {
+		t.Fatalf("events file = %s, %v", raw, err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -105,7 +106,7 @@ func newEvalGetCmd() *cobra.Command {
 		Short: "Show an EvalRun's phase, counts and results",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			run, err := getEvalRun(cmd.Context(), newClientFromCmd(cmd), args[0])
+			run, err := getEvalRun(cmd.Context(), newClientFromCmd(cmd), "", args[0])
 			if err != nil {
 				return err
 			}
@@ -171,8 +172,18 @@ func createEvalRun(ctx context.Context, c *client.Client, body []byte) (*corev1a
 	return decodeEvalRun(c.DoJSON(ctx, http.MethodPost, evalRunsAPIPath, nil, body))
 }
 
-func getEvalRun(ctx context.Context, c *client.Client, name string) (*corev1alpha1.EvalRun, error) {
-	return decodeEvalRun(c.DoJSON(ctx, http.MethodGet, evalRunsAPIPath+"/"+url.PathEscape(name), nil, nil))
+// getEvalRun reads a run. An empty namespace means the CLI's namespace.
+func getEvalRun(ctx context.Context, c *client.Client, namespace, name string) (*corev1alpha1.EvalRun, error) {
+	return decodeEvalRun(c.DoJSON(ctx, http.MethodGet, evalRunsAPIPath+"/"+url.PathEscape(name), namespaceQuery(namespace), nil))
+}
+
+// namespaceQuery pins a request to the run's namespace, which the manifest
+// may have set to something other than the CLI's.
+func namespaceQuery(namespace string) map[string]string {
+	if namespace == "" {
+		return nil
+	}
+	return map[string]string{"namespace": namespace}
 }
 
 func decodeEvalRun(value any, err error) (*corev1alpha1.EvalRun, error) {
@@ -220,7 +231,7 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 			return nil, fmt.Errorf("evalrun/%s did not finish within %s", run.Name, timeout)
 		case <-time.After(evalRunPollInterval):
 		}
-		next, err := getEvalRun(ctx, c, run.Name)
+		next, err := getEvalRun(ctx, c, run.Namespace, run.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -276,7 +287,12 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 	if err := os.WriteFile(filepath.Join(dir, "evalrun.json"), append(encoded, '\n'), 0o644); err != nil {
 		return err
 	}
-	trialsJSONL, _, err := c.GetRaw(ctx, evalRunsAPIPath+"/"+url.PathEscape(run.Name)+"/trials", map[string]string{"format": "jsonl"})
+	query := namespaceQuery(run.Namespace)
+	if query == nil {
+		query = map[string]string{}
+	}
+	query["format"] = "jsonl"
+	trialsJSONL, _, err := c.GetRaw(ctx, evalRunsAPIPath+"/"+url.PathEscape(run.Name)+"/trials", query)
 	if err != nil {
 		return fmt.Errorf("read trial records: %w", err)
 	}
@@ -296,7 +312,7 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 		if errs := validation.IsDNS1123Subdomain(trial.TaskName); len(errs) > 0 {
 			return fmt.Errorf("trial %d of case %q names an invalid Task", trial.Trial, trial.CaseID)
 		}
-		events, _, err := c.GetRaw(ctx, "/api/v1/tasks/"+url.PathEscape(trial.TaskName)+"/events", nil)
+		events, err := allTaskEvents(ctx, c, run.Namespace, trial.TaskName)
 		if err != nil {
 			// Trial Tasks can be gone already; the record still names them.
 			events = fmt.Appendf(nil, "{\"error\": %q}\n", err.Error())
@@ -306,6 +322,58 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 		}
 	}
 	return os.WriteFile(filepath.Join(dir, "summary.md"), []byte(evalRunSummaryMarkdown(run, trials)), 0o644)
+}
+
+// evalEventPageSize and evalEventMaxPages bound one trial's event download.
+const (
+	evalEventPageSize = 500
+	evalEventMaxPages = 1000
+)
+
+// allTaskEvents reads every page of a Task's events, following after= until
+// the stream's latest sequence, and returns them as one document.
+func allTaskEvents(ctx context.Context, c *client.Client, namespace, task string) ([]byte, error) {
+	var collected []json.RawMessage
+	var after, latest int64
+	for range evalEventMaxPages {
+		query := namespaceQuery(namespace)
+		if query == nil {
+			query = map[string]string{}
+		}
+		query["after"] = strconv.FormatInt(after, 10)
+		query["limit"] = strconv.Itoa(evalEventPageSize)
+		raw, _, err := c.GetRaw(ctx, "/api/v1/tasks/"+url.PathEscape(task)+"/events", query)
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			LatestSeq int64             `json:"latestSeq"`
+			Events    []json.RawMessage `json:"events"`
+		}
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return nil, fmt.Errorf("decode events of Task %s: %w", task, err)
+		}
+		latest = page.LatestSeq
+		last := after
+		for _, event := range page.Events {
+			var seq struct {
+				Seq int64 `json:"seq"`
+			}
+			if err := json.Unmarshal(event, &seq); err != nil {
+				return nil, fmt.Errorf("decode events of Task %s: %w", task, err)
+			}
+			last = max(last, seq.Seq)
+		}
+		collected = append(collected, page.Events...)
+		// Stop at the end of the stream, or when a page makes no progress.
+		if len(page.Events) == 0 || last >= latest || last == after {
+			return json.MarshalIndent(map[string]any{
+				"namespace": namespace, "taskName": task, "latestSeq": latest, "events": collected,
+			}, "", "  ")
+		}
+		after = last
+	}
+	return nil, fmt.Errorf("events of Task %s exceed %d pages", task, evalEventMaxPages)
 }
 
 func parseEvalTrials(raw []byte) ([]store.EvalTrialRecord, error) {
