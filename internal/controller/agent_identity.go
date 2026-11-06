@@ -48,9 +48,10 @@ func identityClaimCoversCreation(claim *corev1alpha1.AgentIdentityClaim, created
 }
 
 // identityClaimBindable reports whether new Task bindings may use the claim:
-// it must name the identity and not be on its way out.
+// it must name the identity, not be on its way out, and carry the grant time
+// the API server recorded.
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
-	return identityClaimMatches(claim, issuer, id) && !claim.Releasing
+	return identityClaimMatches(claim, issuer, id) && !claim.Releasing && claim.GrantedAt != nil
 }
 
 // validateAgentIdentity refuses an identity this controller cannot honor.
@@ -69,6 +70,13 @@ func (r *AgentReconciler) validateAgentIdentity(_ context.Context, agent *corev1
 // re-checking after its binding refuses. A later pass releases it once a live
 // scan finds no unfinished Task bound to it: a binding that passed its check
 // before the mark was persisted before it, so that scan sees it.
+//
+// A claim is granted, or granted again after releasing, without a grant
+// time; no Task binds it yet. A later pass, reading the claim back, records
+// as its grant time the latest write time the API server has recorded on the
+// Agent, which is no earlier than the write that granted it. Grant times are
+// compared with creation times the API server stamps, so the controller's
+// clock never decides which objects a claim covers.
 func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.AgentIdentityClaim, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
 	// Start from the live claim: a cached copy can still show a claim this
@@ -88,12 +96,22 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		// it a held claim is released like one the spec no longer names.
 		issuer, id, declared = "", "", false
 	}
-	if claim != nil && identityClaimMatches(claim, issuer, id) && (claim.Releasing || claim.GrantedAt == nil) {
-		// The spec names the held identity again, or use authorization is back
-		// on. Tasks created while it was leaving were not checked for it, so
-		// the claim counts as granted now.
-		claim.Releasing = false
-		claim.GrantedAt = identityClaimGrantTime()
+	if claim != nil && identityClaimMatches(claim, issuer, id) {
+		switch {
+		case claim.Releasing:
+			// The spec names the held identity again, or use authorization is
+			// back on. Tasks created while it was leaving were not checked for
+			// it, so the claim is granted again.
+			claim.Releasing = false
+			claim.GrantedAt = nil
+			return claim, errIdentityGrantTimePending(claim)
+		case claim.GrantedAt == nil:
+			granted := apiServerWriteTime(live)
+			if granted == nil {
+				return claim, errIdentityGrantTimePending(claim)
+			}
+			claim.GrantedAt = granted
+		}
 	}
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
 		if !claim.Releasing {
@@ -137,14 +155,28 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		return nil, fmt.Errorf("identity %s/%s is still held by Task %s/%s of Agent %s until it finishes",
 			issuer, id, holder.Namespace, holder.Name, holder.Status.AgentExecutionBinding.Agent.Name)
 	}
-	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id, GrantedAt: identityClaimGrantTime()}, nil
+	claim = &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}
+	return claim, errIdentityGrantTimePending(claim)
 }
 
-// identityClaimGrantTime is the grant time recorded now, at the second
-// precision the API server stores it with.
-func identityClaimGrantTime() *metav1.Time {
-	now := metav1.Now().Rfc3339Copy()
-	return &now
+// errIdentityGrantTimePending keeps the Agent not Ready while a granted claim
+// waits for the grant time the API server records.
+func errIdentityGrantTimePending(claim *corev1alpha1.AgentIdentityClaim) error {
+	return fmt.Errorf("identity %s/%s is granted and waits for the API server to record the grant time", claim.Issuer, claim.ID)
+}
+
+// apiServerWriteTime returns the latest write time the API server recorded
+// in the object's managedFields, at one-second precision, or nil when it
+// recorded none. The write that granted a claim set its manager's time, so
+// the latest time is never earlier than that write.
+func apiServerWriteTime(obj metav1.Object) *metav1.Time {
+	var latest *metav1.Time
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Time != nil && (latest == nil || entry.Time.After(latest.Time)) {
+			latest = entry.Time.DeepCopy()
+		}
+	}
+	return latest
 }
 
 // errIdentityClaimReleasing reports the first release pass. It is an error only

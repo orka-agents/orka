@@ -252,9 +252,9 @@ identity belongs to one Agent: the first Agent the controller grants it to
 records it in `status.identityClaim`, and any other Agent naming it is not Ready.
 An Agent that stops naming an identity keeps the claim until every Task bound to
 it has finished, and a deleted Agent's identity stays taken by its bound Tasks
-until they finish. A claim records when it was granted, is granted only while
-`--agent-use-authorization-enabled` is set, and binds only Tasks created after
-that second. A Task Orka creates from a scheduled Task, RepositoryScan, or
+until they finish. A claim records when it was granted, by the API server's
+clock, is granted only while `--agent-use-authorization-enabled` is set, and
+binds only Tasks created after that second. A Task Orka creates from a scheduled Task, RepositoryScan, or
 RepositoryMonitor also needs that object created after it, and GatewayBinding
 Tasks cannot use an identity-bound Agent. Create Tasks and these objects once
 the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
