@@ -1515,6 +1515,35 @@ func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace
 	}
 }
 
+// stopActiveChat stops a chat Session's in-flight request, as a client
+// disconnect would, and waits until it has released its reservation. The
+// Session is kept and accepts the next message. It reports whether a request
+// was running.
+func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, error) {
+	ch.activeChatsMu.Lock()
+	request := ch.activeChats[activeChatKey(namespace, sessionID)]
+	ch.activeChatsMu.Unlock()
+	if request == nil {
+		return false, nil
+	}
+	select {
+	case <-request.done:
+		return false, nil
+	default:
+	}
+	request.cancel()
+	timer := time.NewTimer(chatDurabilityTimeout)
+	defer timer.Stop()
+	select {
+	case <-request.done:
+		return true, nil
+	case <-timer.C:
+		return true, fmt.Errorf("%w: active chat did not stop before the cancellation deadline", store.ErrNotReady)
+	case <-ctx.Done():
+		return true, ctx.Err()
+	}
+}
+
 func (ch *ChatHandler) clearChatDeletionGate(namespace, sessionID string) {
 	key := activeChatKey(namespace, sessionID)
 	ch.activeChatsMu.Lock()

@@ -49,8 +49,9 @@ func newSessionCancelCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cancel <name>",
 		Short: "Stop a session's current turn",
-		Long: `Cancel the session's Pending and Running tasks. The session keeps its
-history and accepts the next message.`,
+		Long: `Stop the session's in-flight chat request, if any, and cancel its
+Pending and Running tasks. The session keeps its history and accepts the next
+message.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClientFromCmd(cmd)
@@ -60,7 +61,11 @@ history and accepts the next message.`,
 			if err != nil {
 				return err
 			}
-			tasks, _ := result.(map[string]any)["tasks"].([]any)
+			fields, _ := result.(map[string]any)
+			if stopped, _ := fields["chatTurnStopped"].(bool); stopped {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Chat turn stopped: %s\n", args[0])
+			}
+			tasks, _ := fields["tasks"].([]any)
 			for _, task := range tasks {
 				printTaskCancellation(cmd.OutOrStdout(), task)
 			}
