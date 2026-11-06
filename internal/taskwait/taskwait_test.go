@@ -165,6 +165,17 @@ func TestAcceptsApprovalDecisionOnlyForTheActiveParkedApproval(t *testing.T) {
 	if AcceptsApprovalDecision(task, "a2") {
 		t.Fatal("another approval ID must not be accepted")
 	}
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateRequested
+	if !AcceptsApprovalDecision(task, "a1") {
+		t.Fatal("a requested wait whose turn succeeded must accept a decision")
+	}
+	for _, phase := range []corev1alpha1.TaskPhase{corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled} {
+		task.Status.Phase = phase
+		if AcceptsApprovalDecision(task, "a1") {
+			t.Fatalf("a requested wait after a %s turn is abandoned and must not accept a decision", phase)
+		}
+	}
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateExpired
 	if AcceptsApprovalDecision(task, "a1") {
 		t.Fatal("an ended wait must not accept a late decision")

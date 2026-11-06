@@ -1426,3 +1426,32 @@ func TestTaskApprovalDecisionAPIAcceptsAParkedSignOffAfterTheTurnEnded(t *testin
 		t.Fatal("the decision must nudge the parked Task so its wait resumes promptly")
 	}
 }
+
+func TestTaskApprovalDecisionAPIRejectsAParkedSignOffAfterAFailedTurn(t *testing.T) {
+	eventStore := storetest.NewFakeExecutionEventStore()
+	content, _ := json.Marshal(map[string]any{"approvalID": "parked-1", "action": "Agent sign-off (parked turn)", "parked": true})
+	if _, err := eventStore.AppendExecutionEvent(context.Background(), &store.ExecutionEvent{
+		Namespace: "default", StreamType: store.ExecutionEventStreamTypeTask, StreamID: "parked-task", TaskName: "parked-task",
+		Type: events.ExecutionEventTypeApprovalRequested, ToolCallID: "parked-1", Content: content,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	task := testTask("default", "parked-task")
+	task.Status.Phase = corev1alpha1.TaskPhaseFailed
+	// The turn failed before the controller abandoned the requested wait.
+	task.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateRequested, Kind: corev1alpha1.TaskWaitKindApproval, References: []string{"parked-1"},
+	}
+	h, app := setupTaskEventHandlers(t, eventStore, task)
+	app.Post("/api/v1/tasks/:id/approvals/:approvalID/decision", h.DecideTaskApproval)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tasks/parked-task/approvals/parked-1/decision?namespace=default",
+		bytes.NewBufferString(`{"decision":"approve"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a sign-off whose turn failed has nothing to resume and must conflict, got %d", resp.StatusCode)
+	}
+}

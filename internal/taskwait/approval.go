@@ -142,7 +142,10 @@ func ParkedApprovalTerminalEvent(
 }
 
 // AcceptsApprovalDecision reports whether task is parked on approvalID, so a
-// human decision is accepted even though the parked turn itself has ended.
+// human decision is accepted even though the parked turn itself has ended. A
+// requested wait arms only when its turn succeeded; after a failed or
+// cancelled turn it is abandoned with nothing to resume, so it takes no
+// decision either.
 func AcceptsApprovalDecision(task *corev1alpha1.Task, approvalID string) bool {
 	if task == nil || !task.DeletionTimestamp.IsZero() {
 		return false
@@ -153,7 +156,9 @@ func AcceptsApprovalDecision(task *corev1alpha1.Task, approvalID string) bool {
 		return false
 	}
 	switch wait.State {
-	case corev1alpha1.TaskWaitStateRequested, corev1alpha1.TaskWaitStateWaiting:
+	case corev1alpha1.TaskWaitStateRequested:
+		return task.Status.Phase == corev1alpha1.TaskPhaseSucceeded
+	case corev1alpha1.TaskWaitStateWaiting:
 		return true
 	default:
 		return false
