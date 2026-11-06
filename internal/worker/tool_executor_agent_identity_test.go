@@ -19,6 +19,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 // An Agent identity credential is bound to the Tool's declared destination,
@@ -72,5 +73,14 @@ func TestToolExecutorPassesTaskUIDToResolution(t *testing.T) {
 	}
 	if resolver.request.TaskUID != "task-uid" || resolver.request.AgentIdentity != nil {
 		t.Fatalf("resolve request TaskUID = %q AgentIdentity = %+v", resolver.request.TaskUID, resolver.request.AgentIdentity)
+	}
+}
+
+// A native worker's executor names its Task from the controller-set
+// environment, so its identity use records do too.
+func TestNewToolExecutorBindsTheWorkerTaskUID(t *testing.T) {
+	t.Setenv(workerenv.TaskUID, " task-uid ")
+	if got := NewToolExecutor().TaskUID(); got != "task-uid" {
+		t.Fatalf("TaskUID() = %q, want the controller-set Task UID", got)
 	}
 }
