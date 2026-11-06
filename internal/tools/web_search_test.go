@@ -13,10 +13,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -87,8 +89,20 @@ func TestNewBrokeredWebSearchToolIgnoresWorkerConfigurationAndRejectsPrivateEndp
 	}
 }
 
-func TestBrokeredWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
-	for _, test := range []struct {
+func TestWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
+	// Clear any search API so the worker tool takes the DuckDuckGo path.
+	t.Setenv(workerenv.SearchAPIURL, "")
+
+	webSearchResponse := func(status int, body string) http.RoundTripper {
+		return webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: status,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})
+	}
+	failures := []struct {
 		name      string
 		transport http.RoundTripper
 		want      string
@@ -101,28 +115,53 @@ func TestBrokeredWebSearchReturnsErrorsInsteadOfSyntheticResults(t *testing.T) {
 			want: "DuckDuckGo request failed",
 		},
 		{
-			name: "unparseable response",
+			name:      "error status",
+			transport: webSearchResponse(http.StatusServiceUnavailable, "unavailable"),
+			want:      "DuckDuckGo returned HTTP 503",
+		},
+		{
+			name:      "unparseable response",
+			transport: webSearchResponse(http.StatusOK, "markup changed"),
+			want:      "no parseable results",
+		},
+		{
+			// DuckDuckGo answers automated clients with a challenge page.
+			name:      "bot challenge",
+			transport: webSearchResponse(http.StatusAccepted, `<form id="challenge-form" action="//duckduckgo.com/anomaly.js"></form>`),
+			want:      "DuckDuckGo returned HTTP 202",
+		},
+		{
+			name: "unreadable body",
 			transport: webSearchRoundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header:     make(http.Header),
-					Body:       io.NopCloser(strings.NewReader("markup changed")),
+					Body:       io.NopCloser(iotest.ErrReader(errors.New("connection reset"))),
 				}, nil
 			}),
-			want: "no parseable results",
+			want: "read DuckDuckGo response",
 		},
+	}
+	for _, constructor := range []struct {
+		name string
+		new  func() *WebSearchTool
+	}{
+		{name: "worker", new: NewWebSearchTool},
+		{name: "brokered", new: NewBrokeredWebSearchTool},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			tool := NewBrokeredWebSearchTool()
-			tool.client = &http.Client{Transport: test.transport}
-			result, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"test"}`))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("Execute() result = %q, error = %v, want error containing %q", result, err, test.want)
-			}
-			if strings.Contains(result, "Search Result") {
-				t.Fatalf("Execute() returned synthetic search data: %q", result)
-			}
-		})
+		for _, test := range failures {
+			t.Run(constructor.name+"/"+test.name, func(t *testing.T) {
+				tool := constructor.new()
+				tool.client = &http.Client{Transport: test.transport}
+				result, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"test"}`))
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Execute() result = %q, error = %v, want error containing %q", result, err, test.want)
+				}
+				if result != "" {
+					t.Fatalf("Execute() returned data with its error: %q", result)
+				}
+			})
+		}
 	}
 }
 
@@ -251,6 +290,8 @@ func TestWebSearchTool_Execute(t *testing.T) {
 	}
 
 	tool := NewWebSearchTool()
+	tool.baseURL = ""
+	tool.client = &http.Client{Transport: duckDuckGoResultsTransport(t, nil)}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,26 +307,61 @@ func TestWebSearchTool_Execute(t *testing.T) {
 	}
 }
 
-func TestWebSearchTool_Execute_MockSearch(t *testing.T) {
-	// Test mock search (no API configured)
-	tool := NewWebSearchTool()
-	// Ensure no API URL is set
-	tool.baseURL = ""
+const duckDuckGoResultsHTML = `<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage1&rut=abc">Example Page 1</a>
+	<a class="result__snippet" href="#">First snippet</a>
+</div>
+<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage2&rut=def">Example Page 2</a>
+	<a class="result__snippet" href="#">Second snippet</a>
+</div>
+<div class="result">
+	<a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage3&rut=ghi">Example Page 3</a>
+	<a class="result__snippet" href="#">Third snippet</a>
+</div>`
 
-	args := json.RawMessage(`{"query": "test query"}`)
-	result, err := tool.Execute(context.Background(), args)
+// duckDuckGoResultsTransport answers every request with three DuckDuckGo
+// results, passing each request to inspect first when it is set.
+func duckDuckGoResultsTransport(t *testing.T, inspect func(*http.Request)) http.RoundTripper {
+	t.Helper()
+	return webSearchRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if inspect != nil {
+			inspect(request)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/html"}},
+			Body:       io.NopCloser(strings.NewReader(duckDuckGoResultsHTML)),
+		}, nil
+	})
+}
+
+func TestWebSearchTool_Execute_DuckDuckGoSearch(t *testing.T) {
+	t.Setenv(workerenv.SearchAPIURL, "")
+	tool := NewWebSearchTool()
+	var requested *url.URL
+	tool.client = &http.Client{Transport: duckDuckGoResultsTransport(t, func(request *http.Request) {
+		requested = request.URL
+	})}
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{"query": "test query", "limit": 2}`))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-
-	// Verify result is valid JSON
-	var results []WebSearchResult
-	if err := json.Unmarshal([]byte(result), &results); err != nil {
-		t.Errorf("Execute() returned invalid JSON: %v", err)
+	if requested == nil || requested.Host != "html.duckduckgo.com" || requested.Query().Get("q") != "test query" {
+		t.Fatalf("Execute() requested %v, want the DuckDuckGo HTML endpoint for the query", requested)
 	}
 
-	if len(results) == 0 {
-		t.Error("Execute() returned empty results")
+	var results []WebSearchResult
+	if err := json.Unmarshal([]byte(result), &results); err != nil {
+		t.Fatalf("Execute() returned invalid JSON: %v", err)
+	}
+	want := []WebSearchResult{
+		{Title: "Example Page 1", URL: "https://example.com/page1", Snippet: "First snippet"},
+		{Title: "Example Page 2", URL: "https://example.com/page2", Snippet: "Second snippet"},
+	}
+	if !reflect.DeepEqual(results, want) {
+		t.Fatalf("Execute() results = %+v, want %+v", results, want)
 	}
 }
 
