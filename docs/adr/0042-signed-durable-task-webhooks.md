@@ -1,4 +1,4 @@
-# 40. Sign Task webhooks and deliver them from durable Task status
+# 42. Sign Task webhooks and deliver them from durable Task status
 
 Date: 2026-11-06
 
