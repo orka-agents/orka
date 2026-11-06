@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -236,17 +237,34 @@ const agentIdentityReverifyInterval = time.Hour
 const (
 	reasonIdentityVerified           = "Verified"
 	reasonIdentityVerificationFailed = "VerificationFailed"
+	reasonIdentityIssuerUnavailable  = "IssuerUnavailable"
+)
+
+const (
+	// agentIdentityVerifyTimeout bounds one verification, shorter than a
+	// Tool call's token requests, because Agents verify one at a time.
+	agentIdentityVerifyTimeout = 5 * time.Second
+	// agentIdentityIssuerBackoff is how long every Agent skips verification
+	// after the issuer could not answer.
+	agentIdentityIssuerBackoff = time.Minute
 )
 
 // agentIdentityState is the outcome of verifying an Agent's identity.
 type agentIdentityState struct {
 	declared bool
 	verified bool
-	err      error
+	// unavailable reports that the issuer could not answer; err is set too,
+	// so the Agent is not Ready until it is verified.
+	unavailable bool
+	// retryAfter is when verification may be tried again.
+	retryAfter time.Duration
+	err        error
 }
 
 // verifyAgentIdentity asks the issuer to prove a declared identity. A
 // configuration that already failed validation is not sent to the issuer.
+// After the issuer could not answer, no Agent asks it again until the
+// back-off ends; a refusal from the issuer is not retried early.
 func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1alpha1.Agent, validationErr error) agentIdentityState {
 	issuer, id, ok := agent.IdentityRef()
 	if !ok {
@@ -256,7 +274,27 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	if validationErr != nil || r.IdentityVerifier == nil {
 		return state
 	}
-	if err := r.IdentityVerifier.Verify(ctx, agent); err != nil {
+	unavailable := func(wait time.Duration) agentIdentityState {
+		state.unavailable, state.retryAfter = true, wait
+		state.err = fmt.Errorf("identity %s/%s could not be verified: the issuer is unavailable; retrying in %s",
+			issuer, id, wait.Round(time.Second))
+		return state
+	}
+	r.issuerBackoff.Lock()
+	wait := time.Until(r.issuerBackoff.until)
+	r.issuerBackoff.Unlock()
+	if wait > 0 {
+		return unavailable(wait)
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, agentIdentityVerifyTimeout)
+	defer cancel()
+	if err := r.IdentityVerifier.Verify(verifyCtx, agent); err != nil {
+		if errors.Is(err, agentidentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+			r.issuerBackoff.Lock()
+			r.issuerBackoff.until = time.Now().Add(agentIdentityIssuerBackoff)
+			r.issuerBackoff.Unlock()
+			return unavailable(agentIdentityIssuerBackoff)
+		}
 		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
 		return state
 	}
@@ -280,6 +318,10 @@ func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time, ident
 		ObservedGeneration: agent.Generation,
 	}
 	switch {
+	case identity.unavailable:
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = reasonIdentityIssuerUnavailable
+		condition.Message = identity.err.Error()
 	case identity.err != nil:
 		condition.Reason = reasonIdentityVerificationFailed
 		condition.Message = identity.err.Error()

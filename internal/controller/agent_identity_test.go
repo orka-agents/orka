@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -870,5 +871,71 @@ func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T)
 	_, err = r.agentExecutionIdentity(context.Background(), child, agent)
 	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
 		t.Fatalf("child after an authority change: error = %v, want a permanent refusal", err)
+	}
+}
+
+// With the issuer down, the first Agent's verification starts a shared
+// back-off: the rest of the queue is not each held for a timeout, and every
+// Agent reports the issuer unavailable rather than its identity refused.
+func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
+	agents := make([]client.Object, 0, 5)
+	for i := range 5 {
+		agent := claimedAgent(identityBoundTestAgent(fmt.Sprintf("agent-%d", i), time.Now()))
+		agent.Spec.Identity.Entra.AgentIdentityID = fmt.Sprintf("33333333-3333-3333-3333-%012d", i)
+		agent.Status.IdentityClaim.ID = agent.Spec.Identity.Entra.AgentIdentityID
+		agents = append(agents, agent)
+	}
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agents...).WithStatusSubresource(agents...).Build()
+	calls := 0
+	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
+		calls++
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > agentIdentityVerifyTimeout {
+			t.Errorf("verification deadline = %v, %v; want at most %s", deadline, ok, agentIdentityVerifyTimeout)
+		}
+		return fmt.Errorf("the Entra token endpoint is unreachable: %w", agentidentity.ErrIssuerUnavailable)
+	})
+	for _, agent := range agents {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.RequeueAfter <= 0 || result.RequeueAfter > agentIdentityIssuerBackoff {
+			t.Fatalf("%s: RequeueAfter = %v, want a retry within the back-off", agent.GetName(), result.RequeueAfter)
+		}
+		stored := &corev1alpha1.Agent{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified)
+		if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != reasonIdentityIssuerUnavailable {
+			t.Fatalf("%s: IdentityVerified = %+v, want Unknown/%s", agent.GetName(), condition, reasonIdentityIssuerUnavailable)
+		}
+		if stored.Status.Ready {
+			t.Fatalf("%s: an unverified identity must not make the Agent Ready", agent.GetName())
+		}
+		if !reflect.DeepEqual(stored.Status.IdentityClaim, agent.(*corev1alpha1.Agent).Status.IdentityClaim) {
+			t.Fatalf("%s: IdentityClaim = %+v, want the claim kept while the issuer is down", agent.GetName(), stored.Status.IdentityClaim)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("issuer asked %d times, want once for the whole queue", calls)
+	}
+
+	// A definitive refusal is the identity's own answer and starts no back-off.
+	r.issuerBackoff.until = time.Time{}
+	calls = 0
+	r.IdentityVerifier = identityVerifierFunc(func(context.Context, *corev1alpha1.Agent) error {
+		calls++
+		return errors.New("Entra refused the token request: unauthorized_client (AADSTS7000112, HTTP 400)")
+	})
+	for _, agent := range agents[:2] {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("issuer asked %d times after refusals, want each Agent verified", calls)
 	}
 }
