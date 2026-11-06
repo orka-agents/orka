@@ -1167,6 +1167,44 @@ func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
 	}
 }
 
+// TestRequireLiveConnectionTrustsCustodyOverLaggingStatus covers a
+// re-consent that commits in custody while a delegated exchange runs and
+// before the Connection's status shows it: the status still names the
+// frozen grant, but the credential the exchange used is no longer the
+// person's current grant, so the re-check refuses it.
+func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	used, err := h.source.ResolveConnectionCredential(context.Background(), request)
+	if err != nil || used.AccessToken != "gho_old" {
+		t.Fatalf("credential = %+v, %v", used, err)
+	}
+	// The re-consent commits custody only; its status write is still pending.
+	ref, err := connectors.CredentialRef(h.reload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_new", TokenType: "bearer"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.reload().Status.GrantSequence != request.Frozen.GrantSequence {
+		t.Fatal("the status must still show the frozen grant")
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the stale grant refused", err)
+	}
+
+	// Custody that cannot report its grant fails closed.
+	h.source.Credentials = grantlessCustody{h.store}
+	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err == nil {
+		t.Fatal("custody without a grant read must fail closed")
+	}
+}
+
+// grantlessCustody hides the grant read.
+type grantlessCustody struct{ store.ConnectorCredentialStore }
+
 // countingCustody counts custody reads.
 type countingCustody struct {
 	*sqlite.Store

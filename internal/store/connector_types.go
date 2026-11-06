@@ -95,6 +95,14 @@ type ConnectorCredential struct {
 	Version int64
 }
 
+// ConnectorGrantReader reports the grant custody holds for a Connection
+// without opening its material: the sequence of the consent whose tokens it
+// holds. A missing row is ErrNotFound; a tombstoned one is
+// ErrConnectorCustodyTombstoned.
+type ConnectorGrantReader interface {
+	GetConnectorCredentialGrant(ctx context.Context, ref ConnectorCredentialRef) (int64, error)
+}
+
 // ConnectorCredentialStore seals per-Connection token material with one data
 // key per Connection, itself wrapped by the controller key. Deleting a row
 // deletes its wrapped key, which makes the ciphertext unrecoverable.
