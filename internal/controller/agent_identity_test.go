@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +24,10 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
 const testAgentIdentityID = "33333333-3333-3333-3333-33333333aaaa"
@@ -248,54 +251,109 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		}
 		return task
 	}
-	ref, err := r.agentExecutionIdentity(context.Background(), task(""), agent)
-	if err != nil || ref == nil || ref.Issuer != "entra" || ref.ID != testAgentIdentityID || ref.Instance != instance {
+	ctx := context.Background()
+	ref, err := r.agentExecutionIdentity(ctx, task(""), agent)
+	if err != nil || ref == nil || *ref != (corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: instance}) {
 		t.Fatalf("root Task identity = %+v, %v", ref, err)
 	}
-	if _, err := r.agentExecutionIdentity(context.Background(), task("parent-own"), agent); err != nil {
-		t.Fatalf("child of the same bound Agent: %v", err)
-	}
-	if _, err := r.agentExecutionIdentity(context.Background(), task("nightly"), agent); err != nil {
-		t.Fatalf("scheduled run of the scheduled Task's own Agent: %v", err)
-	}
-	for _, parent := range []string{"parent-recreated", "parent-unbound", "parent-other-instance"} {
-		_, err = r.agentExecutionIdentity(context.Background(), task(parent), agent)
-		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
-			t.Fatalf("child of %s: error = %v, want a permanent refusal", parent, err)
+	for name, child := range map[string]*corev1alpha1.Task{
+		"child of the same bound Agent":                   task("parent-own"),
+		"scheduled run of the scheduled Task's own Agent": task("nightly"),
+	} {
+		if _, err := r.agentExecutionIdentity(ctx, child, agent); err != nil {
+			t.Fatalf("%s: %v", name, err)
 		}
 	}
 
-	if _, err := r.agentExecutionIdentity(context.Background(), task("nightly-unchecked"), agent); err == nil ||
-		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "re-create the scheduled Task") {
-		t.Fatalf("run of a scheduled Task created before the grant: error = %v, want a permanent refusal", err)
-	}
 	otherAgentRun := task("nightly")
 	otherAgentRun.Spec.AgentRef.Name = "other"
-	if _, err := r.agentExecutionIdentity(context.Background(), otherAgentRun, agent); err == nil ||
-		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "scheduled Task names it") {
-		t.Fatalf("scheduled run naming another Agent: error = %v, want a permanent refusal", err)
-	}
 	orphan := task("parent-own")
 	orphan.OwnerReferences = nil
 	replaced := task("parent-own")
 	replaced.OwnerReferences[0].UID = "deleted-parent-uid"
 	misrecorded := task("parent-own")
 	misrecorded.Annotations = map[string]string{labels.AnnotationParentTaskUID: "deleted-parent-uid"}
-	for name, child := range map[string]*corev1alpha1.Task{"orphan": orphan, "replaced parent": replaced, "recorded parent": misrecorded} {
-		_, err = r.agentExecutionIdentity(context.Background(), child, agent)
-		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "still controls it") {
-			t.Fatalf("%s: error = %v, want a permanent refusal", name, err)
-		}
+	for _, tc := range []struct {
+		name string
+		task *corev1alpha1.Task
+		want string
+	}{
+		{"child of a recreated Agent's Task", task("parent-recreated"), "parent's own bound Agent"},
+		{"child of an unbound parent", task("parent-unbound"), "parent's own bound Agent"},
+		{"child of a parent frozen under another instance", task("parent-other-instance"), "parent's own bound Agent"},
+		{"run of a scheduled Task created before the grant", task("nightly-unchecked"), "re-create the scheduled Task"},
+		{"scheduled run naming another Agent", otherAgentRun, "scheduled Task names it"},
+		{"orphan", orphan, "still controls it"},
+		{"replaced parent", replaced, "still controls it"},
+		{"recorded parent", misrecorded, "still controls it"},
+	} {
+		_, err := r.agentExecutionIdentity(ctx, tc.task, agent)
+		requirePermanentIdentityRefusal(t, tc.name, err, tc.want)
 	}
 
-	_, err = r.agentExecutionIdentity(context.Background(), task(""), unclaimed)
-	if err == nil || isPermanentACPAgentConfigurationError(err) || !errors.Is(err, errIdentityClaimPending) {
+	if _, err := r.agentExecutionIdentity(ctx, task(""), unclaimed); !errors.Is(err, errIdentityClaimPending) || isPermanentACPAgentConfigurationError(err) {
 		t.Fatalf("Agent without its claim yet: error = %v, want a retryable wait", err)
 	}
-
 	r.Identity.AgentUseAuthorization = false
-	if _, err := r.agentExecutionIdentity(context.Background(), task(""), agent); err == nil || !isPermanentACPAgentConfigurationError(err) {
-		t.Fatalf("use authorization off: error = %v, want a permanent refusal", err)
+	_, err = r.agentExecutionIdentity(ctx, task(""), agent)
+	requirePermanentIdentityRefusal(t, "use authorization off", err, "agent-use-authorization-enabled")
+}
+
+// requirePermanentIdentityRefusal fails unless err permanently refuses a
+// binding with a message containing want.
+func requirePermanentIdentityRefusal(t *testing.T, name string, err error, want string) {
+	t.Helper()
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("%s: error = %v, want a permanent refusal mentioning %q", name, err, want)
+	}
+}
+
+func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	after := metav1.NewTime(testClaimGrantedAt.Add(time.Second))
+	newScan := &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{Name: "new-scan", Namespace: testNS, UID: "new-scan-uid", CreationTimestamp: after}}
+	oldScan := &corev1alpha1.RepositoryScan{ObjectMeta: metav1.ObjectMeta{Name: "old-scan", Namespace: testNS, UID: "old-scan-uid", CreationTimestamp: testClaimGrantedAt}}
+	newMonitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "new-monitor", Namespace: testNS, UID: "new-monitor-uid", CreationTimestamp: after}}
+	oldMonitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "old-monitor", Namespace: testNS, UID: "old-monitor-uid", CreationTimestamp: testClaimGrantedAt}}
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, newScan, oldScan, newMonitor, oldMonitor).Build()
+	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	ctx := context.Background()
+
+	// producedBy returns a fresh Task controlled by the named source object.
+	producedBy := func(kind, name, uid string) *corev1alpha1.Task {
+		controller := true
+		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: "produced", Namespace: testNS, CreationTimestamp: metav1.Now(),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: kind, Name: name, UID: types.UID(uid), Controller: &controller,
+			}},
+		}}
+	}
+	for name, task := range map[string]*corev1alpha1.Task{
+		"scan created after the grant":    producedBy("RepositoryScan", "new-scan", "new-scan-uid"),
+		"monitor created after the grant": producedBy("RepositoryMonitor", "new-monitor", "new-monitor-uid"),
+	} {
+		if _, err := r.agentExecutionIdentity(ctx, task, agent); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	gatewayTask := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "from-gateway", Namespace: testNS, CreationTimestamp: metav1.Now(),
+		Labels: map[string]string{gateway.TaskGatewayBindingLabel: "support"},
+	}}
+	for _, tc := range []struct {
+		name string
+		task *corev1alpha1.Task
+		want string
+	}{
+		{"scan created in the grant's second", producedBy("RepositoryScan", "old-scan", "old-scan-uid"), "re-create the RepositoryScan"},
+		{"monitor created in the grant's second", producedBy("RepositoryMonitor", "old-monitor", "old-monitor-uid"), "re-create the RepositoryMonitor"},
+		{"replaced scan", producedBy("RepositoryScan", "new-scan", "deleted-scan-uid"), "was replaced"},
+		{"deleted monitor", producedBy("RepositoryMonitor", "gone", "gone-uid"), "is gone"},
+		{"GatewayBinding Task", gatewayTask, "GatewayBinding"},
+	} {
+		_, err := r.agentExecutionIdentity(ctx, tc.task, agent)
+		requirePermanentIdentityRefusal(t, tc.name, err, tc.want)
 	}
 }
 
@@ -425,17 +483,17 @@ func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing
 		executing bool
 		wantFail  bool
 	}{
-		"claim held":                {agent: holder},
-		"claim released":            {agent: released, wantFail: true},
-		"claim releasing":           {agent: releasingAgent(identityBoundTestAgent("reviewer", time.Now())), wantFail: true},
-		"Agent deleted":             {wantFail: true},
-		"already executing is left": {agent: released, executing: true},
+		"claim held":                       {agent: holder},
+		"claim released":                   {agent: released, wantFail: true},
+		"claim releasing":                  {agent: releasingAgent(identityBoundTestAgent("reviewer", time.Now())), wantFail: true},
+		"Agent deleted":                    {wantFail: true},
+		"queued is left to the dispatcher": {agent: released, executing: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			task := boundTask("work", holder, corev1alpha1.TaskPhasePending)
 			task.UID = "work-uid"
 			if tc.executing {
-				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateRunning}
+				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateQueued}
 			}
 			builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task)
 			if tc.agent != nil {
@@ -516,35 +574,102 @@ func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
 	}
 }
 
-func TestRequireBoundIdentityClaimRechecksAQueuedTask(t *testing.T) {
-	fixture := newACPQueuePlanningFailureFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	queued, attempt := fixture.queueValidTask(t, ctx)
-	if queued.Status.Execution == nil || queued.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
-		t.Fatalf("execution = %+v, want Queued for capacity", queued.Status.Execution)
-	}
-	// The binding froze an identity its Agent no longer holds: the Agent is gone.
-	binding := queued.Status.AgentExecutionBinding.DeepCopy()
-	binding.Agent.Identity = &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"}
-	fixture.reconciler.Identity = testIdentityConfig()
-	if _, err, handled := fixture.reconciler.requireBoundIdentityClaim(ctx, queued, binding); err != nil || !handled {
-		t.Fatalf("queued Task: handled=%v err=%v, want it failed before dispatch", handled, err)
-	}
-	current := &corev1alpha1.Task{}
-	if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+func TestACPDispatcherFailsQueuedPoolTaskThatLostItsIdentity(t *testing.T) {
+	// No Task reconcile runs between the claim loss and the dispatcher scan.
+	runACPDispatcherIdentityLossTest(t, false)
+}
+
+func TestACPDispatcherFailsReservedExternalTaskThatLostItsIdentity(t *testing.T) {
+	// An external Reserved attempt holds no RuntimePool reservation, so it
+	// settles without one.
+	runACPDispatcherIdentityLossTest(t, true)
+}
+
+// runACPDispatcherIdentityLossTest queues (or, for external, reserves) a
+// Task bound to an identity whose Agent is gone, runs one dispatcher scan with
+// no Task reconcile in between, and requires the Task and its durable attempt
+// to fail with IdentityUnavailable before any runtime admission.
+func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution == nil ||
-		current.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("IdentityUnavailable") {
-		t.Fatalf("Task status = %+v, want Failed/IdentityUnavailable", current.Status)
+	task := runtimePoolReservationTestTask("identity-lost", "identity-lost-uid", "pool-uid")
+	task.CreationTimestamp = metav1.Now()
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
+		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
 	}
-	persisted, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if external {
+		task.Status.AgentExecutionBinding.Backend = corev1alpha1.AgentExecutionBackendExternalEndpoint
+		task.Status.Execution.RuntimePoolName, task.Status.Execution.RuntimePoolUID = "", ""
+		task.Status.Execution.AgentRuntimeName = "external"
+		task.Status.Execution.State = corev1alpha1.TaskExecutionStateReserved
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "identity-lost.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.ExecutionState != store.PromptExecutionFailed {
-		t.Fatalf("PromptAttempt state = %s, want Failed so it is never dispatched", persisted.ExecutionState)
+	t.Cleanup(func() { _ = db.Close() })
+	controlStore := sqlite.NewStore(db, "identity-lost-test")
+	epochs := NewControllerEpochManager(controlStore, "identity-lost-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	t.Cleanup(func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("controller epoch manager shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attemptID, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{
+		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		AdmissionGate: NewACPAdmissionGate(), sem: make(chan struct{}, 1), active: make(map[types.UID]struct{}),
+	}
+	if external {
+		if err := dispatcher.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionQueued, store.PromptExecutionReserved, "reserve", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dispatcher.dispatchOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != string(taskExecutionReasonIdentityUnavailable) {
+		t.Fatalf("attempt = %s/%s, want Failed/IdentityUnavailable", attempt.ExecutionState, attempt.TerminalReason)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || updated.Status.Execution == nil ||
+		updated.Status.Execution.State != corev1alpha1.TaskExecutionStateFailed ||
+		updated.Status.Execution.Reason != taskExecutionReasonIdentityUnavailable ||
+		!strings.Contains(updated.Status.Execution.Message, "no longer holds identity") {
+		t.Fatalf("Task status = %#v, want Failed/IdentityUnavailable", updated.Status)
 	}
 }
 
