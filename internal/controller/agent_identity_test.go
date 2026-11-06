@@ -272,6 +272,45 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 	}
 }
 
+type identityVerifierFunc func(context.Context, *corev1alpha1.Agent) error
+
+func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
+	return f(ctx, agent)
+}
+
+func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+	// While the issuer proves the original identity, an editor names another.
+	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
+		edited := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(agent), edited); err != nil {
+			return err
+		}
+		edited.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+		edited.Generation = 2
+		return r.Update(ctx, edited)
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err == nil {
+		t.Fatal("Reconcile() = nil error, want the pass retried for the edited Agent")
+	}
+	stored := &corev1alpha1.Agent{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Generation != 2 {
+		t.Fatalf("Generation = %d, want the edit stored", stored.Generation)
+	}
+	if condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified); condition != nil {
+		t.Fatalf("IdentityVerified = %+v, want nothing recorded for the unverified identity", condition)
+	}
+	if stored.Status.IdentityClaim != nil {
+		t.Fatalf("IdentityClaim = %+v, want no claim decided from the old spec", stored.Status.IdentityClaim)
+	}
+}
+
 func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing.T) {
 	holder := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	released := identityBoundTestAgent("reviewer", time.Now())
