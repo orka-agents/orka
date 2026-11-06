@@ -1157,3 +1157,40 @@ func TestDeletingAParkedTaskErasesHistoryOnlyAfterItsWaitEnds(t *testing.T) {
 		t.Fatalf("an ended wait must not hold deletion, got %v, %v", active, err)
 	}
 }
+
+func TestContinuationLinkedBetweenReadsIsNeverOrphaned(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
+	continuation.UID = "uid-continuation"
+	reads := 0
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, continuation).
+		WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if key.Name == "parked" {
+				reads++
+				if reads == 1 {
+					// The wait reconciler links the continuation right after
+					// this read returns.
+					linked := obj.(*corev1alpha1.Task).DeepCopy()
+					linked.Status.Wait.State = corev1alpha1.TaskWaitStateResumed
+					linked.Status.Wait.ContinuationTaskUID = "uid-continuation"
+					if err := c.Status().Update(ctx, linked); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}}).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	pending, orphaned, err := r.continuationLinkPending(context.Background(), continuation)
+	if err != nil || orphaned || !pending {
+		t.Fatalf("a continuation linked between reads must be held, not orphaned: pending=%v orphaned=%v err=%v", pending, orphaned, err)
+	}
+	if pending, orphaned, err = r.continuationLinkPending(context.Background(), continuation); err != nil || orphaned || pending {
+		t.Fatalf("the linked continuation must run, got pending=%v orphaned=%v err=%v", pending, orphaned, err)
+	}
+}

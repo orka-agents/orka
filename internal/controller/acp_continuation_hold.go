@@ -34,26 +34,33 @@ func (r *TaskReconciler) continuationLinkPending(ctx context.Context, task *core
 	if predecessorName == "" && predecessorUID == "" {
 		return false, false, nil
 	}
-	reader := uncachedReader(r.APIReader, r.Client)
-	if _, linked, err := taskwait.Predecessor(ctx, reader, task); err != nil || linked {
-		return err != nil, false, err
-	}
 	if predecessorName == "" || predecessorUID == "" {
 		return false, true, nil
 	}
+	// Decide from one authoritative snapshot of the predecessor, so a link
+	// completed between two reads is never mistaken for an orphan.
 	predecessor := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: predecessorName}, predecessor); err != nil {
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: predecessorName}, predecessor); err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, true, nil
 		}
 		return true, false, err
 	}
 	wait := predecessor.Status.Wait
-	if string(predecessor.UID) == predecessorUID && wait != nil && wait.State == corev1alpha1.TaskWaitStateResuming &&
-		wait.ContinuationTaskName == task.Name {
-		return true, false, nil
+	if string(predecessor.UID) != predecessorUID || wait == nil || wait.ContinuationTaskName != task.Name {
+		return false, true, nil
 	}
-	return false, true, nil
+	switch wait.State {
+	case corev1alpha1.TaskWaitStateResumed:
+		if wait.ContinuationTaskUID == string(task.UID) {
+			return false, false, nil
+		}
+		return false, true, nil
+	case corev1alpha1.TaskWaitStateResuming:
+		return true, false, nil
+	default:
+		return false, true, nil
+	}
 }
 
 const acpContinuationUnlinkedReason corev1alpha1.TaskExecutionReason = "ContinuationUnlinked"
