@@ -870,6 +870,11 @@ func TestValidateProviderSpecForwardingTools(t *testing.T) {
 	if issue := ValidateProviderSpec(forwarding(nil), nil); issue != nil {
 		t.Fatalf("valid forwarding tool refused: %v", issue)
 	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.URL = "https://management.azure.com:443"
+	}), nil); issue != nil {
+		t.Fatalf("the default HTTPS port was refused: %v", issue)
+	}
 	for name, tc := range map[string]struct {
 		mutate func(*corev1alpha1.ConnectorTool)
 		want   string

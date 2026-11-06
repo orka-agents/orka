@@ -156,6 +156,8 @@ admission (except `parameters`, which only the controller can read) and again
 before each Task:
 
 - `url` is an HTTPS origin with no path.
+- Its name is not one of a coding agent's built-in tools (`bash`, `edit`,
+  `glob`, `grep`, `read`, `webfetch`, `websearch`, `write`).
 - `brokeredToolClass` is `read`.
 - It sets no `parameters`, `headers`, `authSecretRef`, or MCP backend.
 - Its credential comes from an `outboundAccessPolicyRef` that injects one

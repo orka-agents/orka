@@ -300,6 +300,7 @@ type ToolActorStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Tool is the Schema for the tools API
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name in ['bash','edit','glob','grep','read','webfetch','websearch','write'])",message="a forwarding tool must not share a name with a coding agent's built-in tool"
 type Tool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

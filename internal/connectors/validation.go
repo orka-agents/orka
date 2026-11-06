@@ -776,8 +776,8 @@ func validateForwardingTool(tool corev1alpha1.ConnectorTool) *Issue {
 	if len(tool.HTTP.Headers) > 0 {
 		return invalid(fmt.Sprintf("forwarding tool %q sets no headers", tool.Name))
 	}
-	if origin, err := harnessv2.ForwardOrigin(tool.HTTP.URL); err != nil || strings.TrimSuffix(tool.HTTP.URL, "/") != origin {
-		return invalid(fmt.Sprintf("forwarding tool %q url must be a lowercase https origin with no path", tool.Name))
+	if _, err := harnessv2.ForwardOrigin(tool.HTTP.URL); err != nil {
+		return invalid(fmt.Sprintf("forwarding tool %q url must be an https origin with no path", tool.Name))
 	}
 	return nil
 }

@@ -3,11 +3,14 @@ package controller
 import (
 	"bytes"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/yaml"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -63,6 +66,39 @@ func TestCustomACPMCPToolDescriptorRefusesUnsafeForwardingTools(t *testing.T) {
 		tc.mutate(tool)
 		if _, err := customACPMCPToolDescriptor(tool); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
+		}
+	}
+}
+
+// The Tool CRD refuses forwarding Tools named like a runtime's built-in tool,
+// which the descriptor builder would treat as provider-native and never
+// forward. Its name list must cover every built-in name a Tool can take.
+func TestForwardingToolCRDCoversEveryBuiltInToolName(t *testing.T) {
+	raw, err := os.ReadFile("../../config/crd/bases/core.orka.ai_tools.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatal(err)
+	}
+	rule := ""
+	for _, check := range crd.Spec.Versions[0].Schema.OpenAPIV3Schema.XValidations {
+		if strings.Contains(check.Rule, "self.metadata.name in") {
+			rule = check.Rule
+		}
+	}
+	if rule == "" {
+		t.Fatal("the Tool CRD has no forwarding name rule")
+	}
+	for provider, names := range providerNativeTools {
+		for lower := range names {
+			if len(validation.IsDNS1123Subdomain(lower)) > 0 {
+				continue
+			}
+			if !strings.Contains(rule, "'"+lower+"'") {
+				t.Errorf("forwarding name rule misses %s built-in tool %q", provider, lower)
+			}
 		}
 	}
 }

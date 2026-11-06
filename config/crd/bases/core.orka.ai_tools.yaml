@@ -543,6 +543,11 @@ spec:
             - available
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: a forwarding tool must not share a name with a coding agent's built-in
+            tool
+          rule: '!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name
+            in [''bash'',''edit'',''glob'',''grep'',''read'',''webfetch'',''websearch'',''write''])'
     served: true
     storage: true
     subresources:

@@ -86,3 +86,50 @@ func TestForwardingToolAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestForwardingToolNameMustNotShadowABuiltInTool(t *testing.T) {
+	raw, err := os.ReadFile("../../config/crd/bases/core.orka.ai_tools.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd apiextensionsv1.CustomResourceDefinition
+	if err := yaml.Unmarshal(raw, &crd); err != nil {
+		t.Fatal(err)
+	}
+	external := *crd.Spec.Versions[0].Schema.OpenAPIV3Schema
+	var schema apiextensions.JSONSchemaProps
+	if err := apiextensionsv1.Convert_v1_JSONSchemaProps_To_apiextensions_JSONSchemaProps(&external, &schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	structural, err := structuralschema.NewStructural(&schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := cel.NewValidator(structural, true, celconfig.PerCallLimit)
+	tool := func(name string, forward bool) map[string]any {
+		http := map[string]any{"url": "https://management.azure.com", "outboundAccessPolicyRef": map[string]any{"name": "azure"}}
+		if forward {
+			http["forward"] = map[string]any{"protocol": "AzureResourceManager"}
+		}
+		return map[string]any{
+			"apiVersion": "core.orka.ai/v1alpha1", "kind": "Tool",
+			"metadata": map[string]any{"name": name, "namespace": "team-a"},
+			"spec":     map[string]any{"description": "Azure", "brokeredToolClass": "read", "http": http},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		forward bool
+		reject  bool
+	}{
+		{"azurearm", true, false},
+		{"read", true, true},
+		{"bash", true, true},
+		{"read", false, false},
+	} {
+		errs, _ := validator.Validate(t.Context(), nil, structural, tool(tc.name, tc.forward), nil, celconfig.RuntimeCELCostBudget)
+		if (len(errs) > 0) != tc.reject {
+			t.Errorf("%s (forward=%t): errors = %v, want reject = %t", tc.name, tc.forward, errs, tc.reject)
+		}
+	}
+}
