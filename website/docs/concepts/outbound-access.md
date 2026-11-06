@@ -109,7 +109,8 @@ spec:
   fork of an identity-bound Task does not carry the identity; create a new Task instead.
   Calls also stop at once when the Task is cancelled, deleted, or finished, or when its
   Session, or that of any Task it was delegated from, is deleted: the controller checks
-  both live before every call.
+  both live before every call. A chat deleted and recreated under the same name is a new
+  Session, so it does not revive its earlier Tasks.
 - **Where:** only Tasks on built-in RuntimePools, whose Pods reach the network only
   through Orka. External `runtimeRef` runtimes, workspace-backed sessions, and native
   `type: ai` workers fail closed.

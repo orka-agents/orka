@@ -290,18 +290,6 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		}
 	}
 
-	// An API fork names its source as parent but is not controlled by it, so
-	// it never binds the source's identity: the requester creates a new Task.
-	fork := task("parent-own")
-	fork.OwnerReferences = nil
-	fork.Annotations = map[string]string{
-		labels.AnnotationParentTaskName: "parent-own", labels.AnnotationForkSourceTask: "parent-own",
-	}
-	if _, err := r.agentExecutionIdentity(context.Background(), fork, agent); err == nil ||
-		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "a fork does not carry") {
-		t.Fatalf("fork of an identity-bound Task: error = %v, want a permanent refusal naming the fork", err)
-	}
-
 	_, err = r.agentExecutionIdentity(context.Background(), task(""), unclaimed)
 	if err == nil || isPermanentACPAgentConfigurationError(err) || !errors.Is(err, errIdentityClaimPending) {
 		t.Fatalf("Agent without its claim yet: error = %v, want a retryable wait", err)
@@ -310,6 +298,33 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	r.Identity.AgentUseAuthorization = false
 	if _, err := r.agentExecutionIdentity(context.Background(), task(""), agent); err == nil || !isPermanentACPAgentConfigurationError(err) {
 		t.Fatalf("use authorization off: error = %v, want a permanent refusal", err)
+	}
+}
+
+// An API fork names its source as parent but is not controlled by it, so it
+// never binds the source's Agent identity: the requester creates a new Task.
+func TestAgentExecutionIdentityRefusesAFork(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	source := boundTask("source", agent, corev1alpha1.TaskPhaseSucceeded)
+	source.UID = "source-uid"
+	source.Status.AgentExecutionBinding.Agent.Identity.Instance = "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222"
+	r := &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, source).Build(),
+		Identity: testIdentityConfig(),
+	}
+	fork := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "source-fork", Namespace: testNS, CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{labels.LabelParentTask: "source"},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskName: "source", labels.AnnotationForkSourceTask: "source",
+			},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+	}
+	_, err := r.agentExecutionIdentity(context.Background(), fork, agent)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "a fork does not carry") {
+		t.Fatalf("fork of an identity-bound Task: error = %v, want a permanent refusal naming the fork", err)
 	}
 }
 
@@ -636,10 +651,32 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	for _, session := range []*store.SessionRecord{
 		{Namespace: testNS, Name: "open", SessionType: "task"},
 		{Namespace: testNS, Name: "chat-open", SessionType: store.SessionTypeChat},
+		{Namespace: testNS, Name: "chat-reused", SessionType: store.SessionTypeChat, CreatedAt: time.Now().Add(-time.Hour)},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
 			t.Fatal(err)
 		}
+	}
+	epoch := func(name string) string {
+		createdAt, err := sessions.GetSessionCreatedAt(context.Background(), testNS, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return labels.SessionEpoch(createdAt)
+	}
+	openEpoch, deletedEpoch := epoch("chat-open"), epoch("chat-reused")
+	// The chat is deleted and a new one created under its name: Tasks of
+	// the first must not act for the requester through the second.
+	if err := sessions.DeleteSession(context.Background(), testNS, "chat-reused"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: testNS, Name: "chat-reused", SessionType: store.SessionTypeChat, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if epoch("chat-reused") == deletedEpoch {
+		t.Fatal("a recreated chat Session must have a new incarnation")
 	}
 	task := func(name string, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
 		task := &corev1alpha1.Task{
@@ -655,8 +692,10 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	withSession := func(name string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) { task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name} }
 	}
-	inChat := func(name string) func(*corev1alpha1.Task) {
-		return func(task *corev1alpha1.Task) { task.Labels = map[string]string{labels.LabelChatSession: name} }
+	inChat := func(name, epoch string) func(*corev1alpha1.Task) {
+		return func(task *corev1alpha1.Task) {
+			task.Labels = map[string]string{labels.LabelChatSession: name, labels.LabelChatSessionEpoch: epoch}
+		}
 	}
 	deleting := metav1.Now()
 	fork := delegationTestTask("fork-of-running", time.Now(), delegatedFrom("parent-running", false))
@@ -690,10 +729,14 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		task("running", nil),
 		task("in-open-session", withSession("open")),
 		task("cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
-		task("in-open-chat", inChat("chat-open")),
-		task("in-deleted-chat", inChat("chat-deleted")),
+		task("in-open-chat", inChat("chat-open", openEpoch)),
+		task("in-deleted-chat", inChat("chat-deleted", openEpoch)),
+		task("in-recreated-chat", inChat("chat-reused", deletedEpoch)),
+		task("in-unpinned-chat", inChat("chat-open", "")),
+		task("parent-in-recreated-chat", inChat("chat-reused", deletedEpoch)),
+		task("child-of-parent-in-recreated-chat", childOf("parent-in-recreated-chat")),
 		task("parent-in-deleted-session", withSession("deleted")),
-		task("parent-in-deleted-chat", inChat("chat-deleted")),
+		task("parent-in-deleted-chat", inChat("chat-deleted", openEpoch)),
 		task("child-of-parent-in-deleted-session", childOf("parent-in-deleted-session")),
 		task("child-of-parent-in-deleted-chat", childOf("parent-in-deleted-chat")),
 		task("child-in-open-session-of-running", func(t *corev1alpha1.Task) {
@@ -733,6 +776,9 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		"cancelled":                          "Cancelled",
 		"in-open-chat":                       "",
 		"in-deleted-chat":                    "Session was deleted",
+		"in-recreated-chat":                  "Session was deleted and replaced",
+		"in-unpinned-chat":                   "no pinned incarnation",
+		"child-of-parent-in-recreated-chat":  "Session of a Task it was delegated from was deleted and replaced",
 		"child-of-parent-in-deleted-session": "Session of a Task it was delegated from was deleted",
 		"child-of-parent-in-deleted-chat":    "Session of a Task it was delegated from was deleted",
 		"child-in-open-session-of-running":   "",

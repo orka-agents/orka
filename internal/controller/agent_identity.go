@@ -610,36 +610,62 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 
 // requireLiveSessions refuses once a Session the Task runs in is gone: its
 // spec.sessionRef, or the chat Session the chat API recorded in the
-// orka.ai/chat-session label. It reads Session metadata only, never the
-// transcript.
+// orka.ai/chat-session label. A chat Session must also be the incarnation
+// the chat API pinned in orka.ai/chat-session-epoch when it created the
+// Task, so a chat deleted and recreated under its name does not keep the
+// Task acting for the requester; admission keeps both labels immutable. It
+// reads Session metadata only, never the transcript.
 func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
-	names := make([]string, 0, 2)
 	if task.Spec.SessionRef != nil {
-		names = append(names, strings.TrimSpace(task.Spec.SessionRef.Name))
-	}
-	names = append(names, strings.TrimSpace(task.Labels[labels.LabelChatSession]))
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		if d.Sessions == nil {
-			return errors.New("no Session store is configured")
-		}
-		var err error
-		if reader, ok := d.Sessions.(sessionTypeReader); ok {
-			_, err = reader.GetSessionType(ctx, task.Namespace, name)
-		} else {
-			var session *store.SessionRecord
-			if session, err = d.Sessions.GetSession(ctx, task.Namespace, name); err == nil && session == nil {
-				err = store.ErrNotFound
+		if name := strings.TrimSpace(task.Spec.SessionRef.Name); name != "" {
+			if err := d.requireSessionExists(ctx, task.Namespace, name, subject); err != nil {
+				return err
 			}
 		}
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s was deleted", subject)
+	}
+	chat := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if chat == "" {
+		return nil
+	}
+	reader, ok := d.Sessions.(store.SessionCreationReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot identify %s", subject)
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, task.Namespace, chat)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
+	}
+	pinned := strings.TrimSpace(task.Labels[labels.LabelChatSessionEpoch])
+	if pinned == "" {
+		return fmt.Errorf("%s has no pinned incarnation", subject)
+	}
+	if labels.SessionEpoch(createdAt) != pinned {
+		return fmt.Errorf("%s was deleted and replaced", subject)
+	}
+	return nil
+}
+
+func (d DelegationLiveness) requireSessionExists(ctx context.Context, namespace, name, subject string) error {
+	if d.Sessions == nil {
+		return errors.New("no Session store is configured")
+	}
+	var err error
+	if reader, ok := d.Sessions.(sessionTypeReader); ok {
+		_, err = reader.GetSessionType(ctx, namespace, name)
+	} else {
+		var session *store.SessionRecord
+		if session, err = d.Sessions.GetSession(ctx, namespace, name); err == nil && session == nil {
+			err = store.ErrNotFound
 		}
-		if err != nil {
-			return fmt.Errorf("read %s: %w", subject, err)
-		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
 	}
 	return nil
 }
