@@ -410,15 +410,18 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
-		return ctrl.Result{}, err
-	}
-
+	// A requested cancellation is applied before the workspace status
+	// projection, so a failing projection cannot keep a cancelled Task
+	// running; the projection resumes on the next reconcile.
 	if message, ok := requestedTaskCancellation(task); ok {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return r.cancelRequestedAgentTask(ctx, task)
+	}
+
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Handle based on current phase

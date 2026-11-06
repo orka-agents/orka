@@ -374,3 +374,119 @@ func TestCancelSessionSkipsTasksDeletedOrReplacedSinceTheList(t *testing.T) {
 		t.Fatalf("cancel request = %q, want the remaining Task cancelled", got)
 	}
 }
+
+// chatTask is a running Task the chat "conversation" created; its
+// chat-session-namespace label, when set, names the chat's namespace.
+func chatTask(namespace, name, chatNamespace string) *corev1alpha1.Task {
+	task := cancelTestTask(name, corev1alpha1.TaskPhaseRunning, "")
+	task.Namespace = namespace
+	task.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	if chatNamespace != "" {
+		task.Labels[labels.LabelChatSessionNamespace] = chatNamespace
+	}
+	return task
+}
+
+func cancelAnnotationIn(t *testing.T, h *Handlers, namespace, name string) (string, bool) {
+	t.Helper()
+	task := &corev1alpha1.Task{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, task); err != nil {
+		t.Fatal(err)
+	}
+	value, ok := task.Annotations[labels.AnnotationCancelRequested]
+	return value, ok
+}
+
+// A chat Task is tied to a Session by its chat's namespace as well as the
+// conversation name, and a chat may have created it in another namespace.
+func TestCancelSessionMatchesChatTasksByTheChatsNamespace(t *testing.T) {
+	h, app := setupCancelTest(t,
+		chatTask("default", "same-namespace", "default"),
+		chatTask("default", "legacy-same-namespace", ""),
+		// Created in this namespace by a chat of the same name in another one.
+		chatTask("default", "other-chats-task", "elsewhere"),
+		// Created in another namespace by this chat.
+		chatTask("elsewhere", "created-elsewhere", "default"),
+		// Another namespace's own chat of the same name.
+		chatTask("elsewhere", "elsewhere-chat", ""),
+	)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	for _, task := range []struct {
+		namespace, name string
+		cancelled       bool
+	}{
+		{"default", "same-namespace", true},
+		{"default", "legacy-same-namespace", true},
+		{"default", "other-chats-task", false},
+		{"elsewhere", "created-elsewhere", true},
+		{"elsewhere", "elsewhere-chat", false},
+	} {
+		if _, ok := cancelAnnotationIn(t, h, task.namespace, task.name); ok != task.cancelled {
+			t.Fatalf("%s/%s cancelled = %v, want %v", task.namespace, task.name, ok, task.cancelled)
+		}
+	}
+}
+
+// With a watch namespace the API acts in no other namespace, so a chat Task
+// elsewhere is not looked for.
+func TestCancelSessionStaysInTheWatchNamespace(t *testing.T) {
+	h, app := setupCancelTest(t,
+		chatTask("default", "same-namespace", "default"),
+		chatTask("elsewhere", "created-elsewhere", "default"),
+	)
+	h.watchNamespace = "default"
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if _, ok := cancelAnnotationIn(t, h, "elsewhere", "created-elsewhere"); ok {
+		t.Fatal("a Task outside the watch namespace must not be cancelled")
+	}
+}
+
+// A chat Task in another namespace is cancelled only with tasks/cancel in
+// that namespace; the route authorized the Session's namespace alone.
+func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		h, app := setupTestHandlersWithObjects(chatTask("elsewhere", "created-elsewhere", "default"))
+		app.Use(func(c fiber.Ctx) error {
+			c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview})
+			return c.Next()
+		})
+		app.Post("/sessions/:id/cancel", h.CancelSession)
+		clientset, seen, _ := identityBindClientsetWithSubjects(allow)
+		h.clientset = clientset
+		if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+			t.Fatal(err)
+		}
+		resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+		want := http.StatusForbidden
+		if allow {
+			want = http.StatusOK
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("allow=%v: status = %d, body = %v, want %d", allow, resp.StatusCode, body, want)
+		}
+		if _, ok := cancelAnnotationIn(t, h, "elsewhere", "created-elsewhere"); ok != allow {
+			t.Fatalf("allow=%v: cancelled = %v", allow, ok)
+		}
+		found := false
+		for _, attributes := range *seen {
+			if attributes.Namespace == "elsewhere" && attributes.Verb == apiVerbUpdate && attributes.Resource == "tasks" &&
+				attributes.Subresource == "cancel" && attributes.Name == "created-elsewhere" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("allow=%v: access reviews = %+v, want update tasks/cancel in the Task's namespace", allow, *seen)
+		}
+	}
+}
