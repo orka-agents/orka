@@ -9,12 +9,16 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -209,4 +213,86 @@ func TestACPMCPBrokerRefusesCallsOnceCancellationIsRequested(t *testing.T) {
 	if _, _, err := findACPMCPTaskExecution(context.Background(), reader, request, fence); !errors.Is(err, errACPMCPTaskCancelled) {
 		t.Fatalf("error = %v, want the cancelled-Task refusal", err)
 	}
+}
+
+// Cancelling a standalone Agent Task while its RuntimeSession is being created
+// aborts the create call. The run settles as Cancelled with the request's
+// message instead of a RuntimeSessionStartFailed failure.
+func TestACPDispatcherSettlesCancellationDuringRuntimeSessionCreate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const request = "cancelled by alice: wrong repository"
+	var fixture *taskScopedCreateConflictFixture
+	createStarted := make(chan struct{}, 1)
+	fixture = newTaskScopedCreateConflictFixture(t, ctx, "cancel-during-create", types.UID("99999999-1111-2222-3333-444444444444"),
+		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server {
+			runtimeServer := newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{})
+			t.Cleanup(runtimeServer.Close)
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/v2/runtime-sessions/") ||
+					strings.Count(r.URL.Path, "/") != 3 {
+					runtimeServer.Config.Handler.ServeHTTP(w, r)
+					return
+				}
+				// Record the cancel request as the API does and the Cancelled
+				// phase as the controller does, then hold the create until the
+				// dispatcher's cancellation watcher aborts it.
+				if err := cancelTaskForTest(r.Context(), *kubeClient, fixture.task, request); err != nil {
+					t.Errorf("cancel the Task: %v", err)
+				}
+				select {
+				case createStarted <- struct{}{}:
+				default:
+				}
+				select {
+				case <-r.Context().Done():
+				case <-ctx.Done():
+				}
+			}))
+		})
+	defer fixture.stop()
+
+	dispatchQueuedTask(ctx, t, fixture.dispatcher, fixture.task.DeepCopy())
+	select {
+	case <-createStarted:
+	default:
+		t.Fatal("the RuntimeSession create was never sent")
+	}
+	current := fixture.currentTask(t, ctx)
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Execution == nil ||
+		current.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		current.Status.Execution.Reason != "Cancelled" {
+		t.Fatalf("status = %#v, want a Cancelled run", current.Status)
+	}
+	if current.Status.Message != request || current.Status.Execution.Message != request {
+		t.Fatalf("messages = %q / %q, want the cancel request", current.Status.Message, current.Status.Execution.Message)
+	}
+	attempt, err := fixture.dispatcher.Store.GetPromptAttempt(ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionCancelled || attempt.OutcomeMarker != request {
+		t.Fatalf("attempt = %s %q, want Cancelled with the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
+	}
+}
+
+func cancelTaskForTest(ctx context.Context, c client.Client, task *corev1alpha1.Task, message string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Task{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			return err
+		}
+		if current.Annotations[labels.AnnotationCancelRequested] != message {
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[labels.AnnotationCancelRequested] = message
+			if err := c.Update(ctx, current); err != nil {
+				return err
+			}
+		}
+		current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+		current.Status.Message = message
+		return c.Status().Update(ctx, current)
+	})
 }
