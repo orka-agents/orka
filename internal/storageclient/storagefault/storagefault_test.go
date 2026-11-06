@@ -530,14 +530,18 @@ func TestLostCreateMemoryResponseDoesNotPopulateCaller(t *testing.T) {
 	fault := faults.Inject(storagefault.Fault{Match: storagefault.Match{Methods: []string{"CreateMemory"}}, Action: storagefault.LoseResponse()})
 	err := client.CreateMemory(t.Context(), memory)
 	require.ErrorIs(t, err, storagev1.ErrOutcomeUnknown)
-	require.Empty(t, memory.ID, "a lost response cannot disclose the provider-generated ID")
-	require.Empty(t, memory.Source)
-	require.True(t, memory.CreatedAt.IsZero())
-	require.True(t, memory.UpdatedAt.IsZero())
+	// The client assigns the memory's ID and times before the write, so the
+	// caller holds them whatever the outcome. What the provider fills in, such
+	// as the default source, stays unpublished.
+	require.Regexp(t, "^mem-", memory.ID, "the client assigns the ID before the write")
+	require.False(t, memory.CreatedAt.IsZero(), "the client assigns the creation time before the write")
+	require.True(t, memory.UpdatedAt.Equal(memory.CreatedAt))
+	require.Empty(t, memory.Source, "a lost response cannot disclose a provider-populated field")
 	records, err := client.ListMemories(t.Context(), storagev1.MemoryFilter{Namespace: memory.Namespace})
 	require.NoError(t, err)
 	require.NotEmpty(t, records, "the provider committed while its response was lost")
-	require.NotEmpty(t, records[0].ID)
+	require.Equal(t, memory.ID, records[0].ID, "the stored memory has the client-assigned ID")
+	require.Equal(t, storagev1.MemorySourceManual, records[0].Source, "the provider filled the source it did not disclose")
 	fault.Remove()
 	delivered := &storagev1.Memory{Namespace: "tenant", Content: "delivered memory"}
 	require.NoError(t, client.CreateMemory(t.Context(), delivered))

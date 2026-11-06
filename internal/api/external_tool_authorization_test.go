@@ -828,9 +828,9 @@ func (s *externalToolSessionAccessStore) CreateSession(ctx context.Context, sess
 	return s.SessionStore.CreateSession(ctx, session)
 }
 
-func (s *externalToolSessionAccessStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
+func (s *externalToolSessionAccessStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string, now time.Time) error {
 	s.calls++
-	return s.SessionStore.AcquireLock(ctx, namespace, name, taskName, taskUID)
+	return s.SessionStore.AcquireLock(ctx, namespace, name, taskName, taskUID, now)
 }
 
 func (s *externalToolGatewayStore) GetGatewayEventForTask(_ context.Context, namespace, taskName, taskUID string) (*store.GatewayEvent, error) {

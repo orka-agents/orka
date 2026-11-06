@@ -227,7 +227,9 @@ Use `"toTask": "*"` to broadcast to all siblings.
 
 ### Get messages
 
-Workers call this to check for unread messages.
+Workers call this to check for unread messages. It returns the oldest unread messages, ordered
+by ID, up to 500 per call; a longer backlog is read over several calls. With `markRead=true`
+exactly the returned messages are marked read.
 
 **Endpoint:** `GET /internal/v1/messages/{namespace}/{taskName}?parentTask={parentTask}&markRead={true|false}`
 

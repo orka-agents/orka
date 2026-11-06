@@ -764,7 +764,7 @@ var _ = Describe("Task Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, task)).To(Succeed())
 			Expect(ss.CreateSession(ctx, &store.SessionRecord{Namespace: ns, Name: sessionName, SessionType: "task"})).To(Succeed())
-			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID))).To(Succeed())
+			Expect(ss.AcquireLock(ctx, ns, sessionName, taskName, string(task.UID), time.Now().UTC())).To(Succeed())
 
 			started := metav1.Now()
 			task.Status.Phase = corev1alpha1.TaskPhaseRunning

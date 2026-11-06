@@ -1,8 +1,10 @@
 package storageclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"time"
 
@@ -14,12 +16,43 @@ import (
 
 // The methods in this file apply Orka's redaction and sanitization policy
 // before a provider sees the data, so a provider only ever stores content
-// that Orka has already made safe to persist.
+// that Orka has already made safe to persist. A request whose caller supplied
+// its own write envelope is sent unchanged (see identity.go), so for it they
+// only check the policy: a request the policy would change is refused with
+// ErrValidation, and one it would not change is sent as it is.
+
+// protectText redacts value, or returns a caller-owned value as it is and
+// refuses one redaction would change.
+func protectText(ctx context.Context, method, field, value string) (string, error) {
+	redacted := redact.SensitiveText(value)
+	if redacted != value && callerOwnsEnvelope(ctx) {
+		return "", unprotected(method, field)
+	}
+	return redacted, nil
+}
+
+// protectTexts redacts every field in place, or, for a caller-owned request,
+// leaves them all as they are and refuses the request if redaction would
+// change any. Nothing is changed when it refuses.
+func protectTexts(ctx context.Context, method string, fields map[string]*string) error {
+	redacted := make(map[string]string, len(fields))
+	for name, field := range fields {
+		value, err := protectText(ctx, method, name, *field)
+		if err != nil {
+			return err
+		}
+		redacted[name] = value
+	}
+	for name, field := range fields {
+		*field = redacted[name]
+	}
+	return nil
+}
 
 // AppendExecutionEvent sanitizes the event payload before appending it.
 func (c *Client) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	started := time.Now()
-	prepared, err := c.prepareExecutionEvent(ctx, event)
+	prepared, err := c.prepareExecutionEvent(ctx, "AppendExecutionEvent", event)
 	if err != nil {
 		recordExecutionEventAppend(event, false, started)
 		return nil, err
@@ -41,7 +74,7 @@ func (c *Client) AppendExecutionEventIfAbsent(
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
 	started := time.Now()
-	prepared, err := c.prepareExecutionEvent(ctx, event)
+	prepared, err := c.prepareExecutionEvent(ctx, "AppendExecutionEventIfAbsent", event)
 	if err != nil {
 		recordExecutionEventAppend(event, false, started)
 		return nil, false, err
@@ -69,7 +102,7 @@ func (c *Client) AppendExecutionEventWithPlanIfAbsent(
 	plan *store.PlanState,
 ) (*store.ExecutionEvent, bool, error) {
 	started := time.Now()
-	prepared, err := c.prepareExecutionEvent(ctx, event)
+	prepared, err := c.prepareExecutionEvent(ctx, "AppendExecutionEventWithPlanIfAbsent", event)
 	if err != nil {
 		recordExecutionEventAppend(event, false, started)
 		return nil, false, err
@@ -101,7 +134,7 @@ func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []st
 	started := time.Now()
 	prepared := make([]store.ExecutionEventAppend, len(appends))
 	for i, entry := range appends {
-		event, err := c.prepareExecutionEvent(ctx, entry.Event)
+		event, err := c.prepareExecutionEvent(ctx, "AppendExecutionEventsIfAbsent", entry.Event)
 		if err != nil {
 			recordExecutionEventGroupAppend(appends, false, started)
 			return nil, err
@@ -131,7 +164,8 @@ func (c *Client) AppendExecutionEventsIfAbsent(ctx context.Context, appends []st
 // usage observation the event carries is derived from the sanitized payload.
 // Orka stamps the creation time when the caller left it unset, so a derived
 // observation shares the event's time. The caller's event is not changed.
-func (c *Client) prepareExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+// A caller-owned event that preparation would change is refused.
+func (c *Client) prepareExecutionEvent(ctx context.Context, method string, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	if event == nil {
 		return nil, store.ValidationErrorf("execution event is required")
 	}
@@ -156,7 +190,21 @@ func (c *Client) prepareExecutionEvent(ctx context.Context, event *store.Executi
 	if err := deriveExecutionEventUsage(ctx, &prepared); err != nil {
 		return nil, err
 	}
+	if callerOwnsEnvelope(ctx) && !sameExecutionEvent(prepared, *event) {
+		return nil, unprotected(method, "the execution event")
+	}
 	return &prepared, nil
+}
+
+// sameExecutionEvent reports whether preparation left an event as it was.
+// Content compares as bytes and the creation time as an instant.
+func sameExecutionEvent(prepared, original store.ExecutionEvent) bool {
+	if !bytes.Equal(prepared.Content, original.Content) || !prepared.CreatedAt.Equal(original.CreatedAt) {
+		return false
+	}
+	prepared.Content, original.Content = nil, nil
+	prepared.CreatedAt, original.CreatedAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(prepared, original)
 }
 
 // providerContext masks the controller's usage attribution once the client
@@ -184,13 +232,26 @@ func cloneExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent {
 	return event
 }
 
-// CreateMemory redacts the memory content before storing it. The caller's
-// record receives the redacted content, as the stored copy does.
+// CreateMemory redacts the memory content before storing it, and gives a
+// memory without an ID or times one. The caller's record receives the
+// redacted content and the assigned identity, as the stored copy does.
 func (c *Client) CreateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
+	content, err := protectText(ctx, "CreateMemory", "the memory's content", memory.Content)
+	if err != nil {
+		return err
+	}
+	memory.Content = content
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedMemory(memory); err != nil {
+			return err
+		}
+		return c.StateProvider.CreateMemory(ctx, memory)
+	}
+	ctx, now := c.ops.withIssueTime(ctx)
+	identifyMemory(memory, now)
 	return c.StateProvider.CreateMemory(ctx, memory)
 }
 
@@ -199,30 +260,50 @@ func (c *Client) UpdateMemory(ctx context.Context, memory *store.Memory) error {
 	if memory == nil {
 		return store.ValidationErrorf("memory is required")
 	}
-	memory.Content = redact.SensitiveText(memory.Content)
+	content, err := protectText(ctx, "UpdateMemory", "the memory's content", memory.Content)
+	if err != nil {
+		return err
+	}
+	memory.Content = content
 	return c.StateProvider.UpdateMemory(ctx, memory)
 }
 
 // CreateMemoryProposal redacts every free-text proposal field before storing
-// the proposal.
+// the proposal, and gives a proposal without an ID or times one.
 func (c *Client) CreateMemoryProposal(ctx context.Context, proposal *store.MemoryProposal) error {
 	if proposal == nil {
 		return store.ValidationErrorf("proposal is required")
 	}
-	proposal.Title = redact.SensitiveText(proposal.Title)
-	proposal.Description = redact.SensitiveText(proposal.Description)
-	proposal.Content = redact.SensitiveText(proposal.Content)
-	proposal.Patch = redact.SensitiveText(proposal.Patch)
-	proposal.Reviewer = redact.SensitiveText(proposal.Reviewer)
-	proposal.ReviewNote = redact.SensitiveText(proposal.ReviewNote)
-	proposal.AppliedBy = redact.SensitiveText(proposal.AppliedBy)
+	if err := protectTexts(ctx, "CreateMemoryProposal", map[string]*string{
+		"the proposal's title":       &proposal.Title,
+		"the proposal's description": &proposal.Description,
+		"the proposal's content":     &proposal.Content,
+		"the proposal's patch":       &proposal.Patch,
+		"the proposal's reviewer":    &proposal.Reviewer,
+		"the proposal's review note": &proposal.ReviewNote,
+		"the proposal's applier":     &proposal.AppliedBy,
+	}); err != nil {
+		return err
+	}
+	if callerOwnsEnvelope(ctx) {
+		if err := requireStampedMemoryProposal(proposal); err != nil {
+			return err
+		}
+		return c.StateProvider.CreateMemoryProposal(ctx, proposal)
+	}
+	ctx, now := c.ops.withIssueTime(ctx)
+	identifyMemoryProposal(proposal, now)
 	return c.StateProvider.CreateMemoryProposal(ctx, proposal)
 }
 
 // ReviewMemoryProposal redacts the reviewer and review note.
 func (c *Client) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
-	review.Reviewer = redact.SensitiveText(review.Reviewer)
-	review.ReviewNote = redact.SensitiveText(review.ReviewNote)
+	if err := protectTexts(ctx, "ReviewMemoryProposal", map[string]*string{
+		"the reviewer":    &review.Reviewer,
+		"the review note": &review.ReviewNote,
+	}); err != nil {
+		return err
+	}
 	return c.StateProvider.ReviewMemoryProposal(ctx, review)
 }
 
@@ -247,7 +328,9 @@ func saveThreatModel(ctx context.Context, writer threatModelWriter, model *store
 	if model == nil {
 		return store.ValidationErrorf("threat model is required")
 	}
-	model.Content = security.SanitizeThreatModel(model.Content)
+	if err := protectThreatModel(ctx, "SaveThreatModel", model); err != nil {
+		return err
+	}
 	return writer.SaveThreatModel(ctx, model)
 }
 
@@ -255,14 +338,34 @@ func saveThreatModelIfVersion(ctx context.Context, writer threatModelWriter, mod
 	if model == nil {
 		return store.ValidationErrorf("threat model is required")
 	}
-	model.Content = security.SanitizeThreatModel(model.Content)
+	if err := protectThreatModel(ctx, "SaveThreatModelIfVersion", model); err != nil {
+		return err
+	}
 	return writer.SaveThreatModelIfVersion(ctx, model, expectedVersion)
+}
+
+// protectThreatModel sanitizes the model's content in place, or leaves a
+// caller-owned model as it is and refuses one sanitizing would change.
+func protectThreatModel(ctx context.Context, method string, model *store.ThreatModel) error {
+	sanitized := security.SanitizeThreatModel(model.Content)
+	if sanitized != model.Content && callerOwnsEnvelope(ctx) {
+		return unprotected(method, "the threat model's content")
+	}
+	model.Content = sanitized
+	return nil
 }
 
 // RecordUsage redacts and bounds the provider and model names before storing
 // the observation.
 func (c *Client) RecordUsage(ctx context.Context, observation store.UsageObservation) error {
-	return c.StateProvider.RecordUsage(ctx, protectUsageObservation(observation))
+	protected := protectUsageObservation(observation)
+	if callerOwnsEnvelope(ctx) {
+		if protected.Provider != observation.Provider || protected.Model != observation.Model {
+			return unprotected("RecordUsage", "the provider or model name")
+		}
+		protected = observation
+	}
+	return c.StateProvider.RecordUsage(ctx, protected)
 }
 
 func protectUsageObservation(observation store.UsageObservation) store.UsageObservation {

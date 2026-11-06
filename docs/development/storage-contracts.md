@@ -89,7 +89,7 @@ Kubernetes authority remains separate from either boundary.
 | `GatewayTaskCleanupReceiptStore`, `GatewayTaskCleanupReceiptMaintenanceStore`, `GatewaySessionCleanupCandidateStore` | Compaction ownership evidence and retained transcript candidates; state. | Gateway retention/recovery. Live uncached Kubernetes absence checks precede receipt deletion. |
 | `MemoryStore`, `MemoryProposalStore` | Durable namespace memories and governance proposals/review/application history; state. | Memory APIs and worker tools. Proposal review does not apply a memory. Redaction and authorization remain Orka responsibilities. |
 | `PlanStore`, `ExecutionEventStore`, `DeduplicatingExecutionEventStore`, `AtomicExecutionEventPlanStore` | Plan state, ordered event streams, sequence projections and deduplication; state. | Task reconciliation, runtime event capture, SSE/API and worker tools. Plan-aware append groups event and plan update. Existing event retention is preserved. |
-| `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. Consume-and-mark-read behavior matters for future retry semantics. |
+| `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. A consuming read is a write that marks exactly the messages it returns, and its replay returns the same messages (see "Messages, counters and chat turns"). |
 | `SecurityStore` | Scan runs, ingestion receipts, slices, threat models, findings, dropped findings and patch proposals; state. | RepositoryScan reconciler and security APIs. Ingestion groups result application, run changes and receipt. Kubernetes RepositoryScan/Task identity remains authoritative. |
 | `RepositoryMonitorStore`, `tools.RepositoryValidationBindingStore` | Monitor snapshots/runs/items, actions, review/publication records, commands, implementation/repair jobs, GitHub mutation records and monitor events; state. | RepositoryMonitor reconciler, APIs and repository validation tools. The narrow binding interface uses monitor-event persistence; it is not a separate database. |
 | `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
@@ -283,8 +283,14 @@ the observable parts.
   provider contracts. Revision 3 added dataset binding (see "Installation
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
-  writes without one during the transition. The revision Orka requires for
-  each part belongs to Orka, not to the contract.
+  writes without one during the transition. Revision 5 split the inbox
+  read into `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage`
+  write the assigned ID and creation time back, and made every Session
+  lease decision, and the claim check in
+  `FreezeGatewayEventTaskRuntimeAllowedTools`, use the time the request
+  carries (see "Messages, counters and chat turns" and "Lease clocks").
+  The revision Orka requires for each part belongs to Orka, not to the
+  contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;
@@ -376,9 +382,10 @@ write without one.
   `UpdateBindingKeyFingerprint`, `CompleteDatasetBootstrap`) and, until it is
   replaced, `SyncControllerEpochMirror` are administrative: they carry no
   envelope and are not checked against the current fence.
-  `GetMessages` counts as a write because it can mark messages read, until it
-  is split into a plain read and a consuming write, and so does `IsLocked`,
-  because SQLite clears an expired Task lock when it finds one. A contract
+  Reading an inbox is two methods, the plain read `ListUnreadMessages` and
+  the consuming write `ConsumeMessages`, so each is classified once.
+  `IsLocked` counts as a write, because SQLite clears an expired Task lock
+  when it finds one. A contract
   test fails when a provider interface method is missing from the catalog, so
   no new method can ship unclassified. A write may also name its natural key:
   request values, such as a dedupe key or a cleanup operation ID, by which the
@@ -507,13 +514,32 @@ write without one.
   with neither, such as a send or a counter update, must not be run again
   unless the caller can observe whether the first one committed.
 - **Messages, counters and chat turns.** Receipts make these retries safe: a
-  replayed `SendMessage` returns the assigned ID without a second message, a
-  replayed counter update adds nothing, a replayed chat-turn reservation or
-  commit returns its original outcome, and a replayed consuming message read
-  returns the same messages, which are marked read by ID. Consuming reads are
-  bounded per call. Before computing the digest, the client assigns transcript
-  message, memory and finding IDs and fills zero record times from
-  `IssuedAt`, so every retry sends the same request.
+  replayed `SendMessage` writes back the assigned ID and creation time
+  without a second message, a replayed counter update adds nothing, and a
+  replayed chat-turn reservation or commit returns its original outcome.
+  `ListUnreadMessages` returns the oldest unread messages of a Task's inbox,
+  ordered by ID, and changes nothing. `ConsumeMessages` returns them and
+  marks exactly those messages read, by ID, so a message the selection did
+  not return is never marked at any isolation level; its replay returns the
+  same messages, without any that Task cleanup deleted in between. Both
+  return at most `MaxMessageBatch` (500) messages per call, so a longer
+  backlog is read over several calls. Orka's own message store keeps one
+  `GetMessages(markRead)`, which the client maps onto the two. SQLite keeps
+  the consumed IDs with the receipt and reads the messages again on replay,
+  which is why a provider never reuses a message ID.
+- **Client-assigned identities and times.** Before computing a write's
+  digest, the storage client gives a transcript message without an ID a
+  UUIDv7 (in `AppendMessages`, `AppendMessagesWithLock` and
+  `CommitSessionTurn`), a memory or memory proposal without an ID one in the
+  `mem-` or `mprop-` form, and a dropped finding without an ID a `drop_`
+  hash, and fills their zero creation times, and a message's, with the
+  operation's `IssuedAt`. Every retry therefore sends the same request, and
+  no provider clock or ID generator decides what Orka stores. A transcript
+  message that already has an ID is the caller's natural key and keeps a zero
+  timestamp, because a provider matches a repeat of it without comparing a
+  zero timestamp. Finding IDs are already derived from fingerprints. A
+  provider still fills a value that a caller bypassing the client leaves
+  empty.
 - **Artifact and result identity.** Artifact writes and deletes are bound to
   the Task UID. A delete leaves a tombstone for that UID, which refuses a
   delayed save for the deleted Task. A replacement carries the envelope's
@@ -587,19 +613,56 @@ write without one.
   in the same request with stored times that came from requests. It never
   compares a caller's time with its own clock. Leases are therefore decided on
   the controller clock, and the commit-time fence makes an early reclaim after
-  a takeover harmless. A request's times are fixed for the operation and
-  covered by its digest, so a retry is judged at the original request time.
-  The provider clock is used only for operation age and the clock-skew check,
-  receipt and tombstone retention, `ObservedAt`, and informational times the
-  provider assigns when a caller leaves them zero, plus connector completion
-  expiry checked inside `CommitSealedConnectorCompletion` at commit time.
-  That expiry is a redemption deadline, not a controller-owned lease: both
-  the request time and the provider's current time must precede it, so a
-  stalled commit cannot redeem an expired completion. Orka estimates the clock
-  offset from `ObservedAt` and refuses writes while it exceeds
-  `MaxClockSkew`. Gateway claims, outbox claims and gateway message admission
-  already carry the request time and lease they need; chat turns, Session
-  locks and `IsLocked` gain them.
+  a takeover harmless: a new controller whose clock is ahead may reclaim a
+  lease early, but the old holder can no longer commit, and one whose clock
+  is behind resumes the work up to twice `MaxClockSkew` later. A request's
+  times are fixed for the operation and covered by its digest, so a retry is
+  judged at the original request time, which owner identity, not expiry,
+  makes harmless. Gateway claims, outbox claims and gateway message
+  admission carry the request time and lease they need, and
+  `FreezeGatewayEventTaskRuntimeAllowedTools` refuses a zero request time
+  with `ErrValidation` rather than judging the claim on its own clock. Chat
+  turns and Session locks carry them too: `AcquireChatTurnRequest` and
+  `CommitSessionTurnRequest` have `Now` (and the reservation's `ExpiresAt`);
+  `AppendMessagesWithLock`, `UpdateTokenCountsWithLock`,
+  `ReleaseLockWithTokenUsage` and `EnsureSessionSoulWithLock` take a
+  `SessionOwnerWrite` with the lock owner and `Now`; and `AcquireLock`,
+  `IsLocked` and `DeleteSession`, which reclaim or respect an expired chat
+  turn or transient lock, take `now`. A zero request time returns
+  `ErrValidation`. `PrepareSessionCleanup` and `CompleteSessionCleanup` judge
+  the locks at the intent's `PreparedAt`. Session mutation leases and prompt
+  attempts are Kubernetes resources and keep the controller clock there. The
+  shared suite decides every lease at request times months away from the
+  wall clock, so a provider that consults its own clock fails it.
+- **Provider clock and skew.** The provider clock is used only for operation
+  age and the future-skew check, receipt and tombstone retention,
+  `ObservedAt`, and informational times the provider assigns when a caller
+  leaves them zero, plus connector completion expiry checked inside
+  `CommitSealedConnectorCompletion` at commit time. That expiry is a
+  redemption deadline, not a controller-owned lease: both the request time
+  and the provider's current time must precede it, so a stalled commit
+  cannot redeem an expired completion. In SQLite the provider clock is the
+  controller's, so the two never differ. For a separate store, the storage
+  client estimates the offset from `ObservedAt` as
+  `ObservedAt - (sent + received) / 2`, uncertain by half the round trip,
+  when the leader starts and every minute after
+  (`ClockMonitor`). While the offset exceeds `MaxClockSkew` (30 seconds) even
+  at the edge of that uncertainty, it refuses new writes to that dataset with
+  `ErrNotReady` and logs it, and it resumes them when a later check finds the
+  clocks back within bounds; it never restarts the controller over skew. A
+  provider that does not report `ObservedAt` is not checked. A provider also
+  refuses an `IssuedAt` more than `MaxClockSkew` in its future with
+  `ErrClockSkew`, which catches a fast controller clock without the check.
+  Which clock owns each time:
+
+  | Time | Clock |
+  | --- | --- |
+  | Chat turn reservations, Session locks, gateway and outbox claims, gateway message expiry | Controller, in the request |
+  | Session mutation leases and prompt attempts | Controller, in Kubernetes |
+  | Operation age, future skew, receipt and tombstone retention, `ObservedAt` | Provider |
+  | Connector completion expiry, at commit | Both: the request time and the provider's current time must precede it |
+  | Creation times of messages, transcript messages, memories, proposals and dropped findings; execution event times | Controller, filled by the storage client |
+  | Other record times a caller leaves zero, such as artifact, result, monitor and security times | Provider, informational only |
 - **Durability and lost writes.** A nil error means the change and its
   receipt survive what the provider's `DurabilityClass` promises: an
   automatic switch loses no acknowledged write under `synchronous-replicated`;
@@ -749,16 +812,17 @@ the named step.
   that, so a provider serializes allocation per stream. Migration preserves
   these values.
 - **Clock ownership.** Callers supply lease times (`now` and lease durations)
-  and most record times. The provider assigns some: artifact and message
+  and most record times; the storage client fills the creation times of
+  messages, transcript messages, memories, memory proposals and dropped
+  findings. The provider still assigns some informational times: artifact
   creation times, Task result timestamps, a plan's creation and update times
-  (`SavePlan` ignores the caller's), and in SQLite the repository monitor
-  times it fills when a caller leaves them zero or always sets, such as in
-  `UpsertRepositoryMonitor` and `CancelWorkActions`. Those two clocks diverge
-  once the store is a separate service. The lease-clock rule in "Write
-  envelopes, operation receipts and controller ownership" decides which side
-  owns each time; the request changes that carry lease times follow it.
-- **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents`,
-  `ListActiveScanRuns` and `GetMessages` return
+  (`SavePlan` ignores the caller's), and in SQLite the repository monitor,
+  security and usage times it fills when a caller leaves them zero or always
+  sets, such as in `UpsertRepositoryMonitor` and `CancelWorkActions`. None of
+  them decides a lease (see "Lease clocks" above); moving them to the client
+  follows the same pattern.
+- **Bounded lists.** `ListSessions`, `ListSessionCleanupIntents` and
+  `ListActiveScanRuns` return
   every match. They gain limits and cursors in the same signature sweep as the
   write envelope.
 - **`state.v1` is a relational contract.** Several methods push joins and
@@ -1130,7 +1194,16 @@ Reads and administrative methods reach the provider unchanged.
   family, carries that fence in its envelope, so a caller holding a replaced
   fence is still refused with `ErrFenced`. A context that already carries an
   envelope belongs to a caller that owns the operation, such as the shared
-  suite, and the write runs once with it.
+  suite, and the write runs once with it. That caller owns the request too:
+  the client sends it unchanged and assigns no identity or time, so a caller
+  that supplies a write envelope must stamp identity and time before
+  computing its digest, and the client refuses a request that lacks them
+  with `ErrValidation`. The same holds for what the client would redact,
+  bound or otherwise prepare (memory and proposal text, gateway text and
+  metadata, threat models, usage names and execution events): a caller that
+  supplies a write envelope must send an already redacted and truncated
+  request, the client refuses one it would change, and one it would not
+  change is sent as it is. No production caller supplies its own envelope.
 - **Retries.** After `ErrUnavailable` (nothing committed) or
   `ErrOutcomeUnknown` (it may have), the client retries the same envelope with
   the same arguments, with backoff, for at most thirty seconds after that
@@ -1172,6 +1245,11 @@ Reads and administrative methods reach the provider unchanged.
   `ErrDuplicateMismatch`. A retry the client makes after its own conflict,
   such as a connector custody commit that lost a race, seals again and is a
   new operation.
+- **Identities and clocks.** Above the decorators, the client fills the IDs
+  and creation times described in "Client-assigned identities and times",
+  and the write's envelope is issued at that same time. While the last clock
+  check found a dataset's clock more than `MaxClockSkew` away (see "Provider
+  clock and skew"), new writes to it are refused with `ErrNotReady`.
 - **Callers.** `store.IsTemporaryStorageError` matches `ErrNotReady`,
   `ErrUnavailable` and `ErrOutcomeUnknown`. The API answers `ErrNotReady` and
   `ErrUnavailable` with 503 and a `Retry-After` hint, in its shared error

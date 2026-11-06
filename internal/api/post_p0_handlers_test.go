@@ -59,17 +59,17 @@ func (f *postP0FakeSessionStore) ListSessions(ctx context.Context, namespace str
 func (f *postP0FakeSessionStore) ListSessionsPage(ctx context.Context, namespace string, after *store.SessionPageCursor, limit int, excludeType string) ([]store.SessionMetadata, bool, error) {
 	return nil, false, nil
 }
-func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string) error {
+func (f *postP0FakeSessionStore) DeleteSession(ctx context.Context, namespace, name string, _ time.Time) error {
 	delete(f.records, f.key(namespace, name))
 	return nil
 }
-func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
+func (f *postP0FakeSessionStore) AcquireLock(ctx context.Context, namespace, name, taskName, taskUID string, _ time.Time) error {
 	return nil
 }
 func (f *postP0FakeSessionStore) ReleaseLock(ctx context.Context, namespace, name, taskName, taskUID string) error {
 	return nil
 }
-func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string) (bool, error) {
+func (f *postP0FakeSessionStore) IsLocked(ctx context.Context, namespace, name, currentTask, currentTaskUID string, _ time.Time) (bool, error) {
 	return false, nil
 }
 func (f *postP0FakeSessionStore) AppendMessages(ctx context.Context, namespace, name string, messages []store.SessionMessage) error {
