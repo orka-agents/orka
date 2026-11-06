@@ -74,6 +74,15 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			"ca.crt": string(caPEM), "assertion": assertion,
 		})).To(Succeed())
 
+		By("installing the Agent use admission policies the controller flag asserts")
+		// --agent-use-authorization-enabled trusts that these are installed;
+		// with them, direct Task writes are checked for `use` as well.
+		DeferCleanup(func() {
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "-k", "config/agent-use-policy", "--ignore-not-found"))
+		})
+		_, err = utils.Run(exec.Command("kubectl", "apply", "-k", "config/agent-use-policy"))
+		Expect(err).NotTo(HaveOccurred())
+
 		By("configuring the controller with the fake Entra as its agent identity issuer")
 		configureControllerForFakeEntra()
 

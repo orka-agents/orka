@@ -193,9 +193,10 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	token, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	s.mu.Lock()
 	grant, ok := s.app[token]
+	ok = ok && bearer
 	probe := Probe{Authorized: ok && grant.resource == s.cfg.Resource, Identity: grant.identity, Resource: grant.resource}
 	s.state.Probes = append(s.state.Probes, probe)
 	s.mu.Unlock()

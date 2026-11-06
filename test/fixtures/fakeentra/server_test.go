@@ -137,6 +137,20 @@ func TestTheFakeRefusesWhatEntraRefuses(t *testing.T) {
 	if status := probe(t, server, "fx-entra-app-forged"); status != http.StatusUnauthorized {
 		t.Fatalf("a forged token: status = %d", status)
 	}
+	token, err := source(assertion).Entra.AppToken(context.Background(), identity, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodGet, server.URL+fakeentra.ProbePath, nil)
+	request.Header.Set("Authorization", token)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a token without the Bearer scheme: status = %d", response.StatusCode)
+	}
 }
 
 func TestADisabledIdentityFailsVerification(t *testing.T) {
