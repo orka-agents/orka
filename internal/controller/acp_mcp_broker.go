@@ -42,6 +42,7 @@ type ACPMCPAuthenticatedTask struct {
 	UID          string
 	ParentTaskID string
 	AgentName    string
+	AgentUID     string // frozen by the Task's execution binding, if any
 	SessionName  string
 	Deadline     time.Time
 }
@@ -1182,6 +1183,9 @@ func (r KubernetesACPMCPBrokerCredentialResolver) ResolveACPMCPBrokerCredentials
 	credentials.Task.Deadline, _ = acpTaskDeadline(task, time.Now().UTC())
 	if task.Spec.AgentRef != nil {
 		credentials.Task.AgentName = strings.TrimSpace(task.Spec.AgentRef.Name)
+	}
+	if binding := task.Status.AgentExecutionBinding; binding != nil && binding.Agent != nil {
+		credentials.Task.AgentUID = string(binding.Agent.UID)
 	}
 	return credentials, nil
 }
