@@ -111,6 +111,10 @@ type AgentIdentityBinding struct {
 	TaskNamespace   string
 	TaskName        string
 	TaskUID         string
+	// TaskCreated is the Task's creation time. Only a Task created at or
+	// after the claim was granted was checked for Agent use while the Agent
+	// named the identity.
+	TaskCreated time.Time
 	// DelegationStart is the root requester's last authenticated action in
 	// the Task chain; Delegated mode refuses calls past the delegation age.
 	DelegationStart time.Time
@@ -680,11 +684,13 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if binding == nil || strings.TrimSpace(binding.Identity.ID) == "" {
 		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
 	}
-	// The bound Agent must still exist and hold the identity: deleting the
-	// Agent, a claim that moved to another Agent, or the owner removing the
-	// identity stops its Tasks' calls. A claim being released is still held,
-	// so no other Agent can take the identity while bound Tasks run, but it
-	// is no longer used.
+	// The bound Agent must still exist, hold the identity, and name it:
+	// deleting the Agent, a claim that moved to another Agent, or the owner
+	// removing or changing the identity stops its Tasks' calls at once. The
+	// spec is checked as well as the claim because the claim is marked
+	// releasing only when the Agent next reconciles. A claim being released
+	// is still held, so no other Agent can take the identity while bound
+	// Tasks run, but it is no longer used.
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
@@ -693,8 +699,15 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
 	}
-	if live.Status.IdentityClaim.Releasing {
+	issuer, id, named := live.IdentityRef()
+	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
+	}
+	// A claim granted again, for example after it was released or Agent use
+	// authorization was re-enabled, covers only Tasks created since; an
+	// older Task's creation was never checked for this grant.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || binding.TaskCreated.Before(grantedAt.Time) {
+		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {

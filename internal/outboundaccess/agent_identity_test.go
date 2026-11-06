@@ -38,6 +38,7 @@ func agentIdentityRequest() ResolveRequest {
 		AgentIdentity: &AgentIdentityBinding{
 			Identity:       corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: "33333333-3333-3333-3333-33333333aaaa", Instance: "entra:t/b"},
 			AgentNamespace: "tenant", AgentName: "reviewer", AgentUID: "agent-uid", AgentGeneration: 2, TaskUID: "task-uid",
+			TaskCreated: testClaimGrantedAt.Add(time.Minute),
 		},
 	}
 }
@@ -85,10 +86,20 @@ func TestValidateSpecReservesEntraIdentityParameters(t *testing.T) {
 	}
 }
 
+var testClaimGrantedAt = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
 func identityHolder(uid string, claimed bool) *corev1alpha1.Agent {
-	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "reviewer", UID: types.UID(uid)}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "reviewer", UID: types.UID(uid)},
+		Spec: corev1alpha1.AgentSpec{Identity: &corev1alpha1.AgentIdentity{
+			Entra: &corev1alpha1.EntraAgentIdentity{AgentIdentityID: "33333333-3333-3333-3333-33333333AAAA"},
+		}},
+	}
 	if claimed {
-		agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: "33333333-3333-3333-3333-33333333aaaa"}
+		granted := metav1.NewTime(testClaimGrantedAt)
+		agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{
+			Issuer: "entra", ID: "33333333-3333-3333-3333-33333333aaaa", GrantedAt: &granted,
+		}
 	}
 	return agent
 }
@@ -111,6 +122,31 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		"identity being released": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Status.IdentityClaim.Releasing = true
+			return agent
+		}(),
+		// The claim is marked releasing only when the Agent next
+		// reconciles; the edit alone must stop the calls.
+		"identity removed, claim not yet released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Spec.Identity = nil
+			return agent
+		}(),
+		// The claim was granted again after the Task was created, so the
+		// Task's creation was never checked against this grant.
+		"claim granted again after the Task was created": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			regranted := metav1.NewTime(testClaimGrantedAt.Add(time.Hour))
+			agent.Status.IdentityClaim.GrantedAt = &regranted
+			return agent
+		}(),
+		"claim without a grant time": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Status.IdentityClaim.GrantedAt = nil
+			return agent
+		}(),
+		"identity changed, claim not yet released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
 			return agent
 		}(),
 	} {

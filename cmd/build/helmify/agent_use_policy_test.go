@@ -57,6 +57,22 @@ func TestStaticChartAgentUseAuthorization(t *testing.T) {
 		require.Equal(t, want, got, "the chart must enforce exactly the canonical policies")
 		require.Equal(t, 4, strings.Count(rendered, "kind: ValidatingAdmissionPolicyBinding"))
 		require.Contains(t, rendered, "name: test-orka-task-agent-use")
+
+		bindings := 0
+		for document := range strings.SplitSeq(rendered, "\n---") {
+			var meta metav1.TypeMeta
+			if yaml.Unmarshal([]byte(document), &meta) != nil || meta.Kind != "ValidatingAdmissionPolicyBinding" {
+				continue
+			}
+			var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding
+			require.NoError(t, yaml.UnmarshalStrict([]byte(document), &binding))
+			require.NotNil(t, binding.Spec.MatchResources, "binding %s must be scoped to the release", binding.Name)
+			require.Equal(t, &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": "orka-test"}},
+				binding.Spec.MatchResources.NamespaceSelector,
+				"another installation that leaves Agent use off must not be enforced by this one")
+			bindings++
+		}
+		require.Equal(t, 4, bindings)
 	})
 }
 

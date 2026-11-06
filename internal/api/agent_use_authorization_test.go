@@ -150,3 +150,62 @@ func TestCreateRepositoryMonitorEnforcesAgentUse(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, create(t, "denied-when-on"),
 		"a caller with no verifiable identity cannot name an Agent once use is enforced")
 }
+
+// agentUseReviews allows every review and records each Agent use review spec.
+func agentUseReviews() (*kubefake.Clientset, *[]authorizationv1.SubjectAccessReviewSpec) {
+	seen := &[]authorizationv1.SubjectAccessReviewSpec{}
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		if attributes := review.Spec.ResourceAttributes; attributes != nil && attributes.Verb == agentUseVerb {
+			*seen = append(*seen, review.Spec)
+		}
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+	return clientset, seen
+}
+
+func TestAgentUseReviewsKubernetesUsernameUnchanged(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	clientset, seen := agentUseReviews()
+	user := &UserInfo{Username: " alice ", UID: "u-1", Groups: []string{"team-a"}, AuthType: AuthTypeTokenReview}
+	require.NoError(t, authorizeTaskAgentUse(context.Background(), clientset, user,
+		agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"})))
+	require.Len(t, *seen, 1)
+	require.Equal(t, " alice ", (*seen)[0].User, "a username is an exact identity and must not borrow another's grants")
+	require.Equal(t, "u-1", (*seen)[0].UID)
+	require.Equal(t, []string{"team-a"}, (*seen)[0].Groups)
+}
+
+func TestAgentUseReviewsExternalCallersByIssuerAndSubject(t *testing.T) {
+	enableAgentUseAuthorization(t)
+	task := agentUseTask(&corev1alpha1.AgentReference{Name: "reviewer"})
+	for _, authType := range []string{AuthTypeOIDC, AuthTypeContextToken} {
+		t.Run(authType, func(t *testing.T) {
+			clientset, seen := agentUseReviews()
+			// A display name that collides with a controller ServiceAccount and
+			// a system group must not reach the review unqualified.
+			user := &UserInfo{
+				Username: "system:serviceaccount:orka-system:orka-controller",
+				Subject:  "subject-1", Issuer: "https://issuer.example",
+				Groups:   []string{"system:masters"},
+				AuthType: authType,
+			}
+			require.NoError(t, authorizeTaskAgentUse(context.Background(), clientset, user, task))
+			require.Len(t, *seen, 1)
+			require.Equal(t, "https://issuer.example#subject-1", (*seen)[0].User)
+			require.Equal(t, []string{"https://issuer.example#system:masters"}, (*seen)[0].Groups)
+			require.Empty(t, (*seen)[0].UID)
+			require.Empty(t, (*seen)[0].Extra)
+
+			for _, incomplete := range []*UserInfo{
+				{Username: "alice", Issuer: "https://issuer.example", AuthType: authType},
+				{Username: "alice", Subject: "subject-1", AuthType: authType},
+			} {
+				requireForbidden(t, authorizeTaskAgentUse(context.Background(), clientset, incomplete, task))
+			}
+			require.Len(t, *seen, 1, "a caller without issuer and subject is refused before any review")
+		})
+	}
+}

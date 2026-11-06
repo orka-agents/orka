@@ -33,6 +33,13 @@ func identityClaimMatches(claim *corev1alpha1.AgentIdentityClaim, issuer, id str
 	return claim != nil && claim.Issuer == issuer && claim.ID == id
 }
 
+// identityClaimCoversTask reports whether the Task was created at or after
+// the claim was granted. Only such a Task was checked for Agent use while the
+// Agent named the identity and the check was enforced (ADR 0039, stage 1).
+func identityClaimCoversTask(claim *corev1alpha1.AgentIdentityClaim, task *corev1alpha1.Task) bool {
+	return claim != nil && claim.GrantedAt != nil && !task.CreationTimestamp.Before(claim.GrantedAt)
+}
+
 // identityClaimBindable reports whether new Task bindings may use the claim:
 // it must name the identity and not be on its way out.
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
@@ -69,9 +76,17 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
 	claim := live.Status.IdentityClaim.DeepCopy()
 	issuer, id, declared := live.IdentityRef()
-	if claim != nil && identityClaimMatches(claim, issuer, id) {
-		// The spec names the held identity again; it is no longer leaving.
+	if declared && !r.Identity.AgentUseAuthorization {
+		// Claims exist only while Agent use authorization is enforced; without
+		// it a held claim is released like one the spec no longer names.
+		issuer, id, declared = "", "", false
+	}
+	if claim != nil && identityClaimMatches(claim, issuer, id) && (claim.Releasing || claim.GrantedAt == nil) {
+		// The spec names the held identity again, or use authorization is back
+		// on. Tasks created while it was leaving were not checked for it, so
+		// the claim counts as granted now.
 		claim.Releasing = false
+		claim.GrantedAt = identityClaimGrantTime()
 	}
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
 		if !claim.Releasing {
@@ -106,7 +121,23 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 			return nil, fmt.Errorf("identity %s/%s is already bound to Agent %s/%s", issuer, id, other.Namespace, other.Name)
 		}
 	}
-	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}, nil
+	// A deleted Agent's claim goes with it, but its bound Tasks still hold the
+	// identity until they finish, so it stays taken until then.
+	if holder, err := identityTaskOfOtherAgent(ctx, reader, agent, issuer, id); err != nil || holder != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("identity %s/%s is still held by Task %s/%s of Agent %s until it finishes",
+			issuer, id, holder.Namespace, holder.Name, holder.Status.AgentExecutionBinding.Agent.Name)
+	}
+	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id, GrantedAt: identityClaimGrantTime()}, nil
+}
+
+// identityClaimGrantTime is the grant time recorded now, at the second
+// precision the API server stores it with.
+func identityClaimGrantTime() *metav1.Time {
+	now := metav1.Now().Rfc3339Copy()
+	return &now
 }
 
 // errIdentityClaimReleasing reports the first release pass. It is an error only
@@ -126,17 +157,37 @@ func activeIdentityTasks(ctx context.Context, reader client.Reader, agent *corev
 	}
 	count := 0
 	for i := range tasks.Items {
-		task := &tasks.Items[i]
-		binding := task.Status.AgentExecutionBinding
-		if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil ||
-			binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-			continue
-		}
-		if binding.Agent.Identity.Issuer == claim.Issuer && binding.Agent.Identity.ID == claim.ID {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], claim.Issuer, claim.ID); bound != nil && bound.UID == agent.UID {
 			count++
 		}
 	}
 	return count, nil
+}
+
+// identityTaskOfOtherAgent returns an unfinished Task bound to the identity
+// through any Agent UID other than agent's, such as a deleted Agent's.
+func identityTaskOfOtherAgent(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent, issuer, id string) (*corev1alpha1.Task, error) {
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(agent.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Tasks bound to identity %s/%s: %w", issuer, id, err)
+	}
+	for i := range tasks.Items {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], issuer, id); bound != nil && bound.UID != agent.UID {
+			return &tasks.Items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// unfinishedIdentityBinding returns the Agent an unfinished Task is bound to
+// when that binding froze the identity.
+func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *corev1alpha1.AgentExecutionAgentRef {
+	binding := task.Status.AgentExecutionBinding
+	if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
+		return nil
+	}
+	return binding.Agent
 }
 
 // agentIdentityReverifyInterval bounds how long a verified identity stays
@@ -267,24 +318,38 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
+	if !identityClaimCoversTask(live.Status.IdentityClaim, task) {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf(
+			"the Task was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; create the Task again",
+			agent.Name, issuer, id))
+	}
+	ref, err := r.Identity.BindingRef(agent)
+	if err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
-		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent); err != nil {
+		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref); err != nil {
 			return nil, err
 		}
 	}
-	return r.Identity.BindingRef(agent)
+	return ref, nil
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an
 // identity-bound Agent only when the parent is bound to that exact Agent and
-// identity, so a child can never borrow an identity its root requester was not
-// checked against, including through an Agent recreated under the same name.
+// identity, issuer instance included, so a child can never borrow an identity
+// its root requester was not checked against, including through an Agent
+// recreated under the same name. The parent must be the Task that controls
+// the child, not one recreated under its name. A scheduled run is not
+// delegation: it runs its scheduled Task's own Agent, which that Task's
+// creator was checked for, and its scheduled Task never binds.
 func requireParentOwnsIdentityAgent(
 	ctx context.Context,
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	parentName string,
 	agent *corev1alpha1.Agent,
+	ref *corev1alpha1.AgentExecutionIdentityRef,
 ) error {
 	parent := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: parentName}, parent); err != nil {
@@ -293,15 +358,26 @@ func requireParentOwnsIdentityAgent(
 		}
 		return fmt.Errorf("resolve the parent Task: %w", err)
 	}
-	refuse := permanentACPAgentConfiguration(fmt.Errorf(
-		"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
-	binding := parent.Status.AgentExecutionBinding
-	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-		return refuse
+	owner := metav1.GetControllerOf(task)
+	recorded := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
+	if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		owner.Name != parentName || owner.UID != parent.UID || (recorded != "" && recorded != string(parent.UID)) {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
-	issuer, id, _ := agent.IdentityRef()
-	if binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
-		return refuse
+	if parent.Spec.Schedule != "" {
+		if parent.Spec.AgentRef != nil && task.Spec.AgentRef != nil && *parent.Spec.AgentRef == *task.Spec.AgentRef {
+			return nil
+		}
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
+	}
+	binding := parent.Status.AgentExecutionBinding
+	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != ref.Issuer || binding.Agent.Identity.ID != ref.ID ||
+		binding.Agent.Identity.Instance != ref.Instance {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
 	}
 	return nil
 }
@@ -326,6 +402,7 @@ func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, tas
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
 		AgentUID: string(agent.UID), AgentGeneration: agent.Generation,
 		TaskNamespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
+		TaskCreated:     task.CreationTimestamp.Time,
 		DelegationStart: start,
 		ManagedEgress:   binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool && !workspaceBacked,
 	}, nil
@@ -424,16 +501,22 @@ func sameRequester(a, b *corev1alpha1.RequestedBy) bool {
 }
 
 // requireBoundIdentityClaim re-checks, after the binding is persisted and
-// until the Task starts, that the Agent still holds the identity the binding
-// froze. A claim released between the binding decision and its write could
-// otherwise leave two Agents with Tasks acting as one identity; once the
-// binding is persisted, any later release sees it and keeps the claim.
+// until the Task is admitted to a runtime, that the Agent still holds the
+// identity the binding froze. A claim released between the binding decision
+// and its write could otherwise leave two Agents with Tasks acting as one
+// identity; once the binding is persisted, any later release sees it and
+// keeps the claim. A Task still Queued or Reserved for capacity has not been
+// admitted, so it is checked on every pass until dispatch.
 func (r *TaskReconciler) requireBoundIdentityClaim(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (ctrl.Result, error, bool) {
-	if task.Status.Execution != nil || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
+	if execution := task.Status.Execution; execution != nil &&
+		execution.State != corev1alpha1.TaskExecutionStateQueued && execution.State != corev1alpha1.TaskExecutionStateReserved {
+		return ctrl.Result{}, nil, false
+	}
+	if binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
 		return ctrl.Result{}, nil, false
 	}
 	frozen := binding.Agent
@@ -443,11 +526,16 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
+	message := fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
 	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
-		return ctrl.Result{}, nil, false
+		if identityClaimCoversTask(live.Status.IdentityClaim, task) {
+			return ctrl.Result{}, nil, false
+		}
+		// The claim was released and granted again after the Task was created.
+		message = fmt.Sprintf("Agent %s/%s was granted identity %s/%s again after the Task was created",
+			frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
 	}
-	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"),
-		fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID))
+	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"), message)
 	return result, failErr, true
 }
 
