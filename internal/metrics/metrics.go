@@ -34,6 +34,7 @@ const (
 	labelRuntimePool = "runtime_pool"
 	labelEventType   = "event_type"
 	labelScope       = "scope"
+	labelState       = "state"
 	labelAccepting   = "accepting"
 )
 
@@ -184,7 +185,7 @@ var (
 			Name: "orka_acp_runtime_pool_admission_state",
 			Help: "Authoritative RuntimePool admission state as a one-hot gauge",
 		},
-		[]string{labelNamespace, labelRuntimePool, "state"},
+		[]string{labelNamespace, labelRuntimePool, labelState},
 	)
 
 	ACPRuntimePoolScaleToZeroTotal = prometheus.NewCounterVec(
@@ -318,7 +319,7 @@ var (
 			Name: "orka_task_wait_transitions_total",
 			Help: "Parked agent turn transitions by wait kind and new state",
 		},
-		[]string{"kind", "state"},
+		[]string{"kind", labelState},
 	)
 
 	TaskWaitDuration = prometheus.NewHistogramVec(
@@ -327,7 +328,7 @@ var (
 			Help:    "Time a parked agent turn held no runtime capacity, from arming to its final state",
 			Buckets: []float64{5, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 86400},
 		},
-		[]string{"kind", "state"},
+		[]string{"kind", labelState},
 	)
 
 	TaskWaitRuntimeReleasesTotal = prometheus.NewCounterVec(
