@@ -191,6 +191,9 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 		}
 		out = append(out, SubstrateEgressRule{Scheme: scheme, Host: host, Ports: ports})
 	}
+	if err := rejectSubstrateEgressOverrides(out); err != nil {
+		return nil, err
+	}
 	slices.SortFunc(out, func(a, b SubstrateEgressRule) int {
 		if c := strings.Compare(a.Host, b.Host); c != 0 {
 			return c
@@ -201,6 +204,31 @@ func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgre
 		return slices.Compare(a.Ports, b.Ports)
 	})
 	return out, nil
+}
+
+// rejectSubstrateEgressOverrides refuses an exact host that a wildcard rule on
+// the same port also matches with a different scheme. The gateway prefers the
+// exact rule ("*.example.com" matches exactly one extra label), so the overlap
+// would replace the wildcard's scheme for that host instead of adding access.
+func rejectSubstrateEgressOverrides(rules []SubstrateEgressRule) error {
+	for _, wildcard := range rules {
+		suffix, ok := strings.CutPrefix(wildcard.Host, "*")
+		if !ok {
+			continue
+		}
+		for _, exact := range rules {
+			label, matches := strings.CutSuffix(exact.Host, suffix)
+			if exact.Scheme == wildcard.Scheme || !matches || label == "" || strings.ContainsAny(label, ".*") {
+				continue
+			}
+			for _, port := range exact.Ports {
+				if slices.Contains(wildcard.Ports, port) {
+					return egressRuleError(fmt.Sprintf("egress host %q port %d uses %s, which overrides %s from %q", exact.Host, port, exact.Scheme, wildcard.Scheme, wildcard.Host))
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func validateSubstrateEgressHost(raw string) (string, error) {
@@ -236,7 +264,8 @@ func validateSubstrateEgressHost(raw string) (string, error) {
 			return "", fmt.Errorf("host %q has a DNS label longer than 63 characters", raw)
 		}
 	}
-	if _, err := strconv.ParseUint(labels[len(labels)-1], 10, 64); err == nil {
+	// The gateway rejects any all-numeric final label, however long.
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
 		return "", fmt.Errorf("host %q must not end in a numeric label", raw)
 	}
 	return host, nil

@@ -32,6 +32,9 @@ func TestValidateSubstrateEgressRulesRejectsUnsafeHosts(t *testing.T) {
 		{"trailing dot", SubstrateEgressRule{Scheme: "https", Host: "example.com."}},
 		{"single label", SubstrateEgressRule{Scheme: "http", Host: "localhost"}},
 		{"numeric tld", SubstrateEgressRule{Scheme: "http", Host: "a.123"}},
+		{"long numeric tld", SubstrateEgressRule{Scheme: "http", Host: "a.12345678901234567890123"}},
+		{"dotted numeric name", SubstrateEgressRule{Scheme: "https", Host: "01.2.3.4"}},
+		{"numeric wildcard suffix", SubstrateEgressRule{Scheme: "tls", Host: "*.example.123", Ports: []int32{443}}},
 		{"bad scheme", SubstrateEgressRule{Scheme: "ftp", Host: "example.com"}},
 		{"tls without ports", SubstrateEgressRule{Scheme: "tls", Host: "example.com"}},
 		{"port zero", SubstrateEgressRule{Scheme: "https", Host: "example.com", Ports: []int32{0}}},
@@ -211,5 +214,23 @@ func TestEnsureSubstrateActorEgressPolicyFailsClosed(t *testing.T) {
 				t.Fatalf("error %T is not a workspace error", err)
 			}
 		})
+	}
+}
+
+func TestValidateSubstrateEgressRulesRejectsWildcardOverrides(t *testing.T) {
+	wildcard := SubstrateEgressRule{Scheme: "tls", Host: "*.example.com", Ports: []int32{443}}
+	if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{wildcard, {Scheme: "https", Host: "api.example.com"}}); err == nil ||
+		!strings.Contains(err.Error(), "overrides") {
+		t.Fatalf("exact rule overriding a wildcard's scheme error = %v", err)
+	}
+	for name, exact := range map[string]SubstrateEgressRule{
+		"same scheme":   {Scheme: "tls", Host: "api.example.com", Ports: []int32{443}},
+		"other port":    {Scheme: "https", Host: "api.example.com", Ports: []int32{8443}},
+		"deeper name":   {Scheme: "https", Host: "a.b.example.com"},
+		"numeric label": {Scheme: "https", Host: "123.example.com", Ports: []int32{8443}},
+	} {
+		if err := ValidateSubstrateEgressRules([]SubstrateEgressRule{wildcard, exact}); err != nil {
+			t.Fatalf("%s: unexpected rejection: %v", name, err)
+		}
 	}
 }
