@@ -13,5 +13,7 @@ describe('activeParkedApprovalId', () => {
     expect(activeParkedApprovalId(task({ kind: 'Tasks', state: 'Waiting', references: ['ap'] }))).toBeUndefined()
     expect(activeParkedApprovalId(task({ kind: 'Approval', state: 'Waiting', references: ['ap'] }, '2026-11-06T00:00:00Z'))).toBeUndefined()
     expect(activeParkedApprovalId(task(undefined))).toBeUndefined()
+    const failed = { metadata: { name: 'tk' }, status: { phase: 'Failed' as const, wait: { kind: 'Approval', state: 'Requested', references: ['ap'] } } }
+    expect(activeParkedApprovalId(failed)).toBeUndefined()
   })
 })

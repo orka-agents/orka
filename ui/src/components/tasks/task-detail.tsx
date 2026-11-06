@@ -236,16 +236,22 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // A task parked on an approval also loads approvals off the Overview so
   // the Approvals tab can show how many are pending.
   const waitingForApproval = task !== undefined && !taskUnavailable && isWaitingForApproval(task)
+  // A parked turn's Task is terminal, but the sign-off it waits on stays
+  // decidable, so it is loaded and polled like a live approval.
+  const parkedApprovalId = task !== undefined && !taskUnavailable ? activeParkedApprovalId(task) : undefined
   const { data: approvalsResp } = useTaskApprovals(
     taskId,
-    overviewActive || waitingForApproval,
+    overviewActive || waitingForApproval || parkedApprovalId !== undefined,
     approvalRefetchInterval,
     taskRunning,
-    taskTerminal,
+    taskTerminal && !parkedApprovalId,
     task?.metadata.uid,
   )
-  // Terminal tasks reject decisions, so their leftovers are not "pending".
-  const pendingApprovals = taskTerminal ? 0 : (approvalsResp?.approvals ?? []).filter((a) => a.status === 'pending').length
+  // Terminal tasks reject decisions, so their leftovers are not "pending";
+  // only the sign-off a parked turn waits on still counts.
+  const pendingApprovals = (approvalsResp?.approvals ?? []).filter(
+    (a) => a.status === 'pending' && (!taskTerminal || a.id === parkedApprovalId),
+  ).length
   const artifactRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
   const resultArtifactRefetchInterval = resultActive && taskRunning && following ? 5000 : false
   const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
@@ -619,7 +625,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             taskId={taskId}
             taskPhase={task.status?.phase}
             taskUid={task.metadata.uid}
-            parkedApprovalId={activeParkedApprovalId(task)}
+            parkedApprovalId={parkedApprovalId}
           />
         </TabsContent>
 
