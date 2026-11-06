@@ -120,6 +120,13 @@ type SessionStore interface {
 	UpdateTokenCounts(ctx context.Context, namespace, name string, inputTokens, outputTokens int) error
 }
 
+// SessionCreationReader reads when a Session record was created without
+// loading its transcript. A Session deleted and recreated under the same
+// name gets a new creation time, so the time identifies one incarnation.
+type SessionCreationReader interface {
+	GetSessionCreatedAt(ctx context.Context, namespace, name string) (time.Time, error)
+}
+
 // SessionTurnCommitter reserves chat turns and atomically commits their
 // transcript messages with token usage. The expected message count fences the
 // session revision observed after acquiring the turn lease.

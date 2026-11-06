@@ -23,6 +23,9 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 		Name: "parent", UID: "parent-uid", Controller: &controller,
 	}}
 
+	chatTask := root.DeepCopy()
+	chatTask.Labels = map[string]string{labels.LabelChatSession: "chat-a", labels.LabelChatSessionEpoch: "1700000000000000000"}
+
 	tests := []struct {
 		name    string
 		oldTask *corev1alpha1.Task
@@ -69,6 +72,21 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 			task.Labels = child.Labels
 			task.Annotations = child.Annotations
 			task.OwnerReferences = child.OwnerReferences
+		}},
+		{name: "remove chat Session label", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			delete(task.Labels, labels.LabelChatSession)
+		}},
+		{name: "repoint chat Session label", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			task.Labels[labels.LabelChatSession] = "chat-b"
+		}},
+		{name: "change chat Session epoch", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			task.Labels[labels.LabelChatSessionEpoch] = "1800000000000000000"
+		}},
+		{name: "remove chat Session epoch", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			delete(task.Labels, labels.LabelChatSessionEpoch)
+		}},
+		{name: "attach root to a chat", oldTask: root, change: func(task *corev1alpha1.Task) {
+			task.Labels = chatTask.Labels
 		}},
 		{name: "update other metadata and status", oldTask: child, allowed: true, change: func(task *corev1alpha1.Task) {
 			task.Labels["example.com/label"] = "updated"

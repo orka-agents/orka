@@ -179,6 +179,21 @@ func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
 	})
 }
 
+func TestAgentIdentityRefusalWithoutBindingNamesTheTask(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "t"}, &lines)
+	request := delegatedRequest(now.Add(-time.Minute))
+	request.AgentIdentity, request.TaskUID = nil, "plain-task-uid"
+	if _, err := resolver.Resolve(context.Background(), request); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"taskUID"="plain-task-uid"`) ||
+		!strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalBinding+`"`) {
+		t.Fatalf("records = %v, want one binding refusal naming the Task", lines)
+	}
+}
+
 func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
 	resolver := &KubernetesResolver{AuditPseudonymKey: []byte(strings.Repeat("k", 32))}
 	pseudonym := func(issuer, subject string) string {

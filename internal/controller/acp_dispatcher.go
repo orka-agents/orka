@@ -64,6 +64,7 @@ const (
 	acpTaskTimeoutReason                     = "TaskTimeout"
 	acpTaskTimeoutCancellationSettledMessage = "task deadline cancellation settled"
 	acpCancelledOperation                    = "cancelled"
+	acpCancelledReason                       = "Cancelled"
 	acpSettlingOperation                     = "settling"
 	acpSucceededOperation                    = "succeeded"
 	acpCredentialBlockedOperation            = "credential-blocked"
@@ -3802,7 +3803,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	deadline, hasDeadline := acpTaskDeadline(task, now)
 	switch {
 	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
-		operation, reason, message = "cancelled-before-admission", "Cancelled", "task cancelled before runtime admission"
+		operation, reason, message = "cancelled-before-admission", acpCancelledReason, "task cancelled before runtime admission"
 		// A Cancelled phase is written after the cancel request, so this copy
 		// carries the request, which names who cancelled and why.
 		if requested := strings.TrimSpace(task.Annotations[labels.AnnotationCancelRequested]); requested != "" && task.DeletionTimestamp.IsZero() {
@@ -3811,7 +3812,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
-		return false, nil
+		// A Task bound to an identity starts only while its Agent still holds
+		// the identity for it (ADR 0039).
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), task, task.Status.AgentExecutionBinding)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
+			return true, nil
+		}
+		if unavailable == "" {
+			return false, nil
+		}
+		operation, reason, message = "identity-unavailable-before-admission", taskExecutionReasonIdentityUnavailable, unavailable
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -3839,6 +3850,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 				return true, releaseErr
 			}
 		}
+	}
+	if reason == taskExecutionReasonIdentityUnavailable {
+		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, operation, reason, message); err != nil {
+			return true, err
+		}
+		if err := d.failTaskBeforeRuntimeAdmission(
+			ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+		); err != nil {
+			return true, err
+		}
+		return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
 	}
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
@@ -4278,12 +4300,36 @@ func (d *ACPDispatcher) handlePreSubmissionContextDone(
 	attemptID string,
 	fence store.ControllerEpochFence,
 ) (bool, error) {
-	if !errors.Is(runtimeContextError(runtimeCtx), context.DeadlineExceeded) {
+	switch runtimeErr := runtimeContextError(runtimeCtx); {
+	case errors.Is(runtimeErr, context.DeadlineExceeded):
+		return true, d.settlePreSubmissionCancellation(
+			ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
+		)
+	case runtimeErr != nil && d.liveTaskCancelled(ctx, task):
+		// The cancellation watcher stopped the run: settle it as Cancelled so
+		// the aborted runtime call is not reported as a start failure. Any
+		// other stop, such as a controller shutdown, keeps its own handling.
+		return true, d.settlePreSubmissionCancellation(
+			ctx, task, attemptID, fence, "cancelled-before-submission", acpCancelledReason, "task cancelled before prompt submission",
+		)
+	default:
 		return false, nil
 	}
-	return true, d.settlePreSubmissionCancellation(
-		ctx, task, attemptID, fence, "timeout-before-submission", acpTaskTimeoutReason, "task deadline exceeded before prompt submission",
-	)
+}
+
+// liveTaskCancelled reports whether the live Task was cancelled or had its
+// cancellation requested.
+func (d *ACPDispatcher) liveTaskCancelled(ctx context.Context, task *corev1alpha1.Task) bool {
+	reader := uncachedReader(d.APIReader, d.Client)
+	if reader == nil || task == nil {
+		return false
+	}
+	latest := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID {
+		return false
+	}
+	_, requested := latest.Annotations[labels.AnnotationCancelRequested]
+	return requested || latest.Status.Phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func (d *ACPDispatcher) newTaskRuntimeContext(ctx context.Context, task *corev1alpha1.Task) (context.Context, context.CancelFunc) {
@@ -4315,6 +4361,13 @@ func (d *ACPDispatcher) settlePreSubmissionCancellation(
 	reason corev1alpha1.TaskExecutionReason,
 	message string,
 ) error {
+	if reason == acpCancelledReason {
+		// A requested cancellation settles with the request, which names who
+		// cancelled and why.
+		if requested := d.requestedCancellationMessage(ctx, task); requested != "" {
+			message = requested
+		}
+	}
 	if err := d.transitionAttemptToCancelled(
 		ctx, attemptID, fence, operation, reason, message,
 	); err != nil {
@@ -6871,15 +6924,17 @@ func (d *ACPDispatcher) finishNonSuccess(ctx context.Context, task *corev1alpha1
 }
 
 // requestedCancellationMessage returns the recorded cancel request on the
-// live Task, which names who cancelled it and why, or "" when there is none.
-// The dispatcher's copy of the Task predates a request made during the run.
+// live Task, which names who cancelled it and why, or "" when there is none
+// or the Task is being deleted. The dispatcher's copy of the Task predates a
+// request made during the run.
 func (d *ACPDispatcher) requestedCancellationMessage(ctx context.Context, task *corev1alpha1.Task) string {
 	reader := uncachedReader(d.APIReader, d.Client)
 	if reader == nil || task == nil {
 		return ""
 	}
 	latest := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID ||
+		!latest.DeletionTimestamp.IsZero() {
 		return ""
 	}
 	return strings.TrimSpace(latest.Annotations[labels.AnnotationCancelRequested])

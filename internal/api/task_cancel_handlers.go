@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,6 +45,14 @@ type sessionCancellation struct {
 	Namespace string             `json:"namespace"`
 	Session   string             `json:"session"`
 	Tasks     []taskCancellation `json:"tasks"`
+	// ChatTurnStopped is true when an in-flight chat request was stopped.
+	ChatTurnStopped bool `json:"chatTurnStopped,omitempty"`
+}
+
+// chatTurnStopper stops a chat Session's in-flight request without deleting
+// the Session, and reports whether one was running.
+type chatTurnStopper interface {
+	stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, error)
 }
 
 var errTaskNotCancellable = errors.New("task cannot be cancelled")
@@ -80,8 +89,9 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// CancelSession stops a Session's current turn by cancelling its Pending and
-// Running Tasks. The Session stays usable for the next message.
+// CancelSession stops a Session's current turn: an in-flight chat request,
+// then its Pending and Running Tasks. The Session stays usable for the next
+// message.
 func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -99,31 +109,36 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	}
 	name := c.Params("id")
 	ctx := c.Context()
-	if _, err := h.sessionStore.GetSession(ctx, namespace, name); err != nil {
+	// Session metadata only: the transcript is not needed to stop a turn.
+	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrGatewayOwnedSession) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
+	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
+	if sessionType == store.SessionTypeChat && h.chatTurns != nil {
+		// Stop the chat request first so it starts no Task after the list
+		// below. It ends as a disconnected client's request does.
+		stopped, err := h.chatTurns.stopActiveChat(ctx, namespace, name)
+		if err != nil {
+			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat turn did not stop in time; retry")
+		}
+		result.ChatTurnStopped = stopped
+	}
 	tasks := &corev1alpha1.TaskList{}
 	if err := h.client.List(ctx, tasks, client.InNamespace(namespace)); err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
-	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if !cancellableTaskPhase(task.Status.Phase) ||
-			(sessionNameForTask(task) != name && strings.TrimSpace(task.Labels[labels.LabelChatSession]) != name) {
-			continue
-		}
-		// A chat-created Task names its Session by label instead of
-		// spec.sessionRef; the label counts only for a chat Session.
-		sessionName, err := executionEventSessionName(ctx, h.sessionStore, namespace, task)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve task session: %v", err))
-		}
-		if sessionName != name {
+		// A chat-created Task may name its continuity Session in
+		// spec.sessionRef and the conversation in the chat label; either
+		// ties it to this Session, the label only for a chat Session.
+		inChat := sessionType == store.SessionTypeChat && strings.TrimSpace(task.Labels[labels.LabelChatSession]) == name
+		if !cancellableTaskPhase(task.Status.Phase) || (sessionNameForTask(task) != name && !inChat) {
 			continue
 		}
 		cancelled, err := h.requestTaskCancellation(c, task, message)
@@ -136,7 +151,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		}
 		result.Tasks = append(result.Tasks, cancelled)
 	}
-	if len(result.Tasks) == 0 {
+	if len(result.Tasks) == 0 && !result.ChatTurnStopped {
 		return fiber.NewError(fiber.StatusConflict, "session has no running turn")
 	}
 	return c.JSON(result)
