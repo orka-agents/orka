@@ -4,6 +4,8 @@ package acp
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,48 +23,84 @@ type procCredentials struct {
 	// zombie is a terminated thread group (every thread exited) awaiting
 	// reaping; it can never run again, so it does not count.
 	zombie bool
+	// complete reports that State, Uid, and Groups were all present and
+	// parsed. A partial or malformed record proves nothing about the process.
+	complete bool
 }
 
 func parseProcCredentials(pid int, data []byte) procCredentials {
 	process := procCredentials{pid: pid, uid: -1}
+	var haveState, haveUID, haveGroups, malformed bool
 	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		switch {
 		case bytes.HasPrefix(line, []byte("State:")):
-			if fields := bytes.Fields(line[len("State:"):]); len(fields) > 0 {
-				process.zombie = fields[0][0] == 'Z' || fields[0][0] == 'X'
+			fields := bytes.Fields(line[len("State:"):])
+			if len(fields) == 0 {
+				malformed = true
+				continue
 			}
+			haveState = true
+			process.zombie = fields[0][0] == 'Z' || fields[0][0] == 'X'
 		case bytes.HasPrefix(line, []byte("Uid:")):
-			if fields := bytes.Fields(line[len("Uid:"):]); len(fields) > 0 {
-				process.uid, _ = strconv.Atoi(string(fields[0]))
+			fields := bytes.Fields(line[len("Uid:"):])
+			if len(fields) == 0 {
+				malformed = true
+				continue
 			}
+			uid, err := strconv.Atoi(string(fields[0]))
+			if err != nil || uid < 0 {
+				malformed = true
+				continue
+			}
+			haveUID, process.uid = true, uid
 		case bytes.HasPrefix(line, []byte("Groups:")):
+			haveGroups = true
 			for field := range bytes.FieldsSeq(line[len("Groups:"):]) {
-				if group, err := strconv.Atoi(string(field)); err == nil {
-					process.groups = append(process.groups, group)
+				group, err := strconv.Atoi(string(field))
+				if err != nil {
+					malformed = true
+					continue
 				}
+				process.groups = append(process.groups, group)
 			}
 		}
 	}
+	process.complete = haveState && haveUID && haveGroups && !malformed
 	return process
 }
 
+// procEntryGone reports whether a /proc read failed only because the process
+// or thread already exited. Every other failure (permission, I/O, a mount that
+// hides other users' processes, a malformed tree) leaves its state unknown.
+func procEntryGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
 // threadGroupLive reports whether any thread of a zombie leader still runs:
-// a leader that called pthread_exit is a zombie while its workers live.
-func threadGroupLive(procRoot string, pid int) bool {
+// a leader that called pthread_exit is a zombie while its workers live. ok is
+// false when the thread list or a thread's state could not be read.
+func threadGroupLive(procRoot string, pid int) (live, ok bool) {
 	tasks, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "task"))
 	if err != nil {
-		return false
+		return false, procEntryGone(err)
 	}
 	for _, task := range tasks {
 		data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "task", task.Name(), "status"))
 		if err != nil {
-			continue
+			if procEntryGone(err) {
+				continue
+			}
+			return false, false
 		}
-		if !parseProcCredentials(pid, data).zombie {
-			return true
+		thread := parseProcCredentials(pid, data)
+		if !thread.complete {
+			return false, false
+		}
+		if !thread.zombie {
+			return true, true
 		}
 	}
-	return false
+	return false, true
 }
 
 func listPIDs(procRoot string) (map[int]struct{}, bool) {
@@ -84,17 +122,29 @@ func listPIDs(procRoot string) (map[int]struct{}, bool) {
 
 const operatorScanRelistLimit = 16
 
-// taggedProcesses returns live processes of uid (any uid when negative) that
-// carry tag. Processes forked while the scan runs are absent from the first
-// listing, so the table is re-listed and new PIDs examined until a listing
-// adds none; a scan that cannot settle reports ok=false.
-func taggedProcesses(procRoot string, uid, tag int) ([]int, bool) {
+// operatorTagScan is one settled scan of the process table for a tag.
+type operatorTagScan struct {
+	// own are live tagged processes of the requested UID (every UID when the
+	// requested UID is negative).
+	own []int
+	// foreign counts live tagged processes of any other UID. The supervisor
+	// never kills them, but while one exists containment is unproven.
+	foreign int
+}
+
+// scanOperatorTag examines every live process for tag. Processes forked while
+// the scan runs are absent from the first listing, so the table is re-listed
+// and new PIDs examined until a listing adds none. A scan that cannot settle,
+// or a process whose state cannot be read completely for any reason other
+// than having exited, reports ok=false: an unreadable process is never
+// presumed gone.
+func scanOperatorTag(procRoot string, uid, tag int) (operatorTagScan, bool) {
 	examined := map[int]struct{}{}
-	var tagged []int
+	var scan operatorTagScan
 	for range operatorScanRelistLimit {
 		pids, ok := listPIDs(procRoot)
 		if !ok {
-			return nil, false
+			return operatorTagScan{}, false
 		}
 		fresh := 0
 		for pid := range pids {
@@ -105,24 +155,45 @@ func taggedProcesses(procRoot string, uid, tag int) ([]int, bool) {
 			fresh++
 			data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
 			if err != nil {
-				continue // exited before inspection
+				if procEntryGone(err) {
+					continue // exited before inspection
+				}
+				return operatorTagScan{}, false
 			}
 			process := parseProcCredentials(pid, data)
-			if uid >= 0 && process.uid != uid {
+			if !process.complete {
+				return operatorTagScan{}, false
+			}
+			if !slices.Contains(process.groups, tag) {
 				continue
 			}
-			if process.zombie && !threadGroupLive(procRoot, pid) {
-				continue
+			if process.zombie {
+				live, ok := threadGroupLive(procRoot, pid)
+				if !ok {
+					return operatorTagScan{}, false
+				}
+				if !live {
+					continue
+				}
 			}
-			if slices.Contains(process.groups, tag) {
-				tagged = append(tagged, pid)
+			if uid < 0 || process.uid == uid {
+				scan.own = append(scan.own, pid)
+			} else {
+				scan.foreign++
 			}
 		}
 		if fresh == 0 {
-			return tagged, true
+			return scan, true
 		}
 	}
-	return tagged, false
+	return scan, false
+}
+
+// taggedProcesses returns live processes of uid (any uid when negative) that
+// carry tag; see scanOperatorTag.
+func taggedProcesses(procRoot string, uid, tag int) ([]int, bool) {
+	scan, ok := scanOperatorTag(procRoot, uid, tag)
+	return scan.own, ok
 }
 
 // OperatorTagInUse reports whether any live process carries the tag group.
@@ -138,29 +209,34 @@ func OperatorTagInUse(tag int) bool {
 // changed process group, session, or parent. Like the RuntimeSession UID
 // cleanup proof, containment requires two consecutive settled empty scans
 // separated by an observation interval, so a process forked during one scan
-// is caught by the next.
+// is caught by the next. An unsettled or unreadable scan, or a tagged process
+// of another UID, resets the proof.
 func KillOperatorTag(uid, tag int) bool {
+	return killOperatorTag("/proc", uid, tag, operatorTagKillRounds, cleanupProofObservationInterval)
+}
+
+func killOperatorTag(procRoot string, uid, tag, rounds int, interval time.Duration) bool {
 	if uid <= 0 || tag < OperatorTagFirstGID || tag > OperatorTagLastGID {
 		return false
 	}
 	clean := 0
-	for range operatorTagKillRounds {
-		tagged, ok := taggedProcesses("/proc", uid, tag)
+	for range rounds {
+		scan, ok := scanOperatorTag(procRoot, uid, tag)
 		switch {
 		case !ok:
 			clean = 0
-		case len(tagged) == 0:
+		case len(scan.own) == 0 && scan.foreign == 0:
 			clean++
 			if clean == 2 {
 				return true
 			}
 		default:
 			clean = 0
-			for _, pid := range tagged {
+			for _, pid := range scan.own {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
 			}
 		}
-		time.Sleep(cleanupProofObservationInterval)
+		time.Sleep(interval)
 	}
 	return false
 }

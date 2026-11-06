@@ -21,7 +21,7 @@ func TestTaggedProcessesMatchUIDAndSupplementaryTag(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		status := "Name:\tsh\nPPid:\t1\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\nGroups:\t" + groups + "\n"
+		status := "Name:\tsh\nState:\tS (sleeping)\nPPid:\t1\nUid:\t" + uid + "\t" + uid + "\t" + uid + "\t" + uid + "\nGroups:\t" + groups + "\n"
 		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -246,5 +246,96 @@ func TestKillOperatorTagStopsForkAndExitChainAsRoot(t *testing.T) {
 	if OperatorTagInUse(tag) {
 		_ = KillOperatorTag(uid, tag)
 		t.Fatal("a fork-and-exit chain survived proven containment")
+	}
+}
+
+// An operator process whose state cannot be read completely is never presumed
+// gone: the scan reports unsettled and containment stays unproven.
+func TestOperatorTagScanFailsClosedOnUninspectableProcesses(t *testing.T) {
+	const tag = 61009
+	write := func(t *testing.T, root, pid, status string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(root, pid), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, pid, "status"), []byte(status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clean := "Name:\tsh\nState:\tS (sleeping)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t\n"
+	cases := map[string]func(t *testing.T, root string){
+		"unreadable status": func(t *testing.T, root string) {
+			// A directory in place of the status file fails the read with
+			// EISDIR, standing in for EACCES or EIO.
+			if err := os.MkdirAll(filepath.Join(root, "21", "status"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"status without credentials": func(t *testing.T, root string) {
+			write(t, root, "21", "Name:\tsh\nState:\tS (sleeping)\n")
+		},
+		"malformed uid": func(t *testing.T, root string) {
+			write(t, root, "21", "Name:\tsh\nState:\tS (sleeping)\nUid:\tx\nGroups:\t61009\n")
+		},
+		"malformed groups": func(t *testing.T, root string) {
+			write(t, root, "21", "Name:\tsh\nState:\tS (sleeping)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t6100x\n")
+		},
+		"zombie leader whose threads cannot be listed": func(t *testing.T, root string) {
+			write(t, root, "21", "Name:\tsh\nState:\tZ (zombie)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t61009\n")
+			// A regular file in place of the task directory fails ReadDir with
+			// ENOTDIR, not ENOENT.
+			if err := os.WriteFile(filepath.Join(root, "21", "task"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"zombie leader with an unreadable thread": func(t *testing.T, root string) {
+			write(t, root, "21", "Name:\tsh\nState:\tZ (zombie)\nUid:\t20001\t20001\t20001\t20001\nGroups:\t61009\n")
+			if err := os.MkdirAll(filepath.Join(root, "21", "task", "22", "status"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			write(t, root, "20", clean)
+			setup(t, root)
+			if _, ok := taggedProcesses(root, 20001, tag); ok {
+				t.Fatal("a scan with an uninspectable process must not settle")
+			}
+			if killOperatorTag(root, 20001, tag, 4, time.Millisecond) {
+				t.Fatal("containment was proven over an uninspectable process")
+			}
+		})
+	}
+	t.Run("exited processes still settle", func(t *testing.T) {
+		root := t.TempDir()
+		write(t, root, "20", clean)
+		// A listed PID whose directory vanished exited before inspection.
+		if err := os.MkdirAll(filepath.Join(root, "23"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !killOperatorTag(root, 20001, tag, 4, time.Millisecond) {
+			t.Fatal("an exited process must not block containment")
+		}
+	})
+}
+
+// The supervisor never kills a tagged process of another UID, but while one
+// is live it cannot claim the operation is contained.
+func TestOperatorTagContainmentRefusesATaggedProcessOfAnotherUID(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "30"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status := "Name:\tsh\nState:\tS (sleeping)\nUid:\t0\t0\t0\t0\nGroups:\t61010\n"
+	if err := os.WriteFile(filepath.Join(root, "30", "status"), []byte(status), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if tagged, ok := taggedProcesses(root, 20001, 61010); !ok || len(tagged) != 0 {
+		t.Fatalf("another UID must never be selected for killing: %v %v", tagged, ok)
+	}
+	if killOperatorTag(root, 20001, 61010, 4, time.Millisecond) {
+		t.Fatal("containment was proven while a tagged process of another UID is live")
 	}
 }
