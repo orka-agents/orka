@@ -212,10 +212,13 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 	return ctrladmission.Allowed("Task provenance fields unchanged")
 }
 
-// A Task's creator establishes its coordination ancestry. Later metadata
-// updates must not move an existing worker into another Task's scope.
+// A Task's creator establishes its coordination ancestry and, for a chat
+// Task, the chat Session incarnation it belongs to. Later metadata updates
+// must not move an existing worker into another Task's scope, nor detach a
+// Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
-	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, []string{labels.LabelParentTask})
+	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch})
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
 	oldOwner, newOwner := taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent

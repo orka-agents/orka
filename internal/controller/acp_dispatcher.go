@@ -3812,7 +3812,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
-		return false, nil
+		// A Task bound to an identity starts only while its Agent still holds
+		// the identity for it (ADR 0039).
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), task, task.Status.AgentExecutionBinding)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
+			return true, nil
+		}
+		if unavailable == "" {
+			return false, nil
+		}
+		operation, reason, message = "identity-unavailable-before-admission", taskExecutionReasonIdentityUnavailable, unavailable
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -3840,6 +3850,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 				return true, releaseErr
 			}
 		}
+	}
+	if reason == taskExecutionReasonIdentityUnavailable {
+		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, operation, reason, message); err != nil {
+			return true, err
+		}
+		if err := d.failTaskBeforeRuntimeAdmission(
+			ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+		); err != nil {
+			return true, err
+		}
+		return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
 	}
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
