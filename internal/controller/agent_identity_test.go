@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -74,14 +75,26 @@ func TestAgentReconcileReportsDeclaredIdentity(t *testing.T) {
 	}
 }
 
+// testClaimGrantedAt is when test claims were granted, before any test Task.
+var testClaimGrantedAt = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+
 func claimedAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
-	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID}
+	granted := testClaimGrantedAt
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, GrantedAt: &granted}
 	return agent
+}
+
+// identityAgentReconciler is an AgentReconciler with Agent use authorization
+// enforced, so it grants identity claims.
+func identityAgentReconciler(objs ...runtime.Object) *AgentReconciler {
+	r := setupAgentReconciler(objs...)
+	r.Identity = testIdentityConfig()
+	return r
 }
 
 func boundTask(name string, agent *corev1alpha1.Agent, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, CreationTimestamp: metav1.Now()},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
 		Status: corev1alpha1.TaskStatus{Phase: phase, AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
@@ -110,7 +123,7 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	}
 
 	fresh := identityBoundTestAgent("fresh", now)
-	r = setupAgentReconciler(fresh)
+	r = identityAgentReconciler(fresh)
 	claim, err = r.reconcileIdentityClaim(context.Background(), fresh)
 	if err != nil || claim == nil {
 		t.Fatalf("an unheld identity is claimed: claim=%v err=%v", claim, err)
@@ -118,7 +131,8 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 }
 
 func releasingAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
-	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, Releasing: true}
+	granted := testClaimGrantedAt
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, Releasing: true, GrantedAt: &granted}
 	return agent
 }
 
@@ -143,9 +157,10 @@ func TestIdentityClaimIsReleasedInTwoPasses(t *testing.T) {
 	}
 
 	renamed := releasingAgent(identityBoundTestAgent("holder", time.Now()))
-	r = setupAgentReconciler(renamed)
-	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing {
-		t.Fatalf("naming the held identity again cancels the release: claim=%+v err=%v", claim, err)
+	r = identityAgentReconciler(renamed)
+	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing ||
+		claim.GrantedAt == nil || !claim.GrantedAt.After(testClaimGrantedAt.Time) {
+		t.Fatalf("naming the held identity again cancels the release and grants it anew: claim=%+v err=%v", claim, err)
 	}
 
 	switched := releasingAgent(identityBoundTestAgent("holder", time.Now()))
@@ -215,7 +230,7 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	// and scheduled runs create them.
 	task := func(parent string) *corev1alpha1.Task {
 		task := &corev1alpha1.Task{
-			ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNS, Labels: map[string]string{}},
+			ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNS, Labels: map[string]string{}, CreationTimestamp: metav1.Now()},
 			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 		}
 		if parent != "" {
@@ -279,13 +294,13 @@ func TestIdentityClaimWaitsForADeletedHoldersTasks(t *testing.T) {
 	now := time.Now()
 	deleted := claimedAgent(identityBoundTestAgent("deleted", now)) // only its Tasks remain
 	claimant := identityBoundTestAgent("claimant", now)
-	r := setupAgentReconciler(claimant, boundTask("still-running", deleted, corev1alpha1.TaskPhaseRunning))
+	r := identityAgentReconciler(claimant, boundTask("still-running", deleted, corev1alpha1.TaskPhaseRunning))
 	claim, err := r.reconcileIdentityClaim(context.Background(), claimant)
 	if claim != nil || err == nil || !strings.Contains(err.Error(), "still held by Task") {
 		t.Fatalf("a deleted holder's running Task keeps the identity taken: claim=%v err=%v", claim, err)
 	}
 
-	r = setupAgentReconciler(claimant, boundTask("done", deleted, corev1alpha1.TaskPhaseSucceeded),
+	r = identityAgentReconciler(claimant, boundTask("done", deleted, corev1alpha1.TaskPhaseSucceeded),
 		boundTask("own", claimant, corev1alpha1.TaskPhaseRunning))
 	claim, err = r.reconcileIdentityClaim(context.Background(), claimant)
 	if err != nil || claim == nil || claim.ID != testAgentIdentityID {
@@ -438,5 +453,56 @@ func TestRequireBoundIdentityClaimRechecksAQueuedTask(t *testing.T) {
 	}
 	if persisted.ExecutionState != store.PromptExecutionFailed {
 		t.Fatalf("PromptAttempt state = %s, want Failed so it is never dispatched", persisted.ExecutionState)
+	}
+}
+
+func TestIdentityClaimsAreGrantedOnlyWhileAgentUseIsEnforced(t *testing.T) {
+	declared := identityBoundTestAgent("reviewer", time.Now())
+	r := setupAgentReconciler(declared) // --agent-use-authorization-enabled is off
+	if claim, err := r.reconcileIdentityClaim(context.Background(), declared); err != nil || claim != nil {
+		t.Fatalf("no claim is granted without the use check: claim=%+v err=%v", claim, err)
+	}
+	held := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r = setupAgentReconciler(held)
+	if claim, err := r.reconcileIdentityClaim(context.Background(), held); err != nil || claim == nil || !claim.Releasing {
+		t.Fatalf("a held claim is released without the use check: claim=%+v err=%v", claim, err)
+	}
+
+	before := time.Now().Truncate(time.Second)
+	r = identityAgentReconciler(declared)
+	claim, err := r.reconcileIdentityClaim(context.Background(), declared)
+	if err != nil || claim == nil || claim.GrantedAt == nil || claim.GrantedAt.Time.Before(before) {
+		t.Fatalf("a granted claim records when: claim=%+v err=%v", claim, err)
+	}
+}
+
+func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	task := func(created time.Time) *corev1alpha1.Task {
+		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: testNS, CreationTimestamp: metav1.NewTime(created)}}
+	}
+	if _, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Time), agent); err != nil {
+		t.Fatalf("Task created in the grant's second: %v", err)
+	}
+	_, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Add(-time.Second)), agent)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "create the Task again") {
+		t.Fatalf("Task created before the grant: error = %v, want a permanent refusal", err)
+	}
+
+	// A claim released and granted again after a bound Task was created no
+	// longer covers that Task.
+	regranted := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	later := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))
+	regranted.Status.IdentityClaim.GrantedAt = &later
+	bound := boundTask("work", claimedAgent(identityBoundTestAgent("reviewer", time.Now())), corev1alpha1.TaskPhasePending)
+	bound.UID = "work-uid"
+	r = &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(bound, regranted).WithStatusSubresource(bound).Build(),
+		Identity: testIdentityConfig(), Recorder: record.NewFakeRecorder(8),
+	}
+	if _, err, handled := r.requireBoundIdentityClaim(context.Background(), bound, bound.Status.AgentExecutionBinding); err != nil || !handled {
+		t.Fatalf("Task bound before a re-grant: handled=%v err=%v, want it failed", handled, err)
 	}
 }

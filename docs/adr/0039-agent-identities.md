@@ -103,19 +103,26 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   Agent. Delegation between Agents stays bounded by the parent Agent's
   `coordination.allowedAgents`.
 - The check is mandatory for every Agent that declares an identity: such an
-  Agent is not Ready unless the policies are installed, and a Task naming it
-  fails closed otherwise. For other Agents it is opt-in, with
-  `--agent-use-authorization-enabled` and the `config/agent-use-policy`
-  policies (Helm: `controller.agentUseAuthorization.enabled`), because
-  turning it on breaks every caller that lacks a `use` grant.
+  Agent is not Ready, holds no claim, and binds no Task unless the controller
+  runs with `--agent-use-authorization-enabled`. The flag asserts that the
+  `config/agent-use-policy` policies are installed; the Helm value
+  `controller.agentUseAuthorization.enabled` sets the flag and installs the
+  policies together, and the controller does not detect the policies itself.
+  For other Agents the check is opt-in, because turning it on breaks every
+  caller that lacks a `use` grant.
 - The check runs when an object is created or edited, but the controller
   resolves a Task's Agent only when it binds the Task. A Task created while
   the check was off, or before its Agent declared an identity, was never
   checked for that identity. So a claim (stage 2) records when it was
-  granted; claims are granted only while the check is enforced and are
-  released when the controller runs without it; and a Task binds an identity
-  only if it was created after the claim was granted. An older queued Task
-  fails closed and must be created again.
+  granted (`status.identityClaim.grantedAt`); claims are granted only while
+  the check is enforced and are released when the controller runs without
+  it; and a Task binds an identity only if it was created at or after the
+  claim was granted, to the second the API server records. A claim that
+  stops releasing, because the Agent names the identity again or the check
+  is back on, counts as granted at that moment. An older queued Task fails
+  closed and must be created again, as does a Task created together with a
+  new identity-bound Agent before its claim was granted, so such Tasks are
+  created once the Agent is Ready.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
