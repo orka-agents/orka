@@ -67,7 +67,10 @@ type Source struct {
 	flightEntered func()
 }
 
-var _ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+var (
+	_ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+	_ outboundaccess.ConnectionLivenessChecker  = (*Source)(nil)
+)
 
 func (s *Source) now() time.Time {
 	if s.Now != nil {
@@ -177,6 +180,20 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		Generation:    connection.Generation,
 		Mode:          connection.Spec.Mode,
 	}, nil
+}
+
+// RequireLiveConnection implements outboundaccess.ConnectionLivenessChecker:
+// the frozen-binding check ResolveConnectionCredential applies before it
+// releases a credential, without reading or refreshing custody.
+func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) error {
+	if s == nil || s.Client == nil {
+		return errors.New("connection credential source is not configured")
+	}
+	if strings.TrimSpace(req.Frozen.UID) == "" {
+		return errors.New("connection credential requires a frozen Connection binding")
+	}
+	_, err := s.loadLiveConnection(ctx, req)
+	return err
 }
 
 // loadLiveConnection re-reads the requester's Connection and checks that it

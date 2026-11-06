@@ -29,6 +29,14 @@ type fakeConnectionSource struct {
 	credential ConnectionCredential
 	err        error
 	calls      int
+	// liveErr is what the post-exchange Connection re-check reports.
+	liveErr    error
+	liveChecks []ConnectionCredentialRequest
+}
+
+func (f *fakeConnectionSource) RequireLiveConnection(_ context.Context, req ConnectionCredentialRequest) error {
+	f.liveChecks = append(f.liveChecks, req)
+	return f.liveErr
 }
 
 func (f *fakeConnectionSource) ResolveConnectionCredential(_ context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {

@@ -158,6 +158,19 @@ func TestAgentIdentityDelegationEndedWhileIssuingIsADelegationRefusal(t *testing
 	}
 }
 
+func TestAgentIdentityLinkChangedWhileIssuingIsADelegationRefusal(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "obo-token"}, &lines)
+	resolver.Connections.(*fakeConnectionSource).liveErr = errors.New("the Connection is being deleted")
+	if _, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); !errors.Is(err, ErrRequesterLinkChanged) {
+		t.Fatalf("Resolve() = %v, want ErrRequesterLinkChanged", err)
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalDelegation+`"`) || strings.Contains(lines[0], "obo-token") {
+		t.Fatalf("records = %v, want one delegation refusal without the credential", lines)
+	}
+}
+
 func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
 	now := time.Now()
 	for name, mutate := range map[string]func(*ResolveRequest){
