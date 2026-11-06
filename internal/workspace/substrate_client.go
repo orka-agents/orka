@@ -66,6 +66,7 @@ func newSubstrateConnection(cfg SubstrateConfig, controlAuth bool) (*grpc.Client
 		return nil, err
 	}
 	options := []grpc.DialOption{grpc.WithTransportCredentials(transportCredentials), grpc.WithUnaryInterceptor(substrateRPCDeadline)}
+	options = append(options, substrateGRPCTelemetryOptions(cfg.EnableTelemetry)...)
 	if controlAuth {
 		mtls := cfg.APICertFile != "" && cfg.APIKeyFile != ""
 		bearer := cfg.APIBearerTokenFile != ""
@@ -139,7 +140,7 @@ func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
 		return nil, err
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true, Proxy: nil}
-	return &http.Client{Transport: transport}, nil
+	return &http.Client{Transport: newSubstrateTracingTransport(transport, cfg.EnableTelemetry)}, nil
 }
 
 func substrateTLSConfig(cfg SubstrateConfig) (*tls.Config, error) {

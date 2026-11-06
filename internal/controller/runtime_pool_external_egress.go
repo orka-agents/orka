@@ -5,6 +5,7 @@ package controller
 import (
 	"fmt"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,19 +45,35 @@ func externalRuntimeUsesEgressAllowlist(provider *workspacev1alpha1.ExecutionWor
 // host-name allowlist: the in-cluster provider authentication proxy and the
 // controller artifact/MCP broker API, the destinations Core's NetworkPolicy
 // shape admits besides DNS (the egress gateway resolves allowlisted names).
+// With --runtime-telemetry-collector-egress and telemetry enabled, the OTLP
+// collector endpoints projected into the supervisor are admitted too.
 // Cleartext origins become HTTP rules; TLS origins become TLSPassthrough so the
 // runtime still verifies the in-cluster origin's own certificate. Any origin
 // the allowlist cannot express fails admission.
 func (r *RuntimePoolReconciler) externalRuntimeEgress(cfg runtimePoolConfig) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
+	return r.externalRuntimeEgressWithEnv(cfg, os.Getenv)
+}
+
+func (r *RuntimePoolReconciler) externalRuntimeEgressWithEnv(cfg runtimePoolConfig, getenv func(string) string) (*workspacev1alpha1.RuntimeEgressPolicy, error) {
 	type destination struct {
 		host string
 		port int32
 	}
-	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{}
-	for _, origin := range []struct{ name, raw string }{
+	type origin struct{ name, raw string }
+	origins := []origin{
 		{name: "provider proxy", raw: cfg.providerProxy.baseURL},
 		{name: "controller API", raw: r.ControllerAPIURL},
-	} {
+	}
+	if r.EnableTelemetry && r.TelemetryCollectorEgress {
+		for _, endpoint := range runtimePoolTelemetryCollectorEndpoints(true, getenv) {
+			if err := validateRuntimeTelemetryCollectorOrigin(endpoint); err != nil {
+				return nil, fmt.Errorf("telemetry collector origin cannot be admitted to the runtime egress allowlist: %w", err)
+			}
+			origins = append(origins, origin{name: "telemetry collector", raw: endpoint})
+		}
+	}
+	granted := map[destination]workspacev1alpha1.RuntimeEgressProtocol{}
+	for _, origin := range origins {
 		host, port, protocol, err := externalEgressOrigin(origin.raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s origin cannot be admitted to the runtime egress allowlist: %w", origin.name, err)

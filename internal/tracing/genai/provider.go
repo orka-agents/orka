@@ -47,3 +47,25 @@ func NormalizeProviderName(name string) string {
 		return strings.TrimSpace(name)
 	}
 }
+
+// AgentRuntimeProvider maps an Orka ACP agent runtime and its pinned profile
+// model to the GenAI provider the runtime's model API speaks, and the model
+// name requested from that provider. OpenCode pins "provider/model".
+func AgentRuntimeProvider(runtime, model string) (provider, requestModel string) {
+	model = strings.TrimSpace(model)
+	switch strings.ToLower(strings.TrimSpace(runtime)) {
+	case "claude":
+		return ProviderAnthropic, model
+	case "codex", "copilot", "agentkit":
+		return ProviderOpenAI, model
+	case "foundry":
+		return ProviderAzureOpenAI, model
+	case "opencode":
+		if providerID, upstream, ok := strings.Cut(model, "/"); ok && strings.TrimSpace(providerID) != "" && strings.TrimSpace(upstream) != "" {
+			return NormalizeProviderName(providerID), strings.TrimSpace(upstream)
+		}
+		return "", model
+	default:
+		return "", model
+	}
+}

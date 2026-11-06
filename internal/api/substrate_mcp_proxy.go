@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -134,7 +135,10 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 	timeout := substrateMCPProxyTimeout(tool)
 	// fasthttp streams the body after this handler returns, so the upstream
 	// request is bounded by its own timeout rather than the handler context.
-	upstreamCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// Only the trace identity carries over, so the routed Actor call joins the
+	// caller's trace without inheriting the handler's cancellation.
+	upstreamCtx, cancel := context.WithTimeout(
+		trace.ContextWithSpanContext(context.Background(), trace.SpanContextFromContext(c.Context())), timeout)
 	request, err := h.substrateMCPRouter.NewRequest(upstreamCtx, tool, method, bytes.NewReader(body))
 	if err != nil {
 		cancel()

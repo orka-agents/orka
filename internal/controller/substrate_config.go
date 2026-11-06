@@ -60,6 +60,9 @@ type SubstrateConfig struct {
 	ClaimTimeout          time.Duration
 	CommandTimeout        time.Duration
 	CleanupPolicy         corev1alpha1.WorkspaceCleanupPolicy
+	// EnableTelemetry mirrors --enable-telemetry: Substrate control and router
+	// clients then propagate Task trace context and record client spans.
+	EnableTelemetry bool
 }
 
 // DefaultSubstrateConfig returns safe alpha defaults. Substrate is still
@@ -256,5 +259,6 @@ func (c SubstrateConfig) WorkspaceClientConfig() workspace.SubstrateConfig {
 		APICertFile: c.APICertFile, APIKeyFile: c.APIKeyFile,
 		APIBearerTokenFile: c.APIBearerTokenFile, APIInsecureSkipVerify: c.APIInsecureSkipVerify,
 		Atespace: c.Atespace, RouterURL: c.RouterURL,
+		EnableTelemetry: c.EnableTelemetry,
 	}
 }

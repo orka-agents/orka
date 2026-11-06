@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	collectormetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	collectortrace "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -30,6 +31,16 @@ func (r *telemetryGRPCReceiver) Export(ctx context.Context, request *collectortr
 	return &collectortrace.ExportTraceServiceResponse{}, nil
 }
 
+// telemetryGRPCMetricsReceiver accepts the GenAI metrics a generic OTLP
+// endpoint also enables.
+type telemetryGRPCMetricsReceiver struct {
+	collectormetrics.UnimplementedMetricsServiceServer
+}
+
+func (telemetryGRPCMetricsReceiver) Export(context.Context, *collectormetrics.ExportMetricsServiceRequest) (*collectormetrics.ExportMetricsServiceResponse, error) {
+	return &collectormetrics.ExportMetricsServiceResponse{}, nil
+}
+
 func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -38,6 +49,7 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	server := grpc.NewServer()
 	receiver := &telemetryGRPCReceiver{t: t, received: make(chan *collectortrace.ExportTraceServiceRequest, 2)}
 	collectortrace.RegisterTraceServiceServer(server, receiver)
+	collectormetrics.RegisterMetricsServiceServer(server, telemetryGRPCMetricsReceiver{})
 	go func() { _ = server.Serve(listener) }()
 	defer server.Stop()
 	for _, prefix := range []string{"http://"} {
