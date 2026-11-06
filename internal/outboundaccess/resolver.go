@@ -781,12 +781,9 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		tokenRequest.UserAssertion = credential.AccessToken
 		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
 	}
-	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
+	token, err := r.issueAgentIdentityToken(ctx, *binding, tokenRequest)
 	if err != nil {
-		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, fmt.Errorf("issue agent identity credential: %w", err))
-	}
-	if strings.TrimSpace(token) == "" {
-		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, errors.New("agent identity issuer returned an empty credential"))
+		return Resolution{}, err
 	}
 	header, prefix := credentialOutput(identity.Output)
 	return Resolution{
@@ -797,6 +794,30 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		ConnectionUID:    connectionUID,
 		Parameters:       parameters,
 	}, nil
+}
+
+// issueAgentIdentityToken asks the issuer for the credential. In Delegated
+// mode it checks the delegation is still live again once the credential is
+// issued: refreshing the requester's token and the on-behalf-of exchange can
+// take many seconds, and a Task or Session ended meanwhile must not get it.
+func (r *KubernetesResolver) issueAgentIdentityToken(ctx context.Context, binding AgentIdentityBinding, tokenRequest AgentIdentityTokenRequest) (string, error) {
+	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
+	if err != nil {
+		return "", refuseAgentIdentity(agentIdentityRefusalIssuer, fmt.Errorf("issue agent identity credential: %w", err))
+	}
+	if strings.TrimSpace(token) == "" {
+		return "", refuseAgentIdentity(agentIdentityRefusalIssuer, errors.New("agent identity issuer returned an empty credential"))
+	}
+	if tokenRequest.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
+		return token, nil
+	}
+	if r.DelegationLive == nil {
+		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, errors.New("delegated agent identity access requires the controller's Task and Session check"))
+	}
+	if err := r.DelegationLive(ctx, binding); err != nil {
+		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("the delegation ended while its credential was issued: %w", err))
+	}
+	return token, nil
 }
 
 // DefaultMaxDelegationAge is a delegated policy's age when it sets none, and
