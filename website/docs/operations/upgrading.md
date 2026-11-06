@@ -65,6 +65,26 @@ spec:
 Startup loading of reviewed memories into the prompt is separate and unchanged; tool
 opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
 
+## Task webhooks are signed and fail closed {#task-webhooks}
+
+`spec.webhookURL` notices are now signed, durable, and bounded. Review receivers before
+upgrading:
+
+- Every request carries an Ed25519-signed `X-Orka-Signature` and a stable
+  `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
+  against `/.well-known/orka/task-webhook-jwks.json`. See
+  [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
+- The controller creates the signing Secret in its namespace on first use. It needs the
+  Secret `create` and `update` access the controller role already grants.
+- Destinations are checked at connect time. A DNS failure, any non-public resolved
+  address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
+  a private address stops receiving notices. Use a Service in the Task's namespace for
+  in-cluster receivers.
+- Failed deliveries are retried at most 8 times with exponential backoff, not every 30
+  seconds forever. Literal private IPs and other policy violations fail at once.
+- The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
+  fields are unchanged.
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database

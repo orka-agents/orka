@@ -109,6 +109,7 @@ spec:
             {{- if include "orka.agentExecutionSnapshotGenerated" . }}
             - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
             - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
+            - {{ printf "--task-webhook-signing-secret=%s" (default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (default "" .Values.controller.taskWebhooks.signingSecretName))) | quote }}
             {{- end }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
