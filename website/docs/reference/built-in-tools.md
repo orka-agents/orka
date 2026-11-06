@@ -48,7 +48,7 @@ endpoints also offer the first five to clients.
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `web_search` | Search the web using a configured search API or DuckDuckGo | `query` (required), `limit` (default 5) |
+| `web_search` | Search the web using a configured search API or DuckDuckGo. A failed search returns a tool error, never placeholder results | `query` (required), `limit` (default 5) |
 | `code_exec` | Execute code in a sandboxed environment | `language` (python/javascript/bash), `code`, `timeout` (default 30s, clamped to 60s) |
 | `file_read` | Read files from the workspace | `path`, `offset`, `limit` (max 1MB) |
 | `web_fetch` | Fetch and extract URL content | `url` (required), `max_chars` (default 50000), `raw` |
