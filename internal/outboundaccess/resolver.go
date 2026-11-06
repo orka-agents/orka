@@ -781,7 +781,7 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		tokenRequest.UserAssertion = credential.AccessToken
 		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
 	}
-	token, err := r.issueAgentIdentityToken(ctx, *binding, tokenRequest)
+	token, err := r.issueAgentIdentityToken(ctx, policy, *binding, tokenRequest)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -800,7 +800,12 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 // mode it checks the delegation is still live again once the credential is
 // issued: refreshing the requester's token and the on-behalf-of exchange can
 // take many seconds, and a Task or Session ended meanwhile must not get it.
-func (r *KubernetesResolver) issueAgentIdentityToken(ctx context.Context, binding AgentIdentityBinding, tokenRequest AgentIdentityTokenRequest) (string, error) {
+func (r *KubernetesResolver) issueAgentIdentityToken(
+	ctx context.Context,
+	policy *corev1alpha1.OutboundAccessPolicy,
+	binding AgentIdentityBinding,
+	tokenRequest AgentIdentityTokenRequest,
+) (string, error) {
 	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
 	if err != nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalIssuer, fmt.Errorf("issue agent identity credential: %w", err))
@@ -817,7 +822,23 @@ func (r *KubernetesResolver) issueAgentIdentityToken(ctx context.Context, bindin
 	if err := r.DelegationLive(ctx, binding); err != nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("the delegation ended while its credential was issued: %w", err))
 	}
+	if r.delegationExpired(policy, binding) {
+		return "", errDelegationExpired
+	}
 	return token, nil
+}
+
+var errDelegationExpired = errors.New("the delegation has expired; the requester must act again for the Agent to act for them")
+
+// delegationExpired reports whether maxDelegationAge has passed since the
+// root requester's last action, or that action is unknown.
+func (r *KubernetesResolver) delegationExpired(policy *corev1alpha1.OutboundAccessPolicy, binding AgentIdentityBinding) bool {
+	age, _ := EffectiveMaxDelegationAge(policy, r.MaxDelegationAge)
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	return binding.DelegationStart.IsZero() || now.After(binding.DelegationStart.Add(age))
 }
 
 // DefaultMaxDelegationAge is a delegated policy's age when it sets none, and
@@ -855,14 +876,8 @@ func (r *KubernetesResolver) resolveDelegation(
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
 			"delegated agent identity access runs only on built-in RuntimePools, whose network Orka controls")
 	}
-	age, _ := EffectiveMaxDelegationAge(policy, r.MaxDelegationAge)
-	now := time.Now()
-	if r.Now != nil {
-		now = r.Now()
-	}
-	if binding.DelegationStart.IsZero() || now.After(binding.DelegationStart.Add(age)) {
-		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
-			"the delegation has expired; the requester must act again for the Agent to act for them")
+	if r.delegationExpired(policy, *binding) {
+		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errDelegationExpired
 	}
 	if r.DelegationLive == nil {
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(
