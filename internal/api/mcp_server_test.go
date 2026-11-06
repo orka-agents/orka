@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -949,6 +950,22 @@ func TestMCPStalledUploadHoldsNoPermit(t *testing.T) {
 	defer response.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, response.StatusCode, "the stalled upload holds no permit")
 	require.NoError(t, stalled.Close())
+
+	// A chunked body carries no Content-Length and fasthttp does not bound
+	// the stream: the read stops one byte past the limit and is refused
+	// without waiting for the rest of the upload.
+	chunked, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	defer chunked.Close() //nolint:errcheck
+	size := mcpMaxRequestBytes + 1024
+	_, err = fmt.Fprintf(chunked, "POST %s HTTP/1.1\r\nHost: orka\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n",
+		mcpEndpointPath, size, strings.Repeat(" ", size))
+	require.NoError(t, err)
+	require.NoError(t, chunked.SetReadDeadline(time.Now().Add(10*time.Second)))
+	tooLarge, err := http.ReadResponse(bufio.NewReader(chunked), nil)
+	require.NoError(t, err, "the oversized chunked body is refused before the upload ends")
+	defer tooLarge.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusRequestEntityTooLarge, tooLarge.StatusCode)
 
 	// Decoding a Content-Encoding is work admitted by a permit: with every
 	// permit taken, a compressed body is refused before it is expanded.

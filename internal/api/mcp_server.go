@@ -217,7 +217,7 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 		c.RequestCtx().SetConnectionClose()
 		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
 	}
-	if len(c.BodyRaw()) > mcpMaxRequestBytes {
+	if !readMCPRawBody(c) {
 		c.RequestCtx().SetConnectionClose()
 		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
 	}
@@ -265,6 +265,24 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 		result = withResultType(result, "complete")
 	}
 	return m.writeResult(c, request.ID, result)
+}
+
+// readMCPRawBody buffers the raw request body, reading at most one byte past
+// mcpMaxRequestBytes: fasthttp does not bound a streamed chunked body. It
+// reports false when the body is too large or cannot be read.
+func readMCPRawBody(c fiber.Ctx) bool {
+	request := c.Request()
+	stream := request.BodyStream()
+	if stream == nil {
+		return len(request.Body()) <= mcpMaxRequestBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(stream, mcpMaxRequestBytes+1))
+	if err != nil || len(data) > mcpMaxRequestBytes {
+		return false
+	}
+	// Replace the consumed stream, so decoding reads the buffered bytes.
+	request.SetBodyRaw(data)
+	return true
 }
 
 func decodeMCPRequest(body []byte) (mcpRequest, *mcpError) {
