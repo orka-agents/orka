@@ -1517,32 +1517,57 @@ func (ch *ChatHandler) cancelAndWaitForActiveChat(ctx context.Context, namespace
 }
 
 // stopActiveChat stops a chat Session's in-flight request, as a client
-// disconnect would, and waits until it has released its reservation. The
-// Session is kept and accepts the next message. It reports whether a request
-// was running.
-func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, error) {
-	ch.activeChatsMu.Lock()
-	request := ch.activeChats[activeChatKey(namespace, sessionID)]
-	ch.activeChatsMu.Unlock()
-	if request == nil {
-		return false, nil
+// disconnect would, and waits until it has stopped. Until release is called,
+// the Session stays fenced: no next message can start, so the caller can
+// cancel the stopped turn's Tasks without catching a new turn's. The Session
+// is kept and accepts the next message after release. It reports whether a
+// request was running.
+func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID string) (bool, func(), error) {
+	key := activeChatKey(namespace, sessionID)
+	for range 3 {
+		ch.activeChatsMu.Lock()
+		request := ch.activeChats[key]
+		if request != nil {
+			// A gate holds the entry after the request finishes, as a
+			// deletion does, so reserveActiveChat refuses the next message.
+			request.deleteWaiters++
+		}
+		ch.activeChatsMu.Unlock()
+		if request == nil {
+			// Idle: hold the reservation ourselves. A request that started
+			// meanwhile is stopped on the next pass.
+			reservation, err := ch.reserveActiveChat(namespace, sessionID)
+			if errors.Is(err, store.ErrConflict) {
+				continue
+			}
+			if err != nil {
+				return false, nil, err
+			}
+			return false, func() { ch.finishActiveChatReservation(reservation, nil) }, nil
+		}
+		release := func() { ch.abandonChatDeletionWaiter(namespace, sessionID, request) }
+		running := true
+		select {
+		case <-request.done:
+			running = false
+		default:
+			request.cancel()
+		}
+		timer := time.NewTimer(chatDurabilityTimeout)
+		select {
+		case <-request.done:
+			timer.Stop()
+			return running, release, nil
+		case <-timer.C:
+			release()
+			return true, nil, fmt.Errorf("%w: active chat did not stop before the cancellation deadline", store.ErrNotReady)
+		case <-ctx.Done():
+			timer.Stop()
+			release()
+			return true, nil, ctx.Err()
+		}
 	}
-	select {
-	case <-request.done:
-		return false, nil
-	default:
-	}
-	request.cancel()
-	timer := time.NewTimer(chatDurabilityTimeout)
-	defer timer.Stop()
-	select {
-	case <-request.done:
-		return true, nil
-	case <-timer.C:
-		return true, fmt.Errorf("%w: active chat did not stop before the cancellation deadline", store.ErrNotReady)
-	case <-ctx.Done():
-		return true, ctx.Err()
-	}
+	return false, nil, fmt.Errorf("%w: chat session %s/%s kept starting requests", store.ErrNotReady, namespace, sessionID)
 }
 
 func (ch *ChatHandler) clearChatDeletionGate(namespace, sessionID string) {
