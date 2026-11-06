@@ -13,7 +13,22 @@ pyflags="-I -W ignore::SyntaxWarning"
 config_dir=${AZURE_CONFIG_DIR:-${HOME:-/tmp}/.azure}
 marker=$config_dir/.orka-signed-in
 case "${1:-}" in
-  login|logout|cloud|version|--version|-h|--help|help|"") ;;
+  logout)
+    rm -f "$marker"
+    ;;
+  cloud)
+    # The supervisor's cloud is the only route to Azure in this runtime;
+    # switching to another cloud would only send az past Orka and fail.
+    if [ -n "${IDENTITY_ENDPOINT:-}" ]; then
+      case "${2:-}" in
+        set|register|update|unregister)
+          echo "ERROR: Orka reaches Azure only through the preselected cloud; 'az cloud ${2}' is not available in this runtime." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
+  login|version|--version|-h|--help|help|"") ;;
   *)
     if [ -n "${IDENTITY_ENDPOINT:-}" ] && [ ! -e "$marker" ]; then
       if "$python" $pyflags -m azure.cli login --identity --allow-no-subscriptions --output none >/dev/null 2>&1; then
