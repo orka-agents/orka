@@ -123,8 +123,9 @@ type ACPDispatcher struct {
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
 	// parkedRuntimeReleases holds parked turns' RuntimeSessions whose
-	// release failed, by Session UID, until the next turn retries it.
-	parkedRuntimeReleases map[string]acpParkedRuntimeRelease
+	// release failed, by exact incarnation, until a later turn of the same
+	// Session retries them.
+	parkedRuntimeReleases map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease
 	finalizedTurns        map[types.UID]string
 	staleRecoveryMu       sync.Mutex
 

@@ -72,7 +72,7 @@ func (d *ACPDispatcher) releaseParkedRuntimeSession(
 		logf.FromContext(ctx).Error(err, "release parked ACP RuntimeSession", "namespace", task.Namespace, "task", task.Name,
 			"runtimeSessionID", runtimeSessionID)
 		metrics.RecordTaskWaitRuntimeRelease("failed")
-		d.setPendingParkedRuntimeRelease(sessionUID, acpParkedRuntimeRelease{
+		d.setPendingParkedRuntimeRelease(parkedRuntimeReleaseKey(sessionUID, runtimeFence), acpParkedRuntimeRelease{
 			task: task.DeepCopy(), runtimeSessionID: runtimeSessionID, fence: runtimeFence,
 		})
 		return
@@ -81,7 +81,7 @@ func (d *ACPDispatcher) releaseParkedRuntimeSession(
 	// later turn may already have installed a newer binding. Forget only the
 	// binding of the RuntimeSession this deleted.
 	d.forgetRetiredRuntimeSessionBinding(sessionUID, runtimeFence)
-	d.clearPendingParkedRuntimeRelease(sessionUID)
+	d.clearPendingParkedRuntimeRelease(parkedRuntimeReleaseKey(sessionUID, runtimeFence))
 	metrics.RecordTaskWaitRuntimeRelease("released")
 }
 
@@ -99,11 +99,12 @@ func (d *ACPDispatcher) forgetRetiredRuntimeSessionBinding(sessionUID string, re
 	delete(d.runtimeSessions, key)
 }
 
-// retryParkedRuntimeRelease retries the failed release of a parked turn's
-// RuntimeSession before the next turn of the same Session claims a resident
-// slot, so that cleanup never waits for spare capacity. It never deletes a
-// RuntimeSession generation the current turn could use, and forgets a
-// release whose runtime instance was replaced, which retired its sessions.
+// retryParkedRuntimeRelease retries every failed release of a parked turn's
+// RuntimeSession in this Session before the next turn claims a resident
+// slot, so that cleanup never waits for spare capacity. Each release is its
+// own exact incarnation and is forgotten only once that deletion succeeded
+// or its runtime instance was replaced, which retired its sessions. It never
+// deletes a RuntimeSession generation the current turn could use.
 func (d *ACPDispatcher) retryParkedRuntimeRelease(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -111,45 +112,68 @@ func (d *ACPDispatcher) retryParkedRuntimeRelease(
 	runtimeInstanceID harnessv2.RuntimeInstanceID,
 	generation uint64,
 ) {
-	pending, ok := d.pendingParkedRuntimeRelease(sessionUID)
-	if !ok {
-		return
+	for key, pending := range d.pendingParkedRuntimeReleases(sessionUID) {
+		if pending.fence.RuntimeInstanceID != runtimeInstanceID {
+			d.clearPendingParkedRuntimeRelease(key)
+			continue
+		}
+		if pending.fence.RuntimeSessionGeneration >= generation {
+			continue
+		}
+		if err := d.deleteRuntimeSession(context.WithoutCancel(ctx), runtimeClient, pending.runtimeSessionID, pending.task, pending.fence, "task_parked"); err != nil {
+			logf.FromContext(ctx).Error(err, "retry release of parked ACP RuntimeSession", "namespace", pending.task.Namespace,
+				"task", pending.task.Name, "runtimeSessionID", pending.runtimeSessionID)
+			metrics.RecordTaskWaitRuntimeRelease("failed")
+			continue
+		}
+		d.clearPendingParkedRuntimeRelease(key)
+		metrics.RecordTaskWaitRuntimeRelease("released")
 	}
-	if pending.fence.RuntimeInstanceID != runtimeInstanceID {
-		d.clearPendingParkedRuntimeRelease(sessionUID)
-		return
-	}
-	if pending.fence.RuntimeSessionGeneration >= generation {
-		return
-	}
-	if err := d.deleteRuntimeSession(context.WithoutCancel(ctx), runtimeClient, pending.runtimeSessionID, pending.task, pending.fence, "task_parked"); err != nil {
-		logf.FromContext(ctx).Error(err, "retry release of parked ACP RuntimeSession", "namespace", pending.task.Namespace,
-			"task", pending.task.Name, "runtimeSessionID", pending.runtimeSessionID)
-		metrics.RecordTaskWaitRuntimeRelease("failed")
-		return
-	}
-	d.clearPendingParkedRuntimeRelease(sessionUID)
-	metrics.RecordTaskWaitRuntimeRelease("released")
 }
 
-func (d *ACPDispatcher) setPendingParkedRuntimeRelease(sessionUID string, release acpParkedRuntimeRelease) {
+// acpParkedRuntimeReleaseKey names one exact RuntimeSession incarnation, so
+// releases of different generations or runtime boots never replace or clear
+// each other.
+type acpParkedRuntimeReleaseKey struct {
+	sessionUID string
+	generation uint64
+	instanceID harnessv2.RuntimeInstanceID
+	bootID     harnessv2.SupervisorBootID
+}
+
+func parkedRuntimeReleaseKey(sessionUID string, fence harnessv2.Fence) acpParkedRuntimeReleaseKey {
+	return acpParkedRuntimeReleaseKey{
+		sessionUID: strings.TrimSpace(sessionUID), generation: fence.RuntimeSessionGeneration,
+		instanceID: fence.RuntimeInstanceID, bootID: fence.SupervisorBootID,
+	}
+}
+
+func (d *ACPDispatcher) setPendingParkedRuntimeRelease(key acpParkedRuntimeReleaseKey, release acpParkedRuntimeRelease) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.parkedRuntimeReleases == nil {
-		d.parkedRuntimeReleases = make(map[string]acpParkedRuntimeRelease)
+		d.parkedRuntimeReleases = make(map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease)
 	}
-	d.parkedRuntimeReleases[strings.TrimSpace(sessionUID)] = release
+	d.parkedRuntimeReleases[key] = release
 }
 
-func (d *ACPDispatcher) pendingParkedRuntimeRelease(sessionUID string) (acpParkedRuntimeRelease, bool) {
+// pendingParkedRuntimeReleases returns a snapshot of the Session's pending
+// releases.
+func (d *ACPDispatcher) pendingParkedRuntimeReleases(sessionUID string) map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	release, ok := d.parkedRuntimeReleases[strings.TrimSpace(sessionUID)]
-	return release, ok
+	sessionUID = strings.TrimSpace(sessionUID)
+	pending := make(map[acpParkedRuntimeReleaseKey]acpParkedRuntimeRelease)
+	for key, release := range d.parkedRuntimeReleases {
+		if key.sessionUID == sessionUID {
+			pending[key] = release
+		}
+	}
+	return pending
 }
 
-func (d *ACPDispatcher) clearPendingParkedRuntimeRelease(sessionUID string) {
+func (d *ACPDispatcher) clearPendingParkedRuntimeRelease(key acpParkedRuntimeReleaseKey) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	delete(d.parkedRuntimeReleases, strings.TrimSpace(sessionUID))
+	delete(d.parkedRuntimeReleases, key)
 }
