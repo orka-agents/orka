@@ -141,17 +141,36 @@ native_template_manifest() {
 }
 # Orka's controller authenticates with its pod certificate. Grant it editor on
 # its Atespace and global viewer for worker placement reads; it is never a
-# bootstrap owner.
+# bootstrap owner. "get access-policy" exits 0 with no output when a scope has
+# no policy, and "create" refuses an existing one, so read the policy as JSON
+# and either create it or merge the binding into it under its uid/version
+# preconditions.
+ensure_access_binding() {
+  local role="$1" principal="$2" manifest="$3"
+  shift 3
+  local current
+  current="$(kubectl_ate get access-policy "$@" -o json)"
+  if [[ -z "${current}" ]]; then
+    jq -n --arg role "${role}" --arg principal "${principal}" \
+      '{metadata:{name:"default"},bindings:[{role:$role,members:[$principal]}]}' >"${manifest}"
+    kubectl_ate create access-policy "$@" -f "${manifest}" >/dev/null
+    return
+  fi
+  if jq -e --arg role "${role}" --arg principal "${principal}" \
+    'any(.bindings[]?; .role == $role and any(.members[]?; . == $principal))' <<<"${current}" >/dev/null; then
+    return
+  fi
+  jq --arg role "${role}" --arg principal "${principal}" '
+    .bindings = ((.bindings // []) as $bindings |
+      if any($bindings[]; .role == $role)
+      then $bindings | map(if .role == $role then .members = ((.members // []) + [$principal]) else . end)
+      else $bindings + [{role:$role,members:[$principal]}] end)' <<<"${current}" >"${manifest}"
+  kubectl_ate update access-policy "$@" -f "${manifest}" >/dev/null
+}
 grant_orka_native_access() {
   local principal="user:spiffe://cluster.local/ns/${ORKA_NAMESPACE}/sa/orka-controller-manager"
-  jq -n --arg principal "${principal}" '{metadata:{name:"default"},bindings:[{role:"editor",members:[$principal]}]}' \
-    >"${TMP_ROOT}/orka-atespace-policy.json"
-  jq -n --arg principal "${principal}" '{metadata:{name:"default"},bindings:[{role:"viewer",members:[$principal]}]}' \
-    >"${TMP_ROOT}/orka-global-policy.json"
-  kubectl_ate get access-policy -a orka-system >/dev/null 2>&1 ||
-    kubectl_ate create access-policy -a orka-system -f "${TMP_ROOT}/orka-atespace-policy.json"
-  kubectl_ate get access-policy --global >/dev/null 2>&1 ||
-    kubectl_ate create access-policy --global -f "${TMP_ROOT}/orka-global-policy.json"
+  ensure_access_binding editor "${principal}" "${TMP_ROOT}/orka-atespace-policy.json" -a orka-system
+  ensure_access_binding viewer "${principal}" "${TMP_ROOT}/orka-global-policy.json" --global
 }
 create_native_resources() {
   local worker_image="$1" mcp_image="$2"
