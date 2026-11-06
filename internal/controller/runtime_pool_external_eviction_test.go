@@ -349,3 +349,70 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 		})
 	}
 }
+
+// startRetirementDrain begins an exact retirement for a reason other than
+// eviction and returns once Core has requested the authenticated drain.
+func startRetirementDrain(t *testing.T, f *externalRuntimePoolFixture) {
+	t.Helper()
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	pool.Annotations[externalRuntimeRetirementRequestedAnnotation] = booleanTrueValue
+	if err := f.r.Update(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if f.supervisor.drainCalls == 0 || f.currentWorkspace(t).Spec.Retirement != nil {
+		t.Fatal("retirement did not reach the authenticated drain")
+	}
+}
+
+// Termination that begins while a retirement drain is already running still
+// records its window, and Suspend is refused once that window has passed.
+func TestExternalEvictionDuringRetirementDrainIsRecordedAndGated(t *testing.T) {
+	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	startRetirementDrain(t, f)
+	if record := evictionRecord(t, f); record != nil {
+		t.Fatalf("eviction recorded before any signal: %#v", record)
+	}
+	late := quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkerEviction)
+	late.Status.Drain.RequestedAt = runtimePoolTestNow.Add(-harnessv2.WorkerEvictionSuspendWindow - time.Minute)
+	f.supervisor.probe = late
+	runtimePoolReconcile(t, f.r, f.pool)
+	record := evictionRecord(t, f)
+	if record == nil || record.Source != externalEvictionSourceSupervisor || !record.Deadline.Equal(late.Status.Drain.RequestedAt.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("eviction during retirement drain = %#v", record)
+	}
+	for range 2 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement != nil {
+		t.Fatalf("Suspend authorized after an eviction window observed during the drain: %#v", retirement)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+		t.Fatalf("deadline condition = %#v", condition)
+	}
+}
+
+// The authenticated probe can outlast a short window; the deadline is
+// rechecked immediately before Suspend is authorized.
+func TestExternalEvictionDeadlineIsRecheckedAfterTheDrainProbe(t *testing.T) {
+	f, w, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	deadline := runtimePoolTestNow.Add(time.Minute)
+	if _, err := f.r.beginExternalRuntimeEviction(t.Context(), &pool, w, externalEvictionSourceWorker, runtimePoolTestNow, deadline); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	f.supervisor.afterProbe = func() { f.r.Now = func() time.Time { return deadline } }
+	runtimePoolReconcile(t, f.r, f.pool)
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement != nil {
+		t.Fatalf("Suspend authorized after the deadline passed during the probe: %#v", retirement)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+		t.Fatalf("deadline condition = %#v", condition)
+	}
+}

@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -205,9 +206,39 @@ func (r *RuntimePoolReconciler) beginExternalRuntimeEviction(
 	source string,
 	signaledAt, deadline time.Time,
 ) (ctrl.Result, error) {
+	record, err := r.recordExternalRuntimeEviction(ctx, pool, w, source, signaledAt, deadline, true)
+	if errors.Is(err, errExternalEvictionUnbound) {
+		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, err.Error())
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !record.Suspendable {
+		return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionNotSuspendable,
+			"runtime worker is terminating and this workspace cannot preserve data; the instance is lost and uncertain work is never replayed")
+	}
+	return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolReasonEvictionDraining,
+		fmt.Sprintf("runtime worker is terminating; draining for data-only suspension before %s", record.Deadline.Format(time.RFC3339)))
+}
+
+var errExternalEvictionUnbound = errors.New("runtime worker eviction observed without an exact instance identity or with an invalid record")
+
+// recordExternalRuntimeEviction persists an eviction signal for the exact
+// current instance, merging it with any earlier record: the earliest signal
+// and the shortest window win, so a later observation never extends the time
+// left to suspend. It is also used while a retirement drain is already in
+// progress, where requestRetirement is false.
+func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
+	ctx context.Context,
+	pool *corev1alpha1.RuntimePool,
+	w *workspacev1alpha1.ExecutionWorkspace,
+	source string,
+	signaledAt, deadline time.Time,
+	requestRetirement bool,
+) (*externalRuntimeEviction, error) {
 	a := w.Status.Allocation
 	if w.Spec.Workload == nil || a == nil || !a.Identity.Valid() || a.Sequence != w.Spec.Workload.Sequence || a.Key != w.Spec.Workload.Key {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime worker eviction observed without an exact instance identity")
+		return nil, errExternalEvictionUnbound
 	}
 	record := externalRuntimeEviction{
 		WorkspaceUID: w.UID, Sequence: a.Sequence, Identity: a.Identity, Source: source,
@@ -215,11 +246,9 @@ func (r *RuntimePoolReconciler) beginExternalRuntimeEviction(
 	}
 	existing, malformed := currentExternalRuntimeEviction(pool, w)
 	if malformed {
-		return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, "runtime eviction record is invalid")
+		return nil, errExternalEvictionUnbound
 	}
 	if existing != nil {
-		// The earliest signal and the shortest window win; a later observation
-		// never extends the time left to suspend.
 		record.Source, record.Suspendable = existing.Source, existing.Suspendable
 		if existing.SignaledAt.Before(record.SignaledAt) {
 			record.SignaledAt = existing.SignaledAt
@@ -228,30 +257,54 @@ func (r *RuntimePoolReconciler) beginExternalRuntimeEviction(
 			record.Deadline = existing.Deadline
 		}
 	}
+	requestRetirement = requestRetirement && record.Suspendable
 	encoded, err := json.Marshal(record)
 	if err != nil {
-		return ctrl.Result{}, err
+		return nil, err
 	}
 	if pool.Annotations[externalRuntimeEvictionAnnotation] != string(encoded) ||
-		(record.Suspendable && pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != booleanTrueValue) {
+		(requestRetirement && pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != booleanTrueValue) {
 		before := pool.DeepCopy()
 		if pool.Annotations == nil {
 			pool.Annotations = map[string]string{}
 		}
 		pool.Annotations[externalRuntimeEvictionAnnotation] = string(encoded)
-		if record.Suspendable {
+		if requestRetirement {
 			pool.Annotations[externalRuntimeRetirementRequestedAnnotation] = booleanTrueValue
 		}
 		if err := r.Patch(ctx, pool, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
-			return ctrl.Result{}, err
+			return nil, err
 		}
 	}
-	if !record.Suspendable {
-		return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionNotSuspendable,
-			"runtime worker is terminating and this workspace cannot preserve data; the instance is lost and uncertain work is never replayed")
+	return &record, nil
+}
+
+// observeExternalRetiringWorkerEviction keeps collecting eviction signals
+// while a retirement drain runs: termination can begin during a drain that
+// started for another reason, and the Pod can reveal a shorter window than a
+// supervisor signal recorded earlier.
+func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, status *harnessv2.StatusResponse) error {
+	a := w.Status.Allocation
+	if a == nil || a.Startup == nil {
+		return nil
 	}
-	return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolReasonEvictionDraining,
-		fmt.Sprintf("runtime worker is terminating; draining for data-only suspension before %s", record.Deadline.Format(time.RFC3339)))
+	if _, err := r.attestExternalWorkspaceStartup(ctx, w.Spec.Workload, a.Startup); err != nil {
+		if eviction := (*externalWorkerEvictionError)(nil); errors.As(err, &eviction) {
+			if _, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline, false); err != nil {
+				return err
+			}
+		}
+	}
+	if status != nil && status.Drain.Requested && status.Drain.Reason == harnessv2.DrainReasonWorkerEviction {
+		signaledAt := status.Drain.RequestedAt.UTC()
+		if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
+			signaledAt = now
+		}
+		if _, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceSupervisor, signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // externalEvictionProgress closes admission and reports the eviction

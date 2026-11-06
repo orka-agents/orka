@@ -803,6 +803,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime materialization is unavailable for drain")
 				}
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil); err != nil {
+					return ctrl.Result{}, err
+				}
 				validationPool, cfg, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
 				if err != nil {
 					return ctrl.Result{}, err
@@ -818,6 +821,9 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				active, err := validateRuntimePoolProbe(validationPool, cfg, pod, probe, r.now())
 				if err != nil || !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
+				}
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status); err != nil {
+					return ctrl.Result{}, err
 				}
 				if !probe.Status.Drain.Requested {
 					if err := r.externalStartupSupervisorClient(pool, a.Startup).RequestDrain(ctx, a.Startup.Endpoint, string(auth.Data[runtimePoolControllerTokenKey]), auth.Data[runtimePoolCapabilitySecretKey], probe.Status, externalRetirementDrainReason(externalRetirementAction(w, deleting))); err != nil {
@@ -837,6 +843,12 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	}
 	action := externalRetirementAction(w, deleting)
 	retirement := &workspacev1alpha1.WorkloadRetirement{Sequence: w.Spec.Workload.Sequence, Identity: a.Identity, Action: action}
+	if action == workspacev1alpha1.WorkloadRetirementSuspend && w.Spec.Retirement == nil && r.externalEvictionDeadlineExceeded(pool, w) {
+		// Recheck immediately before authorizing: the drain probe above can
+		// outlast a short eviction window.
+		return r.externalEvictionProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDegraded, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
+			"runtime worker eviction window ended before the runtime drained; suspension is not authorized and uncertain work is never replayed")
+	}
 	if !reflect.DeepEqual(w.Spec.Retirement, retirement) {
 		before := w.DeepCopy()
 		w.Spec.Retirement = retirement
