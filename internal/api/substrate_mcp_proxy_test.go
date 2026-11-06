@@ -18,6 +18,9 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/tracing/testutil"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
 
@@ -44,6 +48,20 @@ type substrateMCPProxyFixture struct {
 	deny     func(authorizationv1.ResourceAttributes) bool
 	upstream []*http.Request
 	bodies   []string
+	// routerContexts records each router request's trace identity.
+	routerContexts []trace.SpanContext
+}
+
+type substrateMCPTraceRecordingTransport struct {
+	base http.RoundTripper
+	f    *substrateMCPProxyFixture
+}
+
+func (t substrateMCPTraceRecordingTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	t.f.mu.Lock()
+	t.f.routerContexts = append(t.f.routerContexts, trace.SpanContextFromContext(request.Context()))
+	t.f.mu.Unlock()
+	return t.base.RoundTrip(request)
 }
 
 func substrateMCPProxyTool() *corev1alpha1.Tool {
@@ -121,7 +139,9 @@ func newSubstrateMCPProxyFixture(t *testing.T, objects ...client.Object) *substr
 		review.Status.Allowed = deny == nil || !deny(attributes)
 		return true, review, nil
 	})
-	router, err := workerexecutor.NewSubstrateMCPRouter(upstream.URL, upstream.Client())
+	routerClient := upstream.Client()
+	routerClient.Transport = substrateMCPTraceRecordingTransport{base: routerClient.Transport, f: f}
+	router, err := workerexecutor.NewSubstrateMCPRouter(upstream.URL, routerClient)
 	require.NoError(t, err)
 	f.server = NewServer(f.kube, nil, ServerConfig{
 		EnforceNamespaceIsolation: true, Clientset: f.clientset, APIReader: f.kube,
@@ -363,4 +383,22 @@ func TestSubstrateMCPProxyRefusesToolChangedSinceCallerValidated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSubstrateMCPProxyCarriesCallerTraceToRouter(t *testing.T) {
+	testutil.NewSpanHarness(t)
+	previous := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	t.Cleanup(func() { otel.SetTextMapPropagator(previous) })
+	f := newSubstrateMCPProxyFixture(t)
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01")
+	response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, `{"jsonrpc":"2.0","id":"1","method":"tools/call"}`)
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	require.Len(t, f.routerContexts, 1)
+	require.Equal(t, "0af7651916cd43dd8448eb211c80319c", f.routerContexts[0].TraceID().String(),
+		"the routed Actor call must join the caller's trace")
 }

@@ -125,7 +125,11 @@ allows it. Workspace requests carry a host-name egress allowlist instead of a
 Kubernetes NetworkPolicy: each rule names `HTTP`, `HTTPS`, or `TLSPassthrough`, a
 lowercase FQDN (or a single leftmost `*.` wildcard), and its ports. Bare `*`, IP
 addresses, and CIDRs are rejected, and an empty list denies all egress. Core always
-adds its in-cluster provider-auth-proxy origin. The provider applies the allowlist
+adds its in-cluster provider-auth-proxy origin. With `--enable-telemetry` and
+`--runtime-telemetry-collector-egress`, core also adds the OTLP collector origins it
+projects into the supervisor; see
+[collector egress](../guides/observability.md#collector-egress-for-agent-substrate-runtimes).
+The provider applies the allowlist
 before every native Resume and does not resume if it cannot. `HTTPS` rules are
 intercepted by the gateway, so only allowlists with an `HTTPS` rule get the
 `egress-mitm.ate.dev` and `system-roots.ate.dev` trust bundles and seven CA

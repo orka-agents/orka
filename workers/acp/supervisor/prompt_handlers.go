@@ -155,6 +155,13 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	mcpProxy := state.mcpProxy
+	prompt.genai = s.startInvokeAgent(r.Context(), state, request, now)
+	// Settlement records the span first; this only closes a prompt that never
+	// settled, such as one rejected before the agent accepted it.
+	defer prompt.genai.abandon()
+	if providerProxy != nil {
+		providerProxy.setPromptTelemetry(string(request.Metadata.PromptID), prompt.genai)
+	}
 	// Resume an adapter that exited while idle before this prompt gets any
 	// provider or MCP access. Some agents call the model during
 	// session/resume; with the prompt not yet active the provider proxy
@@ -316,6 +323,7 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	result := <-run.Result
+	prompt.genai.setUsage(result.Usage)
 	if result.Err != nil {
 		stage, rpcCode, rpcService, rpcErrorName := promptExecutionDiagnostic(result.Err)
 		slog.Error(
@@ -2138,6 +2146,9 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 			prompt.sequence--
 			return nil, err
 		}
+		if update != nil && update.ToolCall != nil {
+			prompt.genai.observeTool(update.ToolCall, prompt.toolCallNames[update.ToolCall.ToolCallID], event.Timestamp)
+		}
 		if text != "" {
 			messageID := ""
 			if state.profile.ProviderKind == providerKindCodex {
@@ -2523,6 +2534,7 @@ func promptResultFromSettlement(settlement harnessv2.PromptSettlement) acp.Promp
 }
 
 func (s *Server) finishPrompt(state *sessionState, prompt *promptState, result acp.PromptResult, settledAt time.Time) {
+	prompt.genai.finish(result, settledAt)
 	settlement := settlementFromResult(result, settledAt)
 	s.mu.Lock()
 	settlement = recordPromptSettlementLocked(state, prompt, settlement)

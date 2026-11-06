@@ -29,6 +29,7 @@ type Server struct {
 	mux                    *http.ServeMux
 	providerProxy          *providerProxy
 	mcpProxy               *mcpProxy
+	genai                  *supervisorGenAI
 	identityLock           io.Closer
 	e2ePromptWriteFaultDir string
 	e2ePromptWriteRecorder E2EPromptWriteFaultRecorder
@@ -296,6 +297,8 @@ type promptState struct {
 	remoteSettlementUnproven bool
 	permissionRequestIDs     map[harnessv2.PermissionRequestID]struct{}
 	toolCallNames            map[string]string
+	// genai records the prompt's GenAI spans and metrics; nil when disabled.
+	genai *promptGenAI
 }
 
 type promptMutationExecutor interface {
@@ -457,6 +460,7 @@ func newServer(cfg Config, prepareIdentityState func(string, *acp.UIDAllocator) 
 		mux:                    http.NewServeMux(),
 		providerProxy:          proxy,
 		mcpProxy:               mcp,
+		genai:                  newSupervisorGenAI(cfg.GenAITracer, cfg.Meter, cfg.Provider.Kind, cfg.Provider.Model),
 		identityLock:           identityLock,
 		e2ePromptWriteFaultDir: e2ePromptWriteFaultDir,
 		e2ePromptWriteRecorder: cfg.E2EPromptWriteFaultRecorder,

@@ -14,15 +14,16 @@ func TestRuntimePoolTelemetryProjection(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_CLIENT_KEY":       "/private/key",
 		"OTEL_RESOURCE_ATTRIBUTES":            "private=value",
 		"ORKA_TRACEPARENT":                    "private",
-		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "https://private-metrics",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "https://metrics.otel.svc:4318/v1/metrics?token=private",
+		"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  "authorization=private",
 	}
 	getenv := func(name string) string { return values[name] }
 	if got := runtimePoolTelemetryEnv(false, getenv); len(got) != 0 {
 		t.Fatal("disabled runtime received telemetry")
 	}
 	got := runtimePoolTelemetryEnv(true, getenv)
-	if len(got) != 3 {
-		t.Fatalf("projected variable count = %d", len(got))
+	if len(got) != 5 {
+		t.Fatalf("projected variable count = %d: %v", len(got), got)
 	}
 	for _, env := range got {
 		if env.ValueFrom != nil || strings.Contains(env.Value, "private") {
@@ -37,9 +38,13 @@ func TestRuntimePoolTelemetryProjection(t *testing.T) {
 			if env.Value != "https://collector.otel.svc:4318/base" {
 				t.Fatal("generic endpoint semantics changed")
 			}
-		case "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":
+		case "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":
 			if env.Value != "http/protobuf" {
 				t.Fatal("protocol changed")
+			}
+		case "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":
+			if env.Value != "https://metrics.otel.svc:4318/v1/metrics" {
+				t.Fatalf("metrics endpoint = %q", env.Value)
 			}
 		default:
 			t.Fatalf("unexpected telemetry variable %s", env.Name)
@@ -86,5 +91,85 @@ func TestRuntimePoolTelemetryChangesTemplateRevision(t *testing.T) {
 	withPrivateSettings := r.runtimePoolPodTemplate(pool, cfg, selector, "auth", "provider")
 	if withPrivateSettings.Annotations[runtimePoolTemplateRevisionAnnotation] != after.Annotations[runtimePoolTemplateRevisionAnnotation] {
 		t.Fatal("private controller settings entered the supervisor template")
+	}
+}
+
+func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
+	values := map[string]string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces.otel.svc:4318/v1/traces",
+		"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://collector.otel.svc:4318",
+		"OTEL_EXPORTER_OTLP_PROTOCOL":        "http/protobuf",
+	}
+	getenv := func(name string) string { return values[name] }
+	env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, getenv))
+	// The generic base URL is projected for metrics; trace-specific settings
+	// keep precedence for traces under SDK semantics.
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://collector.otel.svc:4318" || env["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] != "http/protobuf" ||
+		env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "http://traces.otel.svc:4318/v1/traces" {
+		t.Fatalf("metrics projection = %v", env)
+	}
+	values["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] = "http://localhost:4318/v1/metrics"
+	env = runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, getenv))
+	for name := range env {
+		if strings.HasPrefix(name, "OTEL_EXPORTER_OTLP_METRICS_") || name == "OTEL_EXPORTER_OTLP_ENDPOINT" {
+			t.Fatalf("unreachable metrics endpoint fell back to %s", name)
+		}
+	}
+	if env["ORKA_ENABLE_TELEMETRY"] != "true" {
+		t.Fatal("unreachable metrics endpoint disabled traces")
+	}
+	// A metrics setting the supervisor would reject drops metrics, never traces.
+	for name, value := range map[string]string{
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "metrics.otel.svc:4317",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+	} {
+		values := map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://traces.otel.svc:4318/v1/traces", name: value}
+		env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(key string) string { return values[key] }))
+		if env["ORKA_ENABLE_TELEMETRY"] != "true" {
+			t.Fatalf("%s=%s disabled traces", name, value)
+		}
+		for projected := range env {
+			if strings.HasPrefix(projected, "OTEL_EXPORTER_OTLP_METRICS_") {
+				t.Fatalf("%s=%s projected unsupported metrics setting %s", name, value, projected)
+			}
+		}
+	}
+	// Metrics alone enable nothing.
+	metricsOnly := map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4318/v1/metrics"}
+	if got := runtimePoolTelemetryEnv(true, func(name string) string { return metricsOnly[name] }); len(got) != 0 {
+		t.Fatalf("metrics-only configuration enabled supervisor telemetry: %v", got)
+	}
+}
+
+func TestValidateRuntimeTelemetryCollectorEgress(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(name string) string { return values[name] }
+	}
+	valid := env(map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "https://collector.otel.svc:4317"})
+	if err := ValidateRuntimeTelemetryCollectorEgress(false, false, valid); err != nil {
+		t.Fatalf("opt-out rejected: %v", err)
+	}
+	if err := ValidateRuntimeTelemetryCollectorEgress(true, true, valid); err != nil {
+		t.Fatalf("valid collector rejected: %v", err)
+	}
+	if err := ValidateRuntimeTelemetryCollectorEgress(false, true, valid); err == nil {
+		t.Fatal("collector egress admitted without telemetry")
+	}
+	for name, values := range map[string]map[string]string{
+		"no endpoint":       {},
+		"loopback only":     {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317"},
+		"IP address":        {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://10.0.0.7:4317"},
+		"IPv6 address":      {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://[fd00::7]:4317"},
+		"scheme-less gRPC":  {"OTEL_EXPORTER_OTLP_ENDPOINT": "collector.otel.svc:4317"},
+		"single label":      {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4317"},
+		"unsupported":       {"OTEL_EXPORTER_OTLP_ENDPOINT": "grpc://collector.otel.svc:4317"},
+		"wildcard":          {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://*.otel.svc:4317"},
+		"bad metrics":       {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4317", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://10.0.0.8:4318/v1/metrics"},
+		"bad trace signal":  {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://10.0.0.9:4318/v1/traces"},
+		"numeric top label": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.123:4317"},
+	} {
+		if err := ValidateRuntimeTelemetryCollectorEgress(true, true, env(values)); err == nil {
+			t.Errorf("%s: invalid collector endpoint admitted", name)
+		}
 	}
 }

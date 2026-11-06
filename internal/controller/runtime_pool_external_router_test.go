@@ -118,6 +118,64 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 	}
 }
 
+func TestExternalRuntimeEgressAdmitsTelemetryCollectorOnlyWhenOptedIn(t *testing.T) {
+	values := map[string]string{
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":  "https://Traces.Otel.svc/v1/traces",
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4318/v1/metrics",
+		"OTEL_EXPORTER_OTLP_HEADERS":          "authorization=private",
+	}
+	getenv := func(name string) string { return values[name] }
+	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc:8080"}}
+	core := []workspacev1alpha1.RuntimeEgressRule{
+		{Protocol: workspacev1alpha1.RuntimeEgressTLSPassthrough, Host: "orka-api.orka-system.svc", Ports: []int32{443}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc", Ports: []int32{8080}},
+	}
+	for _, test := range []struct {
+		name               string
+		telemetry, collect bool
+	}{
+		{"default", false, false},
+		{"telemetry without opt-in", true, false},
+		{"opt-in without telemetry", false, true},
+	} {
+		r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc", EnableTelemetry: test.telemetry, TelemetryCollectorEgress: test.collect}
+		policy, err := r.externalRuntimeEgressWithEnv(cfg, getenv)
+		if err != nil || !reflect.DeepEqual(policy.Rules, core) {
+			t.Fatalf("%s: egress rules = %#v, %v", test.name, policy, err)
+		}
+	}
+
+	r := &RuntimePoolReconciler{ControllerAPIURL: "https://orka-api.orka-system.svc", EnableTelemetry: true, TelemetryCollectorEgress: true}
+	policy, err := r.externalRuntimeEgressWithEnv(cfg, getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []workspacev1alpha1.RuntimeEgressRule{
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "metrics.otel.svc", Ports: []int32{4318}},
+		core[0], core[1],
+		{Protocol: workspacev1alpha1.RuntimeEgressTLSPassthrough, Host: "traces.otel.svc", Ports: []int32{443}},
+	}
+	if !reflect.DeepEqual(policy.Rules, want) {
+		t.Fatalf("egress rules = %#v, want %#v", policy.Rules, want)
+	}
+
+	// The opt-in fails closed: an inexpressible projected collector refuses
+	// admission instead of silently dropping or widening the allowlist.
+	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "http://10.0.0.7:4318/v1/traces"
+	if _, err := r.externalRuntimeEgressWithEnv(cfg, getenv); err == nil || !strings.Contains(err.Error(), "telemetry collector") {
+		t.Fatalf("IP collector admitted: %v", err)
+	}
+	values["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "https://provider-auth-proxy.orka-system.svc:8080/v1/traces"
+	if _, err := r.externalRuntimeEgressWithEnv(cfg, getenv); err == nil {
+		t.Fatal("collector sharing a core origin with a conflicting protocol was admitted")
+	}
+	// Without a projected collector there is nothing to admit.
+	clear(values)
+	if policy, err = r.externalRuntimeEgressWithEnv(cfg, getenv); err != nil || !reflect.DeepEqual(policy.Rules, core) {
+		t.Fatalf("no collector: egress rules = %#v, %v", policy, err)
+	}
+}
+
 func TestExternalRuntimeNetworkShapeFollowsProviderAndStaysFrozen(t *testing.T) {
 	v1 := &workspacev1alpha1.ExecutionWorkspaceProvider{Status: workspacev1alpha1.ExecutionWorkspaceProviderStatus{
 		SupportedFeatures: []workspacev1alpha1.ExecutionWorkspaceFeature{workspacev1alpha1.WorkspaceFeatureEgressAllowlist},

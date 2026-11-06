@@ -65,11 +65,11 @@ func main() {
 		logger.Error("toolbox verification failed", "error", err)
 		os.Exit(1)
 	}
-	tracer, shutdownTelemetry, telemetryErr := supervisor.NewTelemetryFromEnv()
+	telemetry, shutdownTelemetry, telemetryErr := supervisor.NewSupervisorTelemetryFromEnv()
 	if telemetryErr != nil {
 		logger.Warn("supervisor telemetry unavailable")
 	}
-	cfg.Tracer = tracer
+	cfg.Tracer, cfg.GenAITracer, cfg.Meter = telemetry.Tracer, telemetry.GenAITracer, telemetry.Meter
 	runtimeServer, err := supervisor.New(cfg)
 	cfg.ProviderProxy.UpstreamBearerToken = ""
 	if err != nil {

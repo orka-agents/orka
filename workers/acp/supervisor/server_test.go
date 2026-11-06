@@ -31,6 +31,10 @@ const testJSONRPCKey = "jsonrpc"
 const linuxGOOS = "linux"
 
 const providerProxyCanaryMode = "provider-proxy-canary"
+
+// genAITelemetryMode makes one model call through the provider proxy, runs a
+// tool call and reports turn usage, so GenAI spans follow the real prompt path.
+const genAITelemetryMode = "genai-telemetry"
 const providerProjectionCanaryMode = "provider-projection-canary"
 const providerProjectionCanaryValue = "projected"
 const assistantBurstMode = "assistant-burst"
@@ -1186,7 +1190,7 @@ func newTestConfigWithUpstream(t *testing.T, mode, upstreamURL, upstreamToken st
 		Environment: map[string]string{"GO_WANT_SUPERVISOR_ACP_HELPER": "1", "SUPERVISOR_ACP_HELPER_MODE": mode},
 		AdapterName: "fake-acp", AdapterDigest: testDigest("adapter"),
 	}
-	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode {
+	if mode == providerProxyCanaryMode || mode == adapterResumeModelCallMode || mode == genAITelemetryMode {
 		provider.EnvironmentForSession = func(_ harnessv2.CreateRuntimeSessionRequest, _ acp.SessionPaths, proxy ProviderProxyBinding) (map[string]string, error) {
 			config, err := json.Marshal(map[string]string{"openai_base_url": proxy.BaseURL})
 			if err != nil {
@@ -1503,6 +1507,11 @@ func TestSupervisorACPHelper(t *testing.T) {
 					fmt.Fprintln(os.Stderr, err)
 					os.Exit(4)
 				}
+			}
+			if mode == genAITelemetryMode {
+				writeGenAITelemetryHelperTurn(writer, sessionID, promptID)
+				promptID = nil
+				continue
 			}
 			if strings.HasPrefix(mode, "native-prompt-error") {
 				writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "error": map[string]any{"code": -32603, "message": "native provider prompt failed"}})
@@ -2211,4 +2220,31 @@ func TestCreateSessionRebuiltRequestConflictsWhileSessionStaysResident(t *testin
 		status.Sessions[0].State != harnessv2.RuntimeSessionStateIdle {
 		t.Fatalf("resident session was not reported admissible after the rejected rebuild: %#v", status.Sessions)
 	}
+}
+
+func writeGenAITelemetryHelperTurn(writer *bufio.Writer, sessionID string, promptID json.RawMessage) {
+	update := func(value map[string]any) {
+		writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "method": acp.MethodSessionUpdate, "params": map[string]any{
+			"sessionId": sessionID, "update": value,
+		}})
+	}
+	status := "error"
+	if baseURL, err := providerProxyBaseURLFromChild(); err == nil {
+		request, _ := http.NewRequest(http.MethodPost, baseURL+"/responses", strings.NewReader(`{"model":"test-model","input":"PRIVATE_PROMPT"}`))
+		request.Header.Set(providerAuthorizationHeader, "Bearer "+os.Getenv("CODEX_API_KEY"))
+		request.Header.Set("Content-Type", "application/json")
+		if response, err := http.DefaultClient.Do(request); err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+			status = strconv.Itoa(response.StatusCode)
+		}
+	}
+	update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "call-1", "title": "Run PRIVATE_TITLE", "kind": "execute",
+		"rawInput": map[string]any{"command": "PRIVATE_ARGUMENT"}})
+	update(map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "call-1", "status": "completed",
+		"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "PRIVATE_RESULT"}}}})
+	update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "PRIVATE_COMPLETION model=" + status}})
+	writeHelperMessage(writer, map[string]any{testJSONRPCKey: testJSONRPCVersion, "id": rawID(promptID), "result": map[string]any{
+		"stopReason": acp.StopReasonEndTurn, "usage": map[string]any{"inputTokens": 120, "outputTokens": 30, "totalTokens": 150},
+	}})
 }
