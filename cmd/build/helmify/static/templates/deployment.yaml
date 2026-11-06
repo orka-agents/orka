@@ -189,6 +189,9 @@ spec:
             {{- $entraTenant := dig "agentIdentity" "entra" "tenantID" "" .Values.controller }}
             {{- $entraBlueprint := dig "agentIdentity" "entra" "blueprintClientID" "" .Values.controller }}
             {{- if or $entraTenant $entraBlueprint }}
+            {{- if not (and $entraTenant $entraBlueprint) }}
+            {{- fail "controller.agentIdentity.entra.tenantID and controller.agentIdentity.entra.blueprintClientID must be set together" }}
+            {{- end }}
             - {{ printf "--agent-identity-entra-tenant-id=%s" $entraTenant | quote }}
             - {{ printf "--agent-identity-entra-blueprint-client-id=%s" $entraBlueprint | quote }}
             {{- end }}
