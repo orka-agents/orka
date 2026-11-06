@@ -82,6 +82,7 @@ var (
 		labels.AnnotationContinuationOfName,
 		labels.AnnotationContinuationOfUID,
 		labels.AnnotationContinuationIndex,
+		labels.AnnotationContinuationChainDeadline,
 	}
 )
 

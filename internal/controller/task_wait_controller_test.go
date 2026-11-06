@@ -279,6 +279,9 @@ func assertTaskWaitContinuation(t *testing.T, continuation *corev1alpha1.Task) {
 		continuation.Spec.Timeout.Duration < 3*time.Hour+49*time.Minute {
 		t.Fatalf("continuation timeout must be the chain's remaining time, got %v", continuation.Spec.Timeout)
 	}
+	if want := taskWaitTestNow.Add(3*time.Hour + 50*time.Minute).Format(time.RFC3339); continuation.Annotations[labels.AnnotationContinuationChainDeadline] != want {
+		t.Fatalf("continuation must record the chain's absolute deadline %s, got %q", want, continuation.Annotations[labels.AnnotationContinuationChainDeadline])
+	}
 	if continuation.Annotations[labels.AnnotationContinuationOfUID] != "uid-parked" ||
 		continuation.Annotations[labels.AnnotationContinuationIndex] != "1" ||
 		continuation.Labels[labels.LabelAgentName] != "coder" {
@@ -301,7 +304,7 @@ func TestTaskWaitAdoptsAContinuationCreatedBeforeARestart(t *testing.T) {
 	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	existing.UID = "uid-existing"
 	h := newTaskWaitHarness(t, task, existing)
 	h.settle("parked")
@@ -423,7 +426,7 @@ func TestTaskWaitDeletionCancelsAContinuationBeingCreated(t *testing.T) {
 	task.Finalizers = []string{labels.TaskFinalizer}
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	continuation.UID = "uid-cont"
 	h := newTaskWaitHarness(t, task, continuation)
 	if err := h.client.Delete(context.Background(), h.task("parked")); err != nil {
@@ -530,7 +533,7 @@ func TestTaskWaitCancellationFindsAContinuationTheCacheHasNotSeen(t *testing.T) 
 	task.Annotations[labels.AnnotationCancelWait] = "stop"
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
-	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	continuation.UID = "uid-cont"
 
 	deleted := ""
@@ -631,7 +634,7 @@ func TestTaskWaitAdoptsAContinuationDeletedBeforeItWasLinked(t *testing.T) {
 	h := newTaskWaitHarness(t, task)
 
 	// The create landed but the controller lost the response before linking it.
-	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	if err := h.client.Create(context.Background(), continuation); err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +675,7 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
 	// Without provenance admission this lineage annotation may be forged.
-	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	forged.UID, forged.Finalizers = "uid-forged", nil
 	h := newTaskWaitHarness(t, task, forged)
 	h.r.TaskProvenanceProtected = false
@@ -745,7 +748,7 @@ func TestTaskWaitSealsTheRequesterOfAnAdoptedContinuation(t *testing.T) {
 	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
 	// The controller restarted after creating the continuation, before sealing it.
-	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
 	existing.UID = "uid-existing"
 	h := newTaskWaitHarness(t, task, existing)
 	h.settle("parked")
@@ -754,5 +757,21 @@ func TestTaskWaitSealsTheRequesterOfAnAdoptedContinuation(t *testing.T) {
 	}
 	if adopted := h.task(existing.Name); !connectors.RequesterStampValid(testRequesterStampKey, adopted) {
 		t.Fatalf("adoption must seal the continuation's requester: %v", adopted.Annotations)
+	}
+}
+
+func TestContinuationDeadlineDoesNotDriftWithCreationTime(t *testing.T) {
+	parked := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	chainDeadline := taskwait.Deadline(parked)
+	remaining := chainDeadline.Sub(taskWaitTestNow)
+	continuation := buildTaskContinuation(parked, taskwait.ContinuationTaskName(parked), remaining, chainDeadline)
+	// The API server assigned the creation time three seconds after the
+	// remaining budget was computed.
+	continuation.CreationTimestamp = metav1.NewTime(taskWaitTestNow.Add(3 * time.Second))
+	if got, ok := acpTaskDeadline(continuation, taskWaitTestNow); !ok || !got.Equal(chainDeadline) {
+		t.Fatalf("enforced deadline = %v, want the chain deadline %v", got, chainDeadline)
+	}
+	if got := taskwait.Deadline(continuation); !got.Equal(chainDeadline) {
+		t.Fatalf("wait deadline = %v, want the chain deadline %v", got, chainDeadline)
 	}
 }

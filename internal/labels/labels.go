@@ -134,6 +134,10 @@ const (
 	// AnnotationContinuationIndex is the number of continuations before this
 	// Task in its chain.
 	AnnotationContinuationIndex = "orka.ai/continuation-index"
+	// AnnotationContinuationChainDeadline is the absolute RFC 3339 deadline
+	// a continuation inherits from the first Task of its chain. It can only
+	// shorten the deadline derived from creation time and spec.timeout.
+	AnnotationContinuationChainDeadline = "orka.ai/continuation-chain-deadline"
 	// ContinuationLinkFinalizer keeps a continuation Task from disappearing
 	// before its parked predecessor durably records its UID. Without it, a
 	// continuation created and then deleted in that window would look as if

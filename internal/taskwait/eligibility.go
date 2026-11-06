@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 )
 
 const (
@@ -30,7 +31,8 @@ const (
 var ErrIneligible = errors.New("task cannot park its turn")
 
 // Deadline returns the absolute deadline of an ACP Task. It matches the
-// dispatcher: spec.timeout, or the harness v2 default, from creation.
+// dispatcher: spec.timeout, or the harness v2 default, from creation, never
+// later than the chain deadline a continuation inherited.
 func Deadline(task *corev1alpha1.Task) time.Time {
 	if task == nil {
 		return time.Time{}
@@ -39,7 +41,34 @@ func Deadline(task *corev1alpha1.Task) time.Time {
 	if task.Spec.Timeout != nil && task.Spec.Timeout.Duration > 0 {
 		timeout = task.Spec.Timeout.Duration
 	}
-	return task.CreationTimestamp.Add(timeout)
+	return ClampToChainDeadline(task, task.CreationTimestamp.Add(timeout))
+}
+
+// ChainDeadline returns the absolute deadline a continuation inherited from
+// the first Task of its chain. Its timeout alone is relative to its own
+// creation, which happens after the remaining budget was computed.
+func ChainDeadline(task *corev1alpha1.Task) (time.Time, bool) {
+	if task == nil {
+		return time.Time{}, false
+	}
+	raw := strings.TrimSpace(task.Annotations[labels.AnnotationContinuationChainDeadline])
+	if raw == "" {
+		return time.Time{}, false
+	}
+	deadline, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return deadline.UTC(), true
+}
+
+// ClampToChainDeadline returns deadline, or the inherited chain deadline when
+// that is earlier. The annotation can only shorten a Task's deadline.
+func ClampToChainDeadline(task *corev1alpha1.Task, deadline time.Time) time.Time {
+	if chain, ok := ChainDeadline(task); ok && chain.Before(deadline) {
+		return chain
+	}
+	return deadline
 }
 
 // Eligibility explains why a Task cannot park its turn, or returns nil. A

@@ -442,7 +442,7 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateExpired,
 			"the Task deadline leaves no time for a continuation turn")
 	}
-	continuation := buildTaskContinuation(task, name, remaining)
+	continuation := buildTaskContinuation(task, name, remaining, chainDeadline)
 	if continuationRequesterSealable(task) {
 		// Mark the requester as API-sourced from creation so admission waits
 		// for the seal instead of freezing a snapshot without the requester's
@@ -698,8 +698,10 @@ var (
 )
 
 // buildTaskContinuation copies the parked Task's execution inputs. Only the
-// prompt, the Session reference flags, and the remaining timeout change.
-func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining time.Duration) *corev1alpha1.Task {
+// prompt, the Session reference flags, and the remaining timeout change. The
+// chain's absolute deadline is recorded too, so creation latency or clock
+// skew cannot extend it.
+func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining time.Duration, chainDeadline time.Time) *corev1alpha1.Task {
 	spec := *parked.Spec.DeepCopy()
 	spec.Prompt = taskContinuationPrompt(parked)
 	spec.PriorTaskRef = nil
@@ -718,6 +720,8 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 				labels.AnnotationContinuationOfName: parked.Name,
 				labels.AnnotationContinuationOfUID:  string(parked.UID),
 				labels.AnnotationContinuationIndex:  strconv.Itoa(int(taskwait.ChainIndex(parked)) + 1),
+				// RFC 3339 drops sub-second precision, which only shortens the deadline.
+				labels.AnnotationContinuationChainDeadline: chainDeadline.UTC().Format(time.RFC3339),
 			},
 			Finalizers: []string{labels.ContinuationLinkFinalizer},
 			// A non-controller owner: deleting the parked Task cancels its

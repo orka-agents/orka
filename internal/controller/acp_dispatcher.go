@@ -3756,7 +3756,9 @@ func acpTaskDeadline(task *corev1alpha1.Task, now time.Time) (time.Time, bool) {
 		task.Status.AgentExecutionBinding.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV2:
 		return time.Time{}, false
 	}
-	return taskDeadlineFromTimeout(task, now, timeout), true
+	// A parked turn's continuation keeps its chain's absolute deadline even
+	// though its timeout is measured from its own, later creation.
+	return taskwait.ClampToChainDeadline(task, taskDeadlineFromTimeout(task, now, timeout)), true
 }
 
 func taskDeadlineFromTimeout(task *corev1alpha1.Task, now time.Time, timeout time.Duration) time.Time {

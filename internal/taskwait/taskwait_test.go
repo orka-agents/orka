@@ -139,6 +139,18 @@ func TestDeadlineUsesTimeoutOrHarnessDefault(t *testing.T) {
 	if got := Deadline(task); !got.Equal(created.Add(4 * time.Hour)) {
 		t.Fatalf("timeout deadline = %v", got)
 	}
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	// An inherited chain deadline can only shorten the deadline.
+	task.Annotations[labels.AnnotationContinuationChainDeadline] = created.Add(time.Hour).Format(time.RFC3339)
+	if got := Deadline(task); !got.Equal(created.Add(time.Hour)) {
+		t.Fatalf("chain deadline = %v", got)
+	}
+	task.Annotations[labels.AnnotationContinuationChainDeadline] = created.Add(8 * time.Hour).Format(time.RFC3339)
+	if got := Deadline(task); !got.Equal(created.Add(4 * time.Hour)) {
+		t.Fatalf("a later chain deadline must not extend the Task, got %v", got)
+	}
 }
 
 func TestAcceptsApprovalDecisionOnlyForTheActiveParkedApproval(t *testing.T) {

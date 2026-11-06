@@ -93,7 +93,10 @@ parked turn is that continuation, created by Orka when the awaited event arrives
   - a controller-authored prompt describing the event, which never contains the parked
     prompt;
   - `sessionRef.create: false`;
-  - `timeout` equal to the time left before the parked Task's deadline.
+  - `timeout` equal to the time left before the parked Task's deadline. The absolute
+    chain deadline is also recorded in the controller-reserved
+    `orka.ai/continuation-chain-deadline` annotation, and enforcement uses the earlier of
+    the two, so creation latency or clock skew never extends the chain.
 
   It inherits only allowlisted labels and annotations needed for an identical frozen policy.
   It gets a non-controller owner reference to the parked Task, so deleting the parked Task
