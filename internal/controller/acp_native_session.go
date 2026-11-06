@@ -305,16 +305,8 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	// A first turn falls back to the canonical transcript; a Session that
 	// already depends on native continuity fails closed rather than silently
 	// continuing from an older checkpoint.
-	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
-	if err != nil {
+	if skip, err := d.skipNativeCaptureForOperatorTaint(ctx, task, session); skip || err != nil {
 		return err
-	}
-	if tainted {
-		if session.NativeSession != nil {
-			return fmt.Errorf("%w: native continuity cannot be captured from a runtime tainted by operator access: %w",
-				store.ErrConflict, operatoraccess.ErrTainted)
-		}
-		return d.recordNativeCaptureSkipped(ctx, task)
 	}
 	var intent nativeCaptureIntent
 	if saved := task.Annotations[nativeCaptureIntentAnnotation]; saved != "" {
@@ -389,6 +381,22 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	return d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
 		execution.RuntimeSessionRecreationPending = true
 	})
+}
+
+// skipNativeCaptureForOperatorTaint reports whether an operator-tainted
+// runtime must be excluded from native capture, recording the transcript
+// fallback for a first turn or failing closed when the Session already
+// depends on native continuity.
+func (d *ACPDispatcher) skipNativeCaptureForOperatorTaint(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) (bool, error) {
+	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
+	if err != nil || !tainted {
+		return false, err
+	}
+	if session.NativeSession != nil {
+		return true, fmt.Errorf("%w: native continuity cannot be captured from a runtime tainted by operator access: %w",
+			store.ErrConflict, operatoraccess.ErrTainted)
+	}
+	return true, d.recordNativeCaptureSkipped(ctx, task)
 }
 
 // A durable deduplication key survives annotation/event write ordering and restart.

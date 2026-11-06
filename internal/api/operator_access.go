@@ -87,6 +87,9 @@ const (
 	OperatorAuditDenied   = "denied"
 )
 
+// operatorOutcomeFailed is the audit outcome for an unclassified failure.
+const operatorOutcomeFailed = "failed"
+
 // OperatorAuditSink receives operator access audit records.
 type OperatorAuditSink interface {
 	Record(ctx context.Context, record OperatorAuditRecord)

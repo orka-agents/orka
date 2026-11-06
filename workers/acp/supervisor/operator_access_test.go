@@ -369,7 +369,7 @@ func TestOperatorCapabilityIsSingleUse(t *testing.T) {
 	_, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateValidating,
 		func(operatorLaunch) (operatorProcess, error) { return newFakeOperatorProcess(), nil })
 	headers := signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}})
-	var statuses []int
+	statuses := make([]int, 0, 2)
 	for range 2 {
 		request, _ := http.NewRequest(http.MethodGet, operatorExecURL(server, sessionID), nil)
 		request.Header = headers.Clone()

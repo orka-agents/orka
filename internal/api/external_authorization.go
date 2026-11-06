@@ -60,6 +60,10 @@ func (p apiRoutePolicy) withStoreID() apiRoutePolicy {
 	return p
 }
 
+// operatorTaskGetPermission is the Task read that every operator workspace
+// access route requires in addition to its dedicated subresource verb.
+var operatorTaskGetPermission = apiResourcePermission{corev1alpha1.GroupVersion.Group, externalToolTaskResource, gatewayVerbGet, "id"}
+
 // externalAPIPolicies is the complete external user API inventory. Keep the
 // independent HTTP cases and the operator reference in sync when adding routes.
 // Existing handler checks still enforce loaded-object, gateway and workspace
@@ -99,11 +103,11 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	// Operator workspace access uses dedicated virtual subresources that no
 	// built-in aggregate role grants; Task get alone never authorizes it.
 	"GET /api/v1/tasks/:id/exec": coreAPIPolicy(operatoraccess.ExecVerb, operatoraccess.ExecResource, "id",
-		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
+		operatorTaskGetPermission),
 	"GET /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesReadVerb, operatoraccess.FilesResource, "id",
-		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
+		operatorTaskGetPermission),
 	"PUT /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesWriteVerb, operatoraccess.FilesResource, "id",
-		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
+		operatorTaskGetPermission),
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),

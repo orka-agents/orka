@@ -411,7 +411,7 @@ func operatorFailureOutcome(err error) string {
 	if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
 		return fiberErr.Message
 	}
-	return "failed"
+	return operatorOutcomeFailed
 }
 
 func parseOperatorBytes(raw string) (int64, error) {
