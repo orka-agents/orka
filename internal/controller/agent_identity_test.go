@@ -22,6 +22,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -338,9 +339,13 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	rootCreated := metav1.NewTime(time.Now().Add(-30 * time.Minute).Truncate(time.Second))
 	root := boundTask("root", agent, corev1alpha1.TaskPhaseRunning)
+	root.UID = "root-uid"
 	root.CreationTimestamp = rootCreated
 	child := boundTask("child", agent, corev1alpha1.TaskPhaseRunning)
 	child.Labels = map[string]string{labels.LabelParentTask: "root"}
+	child.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "root", UID: root.UID, Controller: new(true),
+	}}
 	child.CreationTimestamp = metav1.Now()
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build()
 
@@ -362,8 +367,130 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	}
 	orphan := child.DeepCopy()
 	orphan.Labels[labels.LabelParentTask] = "gone"
+	orphan.OwnerReferences[0].Name = "gone"
 	if binding, err := agentIdentityBindingFromTask(context.Background(), reader, orphan); err != nil || !binding.DelegationStart.IsZero() {
 		t.Fatalf("a broken chain has no delegation start: %+v %v", binding, err)
+	}
+}
+
+// delegationTestTask is a Task the requester's chain is built from: stamped
+// for alice, and created at created.
+func delegationTestTask(name string, created time.Time, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: testNS, UID: types.UID(name + "-uid"), CreationTimestamp: metav1.NewTime(created),
+			Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, RequestedBy: requester},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	if mutate != nil {
+		mutate(task)
+	}
+	return task
+}
+
+// sealDelegationTestTask seals the requester stamp, and the delegation root
+// stamp when root is set, for the Task's current UID and requester.
+func sealDelegationTestTask(task *corev1alpha1.Task, root bool) {
+	requester := task.Spec.RequestedBy
+	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testRequesterStampKey, task.UID, requester.Issuer, requester.Subject)
+	if root {
+		task.Annotations[labels.AnnotationDelegationRootStamp] = connectors.DelegationRootStamp(testRequesterStampKey, task.UID, requester.Issuer, requester.Subject)
+	}
+}
+
+func delegatedFrom(parent string, pinned bool) func(*corev1alpha1.Task) {
+	return func(task *corev1alpha1.Task) {
+		task.Labels = map[string]string{labels.LabelParentTask: parent}
+		task.Annotations[labels.AnnotationParentTaskName] = parent
+		if pinned {
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent,
+				UID: types.UID(parent + "-uid"), Controller: new(true),
+			}}
+		}
+	}
+}
+
+func TestDelegationStartFollowsOnlyProvenLineage(t *testing.T) {
+	SetRequesterStampKey(testRequesterStampKey)
+	now := time.Now().Truncate(time.Second)
+	rootCreated, childCreated, forkCreated := now.Add(-3*time.Hour), now.Add(-2*time.Hour), now.Add(-time.Minute)
+	root := delegationTestTask("root", rootCreated, nil)
+	sealDelegationTestTask(root, true)
+	child := delegationTestTask("child", childCreated, delegatedFrom("root", true))
+	sealDelegationTestTask(child, false)
+	recreated := delegationTestTask("recreated", now.Add(-time.Hour), nil)
+	sealDelegationTestTask(recreated, true)
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child, recreated).Build()
+
+	tests := map[string]struct {
+		task *corev1alpha1.Task
+		want time.Time
+	}{
+		"an inherited child keeps its root's start": {
+			task: delegationTestTask("grandchild", now, delegatedFrom("child", true)),
+			want: rootCreated,
+		},
+		"a parent pinned by the brokered parent UID": {
+			task: delegationTestTask("brokered", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", false)(task)
+				task.Annotations[labels.AnnotationParentTaskUID] = "child-uid"
+			}),
+			want: rootCreated,
+		},
+		"a fork the requester made starts a new delegation": {
+			task: func() *corev1alpha1.Task {
+				fork := delegationTestTask("fork", forkCreated, delegatedFrom("child", false))
+				fork.Annotations[labels.AnnotationForkSourceTask] = "child"
+				sealDelegationTestTask(fork, true)
+				return fork
+			}(),
+			want: forkCreated,
+		},
+		"a fork without the root stamp cannot be traced": {
+			task: func() *corev1alpha1.Task {
+				fork := delegationTestTask("legacy-fork", forkCreated, delegatedFrom("child", false))
+				sealDelegationTestTask(fork, false)
+				return fork
+			}(),
+		},
+		"an orphaned child cannot be traced": {
+			task: delegationTestTask("orphan", now, delegatedFrom("child", false)),
+		},
+		"a parent recreated under its name": {
+			task: delegationTestTask("stale", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("recreated", true)(task)
+				task.OwnerReferences[0].UID = "an-older-uid"
+			}),
+		},
+		"a parent acting for another requester": {
+			task: delegationTestTask("borrowed", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", true)(task)
+				task.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "mallory"}
+			}),
+		},
+		"a root stamp sealed for another Task": {
+			task: func() *corev1alpha1.Task {
+				fork := delegationTestTask("copied", forkCreated, delegatedFrom("child", false))
+				sealDelegationTestTask(fork, false)
+				fork.Annotations[labels.AnnotationDelegationRootStamp] = root.Annotations[labels.AnnotationDelegationRootStamp]
+				return fork
+			}(),
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := delegationStart(context.Background(), reader, tc.task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("delegationStart() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -385,7 +512,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	sessions := sqlite.NewStore(db, ":memory:")
 	for _, session := range []*store.SessionRecord{
 		{Namespace: testNS, Name: "open", SessionType: "task"},
-		{Namespace: testNS, Name: "cancelled", SessionType: "task", Cancelled: true},
+		{Namespace: testNS, Name: "chat-open", SessionType: store.SessionTypeChat},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
 			t.Fatal(err)
@@ -405,7 +532,16 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	withSession := func(name string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) { task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name} }
 	}
+	inChat := func(name string) func(*corev1alpha1.Task) {
+		return func(task *corev1alpha1.Task) { task.Labels = map[string]string{labels.LabelChatSession: name} }
+	}
 	deleting := metav1.Now()
+	SetRequesterStampKey(testRequesterStampKey)
+	fork := delegationTestTask("fork-of-cancelled", time.Now(), delegatedFrom("parent-cancelled", false))
+	fork.Annotations[labels.AnnotationForkSourceTask] = "parent-cancelled"
+	sealDelegationTestTask(fork, true)
+	legacyFork := delegationTestTask("legacy-fork-of-cancelled", time.Now(), delegatedFrom("parent-cancelled", false))
+	sealDelegationTestTask(legacyFork, false)
 	childOf := func(parent string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) {
 			task.Labels = map[string]string{labels.LabelParentTask: parent}
@@ -434,7 +570,28 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		}),
 		task("running", nil),
 		task("in-open-session", withSession("open")),
-		task("in-cancelled-session", withSession("cancelled")),
+		task("cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
+		task("in-open-chat", inChat("chat-open")),
+		task("in-deleted-chat", inChat("chat-deleted")),
+		task("parent-in-deleted-session", withSession("deleted")),
+		task("parent-in-deleted-chat", inChat("chat-deleted")),
+		task("child-of-parent-in-deleted-session", childOf("parent-in-deleted-session")),
+		task("child-of-parent-in-deleted-chat", childOf("parent-in-deleted-chat")),
+		task("child-in-open-session-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			withSession("open")(t)
+		}),
+		task("orphan-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			t.OwnerReferences = nil
+		}),
+		task("pinned-orphan-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			t.OwnerReferences = nil
+			t.Annotations = map[string]string{labels.AnnotationParentTaskUID: "parent-running-uid"}
+		}),
+		fork,
+		legacyFork,
 		task("in-deleted-session", withSession("deleted")),
 		task("finished", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
 		task("cancel-requested", func(t *corev1alpha1.Task) {
@@ -447,27 +604,36 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	}
 	check := DelegationLiveness{
 		Reader:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build(),
-		Sessions: sessions,
+		Sessions: metadataOnlySessions{sessions},
 	}.Check
 	binding := func(name string) outboundaccess.AgentIdentityBinding {
 		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
 	}
 	for name, want := range map[string]string{
-		"running":                   "",
-		"in-open-session":           "",
-		"in-cancelled-session":      "cancelled",
-		"in-deleted-session":        "deleted",
-		"finished":                  "Succeeded",
-		"cancel-requested":          "cancellation",
-		"deleting":                  "being deleted",
-		"gone":                      "gone",
-		"child-of-running":          "",
-		"child-of-succeeded":        "",
-		"child-of-cancelled":        "was cancelled",
-		"child-of-cancel-requested": "cancellation of a Task it was delegated from",
-		"child-of-gone":             "is gone",
-		"grandchild-of-cancelled":   "was cancelled",
-		"child-of-replaced":         "was replaced",
+		"running":                            "",
+		"in-open-session":                    "",
+		"cancelled":                          "Cancelled",
+		"in-open-chat":                       "",
+		"in-deleted-chat":                    "Session was deleted",
+		"child-of-parent-in-deleted-session": "Session of a Task it was delegated from was deleted",
+		"child-of-parent-in-deleted-chat":    "Session of a Task it was delegated from was deleted",
+		"child-in-open-session-of-running":   "",
+		"orphan-of-running":                  "no UID pins",
+		"pinned-orphan-of-running":           "",
+		"fork-of-cancelled":                  "",
+		"legacy-fork-of-cancelled":           "no UID pins",
+		"in-deleted-session":                 "deleted",
+		"finished":                           "Succeeded",
+		"cancel-requested":                   "cancellation",
+		"deleting":                           "being deleted",
+		"gone":                               "gone",
+		"child-of-running":                   "",
+		"child-of-succeeded":                 "",
+		"child-of-cancelled":                 "was cancelled",
+		"child-of-cancel-requested":          "cancellation of a Task it was delegated from",
+		"child-of-gone":                      "is gone",
+		"grandchild-of-cancelled":            "was cancelled",
+		"child-of-replaced":                  "was replaced",
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := check(context.Background(), binding(name))
@@ -487,6 +653,14 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	if err := check(context.Background(), replaced); err == nil || !strings.Contains(err.Error(), "replaced") {
 		t.Fatalf("a recreated Task: %v", err)
 	}
+}
+
+// metadataOnlySessions refuses to load a Session with its transcript, so the
+// liveness check that runs before every Delegated call must read metadata only.
+type metadataOnlySessions struct{ *sqlite.Store }
+
+func (metadataOnlySessions) GetSession(context.Context, string, string) (*store.SessionRecord, error) {
+	return nil, errors.New("the liveness check loaded the Session transcript")
 }
 
 func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {

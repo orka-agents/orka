@@ -86,7 +86,12 @@ const (
 	// Only controller identities may write it, and admission is not
 	// retroactive, so the source annotation alone proves nothing: a Task
 	// planted while admission was disabled carries no valid stamp.
-	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
+	AnnotationRequestedByStamp = "orka.ai/requested-by-stamp"
+	// AnnotationDelegationRootStamp is an HMAC over the Task UID and
+	// requester that the API server seals, with the requester stamp, only on
+	// Tasks its caller created directly. A child sealed through its parent
+	// never carries it. Only controller identities may write it.
+	AnnotationDelegationRootStamp           = "orka.ai/delegation-root-stamp"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
