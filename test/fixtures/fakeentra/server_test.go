@@ -36,11 +36,11 @@ func newFixture(t *testing.T) (*httptest.Server, func(credential string) *agenti
 	server := httptest.NewTLSServer(fake.Handler())
 	t.Cleanup(server.Close)
 	source := func(credential string) *agentidentity.Source {
-		config := agentidentity.EntraConfig{TenantID: tenant, BlueprintClientID: blueprint}
+		config := agentidentity.EntraConfig{TenantID: tenant, BlueprintClientID: blueprint, Authority: server.URL}
 		return &agentidentity.Source{
 			Config: agentidentity.Config{Entra: &config, AgentUseAuthorization: true},
 			Entra: &agentidentity.EntraIssuer{
-				Config: config, Authority: server.URL, HTTPClient: server.Client(),
+				Config: config, HTTPClient: server.Client(),
 				Credential: func() (string, error) { return credential, nil },
 			},
 		}
