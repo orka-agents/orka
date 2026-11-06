@@ -265,7 +265,7 @@ it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
 `IdentityVerified` condition turns `True` once the controller has obtained a token
 for the identity from its issuer, and the controller asks again at least hourly; a
-refusal sets it `False` and makes the Agent not Ready. Tokens for the identity are
+refusal sets it `False`, makes the Agent not Ready, and stops its identity-backed calls; an issuer that cannot answer sets it `Unknown` instead. Tokens for the identity are
 issued only by the controller, through `agentIdentity`-mode outbound access
 policies, and never reach the runtime. In `Delegated` mode the Agent acts for the
 Task's requester with their own linked grant: only the provider's curated tools,

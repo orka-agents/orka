@@ -134,6 +134,13 @@ func identityHolder(uid string, claimed bool) *corev1alpha1.Agent {
 	return agent
 }
 
+func withIdentityVerified(agent *corev1alpha1.Agent, status metav1.ConditionStatus, reason string) *corev1alpha1.Agent {
+	agent.Status.Conditions = append(agent.Status.Conditions, metav1.Condition{
+		Type: AgentConditionIdentityVerified, Status: status, Reason: reason, Message: "m", LastTransitionTime: metav1.Now(),
+	})
+	return agent
+}
+
 func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 	scheme := resolverScheme(t)
 	resolverWith := func(agent *corev1alpha1.Agent) *KubernetesResolver {
@@ -186,6 +193,11 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent.Finalizers = []string{"example.com/hold"}
 			return agent
 		}(),
+		// A definitive refusal at the last verification, such as a disabled
+		// identity, stops calls even while a policy token is still cached.
+		"issuer refused the identity": func() *corev1alpha1.Agent {
+			return withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionFalse, AgentReasonIdentityVerificationFailed)
+		}(),
 		"claim without a grant time": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Status.IdentityClaim.GrantedAt = nil
@@ -202,6 +214,23 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			resolver.AgentIdentities = &fakeAgentIdentitySource{token: "t"}
 			if _, err := resolver.Resolve(context.Background(), agentIdentityRequest()); err == nil {
 				t.Fatal("Resolve() = nil error, want the call refused")
+			}
+		})
+	}
+
+	// The issuer's own answer decides calls while it is unreachable or the
+	// identity is not verified yet.
+	for name, agent := range map[string]*corev1alpha1.Agent{
+		"issuer unavailable":   withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionUnknown, "IssuerUnavailable"),
+		"not verified yet":     withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionFalse, "Declared"),
+		"verified":             withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionTrue, "Verified"),
+		"refused, now unknown": withIdentityVerified(identityHolder("agent-uid", true), metav1.ConditionUnknown, AgentReasonIdentityVerificationFailed),
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolver := resolverWith(agent)
+			resolver.AgentIdentities = &fakeAgentIdentitySource{token: "t"}
+			if _, err := resolver.Resolve(context.Background(), agentIdentityRequest()); err != nil {
+				t.Fatalf("Resolve() error = %v, want the issuer to decide", err)
 			}
 		})
 	}
