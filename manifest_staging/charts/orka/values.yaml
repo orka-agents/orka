@@ -164,10 +164,17 @@ controller:
     dispatchEnabled: false
     # Exact provider worker namespaces where Orka independently reads Pod identity.
     workerNamespaces: []
+    # Deliver the provider-proxy token into gateway-enforced native workspaces
+    # whose provider cannot inject it at the egress gateway. Off: such
+    # workspaces fail admission instead.
+    allowProviderTokenInSandbox: false
 
   # Retained in-tree Substrate MCP Tool actors and pools only.
   substrate:
     mcpToolsEnabled: false
+    # Credential provider class the Substrate egress gateway was installed with
+    # (only "k8s.io"). Enables MCP Tool egress credentials; empty fails them closed.
+    egressCredentialProvider: ""
     apiEndpoint: api.ate-system.svc:443
     apiCertFile: ""
     apiKeyFile: ""

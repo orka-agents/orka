@@ -40,6 +40,13 @@ const (
 
 // CredentialBootstrapRequest is the seeding payload. First write wins; an
 // identical repeat is acknowledged; a different payload conflicts.
+// ProviderTokenEgressInjectionPlaceholder is the public provider token Core
+// seeds into a runtime whose provider-proxy bearer the backend egress gateway
+// injects. The supervisor sends it as "Authorization: Bearer <placeholder>";
+// the gateway replaces the whole header value before the request reaches the
+// provider proxy, which never accepts the placeholder itself.
+const ProviderTokenEgressInjectionPlaceholder = "orka-egress-gateway-injects-provider-credential"
+
 type CredentialBootstrapRequest struct {
 	ControllerToken  string `json:"controllerToken"`
 	CapabilitySecret string `json:"capabilitySecret"`

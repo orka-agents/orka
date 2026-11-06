@@ -214,6 +214,8 @@ const (
 
 // SubstrateActorEgressRule allows one host name on explicit ports.
 // +kubebuilder:validation:XValidation:rule="self.scheme != 'tls' || (has(self.ports) && size(self.ports) > 0)",message="tls egress requires explicit ports"
+// +kubebuilder:validation:XValidation:rule="!has(self.credential) || self.scheme != 'tls'",message="egress credentials require scheme http or https"
+// +kubebuilder:validation:XValidation:rule="!has(self.credential) || !self.host.startsWith('*')",message="egress credentials require an exact host"
 type SubstrateActorEgressRule struct {
 	// Scheme is http, https (gateway-intercepted) or tls (passthrough).
 	// +kubebuilder:validation:Required
@@ -236,6 +238,38 @@ type SubstrateActorEgressRule struct {
 	// +listType=set
 	// +optional
 	Ports []int32 `json:"ports,omitempty"`
+
+	// Credential asks the Substrate egress gateway to replace one request
+	// header with a value from a Secret in the Tool's namespace, so the actor
+	// never holds the credential. The actor sends the header with any
+	// placeholder value; requests without it are forwarded unchanged. Requires
+	// the controller's --substrate-egress-credential-provider and a credential
+	// provider namespace grant for the actor's Atespace. The Tool author must
+	// be allowed to get the Secret. With scheme http the credential leaves the
+	// gateway in cleartext; with https the gateway re-originates TLS trusting
+	// only public roots.
+	// +optional
+	Credential *SubstrateActorEgressCredential `json:"credential,omitempty"`
+}
+
+// SubstrateActorEgressCredential replaces one request header with a Secret value.
+type SubstrateActorEgressCredential struct {
+	// Header is the HTTP request header to replace. Defaults to Authorization.
+	// Hop-by-hop, routing, framing and cookie headers are rejected.
+	// +kubebuilder:default=Authorization
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+.^_|~-]+$`
+	// +optional
+	Header string `json:"header,omitempty"`
+
+	// Prefix is prepended verbatim to the Secret value, for example "Bearer ".
+	// +kubebuilder:validation:MaxLength=64
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// SecretRef selects the Secret key in the Tool's namespace.
+	SecretRef SecretKeySelector `json:"secretRef"`
 }
 
 // ToolStatus defines the observed state of Tool
