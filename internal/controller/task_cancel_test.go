@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -180,5 +182,31 @@ func TestRequestedCancellationMessageReadsTheLiveTask(t *testing.T) {
 	replaced.UID = "older-uid"
 	if got := d.requestedCancellationMessage(context.Background(), replaced); got != "" {
 		t.Fatalf("message = %q, want none for a replaced Task", got)
+	}
+}
+
+func TestACPMCPBrokerRefusesCallsOnceCancellationIsRequested(t *testing.T) {
+	request, _ := testMCPBrokerRequest(t, harnessv2.MCPToolEffectReadOnly)
+	fence := store.ControllerEpochFence{Epoch: int64(request.Metadata.Fence.ControllerEpoch)}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: acpDispatcherTestTaskName, Namespace: request.Namespace, UID: types.UID(request.Metadata.TaskUID)},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: int32(request.Metadata.TaskAttempt),
+			PromptID: string(request.Metadata.PromptID), RuntimeInstanceID: string(request.Metadata.Fence.RuntimeInstanceID),
+			RuntimeSessionUID:        string(request.Authorization.RuntimeSessionUID),
+			RuntimeSessionGeneration: int64(request.Authorization.SessionGeneration), ControllerEpoch: fence.Epoch,
+		}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
+	if _, _, err := findACPMCPTaskExecution(context.Background(), reader, request, fence); err != nil {
+		t.Fatalf("running Task: %v", err)
+	}
+
+	// The Task is still Running: the controller has not reconciled the request.
+	task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+	reader = fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
+	if _, _, err := findACPMCPTaskExecution(context.Background(), reader, request, fence); !errors.Is(err, errACPMCPTaskCancelled) {
+		t.Fatalf("error = %v, want the cancelled-Task refusal", err)
 	}
 }
