@@ -110,6 +110,9 @@ type ToolContext struct {
 	// tool call. The receipt remains authoritative when provenance admission is
 	// disabled and Task metadata is mutable.
 	ExternalEffects store.ExternalEffectStore
+	// ExecutionEvents lets brokered tools append idempotent Task execution
+	// events, such as the approval request of a parked turn.
+	ExecutionEvents store.DeduplicatingExecutionEventStore
 	// Least-privilege durable dependencies for brokered memory tools.
 	MemoryReader         MemoryReader
 	MemoryProposalWriter MemoryProposalWriter
@@ -792,6 +795,9 @@ func RegisterBrokeredCoordinationTools(r *Registry, k8sClient client.Client) err
 	r.Register(NewRememberMemoryTool())
 	r.Register(NewProposeMemoryTool())
 	r.Register(NewSearchTranscriptTool())
+	// park_until is offered only to Agents that list it in their allowed
+	// tools; it records a data-only park on the authenticated turn.
+	r.Register(NewParkUntilTool())
 	return nil
 }
 

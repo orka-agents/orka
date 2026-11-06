@@ -122,6 +122,32 @@ const (
 
 const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
 
+// Parked-turn continuation metadata. The parked Task's status.wait is the
+// authority for a continuation; these are informational and for selection.
+const (
+	// LabelContinuationOf selects the continuation Tasks of a parked Task.
+	LabelContinuationOf = "orka.ai/continuation-of"
+	// AnnotationContinuationOfName and AnnotationContinuationOfUID name the
+	// parked Task a continuation resumes.
+	AnnotationContinuationOfName = "orka.ai/continuation-of-name"
+	AnnotationContinuationOfUID  = "orka.ai/continuation-of-uid"
+	// AnnotationContinuationIndex is the number of continuations before this
+	// Task in its chain.
+	AnnotationContinuationIndex = "orka.ai/continuation-index"
+	// AnnotationContinuationChainDeadline is the absolute RFC 3339 deadline
+	// a continuation inherits from the first Task of its chain. It can only
+	// shorten the deadline derived from creation time and spec.timeout.
+	AnnotationContinuationChainDeadline = "orka.ai/continuation-chain-deadline"
+	// ContinuationLinkFinalizer keeps a continuation Task from disappearing
+	// before its parked predecessor durably records its UID. Without it, a
+	// continuation created and then deleted in that window would look as if
+	// it had never been created, and recovery would start the work again.
+	ContinuationLinkFinalizer = "orka.ai/continuation-link"
+	// AnnotationCancelWait asks the controller to cancel a parked wait without
+	// deleting the Task. Its value is a short reason.
+	AnnotationCancelWait = "orka.ai/cancel-wait"
+)
+
 const LabelWorkspaceAttachment = "workspace.orka.ai/attachment-for"
 
 // ACPSuspendQuotaLeaseNamePrefix reserves class-owned suspension quota Leases

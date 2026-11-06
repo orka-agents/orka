@@ -3436,9 +3436,12 @@ func (acceptingArtifactReservations) Reserve(context.Context, artifactcap.Operat
 
 type dispatcherPublisherServerOptions struct {
 	disablePRPresentation bool
-	inspectPrepare        func(publisherservice.PublicationPrepareRequest)
-	inspectPublish        func(publisherservice.PublicationPublishRequest)
-	inspectPullRequest    func(publisher.PullRequestIntent)
+	// resolvedBaselineOID, when set, is the branch head workspace resolution
+	// reports, for example the commit an earlier turn published.
+	resolvedBaselineOID func() string
+	inspectPrepare      func(publisherservice.PublicationPrepareRequest)
+	inspectPublish      func(publisherservice.PublicationPublishRequest)
+	inspectPullRequest  func(publisher.PullRequestIntent)
 }
 
 //nolint:gocyclo // Publisher test fixture exposes protocol operations and their fault-injection controls.
@@ -3473,9 +3476,13 @@ func newDispatcherPublisherServer(t *testing.T, treeOID, commitOID, bundleDigest
 			if resolvedRef == defaultACPSourceBranch {
 				resolvedRef = "refs/heads/" + defaultACPSourceBranch
 			}
+			baselineOID := strings.Repeat("1", 40)
+			if len(options) > 0 && options[0].resolvedBaselineOID != nil {
+				baselineOID = options[0].resolvedBaselineOID()
+			}
 			writeDispatcherJSON(w, publisherservice.WorkspaceResolveResponse{
 				OperationID: request.Metadata.OperationID, RequestDigest: testControlDigestForDispatcher("workspace-resolve"),
-				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: strings.Repeat("1", 40),
+				RepositoryID: request.Source.ID, SourceRef: resolvedRef, BaselineOID: baselineOID,
 			})
 		case publisherservice.WorkspacePreparePath:
 			var request publisherservice.WorkspacePrepareRequest
@@ -4783,7 +4790,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
@@ -4871,7 +4878,7 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
-		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity ||
 		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
 	}

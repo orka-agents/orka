@@ -641,6 +641,37 @@ describe('TaskDetail', () => {
     expect(screen.getAllByText('Waiting for approval').length).toBeGreaterThan(0)
   })
 
+  it('counts only the parked sign-off as pending on a parked task', async () => {
+    let approvalRequests = 0
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'parked', namespace: 'default', uid: 'uid-parked' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting', references: ['ap-parked'] } },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/approvals', () => {
+        approvalRequests++
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: 'parked',
+          approvals: [
+            { id: 'ap-parked', action: 'Agent sign-off (parked turn)', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+            { id: 'ap-stale', action: 'bash', status: 'pending', createdAt: '2026-01-01T00:00:00Z' },
+          ],
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<TaskDetail taskId="parked" />)
+    expect(await screen.findByRole('tab', { name: 'Approvals 1 pending' })).toBeInTheDocument()
+    // Off the Overview the parked sign-off keeps its count.
+    await user.click(screen.getByRole('tab', { name: 'Logs' }))
+    expect(screen.getByRole('tab', { name: 'Approvals 1 pending' })).toBeInTheDocument()
+    expect(approvalRequests).toBeGreaterThan(0)
+  })
+
   it('shows a Deleting state instead of an active Delete for a task being deleted', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
