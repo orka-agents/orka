@@ -48,6 +48,11 @@ const (
 	defaultEntraHTTPDeadline = 15 * time.Second
 )
 
+// ErrIssuerUnavailable marks an issuer that could not answer, as opposed to
+// one that refused: a timeout, a network failure, throttling, or a server
+// error. Callers may retry it later.
+var ErrIssuerUnavailable = errors.New("the identity issuer is unavailable")
+
 // maxCachedTokens bounds the token cache however many identities, targets,
 // and policies the controller serves.
 const maxCachedTokens = 1024
@@ -302,12 +307,12 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 	response, err := client.Do(request)
 	if err != nil {
 		reason = "unreachable"
-		return "", 0, errors.New("the Entra token endpoint is unreachable")
+		return "", 0, fmt.Errorf("the Entra token endpoint is unreachable: %w", ErrIssuerUnavailable)
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxTokenResponseBytes))
 	if err != nil {
-		return "", 0, errors.New("read the Entra token response")
+		return "", 0, fmt.Errorf("read the Entra token response: %w", ErrIssuerUnavailable)
 	}
 	var parsed entraTokenResponse
 	_ = json.Unmarshal(body, &parsed)
@@ -317,6 +322,10 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 			code = "unknown_error"
 		}
 		reason = code
+		if response.StatusCode >= http.StatusInternalServerError || response.StatusCode == http.StatusTooManyRequests ||
+			code == "temporarily_unavailable" {
+			return "", 0, fmt.Errorf("Entra could not answer the token request: %s (HTTP %d): %w", code, response.StatusCode, ErrIssuerUnavailable) //nolint:staticcheck // Product name begins the message.
+		}
 		if len(parsed.ErrorCodes) > 0 {
 			return "", 0, fmt.Errorf("Entra refused the token request: %s (AADSTS%d, HTTP %d)", code, parsed.ErrorCodes[0], response.StatusCode) //nolint:staticcheck // Product name begins the message.
 		}

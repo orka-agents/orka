@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/orka-agents/orka/internal/agentcontext"
@@ -61,6 +62,14 @@ type AgentReconciler struct {
 	// IdentityVerifier proves identities with their issuer. Nil leaves them
 	// declared but unverified.
 	IdentityVerifier AgentIdentityVerifier
+
+	// issuerBackoff holds back verification for every Agent after the
+	// issuer could not answer, so an outage costs one timeout, not one per
+	// Agent on the single reconcile worker.
+	issuerBackoff struct {
+		sync.Mutex
+		until time.Time
+	}
 }
 
 // AgentIdentityVerifier proves an Agent's identity with its issuer.
@@ -151,6 +160,9 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	// Update status
 	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim, identity)
+	if err == nil && identity.retryAfter > 0 && (result.RequeueAfter == 0 || result.RequeueAfter > identity.retryAfter) {
+		result.RequeueAfter = identity.retryAfter
+	}
 	if err == nil && identity.declared && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReverifyInterval) {
 		// Identities can be disabled or deleted at the issuer at any time.
 		result.RequeueAfter = agentIdentityReverifyInterval
