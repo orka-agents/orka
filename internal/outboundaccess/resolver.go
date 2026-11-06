@@ -823,7 +823,7 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("the delegation ended while its credential was issued: %w", err))
 	}
 	if r.delegationExpired(policy, binding) {
-		return "", errDelegationExpired
+		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, errDelegationExpired)
 	}
 	return token, nil
 }
