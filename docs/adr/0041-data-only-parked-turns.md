@@ -142,7 +142,9 @@ parked turn is that continuation, created by Orka when the awaited event arrives
   result lives at the chain's tail. `wait_for_tasks` and the wait reconciler follow verified
   continuation links. Other consumers that read a single Task's phase see the parked turn
   only, and must follow `status.wait` to learn more.
-- Scheduled-run history pruning skips parked runs, and a parked run counts as active for
+- Scheduled-run history pruning treats a parked run and its continuations as one run: it
+  skips the chain while it is unfinished, counts it by its tail's outcome, and prunes it
+  through its head. A parked run counts as active for
   `concurrencyPolicy: Forbid`.
 - Continuations of delegated children copy the parent label so their tool policy matches,
   but they are not controller-owned by the coordinator. Coordinator operations on them go

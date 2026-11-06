@@ -3863,15 +3863,24 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 		failedLimit = *task.Spec.FailedRunsHistoryLimit
 	}
 
+	// History limits apply to logical runs. A parked run and its
+	// continuations share the parent label, but they are one run: the chain's
+	// head represents it, its tail supplies the outcome, and deleting the head
+	// cascades to every continuation through their owner references.
 	var succeeded, failed []*corev1alpha1.Task
 	for i := range childList.Items {
 		child := &childList.Items[i]
-		if r.taskContinuationChainUnsettled(ctx, child) {
+		if r.taskIsLinkedContinuation(ctx, child) {
+			// Counted, and pruned, with the head of its chain.
+			continue
+		}
+		tail, settled := r.settledTaskContinuationTail(ctx, child)
+		if !settled {
 			// Deleting a parked run, or a predecessor whose continuation is
 			// still running, would cancel that unfinished work.
 			continue
 		}
-		switch child.Status.Phase {
+		switch tail.Status.Phase {
 		case corev1alpha1.TaskPhaseSucceeded:
 			succeeded = append(succeeded, child)
 		case corev1alpha1.TaskPhaseFailed:
@@ -4827,25 +4836,40 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 	})
 }
 
-// taskContinuationChainUnsettled reports whether a Task still owns unfinished
-// work through a parked wait or its continuation chain. An unresolvable chain
+// settledTaskContinuationTail returns the Task whose outcome represents
+// task's continuation chain, and false while the chain still owns unfinished
+// work through a parked wait or a running continuation. An unresolvable chain
 // is treated as unsettled so cleanup never cancels work it cannot see.
-func (r *TaskReconciler) taskContinuationChainUnsettled(ctx context.Context, task *corev1alpha1.Task) bool {
+func (r *TaskReconciler) settledTaskContinuationTail(ctx context.Context, task *corev1alpha1.Task) (*corev1alpha1.Task, bool) {
 	if task == nil || task.Status.Wait == nil {
-		return false
+		return task, true
 	}
 	if taskwait.Active(task.Status.Wait) {
-		return true
+		return nil, false
 	}
 	if task.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
-		return false
+		return task, true
 	}
 	tail, err := taskwait.ResolveTail(ctx, uncachedReader(r.APIReader, r.Client), task)
 	if apierrors.IsNotFound(err) {
 		// The continuation is already gone; there is nothing left to protect.
+		return task, true
+	}
+	if err != nil || !taskwait.Settled(tail) {
+		return nil, false
+	}
+	return tail, true
+}
+
+// taskIsLinkedContinuation reports whether task continues a parked Task that
+// verifiably links it, so the predecessor's chain accounts for it. A lookup
+// failure counts as linked: the Task is then neither counted nor pruned.
+func (r *TaskReconciler) taskIsLinkedContinuation(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task == nil || strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) == "" {
 		return false
 	}
-	return err != nil || !taskwait.Settled(tail)
+	_, linked, err := taskwait.Predecessor(ctx, uncachedReader(r.APIReader, r.Client), task)
+	return err != nil || linked
 }
 
 func withoutParkedApprovals(pending []approvals.Approval) []approvals.Approval {

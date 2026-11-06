@@ -775,3 +775,60 @@ func TestContinuationDeadlineDoesNotDriftWithCreationTime(t *testing.T) {
 		t.Fatalf("wait deadline = %v, want the chain deadline %v", got, chainDeadline)
 	}
 }
+
+func TestHistoryLimitsPruneAContinuationChainAsOneRun(t *testing.T) {
+	scheduled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: taskWaitTestNamespace, UID: "uid-nightly"},
+		Spec: corev1alpha1.TaskSpec{Schedule: "@daily", SuccessfulRunsHistoryLimit: new(int32(1)), FailedRunsHistoryLimit: new(int32(0))}}
+	run := func(name string, age time.Duration, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: taskWaitTestNamespace, UID: types.UID("uid-" + name),
+				CreationTimestamp: metav1.NewTime(taskWaitTestNow.Add(-age)),
+				Labels:            map[string]string{labels.LabelParentTask: "nightly"},
+			},
+			Status: corev1alpha1.TaskStatus{Phase: phase},
+		}
+	}
+	// The newest run parked and its continuation succeeded; an older run
+	// succeeded without parking.
+	older := run("older-run", 5*time.Hour, corev1alpha1.TaskPhaseSucceeded)
+	parked := run("parked-run", 3*time.Hour, corev1alpha1.TaskPhaseSucceeded)
+	parked.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "parked-run-next", ContinuationTaskUID: "uid-parked-run-next",
+	}
+	next := run("parked-run-next", time.Hour, corev1alpha1.TaskPhaseSucceeded)
+	next.Annotations = map[string]string{
+		labels.AnnotationContinuationOfName: "parked-run", labels.AnnotationContinuationOfUID: "uid-parked-run",
+	}
+	// A run whose continuation failed counts as a failed run.
+	failedHead := run("failed-head", 2*time.Hour, corev1alpha1.TaskPhaseSucceeded)
+	failedHead.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "failed-head-next", ContinuationTaskUID: "uid-failed-head-next",
+	}
+	failedNext := run("failed-head-next", 90*time.Minute, corev1alpha1.TaskPhaseFailed)
+	failedNext.Annotations = map[string]string{
+		labels.AnnotationContinuationOfName: "failed-head", labels.AnnotationContinuationOfUID: "uid-failed-head",
+	}
+
+	r := newUnitReconciler(newTestScheme(), scheduled, older, parked, next, failedHead, failedNext)
+	if err := r.enforceHistoryLimits(context.Background(), scheduled); err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	list := &corev1alpha1.TaskList{}
+	if err := r.List(context.Background(), list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		remaining[item.Name] = true
+	}
+	if !remaining["parked-run"] || !remaining["parked-run-next"] {
+		t.Fatalf("the newest run's chain must be retained as a unit: %v", remaining)
+	}
+	if remaining["older-run"] {
+		t.Fatalf("the older run beyond the success limit must be pruned: %v", remaining)
+	}
+	if remaining["failed-head"] {
+		t.Fatalf("a chain is pruned through its head by its tail's outcome: %v", remaining)
+	}
+}
