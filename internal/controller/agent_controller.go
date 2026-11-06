@@ -156,6 +156,9 @@ func (r *AgentReconciler) validateAgent(ctx context.Context, agent *corev1alpha1
 		if err := r.ToolboxPolicy.ValidateAgentToolboxes(withEffectiveBuiltInContract(agent, r.Mode)); err != nil {
 			return err
 		}
+		if err := r.ToolboxPolicy.ValidateAgentSkills(withEffectiveBuiltInContract(agent, r.Mode)); err != nil {
+			return err
+		}
 	}
 
 	if err := ValidateOpenCodeAgentSpec(agent); err != nil {

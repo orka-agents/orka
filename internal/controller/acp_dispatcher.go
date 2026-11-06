@@ -5456,6 +5456,7 @@ func runtimeProfileFromPool(profile corev1alpha1.RuntimePoolProfileSpec) harness
 		WorkspaceIntent: harnessv2.WorkspaceIntent(profile.WorkspaceIntent), ProxyCredentialRole: profile.ProxyCredentialRole,
 		ProxyCredentialScope: profile.ProxyCredentialScope, ResourceClass: profile.ResourceClass,
 		Toolboxes: runtimeToolboxesFromPool(profile.Toolboxes),
+		Skills:    runtimeSkillsFromPool(profile.Skills),
 	}
 }
 

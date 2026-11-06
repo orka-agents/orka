@@ -27,9 +27,12 @@ const (
 )
 
 // RuntimeToolboxReservedOptNames are the /opt/<name> folders the built-in
-// runtime images already populate. A toolbox may never shadow them.
+// runtime images already populate, plus the skill mount root. A toolbox may
+// never shadow them.
 var RuntimeToolboxReservedOptNames = []string{
 	"codex", "codex-acp", "claude", "claude-agent-acp", "copilot", "opencode", "ripgrep", "yarn-v1.22.22",
+	// The skill mount root is controller-owned and never a toolbox.
+	RuntimeSkillMountRootName,
 }
 
 var (
@@ -107,13 +110,19 @@ func ValidateRuntimeToolboxes(toolboxes []RuntimeToolbox) error {
 // in the canonical form Kubernetes' container-image parser accepts: an
 // explicit registry host, a lowercase repository, no tag, and a sha256 digest.
 func ValidateRuntimeToolboxImage(image string) error {
+	return validateRuntimeImageReference("toolbox", image)
+}
+
+// validateRuntimeImageReference applies the digest-pinned image rules shared
+// by toolboxes and skills; kind names the input in error messages.
+func validateRuntimeImageReference(kind, image string) error {
 	if image == "" {
-		return fmt.Errorf("toolbox image is required")
+		return fmt.Errorf("%s image is required", kind)
 	}
 	if len(image) > MaxRuntimeToolboxImageBytes {
-		return fmt.Errorf("toolbox image exceeds %d bytes", MaxRuntimeToolboxImageBytes)
+		return fmt.Errorf("%s image exceeds %d bytes", kind, MaxRuntimeToolboxImageBytes)
 	}
-	shape := fmt.Errorf("toolbox image %q must be a fully qualified registry reference pinned by digest (<registry>/<repository>@sha256:<64 hex>) without a tag", image)
+	shape := fmt.Errorf("%s image %q must be a fully qualified registry reference pinned by digest (<registry>/<repository>@sha256:<64 hex>) without a tag", kind, image)
 	// ParseNamed accepts only the canonical form, so docker.io shorthand such
 	// as "yq@sha256:..." or "library/yq@sha256:..." is rejected.
 	named, err := reference.ParseNamed(image)

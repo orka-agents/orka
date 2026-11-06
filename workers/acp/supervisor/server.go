@@ -1234,6 +1234,11 @@ func (s *Server) createSession(
 	if err := writeToolboxLoginProfile(paths.Home, s.cfg.Toolboxes); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("toolbox login profile", err)
 	}
+	// Skills land in the session tree before ownership is finalized, so each
+	// private copy belongs to this session's identity alone.
+	if err := materializeSessionSkills(s.cfg.Provider.Kind, s.cfg.Skills, skillMountRoot, paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("skill projection", err)
+	}
 	resumeSessionID := ""
 	if request.NativeRestore != nil {
 		snapshot := request.NativeRestore.Snapshot
