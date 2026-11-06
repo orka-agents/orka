@@ -334,6 +334,9 @@ func NewToolExecutor() *ToolExecutor {
 		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
+		// The controller sets the Task's UID on the worker Pod and overrides
+		// any Task-supplied value, as it does for the namespace above.
+		taskUID: strings.TrimSpace(os.Getenv(workerenv.TaskUID)),
 	}
 }
 
