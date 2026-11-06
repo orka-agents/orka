@@ -589,3 +589,55 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 		t.Fatalf("Task bound before a re-grant: handled=%v err=%v, want it failed", handled, err)
 	}
 }
+
+func TestAgentIdentityBindingFromTaskCarriesTheTaskCreationTime(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	task := boundTask("bound", agent, corev1alpha1.TaskPhaseRunning)
+	task.UID = "bound-uid"
+	binding := agentIdentityBindingFromTask(task)
+	if binding == nil || binding.TaskUID != "bound-uid" || !binding.TaskCreated.Equal(task.CreationTimestamp.Time) {
+		t.Fatalf("binding = %+v, want the Task's UID and creation time for the grant check", binding)
+	}
+	if agentIdentityBindingFromTask(&corev1alpha1.Task{}) != nil {
+		t.Fatal("a Task without an identity binding must yield none")
+	}
+}
+
+// The issuer instance names a non-default authority, so a parent bound before
+// the controller moved to another authority cannot hand its identity to a
+// child bound after.
+func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	instance, _ := testIdentityConfig().Instance("entra")
+	parent := boundTask("parent", agent, corev1alpha1.TaskPhaseRunning)
+	parent.UID = "parent-uid"
+	parent.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
+	sovereign := testIdentityConfig()
+	sovereign.Entra.Authority = "https://login.microsoftonline.us"
+	r := &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, parent).Build(),
+		Identity: sovereign,
+	}
+	controller := true
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: testNS, CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{labels.LabelParentTask: "parent"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: "parent",
+				UID: "parent-uid", Controller: &controller,
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+	}
+	root := child.DeepCopy()
+	root.Labels, root.OwnerReferences = nil, nil
+	ref, err := r.agentExecutionIdentity(context.Background(), root, agent)
+	if err != nil || ref == nil || ref.Instance != instance+"@https://login.microsoftonline.us" {
+		t.Fatalf("root Task identity under another authority = %+v, %v", ref, err)
+	}
+	_, err = r.agentExecutionIdentity(context.Background(), child, agent)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
+		t.Fatalf("child after an authority change: error = %v, want a permanent refusal", err)
+	}
+}

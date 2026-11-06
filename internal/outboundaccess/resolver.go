@@ -109,6 +109,10 @@ type AgentIdentityBinding struct {
 	AgentUID        string
 	AgentGeneration int64
 	TaskUID         string
+	// TaskCreated is the Task's creation time. Only a Task created at or
+	// after the claim was granted was checked for Agent use while the Agent
+	// named the identity.
+	TaskCreated time.Time
 }
 
 // AgentIdentityTokenRequest asks the issuer for a credential for one frozen
@@ -610,6 +614,12 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	issuer, id, named := live.IdentityRef()
 	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
+	}
+	// A claim granted again, for example after it was released or Agent use
+	// authorization was re-enabled, covers only Tasks created since; an
+	// older Task's creation was never checked for this grant.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || binding.TaskCreated.Before(grantedAt.Time) {
+		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {

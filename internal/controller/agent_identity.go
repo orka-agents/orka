@@ -391,6 +391,7 @@ func agentIdentityBindingFromTask(task *corev1alpha1.Task) *outboundaccess.Agent
 	return &outboundaccess.AgentIdentityBinding{
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
 		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
+		TaskCreated: task.CreationTimestamp.Time,
 	}
 }
 
