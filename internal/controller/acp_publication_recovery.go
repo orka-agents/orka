@@ -235,7 +235,7 @@ func (d *ACPDispatcher) recoverPublicationPrepared(
 	if err := d.recoveryDeliveryTransition(ctx, recovery.attemptID, recovery.fence, store.PromptDeliveryPreparing, store.PromptDeliveryPrepared, "recover-publication-prepared"); err != nil {
 		return nil, err
 	}
-	cancelled, err := d.taskCancellationRequested(ctx, recovery.task)
+	cancelled, err := d.taskPublicationRefused(ctx, recovery.task)
 	if err != nil {
 		return nil, err
 	}

@@ -3428,6 +3428,47 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-executionworkspaceclass-operator-access.orka.ai
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - workspace.orka.ai
+      apiVersions:
+      - v1alpha1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - executionworkspaceclasses
+  validations:
+  - expression: |-
+      variables.newValue == variables.oldValue || authorizer.group('workspace.orka.ai')
+
+        .resource('executionworkspaceclasses')
+        .namespace(request.namespace)
+        .name(object.metadata.name)
+        .check('operator-access').allowed()
+    message: only an administrator with the operator-access verb on executionworkspaceclasses
+      may set or change the acp.workspace.orka.ai/operator-access annotation
+    reason: Forbidden
+  - expression: variables.newValue in ['<absent>', 'read', 'exec']
+    message: acp.workspace.orka.ai/operator-access must be "read" or "exec"
+    reason: Invalid
+  variables:
+  - expression: 'has(object.metadata.annotations) && ''acp.workspace.orka.ai/operator-access''
+      in object.metadata.annotations ? object.metadata.annotations[''acp.workspace.orka.ai/operator-access'']
+      : ''<absent>'''
+    name: newValue
+  - expression: 'oldObject != null && has(oldObject.metadata.annotations) && ''acp.workspace.orka.ai/operator-access''
+      in oldObject.metadata.annotations ? oldObject.metadata.annotations[''acp.workspace.orka.ai/operator-access'']
+      : ''<absent>'''
+    name: oldValue
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-gateway-task-protection
 spec:
   failurePolicy: Fail
@@ -3641,6 +3682,15 @@ metadata:
   name: orka-executionworkspace-core-admission.orka.ai
 spec:
   policyName: orka-executionworkspace-core-admission.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-executionworkspaceclass-operator-access.orka.ai
+spec:
+  policyName: orka-executionworkspaceclass-operator-access.orka.ai
   validationActions:
   - Deny
 ---

@@ -65,6 +65,7 @@ not do with a running agent's memory. See
 | [0029](0029-acp-workspace-retention.md) | Bounded retention for ACP execution workspaces | Accepted |
 | [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted |
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
+| [0040](0040-operator-workspace-access.md) | Audited, taint-on-write operator exec and copy into ACP workspaces | Accepted |
 
 ### The Substrate control plane
 

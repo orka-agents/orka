@@ -8,6 +8,7 @@ import (
 
 	gatewayv1alpha1 "github.com/orka-agents/orka/api/gateway/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 )
 
 type apiNamespaceSource uint8
@@ -95,6 +96,14 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "list", ""}),
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/artifacts/:filename": coreAPIPolicy("get", "tasks", "id"),
+	// Operator workspace access uses dedicated virtual subresources that no
+	// built-in aggregate role grants; Task get alone never authorizes it.
+	"GET /api/v1/tasks/:id/exec": coreAPIPolicy(operatoraccess.ExecVerb, operatoraccess.ExecResource, "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
+	"GET /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesReadVerb, operatoraccess.FilesResource, "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
+	"PUT /api/v1/tasks/:id/files": coreAPIPolicy(operatoraccess.FilesWriteVerb, operatoraccess.FilesResource, "id",
+		apiResourcePermission{corev1alpha1.GroupVersion.Group, "tasks", "get", "id"}),
 
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),

@@ -305,7 +305,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	}
 
 	cancelCheckCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	cancelled, err := d.taskCancellationRequested(cancelCheckCtx, task)
+	cancelled, err := d.taskPublicationRefused(cancelCheckCtx, task)
 	cancelCheck()
 	if err != nil {
 		return acpPublicationResult{}, err

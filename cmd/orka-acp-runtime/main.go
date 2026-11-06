@@ -22,6 +22,11 @@ func main() {
 	if len(os.Args) > 1 && toolbox.IsSubcommand(os.Args[1]) {
 		os.Exit(toolbox.Run(os.Args[1], os.Args[2:], os.Stdout, os.Stderr))
 	}
+	// The operator file helper runs as a RuntimeSession child identity
+	// (launched through the ACP exec helper) with no supervisor configuration.
+	if len(os.Args) > 1 && os.Args[1] == supervisor.OperatorFileHelperSubcommand {
+		os.Exit(supervisor.RunOperatorFileHelper(os.Args[2:], os.Stdin, os.Stdout))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

@@ -316,6 +316,7 @@ func main() {
 	var acpToolboxNodeSelector string
 	var acpToolboxMountMethod string
 	var acpWorkspaceDispatchEnabled bool
+	var operatorWorkspaceAccessEnabled bool
 	var oidcIssuer string
 	var oidcAudience string
 	var oidcJWKSURL string
@@ -574,6 +575,11 @@ func main() {
 		"Comma-separated key=value node selector merged into runtime Pods that bind toolboxes.")
 	flag.StringVar(&acpToolboxMountMethod, "acp-toolbox-mount-method", envutil.String("ORKA_ACP_TOOLBOX_MOUNT_METHOD", string(controller.ACPToolboxMountCopy)),
 		"How toolbox files reach runtime Pods: copy (init-container copier, every Kubernetes version) or imageVolume (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+).")
+	flag.BoolVar(&operatorWorkspaceAccessEnabled, "operator-workspace-access-enabled", false,
+		"Serve the operator workspace debugging API (orka task exec / orka task cp). Each call additionally "+
+			"requires the ExecutionWorkspaceClass acp.workspace.orka.ai/operator-access opt-in and the dedicated "+
+			"tasks/exec or tasks/files permission. Write-capable access taints the session so it is never published, "+
+			"reused, checkpointed, or continued.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
@@ -2166,6 +2172,7 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		DashboardEnabled: dashboardEnabled,
+		OperatorAccess:   api.OperatorAccessConfig{Enabled: operatorWorkspaceAccessEnabled},
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,

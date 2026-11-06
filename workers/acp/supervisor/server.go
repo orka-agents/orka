@@ -45,6 +45,7 @@ type Server struct {
 	foundryIdentity    *harnessv2.FoundryBrokerIdentity
 	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
 	promptSlots        chan struct{}
+	operator           operatorAccessState
 }
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
@@ -494,6 +495,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}", s.handleResolvePermission)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", s.handleCancelPrompt)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
+	s.registerOperatorRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -519,7 +521,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	if r.Header.Get(OperatorAccessCapabilityHeader) != "1" {
+		capabilities.SupportsOperatorAccess = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 

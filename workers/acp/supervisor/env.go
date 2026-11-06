@@ -332,8 +332,12 @@ func LoadConfigFromEnv() (Config, error) {
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
 		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
-		Provider:                          providerCaps,
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		// Built-in supervisors serve operator access; whether a session may
+		// use it is decided by the controller-side API's class opt-in,
+		// SubjectAccessReview, and session-state gates.
+		SupportsOperatorAccess: !isExternalACPProvider(providerKind),
+		Provider:               providerCaps,
+		WorkspaceGovernance:    harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envutil.String(EnvListenAddress, ":8080"),

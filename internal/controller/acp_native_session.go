@@ -12,6 +12,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
@@ -298,6 +299,22 @@ func hasNativeCaptureRetryProof(err error, request harnessv2.CaptureNativeSessio
 func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeClient *harnessv2.Client, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, session *acpTaskSession) error {
 	if session.NativeCapture != nil {
 		return nil
+	}
+	// Operator access may have changed the child's private agent state, so a
+	// tainted runtime never becomes the Session's native continuity source.
+	// A first turn falls back to the canonical transcript; a Session that
+	// already depends on native continuity fails closed rather than silently
+	// continuing from an older checkpoint.
+	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
+	if err != nil {
+		return err
+	}
+	if tainted {
+		if session.NativeSession != nil {
+			return fmt.Errorf("%w: native continuity cannot be captured from a runtime tainted by operator access: %w",
+				store.ErrConflict, operatoraccess.ErrTainted)
+		}
+		return d.recordNativeCaptureSkipped(ctx, task)
 	}
 	var intent nativeCaptureIntent
 	if saved := task.Annotations[nativeCaptureIntentAnnotation]; saved != "" {

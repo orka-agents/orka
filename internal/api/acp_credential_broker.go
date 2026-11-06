@@ -14,6 +14,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -137,6 +138,11 @@ func (s *Server) authorizePublicationCredential(
 	execution := task.Status.Execution
 	if execution.State != corev1alpha1.TaskExecutionStateSucceeded {
 		return nil, nil, "", "", fmt.Errorf("publication credential request is not bound to the settled task")
+	}
+	if request.ParentOperation == publisherservice.OperationPublicationPublish && operatoraccess.Tainted(task.Annotations) {
+		// Backstop for the controller's pre-publishing gate: a session tainted
+		// by operator access never receives forge write credentials.
+		return nil, nil, "", "", fmt.Errorf("publication credential is unavailable for an operator-tainted task")
 	}
 	kind, expectedState, expectedCredentialKind := publicationCredentialOperation(request.ParentOperation)
 	credentialRole := request.Reference.Role
