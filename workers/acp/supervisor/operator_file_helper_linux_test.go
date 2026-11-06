@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func runFileHelper(t *testing.T, args []string, stdin io.Reader) (operatorFileStatus, []byte) {
@@ -144,5 +146,64 @@ func TestOperatorFileHelperRejectsMalformedInvocations(t *testing.T) {
 		if status, _ := runFileHelper(t, args, nil); status.OK {
 			t.Fatalf("invocation %v must be refused", args)
 		}
+	}
+}
+
+// The child owns its session root, so it can replace the workspace directory
+// with a symbolic link to its private home; the helper must refuse to follow it.
+func TestOperatorFileHelperRefusesASymlinkedWorkspaceRoot(t *testing.T) {
+	sessionRoot := t.TempDir()
+	home := filepath.Join(sessionRoot, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "credentials"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(sessionRoot, "workspace")
+	if err := os.Symlink(home, workspace); err != nil {
+		t.Fatal(err)
+	}
+	status, content := runFileHelper(t, []string{OperatorFileHelperRead, workspace, "credentials", "1024"}, nil)
+	if status.OK || strings.Contains(string(content), "secret") {
+		t.Fatalf("a symlinked workspace root was followed: %+v %q", status, content)
+	}
+	status, _ = runFileHelper(t, []string{OperatorFileHelperWrite, workspace, "planted", "1"}, strings.NewReader("x"))
+	if status.OK {
+		t.Fatal("a write through a symlinked workspace root must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(home, "planted")); !os.IsNotExist(err) {
+		t.Fatalf("write escaped through a symlinked workspace root: %v", err)
+	}
+}
+
+// The supervisor runs with a 077 umask that the helper inherits; uploads must
+// still keep a replaced file's mode and give a new file 0644.
+func TestOperatorFileHelperAppliesTheIntendedModeDespiteUmask(t *testing.T) {
+	previous := unix.Umask(0o077)
+	defer unix.Umask(previous)
+	root := t.TempDir()
+	for name, mode := range map[string]os.FileMode{"script.sh": 0o755, "notes.txt": 0o644} {
+		target := filepath.Join(root, name)
+		if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(target, mode); err != nil {
+			t.Fatal(err)
+		}
+		status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, name, "3"}, strings.NewReader("new"))
+		if !status.OK {
+			t.Fatalf("upload %s failed: %+v", name, status)
+		}
+		if info, err := os.Stat(target); err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("%s mode = %v (%v), want %v", name, info.Mode().Perm(), err, mode)
+		}
+	}
+	status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, "fresh.txt", "3"}, strings.NewReader("new"))
+	if !status.OK {
+		t.Fatalf("new upload failed: %+v", status)
+	}
+	if info, err := os.Stat(filepath.Join(root, "fresh.txt")); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("new file mode = %v (%v), want 0644", info.Mode().Perm(), err)
 	}
 }

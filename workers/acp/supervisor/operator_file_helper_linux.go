@@ -90,9 +90,12 @@ func mapOperatorOpenError(err error) *operatorFileStatus {
 }
 
 // openOperatorParent walks every directory component without following
-// symbolic links and returns the parent directory and the final name.
+// symbolic links and returns the parent directory and the final name. The
+// workspace root itself is opened with O_NOFOLLOW too: the child owns its
+// session root and could otherwise replace workspace with a symbolic link to
+// its private home or any other directory it can read.
 func openOperatorParent(root, rel string) (int, string, *operatorFileStatus) {
-	dirFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	dirFD, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", mapOperatorOpenError(err)
 	}
@@ -173,6 +176,12 @@ func writeOperatorFile(dirFD int, name string, size int64, stdin io.Reader, stdo
 			_ = unix.Unlinkat(dirFD, temporary, 0)
 		}
 	}()
+	// The helper inherits the supervisor's restrictive umask, which would
+	// narrow the creation mode. Apply the intended mode explicitly so a
+	// replaced file keeps its permissions and a new file gets 0644.
+	if err := unix.Fchmod(fd, perm); err != nil {
+		return mapOperatorOpenError(err)
+	}
 	written, err := io.Copy(file, io.LimitReader(stdin, size+1))
 	if err != nil {
 		return operatorFileFailure(operatorFileCodeIO, "write failed")
