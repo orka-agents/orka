@@ -835,7 +835,7 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, errDelegationExpired)
 	}
 	if err := r.requireLiveRequesterConnection(ctx, policy, req); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err)
+		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err))
 	}
 	return token, nil
 }
