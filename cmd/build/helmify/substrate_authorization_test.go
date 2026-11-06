@@ -88,7 +88,8 @@ func TestWorkspaceUsePoliciesMatchSharedAdmission(t *testing.T) {
 // Helm installs must enforce the same dedicated operator-access verb as the
 // Kustomize installer, or a class editor could opt a class into operator access.
 func TestOperatorAccessPolicyMatchesSharedAdmission(t *testing.T) {
-	shared, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "policy", "workspace_class_operator_access_policy.yaml"))
+	shared, err := os.ReadFile(filepath.Join(
+		"..", "..", "..", "config", "policy", "workspace_class_operator_access_policy.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
