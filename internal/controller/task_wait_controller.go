@@ -484,12 +484,10 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 			}
 			// Without provenance admission anyone who can create Tasks could
 			// forge the lineage annotation; linking it would hand that Task
-			// this one's authority. Fail closed, and delete the claimed
-			// continuation so that nothing runs unlinked, as cancellation does.
-			uid := existing.UID
-			if err := r.Delete(ctx, existing, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("delete unproven continuation task: %w", err)
-			}
+			// this one's authority, and deleting it would act on a forgeable
+			// claim. Fail closed and leave it alone: execution holds every
+			// continuation until its predecessor links it, so this one never
+			// ran and, once the wait ends unlinked, never will.
 			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
 				"an existing continuation cannot be proven to be Orka's because Task provenance admission is disabled")
 		}
@@ -637,7 +635,11 @@ func (r *TaskWaitReconciler) cancel(ctx context.Context, task *corev1alpha1.Task
 		existing := &corev1alpha1.Task{}
 		err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: wait.ContinuationTaskName}, existing)
 		switch {
-		case err == nil && existing.Annotations[labels.AnnotationContinuationOfUID] == string(task.UID):
+		case err == nil && existing.Annotations[labels.AnnotationContinuationOfUID] == string(task.UID) &&
+			(r.TaskProvenanceProtected || r.createdContinuation(existing)):
+			// Only a continuation proven to be Orka's is deleted. An unproven
+			// one is left alone; execution holds it until a link that the
+			// cancelled wait will never record.
 			uid := existing.UID
 			if err := r.Delete(ctx, existing, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("cancel continuation task: %w", err)

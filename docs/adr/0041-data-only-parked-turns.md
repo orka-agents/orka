@@ -81,7 +81,13 @@ parked turn is that continuation, created by Orka when the awaited event arrives
 - A restart adopts an existing Task of that name only if it carries the parked Task's UID
   annotation and Task provenance admission is enabled. Admission reserves the continuation
   lineage annotations to the controller. Without it the annotation could be forged, so the
-  wait is abandoned rather than linked. An unrelated holder also abandons the wait.
+  wait is abandoned rather than linked, and the Task is left alone rather than deleted on
+  that forgeable claim. Without admission, only a continuation this controller process
+  remembers creating can still be linked. An unrelated holder also abandons the wait.
+- A continuation does not execute until its predecessor's `Resumed` wait records its exact
+  UID. Queueing holds it while the predecessor still reserves its name, and cancels it
+  without a prompt attempt once nothing can link it. Abandoning or cancelling an unlinked
+  continuation therefore never discards work that ran.
 - The continuation is created with the `orka.ai/continuation-link` finalizer. That
   finalizer is removed only after the predecessor records the continuation's UID, ends its
   wait without it, or is gone, and Task provenance admission lets only the controller

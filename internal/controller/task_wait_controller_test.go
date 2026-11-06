@@ -546,12 +546,34 @@ func TestTaskWaitCancellationFindsAContinuationTheCacheHasNotSeen(t *testing.T) 
 			return nil
 		}}).Build()
 	authoritative := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task.DeepCopy(), continuation).Build()
-	r := &TaskWaitReconciler{Client: cached, APIReader: authoritative, Now: func() time.Time { return taskWaitTestNow }}
+	r := &TaskWaitReconciler{
+		Client: cached, APIReader: authoritative, TaskProvenanceProtected: true, Now: func() time.Time { return taskWaitTestNow },
+	}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: taskWaitTestNamespace, Name: "parked"}}); err != nil {
 		t.Fatal(err)
 	}
 	if deleted != continuation.Name {
 		t.Fatalf("cancellation must delete the continuation seen by the authoritative reader, deleted %q", deleted)
+	}
+}
+
+func TestTaskWaitCancellationNeverDeletesAnUnprovenContinuation(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Annotations[labels.AnnotationCancelWait] = "stop"
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	// Without provenance admission, a Task holding the reserved name may
+	// carry a forged lineage annotation.
+	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
+	forged.UID, forged.Finalizers = "uid-forged", nil
+	h := newTaskWaitHarness(t, task, forged)
+	h.r.TaskProvenanceProtected = false
+	h.settle("parked")
+	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateCancelled {
+		t.Fatalf("the wait must be cancelled, got %+v", wait)
+	}
+	if got := h.task(forged.Name); !got.DeletionTimestamp.IsZero() || got.UID != "uid-forged" {
+		t.Fatal("a Task whose only claim is a forgeable annotation must not be deleted")
 	}
 }
 
@@ -686,8 +708,8 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 	if wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
 		t.Fatalf("an unprovable continuation must never be linked, got %+v", wait)
 	}
-	if len(h.tasks()) != 1 {
-		t.Fatal("an unprovable continuation must be deleted so that nothing runs unlinked")
+	if got := h.task(forged.Name); !got.DeletionTimestamp.IsZero() {
+		t.Fatal("a Task whose only claim is a forgeable annotation must not be deleted")
 	}
 }
 
@@ -997,8 +1019,9 @@ func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
 		t.Fatalf("the continuation this controller created must be linked after retries ran out, got %+v (created %d)", wait, created)
 	}
 
-	// After a restart nothing proves the same Task was created here: an
-	// unlinked continuation is deleted and the wait abandoned instead.
+	// After a restart nothing proves the same Task was created here: the
+	// wait is abandoned and the unproven Task left alone. Execution holds it
+	// until a link that will now never be recorded, so it never runs.
 	restarted := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
 	restarted.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
 	restarted.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(restarted)
@@ -1010,10 +1033,8 @@ func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
 	if wait := fresh.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
 		t.Fatalf("an unproven continuation must not be linked after a restart, got %+v", wait)
 	}
-	for _, existing := range fresh.tasks() {
-		if existing.Name != "parked" && existing.DeletionTimestamp.IsZero() {
-			t.Fatalf("an unproven continuation must be deleted, found %s", existing.Name)
-		}
+	if got := fresh.task(orphan.Name); !got.DeletionTimestamp.IsZero() {
+		t.Fatal("an unproven continuation must not be deleted on a forgeable claim")
 	}
 }
 
@@ -1042,5 +1063,66 @@ func TestTaskWaitConfirmsAMissingChildAuthoritativelyBeforeResuming(t *testing.T
 	}
 	if len(h.tasks()) != 2 {
 		t.Fatal("no continuation may be created while the child still runs")
+	}
+}
+
+func TestContinuationExecutionWaitsForItsPredecessorsLink(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
+	continuation.UID = "uid-continuation"
+	continuation.Finalizers = nil
+	h := newTaskWaitHarness(t, task, continuation)
+	r := &TaskReconciler{Client: h.client, APIReader: h.client, Scheme: newTestScheme()}
+	queue := func() (ctrl.Result, error) {
+		t.Helper()
+		current := h.task(continuation.Name)
+		// The binding was frozen; queueing would start the prompt.
+		current.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+		return r.queueACPRuntimeTask(context.Background(), current, nil)
+	}
+
+	// The predecessor reserved the name but has not linked this Task yet.
+	result, err := queue()
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("an unlinked continuation must be held, got %+v, %v", result, err)
+	}
+	if got := h.task(continuation.Name); got.Status.Execution != nil || got.Status.Phase != "" {
+		t.Fatalf("a held continuation must not be queued, got %+v", got.Status)
+	}
+
+	// After a restart without provenance admission the wait is abandoned
+	// without linking it. The continuation never ran and now never will.
+	h.r.TaskProvenanceProtected = false
+	h.settle("parked")
+	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateAbandoned {
+		t.Fatalf("the unproven continuation must not be linked, got %+v", wait)
+	}
+	if _, err := queue(); err != nil {
+		t.Fatal(err)
+	}
+	got := h.task(continuation.Name)
+	if got.Status.Phase != corev1alpha1.TaskPhaseCancelled || got.Status.Execution == nil ||
+		got.Status.Execution.Reason != acpContinuationUnlinkedReason || got.Status.Execution.Attempt != 0 {
+		t.Fatalf("an orphaned continuation must be cancelled without running, got %+v", got.Status)
+	}
+}
+
+func TestLinkedContinuationIsNotHeld(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResumed
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	task.Status.Wait.ContinuationTaskUID = "uid-continuation"
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour, taskWaitTestNow.Add(time.Hour))
+	continuation.UID = "uid-continuation"
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task, continuation).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	if pending, orphaned, err := r.continuationLinkPending(context.Background(), continuation); err != nil || pending || orphaned {
+		t.Fatalf("a linked continuation must run, got pending=%v orphaned=%v err=%v", pending, orphaned, err)
+	}
+	plain := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	if pending, orphaned, err := r.continuationLinkPending(context.Background(), plain); err != nil || pending || orphaned {
+		t.Fatalf("an ordinary Task must not be held, got pending=%v orphaned=%v err=%v", pending, orphaned, err)
 	}
 }
