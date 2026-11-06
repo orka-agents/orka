@@ -1016,3 +1016,31 @@ func TestTaskWaitLinksItsContinuationAfterExhaustingLinkRetries(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskWaitConfirmsAMissingChildAuthoritativelyBeforeResuming(t *testing.T) {
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: taskWaitTestNamespace, UID: "uid-child",
+			Labels:      map[string]string{labels.LabelParentTask: "parked"},
+			Annotations: map[string]string{labels.AnnotationParentTaskName: "parked", labels.AnnotationParentTaskUID: "uid-parked"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	h := newTaskWaitHarness(t, parkedTestTask(corev1alpha1.TaskWaitKindTasks, corev1alpha1.TaskPhaseSucceeded, "child"), child)
+	// The informer cache has not observed the just-created child yet.
+	h.r.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == "child" {
+				return apierrors.NewNotFound(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	h.settle("parked")
+	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateWaiting {
+		t.Fatalf("a child the cache has not seen must not resume the parent while it still runs, got %s", got)
+	}
+	if len(h.tasks()) != 2 {
+		t.Fatal("no continuation may be created while the child still runs")
+	}
+}

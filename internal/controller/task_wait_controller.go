@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -340,11 +340,31 @@ func (r *TaskWaitReconciler) evaluateApproval(ctx context.Context, task *corev1a
 }
 
 func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alpha1.Task) (string, bool, time.Duration, error) {
-	wait := task.Status.Wait
-	owners, err := r.taskWaitChildOwners(ctx, task)
-	if err != nil {
-		return "", false, taskWaitPollInterval, err
+	outcome, ready, retryAfter, missing, err := r.evaluateTasksWith(ctx, r.reader(), task)
+	if err != nil || !ready || !missing {
+		return outcome, ready, retryAfter, err
 	}
+	// The cache may not have observed a just-created child or continuation
+	// yet. A missing, replaced, or unlinked child resumes this Task only when
+	// authoritative reads confirm it.
+	outcome, ready, retryAfter, _, err = r.evaluateTasksWith(ctx, r.authoritativeReader(), task)
+	return outcome, ready, retryAfter, err
+}
+
+// evaluateTasksWith evaluates the child wait through reader. It also reports
+// whether the outcome rests on a child, owner link, or continuation that the
+// reader did not find or could not verify.
+func (r *TaskWaitReconciler) evaluateTasksWith(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) (string, bool, time.Duration, bool, error) {
+	wait := task.Status.Wait
+	owners, err := r.taskWaitChildOwners(ctx, reader, task)
+	if err != nil {
+		return "", false, taskWaitPollInterval, false, err
+	}
+	missing := false
 	lines := make([]string, 0, len(wait.References))
 	for i, name := range wait.References {
 		if len(validation.IsDNS1123Subdomain(name)) > 0 {
@@ -352,33 +372,37 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 			continue
 		}
 		child := &corev1alpha1.Task{}
-		if err := r.reader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, child); err != nil {
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, child); err != nil {
 			if apierrors.IsNotFound(err) {
+				missing = true
 				lines = append(lines, name+": no longer exists")
 				continue
 			}
-			return "", false, taskWaitPollInterval, err
+			return "", false, taskWaitPollInterval, false, err
 		}
 		// Only the exact child authorized when the wait was recorded counts;
 		// a same-named replacement never controls when this Task resumes.
 		if len(wait.ReferenceUIDs) != len(wait.References) || string(child.UID) != wait.ReferenceUIDs[i] {
+			missing = true
 			lines = append(lines, name+": is no longer the task this wait was authorized for")
 			continue
 		}
 		if !taskWaitChildBelongsToAny(owners, child) {
+			missing = true
 			lines = append(lines, name+": is no longer this task's child")
 			continue
 		}
-		tail, err := taskwait.ResolveTail(ctx, r.reader(), child)
+		tail, err := taskwait.ResolveTail(ctx, reader, child)
 		if err != nil {
 			if errors.Is(err, taskwait.ErrChainBroken) || apierrors.IsNotFound(err) {
+				missing = true
 				lines = append(lines, name+": its continuation chain is broken")
 				continue
 			}
-			return "", false, taskWaitPollInterval, err
+			return "", false, taskWaitPollInterval, false, err
 		}
 		if !taskwait.Settled(tail) {
-			return "", false, taskWaitPollInterval, nil
+			return "", false, taskWaitPollInterval, false, nil
 		}
 		line := fmt.Sprintf("%s: %s", name, tail.Status.Phase)
 		if tail.Name != child.Name {
@@ -390,16 +414,16 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 		lines = append(lines, line)
 	}
 	return "The child tasks you waited for have finished: " + strings.Join(lines, "; ") +
-		". Call wait_for_tasks with the same names to read their results.", true, 0, nil
+		". Call wait_for_tasks with the same names to read their results.", true, 0, missing, nil
 }
 
 // taskWaitChildOwners returns the parked Task and its verified predecessors.
 // A continuation keeps authority over the children its predecessors delegated.
-func (r *TaskWaitReconciler) taskWaitChildOwners(ctx context.Context, task *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
+func (r *TaskWaitReconciler) taskWaitChildOwners(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
 	owners := []*corev1alpha1.Task{task}
 	current := task
 	for range taskwait.MaxChainLength {
-		previous, ok, err := taskwait.Predecessor(ctx, r.reader(), current)
+		previous, ok, err := taskwait.Predecessor(ctx, reader, current)
 		if err != nil {
 			return nil, err
 		}
