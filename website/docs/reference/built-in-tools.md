@@ -55,6 +55,20 @@ endpoints also offer the first five to clients.
 | `file_write` | Write or append files in workspace paths | `path` (required), `content` (required), `mode` (`write`/`append`), `create_dirs` |
 | `request_approval` | Park the Task until a person approves or declines one exact custom-tool call. Added automatically for autonomous coordinators; see [human approval](../guides/autonomous-tasks.md#human-approvals). | `action`, `targetTool` (a custom Tool name), `targetArguments` (the exact argument object) (required); `riskSummary`, `severity` (`warning`/`critical`) |
 
+### Web search backend
+
+When `SEARCH_API_URL` is set, `web_search` sends a GET request to that URL with `q` and `limit`
+query parameters and `SEARCH_API_KEY`, if set, as a bearer token, and returns the response
+body as the result. Without it, the tool queries DuckDuckGo's HTML endpoint, which often
+answers requests from cloud and CI addresses with an HTTP 202 challenge page. The tool then
+returns an error such as `DuckDuckGo returned HTTP 202`: a native `type: ai` Task records it
+as a `ToolCallFailed` event and passes it to the model, and the compatible endpoints return
+`{"success": false, "error": ...}`.
+
+Neither the Helm chart nor the controller sets these variables. For a native `type: ai` Task,
+set them in the Task's `spec.env`, with `valueFrom.secretKeyRef` for the key. Agent runtime
+Tasks call a brokered `web_search` that ignores them and always uses DuckDuckGo.
+
 ## Memory tools
 
 Every native `type: ai` Task receives these during the warning release, regardless of
