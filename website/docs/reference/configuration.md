@@ -422,6 +422,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
 | `--max-tasks-per-namespace` | `0` | Max active tasks per namespace (0 = unlimited) |
 | `--acp-workspace-dispatch-enabled` | `ORKA_ACP_WORKSPACE_DISPATCH_ENABLED` env or `false` | Admit workspace-provider-backed ACP RuntimeSession dispatch; when false, workspace-backed agent Tasks fail closed |
+| `--operator-workspace-access-enabled` | `false` | Serve `orka task exec` / `orka task cp`. Each call also needs the class `acp.workspace.orka.ai/operator-access` opt-in and the `tasks/exec` or `tasks/files` permission; write-capable access taints the session. See [Operator workspace access](../guides/operator-workspace-access.md) |
 | `--substrate-mcp-tools-enabled` | `ORKA_SUBSTRATE_MCP_TOOLS_ENABLED` env or `false` | Enable native MCP Tool actors and actor pools; does not allocate ACP workspaces. |
 | `--acp-toolboxes-enabled` | `ORKA_ACP_TOOLBOXES_ENABLED` env or `false` | Let built-in Agents declare `runtime.toolboxes`. Off by default; see [Toolboxes](../guides/toolboxes.md) |
 | `--acp-toolbox-allowed-registries` | `ORKA_ACP_TOOLBOX_ALLOWED_REGISTRIES` env or `""` | Comma-separated registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing |

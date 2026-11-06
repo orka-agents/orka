@@ -340,6 +340,24 @@ ID            STATUS   TOOL               ARGUMENTS                             
 8a8d1a7d418d  pending  create-work-order  asset=pump-1 summary="Inspect the pressure transmitter."  in 9m
 ```
 
+### Debugging a running Task's workspace
+
+Administrators can run a command in, or copy a single file out of or into, the
+execution workspace of a running class-backed ACP Task. These commands are off
+by default. They need the controller flag, a class opt-in, and dedicated
+`tasks/exec` / `tasks/files` permissions. Every call is audited:
+
+```bash
+orka task exec my-task -- git status
+orka task exec my-task -it -- bash
+orka task cp my-task:src/main.go ./main.go     # read-only, does not taint
+orka task cp ./fix.patch my-task:fix.patch     # taints the session
+```
+
+Exec and copies in taint the session: it is never published, reused,
+checkpointed, or continued. See
+[Operator workspace access](../guides/operator-workspace-access.md).
+
 ## Chat and dashboard helpers
 
 `orka run` is a chat interface backed by Orka chat and provider configuration:

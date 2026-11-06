@@ -332,8 +332,12 @@ func LoadConfigFromEnv() (Config, error) {
 		SupportsAgentSessionConfiguration: !isExternalACPProvider(providerKind),
 		SupportsNativeSessions:            providerKind == providerKindCodex,
 		SupportsFoundryRecovery:           foundryRecovery,
-		Provider:                          providerCaps,
-		WorkspaceGovernance:               harnessv2.StrictWorkspaceGovernanceCapabilities(),
+		// Built-in supervisors serve operator access; whether a session may
+		// use it is decided by the controller-side API's class opt-in,
+		// SubjectAccessReview, and session-state gates.
+		SupportsOperatorAccess: operatorAccessSupported(providerKind, os.Geteuid()),
+		Provider:               providerCaps,
+		WorkspaceGovernance:    harnessv2.StrictWorkspaceGovernanceCapabilities(),
 	}
 	cfg := Config{
 		ListenAddress: envutil.String(EnvListenAddress, ":8080"),
@@ -1296,4 +1300,12 @@ func nativeInstructionProjection(provider, prompt string) *acp.InstructionProjec
 	default:
 		return nil
 	}
+}
+
+// operatorAccessSupported reports whether this supervisor can serve operator
+// access. Operator commands run with exactly one supplementary tag group,
+// which only a root supervisor can assign; a non-root supervisor's children
+// inherit its own groups, so the exec helper would refuse every launch.
+func operatorAccessSupported(providerKind string, euid int) bool {
+	return euid == 0 && !isExternalACPProvider(providerKind)
 }

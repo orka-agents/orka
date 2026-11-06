@@ -83,6 +83,8 @@ func newTaskCmd() *cobra.Command {
 	cmd.AddCommand(newTaskDeleteCmd())
 	cmd.AddCommand(newTaskArtifactsCmd())
 	cmd.AddCommand(newTaskDownloadCmd())
+	cmd.AddCommand(newTaskExecCmd())
+	cmd.AddCommand(newTaskCopyCmd())
 	return cmd
 }
 

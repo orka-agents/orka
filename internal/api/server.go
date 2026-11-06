@@ -32,6 +32,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -100,6 +101,8 @@ type ServerConfig struct {
 	E2EPromptFaultEnabled     bool
 	Connectors                ConnectorConfig
 	ConnectorTools            ConnectorToolExecutionConfig
+	// OperatorAccess configures `orka task exec` / `orka task cp`.
+	OperatorAccess OperatorAccessConfig
 	// DashboardEnabled mirrors --dashboard-enabled: only then does the API
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
@@ -236,6 +239,9 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
+	if isOperatorFileUpload(header) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: int(operatoraccess.MaxFileBytes), ReadTimeout: 10 * time.Minute}
+	}
 	config := requestBodyConfigWithNativeSessionLimit(header, s.handlers.nativeSessionMaxBytes)
 	// Fiber routes on fasthttp PathOriginal, including its fragment handling.
 	// net/url's request-target parsing differs for a literal '#' character.
@@ -246,6 +252,23 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
 	}
 	return config
+}
+
+// isOperatorFileUpload matches PUT /api/v1/tasks/{task}/files, whose bounded
+// body is streamed to the runtime supervisor.
+func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
+	if string(header.Method()) != fiber.MethodPut {
+		return false
+	}
+	var uri fasthttp.URI
+	if uri.Parse(header.Host(), header.RequestURI()) != nil {
+		return false
+	}
+	// Fiber routes case-insensitively, so this must match every spelling the
+	// upload route accepts.
+	parts := strings.Split(strings.Trim(string(uri.PathOriginal()), "/"), "/")
+	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], externalToolTaskResource) && strings.EqualFold(parts[4], "files")
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,
@@ -362,6 +385,14 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
 	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
+	// each call also needs the class opt-in and the dedicated tasks/exec or
+	// tasks/files permission.
+	// Their audit envelope precedes route authorization so dedicated
+	// permission denials are audited too.
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.HandleOperatorExec)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.HandleOperatorFileDownload)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.HandleOperatorFileUpload)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)

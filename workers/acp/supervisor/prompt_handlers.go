@@ -1385,6 +1385,18 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
+	// No operator operation may run, or still be launching, when the session
+	// is torn down. An unfinished barrier fails deletion closed and keeps the
+	// session resources; the pool is replaced instead.
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		s.mu.Lock()
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
+		state.descriptor.LastTransitionAt = time.Now().UTC()
+		s.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced before deletion", nil, false)
+		return
+	}
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
@@ -1893,6 +1905,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 
 	freezeCtx, cancel := context.WithTimeout(r.Context(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 	defer cancel()
+	// No operator operation may run, or start, while the workspace is frozen
+	// and its delta is captured.
+	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+		s.poisonSession(state, "operator operations could not be quiesced before the workspace freeze")
+		s.poisonPool("operator_quiesce_unproven")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced", nil, false)
+		return
+	}
 	if err := runtimeSession.Freeze(freezeCtx); err != nil {
 		s.poisonSession(state, "workspace freeze could not be proven")
 		s.poisonPool("workspace_freeze_unproven")

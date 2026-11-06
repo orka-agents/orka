@@ -12,6 +12,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/operatoraccess"
 	"github.com/orka-agents/orka/internal/store"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
@@ -299,6 +300,14 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	if session.NativeCapture != nil {
 		return nil
 	}
+	// Operator access may have changed the child's private agent state, so a
+	// tainted runtime never becomes the Session's native continuity source.
+	// A first turn falls back to the canonical transcript; a Session that
+	// already depends on native continuity fails closed rather than silently
+	// continuing from an older checkpoint.
+	if skip, err := d.skipNativeCaptureForOperatorTaint(ctx, task, session); skip || err != nil {
+		return err
+	}
 	var intent nativeCaptureIntent
 	if saved := task.Annotations[nativeCaptureIntentAnnotation]; saved != "" {
 		if err := json.Unmarshal([]byte(saved), &intent); err != nil {
@@ -362,6 +371,27 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 		}
 		return fmt.Errorf("capture private native Session; exact runtime evidence retained: %w", err)
 	}
+	return d.acceptNativeCapture(ctx, task, runtimeFence, session, intent, response)
+}
+
+// acceptNativeCapture adopts a captured (or receipt-reconciled) snapshot as
+// the Session's native continuity source. An operator exec admitted before
+// the capture closed operator admission may have changed the private home;
+// the capture barrier killed it, but its effects are in the snapshot. orka-api
+// persists the taint before forwarding any operator write, so the
+// authoritative taint read after capture proves whether the snapshot is clean.
+// A tainted snapshot is discarded.
+func (d *ACPDispatcher) acceptNativeCapture(
+	ctx context.Context, task *corev1alpha1.Task, runtimeFence harnessv2.Fence, session *acpTaskSession,
+	intent nativeCaptureIntent, response *harnessv2.CaptureNativeSessionResponse,
+) error {
+	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
+	if err != nil {
+		return fmt.Errorf("recheck operator taint after native capture: %w", err)
+	}
+	if tainted {
+		return d.fallBackFromOperatorTaintedCapture(ctx, task, session)
+	}
 	session.NativeCapture = &store.NativeSessionRecord{
 		Namespace: session.Turn.Lease.Session.Namespace, SessionName: session.Turn.Lease.Session.SessionName, SessionUID: session.Turn.Lease.Session.SessionUID,
 		Snapshot: response.Snapshot, RuntimeSessionGeneration: int64(runtimeFence.RuntimeSessionGeneration),
@@ -372,6 +402,44 @@ func (d *ACPDispatcher) captureTaskNativeSession(ctx context.Context, runtimeCli
 	return d.patchExecution(ctx, task, func(execution *corev1alpha1.TaskExecutionStatus) {
 		execution.RuntimeSessionRecreationPending = true
 	})
+}
+
+// skipNativeCaptureForOperatorTaint reports whether an operator-tainted
+// runtime must be excluded from native capture, recording the transcript
+// fallback for a first turn or failing closed when the Session already
+// depends on native continuity.
+func (d *ACPDispatcher) skipNativeCaptureForOperatorTaint(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) (bool, error) {
+	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
+	if err != nil || !tainted {
+		return false, err
+	}
+	return true, d.fallBackFromOperatorTaintedCapture(ctx, task, session)
+}
+
+// fallBackFromOperatorTaintedCapture excludes a tainted runtime from native
+// continuity. A Session that already depends on native continuity fails
+// closed. Otherwise a persisted capture intent is first reconciled to record
+// that this turn has no native checkpoint, since settlement and runtime
+// deletion otherwise keep waiting for one, and the turn then falls back to
+// the canonical transcript.
+func (d *ACPDispatcher) fallBackFromOperatorTaintedCapture(ctx context.Context, task *corev1alpha1.Task, session *acpTaskSession) error {
+	if session.NativeSession != nil {
+		return fmt.Errorf("%w: native continuity cannot be captured from a runtime tainted by operator access: %w",
+			store.ErrConflict, operatoraccess.ErrTainted)
+	}
+	if saved := task.Annotations[nativeCaptureIntentAnnotation]; saved != "" {
+		var intent nativeCaptureIntent
+		if err := json.Unmarshal([]byte(saved), &intent); err != nil {
+			return fmt.Errorf("%w: durable native capture intent is malformed", store.ErrConflict)
+		}
+		if !intent.Unsupported {
+			intent.Unsupported = true
+			if err := d.persistNativeCaptureIntent(ctx, task, intent); err != nil {
+				return err
+			}
+		}
+	}
+	return d.recordNativeCaptureSkipped(ctx, task)
 }
 
 // A durable deduplication key survives annotation/event write ordering and restart.

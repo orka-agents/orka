@@ -47,6 +47,32 @@ type SessionPaths struct {
 	Cache     string
 	Data      string
 	State     string
+	// WorkspaceDevice and WorkspaceInode identify the workspace directory as
+	// recorded by RecordWorkspaceIdentity before the session child starts.
+	// The child may own the session root and rename entries in it, so code
+	// that reopens Workspace by path later verifies this identity.
+	WorkspaceDevice uint64
+	WorkspaceInode  uint64
+}
+
+// RecordWorkspaceIdentity records the workspace directory's device and inode.
+// Call it only while the supervisor still exclusively controls the tree, that
+// is before the session child starts. Platforms without Unix inode identity
+// return an error, which callers must treat as a refusal.
+func RecordWorkspaceIdentity(paths *SessionPaths) error {
+	info, err := os.Lstat(paths.Workspace)
+	if err != nil {
+		return fmt.Errorf("inspect session workspace: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("session workspace is not a directory")
+	}
+	dev, ino, err := directoryIdentity(info)
+	if err != nil {
+		return err
+	}
+	paths.WorkspaceDevice, paths.WorkspaceInode = dev, ino
+	return nil
 }
 
 func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {

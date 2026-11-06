@@ -1,3 +1,4 @@
 resources:
 - workspace_class_use_policy.yaml
 - workspace_core_admission_policy.yaml
+- workspace_class_operator_access_policy.yaml

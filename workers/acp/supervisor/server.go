@@ -45,7 +45,15 @@ type Server struct {
 	foundryIdentity    *harnessv2.FoundryBrokerIdentity
 	foundryRecoveryOps map[harnessv2.OperationID]foundryRecoveryOperation
 	promptSlots        chan struct{}
+	operator           operatorAccessState
 }
+
+// Session-creation filesystem steps, replaceable in tests that check their
+// order.
+var (
+	recordSessionWorkspaceIdentity = acp.RecordWorkspaceIdentity
+	finalizeSessionOwnership       = acp.FinalizeSessionOwnership
+)
 
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
 
@@ -266,6 +274,13 @@ type sessionState struct {
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
+	// operators registers admitted operator processes (nil while starting).
+	// Leaving an operator-admitting state revokes and kills all of them.
+	operators   map[uint64]*operatorRegistration
+	operatorSeq uint64
+	// operatorsClosed is set by the freeze/deletion barrier and cleared when
+	// the session returns to an operator-admitting state.
+	operatorsClosed bool
 }
 
 type promptState struct {
@@ -494,6 +509,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/permissions/{requestID}", s.handleResolvePermission)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/prompts/{promptID}/cancel", s.handleCancelPrompt)
 	s.mux.HandleFunc("PUT /v2/runtime-sessions/{sessionID}/workspace-deltas/{deltaID}", s.handleWorkspaceDelta)
+	s.registerOperatorRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -519,7 +535,10 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		capabilities.Limits.MaxNativeSessionBytes = 0
 		capabilities.SupportsNativeSessions = false
 	}
-	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader)
+	if r.Header.Get(OperatorAccessCapabilityHeader) != "1" {
+		capabilities.SupportsOperatorAccess = false
+	}
+	w.Header().Set("Vary", harnessv2.NativeSessionLimitsHeader+", "+OperatorAccessCapabilityHeader)
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
@@ -1259,7 +1278,16 @@ func (s *Server) createSession(
 		}
 		resumeSessionID = snapshot.ProviderSessionID
 	}
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
+	// Operator file copies reopen the workspace by path once the child, which
+	// may own the session root, is running, so its identity is pinned here.
+	// It must precede the ownership handoff: afterwards the 0700 child-owned
+	// session root is no longer traversable by a supervisor that runs without
+	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not
+	// change the directory's identity, and nothing later replaces it.
+	if err := recordSessionWorkspaceIdentity(&paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
+	}
+	if err := finalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
 	if projection.Instructions != nil {
@@ -1271,7 +1299,7 @@ func (s *Server) createSession(
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
 		// tree is re-assigned to exactly this session's UID.
-		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+		if err := finalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
@@ -1659,6 +1687,10 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.failDrainCleanup(sessionID, state, "operator_quiesce_unproven")
+		return
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
@@ -1762,6 +1794,13 @@ func (s *Server) Close(ctx context.Context) error {
 			case <-capture.done:
 			case <-ctx.Done():
 				errs = append(errs, fmt.Errorf("native session capture still in progress: %w", ctx.Err()))
+				continue
+			}
+		}
+		if state.runtime != nil {
+			if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+				// Keep the session's resources; the pool is replaced instead.
+				errs = append(errs, fmt.Errorf("runtime session operator quiesce: %w", err))
 				continue
 			}
 		}

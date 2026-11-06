@@ -305,13 +305,13 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 	}
 
 	cancelCheckCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	cancelled, err := d.taskCancellationRequested(cancelCheckCtx, task)
+	cancelled, refusal, err := d.taskPublicationRefused(cancelCheckCtx, task)
 	cancelCheck()
 	if err != nil {
 		return acpPublicationResult{}, err
 	}
 	if cancelled {
-		won, cancelErr := d.cancelPreparedPublication(ctx, task)
+		won, cancelErr := d.cancelPreparedPublication(ctx, task, refusal)
 		if cancelErr != nil {
 			return acpPublicationResult{}, cancelErr
 		}
@@ -322,7 +322,7 @@ func (d *ACPDispatcher) publishWorkspaceDeltaOperation(
 		if err != nil {
 			return acpPublicationResult{}, err
 		}
-		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPrepared, store.PromptDeliveryCancelledBeforePublish, "cancel-before-publish", ""); err != nil {
+		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryPrepared, store.PromptDeliveryCancelledBeforePublish, "cancel-before-publish", refusal); err != nil {
 			return acpPublicationResult{}, err
 		}
 		if err := d.reclaimStandaloneTaskBranchClaim(ctx, task, attemptID, fence, publication); err != nil {
@@ -1189,6 +1189,9 @@ func publicationTaskDeliveryStatus(workspace *corev1alpha1.WorkspaceConfig, base
 		status.State, status.Outcome = corev1alpha1.TaskDeliveryStatePublicationOutcomeUnknown, corev1alpha1.TaskDeliveryOutcomePublicationOutcomeUnknown
 	}
 	status.Message = publication.TerminalReason
+	if publication.State == store.PublicationCancelledBeforePublish && publication.TerminalReason == operatorTaintedPublicationMessage {
+		status.Reason = corev1alpha1.TaskDeliveryReasonOperatorTainted
+	}
 	return status
 }
 
@@ -1488,6 +1491,7 @@ func (d *ACPDispatcher) failTaskForDelivery(ctx context.Context, task *corev1alp
 }
 
 func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *corev1alpha1.Task, status corev1alpha1.TaskDeliveryStatus, message string) error {
+	message = cancelledBeforePublishMessage(status, message)
 	// Execution succeeded before the cancellation settled the publication, so
 	// the projection carries the frozen successful execution identity with the
 	// cancelled Phase.
@@ -1525,7 +1529,18 @@ func (d *ACPDispatcher) cancelTaskAfterExecution(ctx context.Context, task *core
 	})
 }
 
-func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+// cancelledBeforePublishMessage replaces the generic cancellation message
+// when the delivery records an operator-taint refusal.
+func cancelledBeforePublishMessage(status corev1alpha1.TaskDeliveryStatus, message string) string {
+	if operatorTaintedDelivery(status) {
+		return operatorTaintedPublicationMessage
+	}
+	return message
+}
+
+// cancelPreparedPublication cancels a prepared publication before publish;
+// terminalReason is recorded on it (empty for a user cancellation).
+func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *corev1alpha1.Task, terminalReason string) (bool, error) {
 	if task == nil || task.Status.Execution == nil {
 		return false, nil
 	}
@@ -1547,7 +1562,7 @@ func (d *ACPDispatcher) cancelPreparedPublication(ctx context.Context, task *cor
 		return false, err
 	}
 	_, err = d.transitionPublication(ctx, publication, fence, store.PublicationCancelledBeforePublish,
-		publicationOperationID("cancel-before-publish", task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, "")
+		publicationOperationID("cancel-before-publish", task), mustACPDomainDigest("publication-cancel", publication.ID), nil, nil, nil, terminalReason)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			latest, getErr := d.Store.GetPublication(ctx, publication.ID)

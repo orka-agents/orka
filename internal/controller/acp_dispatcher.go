@@ -821,7 +821,7 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 			}
 			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				_, _ = d.cancelPreparedPublication(cancelCtx, task)
+				_, _ = d.cancelPreparedPublication(cancelCtx, task, "")
 				stop()
 				cancel()
 				return

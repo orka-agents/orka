@@ -336,6 +336,10 @@ func (s *Server) nativeCaptureLimit(r *http.Request) int {
 }
 
 func (s *Server) captureNativeSession(ctx context.Context, state *sessionState, limit int) (harnessv2.NativeSessionSnapshot, error) {
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.poisonPool("operator_quiesce_unproven")
+		return harnessv2.NativeSessionSnapshot{}, fmt.Errorf("native capture could not quiesce operator operations; private home retained")
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
