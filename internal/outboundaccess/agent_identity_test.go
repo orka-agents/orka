@@ -85,7 +85,12 @@ func TestValidateSpecReservesEntraIdentityParameters(t *testing.T) {
 }
 
 func identityHolder(uid string, claimed bool) *corev1alpha1.Agent {
-	agent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "reviewer", UID: types.UID(uid)}}
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "reviewer", UID: types.UID(uid)},
+		Spec: corev1alpha1.AgentSpec{Identity: &corev1alpha1.AgentIdentity{
+			Entra: &corev1alpha1.EntraAgentIdentity{AgentIdentityID: "33333333-3333-3333-3333-33333333AAAA"},
+		}},
+	}
 	if claimed {
 		agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: "33333333-3333-3333-3333-33333333aaaa"}
 	}
@@ -110,6 +115,18 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		"identity being released": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Status.IdentityClaim.Releasing = true
+			return agent
+		}(),
+		// The claim is marked releasing only when the Agent next
+		// reconciles; the edit alone must stop the calls.
+		"identity removed, claim not yet released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Spec.Identity = nil
+			return agent
+		}(),
+		"identity changed, claim not yet released": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			agent.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
 			return agent
 		}(),
 	} {
