@@ -222,18 +222,13 @@ func (t *ParkUntilTool) kindInputs(
 	now, deadline time.Time,
 ) ([]string, *time.Time, error) {
 	switch kind {
+	// Fields that belong to another kind are ignored.
 	case corev1alpha1.TaskWaitKindApproval:
-		if len(args.Tasks) > 0 || strings.TrimSpace(args.Duration) != "" {
-			return nil, nil, fmt.Errorf("kind=approval accepts only reason and timeout")
-		}
 		if toolCtx.ExecutionEvents == nil {
 			return nil, nil, fmt.Errorf("parked approvals require execution event storage")
 		}
 		return nil, nil, nil
 	case corev1alpha1.TaskWaitKindTimer:
-		if len(args.Tasks) > 0 {
-			return nil, nil, fmt.Errorf("kind=timer does not accept tasks")
-		}
 		duration, err := time.ParseDuration(strings.TrimSpace(args.Duration))
 		if err != nil || duration < time.Second || duration > maxParkTimerDuration {
 			return nil, nil, fmt.Errorf("kind=timer requires duration between 1s and %s", maxParkTimerDuration)
@@ -244,9 +239,6 @@ func (t *ParkUntilTool) kindInputs(
 		}
 		return nil, &resumeAt, nil
 	case corev1alpha1.TaskWaitKindTasks:
-		if strings.TrimSpace(args.Duration) != "" {
-			return nil, nil, fmt.Errorf("kind=tasks does not accept duration")
-		}
 		names := make([]string, 0, len(args.Tasks))
 		for _, name := range args.Tasks {
 			name = strings.TrimSpace(name)
