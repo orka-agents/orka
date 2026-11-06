@@ -70,9 +70,26 @@ func (d *ACPDispatcher) releaseParkedRuntimeSession(
 		})
 		return
 	}
-	d.forgetRuntimeSessionBinding(sessionUID)
+	// The Session lease was released when the result was finalized, so a
+	// later turn may already have installed a newer binding. Forget only the
+	// binding of the RuntimeSession this deleted.
+	d.forgetRetiredRuntimeSessionBinding(sessionUID, runtimeFence)
 	d.clearPendingParkedRuntimeRelease(sessionUID)
 	metrics.RecordTaskWaitRuntimeRelease("released")
+}
+
+// forgetRetiredRuntimeSessionBinding removes the cached binding only while it
+// still names the exact retired RuntimeSession incarnation.
+func (d *ACPDispatcher) forgetRetiredRuntimeSessionBinding(sessionUID string, retired harnessv2.Fence) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key := strings.TrimSpace(sessionUID)
+	binding, ok := d.runtimeSessions[key]
+	if !ok || binding.Generation != retired.RuntimeSessionGeneration ||
+		binding.RuntimeInstanceID != retired.RuntimeInstanceID || binding.SupervisorBootID != retired.SupervisorBootID {
+		return
+	}
+	delete(d.runtimeSessions, key)
 }
 
 // retryParkedRuntimeRelease retries the failed release of a parked turn's

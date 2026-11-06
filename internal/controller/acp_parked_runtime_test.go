@@ -135,3 +135,44 @@ func TestFailedParkedRuntimeReleaseIsRetriedBeforeTheNextTurnClaimsASlot(t *test
 		t.Fatal("a release on a replaced runtime instance must be dropped without a delete")
 	}
 }
+
+func TestParkedRuntimeReleaseKeepsASuccessorsBinding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeDispatcherJSONStatus(w, http.StatusNotFound, harnessv2.ErrorResponse{
+			Protocol: harnessv2.ProtocolVersion, Code: harnessv2.ErrorCodeInvalidRequest, Message: "runtime session not found",
+		})
+	}))
+	defer server.Close()
+	runtimeClient, err := harnessv2.NewClient(
+		server.URL, harnessv2.WithControllerBearerToken(strings.Repeat("t", 32)),
+		harnessv2.WithOperationCapabilitySecret([]byte(strings.Repeat("s", 32))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "parked", UID: types.UID("99999999-9999-9999-9999-999999999999")},
+		Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-parked"}},
+	}
+	fence := harnessv2.Fence{
+		RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", ControllerEpoch: 1,
+		RuntimePoolUID: "pool-uid", RuntimePoolGeneration: 1, RuntimeProfileDigest: harnessv2.ProfileDigest(testControlDigestForDispatcher("parked-profile")),
+		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion, RuntimeSessionUID: "session-parked", RuntimeSessionGeneration: 2,
+	}
+	d := &ACPDispatcher{}
+	// A later turn of the Session installed its own binding while this
+	// deletion was in flight.
+	successor := ACPRuntimeSessionBinding{SessionUID: "session-parked", Generation: 3, RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id"}
+	d.setRuntimeSessionBinding(successor)
+	d.releaseParkedRuntimeSession(context.Background(), runtimeClient, "runtime-session-parked-g2", parked, fence, "session-parked")
+	if got := d.currentRuntimeSessionBinding("session-parked"); got == nil || *got != successor {
+		t.Fatalf("releasing the retired RuntimeSession must keep the successor's binding, got %+v", got)
+	}
+
+	retired := ACPRuntimeSessionBinding{SessionUID: "session-parked", Generation: 2, RuntimeInstanceID: "runtime-instance", SupervisorBootID: "boot-id", RecreationRequired: true}
+	d.setRuntimeSessionBinding(retired)
+	d.releaseParkedRuntimeSession(context.Background(), runtimeClient, "runtime-session-parked-g2", parked, fence, "session-parked")
+	if got := d.currentRuntimeSessionBinding("session-parked"); got != nil {
+		t.Fatalf("the retired RuntimeSession's own binding must be forgotten, got %+v", got)
+	}
+}
