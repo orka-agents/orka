@@ -13,6 +13,7 @@ import { PRStatusBadge } from './pr-status-badge'
 import { TaskResultViewer } from './task-result-viewer'
 import { StructuredLogViewer } from './structured-log-viewer'
 import { TaskApprovalPanel } from './task-approval-panel'
+import { activeParkedApprovalId } from '@/lib/parked-approval'
 import { ForkProvenance } from './fork-provenance'
 import { RunTimeline } from './run-timeline'
 import { TaskSchedulePanel } from './task-schedule-panel'
@@ -614,7 +615,12 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </TabsContent>
 
         <TabsContent value="approvals">
-          <TaskApprovalPanel taskId={taskId} taskPhase={task.status?.phase} taskUid={task.metadata.uid} />
+          <TaskApprovalPanel
+            taskId={taskId}
+            taskPhase={task.status?.phase}
+            taskUid={task.metadata.uid}
+            parkedApprovalId={activeParkedApprovalId(task)}
+          />
         </TabsContent>
 
         <TabsContent value="logs">

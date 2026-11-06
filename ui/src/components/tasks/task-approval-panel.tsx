@@ -46,6 +46,7 @@ function ApprovalCard({
   approval,
   taskId,
   taskTerminal,
+  parkedApprovalId,
   onConflict,
 }: {
   approval: Approval
@@ -54,6 +55,9 @@ function ApprovalCard({
   // decisions on terminal tasks (409), so such approvals are non-actionable even
   // if still derived as pending.
   taskTerminal?: boolean
+  // The approval an active parked wait is waiting on; it stays decidable after
+  // the parked turn has ended.
+  parkedApprovalId?: string
   // Called when a decision returns 409 so the panel can refetch settled state.
   onConflict?: () => void
 }) {
@@ -62,8 +66,10 @@ function ApprovalCard({
   const [conflict, setConflict] = useState<string | null>(null)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const isPending = approval.status === 'pending'
-  // A pending approval on a completed task can't be decided — show it read-only.
-  const actionable = isPending && !taskTerminal
+  // A pending approval on a completed task can't be decided — show it read-only —
+  // unless it is the sign-off a parked turn is waiting on.
+  const closed = !!taskTerminal && approval.id !== parkedApprovalId
+  const actionable = isPending && !closed
   const submitting = decide.isPending
 
   async function submit(decision: 'approve' | 'decline') {
@@ -173,7 +179,7 @@ function ApprovalCard({
           </p>
         )}
 
-        {isPending && taskTerminal && (
+        {isPending && closed && (
           <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
             This approval can no longer be decided because the task has completed.
           </p>
@@ -221,12 +227,30 @@ function ApprovalCard({
   )
 }
 
-export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: string; taskPhase?: TaskPhase; taskUid?: string }) {
+export function TaskApprovalPanel({
+  taskId,
+  taskPhase,
+  taskUid,
+  parkedApprovalId,
+}: {
+  taskId: string
+  taskPhase?: TaskPhase
+  taskUid?: string
+  parkedApprovalId?: string
+}) {
   // Poll for new approvals while active and unresolved execution after termination.
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
   // Terminal tasks reject decisions, but recovery can still update their approvals.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
-  const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal, taskUid)
+  // A parked sign-off keeps polling until it is decided.
+  const { data, isLoading, error, refetch } = useTaskApprovals(
+    taskId,
+    true,
+    5000,
+    taskRunning,
+    taskTerminal && !parkedApprovalId,
+    taskUid,
+  )
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')
 
@@ -292,7 +316,14 @@ export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: stri
         )}
       </div>
       {approvals.map((approval) => (
-        <ApprovalCard key={approval.id} approval={approval} taskId={taskId} taskTerminal={taskTerminal} onConflict={() => refetch()} />
+        <ApprovalCard
+          key={approval.id}
+          approval={approval}
+          taskId={taskId}
+          taskTerminal={taskTerminal}
+          parkedApprovalId={parkedApprovalId}
+          onConflict={() => refetch()}
+        />
       ))}
     </div>
   )

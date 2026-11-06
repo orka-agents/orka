@@ -310,4 +310,18 @@ describe('TaskApprovalPanel', () => {
     expect(screen.queryByRole('button', { name: 'Decline' })).not.toBeInTheDocument()
     expect(screen.getByText(/can no longer be decided because the task has completed/i)).toBeInTheDocument()
   })
+
+  it('keeps the sign-off a parked turn waits on decidable after the turn ended', async () => {
+    server.use(
+      http.get(`${API}/tasks/:id/approvals`, () =>
+        HttpResponse.json(listResponse([approval({ id: 'parked-1', action: 'park_until' }), approval({ id: 'other' })])),
+      ),
+    )
+    render(<TaskApprovalPanel taskId="tk" taskPhase="Succeeded" parkedApprovalId="parked-1" />)
+    await waitFor(() => expect(screen.getAllByTestId('approval-card')).toHaveLength(2))
+    // Only the parked sign-off is actionable; the unrelated approval stays read-only.
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Decline' })).toHaveLength(1)
+    expect(screen.getAllByText(/can no longer be decided because the task has completed/i)).toHaveLength(1)
+  })
 })
