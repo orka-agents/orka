@@ -31,6 +31,15 @@ type writeCase[P any] struct {
 	// that differs from the envelope's is checked too.
 	explicitFence bool
 	observe       func(t *testing.T, provider P) any
+	// observeWrites marks a case whose observe calls a method the catalog
+	// lists as a write, such as IsLocked. For a provider that refuses such a
+	// method while its dataset is migrating, the maintenance cases compare
+	// observeReads instead while the dataset is migrating.
+	observeWrites bool
+	// observeReads observes, through catalog reads alone, what it can of
+	// what observe does, for a case that sets observeWrites. It is nil when
+	// no catalog read serves those records.
+	observeReads func(t *testing.T, provider P) any
 	// afterCommit, when set, changes what the write changed, such as writing
 	// a deleted record again, after the first call commits. The receipt check
 	// then proves that a replay returns the original outcome without running
@@ -382,6 +391,12 @@ func runConcurrentReplays[P writeCaseProvider](t *testing.T, provider P, c write
 	return outcomes
 }
 
+// servesContract reports whether contract's provider serves a method: a
+// method of that part, or one every part serves.
+func servesContract(info storagev1.MethodInfo, contract string) bool {
+	return info.Contract == "" || info.Contract == contract
+}
+
 // uncoveredWrites checks cases against the method catalog and returns, sorted,
 // the write methods of contract that no case covers. A case for an unknown
 // method, for a method that is not a write of contract, or for a method that
@@ -393,7 +408,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 		switch {
 		case !ok:
 			return nil, fmt.Errorf("write case %q names no contract method", c.method)
-		case info.Kind != storagev1.MethodWrite || info.Contract != contract:
+		case info.Kind != storagev1.MethodWrite || !servesContract(info, contract):
 			return nil, fmt.Errorf("write case %q is not a %s write", c.method, contract)
 		case covered[c.method]:
 			return nil, fmt.Errorf("write case %q is listed twice", c.method)
@@ -402,7 +417,7 @@ func uncoveredWrites[P any](contract string, cases []writeCase[P]) ([]string, er
 	}
 	var uncovered []string
 	for name, info := range storagev1.Methods() {
-		if info.Kind == storagev1.MethodWrite && info.Contract == contract && !covered[name] {
+		if info.Kind == storagev1.MethodWrite && servesContract(info, contract) && !covered[name] {
 			uncovered = append(uncovered, name)
 		}
 	}

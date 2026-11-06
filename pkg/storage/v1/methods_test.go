@@ -21,6 +21,7 @@ var catalogInterfaces = map[string]reflect.Type{
 	"OperationReceiptStore":   reflect.TypeFor[storagev1.OperationReceiptStore](),
 	"ControllerEpochAdvancer": reflect.TypeFor[storagev1.ControllerEpochAdvancer](),
 	"DatasetBindingStore":     reflect.TypeFor[storagev1.DatasetBindingStore](),
+	"WriteWatermarkStore":     reflect.TypeFor[storagev1.WriteWatermarkStore](),
 }
 
 // readPrefixes are the name prefixes of methods that change nothing.
@@ -106,6 +107,8 @@ func TestMethodCatalogKinds(t *testing.T) {
 		"IsLocked":                    storagev1.MethodWrite,
 		"Describe":                    storagev1.MethodRead,
 		"SaveArtifact":                storagev1.MethodWrite,
+		"AdvanceWriteWatermark":       storagev1.MethodWrite,
+		"GetWriteWatermark":           storagev1.MethodRead,
 	} {
 		info, ok := storagev1.LookupMethod(name)
 		require.True(t, ok, name)
@@ -131,6 +134,11 @@ var classified = map[string]storagev1.CallClass{
 	"DetachDatasetBinding":        storagev1.CallControl,
 	"GetDatasetBinding":           storagev1.CallControl,
 	"UpdateBindingKeyFingerprint": storagev1.CallControl,
+
+	// The write watermark records and checks what a dataset acknowledged, so
+	// lost writes are detected even while ordinary work saturates the store.
+	"AdvanceWriteWatermark": storagev1.CallControl,
+	"GetWriteWatermark":     storagev1.CallControl,
 
 	"DeleteGatewayTaskCleanupReceipt":     storagev1.CallBackground,
 	"ListGatewaySessionCleanupCandidates": storagev1.CallBackground,

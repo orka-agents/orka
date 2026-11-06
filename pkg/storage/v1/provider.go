@@ -135,8 +135,9 @@ const (
 	// SaveResult or SaveArtifact replaces a stored result or file only when
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
-	// [ProviderLimits.MaxResultBytes].
-	ContractRevision = 6
+	// [ProviderLimits.MaxResultBytes]. Revision 7 requires [WriteWatermarkStore]
+	// on both provider contracts.
+	ContractRevision = 7
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -185,6 +186,7 @@ type StateProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	OutboxPersistenceStore
 	OutboxBacklogReader
 	TaskJobAuthorityStore
@@ -216,5 +218,6 @@ type ArtifactProvider interface {
 	ControllerEpochAdvancer
 	OperationReceiptStore
 	DatasetBindingStore
+	WriteWatermarkStore
 	ArtifactStore
 }

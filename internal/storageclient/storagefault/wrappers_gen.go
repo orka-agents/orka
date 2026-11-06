@@ -76,6 +76,19 @@ func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1
 	return r0, err
 }
 
+func (p *stateProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEvent", func(ctx context.Context) (err error) {
@@ -1497,6 +1510,19 @@ func (p *stateProvider) GetWorkAction(ctx context.Context, a1 string, a2 string)
 	})
 	if injected {
 		var z0 *storagev1.WorkAction
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "GetWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
 		return z0, err
 	}
 	return r0, err
@@ -2945,6 +2971,19 @@ func (p *artifactProvider) AdvanceControllerEpoch(ctx context.Context, a1 storag
 	return r0, err
 }
 
+func (p *artifactProvider) AdvanceWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "AdvanceWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.AdvanceWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *artifactProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
 	var r0 storagev1.DatasetBinding
 	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
@@ -3021,6 +3060,19 @@ func (p *artifactProvider) GetDatasetBinding(ctx context.Context, a1 string) (st
 	})
 	if injected {
 		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *artifactProvider) GetWriteWatermark(ctx context.Context) (storagev1.WriteWatermark, error) {
+	var r0 storagev1.WriteWatermark
+	injected, err := p.injector.call(ctx, p.contract, "GetWriteWatermark", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetWriteWatermark(ctx)
+		return err
+	})
+	if injected {
+		var z0 storagev1.WriteWatermark
 		return z0, err
 	}
 	return r0, err
