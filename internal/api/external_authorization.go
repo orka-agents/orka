@@ -76,6 +76,7 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/usage/other/:category": coreAPIPolicy("list", "tasks", "",
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "repositorymonitors", "list", ""},
 		apiResourcePermission{corev1alpha1.GroupVersion.Group, "sessions", "list", ""}).inNamespace(apiUsageTeamNamespaces),
+	"GET /api/v1/capability-gaps":     coreAPIPolicy("list", "tasks", ""),
 	"POST /api/v1/tasks":              coreAPIPolicy("create", "tasks", "").inNamespace(apiCreateNamespace),
 	"GET /api/v1/tasks":               coreAPIPolicy("list", "tasks", ""),
 	"GET /api/v1/tasks/:id":           coreAPIPolicy("get", "tasks", "id"),

@@ -22,6 +22,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workspace/statusrules"
@@ -76,7 +77,16 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 		// The single configuration gate for bound Tasks: ordinary planning
 		// AND bound-task recovery both flow through this chokepoint before
 		// any workspace or RuntimePool demand exists.
-		return r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
+		result, err := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("WorkspaceUnsupported"), reason)
+		// A requeue means the failure is not projected yet; count it once,
+		// on the pass that marks the Task failed.
+		if err == nil && result.IsZero() {
+			recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), r.gatewayEventStore(), task, capabilitygap.Signal{
+				Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonExecutionWorkspace,
+				Runtime: capabilityGapBoundRuntime(bound),
+			})
+		}
+		return result, err
 	}
 	if err := r.ACPAdmissionGate.Check(); err != nil {
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil

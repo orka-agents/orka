@@ -10,6 +10,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
@@ -180,7 +181,9 @@ func nativeRestoreHonorsHistoryBoundary(ref *corev1alpha1.SessionReference, chec
 
 // rejectNativeSessionRuntime fails a Task that cannot use the Session's native
 // checkpoint before it binds the Session. cause selects the reported reason.
-func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, cause error) error {
+func (d *ACPDispatcher) rejectNativeSessionRuntime(
+	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence, gapRuntime string, cause error,
+) error {
 	reason := corev1alpha1.TaskExecutionReason("NativeSessionRuntimeUnsupported")
 	message := errNativeSessionRuntimeUnsupported.Error()
 	if errors.Is(cause, errNativeSessionHistoryBoundary) {
@@ -190,7 +193,13 @@ func (d *ACPDispatcher) rejectNativeSessionRuntime(ctx context.Context, task *co
 	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "native-session-runtime-unsupported", reason, message); err != nil {
 		return err
 	}
-	return d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message)
+	if err := d.failTaskBeforeSessionBinding(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message); err != nil {
+		return err
+	}
+	recordTaskCapabilityGap(ctx, uncachedReader(d.APIReader, d.Client), d.gatewayEventStore(), task, capabilitygap.Signal{
+		Category: capabilitygap.CategoryUnsupportedRequest, Reason: capabilitygap.ReasonNativeSession, Runtime: gapRuntime,
+	})
+	return nil
 }
 
 func nativeRestoreForTask(session *acpTaskSession, request harnessv2.CreateRuntimeSessionRequest, supported bool) (*harnessv2.NativeSessionRestore, error) {

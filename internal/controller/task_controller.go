@@ -50,6 +50,7 @@ import (
 	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/artifactcap"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	execevents "github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/executionmode"
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
@@ -854,6 +855,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 	// Validate task-agent compatibility
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
 		log.Error(err, "task-agent compatibility validation failed")
+		if unsupported, ok := errors.AsType[unsupportedTaskRequestError](err); ok {
+			return r.rejectPlannedAgentExecution(ctx, task, agent, rejectAgentExecutionPlan(err.Error()).unsupported(unsupported.reason))
+		}
 		return r.failTask(ctx, task, err.Error())
 	}
 
@@ -885,11 +889,11 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		agent = withEffectiveBuiltInContract(agent, r.Mode)
 		plan := r.planAgentExecution(ctx, task, agent)
 		if err := validatePlannedRuntimeRefAgentTaskRestrictions(task, agent, plan); err != nil {
-			return r.rejectPlannedAgentExecution(ctx, task, rejectAgentExecutionPlan(err.Error()))
+			return r.rejectPlannedAgentExecution(ctx, task, agent, rejectAgentExecutionPlan(err.Error()))
 		}
 		switch plan.path {
 		case agentExecutionPathRejected:
-			return r.rejectPlannedAgentExecution(ctx, task, plan)
+			return r.rejectPlannedAgentExecution(ctx, task, agent, plan)
 		case agentExecutionPathACP, agentExecutionPathExternal:
 			if result, err, handled := r.ensureAgentExecutionBinding(ctx, task, agent); handled {
 				return result, err
@@ -3431,10 +3435,23 @@ func validateRuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, agent *cor
 		return fmt.Errorf("runtimeRef custom runtimes do not support task secretRef credential delivery")
 	}
 	if task != nil && task.Spec.PriorTaskRef != nil {
-		return fmt.Errorf("runtimeRef custom runtimes do not support priorTaskRef workspace handoff")
+		return unsupportedTaskRequestError{
+			err:    errors.New("runtimeRef custom runtimes do not support priorTaskRef workspace handoff"),
+			reason: capabilitygap.ReasonPriorTaskRef,
+		}
 	}
 	return nil
 }
+
+// unsupportedTaskRequestError is a compatibility rejection that is also an
+// unsupported-request capability-gap signal.
+type unsupportedTaskRequestError struct {
+	err    error
+	reason capabilitygap.Reason
+}
+
+func (e unsupportedTaskRequestError) Error() string { return e.err.Error() }
+func (e unsupportedTaskRequestError) Unwrap() error { return e.err }
 
 func validatePlannedRuntimeRefAgentTaskRestrictions(
 	task *corev1alpha1.Task,

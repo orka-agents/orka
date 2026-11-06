@@ -17,6 +17,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/capabilitygap"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
+	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 type agentExecutionPath string
@@ -32,6 +36,9 @@ type agentExecutionPlan struct {
 	externalRuntimeName  string
 	rejectionReason      string
 	workspaceStatusError error
+	// gapReason marks a rejection as an unsupported-request capability-gap
+	// signal. Validation failures and missing configuration leave it empty.
+	gapReason capabilitygap.Reason
 	// transientError defers planning instead of rejecting: the reconcile
 	// returns it so a brief read outage requeues rather than permanently
 	// failing the Task.
@@ -49,6 +56,20 @@ func rejectAgentExecutionPlan(reason string) agentExecutionPlan {
 func rejectAgentExecutionPlanWithWorkspaceStatus(reason string, err error) agentExecutionPlan {
 	plan := rejectAgentExecutionPlan(reason)
 	plan.workspaceStatusError = err
+	return plan
+}
+
+// unsupported marks a rejection as an unsupported-request signal.
+func (p agentExecutionPlan) unsupported(reason capabilitygap.Reason) agentExecutionPlan {
+	p.gapReason = reason
+	return p
+}
+
+func rejectAgentToolboxPlan(task *corev1alpha1.Task, agent *corev1alpha1.Agent, external bool, reason string) agentExecutionPlan {
+	plan := rejectAgentExecutionPlan(reason)
+	if agentToolboxUnsupportedReason(task, agent, external) != "" {
+		plan = plan.unsupported(capabilitygap.ReasonToolboxes)
+	}
 	return plan
 }
 
@@ -75,7 +96,7 @@ func (r *TaskReconciler) planAgentExecution(
 	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
 		name := strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name)
 		if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, true); reason != "" {
-			return rejectAgentExecutionPlan(reason)
+			return rejectAgentToolboxPlan(task, agent, true, reason)
 		}
 		reader := uncachedReader(r.APIReader, r.Client)
 		runtime := &corev1alpha1.AgentRuntime{}
@@ -92,40 +113,45 @@ func (r *TaskReconciler) planAgentExecution(
 		case corev1alpha1.AgentRuntimeContractHarnessV2:
 			if workspaceRequested {
 				err := errors.New("Task.spec.execution.workspace is not supported for external AgentRuntime dispatch; repository access uses Task.spec.workspace") //nolint:staticcheck // Field path begins the user-facing validation message.
-				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err)
+				return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err).unsupported(capabilitygap.ReasonExecutionWorkspace)
 			}
 			if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.MaxTurns != nil {
-				return rejectAgentExecutionPlan("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile")
+				return rejectAgentExecutionPlan("runtimeRef custom runtimes do not support maxTurns; iteration limits are fixed by the registered runtime profile").
+					unsupported(capabilitygap.ReasonMaxTurns)
 			}
-			if reason := agentV2RuntimeUnsupportedReason(task, agent); reason != "" {
-				return rejectAgentExecutionPlan(reason)
+			if reason, gap := agentV2RuntimeUnsupportedReason(task, agent); reason != "" {
+				return rejectAgentExecutionPlan(reason).unsupported(gap)
 			}
 			if task.Spec.PriorTaskRef != nil {
-				return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by external v2 runtimes; use sessionRef")
+				return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by external v2 runtimes; use sessionRef").
+					unsupported(capabilitygap.ReasonPriorTaskRef)
 			}
 			return agentExecutionPlan{path: agentExecutionPathExternal, externalRuntimeName: name}
 		default:
-			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q contractVersion %q is unsupported; explicit %s is required", name, runtime.RegisteredContractVersion(), corev1alpha1.AgentRuntimeContractHarnessV2))
+			return rejectAgentExecutionPlan(fmt.Sprintf("AgentRuntime %q contractVersion %q is unsupported; explicit %s is required", name, runtime.RegisteredContractVersion(), corev1alpha1.AgentRuntimeContractHarnessV2)).
+				unsupported(capabilitygap.ReasonContractVersion)
 		}
 	}
 
 	switch agent.Spec.Runtime.Type {
 	case corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode:
 	default:
-		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime %q is not supported by the ACP core runtime", agent.Spec.Runtime.Type))
+		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime %q is not supported by the ACP core runtime", agent.Spec.Runtime.Type)).
+			unsupported(capabilitygap.ReasonRuntime)
 	}
 
 	contract := agent.BuiltInContractVersion()
 	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
-		return rejectAgentExecutionPlan(reason)
+		return rejectAgentToolboxPlan(task, agent, false, reason)
 	}
 	switch contract {
 	case corev1alpha1.AgentRuntimeContractHarnessV2:
-		if reason := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
-			return rejectAgentExecutionPlan(reason)
+		if reason, gap := agentACPRuntimeUnsupportedReason(task, agent); reason != "" {
+			return rejectAgentExecutionPlan(reason).unsupported(gap)
 		}
 		if task.Spec.PriorTaskRef != nil {
-			return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef")
+			return rejectAgentExecutionPlan("priorTaskRef continuation is not supported by the ACP core runtime; use sessionRef").
+				unsupported(capabilitygap.ReasonPriorTaskRef)
 		}
 		if workspaceRequested {
 			if plan, rejected := r.rejectUnsupportedACPWorkspacePlan(ctx, task); rejected {
@@ -134,7 +160,8 @@ func (r *TaskReconciler) planAgentExecution(
 		}
 		return agentACPPlan()
 	default:
-		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime.contractVersion %q is unsupported; explicit %s is required", contract, corev1alpha1.AgentRuntimeContractHarnessV2))
+		return rejectAgentExecutionPlan(fmt.Sprintf("agent runtime.contractVersion %q is unsupported; explicit %s is required", contract, corev1alpha1.AgentRuntimeContractHarnessV2)).
+			unsupported(capabilitygap.ReasonContractVersion)
 	}
 }
 
@@ -179,7 +206,7 @@ func (r *TaskReconciler) rejectUnsupportedACPWorkspacePlan(ctx context.Context, 
 
 	if !r.ACPWorkspaceDispatchEnabled {
 		err := fmt.Errorf("workspace-provider-backed RuntimeSession dispatch is disabled; enable --acp-workspace-dispatch-enabled to host this Task's RuntimeSession in a %s workspace", binding.Provider)
-		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err), true
+		return rejectAgentExecutionPlanWithWorkspaceStatus(err.Error(), err).unsupported(capabilitygap.ReasonExecutionWorkspace), true
 	}
 	return agentExecutionPlan{}, false
 }
@@ -239,6 +266,7 @@ func externalAgentRuntimeConformanceError(
 func (r *TaskReconciler) rejectPlannedAgentExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
 	plan agentExecutionPlan,
 ) (ctrl.Result, error) {
 	if plan.transientError != nil {
@@ -251,31 +279,111 @@ func (r *TaskReconciler) rejectPlannedAgentExecution(
 			return ctrl.Result{}, statusErr
 		}
 	}
-	return r.failTask(ctx, task, plan.rejectionReason)
+	result, err := r.failTask(ctx, task, plan.rejectionReason)
+	if err == nil && plan.gapReason != "" {
+		recordTaskCapabilityGap(ctx, uncachedReader(r.APIReader, r.Client), r.gatewayEventStore(), task, capabilitygap.Signal{
+			Category: capabilitygap.CategoryUnsupportedRequest,
+			Reason:   plan.gapReason,
+			Runtime:  capabilityGapAgentRuntime(agent),
+		})
+	}
+	return result, err
 }
 
-func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+// capabilityGapAgentRuntime labels an Agent's runtime for capability-gap
+// signals: a runtimeRef is external, a built-in type keeps its name.
+func capabilityGapAgentRuntime(agent *corev1alpha1.Agent) string {
+	if agent == nil || agent.Spec.Runtime == nil {
+		return capabilitygap.RuntimeUnknown
+	}
+	if agent.Spec.Runtime.RuntimeRef != nil && strings.TrimSpace(agent.Spec.Runtime.RuntimeRef.Name) != "" {
+		return capabilitygap.RuntimeExternal
+	}
+	return capabilitygap.RuntimeLabel(string(agent.Spec.Runtime.Type))
+}
+
+// capabilityGapBoundRuntime labels a verified bound execution the way
+// capabilityGapAgentRuntime labels an Agent: runtimeRef dispatch is external,
+// a built-in profile keeps its provider name. It reads only frozen state.
+func capabilityGapBoundRuntime(bound *verifiedAgentExecution) string {
+	if bound == nil || bound.binding == nil {
+		return capabilitygap.RuntimeUnknown
+	}
+	if bound.binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint {
+		return capabilitygap.RuntimeExternal
+	}
+	return capabilitygap.RuntimeLabel(bound.plan.Profile.ProviderKind)
+}
+
+// recordTaskCapabilityGap records signal for task. It reads the Task's
+// namespace UID, fenced on the Task's own UID, and resolves the Task's Gateway
+// owner, including ownership recorded only in its retained GatewayEvent, only
+// while recording is on. Without a verified UID or owner the signal still
+// counts in Prometheus but stays out of the summary, so a recreated namespace
+// never sees earlier counts and an unverified Gateway Task never reaches
+// callers who cannot read its Gateway.
+func recordTaskCapabilityGap(
+	ctx context.Context, reader client.Reader, events store.GatewayEventStore, task *corev1alpha1.Task, signal capabilitygap.Signal,
+) {
+	if task == nil || capabilitygap.Default() == nil {
+		return
+	}
+	signal.Namespace, signal.Task, signal.TaskUID = task.Namespace, task.Name, string(task.UID)
+	owner, ok, ownerErr := gatewayruntime.ResolveTaskOwner(ctx, events, task)
+	if ownerErr == nil && ok {
+		signal.Gateway = capabilitygap.GatewayOwner{
+			Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+		}
+	}
+	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil && ownerErr == nil {
+		signal.NamespaceUID = uid
+	}
+	capabilitygap.Record(signal)
+}
+
+// gatewayEventStore returns the store that links Gateway-created Tasks to
+// their retained GatewayEvents, if configured.
+func (r *TaskReconciler) gatewayEventStore() store.GatewayEventStore {
+	if r == nil || r.SessionManager == nil {
+		return nil
+	}
+	return r.SessionManager.gatewayEventStore
+}
+
+// gatewayEventStore returns the store that links Gateway-created Tasks to
+// their retained GatewayEvents, if configured.
+func (d *ACPDispatcher) gatewayEventStore() store.GatewayEventStore {
+	if d == nil || d.Sessions == nil {
+		return nil
+	}
+	return d.Sessions.gatewayEvents
+}
+
+func agentACPRuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (string, capabilitygap.Reason) {
 	if task != nil && task.Spec.Transaction != nil {
-		return "ACP core runtime tasks do not support transaction token delegation"
+		return "ACP core runtime tasks do not support transaction token delegation", capabilitygap.ReasonTransactionDelegation
 	}
 	return agentV2RuntimeUnsupportedReason(task, agent)
 }
 
-func agentV2RuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) string {
+func agentV2RuntimeUnsupportedReason(task *corev1alpha1.Task, agent *corev1alpha1.Agent) (string, capabilitygap.Reason) {
 	if task == nil {
-		return ""
+		return "", ""
 	}
 	switch {
 	case agent != nil && agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous:
-		return "ACP core runtime tasks do not support Agent.spec.coordination.autonomous; disable autonomous coordination"
+		return "ACP core runtime tasks do not support Agent.spec.coordination.autonomous; disable autonomous coordination",
+			capabilitygap.ReasonAutonomousCoordination
 	case task.Spec.RetryPolicy != nil && task.Spec.RetryPolicy.MaxRetries > 0:
-		return "ACP core runtime tasks do not support effective Task.spec.retryPolicy retries; maxRetries must be 0"
+		return "ACP core runtime tasks do not support effective Task.spec.retryPolicy retries; maxRetries must be 0",
+			capabilitygap.ReasonRetryPolicy
 	case effectiveAgentResources(task, agent):
-		return "ACP core runtime tasks do not support custom Kubernetes resources until a reviewed RuntimePool resource class is selected"
+		return "ACP core runtime tasks do not support custom Kubernetes resources until a reviewed RuntimePool resource class is selected",
+			capabilitygap.ReasonResources
 	case resolveExecution(task, agent) != nil:
-		return "ACP core runtime tasks do not support per-Task execution placement"
+		return "ACP core runtime tasks do not support per-Task execution placement", capabilitygap.ReasonPlacement
 	default:
-		return ""
+		return "", ""
 	}
 }
 
