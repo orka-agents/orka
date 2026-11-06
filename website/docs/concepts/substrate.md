@@ -149,7 +149,7 @@ provider with `--egress-credential-provider=k8s.io
 re-originates `https` trusting only public roots. If injection is unavailable the
 pool reports why and stays closed; `--acp-workspace-allow-provider-token-in-sandbox`
 explicitly restores bootstrap delivery. See
-[ADR 0040](https://github.com/orka-agents/orka/blob/main/docs/adr/0040-substrate-egress-credential-injection.md)
+[ADR 0045](https://github.com/orka-agents/orka/blob/main/docs/adr/0045-substrate-egress-credential-injection.md)
 for the remaining limits: any guest process can send the placeholder, a
 header-echoing destination reveals the value, and grants are per Atespace.
 

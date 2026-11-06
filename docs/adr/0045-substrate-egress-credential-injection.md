@@ -1,4 +1,4 @@
-# 40. Inject Substrate egress credentials at the gateway
+# 45. Inject Substrate egress credentials at the gateway
 
 Date: 2026-11-06
 
