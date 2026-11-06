@@ -14,6 +14,104 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// CreateEvalRunRequest creates an EvalRun. Name, or generateName for a
+// server-chosen suffix, is required.
+type CreateEvalRunRequest struct {
+	Name         string                   `json:"name"`
+	GenerateName string                   `json:"generateName"`
+	Namespace    string                   `json:"namespace"`
+	Metadata     EvalRunMetadataRequest   `json:"metadata"`
+	Spec         corev1alpha1.EvalRunSpec `json:"spec"`
+}
+
+// EvalRunMetadataRequest is the metadata a client may set on a new EvalRun.
+type EvalRunMetadataRequest struct {
+	MetadataRequest
+	GenerateName string `json:"generateName,omitempty"`
+}
+
+// CreateEvalRun creates an EvalRun. It is authorized like creating the
+// EvalRun; the EvalRun's own admission and the controller validate the spec.
+func (h *Handlers) CreateEvalRun(c fiber.Ctx) error {
+	if err := refuseEvalTransactionTokens(c, "eval runs cannot be created with transaction tokens"); err != nil {
+		return err
+	}
+	var req CreateEvalRunRequest
+	if err := c.Bind().JSON(&req); err != nil {
+		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+	}
+	name, generateName := firstNonEmpty(req.Name, req.Metadata.Name), firstNonEmpty(req.GenerateName, req.Metadata.GenerateName)
+	if name == "" && generateName == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "name or generateName is required")
+	}
+	namespace, err := h.resolveNamespace(c, firstNonEmpty(req.Namespace, req.Metadata.Namespace))
+	if err != nil {
+		return err
+	}
+	run := &corev1alpha1.EvalRun{
+		ObjectMeta: objectMetaFromRequest(name, namespace, req.Metadata.MetadataRequest),
+		Spec:       req.Spec,
+	}
+	if name == "" {
+		run.GenerateName = generateName
+	}
+	if err := h.client.Create(c.Context(), run); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return fiber.NewError(fiber.StatusConflict, "eval run already exists")
+		}
+		if invalid := invalidObjectError("eval run", err); invalid != nil {
+			return invalid
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to create eval run: %v", err))
+	}
+	return c.Status(fiber.StatusCreated).JSON(run)
+}
+
+// GetEvalRun returns one EvalRun, including its status.
+func (h *Handlers) GetEvalRun(c fiber.Ctx) error {
+	if err := refuseEvalTransactionTokens(c, "eval runs cannot be read with transaction tokens"); err != nil {
+		return err
+	}
+	run, err := h.getEvalRun(c)
+	if err != nil {
+		return err
+	}
+	return c.JSON(run)
+}
+
+func (h *Handlers) getEvalRun(c fiber.Ctx) (*corev1alpha1.EvalRun, error) {
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return nil, err
+	}
+	run := &corev1alpha1.EvalRun{}
+	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: c.Params("name")}, run); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fiber.NewError(fiber.StatusNotFound, "eval run not found")
+		}
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get eval run: %v", err))
+	}
+	return run, nil
+}
+
+// refuseEvalTransactionTokens refuses transaction-token callers: no
+// context-token scope covers evals.
+func refuseEvalTransactionTokens(c fiber.Ctx, message string) error {
+	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeContextToken {
+		return fiber.NewError(fiber.StatusForbidden, message)
+	}
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // evalTrialsJSONLContentType is the media type of the JSONL trial listing.
 const evalTrialsJSONLContentType = "application/jsonl"
 
@@ -24,24 +122,16 @@ func (h *Handlers) ListEvalRunTrials(c fiber.Ctx) error {
 	if h.evalTrialStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "eval trial store not configured")
 	}
-	// No transaction-token scope covers evals, so token callers are refused.
-	if ui := GetUserInfo(c); ui != nil && ui.AuthType == AuthTypeContextToken {
-		return fiber.NewError(fiber.StatusForbidden, "eval trials cannot be read with transaction tokens")
+	if err := refuseEvalTransactionTokens(c, "eval trials cannot be read with transaction tokens"); err != nil {
+		return err
 	}
 	jsonl, err := evalTrialsWantJSONL(c)
 	if err != nil {
 		return err
 	}
-	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	run, err := h.getEvalRun(c)
 	if err != nil {
 		return err
-	}
-	run := &corev1alpha1.EvalRun{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: c.Params("name")}, run); err != nil {
-		if apierrors.IsNotFound(err) {
-			return fiber.NewError(fiber.StatusNotFound, "eval run not found")
-		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get eval run: %v", err))
 	}
 	records, err := h.evalTrialStore.ListEvalTrials(c.Context(), run.Namespace, run.Name, string(run.UID))
 	if err != nil {

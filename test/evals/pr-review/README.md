@@ -87,5 +87,12 @@ spec:
   graders: [verdict, localization, contract, honesty]
 ```
 
+Create and follow it with the CLI, which also saves the trial records, a
+summary and the events of every failed trial:
+
+```bash
+orka eval run -f evalrun.yaml --output-dir ./results
+```
+
 Results are in `status.results`; per-trial records are at
 `GET /api/v1/evals/runs/<name>/trials`.

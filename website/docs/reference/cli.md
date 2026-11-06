@@ -498,6 +498,24 @@ orka monitor delete my-monitor
 
 Manual run and action commands such as `orka security scan run`, `orka monitor run`, and finding patch and pull request actions create downstream Tasks, and need working GitHub, provider, and agent configuration.
 
+## Capability evals
+
+`orka eval run` creates an EvalRun from a manifest. The cases ConfigMap and the
+RepositoryMonitor it references must already exist, and the controller must run
+with `--enable-evals`:
+
+```bash
+orka eval run -f evalrun.yaml                          # create and return
+orka eval run -f evalrun.yaml --wait                   # print progress and results; fail unless Succeeded
+orka eval run -f evalrun.yaml --output-dir ./results   # also write evalrun.json, trials.jsonl, summary.md, events/
+orka eval get pr-review-x7                             # phase, counts and per-grader results
+```
+
+`--output-dir` writes the finished EvalRun, its trial records as JSONL, a
+Markdown summary with a table of failed trials, and the execution events of each
+failed trial under `events/`. Read those transcripts before trusting a score.
+See `test/evals/pr-review/README.md` for the PR review cases.
+
 ## Usage and PR outcomes
 
 Usage commands read retained model measurements and verified PR outcomes through

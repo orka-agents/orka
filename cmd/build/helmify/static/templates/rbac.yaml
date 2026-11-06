@@ -29,11 +29,13 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
-  # Users create EvalRuns; the controller runs their trials, manages their
-  # finalizer and status, and deletes them after ttlSecondsAfterFinished.
+  # Users create EvalRuns, directly or through POST /api/v1/evals/runs, which
+  # the API server creates after authorizing the caller; the controller runs
+  # their trials, manages their finalizer and status, and deletes them after
+  # ttlSecondsAfterFinished.
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns"]
-    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status", "evalruns/status"]
     verbs: ["get", "update", "patch"]

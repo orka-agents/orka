@@ -261,6 +261,8 @@ otherwise. In the additional-checks column:
 | `POST` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `create` | `:name` | `Q` | `patch` on `core.orka.ai/repositorymonitors`, `:name` |
 | `GET` | `/api/v1/monitors/repositories/:name/runs` | `core.orka.ai` | `repositorymonitors/runs` | `list` | `:name` | `Q` | none |
 | `GET` | `/api/v1/monitors/repositories/:name/items` | `core.orka.ai` | `repositorymonitors/items` | `list` | `:name` | `Q` | none |
+| `POST` | `/api/v1/evals/runs` | `core.orka.ai` | `evalruns` | `create` | empty | `C` | none; transaction-token callers are refused |
+| `GET` | `/api/v1/evals/runs/:name` | `core.orka.ai` | `evalruns` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
 | `GET` | `/api/v1/evals/runs/:name/trials` | `core.orka.ai` | `evalruns` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
 | `POST` | `/api/v1/monitors/repositories/:name/commands` | `core.orka.ai` | `repositorymonitors/commands` | `create` | `:name` | `Q` | `create` on `core.orka.ai/repositorymonitors/runs`, `:name`; `patch` on `core.orka.ai/repositorymonitors`, `:name` |
 | `GET` | `/api/v1/monitors/commands` | `core.orka.ai` | `monitorcommands` | `list` | empty | `Q` | none |

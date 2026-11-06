@@ -146,6 +146,8 @@ PUT /api/v1/monitors/repositories/:name | update core.orka.ai:repositorymonitors
 DELETE /api/v1/monitors/repositories/:name | delete core.orka.ai:repositorymonitors protected
 POST /api/v1/monitors/repositories/:name/runs | create core.orka.ai:repositorymonitors/runs protected; patch core.orka.ai:repositorymonitors protected
 GET /api/v1/monitors/repositories/:name/runs | list core.orka.ai:repositorymonitors/runs protected
+POST /api/v1/evals/runs | create core.orka.ai:evalruns
+GET /api/v1/evals/runs/:name | get core.orka.ai:evalruns protected
 GET /api/v1/evals/runs/:name/trials | get core.orka.ai:evalruns protected
 GET /api/v1/monitors/repositories/:name/items | list core.orka.ai:repositorymonitors/items protected
 POST /api/v1/monitors/repositories/:name/commands | create core.orka.ai:repositorymonitors/commands protected; create core.orka.ai:repositorymonitors/runs protected; patch core.orka.ai:repositorymonitors protected

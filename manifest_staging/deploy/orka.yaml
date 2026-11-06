@@ -1134,6 +1134,7 @@ rules:
   - branchclaims
   - connections
   - controllerepochs
+  - evalruns
   - externaleffects
   - promptattempts
   - providers
@@ -1222,17 +1223,6 @@ rules:
   resources:
   - connectorproviders
   verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - core.orka.ai
-  resources:
-  - evalruns
-  verbs:
-  - delete
   - get
   - list
   - patch
