@@ -73,12 +73,9 @@ type Status struct {
 	Message  string `json:"message,omitempty"`
 }
 
-// Frame prefixes payload with its channel.
+// Frame prefixes a copy of payload with its channel.
 func Frame(channel byte, payload []byte) []byte {
-	out := make([]byte, 1+len(payload))
-	out[0] = channel
-	copy(out[1:], payload)
-	return out
+	return append([]byte{channel}, payload...)
 }
 
 // ControlFrame encodes a control message.

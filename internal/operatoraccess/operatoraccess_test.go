@@ -136,3 +136,18 @@ func TestExecOptionsNormalize(t *testing.T) {
 		t.Fatalf("ClampFileBytes(huge) = %d", got)
 	}
 }
+
+func TestFramePrefixesACopyOfThePayload(t *testing.T) {
+	payload := []byte("hello")
+	frame := Frame(ChannelStdout, payload)
+	if len(frame) != 1+len(payload) || frame[0] != ChannelStdout || string(frame[1:]) != "hello" {
+		t.Fatalf("frame = %q", frame)
+	}
+	payload[0] = 'j'
+	if string(frame[1:]) != "hello" {
+		t.Fatal("frame aliases the caller's payload buffer")
+	}
+	if empty := Frame(ChannelControl, nil); len(empty) != 1 || empty[0] != ChannelControl {
+		t.Fatalf("empty frame = %q", empty)
+	}
+}
