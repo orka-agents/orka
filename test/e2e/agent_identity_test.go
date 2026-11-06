@@ -225,11 +225,23 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			Step: "app", ClientID: fakeEntraIdentity, Identity: fakeEntraIdentity, Scope: fakeentra.ExchangeScope,
 			Error: "unauthorized_client", ErrorCode: fakeentra.DisabledErrorCode,
 		}), "re-verification must have been refused at the issuer")
-		// The refusal reaches the model as a failed tool call; whatever the
-		// Task's outcome, the resource must not have been called. Once the
-		// issuer has refused the identity, Orka refuses the call itself, so
-		// no token is even requested for the resource.
-		runTask("e2e-identity-disabled", "[e2e:agent-identity-disabled]")
+		// The refusal reaches the model as a failed tool call; the Task's own
+		// outcome does not matter, but the call must have been attempted and
+		// refused. Once the issuer has refused the identity, Orka refuses the
+		// call itself, so no token is even requested for the resource.
+		evalBefore, err := providerProxyMockLLM.evalSnapshot()
+		Expect(err).NotTo(HaveOccurred())
+		marker := "[e2e:agent-identity-disabled]"
+		Expect(runTask("e2e-identity-disabled", marker)).To(BeElementOf("Succeeded", "Failed"))
+		tool := "mcp__orka__" + agentIdentityE2ETool
+		Eventually(func(g Gomega) {
+			requests, captureErr := providerProxyMockLLM.evalRequestsSince(evalBefore, marker)
+			g.Expect(captureErr).NotTo(HaveOccurred())
+			g.Expect(authorizationToolResultSeen(requests, tool, "")).
+				To(BeTrue(), "the model must have called the Tool and received its refusal")
+			g.Expect(authorizationToolResultSeen(requests, tool, fakeentra.ProbeOK)).
+				To(BeFalse(), "the probe's answer must not reach the model")
+		}, time.Minute, time.Second).Should(Succeed())
 		after := fakeEntraState()
 		Expect(after.Probes).To(HaveLen(len(before.Probes)), "a disabled identity's call must never reach the resource")
 		Expect(resourceTokenRequests(after)).To(Equal(resourceTokenRequests(before)),
