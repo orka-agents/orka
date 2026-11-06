@@ -162,7 +162,9 @@ type operatorLease struct {
 // and slot stay held so no barrier, tag reuse, or new operation can proceed.
 func (s *Server) finishOperation(lease *operatorLease) {
 	if lease.process != nil {
-		proven := lease.process.Kill()
+		// Retire fences off late Kill calls (for example from the input
+		// relay) before the tag is released for reuse below.
+		proven := lease.process.Retire()
 		_, _, _ = lease.process.Wait()
 		for _, closer := range []io.Closer{lease.process.Stdin(), lease.process.Stdout(), lease.process.Stderr()} {
 			if closer != nil {
@@ -217,6 +219,10 @@ type operatorProcess interface {
 	// Kill terminates the whole operation and reports whether no process of
 	// it remains. It is safe to call repeatedly and concurrently.
 	Kill() bool
+	// Retire performs the final Kill, waiting for any in-flight one, and
+	// turns every later Kill into a no-op, so a late caller cannot act on the
+	// operation's tag group after it is released for reuse.
+	Retire() bool
 }
 
 type operatorStarter func(operatorLaunch) (operatorProcess, error)
@@ -817,10 +823,29 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 		// followed by EOF, so a truncated or oversized upload never replaces
 		// the target. One extra byte is forwarded to prove oversize.
 		body := http.MaxBytesReader(w, r.Body, request.Size+1)
+		stdin := process.Stdin()
+		copied := make(chan struct{})
 		go func() {
-			stdin := process.Stdin()
+			defer close(copied)
+			if operatorUploadCopyStarted != nil {
+				operatorUploadCopyStarted()
+			}
 			_, _ = io.Copy(stdin, body)
 			_ = stdin.Close()
+		}()
+		// The handler must not return while the copy still reads r.Body or
+		// uses w through MaxBytesReader: a helper that fails before reading
+		// its stdin would otherwise leave it blocked on the client.
+		defer func() {
+			select {
+			case <-copied:
+				return
+			default:
+			}
+			_ = controller.SetReadDeadline(time.Now())
+			_ = stdin.Close()
+			process.Kill()
+			<-copied
 		}()
 		result, ok := readOperatorFileStatus(process.Stdout())
 		if !ok {
@@ -865,6 +890,10 @@ func operatorFileHelperBound(request harnessv2.OperatorFileRequest) int64 {
 	}
 	return request.MaxBytes
 }
+
+// operatorUploadCopyStarted is a test hook run when an upload body copy
+// starts.
+var operatorUploadCopyStarted func()
 
 // OperatorFileHelperSubcommand is the hidden orka-acp-runtime subcommand that
 // implements operator file copies as the session child identity.
@@ -935,11 +964,21 @@ type realOperatorProcess struct {
 	waitErr  error
 	uid      int
 	tag      int
-	cmd      *exec.Cmd
-	master   *os.File
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
+	// reapMu fences process-group signals against reaping the leader: the
+	// group ID is the leader's PID, which stays allocated (alive or zombie)
+	// until it is reaped, so a signal sent under reapMu before reaped is set
+	// can only reach this operation's group.
+	reapMu sync.Mutex
+	reaped bool
+	// killMu serializes kills; once retired, the tag group may be reused by
+	// a later operation, so later Kill calls must not scan for it.
+	killMu  sync.Mutex
+	retired bool
+	cmd     *exec.Cmd
+	master  *os.File
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	stderr  io.ReadCloser
 }
 
 func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
@@ -1031,6 +1070,12 @@ func (p *realOperatorProcess) Resize(rows, cols uint16) error {
 	return acp.ResizeOperatorPTY(p.master, rows, cols)
 }
 
+// Replaceable in tests.
+var (
+	signalOperatorGroup      = acp.SignalOperatorCommand
+	killOperatorTagProcesses = acp.KillOperatorTag
+)
+
 func (p *realOperatorProcess) Signal(name string) error {
 	if name == "KILL" {
 		// Kill the whole tagged operation, not just the process group.
@@ -1041,7 +1086,14 @@ func (p *realOperatorProcess) Signal(name string) error {
 	if !ok {
 		return fmt.Errorf("signal %q is not allowed", name)
 	}
-	return acp.SignalOperatorCommand(p.cmd, signal)
+	p.reapMu.Lock()
+	defer p.reapMu.Unlock()
+	if p.reaped {
+		// The leader's PID, and with it the group ID, may already belong to
+		// an unrelated process group.
+		return nil
+	}
+	return signalOperatorGroup(p.cmd, signal)
 }
 
 func (p *realOperatorProcess) Wait() (int, bool, error) {
@@ -1050,7 +1102,15 @@ func (p *realOperatorProcess) Wait() (int, bool, error) {
 }
 
 func (p *realOperatorProcess) wait() (int, bool, error) {
+	// Wait for the leader to exit without reaping it, then reap only while
+	// no group signal is in flight; see reapMu.
+	if p.cmd.Process != nil {
+		waitOperatorLeaderExit(p.cmd.Process.Pid)
+	}
+	p.reapMu.Lock()
+	p.reaped = true
 	err := p.cmd.Wait()
+	p.reapMu.Unlock()
 	state := p.cmd.ProcessState
 	if state == nil {
 		return -1, false, err
@@ -1066,12 +1126,32 @@ func (p *realOperatorProcess) wait() (int, bool, error) {
 }
 
 func (p *realOperatorProcess) Kill() bool {
+	p.killMu.Lock()
+	defer p.killMu.Unlock()
+	if p.retired {
+		return true
+	}
+	return p.killLocked()
+}
+
+func (p *realOperatorProcess) Retire() bool {
+	p.killMu.Lock()
+	defer p.killMu.Unlock()
+	if p.retired {
+		return true
+	}
+	proven := p.killLocked()
+	p.retired = true
+	return proven
+}
+
+func (p *realOperatorProcess) killLocked() bool {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return true
 	}
 	// The tag reaches every descendant, wherever it moved; killing the
 	// leader directly also unblocks Wait if it left its own group.
-	proven := acp.KillOperatorTag(p.uid, p.tag)
+	proven := killOperatorTagProcesses(p.uid, p.tag)
 	_ = p.cmd.Process.Kill()
 	return proven
 }

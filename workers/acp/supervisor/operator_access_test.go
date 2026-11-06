@@ -1,11 +1,13 @@
 package supervisor
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,6 +37,7 @@ type fakeOperatorProcess struct {
 	stdoutW    *io.PipeWriter
 	exit       chan int
 	killed     atomic.Bool
+	retired    atomic.Bool
 	mu         sync.Mutex
 	signals    []string
 	once       sync.Once
@@ -59,9 +62,17 @@ func (p *fakeOperatorProcess) Stdout() io.ReadCloser       { return p.stdoutR }
 func (p *fakeOperatorProcess) Stderr() io.ReadCloser       { return nil }
 func (p *fakeOperatorProcess) Resize(uint16, uint16) error { return nil }
 func (p *fakeOperatorProcess) Kill() bool {
+	if p.retired.Load() {
+		return true
+	}
 	p.killed.Store(true)
 	p.finish(137)
 	return !p.unkillable
+}
+func (p *fakeOperatorProcess) Retire() bool {
+	proven := p.Kill()
+	p.retired.Store(true)
+	return proven
 }
 func (p *fakeOperatorProcess) Wait() (int, bool, error) {
 	code := <-p.exit
@@ -776,5 +787,78 @@ func TestOperatorExecDisconnectKillsAndReleasesTheOperation(t *testing.T) {
 				process.killed.Load(), registrations, tags, len(supervisor.operatorState().slots))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// When the file helper fails before reading its stdin, the handler must not
+// return while the upload copy still reads r.Body (or uses the response through
+// MaxBytesReader) for a client that keeps the body open.
+func TestOperatorUploadCopyEndsBeforeTheHandlerReturns(t *testing.T) {
+	process := newFakeOperatorProcess()
+	stdinDrained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, process.stdinR)
+		close(stdinDrained)
+	}()
+	go func() {
+		_, _ = process.stdoutW.Write([]byte(`{"ok":false,"code":"not_found","error":"no such file or directory"}` + "\n"))
+	}()
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	supervisor.operatorState().runtimeExecutable = "/orka-acp-runtime"
+	if err := acp.RecordWorkspaceIdentity(&supervisor.sessions[sessionID].paths); err != nil {
+		t.Fatal(err)
+	}
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	request := harnessv2.OperatorFileRequest{
+		Protocol: harnessv2.ProtocolVersion, AuditID: "op-test", Path: "notes.txt", MaxBytes: 100, Size: 100, Write: true,
+		Metadata: harnessv2.MutationMetadata{Fence: fence, OperationID: "operator-copy-in-1", ExpiresAt: time.Now().UTC().Add(time.Minute)},
+	}
+	header, capability, err := harnessv2.SealOperatorRequest(operatorTestSecret, &request, &request.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := harnessv2.OperatorFilesPath(sessionID)
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close() //nolint:errcheck
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	// Declare 100 bytes but send only 3, holding the body open.
+	_, err = io.WriteString(conn, "PUT "+path+" HTTP/1.1\r\nHost: supervisor\r\nContent-Length: 100\r\n"+
+		"Authorization: Bearer "+operatorTestToken+"\r\n"+OperationCapabilityHeader+": "+capability+"\r\n"+
+		harnessv2.OperatorRequestHeader+": "+header+"\r\n\r\nabc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.StatusCode)
+	}
+	select {
+	case <-stdinDrained:
+	case <-time.After(time.Second):
+		t.Fatal("the handler returned while the upload copy was still reading the request body")
+	}
+}
+
+// Operator commands need a supplementary tag group that only a root supervisor
+// can assign, so a non-root (same-identity development) supervisor must not
+// advertise operator access.
+func TestOperatorAccessIsAdvertisedOnlyByRootBuiltInSupervisors(t *testing.T) {
+	if !operatorAccessSupported(providerKindCodex, 0) {
+		t.Fatal("a root built-in supervisor must advertise operator access")
+	}
+	if operatorAccessSupported(providerKindCodex, 1000) {
+		t.Fatal("a non-root supervisor cannot launch tagged operator commands")
+	}
+	if operatorAccessSupported(providerKindFoundry, 0) {
+		t.Fatal("external ACP providers must not advertise operator access")
 	}
 }
