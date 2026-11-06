@@ -24,7 +24,9 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 	}}
 
 	chatTask := root.DeepCopy()
-	chatTask.Labels = map[string]string{labels.LabelChatSession: "chat-a", labels.LabelChatSessionEpoch: "1700000000000000000"}
+	chatTask.Labels = map[string]string{
+		labels.LabelChatSession: "chat-a", labels.LabelChatSessionEpoch: "1700000000000000000", labels.LabelChatSessionNamespace: "chat-ns",
+	}
 
 	tests := []struct {
 		name    string
@@ -81,6 +83,12 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 		}},
 		{name: "change chat Session epoch", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
 			task.Labels[labels.LabelChatSessionEpoch] = "1800000000000000000"
+		}},
+		{name: "change chat Session namespace", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			task.Labels[labels.LabelChatSessionNamespace] = "other-ns"
+		}},
+		{name: "remove chat Session namespace", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
+			delete(task.Labels, labels.LabelChatSessionNamespace)
 		}},
 		{name: "remove chat Session epoch", oldTask: chatTask, change: func(task *corev1alpha1.Task) {
 			delete(task.Labels, labels.LabelChatSessionEpoch)

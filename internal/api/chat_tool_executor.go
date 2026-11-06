@@ -407,6 +407,9 @@ func (e *ToolExecutor) taskLabels() map[string]string {
 	taskLabels := map[string]string{
 		labels.LabelCreatedBy:   "orchestrator",
 		labels.LabelChatSession: e.sessionID,
+		// The chat may create Tasks in other namespaces; its Session stays
+		// in the chat's own.
+		labels.LabelChatSessionNamespace: e.namespace,
 	}
 	if e.chatSessionEpoch != "" {
 		taskLabels[labels.LabelChatSessionEpoch] = e.chatSessionEpoch

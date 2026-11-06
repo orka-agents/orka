@@ -759,6 +759,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		{Namespace: testNS, Name: "chat-reused", SessionType: store.SessionTypeChat, CreatedAt: time.Now().Add(-time.Hour)},
 		{Namespace: testNS, Name: "deleting", SessionType: "task"},
 		{Namespace: testNS, Name: "chat-deleting", SessionType: store.SessionTypeChat},
+		{Namespace: "chat-ns", Name: "chat-elsewhere", SessionType: store.SessionTypeChat},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
 			t.Fatal(err)
@@ -775,13 +776,15 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	epoch := func(name string) string {
-		createdAt, err := sessions.GetSessionCreatedAt(context.Background(), testNS, name)
+	epochIn := func(namespace, name string) string {
+		createdAt, err := sessions.GetSessionCreatedAt(context.Background(), namespace, name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return labels.SessionEpoch(createdAt)
 	}
+	epoch := func(name string) string { return epochIn(testNS, name) }
+	elsewhereEpoch := epochIn("chat-ns", "chat-elsewhere")
 	openEpoch, deletedEpoch, deletingEpoch := epoch("chat-open"), epoch("chat-reused"), epoch("chat-deleting")
 	// The chat is deleted and a new one created under its name: Tasks of
 	// the first must not act for the requester through the second.
@@ -852,6 +855,13 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		task("in-recreated-chat", inChat("chat-reused", deletedEpoch)),
 		task("in-unpinned-chat", inChat("chat-open", "")),
 		task("in-deleting-session", withSession("deleting")),
+		// A chat in another namespace created this Task; its Session is
+		// found in the chat's namespace the chat API recorded.
+		task("in-chat-elsewhere", func(t *corev1alpha1.Task) {
+			inChat("chat-elsewhere", elsewhereEpoch)(t)
+			t.Labels[labels.LabelChatSessionNamespace] = "chat-ns"
+		}),
+		task("in-chat-elsewhere-unrecorded", inChat("chat-elsewhere", elsewhereEpoch)),
 		task("in-deleting-chat", inChat("chat-deleting", deletingEpoch)),
 		task("parent-in-deleting-session", withSession("deleting")),
 		task("child-of-parent-in-deleting-session", childOf("parent-in-deleting-session")),
@@ -901,6 +911,8 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		"in-recreated-chat":                   "Session was deleted and replaced",
 		"in-unpinned-chat":                    "no pinned incarnation",
 		"in-deleting-session":                 "Session is being deleted",
+		"in-chat-elsewhere":                   "",
+		"in-chat-elsewhere-unrecorded":        "Session was deleted",
 		"in-deleting-chat":                    "Session is being deleted",
 		"child-of-parent-in-deleting-session": "Session of a Task it was delegated from is being deleted",
 		"child-of-parent-in-recreated-chat":   "Session of a Task it was delegated from was deleted and replaced",
