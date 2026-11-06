@@ -327,7 +327,7 @@ func archivedSessionRecoveryDispatcher(fixture *externalACPDispatchFixture, cont
 	close(epochs.ready)
 	return &ACPDispatcher{
 		Client: fixture.client, APIReader: fixture.client, Store: control, ResultStore: fixture.persistence,
-		EventStore: fixture.persistence, PlanStore: fixture.persistence, Snapshots: fixture.persistence, Epochs: epochs,
+		EventStore: fixture.persistence, Snapshots: fixture.persistence, Epochs: epochs,
 		Interval: 10 * time.Millisecond, MaxConcurrent: 1,
 	}
 }
