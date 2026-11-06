@@ -175,7 +175,7 @@ func (i *EntraIssuer) OnBehalfOfToken(ctx context.Context, identityID, resource,
 		return "", errors.New("an on-behalf-of exchange requires the requester's token")
 	}
 	user := sha256.Sum256([]byte(userAssertion))
-	return i.cached(appTokenCacheKey("obo", identityID, resource, policy)+"\x00"+hex.EncodeToString(user[:]), func() (string, time.Duration, error) {
+	return i.cached(ctx, appTokenCacheKey("obo", identityID, resource, policy)+"\x00"+hex.EncodeToString(user[:]), func(ctx context.Context) (string, time.Duration, error) {
 		exchange, err := i.ExchangeToken(ctx, identityID)
 		if err != nil {
 			return "", 0, err
