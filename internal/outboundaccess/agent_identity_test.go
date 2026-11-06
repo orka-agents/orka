@@ -139,6 +139,14 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent.Status.IdentityClaim.GrantedAt = &regranted
 			return agent
 		}(),
+		// Times have one-second precision, so a Task from the grant's own
+		// second may predate the grant.
+		"Task created in the grant's second": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			sameSecond := metav1.NewTime(testClaimGrantedAt.Add(time.Minute))
+			agent.Status.IdentityClaim.GrantedAt = &sameSecond
+			return agent
+		}(),
 		"claim without a grant time": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Status.IdentityClaim.GrantedAt = nil
