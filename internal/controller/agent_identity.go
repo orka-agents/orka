@@ -237,7 +237,7 @@ const agentIdentityReverifyInterval = time.Hour
 
 const (
 	reasonIdentityVerified           = "Verified"
-	reasonIdentityVerificationFailed = "VerificationFailed"
+	reasonIdentityVerificationFailed = outboundaccess.AgentReasonIdentityVerificationFailed
 	reasonIdentityIssuerUnavailable  = "IssuerUnavailable"
 )
 

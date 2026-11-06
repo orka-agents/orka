@@ -27,6 +27,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -141,6 +142,28 @@ type AgentIdentityTokenRequest struct {
 	Policy   PolicyIdentity
 	// UserAssertion is the requester's token, for Delegated mode only.
 	UserAssertion string
+}
+
+// AgentConditionIdentityVerified is the Agent condition reporting whether its
+// issuer proved the identity, and AgentReasonIdentityVerificationFailed the
+// reason for a definitive refusal, as opposed to an issuer that could not
+// answer or an identity not verified yet.
+const (
+	AgentConditionIdentityVerified        = "IdentityVerified"
+	AgentReasonIdentityVerificationFailed = "VerificationFailed"
+)
+
+// issuerRefusedIdentity fails closed once the issuer has definitively refused
+// the Agent's identity, for example because it was disabled or deleted, so a
+// policy token still cached from before is not served for new calls. An
+// issuer that could not answer, or an identity not verified yet, does not
+// refuse here; the issuer's own answer decides those calls.
+func issuerRefusedIdentity(agent *corev1alpha1.Agent) error {
+	condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionIdentityVerified)
+	if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == AgentReasonIdentityVerificationFailed {
+		return errors.New("the issuer refused the Task's bound Agent identity when it was last verified")
+	}
+	return nil
 }
 
 // AgentIdentityTokenSource issues Agent identity credentials. It exists only
@@ -756,6 +779,9 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	// predate it and is refused too.
 	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
 		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
+	}
+	if err := issuerRefusedIdentity(live); err != nil {
+		return Resolution{}, err
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {

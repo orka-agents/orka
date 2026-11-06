@@ -37,6 +37,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
 const (
@@ -80,7 +81,7 @@ type AgentIdentityVerifier interface {
 const (
 	// conditionTypeIdentityVerified reports whether an Agent's identity has
 	// been verified with its issuer.
-	conditionTypeIdentityVerified = "IdentityVerified"
+	conditionTypeIdentityVerified = outboundaccess.AgentConditionIdentityVerified
 	reasonIdentityDeclared        = "Declared"
 )
 
