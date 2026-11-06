@@ -84,7 +84,7 @@ spec:
 
 ### As the person who asked
 
-Each person links their own Azure account once. Register an Entra app with
+Each person links their own Azure account. Register an Entra app with
 the delegated permission **Azure Service Management → user_impersonation**,
 then declare it as a ConnectorProvider whose only tool is the forwarding one:
 
@@ -127,6 +127,12 @@ spec:
 ```bash
 orka connect azure -n team-a
 ```
+
+Request only the `user_impersonation` scope. Entra leaves `offline_access` out
+of the scopes it reports as granted, so asking for it makes linking fail
+([#1030](https://github.com/orka-agents/orka/issues/1030)). Without it there
+is no refresh token: a link lasts until its access token expires, about an
+hour, and then the person runs `orka connect azure` again.
 
 The Agent can also act for the requester through its own identity
 (`agentIdentity.mode: Delegated`); add the same `azurearm` tool to the sign-in

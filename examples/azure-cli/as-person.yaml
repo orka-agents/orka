@@ -1,6 +1,7 @@
 # The Agent uses az as the person who asked: each person links their own
-# Azure account once with `orka connect azure`, and Azure RBAC on that person
-# decides what az can see. Use this file or as-agent.yaml, not both: both
+# Azure account with `orka connect azure`, and Azure RBAC on that person
+# decides what az can see. Without offline_access (#1030) a link lasts about
+# an hour, until its access token expires. Use this file or as-agent.yaml, not both: both
 # declare the Tool azurearm.
 apiVersion: core.orka.ai/v1alpha1
 kind: ConnectorProvider
