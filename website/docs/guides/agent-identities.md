@@ -526,7 +526,7 @@ For each call, the controller:
 | Audit reason `policy` | The policy changed since the Tool checked it, its target is not HTTPS, or it sets `authSecretRef` |
 | Audit reason `binding` | The Task's identity no longer holds: the Agent was deleted or its `spec.identity` removed or changed, the claim is being released, or the Task was created before the identity was granted (create it again) |
 | Audit reason `delegation` | A Delegated precondition failed: the Task has no verified requester, the person's link expired, `maxDelegationAge` passed, or the Task, a Task above it, or its Session was cancelled or deleted |
-| Audit reason `issuer` | The token request failed: Entra refused it, or, for a Delegated call, the person's linked token is not addressed to the blueprint (the provider must request `api://<blueprint appId>/access_agent`). `IdentityVerified` checks only the identity's own app-only token, so it can stay `True` while delegated exchanges fail; for an `AADSTS` code in that case, check the controller log |
+| Audit reason `issuer` | The token request failed: Entra refused it, or, for a Delegated call, the person's linked token is not addressed to the blueprint (the provider must request `api://<blueprint appId>/access_agent`). `IdentityVerified` checks only the identity's own app-only token, so it can stay `True` while delegated exchanges fail |
 | The agent sees only `MCP broker call failed` | The audit record gives the reason category; it records no error text, so arguments and tokens cannot leak into it. Showing a safe reason to the agent is tracked in [#742](https://github.com/orka-agents/orka/issues/742) |
 
 ## Other issuers
