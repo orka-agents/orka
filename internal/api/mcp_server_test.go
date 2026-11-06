@@ -583,6 +583,7 @@ func TestMCPApprovalDecisionsFollowRESTRules(t *testing.T) {
 	for _, args := range []map[string]any{
 		{"task": "running", "approvalId": "first", "decision": "maybe"},
 		{"task": "running", "approvalId": "", "decision": "approve"},
+		{"task": "running", "approvalId": "..", "decision": "approve"},
 		{"task": "running", "approvalId": "first", "decision": "approve", "reason": strings.Repeat("x", mcpMaxReasonLength+1)},
 		{"task": "running", "approvalId": "first", "decision": "approve", "unexpected": true},
 	} {

@@ -1080,7 +1080,10 @@ func validateMCPApprovalID(id string) error {
 	if strings.TrimSpace(id) == "" {
 		return mcpArgumentError("approvalId is required")
 	}
-	if len(id) > mcpMaxApprovalIDLength || !utf8.ValidString(id) || strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+	// Dot segments would be normalized out of the replayed path and address a
+	// different route, so they are refused rather than escaped.
+	if id == "." || id == ".." || len(id) > mcpMaxApprovalIDLength || !utf8.ValidString(id) ||
+		strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return mcpArgumentError("approvalId is invalid")
 	}
 	return nil

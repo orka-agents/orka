@@ -358,7 +358,7 @@ func (m *mcpServer) updateTask(call *mcpCall) (any, error) {
 	type decision struct{ id, decision, reason string }
 	var decisions []decision
 	for id, raw := range params.InputResponses {
-		if !pending[id] {
+		if !pending[id] || validateMCPApprovalID(id) != nil {
 			return nil, newMCPError(mcpCodeInvalidParams, "input response does not match a pending approval request")
 		}
 		var response struct {
