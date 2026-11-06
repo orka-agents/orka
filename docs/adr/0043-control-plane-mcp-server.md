@@ -1,4 +1,4 @@
-# ADR 0040: Serve a control-plane MCP server by replaying REST routes
+# ADR 0043: Serve a control-plane MCP server by replaying REST routes
 
 Date: 2026-11-06
 
