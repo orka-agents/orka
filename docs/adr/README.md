@@ -66,6 +66,7 @@ not do with a running agent's memory. See
 | [0031](0031-native-substrate-checkpoints.md) | Native upstream Tags, cold restore, and checkpoint ownership | Accepted, partly superseded by 0039 |
 | [0030](0030-substrate-full-memory-restore-gate.md) | The security gate before full-memory restore is ever allowed | Accepted |
 | [0039](0039-agent-substrate-v1.md) | Move to Agent Substrate v1.0.0: Orka-issued Actor credentials, router-only ingress, allowlisted egress | Accepted |
+| [0040](0040-substrate-upgrade-and-eviction.md) | Survive Substrate 1.x upgrades and worker eviction: digest-pinned image follow, eviction drain and suspension | Accepted |
 
 ### The Substrate control plane
 

@@ -1147,6 +1147,9 @@ func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionSchedulingReady, metav1.ConditionUnknown, runtimePoolSchedulingReasonPodNotReady, status.Message)
 		r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionRolloutReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonRolloutFailed, status.Message)
 	case probe.Status.Drain.Requested || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleDraining || probe.Status.Lifecycle == harnessv2.SupervisorLifecycleTerminating:
+		if result, handled, err := r.observeExternalSupervisorEviction(ctx, pool, probe.Status); err != nil || handled {
+			return result, err
+		}
 		status.Lifecycle = corev1alpha1.RuntimePoolLifecycleDraining
 		status.AdmissionState = corev1alpha1.RuntimePoolAdmissionDraining
 		status.Message = "runtime supervisor is draining"
