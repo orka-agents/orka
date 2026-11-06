@@ -36,6 +36,7 @@ const sidebars = {
           items: [
             'guides/container-tasks',
             'guides/scheduled-tasks',
+            'guides/scout',
             'guides/codex-session-migration',
           ],
         },

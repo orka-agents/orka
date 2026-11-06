@@ -1,0 +1,29 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: orka-scout
+spec:
+  # Placeholder model. Pick the cheapest model that meets the scout's quality
+  # bar; built-in runtime Agents must name one.
+  model:
+    name: claude-sonnet-4.6
+  # The system prompt is the people-owned watchlist ConfigMap, so the sources
+  # the scout reads change only through review of that ConfigMap.
+  systemPrompt:
+    configMapRef:
+      name: orka-scout-watchlist
+      key: watchlist.md
+  runtime:
+    type: claude
+    contractVersion: orka.harness.v2
+    defaultMaxTurns: 80
+    # No shell. Web reads go only through the controller-brokered web_search
+    # and web_fetch tools; the provider-native WebFetch and WebSearch tools are
+    # not granted, and the runtime Pod's NetworkPolicy blocks direct egress.
+    defaultAllowBash: false
+    defaultAllowedTools:
+      - Read
+      - Glob
+      - Grep
+      - web_search
+      - web_fetch
