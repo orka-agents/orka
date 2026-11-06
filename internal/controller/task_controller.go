@@ -3866,8 +3866,9 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	var succeeded, failed []*corev1alpha1.Task
 	for i := range childList.Items {
 		child := &childList.Items[i]
-		if taskwait.Active(child.Status.Wait) {
-			// Deleting a parked run would cancel its pending continuation.
+		if r.taskContinuationChainUnsettled(ctx, child) {
+			// Deleting a parked run, or a predecessor whose continuation is
+			// still running, would cancel that unfinished work.
 			continue
 		}
 		switch child.Status.Phase {
@@ -4824,6 +4825,27 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
 		return nil
 	})
+}
+
+// taskContinuationChainUnsettled reports whether a Task still owns unfinished
+// work through a parked wait or its continuation chain. An unresolvable chain
+// is treated as unsettled so cleanup never cancels work it cannot see.
+func (r *TaskReconciler) taskContinuationChainUnsettled(ctx context.Context, task *corev1alpha1.Task) bool {
+	if task == nil || task.Status.Wait == nil {
+		return false
+	}
+	if taskwait.Active(task.Status.Wait) {
+		return true
+	}
+	if task.Status.Wait.State != corev1alpha1.TaskWaitStateResumed {
+		return false
+	}
+	tail, err := taskwait.ResolveTail(ctx, uncachedReader(r.APIReader, r.Client), task)
+	if apierrors.IsNotFound(err) {
+		// The continuation is already gone; there is nothing left to protect.
+		return false
+	}
+	return err != nil || !taskwait.Settled(tail)
 }
 
 func withoutParkedApprovals(pending []approvals.Approval) []approvals.Approval {

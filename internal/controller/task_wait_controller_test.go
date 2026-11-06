@@ -513,3 +513,70 @@ func TestTaskWaitRequestsMapChildrenAndContinuationsToTheParkedTask(t *testing.T
 		t.Fatalf("unexpected requests %+v", got)
 	}
 }
+
+func TestTaskWaitCancellationFindsAContinuationTheCacheHasNotSeen(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Annotations[labels.AnnotationCancelWait] = "stop"
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	continuation.UID = "uid-cont"
+
+	deleted := ""
+	cached := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			deleted = obj.GetName()
+			return nil
+		}}).Build()
+	authoritative := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task.DeepCopy(), continuation).Build()
+	r := &TaskWaitReconciler{Client: cached, APIReader: authoritative, Now: func() time.Time { return taskWaitTestNow }}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: taskWaitTestNamespace, Name: "parked"}}); err != nil {
+		t.Fatal(err)
+	}
+	if deleted != continuation.Name {
+		t.Fatalf("cancellation must delete the continuation seen by the authoritative reader, deleted %q", deleted)
+	}
+}
+
+func TestHistoryLimitsKeepPredecessorsOfRunningContinuations(t *testing.T) {
+	scheduled := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: taskWaitTestNamespace, UID: "uid-nightly"},
+		Spec: corev1alpha1.TaskSpec{Schedule: "@daily", SuccessfulRunsHistoryLimit: new(int32(0))}}
+	run := func(name string, age time.Duration) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: taskWaitTestNamespace, UID: types.UID("uid-" + name),
+				CreationTimestamp: metav1.NewTime(taskWaitTestNow.Add(-age)),
+				Labels:            map[string]string{labels.LabelParentTask: "nightly"},
+			},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+		}
+	}
+	parked := run("parked-run", 3*time.Hour)
+	parked.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "parked-run-next", ContinuationTaskUID: "uid-parked-run-next",
+	}
+	next := run("parked-run-next", time.Hour)
+	next.Annotations = map[string]string{labels.AnnotationContinuationOfUID: "uid-parked-run"}
+	next.Status.Phase = corev1alpha1.TaskPhaseRunning
+	done := run("done-run", 2*time.Hour)
+
+	r := newUnitReconciler(newTestScheme(), scheduled, parked, next, done)
+	if err := r.enforceHistoryLimits(context.Background(), scheduled); err != nil {
+		t.Fatal(err)
+	}
+	remaining := map[string]bool{}
+	list := &corev1alpha1.TaskList{}
+	if err := r.List(context.Background(), list); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range list.Items {
+		remaining[item.Name] = true
+	}
+	if !remaining["parked-run"] || !remaining["parked-run-next"] {
+		t.Fatalf("a predecessor with a running continuation must not be pruned: %v", remaining)
+	}
+	if remaining["done-run"] {
+		t.Fatalf("settled runs beyond the history limit are still pruned: %v", remaining)
+	}
+}

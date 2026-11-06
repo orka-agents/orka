@@ -420,8 +420,10 @@ func (r *TaskWaitReconciler) markResumed(ctx context.Context, task *corev1alpha1
 func (r *TaskWaitReconciler) cancel(ctx context.Context, task *corev1alpha1.Task, reason string) (ctrl.Result, error) {
 	wait := task.Status.Wait
 	if wait.State == corev1alpha1.TaskWaitStateResuming && strings.TrimSpace(wait.ContinuationTaskName) != "" {
+		// Read authoritatively: a continuation created moments ago may not be
+		// cached yet, and missing it would leave it running after cancellation.
 		existing := &corev1alpha1.Task{}
-		err := r.reader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: wait.ContinuationTaskName}, existing)
+		err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: wait.ContinuationTaskName}, existing)
 		switch {
 		case err == nil && existing.Annotations[labels.AnnotationContinuationOfUID] == string(task.UID):
 			uid := existing.UID
