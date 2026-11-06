@@ -122,8 +122,11 @@ type ACPDispatcher struct {
 	active          map[types.UID]struct{}
 	sem             chan struct{}
 	runtimeSessions map[string]ACPRuntimeSessionBinding
-	finalizedTurns  map[types.UID]string
-	staleRecoveryMu sync.Mutex
+	// parkedRuntimeReleases holds parked turns' RuntimeSessions whose
+	// release failed, by Session UID, until the next turn retries it.
+	parkedRuntimeReleases map[string]acpParkedRuntimeRelease
+	finalizedTurns        map[types.UID]string
+	staleRecoveryMu       sync.Mutex
 
 	approvalRecoveryMu sync.Mutex
 	approvalRecovery   map[acpMCPApprovalTaskKey]acpMCPApprovalRecoveryProgress
@@ -1155,6 +1158,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	if handled, deadlineErr := d.handlePreSubmissionContextDone(ctx, runtimeCtx, task, attemptID, fence); handled {
 		return deadlineErr
+	}
+	if sessionExecution != nil && !sessionExecution.Reused {
+		// A parked turn whose release failed still holds a resident slot.
+		// Retry it before this turn claims one, whether or not one is free.
+		d.retryParkedRuntimeRelease(
+			ctx, runtimeClient, sessionExecution.Binding.SessionUID, runtimeFence.RuntimeInstanceID, sessionExecution.Binding.Generation,
+		)
 	}
 	if reservationLease != nil && sessionExecution != nil {
 		residentSlots := int32(0)
