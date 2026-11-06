@@ -174,10 +174,40 @@ func (c unavailableSupervisorClient) RequestDrain(context.Context, string, strin
 	return c.err
 }
 
+// externalStartupMatchesBoundEvidence fails closed unless provider startup
+// evidence names exactly the instance, endpoint, router target and worker or
+// Pod that Core independently bound before credential delivery. Provider
+// status can change after binding; it must never redirect controller
+// credentials to another Actor that shares the bound instance identity.
+func externalStartupMatchesBoundEvidence(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) error {
+	if pool == nil || evidence == nil {
+		return nil
+	}
+	binding, err := externalRuntimeEvidence(pool)
+	if err != nil || binding == nil {
+		return err
+	}
+	matches := binding.Identity == evidence.Identity && binding.Endpoint == evidence.Endpoint &&
+		binding.RouterTarget == externalStartupRouterTarget(evidence)
+	if evidence.Process != nil {
+		matches = matches && binding.NativeProcess && binding.Pod == evidence.Process.Worker
+	} else {
+		matches = matches && !binding.NativeProcess && evidence.Pod != nil && binding.Pod == *evidence.Pod
+	}
+	if !matches {
+		return fmt.Errorf("startup evidence differs from the bound runtime instance: %w", workspaceprovider.ErrStaleIdentity)
+	}
+	return nil
+}
+
 // externalStartupSupervisorClient selects the supervisor transport for exact
 // provider startup evidence: routed evidence uses only the configured router;
-// direct evidence keeps the pool's existing transport.
+// direct evidence keeps the pool's existing transport. Evidence for an
+// already-bound instance must match its saved binding first.
 func (r *RuntimePoolReconciler) externalStartupSupervisorClient(pool *corev1alpha1.RuntimePool, evidence *workspacev1alpha1.StartupEvidence) RuntimePoolSupervisorClient {
+	if err := externalStartupMatchesBoundEvidence(pool, evidence); err != nil {
+		return unavailableSupervisorClient{err: err}
+	}
 	routed, err := externalStartupHTTPClient(r.SubstrateRouter, evidence, runtimePoolProbeTimeout)
 	if err != nil {
 		return unavailableSupervisorClient{err: err}

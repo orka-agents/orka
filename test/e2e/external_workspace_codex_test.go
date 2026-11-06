@@ -216,17 +216,28 @@ func buildExternalFakeWorkspaceProvider() (string, error) {
 	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
 		return "", fmt.Errorf("external fake provider checkout did not resolve the exact pinned revision")
 	}
-	// The module tag must name the exact commit built here.
-	if _, err := utils.Run(exec.Command("git", "-C", sourceDir, "fetch", "--quiet", "--depth=1",
-		"https://github.com/orka-agents/orka-workspace.git", "refs/tags/"+externalFakeWorkspaceProviderVersion)); err != nil {
-		return "", err
-	}
-	output, err = utils.Run(exec.Command("git", "-C", sourceDir, "rev-parse", "FETCH_HEAD^{commit}"))
+	// The pinned module version must name the exact commit built here. A
+	// pseudo-version has no tag; its encoded commit prefix must match the
+	// revision, which the exact-SHA fetch above already pins, and go.sum
+	// authenticates the module content. A release version's tag must resolve
+	// to that commit. Malformed versions fail closed.
+	pseudo, err := utils.PseudoVersionNamesRevision(
+		externalFakeWorkspaceProviderVersion, externalFakeWorkspaceProviderRevision)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
-		return "", fmt.Errorf("pinned Core workspace module tag does not resolve to the external fake provider revision")
+	if !pseudo {
+		if _, err := utils.Run(exec.Command("git", "-C", sourceDir, "fetch", "--quiet", "--depth=1",
+			"https://github.com/orka-agents/orka-workspace.git", "refs/tags/"+externalFakeWorkspaceProviderVersion)); err != nil {
+			return "", err
+		}
+		output, err = utils.Run(exec.Command("git", "-C", sourceDir, "rev-parse", "FETCH_HEAD^{commit}"))
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(output) != externalFakeWorkspaceProviderRevision {
+			return "", fmt.Errorf("pinned Core workspace module tag does not resolve to the external fake provider revision")
+		}
 	}
 	image := "ghcr.io/orka-agents/orka/e2e-external-fake-provider:" + externalFakeWorkspaceProviderRevision[:12]
 	if _, err := utils.Run(exec.Command("docker", "build", "-t", image,
