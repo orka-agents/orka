@@ -53,12 +53,14 @@ func (c Config) Validate() error {
 	if c.Entra == nil {
 		return nil
 	}
-	tenant, blueprint := strings.TrimSpace(c.Entra.TenantID), strings.TrimSpace(c.Entra.BlueprintClientID)
-	if tenant == "" || blueprint == "" {
+	tenant, blueprint := c.Entra.TenantID, c.Entra.BlueprintClientID
+	if strings.TrimSpace(tenant) == "" || strings.TrimSpace(blueprint) == "" {
 		return fmt.Errorf("the Entra agent identity issuer needs both a tenant ID and a blueprint client ID")
 	}
+	// The issuer sends these values as they are, so surrounding space would
+	// reach Entra; they must be bare GUIDs.
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
-		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs")
+		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
 	}
 	authority, err := url.Parse(c.Entra.authority())
 	if err != nil || authority.Scheme != "https" || authority.Host == "" || authority.User != nil ||

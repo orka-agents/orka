@@ -252,10 +252,12 @@ identity belongs to one Agent: the first Agent the controller grants it to
 records it in `status.identityClaim`, and any other Agent naming it is not Ready.
 An Agent that stops naming an identity keeps the claim until every Task bound to
 it has finished, and a deleted Agent's identity stays taken by its bound Tasks
-until they finish. A claim records when it was granted, is granted only while
-`--agent-use-authorization-enabled` is set, and binds only Tasks created after
-that second (a scheduled run also needs its scheduled Task created after it);
-create Tasks once the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
+until they finish. A claim records when it was granted, by the API server's
+clock, is granted only while `--agent-use-authorization-enabled` is set, and
+binds only Tasks created after that second. A Task Orka creates from a scheduled Task, RepositoryScan, or
+RepositoryMonitor also needs that object created after it, and GatewayBinding
+Tasks cannot use an identity-bound Agent. Create Tasks and these objects once
+the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
 `config/agent-use-policy` policies installed (the Helm value does both; the
 controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
@@ -269,6 +271,14 @@ policies, and never reach the runtime. In `Delegated` mode the Agent acts for th
 Task's requester with their own linked grant: only the provider's curated tools,
 only on built-in RuntimePools, only within `maxDelegationAge` of the requester's
 last action, and every write needs the requester's own approval.
+
+The controller's blueprint credential is a projected token on the node that
+runs it. AI workers can create Jobs in the release namespace, and a privileged
+Pod, or one with a `hostPath` volume, can read any token on its node, this one
+included, whichever ServiceAccount it runs as. Before you turn on agent
+identities, enforce at least the `baseline` Pod Security profile on the release
+namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
+admission control; the chart does not label a namespace it does not create.
 
 ## Secret management
 

@@ -5,6 +5,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -156,13 +158,34 @@ func TestCancelSessionCancelsOnlyItsRunningTurn(t *testing.T) {
 	}
 }
 
+func TestCancelSessionHidesGatewayOwnedSessions(t *testing.T) {
+	h, app := setupCancelTest(t, cancelTestTask("gateway-turn", corev1alpha1.TaskPhaseRunning, "gateway-chat"))
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "gateway-chat", SessionType: store.SessionTypeGateway,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := postCancel(t, app, "/sessions/gateway-chat/cancel", ""); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a gateway-owned Session: status = %d, body = %v, want 404", resp.StatusCode, body)
+	}
+	if _, ok := cancelAnnotation(t, h, "gateway-turn"); ok {
+		t.Fatal("a gateway-owned Session's Task must not be cancelled through the Session API")
+	}
+}
+
 func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	chatTurn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
 	chatTurn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	// create_ai_task sets both: the conversation label and a continuity Session.
+	withContinuity := cancelTestTask("chat-turn-with-continuity", corev1alpha1.TaskPhaseRunning, "continuity")
+	withContinuity.Labels = map[string]string{labels.LabelChatSession: "conversation"}
 	mislabeled := cancelTestTask("mislabeled", corev1alpha1.TaskPhaseRunning, "")
 	mislabeled.Labels = map[string]string{labels.LabelChatSession: "task-session"}
-	h, app := setupCancelTest(t, chatTurn, mislabeled)
-	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task"} {
+	h, app := setupCancelTest(t, chatTurn, withContinuity, mislabeled)
+	// Stopping a turn reads Session metadata, never the transcript.
+	sessions := &metadataOnlySessionStore{SessionStore: h.sessionStore, typeReader: h.sessionStore.(transcriptSessionTypeReader)}
+	h.sessionStore = sessions
+	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task", "continuity": "task"} {
 		if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: name, SessionType: sessionType}); err != nil {
 			t.Fatal(err)
 		}
@@ -171,8 +194,13 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
 	}
-	if got, _ := cancelAnnotation(t, h, "chat-turn"); got != "cancelled by alice" {
-		t.Fatalf("chat turn cancel request = %q", got)
+	for _, name := range []string{"chat-turn", "chat-turn-with-continuity"} {
+		if got, _ := cancelAnnotation(t, h, name); got != "cancelled by alice" {
+			t.Fatalf("%s cancel request = %q", name, got)
+		}
+	}
+	if sessions.getCalls != 0 {
+		t.Fatalf("GetSession calls = %d, want the metadata-only lookup", sessions.getCalls)
 	}
 	// The chat label names a Session only when that Session is a chat.
 	if resp, _ := postCancel(t, app, "/sessions/task-session/cancel", ""); resp.StatusCode != http.StatusConflict {
@@ -180,5 +208,169 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	}
 	if _, ok := cancelAnnotation(t, h, "mislabeled"); ok {
 		t.Fatal("a chat label must not tie a Task to a non-chat Session")
+	}
+}
+
+func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
+	h, app := setupCancelTest(t)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	chat := &ChatHandler{}
+	h.chatTurns = chat
+	if resp, _ := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("an idle chat Session: status = %d, want 409", resp.StatusCode)
+	}
+
+	// A chat request that has not started a Task yet still counts as a turn.
+	reservation, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		<-reservation.cancelContext.Done()
+		close(stopped)
+		chat.finishActiveChatReservation(reservation, nil)
+	}()
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK || body["chatTurnStopped"] != true {
+		t.Fatalf("status = %d, body = %v, want the chat turn stopped", resp.StatusCode, body)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("the chat request was not cancelled")
+	}
+	// The reservation is released, so the Session accepts the next message.
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+// staleCacheClient lists from a cache that has not seen the newest Tasks, and
+// runs onPatch before each patch.
+type staleCacheClient struct {
+	client.Client
+	onPatch func()
+}
+
+func (c staleCacheClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+		tasks.Items = nil
+	}
+	return nil
+}
+
+func (c staleCacheClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	if c.onPatch != nil {
+		c.onPatch()
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
+// A chat request that created a Task just before it was stopped: the Task is
+// found although the cache has not seen it, and no next message can start
+// until it is cancelled.
+func TestCancelSessionCancelsTheStoppedChatTurnsTaskBeforeTheNextMessage(t *testing.T) {
+	created := cancelTestTask("just-created", corev1alpha1.TaskPhasePending, "")
+	created.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	h, app := setupCancelTest(t, created)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	chat := &ChatHandler{}
+	h.chatTurns = chat
+	live := h.client
+	h.apiReader = live
+	var nextMessageErr error
+	h.client = staleCacheClient{Client: live, onPatch: func() {
+		next, err := chat.reserveActiveChat("default", "conversation")
+		if err == nil {
+			chat.finishActiveChatReservation(next, nil)
+		}
+		nextMessageErr = err
+	}}
+
+	reservation, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-reservation.cancelContext.Done()
+		chat.finishActiveChatReservation(reservation, nil)
+	}()
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK || body["chatTurnStopped"] != true {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if got, _ := cancelAnnotation(t, h, "just-created"); got != "cancelled by alice" {
+		t.Fatalf("cancel request = %q, want the Task the cache missed cancelled", got)
+	}
+	if !errors.Is(nextMessageErr, store.ErrConflict) {
+		t.Fatalf("next message while cancelling = %v, want it refused", nextMessageErr)
+	}
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message after the stop: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+func TestStopActiveChatFencesAnIdleSession(t *testing.T) {
+	chat := &ChatHandler{}
+	running, release, err := chat.stopActiveChat(context.Background(), "default", "conversation")
+	if err != nil || running {
+		t.Fatalf("stopActiveChat() = %v, %v; want an idle Session", running, err)
+	}
+	if _, err := chat.reserveActiveChat("default", "conversation"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("next message before release = %v, want it refused", err)
+	}
+	release()
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message after release: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+// phantomListReader lists Tasks that are gone or replaced by the time they
+// are read.
+type phantomListReader struct {
+	client.Reader
+	phantoms []corev1alpha1.Task
+}
+
+func (r phantomListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	if err := r.Reader.List(ctx, list, opts...); err != nil {
+		return err
+	}
+	if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+		tasks.Items = append(append([]corev1alpha1.Task{}, r.phantoms...), tasks.Items...)
+	}
+	return nil
+}
+
+func TestCancelSessionSkipsTasksDeletedOrReplacedSinceTheList(t *testing.T) {
+	h, app := setupCancelTest(t, cancelTestTask("still-running", corev1alpha1.TaskPhaseRunning, "chat"))
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "chat", SessionType: "task"}); err != nil {
+		t.Fatal(err)
+	}
+	replaced := cancelTestTask("still-running", corev1alpha1.TaskPhaseRunning, "chat")
+	replaced.UID = "an-older-uid"
+	h.apiReader = phantomListReader{Reader: h.client, phantoms: []corev1alpha1.Task{
+		*cancelTestTask("deleted", corev1alpha1.TaskPhaseRunning, "chat"), *replaced,
+	}}
+	resp, body := postCancel(t, app, "/sessions/chat/cancel", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if tasks, _ := body["tasks"].([]any); len(tasks) != 1 {
+		t.Fatalf("cancelled = %v, want only the Task that still exists", body["tasks"])
+	}
+	if got, _ := cancelAnnotation(t, h, "still-running"); got != "cancelled by alice" {
+		t.Fatalf("cancel request = %q, want the remaining Task cancelled", got)
 	}
 }

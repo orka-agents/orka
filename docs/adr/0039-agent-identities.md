@@ -117,15 +117,29 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   granted (`status.identityClaim.grantedAt`); claims are granted only while
   the check is enforced and are released when the controller runs without
   it; and a Task binds an identity only if it was created after the claim
-  was granted. Both times are recorded to the second, so a Task created in
-  the grant's own second, which may predate the grant, is refused too. A
-  claim that stops releasing, because the Agent names the identity again or
-  the check is back on, counts as granted at that moment. An older queued
+  was granted. The grant time comes from the API server's clock, like
+  creation times, never the controller's: a granted claim first carries no
+  grant time and binds nothing, and the controller then records the latest
+  write time the API server stamped on the Agent's `managedFields`, which is
+  no earlier than the write that granted it. Both times are recorded to the
+  second, so a Task created in the grant's own second, which may predate the
+  grant, is refused too. A claim that stops releasing, because the Agent
+  names the identity again or the check is back on, is granted again the
+  same way. An older queued
   Task fails closed and must be created again, as does a Task created
   together with a new identity-bound Agent before or as its claim was
   granted, so such Tasks are created once the Agent is Ready. A scheduled
   Task never binds itself, so its runs bind only if the scheduled Task was
-  also created after the grant; an older one must be re-created.
+  also created after the grant; an older one must be re-created. The same
+  holds for every durable object Orka creates Tasks from with its own broad
+  `use` grant: a Task controlled by a RepositoryScan or RepositoryMonitor
+  binds only if that object, matched by owner UID, was also created after
+  the grant, and fails closed with "re-create" otherwise. GatewayBinding
+  Tasks record their binding only by name, so they cannot prove this and are
+  refused for identity-bound Agents. Before every runtime admission the
+  dispatcher checks again that the Agent still holds a non-releasing claim
+  the Task satisfies, and otherwise fails the Task with
+  `IdentityUnavailable`.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
@@ -169,8 +183,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   including Tasks whose Agent has no identity. A sibling is another child of
   the same parent, and an identity-bound child's parent runs the same Agent
   (stage 1), so those messages reach only Agents that Agent's
-  `coordination.allowedAgents` lists. That list, which its owner also sets,
-  bounds them, not the ceiling.
+  `coordination.allowedAgents` lists, plus Agents the parent Task created
+  itself with `create_agent`, which coordination admits without listing.
+  The list, which its owner also sets, bounds the rest; nothing but the
+  parent's own choices bounds the Agents it creates, and none of this is
+  the ceiling.
 - Emit `gen_ai.agent.id` as the Agent UID, not its reusable name, on Task and
   Tool-call spans, and write an identity use record for every identity-backed
   call (see below). Issuer logs and Orka records then share a join key.

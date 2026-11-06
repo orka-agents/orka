@@ -90,6 +90,18 @@ func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *cor
 		if !ok {
 			return nil
 		}
+		if current.Status.Execution == nil && strings.TrimSpace(current.Labels[acpExecutionWorkspaceLinkLabel]) != "" {
+			// Cancelled while its class workspace was being admitted or
+			// attached: settle any attempt persisted before its status, and
+			// record the terminal execution a queued timeout records, so
+			// cleanup recognizes it and terminal settlement revokes the
+			// linked attachment.
+			attempt, err := r.settleUnprojectedACPAttempt(ctx, current, acpCancelledReason, requested, "cancelled-before-status")
+			if err != nil {
+				return err
+			}
+			setCancelledBeforeStatusExecution(&current.Status, attempt, acpCancelledReason, requested, metav1.Now())
+		}
 		if err := cancelTaskStatus(ctx, r.Client, r.ResultStore, r.DurableControlStore, r.ControllerEpochManager, current, requested); err != nil {
 			return err
 		}

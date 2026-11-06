@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,9 +45,23 @@ type sessionCancellation struct {
 	Namespace string             `json:"namespace"`
 	Session   string             `json:"session"`
 	Tasks     []taskCancellation `json:"tasks"`
+	// ChatTurnStopped is true when an in-flight chat request was stopped.
+	ChatTurnStopped bool `json:"chatTurnStopped,omitempty"`
+}
+
+// chatTurnStopper stops a chat Session's in-flight request without deleting
+// the Session, and reports whether one was running. The Session accepts no
+// next message until release is called.
+type chatTurnStopper interface {
+	stopActiveChat(ctx context.Context, namespace, sessionID string) (running bool, release func(), err error)
 }
 
 var errTaskNotCancellable = errors.New("task cannot be cancelled")
+
+// errCancelTaskGone is the 404 for a Task deleted or replaced while it was
+// being cancelled. It is distinct from an authorization refusal answered as
+// 404, which a Session cancel must not skip.
+var errCancelTaskGone = fiber.NewError(fiber.StatusNotFound, "task not found")
 
 // CancelTask asks the controller to stop a Pending or Running Task. Unlike
 // delete, it keeps everything the Task produced. The controller ends the
@@ -80,8 +95,9 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 	return c.JSON(result)
 }
 
-// CancelSession stops a Session's current turn by cancelling its Pending and
-// Running Tasks. The Session stays usable for the next message.
+// CancelSession stops a Session's current turn: an in-flight chat request,
+// then its Pending and Running Tasks. The Session stays usable for the next
+// message.
 func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
@@ -99,44 +115,57 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	}
 	name := c.Params("id")
 	ctx := c.Context()
-	if _, err := h.sessionStore.GetSession(ctx, namespace, name); err != nil {
+	// Session metadata only: the transcript is not needed to stop a turn.
+	sessionType, err := transcriptSessionType(ctx, h.sessionStore, namespace, name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrGatewayOwnedSession) {
 			return fiber.NewError(fiber.StatusNotFound, "session not found")
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
-	tasks := &corev1alpha1.TaskList{}
-	if err := h.client.List(ctx, tasks, client.InNamespace(namespace)); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
+	// Gateway-owned Sessions are outside the general Session API: answer as
+	// for a missing one, before any conflict check or Task is touched.
+	if sessionType == store.SessionTypeGateway {
+		return fiber.NewError(fiber.StatusNotFound, "session not found")
 	}
 	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
+	if sessionType == store.SessionTypeChat && h.chatTurns != nil {
+		// Stop the chat request first so it starts no Task after the list
+		// below. It ends as a disconnected client's request does, and the
+		// Session takes no next message until its Tasks are cancelled.
+		stopped, release, err := h.chatTurns.stopActiveChat(ctx, namespace, name)
+		if err != nil {
+			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat turn did not stop in time; retry")
+		}
+		defer release()
+		result.ChatTurnStopped = stopped
+	}
+	// Read live: the cache can miss a Task the stopped request just created.
+	tasks := &corev1alpha1.TaskList{}
+	if err := h.uncachedReader().List(ctx, tasks, client.InNamespace(namespace)); err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
+	}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if !cancellableTaskPhase(task.Status.Phase) ||
-			(sessionNameForTask(task) != name && strings.TrimSpace(task.Labels[labels.LabelChatSession]) != name) {
-			continue
-		}
-		// A chat-created Task names its Session by label instead of
-		// spec.sessionRef; the label counts only for a chat Session.
-		sessionName, err := executionEventSessionName(ctx, h.sessionStore, namespace, task)
-		if err != nil {
-			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve task session: %v", err))
-		}
-		if sessionName != name {
+		// A chat-created Task may name its continuity Session in
+		// spec.sessionRef and the conversation in the chat label; either
+		// ties it to this Session, the label only for a chat Session.
+		inChat := sessionType == store.SessionTypeChat && strings.TrimSpace(task.Labels[labels.LabelChatSession]) == name
+		if !cancellableTaskPhase(task.Status.Phase) || (sessionNameForTask(task) != name && !inChat) {
 			continue
 		}
 		cancelled, err := h.requestTaskCancellation(c, task, message)
 		if err != nil {
 			var fiberErr *fiber.Error
-			if errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict {
-				continue // finished meanwhile
+			if errors.Is(err, errCancelTaskGone) || (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict) {
+				continue // finished, deleted or replaced since the list
 			}
 			return err
 		}
 		result.Tasks = append(result.Tasks, cancelled)
 	}
-	if len(result.Tasks) == 0 {
+	if len(result.Tasks) == 0 && !result.ChatTurnStopped {
 		return fiber.NewError(fiber.StatusConflict, "session has no running turn")
 	}
 	return c.JSON(result)
@@ -156,7 +185,7 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	result := taskCancellation{Namespace: task.Namespace, Name: task.Name}
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &corev1alpha1.Task{}
-		if err := h.client.Get(ctx, key, current); err != nil {
+		if err := h.uncachedReader().Get(ctx, key, current); err != nil {
 			return err
 		}
 		if current.UID != task.UID {
@@ -194,7 +223,7 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	case errors.Is(err, errTaskNotCancellable):
 		return taskCancellation{}, fiber.NewError(fiber.StatusConflict, err.Error())
 	case apierrors.IsNotFound(err):
-		return taskCancellation{}, fiber.NewError(fiber.StatusNotFound, "task not found")
+		return taskCancellation{}, errCancelTaskGone
 	default:
 		return taskCancellation{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to cancel task: %v", err))
 	}

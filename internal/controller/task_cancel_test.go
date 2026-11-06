@@ -9,15 +9,21 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
@@ -208,5 +214,290 @@ func TestACPMCPBrokerRefusesCallsOnceCancellationIsRequested(t *testing.T) {
 	reader = fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
 	if _, _, err := findACPMCPTaskExecution(context.Background(), reader, request, fence); !errors.Is(err, errACPMCPTaskCancelled) {
 		t.Fatalf("error = %v, want the cancelled-Task refusal", err)
+	}
+}
+
+// Cancelling a standalone Agent Task while its RuntimeSession is being created
+// aborts the create call. The run settles as Cancelled with the request's
+// message instead of a RuntimeSessionStartFailed failure.
+func TestACPDispatcherSettlesCancellationDuringRuntimeSessionCreate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const request = "cancelled by alice: wrong repository"
+	var fixture *taskScopedCreateConflictFixture
+	createStarted := make(chan struct{}, 1)
+	fixture = newTaskScopedCreateConflictFixture(t, ctx, "cancel-during-create", types.UID("99999999-1111-2222-3333-444444444444"),
+		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, kubeClient *client.Client) *httptest.Server {
+			runtimeServer := newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{})
+			t.Cleanup(runtimeServer.Close)
+			return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, "/v2/runtime-sessions/") ||
+					strings.Count(r.URL.Path, "/") != 3 {
+					runtimeServer.Config.Handler.ServeHTTP(w, r)
+					return
+				}
+				// Record the cancel request as the API does and the Cancelled
+				// phase as the controller does, then hold the create until the
+				// dispatcher's cancellation watcher aborts it.
+				if err := cancelTaskForTest(r.Context(), *kubeClient, fixture.task, request); err != nil {
+					t.Errorf("cancel the Task: %v", err)
+				}
+				select {
+				case createStarted <- struct{}{}:
+				default:
+				}
+				select {
+				case <-r.Context().Done():
+				case <-ctx.Done():
+				}
+			}))
+		})
+	defer fixture.stop()
+
+	dispatchQueuedTask(ctx, t, fixture.dispatcher, fixture.task.DeepCopy())
+	select {
+	case <-createStarted:
+	default:
+		t.Fatal("the RuntimeSession create was never sent")
+	}
+	current := fixture.currentTask(t, ctx)
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Execution == nil ||
+		current.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
+		current.Status.Execution.Reason != "Cancelled" {
+		t.Fatalf("status = %#v, want a Cancelled run", current.Status)
+	}
+	if current.Status.Message != request || current.Status.Execution.Message != request {
+		t.Fatalf("messages = %q / %q, want the cancel request", current.Status.Message, current.Status.Execution.Message)
+	}
+	attempt, err := fixture.dispatcher.Store.GetPromptAttempt(ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionCancelled || attempt.OutcomeMarker != request {
+		t.Fatalf("attempt = %s %q, want Cancelled with the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
+	}
+}
+
+func cancelTaskForTest(ctx context.Context, c client.Client, task *corev1alpha1.Task, message string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1alpha1.Task{}
+		if err := c.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+			return err
+		}
+		if current.Annotations[labels.AnnotationCancelRequested] != message {
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[labels.AnnotationCancelRequested] = message
+			if err := c.Update(ctx, current); err != nil {
+				return err
+			}
+		}
+		current.Status.Phase = corev1alpha1.TaskPhaseCancelled
+		current.Status.Message = message
+		return c.Status().Update(ctx, current)
+	})
+}
+
+// Cancelling a class-backed Agent Task while its workspace attachment is
+// pending, before any execution status exists, still settles the attachment.
+// With artifact retirement enabled, completion and deletion recognize the
+// Task as ended before an attempt and finish.
+func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
+	ctx := context.Background()
+	r, task, workspaceKey, retirer := cancelTaskWithPendingClassWorkspace(t)
+	key := client.ObjectKeyFromObject(task)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+
+	// Completion retires artifact references and settles the workspace.
+	settled := false
+	for range 5 {
+		if err := r.Get(ctx, key, task); err != nil {
+			t.Fatal(err)
+		}
+		result, err := r.handleCompleted(ctx, task)
+		if err != nil {
+			t.Fatalf("handleCompleted: %v", err)
+		}
+		if result.RequeueAfter >= 30*time.Second {
+			t.Fatalf("handleCompleted requeue = %v, want completion to proceed", result.RequeueAfter)
+		}
+		err = r.Get(ctx, workspaceKey, workspace)
+		if apierrors.IsNotFound(err) || (err == nil && workspace.Spec.Attachment == nil) {
+			settled = true
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !settled {
+		t.Fatalf("workspace attachment = %+v, want it revoked", workspace.Spec.Attachment)
+	}
+	if len(retirer.calls) != 1 {
+		t.Fatalf("artifact retirement calls = %d, want one", len(retirer.calls))
+	}
+
+	// Deletion reclaims the (absent) attempts and releases the finalizer.
+	if err := r.Delete(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := r.Get(ctx, key, task); apierrors.IsNotFound(err) {
+			return
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.handleDeletion(ctx, task); err != nil {
+			t.Fatalf("handleDeletion: %v", err)
+		}
+	}
+	t.Fatalf("finalizers = %v, want the deleted Task released", task.Finalizers)
+}
+
+// cancelTaskWithPendingClassWorkspace cancels a class-backed Agent Task whose
+// workspace attachment is written but not yet acknowledged, with artifact
+// retirement enabled, and returns it Cancelled.
+func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1alpha1.Task, types.NamespacedName, *recordingIdentityRetirer) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask(func(task *corev1alpha1.Task) {
+		task.Finalizers = []string{labels.TaskFinalizer}
+	})
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controls := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controls, "controller")
+	done := make(chan error, 1)
+	go func() { done <- epochs.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	retirer := &recordingIdentityRetirer{}
+	r.DurableControlStore, r.ControllerEpochManager, r.ACPArtifactRetirer = controls, epochs, retirer
+
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspaceKey := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	// The attach pass writes the attachment; the adapter has not acknowledged it.
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
+		t.Fatalf("attach pass = (%v, %v), want a pending attachment", ready, err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil || workspace.Spec.Attachment == nil ||
+		workspace.Spec.Attachment.TaskRef.UID != task.UID {
+		t.Fatalf("workspace attachment = %+v, %v; want this Task's pending attachment", workspace.Spec.Attachment, err)
+	}
+
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := r.Get(ctx, key, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Labels[acpExecutionWorkspaceLinkLabel] != workspaceName || task.Status.Execution != nil {
+		t.Fatalf("task link = %q, execution = %+v; want a linked Task without execution status",
+			task.Labels[acpExecutionWorkspaceLinkLabel], task.Status.Execution)
+	}
+	task.Annotations[labels.AnnotationCancelRequested] = "cancelled by alice: wrong repository"
+	if err := r.Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	if err := r.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.cancelRequestedAgentTask(ctx, task); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := r.Get(ctx, key, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseCancelled || task.Status.Execution == nil ||
+		task.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled || task.Status.Execution.Attempt != 0 ||
+		!acpTaskRequiresAuthoritativeAttemptDiscovery(task) {
+		t.Fatalf("status = %+v, want a Cancelled record cleanup recognizes as ended before an attempt", task.Status)
+	}
+
+	return r, task, workspaceKey, retirer
+}
+
+// A recorded cancel request stops a prepared publication before the
+// controller writes the Cancelled phase.
+func TestPublicationHonorsARecordedCancelRequest(t *testing.T) {
+	running := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "running", Namespace: testNS, UID: "running-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	requested := running.DeepCopy()
+	requested.Name, requested.UID = "requested", "requested-uid"
+	requested.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(running, requested).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	for task, want := range map[*corev1alpha1.Task]bool{running: false, requested: true} {
+		got, err := d.taskCancellationRequested(context.Background(), task)
+		if err != nil || got != want {
+			t.Fatalf("%s: taskCancellationRequested() = %v, %v; want %v", task.Name, got, err, want)
+		}
+	}
+}
+
+// A write Task cancelled after its prompt succeeded but before publication
+// pushed keeps who cancelled it and why.
+func TestCancelTaskAfterExecutionKeepsTheCancelRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controls := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controls, "controller")
+	done := make(chan error, 1)
+	go func() { done <- epochs.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	const request = "cancelled by alice: wrong repository"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "write", Namespace: testNS, UID: "write-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: request},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: "prompt-1",
+		}},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c, Store: controls, Epochs: epochs}
+	delivery := corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateCancelledBeforePublish, Outcome: corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish,
+	}
+	if err := d.cancelTaskAfterExecution(ctx, task.DeepCopy(), delivery, "publication cancelled before push"); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Message != request {
+		t.Fatalf("status = %s %q, want Cancelled with the cancel request", current.Status.Phase, current.Status.Message)
 	}
 }

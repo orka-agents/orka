@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,18 @@ type fakeAgentIdentitySource struct {
 func (f *fakeAgentIdentitySource) AgentIdentityToken(_ context.Context, req AgentIdentityTokenRequest) (string, error) {
 	f.request = req
 	return f.token, f.err
+}
+
+// endingConnectionSource ends the delegation while it refreshes the
+// requester's token, as cancelling a parent Task during a slow refresh does.
+type endingConnectionSource struct {
+	*fakeConnectionSource
+	end func()
+}
+
+func (f *endingConnectionSource) ResolveConnectionCredential(ctx context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {
+	f.end()
+	return f.fakeConnectionSource.ResolveConnectionCredential(ctx, req)
 }
 
 func agentIdentityPolicySpec() corev1alpha1.OutboundAccessPolicySpec {
@@ -55,6 +68,10 @@ func TestValidateSpecAgentIdentityMode(t *testing.T) {
 			a.Entra.Resource = "https://graph.microsoft.com/.default"
 		},
 		"plain http": func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "http://graph.microsoft.com" },
+		"query": func(a *corev1alpha1.AgentIdentityOutboundAccess) {
+			a.Entra.Resource = "https://graph.microsoft.com/?x=1"
+		},
+		"fragment": func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "api://orka-resource#part" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := agentIdentityPolicySpec()
@@ -145,6 +162,15 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent := identityHolder("agent-uid", true)
 			sameSecond := metav1.NewTime(testClaimGrantedAt.Add(time.Minute))
 			agent.Status.IdentityClaim.GrantedAt = &sameSecond
+			return agent
+		}(),
+		// A finalizer keeps a deleted Agent readable; deletion still stops
+		// its Tasks' calls.
+		"Agent being deleted": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			deleting := metav1.Now()
+			agent.DeletionTimestamp = &deleting
+			agent.Finalizers = []string{"example.com/hold"}
 			return agent
 		}(),
 		"claim without a grant time": func() *corev1alpha1.Agent {
@@ -283,6 +309,51 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		}
 		if len(resolution.SensitiveValues) != 2 {
 			t.Fatalf("both tokens must be redacted: %v", resolution.SensitiveValues)
+		}
+	})
+
+	t.Run("refuses a delegation that expired during the exchange", func(t *testing.T) {
+		identity := &fakeAgentIdentitySource{token: "obo-token"}
+		r := resolver(delegatedPolicySpec(nil), nil, identity)
+		r.Connections = connection()
+		r.DelegationLive = func(context.Context, AgentIdentityBinding) error { return nil }
+		start := now.Add(-time.Hour + time.Second)
+		calls := 0
+		// The first clock reading is before the exchange; the second, after
+		// it, is past the policy's one-hour maxDelegationAge.
+		r.Now = func() time.Time {
+			if calls++; calls > 1 {
+				return start.Add(time.Hour + time.Second)
+			}
+			return now
+		}
+		resolution, err := r.Resolve(context.Background(), delegatedRequest(start))
+		if err == nil || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("Resolve() = %v, want the expired delegation refused", err)
+		}
+		if resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+			t.Fatalf("no credential may be returned: %#v", resolution)
+		}
+	})
+
+	t.Run("refuses a delegation that ended during a slow refresh", func(t *testing.T) {
+		var ended atomic.Bool
+		refreshing := &endingConnectionSource{fakeConnectionSource: connection(), end: func() { ended.Store(true) }}
+		identity := &fakeAgentIdentitySource{token: "obo-token"}
+		r := resolver(delegatedPolicySpec(nil), nil, identity)
+		r.Connections = refreshing
+		r.DelegationLive = func(context.Context, AgentIdentityBinding) error {
+			if ended.Load() {
+				return errors.New("a Task it was delegated from was cancelled")
+			}
+			return nil
+		}
+		resolution, err := r.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		if err == nil || !strings.Contains(err.Error(), "ended while its credential was issued") {
+			t.Fatalf("Resolve() = %v, want the ended delegation refused", err)
+		}
+		if resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+			t.Fatalf("no credential may be returned: %#v", resolution)
 		}
 	})
 

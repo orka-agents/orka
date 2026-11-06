@@ -19,6 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
@@ -38,13 +40,20 @@ func identityClaimMatches(claim *corev1alpha1.AgentIdentityClaim, issuer, id str
 // Both times have one-second precision, so a Task created in the grant's
 // second may predate the grant and is refused.
 func identityClaimCoversTask(claim *corev1alpha1.AgentIdentityClaim, task *corev1alpha1.Task) bool {
-	return claim != nil && claim.GrantedAt != nil && task.CreationTimestamp.After(claim.GrantedAt.Time)
+	return identityClaimCoversCreation(claim, task.CreationTimestamp)
+}
+
+// identityClaimCoversCreation reports whether an object created at created
+// was created strictly after the claim was granted.
+func identityClaimCoversCreation(claim *corev1alpha1.AgentIdentityClaim, created metav1.Time) bool {
+	return claim != nil && claim.GrantedAt != nil && created.After(claim.GrantedAt.Time)
 }
 
 // identityClaimBindable reports whether new Task bindings may use the claim:
-// it must name the identity and not be on its way out.
+// it must name the identity, not be on its way out, and carry the grant time
+// the API server recorded.
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
-	return identityClaimMatches(claim, issuer, id) && !claim.Releasing
+	return identityClaimMatches(claim, issuer, id) && !claim.Releasing && claim.GrantedAt != nil
 }
 
 // validateAgentIdentity refuses an identity this controller cannot honor.
@@ -63,6 +72,13 @@ func (r *AgentReconciler) validateAgentIdentity(_ context.Context, agent *corev1
 // re-checking after its binding refuses. A later pass releases it once a live
 // scan finds no unfinished Task bound to it: a binding that passed its check
 // before the mark was persisted before it, so that scan sees it.
+//
+// A claim is granted, or granted again after releasing, without a grant
+// time; no Task binds it yet. A later pass, reading the claim back, records
+// as its grant time the latest write time the API server has recorded on the
+// Agent, which is no earlier than the write that granted it. Grant times are
+// compared with creation times the API server stamps, so the controller's
+// clock never decides which objects a claim covers.
 func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.AgentIdentityClaim, error) {
 	reader := uncachedReader(r.APIReader, r.Client)
 	// Start from the live claim: a cached copy can still show a claim this
@@ -82,12 +98,22 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		// it a held claim is released like one the spec no longer names.
 		issuer, id, declared = "", "", false
 	}
-	if claim != nil && identityClaimMatches(claim, issuer, id) && (claim.Releasing || claim.GrantedAt == nil) {
-		// The spec names the held identity again, or use authorization is back
-		// on. Tasks created while it was leaving were not checked for it, so
-		// the claim counts as granted now.
-		claim.Releasing = false
-		claim.GrantedAt = identityClaimGrantTime()
+	if claim != nil && identityClaimMatches(claim, issuer, id) {
+		switch {
+		case claim.Releasing:
+			// The spec names the held identity again, or use authorization is
+			// back on. Tasks created while it was leaving were not checked for
+			// it, so the claim is granted again.
+			claim.Releasing = false
+			claim.GrantedAt = nil
+			return claim, errIdentityGrantTimePending(claim)
+		case claim.GrantedAt == nil:
+			granted := apiServerWriteTime(live)
+			if granted == nil {
+				return claim, errIdentityGrantTimePending(claim)
+			}
+			claim.GrantedAt = granted
+		}
 	}
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
 		if !claim.Releasing {
@@ -131,14 +157,28 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 		return nil, fmt.Errorf("identity %s/%s is still held by Task %s/%s of Agent %s until it finishes",
 			issuer, id, holder.Namespace, holder.Name, holder.Status.AgentExecutionBinding.Agent.Name)
 	}
-	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id, GrantedAt: identityClaimGrantTime()}, nil
+	claim = &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}
+	return claim, errIdentityGrantTimePending(claim)
 }
 
-// identityClaimGrantTime is the grant time recorded now, at the second
-// precision the API server stores it with.
-func identityClaimGrantTime() *metav1.Time {
-	now := metav1.Now().Rfc3339Copy()
-	return &now
+// errIdentityGrantTimePending keeps the Agent not Ready while a granted claim
+// waits for the grant time the API server records.
+func errIdentityGrantTimePending(claim *corev1alpha1.AgentIdentityClaim) error {
+	return fmt.Errorf("identity %s/%s is granted and waits for the API server to record the grant time", claim.Issuer, claim.ID)
+}
+
+// apiServerWriteTime returns the latest write time the API server recorded
+// in the object's managedFields, at one-second precision, or nil when it
+// recorded none. The write that granted a claim set its manager's time, so
+// the latest time is never earlier than that write.
+func apiServerWriteTime(obj metav1.Object) *metav1.Time {
+	var latest *metav1.Time
+	for _, entry := range obj.GetManagedFields() {
+		if entry.Time != nil && (latest == nil || entry.Time.After(latest.Time)) {
+			latest = entry.Time.DeepCopy()
+		}
+	}
+	return latest
 }
 
 // errIdentityClaimReleasing reports the first release pass. It is an error only
@@ -198,17 +238,34 @@ const agentIdentityReverifyInterval = time.Hour
 const (
 	reasonIdentityVerified           = "Verified"
 	reasonIdentityVerificationFailed = "VerificationFailed"
+	reasonIdentityIssuerUnavailable  = "IssuerUnavailable"
+)
+
+const (
+	// agentIdentityVerifyTimeout bounds one verification, shorter than a
+	// Tool call's token requests, because Agents verify one at a time.
+	agentIdentityVerifyTimeout = 5 * time.Second
+	// agentIdentityIssuerBackoff is how long every Agent skips verification
+	// after the issuer could not answer.
+	agentIdentityIssuerBackoff = time.Minute
 )
 
 // agentIdentityState is the outcome of verifying an Agent's identity.
 type agentIdentityState struct {
 	declared bool
 	verified bool
-	err      error
+	// unavailable reports that the issuer could not answer; err is set too,
+	// so the Agent is not Ready until it is verified.
+	unavailable bool
+	// retryAfter is when verification may be tried again.
+	retryAfter time.Duration
+	err        error
 }
 
 // verifyAgentIdentity asks the issuer to prove a declared identity. A
 // configuration that already failed validation is not sent to the issuer.
+// After the issuer could not answer, no Agent asks it again until the
+// back-off ends; a refusal from the issuer is not retried early.
 func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1alpha1.Agent, validationErr error) agentIdentityState {
 	issuer, id, ok := agent.IdentityRef()
 	if !ok {
@@ -218,7 +275,27 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	if validationErr != nil || r.IdentityVerifier == nil {
 		return state
 	}
-	if err := r.IdentityVerifier.Verify(ctx, agent); err != nil {
+	unavailable := func(wait time.Duration) agentIdentityState {
+		state.unavailable, state.retryAfter = true, wait
+		state.err = fmt.Errorf("identity %s/%s could not be verified: the issuer is unavailable; retrying in %s",
+			issuer, id, wait.Round(time.Second))
+		return state
+	}
+	r.issuerBackoff.Lock()
+	wait := time.Until(r.issuerBackoff.until)
+	r.issuerBackoff.Unlock()
+	if wait > 0 {
+		return unavailable(wait)
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, agentIdentityVerifyTimeout)
+	defer cancel()
+	if err := r.IdentityVerifier.Verify(verifyCtx, agent); err != nil {
+		if errors.Is(err, agentidentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+			r.issuerBackoff.Lock()
+			r.issuerBackoff.until = time.Now().Add(agentIdentityIssuerBackoff)
+			r.issuerBackoff.Unlock()
+			return unavailable(agentIdentityIssuerBackoff)
+		}
 		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
 		return state
 	}
@@ -242,6 +319,10 @@ func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time, ident
 		ObservedGeneration: agent.Generation,
 	}
 	switch {
+	case identity.unavailable:
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = reasonIdentityIssuerUnavailable
+		condition.Message = identity.err.Error()
 	case identity.err != nil:
 		condition.Reason = reasonIdentityVerificationFailed
 		condition.Message = identity.err.Error()
@@ -328,12 +409,67 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
+	if err := requireTaskSourceCoveredByClaim(ctx, reader, task, agent, ref, live.Status.IdentityClaim); err != nil {
+		return nil, err
+	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
 		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref, live.Status.IdentityClaim); err != nil {
 			return nil, err
 		}
 	}
 	return ref, nil
+}
+
+// requireTaskSourceCoveredByClaim refuses a Task that Orka created from a
+// durable object naming the Agent, unless that object was created after the
+// claim was granted. Orka creates such Tasks under its own broad Agent use
+// grant, so only the object's own creation was checked for the Agent, and an
+// object created while the check was off or before the Agent named the
+// identity was never checked for it. The source is the Task's controlling
+// RepositoryScan or RepositoryMonitor, matched by UID. A GatewayBinding's
+// Tasks record the binding only by name, so they cannot be tied to the
+// binding the check judged and are refused. Scheduled runs and delegated
+// children are judged by requireParentOwnsIdentityAgent.
+func requireTaskSourceCoveredByClaim(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+	ref *corev1alpha1.AgentExecutionIdentityRef,
+	claim *corev1alpha1.AgentIdentityClaim,
+) error {
+	if task.Labels[gateway.TaskGatewayBindingLabel] != "" || task.Annotations[gateway.TaskGatewayBindingAnnotation] != "" {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a GatewayBinding's Task cannot use identity-bound Agent %q: the Task does not record which binding created it", agent.Name))
+	}
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+		return nil
+	}
+	var source client.Object
+	switch owner.Kind {
+	case "RepositoryScan":
+		source = &corev1alpha1.RepositoryScan{}
+	case "RepositoryMonitor":
+		source = &corev1alpha1.RepositoryMonitor{}
+	default:
+		return nil
+	}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: owner.Name}, source); err != nil {
+		if apierrors.IsNotFound(err) {
+			return permanentACPAgentConfiguration(fmt.Errorf("the %s %q that created the Task is gone", owner.Kind, owner.Name))
+		}
+		return fmt.Errorf("resolve the %s that created the Task: %w", owner.Kind, err)
+	}
+	if source.GetUID() != owner.UID {
+		return permanentACPAgentConfiguration(fmt.Errorf("the %s %q that created the Task was replaced", owner.Kind, owner.Name))
+	}
+	if !identityClaimCoversCreation(claim, source.GetCreationTimestamp()) {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"%s %q was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; re-create the %s",
+			owner.Kind, owner.Name, agent.Name, ref.Issuer, ref.ID, owner.Kind))
+	}
+	return nil
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an
@@ -514,43 +650,66 @@ func sameRequester(a, b *corev1alpha1.RequestedBy) bool {
 	return a.Issuer == b.Issuer && a.Subject == b.Subject
 }
 
+// taskExecutionReasonIdentityUnavailable fails a Task whose bound identity
+// may no longer be used before its runtime admission.
+const taskExecutionReasonIdentityUnavailable = corev1alpha1.TaskExecutionReason("IdentityUnavailable")
+
 // requireBoundIdentityClaim re-checks, after the binding is persisted and
-// until the Task is admitted to a runtime, that the Agent still holds the
-// identity the binding froze. A claim released between the binding decision
-// and its write could otherwise leave two Agents with Tasks acting as one
-// identity; once the binding is persisted, any later release sees it and
-// keeps the claim. A Task still Queued or Reserved for capacity has not been
-// admitted, so it is checked on every pass until dispatch.
+// until the Task is queued, that the Agent still holds the identity the
+// binding froze. A claim released between the binding decision and its write
+// could otherwise leave two Agents with Tasks acting as one identity; once the
+// binding is persisted, any later release sees it and keeps the claim. A
+// queued Task is checked by the ACPDispatcher right before every runtime
+// admission instead, which settles its durable attempt for either backend.
 func (r *TaskReconciler) requireBoundIdentityClaim(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (ctrl.Result, error, bool) {
-	if execution := task.Status.Execution; execution != nil &&
-		execution.State != corev1alpha1.TaskExecutionStateQueued && execution.State != corev1alpha1.TaskExecutionStateReserved {
+	if task.Status.Execution != nil {
 		return ctrl.Result{}, nil, false
 	}
-	if binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
-		return ctrl.Result{}, nil, false
-	}
-	frozen := binding.Agent
-	live := &corev1alpha1.Agent{}
-	err := uncachedReader(r.APIReader, r.Client).Get(ctx, types.NamespacedName{Namespace: frozen.Namespace, Name: frozen.Name}, live)
-	if err != nil && !apierrors.IsNotFound(err) {
+	message, err := boundIdentityUnavailable(ctx, uncachedReader(r.APIReader, r.Client), task, binding)
+	if err != nil {
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
-	message := fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
+	if message == "" {
+		return ctrl.Result{}, nil, false
+	}
+	result, failErr := r.failACPPlanningTask(ctx, task, taskExecutionReasonIdentityUnavailable, message)
+	return result, failErr, true
+}
+
+// boundIdentityUnavailable returns why a Task may not start with the identity
+// its binding froze, or "" when it may: the bound Agent must still hold the
+// identity, not be releasing it, and have granted it before the Task was
+// created. Only a failed read returns an error.
+func boundIdentityUnavailable(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	binding *corev1alpha1.AgentExecutionBinding,
+) (string, error) {
+	if binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
+		return "", nil
+	}
+	frozen := binding.Agent
+	live := &corev1alpha1.Agent{}
+	err := reader.Get(ctx, types.NamespacedName{Namespace: frozen.Namespace, Name: frozen.Name}, live)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("read the Agent's identity claim: %w", err)
+	}
 	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
 		if identityClaimCoversTask(live.Status.IdentityClaim, task) {
-			return ctrl.Result{}, nil, false
+			return "", nil
 		}
 		// The claim was released and granted again after the Task was created.
-		message = fmt.Sprintf("Agent %s/%s was granted identity %s/%s again after the Task was created",
-			frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
+		return fmt.Sprintf("Agent %s/%s was granted identity %s/%s again after the Task was created",
+			frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID), nil
 	}
-	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"), message)
-	return result, failErr, true
+	return fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s",
+		frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID), nil
 }
 
 // agentIdentityReleaseRecheck is how soon a releasing claim is checked again.
@@ -610,38 +769,91 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 	return errors.New("the delegating Task chain is too deep")
 }
 
-// requireLiveSessions refuses once a Session the Task runs in is gone: its
-// spec.sessionRef, or the chat Session the chat API recorded in the
-// orka.ai/chat-session label. It reads Session metadata only, never the
-// transcript.
+// requireLiveSessions refuses once a Session the Task runs in is gone or
+// being deleted: its spec.sessionRef, or the chat Session the chat API
+// recorded in the orka.ai/chat-session label. A chat Session must also be the
+// incarnation the chat API pinned in orka.ai/chat-session-epoch when it
+// created the Task, so a chat deleted and recreated under its name does not
+// keep the Task acting for the requester; admission keeps both labels
+// immutable. It reads Session metadata only, never the transcript.
 func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
-	names := make([]string, 0, 2)
 	if task.Spec.SessionRef != nil {
-		names = append(names, strings.TrimSpace(task.Spec.SessionRef.Name))
-	}
-	names = append(names, strings.TrimSpace(task.Labels[labels.LabelChatSession]))
-	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		if d.Sessions == nil {
-			return errors.New("no Session store is configured")
-		}
-		var err error
-		if reader, ok := d.Sessions.(sessionTypeReader); ok {
-			_, err = reader.GetSessionType(ctx, task.Namespace, name)
-		} else {
-			var session *store.SessionRecord
-			if session, err = d.Sessions.GetSession(ctx, task.Namespace, name); err == nil && session == nil {
-				err = store.ErrNotFound
+		if name := strings.TrimSpace(task.Spec.SessionRef.Name); name != "" {
+			if err := d.requireSessionExists(ctx, task.Namespace, name, subject); err != nil {
+				return err
+			}
+			if err := d.requireNoSessionCleanup(ctx, task.Namespace, name, subject); err != nil {
+				return err
 			}
 		}
-		if errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("%s was deleted", subject)
+	}
+	chat := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if chat == "" {
+		return nil
+	}
+	reader, ok := d.Sessions.(store.SessionCreationReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot identify %s", subject)
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, task.Namespace, chat)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
+	}
+	pinned := strings.TrimSpace(task.Labels[labels.LabelChatSessionEpoch])
+	if pinned == "" {
+		return fmt.Errorf("%s has no pinned incarnation", subject)
+	}
+	if labels.SessionEpoch(createdAt) != pinned {
+		return fmt.Errorf("%s was deleted and replaced", subject)
+	}
+	return d.requireNoSessionCleanup(ctx, task.Namespace, chat, subject)
+}
+
+// sessionCleanupIntentReader reports whether a Session's deletion has
+// recorded its durable cleanup intent.
+type sessionCleanupIntentReader interface {
+	HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error)
+}
+
+// requireNoSessionCleanup refuses once the Session's deletion has started: its
+// record stays until runtime retirement finishes, but the requester already
+// deleted it. A store that cannot tell fails closed.
+func (d DelegationLiveness) requireNoSessionCleanup(ctx context.Context, namespace, name, subject string) error {
+	reader, ok := d.Sessions.(sessionCleanupIntentReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot tell whether %s is being deleted", subject)
+	}
+	pending, err := reader.HasSessionCleanupIntent(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("read the deletion state of %s: %w", subject, err)
+	}
+	if pending {
+		return fmt.Errorf("%s is being deleted", subject)
+	}
+	return nil
+}
+
+func (d DelegationLiveness) requireSessionExists(ctx context.Context, namespace, name, subject string) error {
+	if d.Sessions == nil {
+		return errors.New("no Session store is configured")
+	}
+	var err error
+	if reader, ok := d.Sessions.(sessionTypeReader); ok {
+		_, err = reader.GetSessionType(ctx, namespace, name)
+	} else {
+		var session *store.SessionRecord
+		if session, err = d.Sessions.GetSession(ctx, namespace, name); err == nil && session == nil {
+			err = store.ErrNotFound
 		}
-		if err != nil {
-			return fmt.Errorf("read %s: %w", subject, err)
-		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
 	}
 	return nil
 }

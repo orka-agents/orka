@@ -185,9 +185,9 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			t.Fatalf("err = %v, want the missing link named", err)
 		}
 		for state, want := range map[string]string{
-			corev1alpha1.ConnectionStateExpired: "expired before this Task started",
-			corev1alpha1.ConnectionStateReady:   "became Ready after this Task started",
-			"Revoked":                           "was not Ready (Revoked)",
+			corev1alpha1.ConnectionStateExpired: "is expired",
+			corev1alpha1.ConnectionStateReady:   "is Ready but is not bound to this Task",
+			"Revoked":                           "is not Ready (Revoked)",
 		} {
 			link := &corev1alpha1.Connection{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "alice-github"},
@@ -201,6 +201,20 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 			if _, err := linked.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("%s link: err = %v, want %q", state, err, want)
 			}
+		}
+		duplicate := func(name string) *corev1alpha1.Connection {
+			return &corev1alpha1.Connection{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: name},
+				Spec: corev1alpha1.ConnectionSpec{
+					Subject:     corev1alpha1.ConnectionSubject{Issuer: "https://issuer.example.test", Subject: "alice"},
+					ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"},
+				},
+				Status: corev1alpha1.ConnectionStatus{State: corev1alpha1.ConnectionStateReady},
+			}
+		}
+		duplicated := &KubernetesResolver{Reader: newReader().WithObjects(duplicate("alice-github"), duplicate("alice-github-2")).Build(), Connections: source}
+		if _, err := duplicated.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "has 2 links to") {
+			t.Fatalf("duplicate links: err = %v, want them named", err)
 		}
 		other := &corev1alpha1.Connection{
 			ObjectMeta: metav1.ObjectMeta{Namespace: "tenant", Name: "bob-github"},

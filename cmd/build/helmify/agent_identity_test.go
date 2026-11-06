@@ -34,6 +34,13 @@ func TestStaticChartAgentIdentityFlags(t *testing.T) {
 	require.NoError(t, err, "%s", deployment)
 	require.Contains(t, deployment, `"--agent-identity-entra-tenant-id=11111111-1111-1111-1111-111111111111"`)
 	require.Contains(t, deployment, `"--agent-identity-entra-blueprint-client-id=22222222-2222-2222-2222-222222222222"`)
+
+	// One value alone would crash-loop the controller, so rendering fails.
+	out, err := helmTemplateStaticChart(t,
+		"--set-string", "controller.agentIdentity.entra.tenantID=11111111-1111-1111-1111-111111111111",
+		"--show-only", "templates/deployment.yaml")
+	require.Error(t, err, "%s", out)
+	require.Contains(t, out+err.Error(), "must be set together")
 }
 
 func TestStaticChartMountsTheAgentIdentityToken(t *testing.T) {
@@ -91,6 +98,7 @@ func TestStaticChartProtectsTheControllerServiceAccountWithAgentIdentities(t *te
 			var expected admissionregistrationv1.ValidatingAdmissionPolicy
 			require.NoError(t, yaml.UnmarshalStrict([]byte(strings.NewReplacer(
 				"ORKA_NAMESPACE", tc.namespace, "CONTROLLER_SA", tc.controllerAccount,
+				"CONTROLLER_DEPLOYMENT", tc.fullname+"-controller",
 			).Replace(canonicalPolicy)), &expected))
 			require.Equal(t, expected.Spec, actual.Spec, "Helm must preserve the canonical controller ServiceAccount rules")
 

@@ -1,6 +1,7 @@
 package outboundaccess
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -138,6 +139,25 @@ func TestAgentIdentityUseRecordsCarryOnlyAClassifiedReason(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityDelegationEndedWhileIssuingIsADelegationRefusal(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "obo-token"}, &lines)
+	checks := 0
+	resolver.DelegationLive = func(context.Context, AgentIdentityBinding) error {
+		if checks++; checks > 1 {
+			return errors.New("a Task it was delegated from was cancelled")
+		}
+		return nil
+	}
+	if _, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalDelegation+`"`) || strings.Contains(lines[0], "obo-token") {
+		t.Fatalf("records = %v, want one delegation refusal without the credential", lines)
+	}
+}
+
 func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
 	now := time.Now()
 	for name, mutate := range map[string]func(*ResolveRequest){
@@ -179,6 +199,21 @@ func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
 	})
 }
 
+func TestAgentIdentityRefusalWithoutBindingNamesTheTask(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "t"}, &lines)
+	request := delegatedRequest(now.Add(-time.Minute))
+	request.AgentIdentity, request.TaskUID = nil, "plain-task-uid"
+	if _, err := resolver.Resolve(context.Background(), request); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"taskUID"="plain-task-uid"`) ||
+		!strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalBinding+`"`) {
+		t.Fatalf("records = %v, want one binding refusal naming the Task", lines)
+	}
+}
+
 func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
 	resolver := &KubernetesResolver{AuditPseudonymKey: []byte(strings.Repeat("k", 32))}
 	pseudonym := func(issuer, subject string) string {
@@ -191,6 +226,31 @@ func TestRequesterPseudonymKeepsOpaqueClaimsExact(t *testing.T) {
 	for _, other := range []string{pseudonym("https://issuer.example.test", " alice "), pseudonym(" https://issuer.example.test", "alice")} {
 		if other == base {
 			t.Fatal("distinct verified claims must not share a pseudonym")
+		}
+	}
+}
+
+// A resolver built like an AI worker's (no AuditLog, no identity source, no
+// process logger) still writes exactly one record for a refused call.
+func TestAgentIdentityRefusalWithoutAuditLogIsRecorded(t *testing.T) {
+	var output bytes.Buffer
+	previous := agentIdentityAuditOutput
+	agentIdentityAuditOutput = &output
+	t.Cleanup(func() { agentIdentityAuditOutput = previous })
+	reader := ctrlfake.NewClientBuilder().WithScheme(resolverScheme(t)).
+		WithObjects(readyPolicy("agent", agentIdentityPolicySpec()), identityHolder("agent-uid", true)).Build()
+	resolver := &KubernetesResolver{Reader: reader}
+	if _, err := resolver.Resolve(context.Background(), agentIdentityRequest()); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused outside the controller")
+	}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("records = %q, want exactly one", output.String())
+	}
+	for _, want := range []string{`"logger":"agent-identity-audit"`, `"outcome":"refused"`,
+		`"reason":"` + agentIdentityRefusalBinding + `"`, `"mode":"Self"`, `"taskUID":"task-uid"`} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("record lacks %s: %s", want, lines[0])
 		}
 	}
 }

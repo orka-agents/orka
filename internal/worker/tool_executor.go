@@ -116,6 +116,7 @@ type ToolExecutor struct {
 	requester                   *corev1alpha1.RequestedBy
 	frozenConnections           map[string]outboundaccess.FrozenConnection
 	agentIdentity               *outboundaccess.AgentIdentityBinding
+	taskUID                     string
 	checkedPolicies             map[string]outboundaccess.PolicyIdentity
 	// sendGate, when set, is judged after every lookup and credential
 	// resolution and immediately before the request leaves the process.
@@ -147,6 +148,15 @@ func (e *ToolExecutor) SetRequester(requester *corev1alpha1.RequestedBy) {
 		return
 	}
 	e.requester = requester.DeepCopy()
+}
+
+// SetTaskUID records the authenticated executing Task, which outbound access
+// resolution names in its identity use records.
+func (e *ToolExecutor) SetTaskUID(uid string) {
+	if e == nil {
+		return
+	}
+	e.taskUID = uid
 }
 
 // SetFrozenConnections records the Connection identities frozen into the
@@ -209,6 +219,14 @@ func (e *ToolExecutor) Requester() *corev1alpha1.RequestedBy {
 		return nil
 	}
 	return e.requester.DeepCopy()
+}
+
+// TaskUID returns the bound executing Task's UID, or "".
+func (e *ToolExecutor) TaskUID() string {
+	if e == nil {
+		return ""
+	}
+	return e.taskUID
 }
 
 // FrozenConnections returns a copy of the frozen Connection bindings.
@@ -318,6 +336,9 @@ func NewToolExecutor() *ToolExecutor {
 		credentialAuthorityEnforced: workerenv.IsTrue(os.Getenv(workerenv.TransactionCredentialAuthorizationEnforced)),
 		credentialScopeAllowed:      containsAnyString(credentialScopes, requiredCredentialScopes),
 		credentialSecret:            authorityConstraint,
+		// The controller sets the Task's UID on the worker Pod and overrides
+		// any Task-supplied value, as it does for the namespace above.
+		taskUID: strings.TrimSpace(os.Getenv(workerenv.TaskUID)),
 	}
 }
 
@@ -1104,6 +1125,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		},
 		Arguments:     args,
 		MCPBacked:     isMCPSubstrateActorTool(tool) || prepared.mcp,
+		TaskUID:       e.taskUID,
 		AgentIdentity: e.agentIdentity,
 	})
 	if err != nil {
