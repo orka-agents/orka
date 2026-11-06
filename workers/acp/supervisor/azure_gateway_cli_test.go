@@ -80,6 +80,17 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 	if err == nil || !strings.Contains(output, "OrkaReadOnly") {
 		t.Fatalf("az group create should be refused as a write: %v\n%s", err, output)
 	}
+	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {
+		// Outside a running prompt the wrapper's sign-in fails, and it says why.
+		fixture.session.deactivate(fixture.authorize.PromptID, harnessv2.RuntimeSessionStateIdle)
+		if output, err := run("account", "clear"); err != nil {
+			t.Fatalf("az account clear: %v\n%s", err, output)
+		}
+		output, err := run("group", "list")
+		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaNotAuthorized") {
+			t.Fatalf("az group list outside a prompt should explain the refusal: %v\n%s", err, output)
+		}
+	}
 	for _, call := range fixture.brokerCalls() {
 		if strings.Contains(string(call.Call.Arguments), "rg-three") {
 			t.Fatal("the refused write reached the broker")

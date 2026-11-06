@@ -37,7 +37,11 @@ case "${1:-}" in
   *)
     # Sign in whenever az's own profile holds no account.
     if [ -n "${IDENTITY_ENDPOINT:-}" ] && ! grep -qs '"user"' "$profile"; then
-      "$python" $pyflags -m azure.cli login --identity --allow-no-subscriptions --output none >/dev/null 2>&1 || true
+      # A failed sign-in says why (for example OrkaNotAuthorized) before the
+      # command runs, rather than leaving only az's generic sign-in hint.
+      if ! signin_error=$("$python" $pyflags -m azure.cli login --identity --allow-no-subscriptions --output none 2>&1); then
+        printf 'Orka could not sign az in: %s\n' "$signin_error" >&2
+      fi
     fi
     ;;
 esac
