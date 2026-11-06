@@ -4552,6 +4552,16 @@ func TestACPDispatcherSettlesCancelledTaskBeforeRuntimePoolAdmissionWithItsReque
 	}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", false)
 }
 
+// A cancel request recorded before the controller writes the Cancelled phase
+// already stops runtime admission: the queued Task is settled, not started.
+func TestACPDispatcherSettlesCancelRequestedTaskBeforeRuntimePoolAdmission(t *testing.T) {
+	for _, throughDispatch := range []bool{false, true} {
+		runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {
+			task.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+		}, corev1alpha1.TaskExecutionReason("Cancelled"), "cancelled by alice: wrong repository", throughDispatch)
+	}
+}
+
 func TestACPDispatcherSettlesExpiredTaskBeforeRuntimePoolAdmission(t *testing.T) {
 	timeout := metav1.Duration{Duration: time.Minute}
 	runACPDispatcherPreAdmissionSettlementTest(t, func(task *corev1alpha1.Task) {

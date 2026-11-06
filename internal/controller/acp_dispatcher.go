@@ -3801,11 +3801,13 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	message := ""
 	now := time.Now().UTC()
 	deadline, hasDeadline := acpTaskDeadline(task, now)
+	// Callers pass a live read. A recorded cancel request stops admission
+	// before the controller writes the Cancelled phase.
+	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
 	switch {
-	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled:
+	case !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested:
 		operation, reason, message = "cancelled-before-admission", acpCancelledReason, "task cancelled before runtime admission"
-		// A Cancelled phase is written after the cancel request, so this copy
-		// carries the request, which names who cancelled and why.
+		// The cancel request names who cancelled and why.
 		if requested := strings.TrimSpace(task.Annotations[labels.AnnotationCancelRequested]); requested != "" && task.DeletionTimestamp.IsZero() {
 			message = requested
 		}
