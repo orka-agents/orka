@@ -2863,8 +2863,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		}
 	}
 
-	// Clean up plan state on completion (best-effort)
-	if r.PlanStore != nil {
+	// Clean up plan state on completion (best-effort). A cancelled Task keeps
+	// its plan, which shows how far it got; deletion removes it.
+	if r.PlanStore != nil && phase != corev1alpha1.TaskPhaseCancelled {
 		if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 			log.Error(err, "failed to delete plan state on completion")
 		}
