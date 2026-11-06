@@ -231,6 +231,10 @@ Each record includes:
 - the exit code or outcome, and the start and finish times
 - whether the session was tainted
 
+Free-text fields (the command basename, copy path, Task name, and outcome) are
+redacted with Orka's shared credential rules, and a value that still looks like
+a credential is recorded as `[REDACTED]`.
+
 ## Troubleshooting
 
 | Error | Cause |

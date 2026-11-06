@@ -725,3 +725,50 @@ func TestOperatorExecRevalidatesAfterTheDelayedExecRequest(t *testing.T) {
 	}
 	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
 }
+
+// Every audit sink, log line, and Task Event receives a sanitized record: a
+// credential-shaped command basename, copy path, caller-supplied Task name, or
+// relayed error outcome never reaches it verbatim.
+func TestOperatorAuditRecordsAreSanitized(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	f := newOperatorFixture(t, true, "exec")
+	f.server.operatorAudit(context.Background(), OperatorAuditRecord{
+		AuditID: "op-1", Phase: OperatorAuditDenied, Operation: operatoraccess.OperationExec,
+		Task: token, Command: token, Path: "secrets/" + token,
+		Outcome: "runtime supervisor: command \"Authorization: Bearer " + token + "\" failed " + strings.Repeat("x", 2000),
+	})
+	records := f.audit.snapshot()
+	require.Len(t, records, 1)
+	raw, err := json.Marshal(records[0])
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), token)
+	require.LessOrEqual(t, len([]rune(records[0].Outcome)), maxOperatorAuditOutcomeChars)
+
+	// Ordinary values pass through unchanged.
+	clean := sanitizeOperatorAuditRecord(OperatorAuditRecord{Task: "t1", Command: "git", Path: "src/notes#1.txt", Outcome: "exited"})
+	require.Equal(t, "t1", clean.Task)
+	require.Equal(t, "git", clean.Command)
+	require.Equal(t, "src/notes#1.txt", clean.Path)
+	require.Equal(t, "exited", clean.Outcome)
+}
+
+// A command whose argv[0] is itself a credential is never echoed back into the
+// audit trail through the supervisor's refusal message.
+func TestOperatorExecAuditNeverCarriesARawCredentialArgv0(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	cli := cliclient.NewWithNamespace("http://"+listener.Addr().String(), "token", operatorTestNamespace)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err = cli.OperatorExec(ctx, "t1", operatoraccess.ExecOptions{Argv: []string{"GITHUB_TOKEN=" + token, "--flag=" + token}},
+		cliclient.OperatorExecStreams{Stdout: io.Discard})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(f.audit.phases()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	raw, err := json.Marshal(f.audit.snapshot())
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), token)
+}

@@ -23,8 +23,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	"github.com/orka-agents/orka/internal/redact"
+	"github.com/orka-agents/orka/internal/security"
 )
 
 const (
@@ -125,7 +128,47 @@ func (s *Server) operatorAudit(ctx context.Context, record OperatorAuditRecord) 
 	if sink == nil {
 		sink = defaultOperatorAuditSink{server: s}
 	}
-	sink.Record(ctx, record)
+	sink.Record(ctx, sanitizeOperatorAuditRecord(record))
+}
+
+const (
+	maxOperatorAuditNameChars    = 253
+	maxOperatorAuditPathChars    = 1024
+	maxOperatorAuditOutcomeChars = 512
+)
+
+// sanitizeOperatorAuditRecord is the single choke point between operator
+// access and every audit sink, log line, and Task Event. Records never carry
+// raw argv, environment, file content, or upload bodies; the remaining
+// free-text fields (the command basename, the copy path, caller-supplied names
+// recorded before a Task is read, and relayed error outcomes) are redacted
+// with the shared rules, replaced outright when they still look like a
+// credential, and bounded.
+func sanitizeOperatorAuditRecord(record OperatorAuditRecord) OperatorAuditRecord {
+	record.Namespace = sanitizeOperatorAuditText(record.Namespace, maxOperatorAuditNameChars)
+	record.Task = sanitizeOperatorAuditText(record.Task, maxOperatorAuditNameChars)
+	record.Workspace = sanitizeOperatorAuditText(record.Workspace, maxOperatorAuditNameChars)
+	record.Command = sanitizeOperatorAuditText(record.Command, maxOperatorAuditNameChars)
+	record.Path = sanitizeOperatorAuditText(record.Path, maxOperatorAuditPathChars)
+	record.Outcome = sanitizeOperatorAuditText(record.Outcome, maxOperatorAuditOutcomeChars)
+	return record
+}
+
+func sanitizeOperatorAuditText(value string, maxChars int) string {
+	if value == "" {
+		return ""
+	}
+	if security.LooksLikeSecret(value) {
+		return events.ExecutionEventRedactedValue
+	}
+	redacted := redact.SensitiveText(value)
+	if security.LooksLikeSecret(redacted) {
+		return events.ExecutionEventRedactedValue
+	}
+	if runes := []rune(redacted); len(runes) > maxChars {
+		redacted = string(runes[:maxChars])
+	}
+	return redacted
 }
 
 type defaultOperatorAuditSink struct{ server *Server }

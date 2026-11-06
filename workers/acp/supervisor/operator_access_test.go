@@ -666,3 +666,15 @@ func TestOperatorBarrierPrecedesEveryTeardownPath(t *testing.T) {
 		}
 	})
 }
+
+// Refusal messages are relayed into orka-api audit records and Task Events,
+// so they never echo the operator's raw argv[0].
+func TestResolveOperatorCommandErrorsNeverEchoArgv0(t *testing.T) {
+	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	for _, argv0 := range []string{"TOKEN=" + secret, "/nonexistent/" + secret} {
+		_, err := resolveOperatorCommand(argv0, "/usr/bin:/bin")
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("resolveOperatorCommand(%q) = %v; must fail without echoing argv[0]", argv0, err)
+		}
+	}
+}

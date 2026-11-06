@@ -403,11 +403,13 @@ func (s *Server) acquireOperatorSlot(w http.ResponseWriter) (func(), bool) {
 	}
 }
 
+// resolveOperatorCommand never echoes argv0 in its errors: they are relayed
+// into orka-api audit records and Task Events, which must not carry raw argv.
 func resolveOperatorCommand(argv0, childPath string) (string, error) {
 	if filepath.IsAbs(argv0) {
 		info, err := os.Stat(argv0)
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-			return "", fmt.Errorf("command %q was not found or is not executable", argv0)
+			return "", fmt.Errorf("the command was not found or is not executable")
 		}
 		return filepath.Clean(argv0), nil
 	}
@@ -424,7 +426,7 @@ func resolveOperatorCommand(argv0, childPath string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("command %q was not found in the session PATH", argv0)
+	return "", fmt.Errorf("the command was not found in the session PATH")
 }
 
 func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
