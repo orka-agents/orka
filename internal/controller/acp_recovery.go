@@ -821,6 +821,9 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		} else if recovered {
 			return nil
 		}
+		if cancelled, err := d.recoverRequestedPromptCancellation(ctx, task, attempt, fence); err != nil || cancelled {
+			return err
+		}
 		const reason = "RuntimeLost"
 		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
 		recoveredAt := time.Now().UTC()
@@ -850,6 +853,34 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 	default:
 		return fmt.Errorf("unsupported stale prompt attempt state %s", attempt.ExecutionState)
 	}
+}
+
+// recoverRequestedPromptCancellation settles an in-flight prompt whose Task
+// had its cancellation requested before controller leadership changed. The
+// prompt is not replayed, as for any lost prompt, but it ends Cancelled with
+// the request's message instead of OutcomeUnknown, so the request is not
+// lost. A submission whose acceptance is already unknown cannot be cancelled
+// and keeps the OutcomeUnknown settlement.
+func (d *ACPDispatcher) recoverRequestedPromptCancellation(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
+) (bool, error) {
+	if attempt.ExecutionState == store.PromptExecutionSubmittedUnknown || d.requestedCancellationMessage(ctx, task) == "" {
+		return false, nil
+	}
+	const diagnostic = "cancellation was requested before controller leadership changed; the prompt was not replayed"
+	if err := d.closeRecoveredPromptJournal(ctx, task, time.Now().UTC(), diagnostic); err != nil {
+		return true, err
+	}
+	session, err := d.recoveredTaskSession(ctx, task, attempt)
+	if err != nil {
+		return true, err
+	}
+	return true, d.finishNonSuccessWithCancellationReason(
+		ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: harnessv2.EventCancelled}, "",
+	)
 }
 
 // recoverArchivedTerminalSession recognizes completed Session deletion without
