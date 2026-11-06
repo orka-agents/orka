@@ -102,6 +102,11 @@ func TestAgentIdentityUseRecordsCarryOnlyAClassifiedReason(t *testing.T) {
 			source: &fakeAgentIdentitySource{token: "t"}, request: func(r *ResolveRequest) { r.MCPBacked = true },
 			reason: agentIdentityRefusalBinding, leaks: []string{"MCP"},
 		},
+		"Task created before the identity grant": {
+			source:  &fakeAgentIdentitySource{token: "t"},
+			request: func(r *ResolveRequest) { r.AgentIdentity.TaskCreated = testClaimGrantedAt.Add(-time.Minute) },
+			reason:  agentIdentityRefusalBinding,
+		},
 		"canceled": {
 			source: &fakeAgentIdentitySource{err: context.Canceled},
 			reason: agentIdentityRefusalCanceled,
