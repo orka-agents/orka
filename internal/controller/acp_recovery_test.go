@@ -3744,7 +3744,7 @@ func TestRetireRecoveredRuntimeSessionBindingKeepsSessionBoundReadBindings(t *te
 			if tc.liveIncomplete {
 				d.setRuntimeSessionBinding(ACPRuntimeSessionBinding{SessionUID: sessionUID})
 			}
-			d.retireRecoveredRuntimeSessionBinding(tc.task, tc.attempt, tc.binding)
+			d.retireRecoveredRuntimeSessionBinding(context.Background(), tc.task, tc.attempt, tc.binding)
 			if got := d.currentRuntimeSessionBinding(sessionUID) != nil; got != tc.keep {
 				t.Fatalf("binding retained = %v, want %v", got, tc.keep)
 			}

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,10 +17,13 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func TestTurnRequestedParkMatchesOnlyTheSettlingTurn(t *testing.T) {
@@ -174,5 +178,43 @@ func TestParkedRuntimeReleaseKeepsASuccessorsBinding(t *testing.T) {
 	d.releaseParkedRuntimeSession(context.Background(), runtimeClient, "runtime-session-parked-g2", parked, fence, "session-parked")
 	if got := d.currentRuntimeSessionBinding("session-parked"); got != nil {
 		t.Fatalf("the retired RuntimeSession's own binding must be forgotten, got %+v", got)
+	}
+}
+
+func TestTurnRequestedParkFailsClosedOnALookupError(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "default", UID: "uid-t"},
+		Status:     corev1alpha1.TaskStatus{Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-uid-t-1"}},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).
+		WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return errors.New("apiserver unavailable")
+		}}).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	if !d.turnRequestedPark(context.Background(), task) {
+		t.Fatal("a turn whose park cannot be ruled out must release its runtime")
+	}
+}
+
+func TestRecoveredParkedTurnNeverKeepsAReusableRuntimeBinding(t *testing.T) {
+	const sessionUID = "acp-session-parked-recovery"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parked", Namespace: "default", UID: "uid-parked"},
+		Spec:       corev1alpha1.TaskSpec{SessionRef: &corev1alpha1.SessionReference{Name: "durable", Append: true}},
+		Status: corev1alpha1.TaskStatus{
+			Execution: &corev1alpha1.TaskExecutionStatus{Attempt: 1, PromptID: "prompt-uid-parked-1"},
+			Wait: &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateWaiting, Kind: corev1alpha1.TaskWaitKindTimer, Attempt: 1, PromptID: "prompt-uid-parked-1",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	binding := ACPRuntimeSessionBinding{SessionUID: sessionUID, Generation: 1}
+	d.setRuntimeSessionBinding(binding)
+	attempt := &store.PromptAttempt{ExecutionState: store.PromptExecutionSucceeded, DeliveryState: store.PromptDeliveryNotRequested}
+	d.retireRecoveredRuntimeSessionBinding(context.Background(), task, attempt, binding)
+	if d.currentRuntimeSessionBinding(sessionUID) != nil {
+		t.Fatal("recovery must not keep the live runtime of a turn that parked; its continuation starts from the transcript")
 	}
 }

@@ -20,7 +20,10 @@ import (
 
 // turnRequestedPark reports whether the settling turn recorded a wait for
 // itself. It reads the authoritative Task: the wait was written by the
-// brokered park_until call during this exact attempt and prompt.
+// brokered park_until call during this exact attempt and prompt. A failed
+// read counts as parked, so the turn's runtime is released and its process
+// memory can never be reused by a continuation; an unneeded release costs
+// only a recreated RuntimeSession.
 func (d *ACPDispatcher) turnRequestedPark(ctx context.Context, task *corev1alpha1.Task) bool {
 	if task == nil || task.Status.Execution == nil {
 		return false
@@ -33,12 +36,16 @@ func (d *ACPDispatcher) turnRequestedPark(ctx context.Context, task *corev1alpha
 		return false
 	}
 	latest := &corev1alpha1.Task{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil || latest.UID != task.UID {
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		logf.FromContext(ctx).Info("Could not confirm whether the turn parked; releasing its runtime",
+			"namespace", task.Namespace, "task", task.Name, "reason", err.Error())
+		return true
+	}
+	if latest.UID != task.UID {
 		return false
 	}
 	wait := latest.Status.Wait
-	return wait != nil && wait.State == corev1alpha1.TaskWaitStateRequested &&
-		wait.Attempt == task.Status.Execution.Attempt && wait.PromptID == task.Status.Execution.PromptID
+	return wait != nil && wait.Attempt == task.Status.Execution.Attempt && wait.PromptID == task.Status.Execution.PromptID
 }
 
 // acpParkedRuntimeRelease is the exact RuntimeSession of a parked turn whose
