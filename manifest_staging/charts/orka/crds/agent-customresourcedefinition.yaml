@@ -1696,8 +1696,9 @@ spec:
                     description: |-
                       GrantedAt is when the controller granted the claim, while Agent use
                       authorization was enforced. A Task binds the identity only if it was
-                      created at or after this time, so its creation was checked for Agent
-                      use while the Agent named the identity.
+                      created strictly after this time (both have one-second precision), so
+                      its creation was checked for Agent use while the Agent named the
+                      identity.
                     format: date-time
                     type: string
                   id:

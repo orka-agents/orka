@@ -250,8 +250,9 @@ records it in `status.identityClaim`, and any other Agent naming it is not Ready
 An Agent that stops naming an identity keeps the claim until every Task bound to
 it has finished, and a deleted Agent's identity stays taken by its bound Tasks
 until they finish. A claim records when it was granted, is granted only while
-`--agent-use-authorization-enabled` is set, and binds only Tasks created at or
-after that time; create Tasks once the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
+`--agent-use-authorization-enabled` is set, and binds only Tasks created after
+that second (a scheduled run also needs its scheduled Task created after it);
+create Tasks once the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
 `config/agent-use-policy` policies installed (the Helm value does both; the
 controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
