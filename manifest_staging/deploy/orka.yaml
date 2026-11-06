@@ -2684,8 +2684,7 @@ spec:
         - --gateway-delivery-max-attempts=10
         - --substrate-mcp-tools-enabled=false
         - --substrate-api-endpoint=api.ate-system.svc:443
-        - --substrate-router-url=http://atenet-router.ate-system.svc
-        - --substrate-actor-dns-suffix=actors.resources.substrate.ate.dev
+        - --substrate-router-url=https://atenet-router.ate-system.svc:443
         - --substrate-claim-timeout=2m
         - --substrate-command-timeout=30m
         - --substrate-cleanup-policy=delete

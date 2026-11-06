@@ -12,44 +12,33 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/validation"
-
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
-	EnvSubstrateAPIEndpoint               = "ORKA_SUBSTRATE_API_ENDPOINT"
-	EnvSubstrateAPICAFile                 = "ORKA_SUBSTRATE_API_CA_FILE"
-	EnvSubstrateAPICertFile               = "ORKA_SUBSTRATE_API_CERT_FILE"
-	EnvSubstrateAPIKeyFile                = "ORKA_SUBSTRATE_API_KEY_FILE"
-	EnvSubstrateAPIBearerTokenFile        = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
-	EnvSubstrateAPIInsecureSkipVerify     = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
-	EnvSubstrateRouterURL                 = "ORKA_SUBSTRATE_ROUTER_URL"
-	EnvSubstrateActorDNSSuffix            = "ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX"
-	EnvSubstrateDefaultTemplate           = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
-	EnvSubstrateDefaultTemplateNS         = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE"
-	EnvSubstrateBootstrapSecretName       = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME"
-	EnvSubstrateBootstrapSecretKey        = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY"
-	EnvSubstrateSessionIdentitySecretName = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_NAME"
-	EnvSubstrateSessionIdentitySecretKey  = "ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_KEY"
-	EnvSubstrateSessionIdentityRequired   = "ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED"
-	EnvSubstrateSessionIdentityAudience   = "ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE"
-	EnvSubstrateSessionIdentityAppID      = "ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID"
-	EnvSubstrateSessionIdentityUserID     = "ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID"
-	EnvSubstrateClaimTimeout              = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
-	EnvSubstrateCommandTimeout            = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
-	EnvSubstrateCleanupPolicy             = "ORKA_SUBSTRATE_CLEANUP_POLICY"
+	EnvSubstrateAPIEndpoint           = "ORKA_SUBSTRATE_API_ENDPOINT"
+	EnvSubstrateAPICAFile             = "ORKA_SUBSTRATE_API_CA_FILE"
+	EnvSubstrateAPICertFile           = "ORKA_SUBSTRATE_API_CERT_FILE"
+	EnvSubstrateAPIKeyFile            = "ORKA_SUBSTRATE_API_KEY_FILE"
+	EnvSubstrateAPIBearerTokenFile    = "ORKA_SUBSTRATE_API_BEARER_TOKEN_FILE"
+	EnvSubstrateAPIInsecureSkipVerify = "ORKA_SUBSTRATE_API_INSECURE_SKIP_VERIFY"
+	EnvSubstrateRouterURL             = "ORKA_SUBSTRATE_ROUTER_URL"
+	EnvSubstrateDefaultTemplate       = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE"
+	EnvSubstrateDefaultTemplateNS     = "ORKA_SUBSTRATE_DEFAULT_TEMPLATE_NAMESPACE"
+	EnvSubstrateBootstrapSecretName   = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_NAME"
+	EnvSubstrateBootstrapSecretKey    = "ORKA_SUBSTRATE_BOOTSTRAP_TOKEN_SECRET_KEY"
+	EnvSubstrateClaimTimeout          = "ORKA_SUBSTRATE_CLAIM_TIMEOUT"
+	EnvSubstrateCommandTimeout        = "ORKA_SUBSTRATE_COMMAND_TIMEOUT"
+	EnvSubstrateCleanupPolicy         = "ORKA_SUBSTRATE_CLEANUP_POLICY"
 )
 
 const (
-	defaultSubstrateAPIEndpoint        = "api.ate-system.svc:443"
-	defaultSubstrateRouterURL          = "http://atenet-router.ate-system.svc"
-	defaultSubstrateActorDNSSuffix     = "actors.resources.substrate.ate.dev"
-	defaultSubstrateBootstrapKey       = "token"
-	defaultSubstrateSessionIdentityKey = "token"
-	defaultSubstrateClaimTimeout       = 2 * time.Minute
-	defaultSubstrateCommandTimeout     = 30 * time.Minute
+	defaultSubstrateAPIEndpoint    = "api.ate-system.svc:443"
+	defaultSubstrateRouterURL      = "https://atenet-router.ate-system.svc:443"
+	defaultSubstrateBootstrapKey   = "token"
+	defaultSubstrateClaimTimeout   = 2 * time.Minute
+	defaultSubstrateCommandTimeout = 30 * time.Minute
 )
 
 // SubstrateConfig holds disabled-by-default alpha configuration for the
@@ -61,23 +50,16 @@ type SubstrateConfig struct {
 	APIKeyFile         string
 	APIBearerTokenFile string
 	// Atespace is selected from the immutable workspace binding by the controller.
-	Atespace                  string
-	APIInsecureSkipVerify     bool
-	RouterURL                 string
-	ActorDNSSuffix            string
-	DefaultTemplate           string
-	DefaultTemplateNS         string
-	BootstrapSecretName       string
-	BootstrapSecretKey        string
-	SessionIdentitySecretName string
-	SessionIdentitySecretKey  string
-	SessionIdentityRequired   bool
-	SessionIdentityAudience   string
-	SessionIdentityAppID      string
-	SessionIdentityUserID     string
-	ClaimTimeout              time.Duration
-	CommandTimeout            time.Duration
-	CleanupPolicy             corev1alpha1.WorkspaceCleanupPolicy
+	Atespace              string
+	APIInsecureSkipVerify bool
+	RouterURL             string
+	DefaultTemplate       string
+	DefaultTemplateNS     string
+	BootstrapSecretName   string
+	BootstrapSecretKey    string
+	ClaimTimeout          time.Duration
+	CommandTimeout        time.Duration
+	CleanupPolicy         corev1alpha1.WorkspaceCleanupPolicy
 }
 
 // DefaultSubstrateConfig returns safe alpha defaults. Substrate is still
@@ -86,11 +68,22 @@ func DefaultSubstrateConfig() SubstrateConfig {
 	return SubstrateConfig{
 		APIEndpoint:    defaultSubstrateAPIEndpoint,
 		RouterURL:      defaultSubstrateRouterURL,
-		ActorDNSSuffix: defaultSubstrateActorDNSSuffix,
 		ClaimTimeout:   defaultSubstrateClaimTimeout,
 		CommandTimeout: defaultSubstrateCommandTimeout,
 		CleanupPolicy:  corev1alpha1.WorkspaceCleanupPolicyDelete,
 	}
+}
+
+// removedSubstrateEnv names settings from the Substrate v0.1.0 integration.
+// Setting any of them fails startup instead of silently changing behavior.
+var removedSubstrateEnv = []string{
+	"ORKA_SUBSTRATE_ACTOR_DNS_SUFFIX",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_NAME",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_TOKEN_SECRET_KEY",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_REQUIRED",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_AUDIENCE",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_APP_ID",
+	"ORKA_SUBSTRATE_SESSION_IDENTITY_USER_ID",
 }
 
 // SubstrateConfigFromEnv loads Substrate config defaults from process env.
@@ -119,9 +112,6 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateRouterURL)); value != "" {
 		cfg.RouterURL = value
 	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateActorDNSSuffix)); value != "" {
-		cfg.ActorDNSSuffix = value
-	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateDefaultTemplate)); value != "" {
 		cfg.DefaultTemplate = value
 	}
@@ -134,23 +124,10 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	if value := strings.TrimSpace(getenv(EnvSubstrateBootstrapSecretKey)); value != "" {
 		cfg.BootstrapSecretKey = value
 	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentitySecretName)); value != "" {
-		cfg.SessionIdentitySecretName = value
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentitySecretKey)); value != "" {
-		cfg.SessionIdentitySecretKey = value
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityRequired)); value != "" {
-		cfg.SessionIdentityRequired = strings.EqualFold(value, "true")
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAudience)); value != "" {
-		cfg.SessionIdentityAudience = value
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityAppID)); value != "" {
-		cfg.SessionIdentityAppID = value
-	}
-	if value := strings.TrimSpace(getenv(EnvSubstrateSessionIdentityUserID)); value != "" {
-		cfg.SessionIdentityUserID = value
+	for _, name := range removedSubstrateEnv {
+		if strings.TrimSpace(getenv(name)) != "" {
+			return cfg, fmt.Errorf("%s is no longer supported: Substrate v1 routes Actors by the ate-target-actor header and Orka issues per-Actor credentials itself", name)
+		}
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateClaimTimeout)); value != "" {
 		duration, err := time.ParseDuration(value)
@@ -181,9 +158,6 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	if strings.TrimSpace(c.RouterURL) == "" {
 		c.RouterURL = defaultSubstrateRouterURL
 	}
-	if strings.TrimSpace(c.ActorDNSSuffix) == "" {
-		c.ActorDNSSuffix = defaultSubstrateActorDNSSuffix
-	}
 	if c.ClaimTimeout == 0 {
 		c.ClaimTimeout = defaultSubstrateClaimTimeout
 	}
@@ -195,9 +169,6 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	}
 	if strings.TrimSpace(c.BootstrapSecretName) != "" && strings.TrimSpace(c.BootstrapSecretKey) == "" {
 		c.BootstrapSecretKey = defaultSubstrateBootstrapKey
-	}
-	if strings.TrimSpace(c.SessionIdentitySecretName) != "" && strings.TrimSpace(c.SessionIdentitySecretKey) == "" {
-		c.SessionIdentitySecretKey = defaultSubstrateSessionIdentityKey
 	}
 	return c
 }
@@ -220,38 +191,33 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 	if (cfg.APICertFile != "") == (cfg.APIBearerTokenFile != "") {
 		return fmt.Errorf("substrate control authentication requires either a client certificate/key pair or --substrate-api-bearer-token-file")
 	}
+	// The router serves only mTLS from SPIFFE IDs on its ingress allowlist,
+	// so Actor traffic always needs the pod-certificate identity.
+	if cfg.APICertFile == "" {
+		return fmt.Errorf("substrate router access requires the pod-certificate identity in --substrate-api-cert-file and --substrate-api-key-file")
+	}
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return fmt.Errorf("substrate router URL is required")
-	}
-	if strings.TrimSpace(cfg.ActorDNSSuffix) == "" {
-		return fmt.Errorf("substrate actor DNS suffix is required")
 	}
 	if cfg.ClaimTimeout <= 0 {
 		return fmt.Errorf("substrate claim timeout must be greater than zero")
 	}
-	return validateSubstrateRouting(cfg.RouterURL, cfg.ActorDNSSuffix)
+	return validateSubstrateRouting(cfg.RouterURL)
 }
 
-// validateSubstrateRouting checks the router URL and actor DNS suffix that MCP
-// actor requests are routed with.
-func validateSubstrateRouting(routerURL, actorDNSSuffix string) error {
+// validateSubstrateRouting checks the router URL that MCP actor requests are
+// sent to. Upstream v1 serves Actor traffic only over mTLS.
+func validateSubstrateRouting(routerURL string) error {
 	trimmed := strings.TrimSpace(routerURL)
 	parsed, err := url.Parse(trimmed)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != urlSchemeHTTP && parsed.Scheme != urlSchemeHTTPS) {
-		return fmt.Errorf("substrate router URL is invalid")
+	if err != nil || parsed.Host == "" || parsed.Scheme != urlSchemeHTTPS {
+		return fmt.Errorf("substrate router URL must be an https URL")
 	}
 	// Tool.status.endpoint republishes the router URL to Tool readers, and the
 	// MCP path is appended to it as text.
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" ||
 		strings.Contains(trimmed, "#") {
 		return fmt.Errorf("substrate router URL must not contain credentials, a query, or a fragment")
-	}
-	suffix := strings.ToLower(strings.Trim(strings.TrimSpace(actorDNSSuffix), "."))
-	if suffix == "" {
-		return fmt.Errorf("substrate actor DNS suffix is required")
-	}
-	if problems := validation.IsDNS1123Subdomain(suffix); len(problems) > 0 {
-		return fmt.Errorf("substrate actor DNS suffix is invalid: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }
@@ -267,9 +233,6 @@ func (c SubstrateConfig) Validate() error {
 	}
 	if strings.TrimSpace(cfg.BootstrapSecretKey) == "" {
 		return fmt.Errorf("substrate workspace bootstrap token secret key is required")
-	}
-	if cfg.SessionIdentityRequired && strings.TrimSpace(cfg.SessionIdentitySecretName) == "" {
-		return fmt.Errorf("substrate SessionIdentity requires --substrate-session-identity-token-secret-name")
 	}
 	if cfg.CommandTimeout <= 0 {
 		return fmt.Errorf("substrate command timeout must be greater than zero")
@@ -292,6 +255,6 @@ func (c SubstrateConfig) WorkspaceClientConfig() workspace.SubstrateConfig {
 		APIEndpoint: c.APIEndpoint, APICAFile: c.APICAFile,
 		APICertFile: c.APICertFile, APIKeyFile: c.APIKeyFile,
 		APIBearerTokenFile: c.APIBearerTokenFile, APIInsecureSkipVerify: c.APIInsecureSkipVerify,
-		Atespace: c.Atespace, RouterURL: c.RouterURL, ActorDNSSuffix: c.ActorDNSSuffix,
+		Atespace: c.Atespace, RouterURL: c.RouterURL,
 	}
 }

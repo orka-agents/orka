@@ -92,8 +92,7 @@ func TestValidateDisabledSubstrateRecoveryConfig(t *testing.T) {
 		APIInsecureSkipVerify: true,
 		APICertFile:           "/run/substrate-client/credential-bundle.pem",
 		APIKeyFile:            "/run/substrate-client/credential-bundle.pem",
-		RouterURL:             "http://atenet-router.ate-system.svc",
-		ActorDNSSuffix:        "actors.resources.substrate.ate.dev",
+		RouterURL:             "https://atenet-router.ate-system.svc:443",
 	}
 	invalidConfig := validConfig
 	invalidConfig.APIInsecureSkipVerify = false

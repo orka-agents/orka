@@ -117,6 +117,10 @@ type RegistryACPMCPToolExecutor struct {
 	OutboundAccess      outboundaccess.Resolver
 	TransactionExchange *workerexecutor.TransactionExchangeConfig
 	ContextFactory      func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	// SubstrateMCPRouter reaches Substrate MCP actors in-process with the
+	// manager's router identity, the same path the Orka API MCP proxy uses.
+	// Nil makes brokered Substrate MCP Tools fail closed.
+	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
 
 	// EnforceTransactionCredentialAuth mirrors the controller-wide context-token
 	// authorization enforcement mode. Custom-Tool executions always bind the
@@ -497,6 +501,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 			return nil, fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
+		executor.SetSubstrateMCPRouter(e.SubstrateMCPRouter)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
@@ -652,6 +657,9 @@ type ACPMCPBrokerDependencies struct {
 	OutboundAccess          outboundaccess.Resolver
 	TransactionExchange     *workerexecutor.TransactionExchangeConfig
 	ContextFactory          func(context.Context, harnessv2.MCPBrokerCallRequest) (*tools.ToolContext, error)
+	// SubstrateMCPRouter is the manager's in-process router client for
+	// Substrate MCP actor Tools; see RegistryACPMCPToolExecutor.
+	SubstrateMCPRouter *workerexecutor.SubstrateMCPRouter
 	// Connections resolves linked-account credentials for catalog
 	// built-in tools; see RegistryACPMCPToolExecutor.Connections.
 	Connections outboundaccess.ConnectionCredentialSource
@@ -686,6 +694,7 @@ func NewProductionACPMCPBroker(dependencies ACPMCPBrokerDependencies) (*ACPMCPBr
 			Registry:                dependencies.Registry, Reader: dependencies.Reader, KubeClient: dependencies.KubeClient,
 			HTTPClient: dependencies.HTTPClient, OutboundAccess: dependencies.OutboundAccess,
 			TransactionExchange: dependencies.TransactionExchange, ContextFactory: dependencies.ContextFactory,
+			SubstrateMCPRouter:               dependencies.SubstrateMCPRouter,
 			Connections:                      dependencies.Connections,
 			ConnectorReadScopes:              append([]string(nil), dependencies.ConnectorReadScopes...),
 			EnforceTransactionCredentialAuth: dependencies.EnforceTransactionCredentialAuth,

@@ -10,7 +10,7 @@ import (
 
 // Native template references are an explicit operator selection. Upstream
 // templates have no Kubernetes labels, annotations or Ready condition. The
-// Actor's native readiness probe gates the subsequent ResumeActor call.
+// Actor's native wakeup probe gates router ingress after each ResumeActor.
 func validateNativeSubstrateRoutableTemplate(ctx context.Context, cfg SubstrateConfig, request *ExecutionWorkspaceRequest) error {
 	cfg = cfg.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, cfg.ClaimTimeout)
@@ -38,9 +38,9 @@ func validateNativeSubstrateRoute(template *ateapipb.ActorTemplate) error {
 		return fmt.Errorf("native Substrate template has no immutable identity")
 	}
 	for _, container := range template.GetContainers() {
-		if container.GetReadyz().GetHttpGet().GetPort() == substrateActorListenPort {
+		if container.GetWakeupProbe().GetHttpGet().GetPort() == substrateActorListenPort {
 			return nil
 		}
 	}
-	return fmt.Errorf("substrate MCP template must probe its routable HTTP endpoint on port %d", substrateActorListenPort)
+	return fmt.Errorf("substrate MCP template must set a wakeup probe on its routable HTTP endpoint port %d", substrateActorListenPort)
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/workspace/daemonprotocol"
 )
 
 func isSubstrateHandoffUpload(path string) bool {
@@ -29,7 +30,7 @@ func (e *SubstrateWorkspaceExecutor) seedNativeWorkspaceCredential(ctx context.C
 	if actor == nil || actor.ActorUID == "" || actor.Status != substrateStatusRunning {
 		return fmt.Errorf("native bootstrap requires an exact running Actor")
 	}
-	if (e.sessionIdentity != nil || e.sessionIdentityToken != "") && e.cacheSessionIdentityHandoff(actorID, actor, "") != token {
+	if e.cacheActorHandoff(actorID, actor, "") != token {
 		return fmt.Errorf("native workspace credential belongs to another Actor or Pod lifetime")
 	}
 	payload, err := json.Marshal(harnessv2.WorkspaceBootstrapRequest{HandoffToken: token})
@@ -102,7 +103,8 @@ func (e *SubstrateWorkspaceExecutor) nativeWorkspaceBootstrapRequest(
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid native bootstrap route")
 	}
-	get.Host = SubstrateActorKey(ref.Atespace, ref.Name) + "." + e.actorDNSSuffix
+	target := ref.Atespace + "/" + ref.Name
+	get.Header.Set(daemonprotocol.TargetActorHeader, target)
 	client := *e.httpClient
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(get)
@@ -137,7 +139,7 @@ func (e *SubstrateWorkspaceExecutor) nativeWorkspaceBootstrapRequest(
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid native bootstrap route")
 	}
-	request.Host = get.Host
+	request.Header.Set(daemonprotocol.TargetActorHeader, target)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(harnessv2.CredentialBootstrapNonceHeader, nonce)
 	request.Header.Set(harnessv2.CredentialBootstrapSignatureHeader, signature)

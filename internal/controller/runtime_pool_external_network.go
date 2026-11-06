@@ -248,13 +248,26 @@ func (r *RuntimePoolReconciler) deleteExternalCoreNetworkPolicies(ctx context.Co
 		if err := workspaceprovider.ValidateWorkspaceWorkload(w); err != nil || w.Spec.Workload.Runtime == nil || w.Spec.Workload.Runtime.Template.Namespace == "" {
 			return false, workspaceprovider.ErrStaleIdentity
 		}
-		var err error
-		frozenTargets, err = externalFrozenIngressTargets(pool, w.Spec.Workload.Runtime)
-		if err != nil {
-			return false, err
-		}
 		cfg.namespace = w.Spec.Workload.Runtime.Template.Namespace
-		cfg.providerProxy.namespace, cfg.providerProxy.podLabels, cfg.providerProxy.port = frozenTargets[0].Namespace, frozenTargets[0].Selector, frozenTargets[0].Port
+		// A gateway-enforced (egress allowlist) request never froze Pod peers,
+		// and Core grants its routed process no worker ingress. Its pool
+		// policies select no runtime Pod and were written from the current
+		// provider-proxy configuration. Only the NetworkPolicy shape carries
+		// frozen endpoint targets.
+		if runtime := w.Spec.Workload.Runtime; runtime.Egress != nil && runtime.NetworkPolicy == nil {
+			proxy, err := r.ProviderProxy.normalized()
+			if err != nil {
+				return false, err
+			}
+			cfg.providerProxy = proxy
+		} else {
+			var err error
+			frozenTargets, err = externalFrozenIngressTargets(pool, runtime)
+			if err != nil {
+				return false, err
+			}
+			cfg.providerProxy.namespace, cfg.providerProxy.podLabels, cfg.providerProxy.port = frozenTargets[0].Namespace, frozenTargets[0].Selector, frozenTargets[0].Port
+		}
 	}
 	policyReconciler := &RuntimePoolReconciler{ControllerNamespace: r.ControllerNamespace, ControllerAPIPort: r.ControllerAPIPort}
 	if len(frozenTargets) == 2 {

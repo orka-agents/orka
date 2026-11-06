@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MCP tool conformance against the unmodified official Substrate pin.
+# MCP tool conformance against the unmodified official Substrate v1 pin.
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KIND_CLUSTER="${KIND_CLUSTER:-orka-agent-substrate-e2e}"
@@ -112,8 +112,8 @@ mount_substrate_identity() {
   local resource="$1" name="$2" container="$3"
   kubectl -n orka-system patch "${resource}" "${name}" --type=strategic -p "$(jq -cn --arg container "${container}" '{spec:{template:{spec:{securityContext:{fsGroup:65532},containers:[{name:$container,volumeMounts:[{name:"substrate-client",mountPath:"/run/substrate-client",readOnly:true},{name:"substrate-server",mountPath:"/run/substrate-server",readOnly:true}]}],volumes:[{name:"substrate-client",projected:{sources:[{podCertificate:{signerName:"podidentity.podcert.ate.dev/identity",keyType:"ECDSAP256",credentialBundlePath:"credential-bundle.pem"}}]}},{name:"substrate-server",projected:{sources:[{clusterTrustBundle:{signerName:"servicedns.podcert.ate.dev/identity",labelSelector:{matchLabels:{"podcert.ate.dev/canarying":"live"}},path:"trust-bundle.pem"}}]}}]}}}}')"
 }
-publish_ateom_image() {
-  (cd "${SUBSTRATE_DIR}" && KO_DOCKER_REPO="localhost:${KIND_REGISTRY_PORT}" ko build --platform="linux/$(go env GOARCH)" ./cmd/ateom-gvisor)
+publish_worker_image() {
+  (cd "${SUBSTRATE_DIR}" && KO_DOCKER_REPO="localhost:${KIND_REGISTRY_PORT}" ko build --platform="linux/$(go env GOARCH)" ./cmd/ateworker-gvisor)
 }
 build_image() {
   local name="$1" dockerfile="$2" ref
@@ -122,26 +122,47 @@ build_image() {
   docker push "${ref}" >&2
   docker inspect --format '{{index .RepoDigests 0}}' "${ref}"
 }
+# One template-sized Actor: worker Pod limits leave room for exactly one
+# (gVisor reserves 64Mi of the worker's memory limit).
+NATIVE_ACTOR_CPU_MILLICORES=1000
+NATIVE_ACTOR_MEMORY_BYTES=1073741824
 native_template_manifest() {
   local name="$1" image="$2"
-  jq -n --arg name "${name}" --arg image "${image}" '
+  jq -n --arg name "${name}" --arg image "${image}" \
+    --argjson cpu "${NATIVE_ACTOR_CPU_MILLICORES}" --arg memory "${NATIVE_ACTOR_MEMORY_BYTES}" '
     {metadata:{atespace:"orka-system",name:$name},workerSelector:{matchLabels:{"orka.ai/native-pool":"conformance"}},
      containers:[{name:"server",image:$image,
        env:[{name:"ORKA_WORKSPACE_AGENT_LISTEN_ADDR",value:":80"}],
-       readyz:{httpGet:{path:"/healthz",port:80}},
+       wakeupProbe:{httpGet:{path:"/healthz",port:80}},
        securityContext:{capabilities:{drop:["ALL"],add:["NET_BIND_SERVICE","SETUID","SETGID","CHOWN","KILL"]}}}],
-     resources:{limits:[{name:"cpu",quantity:"1"},{name:"memory",quantity:"1Gi"}]},
-     snapshotsConfig:{storageLocation:"s3://ate-snapshots/orka-conformance/",onPause:"SNAPSHOT_CONTENT_SCOPE_DATA",onCommit:"SNAPSHOT_CONTENT_SCOPE_DATA",onResume:{fromData:"RESUME_SOURCE_COLD_BOOT"}},
-     sandboxConfig:{sandboxClass:"SANDBOX_CLASS_GVISOR",configName:"gvisor-default"}}
+     resources:{limits:{cpuMillicores:$cpu,memoryBytes:$memory}},
+     snapshotConfig:{preferredFidelity:"SNAPSHOT_FIDELITY_VOLUMES",goldenSnapshotConfig:{mode:"GOLDEN_SNAPSHOT_MODE_DISABLED"}}}
   '
+}
+# Orka's controller authenticates with its pod certificate. Grant it editor on
+# its Atespace and global viewer for worker placement reads; it is never a
+# bootstrap owner.
+grant_orka_native_access() {
+  local principal="user:spiffe://cluster.local/ns/${ORKA_NAMESPACE}/sa/orka-controller-manager"
+  jq -n --arg principal "${principal}" '{metadata:{name:"default"},bindings:[{role:"editor",members:[$principal]}]}' \
+    >"${TMP_ROOT}/orka-atespace-policy.json"
+  jq -n --arg principal "${principal}" '{metadata:{name:"default"},bindings:[{role:"viewer",members:[$principal]}]}' \
+    >"${TMP_ROOT}/orka-global-policy.json"
+  kubectl_ate get access-policy -a orka-system >/dev/null 2>&1 ||
+    kubectl_ate create access-policy -a orka-system -f "${TMP_ROOT}/orka-atespace-policy.json"
+  kubectl_ate get access-policy --global >/dev/null 2>&1 ||
+    kubectl_ate create access-policy --global -f "${TMP_ROOT}/orka-global-policy.json"
 }
 create_native_resources() {
   local worker_image="$1" mcp_image="$2"
   kubectl create namespace ate-demo --dry-run=client -o yaml | kubectl apply -f -
   bash "${ROOT_DIR}/scripts/lib/ensure-static-mode-namespace.sh" kubectl "${ORKA_NAMESPACE}" harness-v2
+  # Substrate's system NetworkPolicy admits API clients only from labeled namespaces.
+  kubectl label namespace "${ORKA_NAMESPACE}" ate.dev/api-access=true --overwrite
   kubectl_ate get atespace orka-system >/dev/null 2>&1 || kubectl_ate create atespace orka-system
+  grant_orka_native_access
   kubectl -n ate-demo apply -f - <<YAML
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: orka-native
@@ -149,16 +170,14 @@ metadata:
 spec:
   replicas: 3
   workerImage: ${worker_image}
+  sandboxClasses: [{name: gvisor, configRef: {name: gvisor-default}}]
   template:
     resources:
       requests: {cpu: 250m, memory: 512Mi}
-      limits: {cpu: "2", memory: 2Gi}
+      limits: {cpu: "1", memory: 1088Mi}
 YAML
   native_template_manifest orka-mcp "${mcp_image}" >"${TMP_ROOT}/orka-mcp.json"
   kubectl_ate create actor-template -f "${TMP_ROOT}/orka-mcp.json"
-  kubectl -n ate-system patch deployment atenet-router --type=json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--route-timeout=30m"}]'
-  kubectl -n ate-system patch deployment atenet-router --type=strategic -p '{"spec":{"template":{"spec":{"containers":[{"name":"envoy","command":["/usr/local/bin/envoy","-c","/etc/envoy/envoy.yaml","--component-log-level","upstream:info,router:info,ext_proc:info"]}]}}}}'
-  kubectl -n ate-system rollout status deployment/atenet-router --timeout=3m
   kubectl -n ate-demo wait --for=jsonpath='{.status.readyReplicas}'=3 workerpool/orka-native --timeout=5m
 }
 exercise_mcp() {
@@ -220,6 +239,9 @@ spec:
       - name: tool-client
         image: ${image}
         env:
+        # Substrate MCP Tools are reached only through the authenticated orka-api
+        # proxy; this client's ServiceAccount never talks to the router.
+        - {name: ORKA_CONTROLLER_URL, value: http://orka-api.orka-system.svc:8080}
         - {name: ORKA_TOOL_NAMESPACE, value: orka-system}
         - {name: ORKA_TOOL_NAME, value: native-mcp}
         - {name: ORKA_TOOL_ARGS, value: '{"message":"native"}'}
@@ -252,7 +274,7 @@ main() {
   mcp="${mcp/localhost:${KIND_REGISTRY_PORT}/${registry_ip}:5000}"
   openssl rand -hex 32 >"${TMP_ROOT}/bootstrap-token"
   chmod 600 "${TMP_ROOT}/bootstrap-token"
-  worker="$(publish_ateom_image)"
+  worker="$(publish_worker_image)"
   create_native_resources "${worker}" "${mcp}"
   kubectl -n orka-system create secret generic orka-substrate-bootstrap --from-file="token=${TMP_ROOT}/bootstrap-token" --dry-run=client -o yaml | kubectl apply -f -
   deploy_orka "${controller}"

@@ -40,11 +40,15 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	workerexecutor "github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
 const (
 	toolConditionAvailable = "Available"
+	// toolConditionEgressPolicyReady reports whether a Substrate MCP actor's
+	// native egress policy was installed and verified before resume.
+	toolConditionEgressPolicyReady = "EgressPolicyReady"
 
 	// toolHealthCheckInterval is how often tools are re-checked.
 	toolHealthCheckInterval = 5 * time.Minute
@@ -93,6 +97,13 @@ type ToolReconciler struct {
 	// SubstrateExecutorFactory is injectable for tests.
 	SubstrateTemplateValidator func(context.Context, *ExecutionWorkspaceRequest) error
 	SubstrateExecutorFactory   func(SubstrateConfig) (workspace.WorkspaceExecutor, error)
+	// SubstrateEgressPolicyApplier installs and verifies an MCP actor's
+	// native egress policy. Nil uses the Substrate control API. Injectable
+	// for tests.
+	SubstrateEgressPolicyApplier func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error
+	// SubstrateRouterHTTPClient reaches MCP actors for readiness checks. Nil
+	// builds the mTLS router client from SubstrateConfig. Injectable for tests.
+	SubstrateRouterHTTPClient *http.Client
 }
 
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tools,verbs=get;list;watch;create;update;patch;delete
@@ -327,6 +338,11 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 		return nil
 	}
 	if ref := tool.Spec.HTTP.OutboundAccessPolicyRef; ref != nil {
+		if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+			// Workers reach actors only through the Orka MCP proxy, which never
+			// forwards caller-resolved outbound credentials or gateway routes.
+			return fmt.Errorf("mcp.substrateActor tools do not support outboundAccessPolicyRef; use http.authSecretRef for actor credentials and mcp.substrateActor.egress for actor egress")
+		}
 		if strings.TrimSpace(ref.Name) == "" {
 			return fmt.Errorf("outboundAccessPolicyRef.name is required")
 		}
@@ -357,12 +373,6 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)
 			}
 			targetURL := strings.TrimSpace(tool.Spec.HTTP.URL)
-			if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
-				targetURL = strings.TrimSpace(tool.Status.Endpoint)
-				if targetURL == "" {
-					return nil
-				}
-			}
 			parsed, err := url.Parse(targetURL)
 			if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 				return fmt.Errorf("direct outbound access policy %q requires an HTTPS Tool URL", ref.Name)
@@ -407,6 +417,15 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 	}
 	if actor.PoolRef != nil && strings.TrimSpace(actor.PoolRef.Name) == "" {
 		return fmt.Errorf("mcp.substrateActor.poolRef.name is required")
+	}
+	if _, err := workerexecutor.SubstrateMCPActorPath(tool); err != nil {
+		return err
+	}
+	if err := validateSubstrateMCPToolHeaders(tool); err != nil {
+		return err
+	}
+	if err := workspace.ValidateSubstrateEgressRules(substrateMCPEgressRules(tool)); err != nil {
+		return fmt.Errorf("invalid mcp.substrateActor.egress: %w", err)
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
 	if r.EnforceNamespaceIsolation && templateRequest.TemplateNamespace != tool.Namespace {
@@ -553,21 +572,17 @@ func (r *ToolReconciler) reconcileSubstrateMCPTool(ctx context.Context, tool *co
 		return result, err
 	}
 
-	path := strings.TrimSpace(tool.Spec.MCP.Path)
-	if path == "" {
-		path = "/mcp"
-	}
-	endpoint := strings.TrimRight(cfg.RouterURL, "/") + "/" + strings.TrimLeft(path, "/")
-	routeHost := actorID + "." + strings.Trim(strings.TrimSpace(cfg.ActorDNSSuffix), ".")
+	// Workers and other callers reach the actor only through the Orka API
+	// proxy; the router URL and actor target never leave the manager.
+	endpoint := workerexecutor.SubstrateMCPProxyPath(tool.Namespace, tool.Name)
 	templateRef := &corev1alpha1.WorkspaceTemplateReference{Name: templateRequest.TemplateName, Namespace: templateRequest.TemplateNamespace}
 	actorStatus := &corev1alpha1.ToolActorStatus{
 		Provider:    corev1alpha1.WorkspaceProviderSubstrate,
 		ActorID:     actorID,
-		RouteHost:   routeHost,
 		TemplateRef: templateRef,
 		PoolRef:     poolRef,
 	}
-	if err := r.waitForMCPActorEndpoint(ctx, endpoint, routeHost, cfg.ClaimTimeout); err != nil {
+	if err := r.waitForMCPActorEndpoint(ctx, cfg, tool, actorID, cfg.ClaimTimeout); err != nil {
 		if cleanupRef != nil && tool.Status.Actor != nil {
 			previousActor := *tool.Status.Actor
 			return r.updateStatusWithActor(ctx, tool, false, err.Error(), tool.Status.Endpoint, &previousActor)
@@ -590,6 +605,22 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	timeout time.Duration,
 ) (ctrl.Result, bool, error) {
 	bootActor := shouldBootSubstrateMCPToolActor(tool, actorID, bootRequested, claim.Created)
+	// Substrate v1 routes all actor egress through the gateway under the
+	// actor's native policy. Install and verify it before every resume; any
+	// failure leaves the actor suspended.
+	if err := r.applySubstrateMCPActorEgress(ctx, tool, actorID); err != nil {
+		message := "actor egress policy was not applied; actor not resumed: " + err.Error()
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyFailed",
+			Message: message, ObservedGeneration: tool.Generation,
+		})
+		result, updateErr := r.updateStatus(ctx, tool, false, message)
+		return result, true, updateErr
+	}
+	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+		Type: toolConditionEgressPolicyReady, Status: metav1.ConditionTrue, Reason: "EgressPolicyApplied",
+		Message: "Actor egress policy is installed and verified", ObservedGeneration: tool.Generation,
+	})
 	if _, err := executor.WaitReady(ctx, workspace.WaitReadyRequest{
 		Ref:                   claim.Ref,
 		Template:              claim.Template,
@@ -1687,23 +1718,26 @@ func sensitiveURLParameter(name string) bool {
 	}, prefix)
 }
 
-func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string) error {
-	httpClient := r.getHTTPClient()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, router *workerexecutor.SubstrateMCPRouter, tool *corev1alpha1.Tool) error {
+	req, err := router.NewRequest(ctx, tool, http.MethodHead, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create MCP endpoint check request: %w", err)
 	}
-	if routeHost != "" {
-		req.Host = routeHost
+	httpClient := *router.HTTPClient()
+	if httpClient.Timeout <= 0 {
+		httpClient.Timeout = toolHealthCheckTimeout
 	}
-
+	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("MCP endpoint unreachable: %w", err)
+		return fmt.Errorf("MCP endpoint unreachable through the Substrate router")
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
+	// An Actor protected by spec.http.authSecretRef answers this unauthenticated
+	// probe with 401/403 and is still reachable. The router may reject an
+	// unlisted client either during TLS or with a 403, so a 403 alone cannot
+	// distinguish the two; a router identity problem surfaces on Tool calls.
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
@@ -1714,8 +1748,29 @@ func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, endpoi
 	}
 }
 
-func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint string, routeHost string, timeout time.Duration) error {
-	lastErr := r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+// waitForMCPActorEndpoint polls the actor's MCP path through the router with
+// the controller's mTLS identity and the ate-target-actor header.
+func (r *ToolReconciler) waitForMCPActorEndpoint(
+	ctx context.Context, cfg SubstrateConfig, tool *corev1alpha1.Tool, actorID string, timeout time.Duration,
+) error {
+	routerClient := r.SubstrateRouterHTTPClient
+	if routerClient == nil {
+		// A fresh client reloads the rotated pod certificate; release its
+		// connections once readiness is decided.
+		built, err := workspace.NewSubstrateRouterHTTPClient(cfg.WorkspaceClientConfig())
+		if err != nil {
+			return err
+		}
+		defer built.CloseIdleConnections()
+		routerClient = built
+	}
+	router, err := workerexecutor.NewSubstrateMCPRouter(cfg.RouterURL, routerClient)
+	if err != nil {
+		return err
+	}
+	probe := tool.DeepCopy()
+	probe.Status.Actor = &corev1alpha1.ToolActorStatus{Provider: corev1alpha1.WorkspaceProviderSubstrate, ActorID: actorID}
+	lastErr := r.healthCheckMCPActorEndpoint(ctx, router, probe)
 	if lastErr == nil || timeout <= 0 {
 		return lastErr
 	}
@@ -1733,12 +1788,63 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(ctx context.Context, endpoint s
 		case <-timer.C:
 			return lastErr
 		case <-ticker.C:
-			lastErr = r.healthCheckMCPActorEndpoint(ctx, endpoint, routeHost)
+			lastErr = r.healthCheckMCPActorEndpoint(ctx, router, probe)
 			if lastErr == nil {
 				return nil
 			}
 		}
 	}
+}
+
+func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool *corev1alpha1.Tool, actorID string) error {
+	rules := substrateMCPEgressRules(tool)
+	if err := workspace.ValidateSubstrateEgressRules(rules); err != nil {
+		return err
+	}
+	apply := r.SubstrateEgressPolicyApplier
+	if apply == nil {
+		apply = applyNativeSubstrateActorEgressPolicy
+	}
+	return apply(ctx, r.SubstrateConfig.WithDefaults(), actorID, rules)
+}
+
+func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+	cfg = cfg.WithDefaults()
+	ctx, cancel := context.WithTimeout(ctx, cfg.ClaimTimeout)
+	defer cancel()
+	api, err := workspace.NewSubstrateNativeClient(cfg.WorkspaceClientConfig())
+	if err != nil {
+		return err
+	}
+	defer api.Close() //nolint:errcheck
+	return api.EnsureActorEgressPolicy(ctx, actorID, rules)
+}
+
+func substrateMCPEgressRules(tool *corev1alpha1.Tool) []workspace.SubstrateEgressRule {
+	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil
+	}
+	rules := make([]workspace.SubstrateEgressRule, 0, len(tool.Spec.MCP.SubstrateActor.Egress))
+	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
+		rules = append(rules, workspace.SubstrateEgressRule{Scheme: string(rule.Scheme), Host: rule.Host, Ports: append([]int32(nil), rule.Ports...)})
+	}
+	return rules
+}
+
+// validateSubstrateMCPToolHeaders rejects Tool headers that would override
+// router targeting, MCP session, transaction or credential headers owned by
+// the Orka MCP proxy.
+func validateSubstrateMCPToolHeaders(tool *corev1alpha1.Tool) error {
+	if tool.Spec.HTTP == nil {
+		return nil
+	}
+	for name := range tool.Spec.HTTP.Headers {
+		if workerexecutor.SubstrateMCPReservedHeader(name) ||
+			(strings.EqualFold(strings.TrimSpace(name), "Authorization") && tool.Spec.HTTP.AuthSecretRef != nil) {
+			return fmt.Errorf("mcp.substrateActor tools must not configure reserved header %q", name)
+		}
+	}
+	return nil
 }
 
 // getHTTPClient returns the HTTP client for health checks.

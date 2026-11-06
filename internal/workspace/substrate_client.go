@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,7 +14,6 @@ import (
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -48,29 +49,12 @@ type grpcSubstrateControlClient struct {
 	atespace string
 }
 
-type grpcSubstrateSessionIdentityClient struct {
-	conn     *grpc.ClientConn
-	client   ateapipb.ActorIdentityClient
-	atespace string
-}
-
 func newGRPCSubstrateControlClient(cfg SubstrateConfig) (*grpcSubstrateControlClient, error) {
 	conn, err := newSubstrateConnection(cfg, true)
 	if err != nil {
 		return nil, err
 	}
 	return &grpcSubstrateControlClient{conn: conn, client: ateapipb.NewControlClient(conn), atespace: strings.TrimSpace(cfg.Atespace)}, nil
-}
-
-func newGRPCSubstrateSessionIdentityClient(cfg SubstrateConfig) (*grpcSubstrateSessionIdentityClient, error) {
-	// ActorIdentity authenticates the worker Pod hosting this exact Actor.
-	// Never append the controller's control-plane identity to that request.
-	cfg.APICertFile, cfg.APIKeyFile, cfg.APIBearerTokenFile = "", "", ""
-	conn, err := newSubstrateConnection(cfg, false)
-	if err != nil {
-		return nil, err
-	}
-	return &grpcSubstrateSessionIdentityClient{conn: conn, client: ateapipb.NewActorIdentityClient(conn), atespace: cfg.Atespace}, nil
 }
 
 func newSubstrateConnection(cfg SubstrateConfig, controlAuth bool) (*grpc.ClientConn, error) {
@@ -112,7 +96,6 @@ func substrateRPCDeadline(ctx context.Context, method string, req, reply any, co
 	switch method {
 	case ateapipb.Control_ResumeActor_FullMethodName,
 		ateapipb.Control_SuspendActor_FullMethodName,
-		ateapipb.Control_PauseActor_FullMethodName,
 		ateapipb.Control_DeleteActor_FullMethodName,
 		ateapipb.Control_DeleteActorTemplate_FullMethodName,
 		ateapipb.Control_CreateTag_FullMethodName,
@@ -131,14 +114,35 @@ func (c *grpcSubstrateControlClient) Close() error {
 	return c.conn.Close()
 }
 
-func (c *grpcSubstrateSessionIdentityClient) Close() error {
-	if c == nil || c.conn == nil {
-		return nil
+func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCredentials, error) {
+	tlsConfig, err := substrateTLSConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
-	return c.conn.Close()
+	return credentials.NewTLS(tlsConfig), nil
 }
 
-func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCredentials, error) {
+// NewSubstrateRouterHTTPClient returns the client for Actor traffic through
+// atenet-router. Upstream v1 serves only mTLS from SPIFFE IDs on its ingress
+// allowlist, so the pod-certificate client identity is required. Proxies are
+// never used for Actor traffic.
+func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
+	router, err := url.Parse(strings.TrimSpace(cfg.RouterURL))
+	if err != nil || router.Scheme != "https" || router.Host == "" || router.User != nil {
+		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "Substrate router URL must be an https URL", false, nil)
+	}
+	if cfg.APICertFile == "" || cfg.APIKeyFile == "" {
+		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "Substrate router requires a pod-certificate client identity", false, nil)
+	}
+	tlsConfig, err := substrateTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	transport := &http.Transport{TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true, Proxy: nil}
+	return &http.Client{Transport: transport}, nil
+}
+
+func substrateTLSConfig(cfg SubstrateConfig) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if cfg.APIInsecureSkipVerify {
 		tlsConfig.InsecureSkipVerify = true //nolint:gosec // explicit local smoke-test option; authentication still required
@@ -175,7 +179,7 @@ func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCr
 		}
 		tlsConfig.GetClientCertificate = loadPair
 	}
-	return credentials.NewTLS(tlsConfig), nil
+	return tlsConfig, nil
 }
 
 type substrateBearerCredentials struct{ path string }
@@ -203,7 +207,30 @@ func (c *grpcSubstrateControlClient) GetActor(ctx context.Context, actorID strin
 	if err != nil {
 		return nil, substrateControlError("get actor", err)
 	}
-	return substrateActorFromProto(actor), nil
+	converted := substrateActorFromProto(actor)
+	if err := c.resolveBootedTemplateUID(ctx, actor, converted); err != nil {
+		return nil, err
+	}
+	return converted, nil
+}
+
+// resolveBootedTemplateUID fills the guest-state template identity of an Actor
+// that is placed on a worker but has never been snapshotted. Upstream v1 records
+// the template UID only on snapshots; such an Actor booted from the template its
+// reference names, and ActorTemplates are immutable, so the named template's
+// current UID is its guest-state identity. A template recreated under the same
+// name has a new UID and fails the caller's identity comparison.
+func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Context, actor *ateapipb.Actor, converted *substrateActor) error {
+	if converted == nil || converted.TemplateUID != "" || len(actor.GetStatus().GetSnapshots()) != 0 ||
+		actor.GetStatus().GetWorkerAssignment() == nil || actor.GetActorTemplate().GetName() == "" {
+		return nil
+	}
+	template, err := c.client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: actor.GetActorTemplate()})
+	if err != nil {
+		return substrateControlError("get actor template", err)
+	}
+	converted.TemplateUID = template.GetMetadata().GetUid()
+	return nil
 }
 
 func (c *grpcSubstrateControlClient) CreateActor(ctx context.Context, actorID, templateNamespace, templateName string) (*substrateActor, error) {
@@ -221,16 +248,43 @@ func (c *grpcSubstrateControlClient) CreateActor(ctx context.Context, actorID, t
 	return substrateActorFromProto(actor), nil
 }
 
+// ResumeActor resumes an Actor. Upstream v1 removed the per-call boot flag;
+// a boot request is honored only when Substrate cannot seed the Actor from a
+// golden snapshot: the Actor has no snapshot or source Tag and its template has
+// golden snapshots disabled. Otherwise the request fails closed.
 func (c *grpcSubstrateControlClient) ResumeActor(ctx context.Context, actorID string, boot bool) (*substrateActor, error) {
 	ref, err := substrateObjectRef(actorID, c.atespace)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref, Boot: boot})
+	if boot {
+		if err := c.requireColdBoot(ctx, ref); err != nil {
+			return nil, err
+		}
+	}
+	resp, err := c.client.ResumeActor(ctx, &ateapipb.ResumeActorRequest{Actor: ref})
 	if err != nil {
 		return nil, substrateControlError("resume actor", err)
 	}
 	return substrateActorFromProto(resp.GetActor()), nil
+}
+
+func (c *grpcSubstrateControlClient) requireColdBoot(ctx context.Context, ref *ateapipb.ObjectRef) error {
+	actor, err := c.client.GetActor(ctx, &ateapipb.GetActorRequest{Actor: ref})
+	if err != nil {
+		return substrateControlError("resume actor", err)
+	}
+	if actor.GetSourceTag().GetName() != "" || len(actor.GetStatus().GetSnapshots()) != 0 {
+		return NewError("resume actor", ErrorKindFailedPrecondition, "Substrate Actor already has guest state; boot from scratch is unavailable", false, nil)
+	}
+	template, err := c.client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: actor.GetActorTemplate()})
+	if err != nil {
+		return substrateControlError("resume actor", err)
+	}
+	if template.GetSnapshotConfig().GetGoldenSnapshotConfig().GetMode() != ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED {
+		return NewError("resume actor", ErrorKindFailedPrecondition, "boot from scratch requires an ActorTemplate with golden snapshots disabled", false, nil)
+	}
+	return nil
 }
 
 func (c *grpcSubstrateControlClient) SuspendActor(ctx context.Context, actorID string) (*substrateActor, error) {
@@ -238,21 +292,26 @@ func (c *grpcSubstrateControlClient) SuspendActor(ctx context.Context, actorID s
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{Actor: ref})
+	resp, err := c.client.SuspendActor(ctx, &ateapipb.SuspendActorRequest{
+		Actor:   ref,
+		Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
+	})
 	if err != nil {
 		return nil, substrateControlError("suspend actor", err)
 	}
 	return substrateActorFromProto(resp.GetActor()), nil
 }
 
-func (c *grpcSubstrateControlClient) DeleteActor(ctx context.Context, actorID string) error {
+// DeleteActor terminates the Actor in any state without taking a snapshot.
+// A nonempty actorUID is sent as a native precondition, so a different Actor
+// recreated under the same name is never deleted. Cleanup callers prove their
+// own lifetime and ownership fences before invoking this.
+func (c *grpcSubstrateControlClient) DeleteActor(ctx context.Context, actorID, actorUID string) error {
 	ref, err := substrateObjectRef(actorID, c.atespace)
 	if err != nil {
 		return err
 	}
-	// Native AnyState terminates without taking a memory snapshot. Cleanup
-	// callers prove their own lifetime/ownership fences before invoking this.
-	_, err = c.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: ref, AnyState: true})
+	_, err = c.client.DeleteActor(ctx, &ateapipb.DeleteActorRequest{Actor: ref, Options: &ateapipb.DeleteOptions{Uid: strings.TrimSpace(actorUID)}})
 	return substrateControlError("delete actor", err)
 }
 
@@ -260,7 +319,7 @@ func (c *grpcSubstrateControlClient) ListWorkers(ctx context.Context) ([]substra
 	var workers []substrateWorker
 	pages := substratePages{}
 	for {
-		resp, err := c.client.ListWorkers(ctx, &ateapipb.ListWorkersRequest{PageSize: 1000, PageToken: pages.token})
+		resp, err := c.client.ListWorkers(ctx, &ateapipb.ListWorkersRequest{Options: pages.options()})
 		if err != nil {
 			return nil, substrateControlError("list workers", err)
 		}
@@ -280,7 +339,7 @@ func (c *grpcSubstrateControlClient) ListActors(ctx context.Context) ([]substrat
 	var actors []substrateActor
 	pages := substratePages{}
 	for {
-		resp, err := c.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: c.atespace, PageSize: 1000, PageToken: pages.token})
+		resp, err := c.client.ListActors(ctx, &ateapipb.ListActorsRequest{Atespace: c.atespace, Options: pages.options()})
 		if err != nil {
 			return nil, substrateControlError("list actors", err)
 		}
@@ -318,24 +377,33 @@ func (p *substratePages) advance(token string) (bool, error) {
 	return true, nil
 }
 
-func (c *grpcSubstrateSessionIdentityClient) MintJWT(ctx context.Context, req substrateMintJWTRequest, bearerToken string) (string, error) {
-	if strings.TrimSpace(req.Atespace) == "" || strings.TrimSpace(req.ActorName) == "" || strings.TrimSpace(req.ActorUID) == "" {
-		return "", NewError("mint actor identity", ErrorKindFailedPrecondition, "ActorIdentity requires the exact Actor Atespace, name and UID", false, nil)
+func (p *substratePages) options() *ateapipb.ListOptions {
+	return &ateapipb.ListOptions{PageSize: 1000, PageToken: p.token}
+}
+
+// latestSubstrateSnapshot returns the Actor's newest snapshot generation.
+func latestSubstrateSnapshot(snapshots []*ateapipb.Snapshot) *ateapipb.Snapshot {
+	var latest *ateapipb.Snapshot
+	for _, snapshot := range snapshots {
+		if snapshot != nil && (latest == nil || snapshot.GetGeneration() > latest.GetGeneration()) {
+			latest = snapshot
+		}
 	}
-	// Replace, rather than append, so an inherited controller credential can
-	// never take precedence over the hosting worker's Pod-bound token.
-	md, _ := metadata.FromOutgoingContext(ctx)
-	md = md.Copy()
-	md.Set("authorization", "Bearer "+strings.TrimSpace(bearerToken))
-	ctx = metadata.NewOutgoingContext(ctx, md)
-	resp, err := c.client.MintJWT(ctx, &ateapipb.MintJWTRequest{
-		Audience: append([]string(nil), req.Audience...), Atespace: req.Atespace,
-		ActorName: req.ActorName, ActorUid: req.ActorUID,
-	})
-	if err != nil {
-		return "", substrateControlError("mint actor identity", err)
+	return latest
+}
+
+// substrateSnapshotScope classifies a snapshot fidelity. Only VOLUMES holds
+// data alone; ROOTFS keeps no process memory but is not data-only either, so it
+// is left unclassified and data-only checks fail closed on it.
+func substrateSnapshotScope(fidelity ateapipb.SnapshotFidelity) SubstrateSnapshotContentScope {
+	switch fidelity {
+	case ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES:
+		return SubstrateSnapshotContentScopeData
+	case ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY:
+		return SubstrateSnapshotContentScopeFull
+	default:
+		return ""
 	}
-	return resp.GetActorJwt(), nil
 }
 
 func substrateActorFromProto(actor *ateapipb.Actor) *substrateActor {
@@ -344,30 +412,40 @@ func substrateActorFromProto(actor *ateapipb.Actor) *substrateActor {
 	}
 	meta, state := actor.GetMetadata(), actor.GetStatus()
 	assignment := state.GetWorkerAssignment()
-	scope := SubstrateSnapshotContentScope("")
-	switch state.GetExternalSnapshot().GetContentScope() {
-	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA:
-		scope = SubstrateSnapshotContentScopeData
-	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL:
-		scope = SubstrateSnapshotContentScopeFull
-	}
-	return &substrateActor{
+	converted := &substrateActor{
 		ActorID: meta.GetName(), Atespace: meta.GetAtespace(), ActorUID: meta.GetUid(), ActorVersion: meta.GetVersion(),
 		TemplateNamespace: actor.GetActorTemplate().GetAtespace(), TemplateName: actor.GetActorTemplate().GetName(),
-		TemplateUID:  state.GetCurrentActorTemplateUid(),
 		Status:       "STATUS_" + strings.TrimPrefix(state.GetState().String(), "ACTOR_STATE_"),
 		PodNamespace: assignment.GetWorkerNamespace(), PodName: assignment.GetWorkerPod(),
-		PodUID: assignment.GetWorkerPodUid(), PodIP: assignment.GetWorkerPodIp(),
+		PodUID: assignment.GetWorkerPodUid(), PodIP: firstNonEmpty(assignment.GetWorkerPodIps()),
 		WorkerName: assignment.GetWorker().GetName(), WorkerPool: assignment.GetWorkerPool(),
-		LastSnapshot: state.GetExternalSnapshot().GetSnapshotUri(), SnapshotScope: scope,
-		InProgressSnapshot: state.GetInProgressSnapshotName(),
 	}
+	if latest := latestSubstrateSnapshot(state.GetSnapshots()); latest != nil {
+		converted.TemplateUID = latest.GetActorTemplateUid()
+		converted.SnapshotScope = substrateSnapshotScope(latest.GetFidelity())
+		durable := latest.GetDurableSnapshot()
+		if durable.GetState() == ateapipb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
+			converted.LastSnapshot = durable.GetObject().GetSnapshotUri()
+		} else {
+			converted.InProgressSnapshot = latest.GetUuid()
+		}
+	}
+	return converted
 }
 
 func substrateWorkerFromProto(worker *ateapipb.Worker) substrateWorker {
 	return substrateWorker{
 		WorkerName: worker.GetMetadata().GetName(), WorkerPodUID: worker.GetWorkerPodUid(),
 		WorkerNamespace: worker.GetWorkerNamespace(), WorkerPool: worker.GetWorkerPool(),
-		WorkerPod: worker.GetWorkerPod(), IP: worker.GetIp(),
+		WorkerPod: worker.GetWorkerPod(), IP: firstNonEmpty(worker.GetStatus().GetIps()),
 	}
+}
+
+func firstNonEmpty(values []string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
