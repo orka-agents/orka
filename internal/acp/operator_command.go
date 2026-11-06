@@ -8,6 +8,14 @@ import (
 	"strings"
 )
 
+// Operator tag groups. Each operator operation runs with exactly one
+// supplementary group from this range, unique among live processes. No file
+// in the runtime is owned by or grants access to these groups.
+const (
+	OperatorTagFirstGID = 61000
+	OperatorTagLastGID  = 64999
+)
+
 // OperatorCommandConfig describes one operator debugging command. It runs
 // through the same exec helper, UID/GID, empty supplementary groups, resource
 // limits, and parent-death fence as the RuntimeSession's ACP adapter, so an
@@ -16,6 +24,9 @@ type OperatorCommandConfig struct {
 	ExecHelperCommand string
 	UID               int
 	GID               int
+	// TagGID is the unique supplementary group that marks every process of
+	// this operation (see OperatorTagFirstGID).
+	TagGID int
 	// Argv[0] must already be an absolute executable path.
 	Argv        []string
 	Environment []string
@@ -39,13 +50,10 @@ func NewOperatorCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
 	if strings.TrimSpace(cfg.Dir) == "" || !filepath.IsAbs(cfg.Dir) {
 		return nil, fmt.Errorf("operator command directory must be absolute")
 	}
-	cmd, err := newChildCommand(ProcessConfig{
-		Command:           cfg.Argv[0],
-		Args:              cfg.Argv[1:],
-		UID:               cfg.UID,
-		GID:               cfg.GID,
-		ExecHelperCommand: cfg.ExecHelperCommand,
-	})
+	if cfg.TagGID < OperatorTagFirstGID || cfg.TagGID > OperatorTagLastGID {
+		return nil, fmt.Errorf("operator command requires a tag group in %d-%d", OperatorTagFirstGID, OperatorTagLastGID)
+	}
+	cmd, err := newOperatorChildCommand(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -53,12 +61,12 @@ func NewOperatorCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
 	cmd.Env = append([]string(nil), cfg.Environment...)
 	if cfg.TTY != nil {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = cfg.TTY, cfg.TTY, cfg.TTY
-		cmd.SysProcAttr = operatorTTYSysProcAttr(cfg.UID, cfg.GID)
 	}
 	return cmd, nil
 }
 
-// SignalOperatorCommand signals the command's process group.
+// SignalOperatorCommand signals the command's process group. It never kills
+// the operation; use KillOperatorTag for containment.
 func SignalOperatorCommand(cmd *exec.Cmd, signal os.Signal) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil

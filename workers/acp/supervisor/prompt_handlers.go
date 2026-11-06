@@ -1385,6 +1385,9 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	runtimeSession := state.runtime
 	providerProxy := state.providerProxy
 	s.mu.Unlock()
+	// Operator processes share the child UID, so runtime deletion also stops
+	// them; the barrier additionally refuses launches still in flight.
+	_ = s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 	var providerCleanupErr error
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
@@ -1893,6 +1896,14 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 
 	freezeCtx, cancel := context.WithTimeout(r.Context(), defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
 	defer cancel()
+	// No operator operation may run, or start, while the workspace is frozen
+	// and its delta is captured.
+	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+		s.poisonSession(state, "operator operations could not be quiesced before the workspace freeze")
+		s.poisonPool("operator_quiesce_unproven")
+		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "operator operations could not be quiesced", nil, false)
+		return
+	}
 	if err := runtimeSession.Freeze(freezeCtx); err != nil {
 		s.poisonSession(state, "workspace freeze could not be proven")
 		s.poisonPool("workspace_freeze_unproven")

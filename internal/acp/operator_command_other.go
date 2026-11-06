@@ -5,10 +5,14 @@ package acp
 import (
 	"fmt"
 	"os"
-	"syscall"
+	"os/exec"
 )
 
-func operatorTTYSysProcAttr(uid, gid int) *syscall.SysProcAttr { return childSysProcAttr(uid, gid) }
+func newOperatorChildCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
+	cmd := exec.Command(cfg.Argv[0], cfg.Argv[1:]...)
+	cmd.SysProcAttr = childSysProcAttr(cfg.UID, cfg.GID)
+	return cmd, nil
+}
 
 // OpenOperatorPTY is only supported on Linux.
 func OpenOperatorPTY(_, _ int, _, _ uint16) (*os.File, *os.File, error) {

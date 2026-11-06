@@ -152,10 +152,11 @@ directory must already exist.
 `-t` allocates a terminal. Because `-t` means `--tty` on `orka task exec`, use
 `--token` there for a bearer token. Without a terminal, the first Ctrl-C is
 forwarded to the remote command as `SIGINT` and a second abandons the stream.
-Closing the stream kills the remote command and every process it started. The
-command runs under a small subreaper shim, so even descendants that start a new
-session or process group cannot outlive the timeout, a disconnect, or the
-session's validation freeze. When a prompt settles and the workspace is frozen
+Closing the stream kills the remote command and every process it started. Each
+operation carries a unique supplementary group that its processes cannot drop.
+So even descendants that start a new session or process group, or outlive the
+command, cannot survive the timeout, a disconnect, or the session's validation
+freeze. When a prompt settles and the workspace is frozen
 for validation, or the session is deleted, running operator commands are
 killed.
 

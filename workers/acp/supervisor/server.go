@@ -271,6 +271,9 @@ type sessionState struct {
 	// Leaving an operator-admitting state revokes and kills all of them.
 	operators   map[uint64]operatorProcess
 	operatorSeq uint64
+	// operatorsClosed is set by the freeze/deletion barrier and cleared when
+	// the session returns to an operator-admitting state.
+	operatorsClosed bool
 }
 
 type promptState struct {

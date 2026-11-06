@@ -5,20 +5,43 @@ package acp
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-func operatorTTYSysProcAttr(uid, gid int) *syscall.SysProcAttr {
-	// Setsid makes the helper its own process-group leader, which satisfies
-	// the exec helper's process-group fence exactly like Setpgid does.
-	attr := &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Pdeathsig: syscall.SIGKILL}
-	if os.Geteuid() == 0 {
-		attr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
+func newOperatorChildCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
+	helperCommand := strings.TrimSpace(cfg.ExecHelperCommand)
+	if helperCommand == "" {
+		helperCommand = DefaultExecHelperCommand
 	}
-	return attr
+	if !filepath.IsAbs(helperCommand) {
+		return nil, fmt.Errorf("ACP exec helper command must be an absolute path")
+	}
+	args := make([]string, 0, 5+len(cfg.Argv))
+	args = append(args,
+		operatorExecHelperProtocolVersion, strconv.Itoa(os.Getpid()), strconv.Itoa(cfg.UID),
+		strconv.Itoa(cfg.GID), strconv.Itoa(cfg.TagGID),
+	)
+	args = append(args, cfg.Argv...)
+	cmd := exec.Command(helperCommand, args...)
+	// A terminal command is a session leader (Setsid also satisfies the exec
+	// helper's process-group fence); otherwise it leads its own group.
+	attr := &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if cfg.TTY != nil {
+		attr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Pdeathsig: syscall.SIGKILL}
+	}
+	if os.Geteuid() == 0 {
+		attr.Credential = &syscall.Credential{
+			Uid: uint32(cfg.UID), Gid: uint32(cfg.GID), Groups: []uint32{uint32(cfg.TagGID)},
+		}
+	}
+	cmd.SysProcAttr = attr
+	return cmd, nil
 }
 
 // OpenOperatorPTY allocates a pseudo-terminal whose slave is owned by the

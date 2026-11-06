@@ -281,8 +281,8 @@ func TestOperatorExecStreamsStdinAndExitStatus(t *testing.T) {
 	if result.stdout != "hello" || result.status.ExitCode != 3 || result.status.Reason != operatoraccess.ExitReasonExited {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if launched.UID != 20001 || launched.GID != 20000 || !filepath.IsAbs(launched.Argv[0]) ||
-		launched.Argv[1] != acp.OperatorShimSubcommand || !filepath.IsAbs(launched.Argv[2]) || launched.Argv[3] != "-c" {
+	if launched.UID != 20001 || launched.GID != 20000 || !filepath.IsAbs(launched.Argv[0]) || launched.Argv[1] != "-c" ||
+		launched.Tag < acp.OperatorTagFirstGID || launched.Tag > acp.OperatorTagLastGID {
 		t.Fatalf("operator command must run as the session child identity with a resolved command: %+v", launched)
 	}
 	if !strings.HasSuffix(launched.Dir, "workspace") {
@@ -458,5 +458,83 @@ func TestOperatorExecObservesControlsWhileStdinIsBlocked(t *testing.T) {
 		})
 	if result.status.ExitCode != 130 {
 		t.Fatalf("interrupt was not observed behind blocked stdin: %+v", result.status)
+	}
+}
+
+func TestOperatorTagsAreUniqueAndSkipLiveTags(t *testing.T) {
+	previous := operatorTagInUse
+	t.Cleanup(func() { operatorTagInUse = previous })
+	operatorTagInUse = func(tag int) bool { return tag == acp.OperatorTagFirstGID }
+	var state operatorAccessState
+	first, ok := state.allocateTag()
+	if !ok || first == acp.OperatorTagFirstGID {
+		t.Fatalf("allocated a tag still carried by a live process: %d", first)
+	}
+	second, ok := state.allocateTag()
+	if !ok || second == first {
+		t.Fatalf("tags must be unique among live operations: %d %d", first, second)
+	}
+	state.releaseTag(first)
+	operatorTagInUse = func(int) bool { return true }
+	if _, ok := state.allocateTag(); ok {
+		t.Fatal("allocation must fail closed when every tag is in use")
+	}
+}
+
+func TestOperatorQuiesceBarrierBlocksLaunchesAndKillsOperations(t *testing.T) {
+	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStatePromptRunning, nil)
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	metadata := harnessv2.MutationMetadata{Fence: fence}
+	bound, status, _ := supervisor.operatorTargetFor(sessionID, metadata)
+	pending, status2, _ := supervisor.operatorTargetFor(sessionID, metadata)
+	if status != 0 || status2 != 0 {
+		t.Fatalf("admission failed: %d %d", status, status2)
+	}
+	running := newFakeOperatorProcess()
+	if !supervisor.bindOperatorProcess(bound, running) {
+		t.Fatal("bind failed")
+	}
+	// The pending launch finishes (and is refused) after the barrier starts.
+	late := newFakeOperatorProcess()
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		if supervisor.bindOperatorProcess(pending, late) {
+			t.Error("a launch completing during the barrier was bound")
+		}
+		late.Kill()
+		supervisor.releaseOperator(pending)
+	}()
+	state := supervisor.sessions[sessionID]
+	if err := supervisor.quiesceOperators(state, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !running.killed.Load() || !late.killed.Load() {
+		t.Fatalf("barrier returned with live operator operations: running=%v late=%v", running.killed.Load(), late.killed.Load())
+	}
+	if _, status, _ := supervisor.operatorTargetFor(sessionID, metadata); status == 0 {
+		t.Fatal("admission must stay closed after the barrier")
+	}
+	// Returning to an admitting state reopens admission.
+	supervisor.mu.Lock()
+	setSessionState(state, harnessv2.RuntimeSessionStateValidating)
+	setSessionState(state, harnessv2.RuntimeSessionStateIdle)
+	supervisor.mu.Unlock()
+	if target, status, message := supervisor.operatorTargetFor(sessionID, metadata); status != 0 {
+		t.Fatalf("admission did not reopen: %d %s", status, message)
+	} else {
+		supervisor.releaseOperator(target)
+	}
+}
+
+func TestOperatorQuiesceFailsClosedOnStuckLaunch(t *testing.T) {
+	supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	if _, status, _ := supervisor.operatorTargetFor(sessionID, harnessv2.MutationMetadata{Fence: fence}); status != 0 {
+		t.Fatal("admission failed")
+	}
+	if err := supervisor.quiesceOperators(supervisor.sessions[sessionID], 50*time.Millisecond); err == nil {
+		t.Fatal("a launch that never settles must fail the barrier closed")
 	}
 }

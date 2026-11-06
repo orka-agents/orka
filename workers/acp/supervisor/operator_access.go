@@ -84,12 +84,45 @@ func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProc
 	if _, registered := current.operators[target.token]; !registered {
 		return false
 	}
-	if _, admitted := operatorAccessStates[current.descriptor.State]; !admitted || current.creating {
+	if _, admitted := operatorAccessStates[current.descriptor.State]; !admitted || current.creating || current.operatorsClosed {
 		delete(current.operators, target.token)
 		return false
 	}
 	current.operators[target.token] = process
 	return true
+}
+
+// quiesceOperators is the barrier before a workspace freeze or session
+// deletion: it closes operator admission, synchronously kills every bound
+// operator operation, and waits until in-flight launches have been refused
+// and killed by their handlers. On error the caller must fail closed.
+func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		state.operatorsClosed = true
+		pending := 0
+		var bound []operatorProcess
+		for token, process := range state.operators {
+			if process == nil {
+				pending++
+				continue
+			}
+			bound = append(bound, process)
+			delete(state.operators, token)
+		}
+		s.mu.Unlock()
+		for _, process := range bound {
+			process.Kill()
+		}
+		if pending == 0 && len(bound) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("operator operations could not be quiesced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (s *Server) releaseOperator(target operatorTarget) {
@@ -104,6 +137,7 @@ func (s *Server) releaseOperator(target operatorTarget) {
 type operatorLaunch struct {
 	UID   int
 	GID   int
+	Tag   int
 	Argv  []string
 	Env   []string
 	Dir   string
@@ -135,8 +169,12 @@ type operatorAccessState struct {
 	usedMu sync.Mutex
 	used   map[harnessv2.OperationID]time.Time
 	// runtimeExecutable is the absolute orka-acp-runtime binary that hosts the
-	// operator command shim and the file helper.
+	// file helper.
 	runtimeExecutable string
+	// tags are the operator tag groups held by live operations.
+	tagMu   sync.Mutex
+	tags    map[int]struct{}
+	nextTag int
 }
 
 func (s *Server) operatorState() *operatorAccessState {
@@ -154,6 +192,35 @@ func (s *Server) operatorState() *operatorAccessState {
 		}
 	})
 	return &s.operator
+}
+
+// operatorTagInUse is replaceable in tests.
+var operatorTagInUse = acp.OperatorTagInUse
+
+// allocateTag reserves a tag group that no live process carries.
+func (o *operatorAccessState) allocateTag() (int, bool) {
+	o.tagMu.Lock()
+	defer o.tagMu.Unlock()
+	if o.tags == nil {
+		o.tags = map[int]struct{}{}
+	}
+	size := acp.OperatorTagLastGID - acp.OperatorTagFirstGID + 1
+	for range size {
+		tag := acp.OperatorTagFirstGID + o.nextTag%size
+		o.nextTag++
+		if _, held := o.tags[tag]; held || operatorTagInUse(tag) {
+			continue
+		}
+		o.tags[tag] = struct{}{}
+		return tag, true
+	}
+	return 0, false
+}
+
+func (o *operatorAccessState) releaseTag(tag int) {
+	o.tagMu.Lock()
+	defer o.tagMu.Unlock()
+	delete(o.tags, tag)
 }
 
 func (s *Server) registerOperatorRoutes() {
@@ -189,7 +256,7 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	if mismatch := s.sessionFenceMismatch(state, metadata); mismatch != harnessv2.FenceMatch {
 		return operatorTarget{}, http.StatusConflict, "runtime session fence does not match the requested Task session"
 	}
-	if _, ok := operatorAccessStates[state.descriptor.State]; !ok {
+	if _, ok := operatorAccessStates[state.descriptor.State]; !ok || state.operatorsClosed {
 		return operatorTarget{}, http.StatusConflict, fmt.Sprintf(
 			"runtime session is %s; operator access is refused while the workspace is frozen, prepared for publication, publishing, finalizing, or being deleted",
 			state.descriptor.State)
@@ -330,16 +397,15 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 		writeOperatorError(w, http.StatusConflict, "operator environment is unavailable")
 		return
 	}
-	runtimeExecutable := s.operatorState().runtimeExecutable
-	if runtimeExecutable == "" || !filepath.IsAbs(runtimeExecutable) {
-		writeOperatorError(w, http.StatusServiceUnavailable, "operator command shim is unavailable")
+	tag, ok := s.operatorState().allocateTag()
+	if !ok {
+		writeOperatorError(w, http.StatusTooManyRequests, "no operator tag group is available")
 		return
 	}
-	// The command runs under the subreaper shim so no descendant can escape
-	// the operation's timeout, disconnect, or concurrency bound.
-	argv := append([]string{runtimeExecutable, acp.OperatorShimSubcommand, command}, request.Exec.Argv[1:]...)
+	defer s.operatorState().releaseTag(tag)
+	argv := append([]string{command}, request.Exec.Argv[1:]...)
 	process, err := s.operatorState().starter(operatorLaunch{
-		UID: target.uid, GID: target.gid, Argv: argv, Env: env, Dir: target.paths.Workspace,
+		UID: target.uid, GID: target.gid, Tag: tag, Argv: argv, Env: env, Dir: target.paths.Workspace,
 		TTY: request.Exec.TTY, Rows: request.Exec.Rows, Cols: request.Exec.Cols, Stdin: request.Exec.Stdin,
 	})
 	if err != nil {
@@ -650,8 +716,14 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 		writeOperatorError(w, http.StatusConflict, "operator environment is unavailable")
 		return
 	}
+	tag, ok := s.operatorState().allocateTag()
+	if !ok {
+		writeOperatorError(w, http.StatusTooManyRequests, "no operator tag group is available")
+		return
+	}
+	defer s.operatorState().releaseTag(tag)
 	process, err := s.operatorState().starter(operatorLaunch{
-		UID: target.uid, GID: target.gid, Env: env, Dir: target.paths.Workspace, Stdin: request.Write,
+		UID: target.uid, GID: target.gid, Tag: tag, Env: env, Dir: target.paths.Workspace, Stdin: request.Write,
 		Argv: []string{helper, OperatorFileHelperSubcommand, mode, target.paths.Workspace, request.Path, strconv.FormatInt(operatorFileHelperBound(request), 10)},
 	})
 	if err != nil {
@@ -799,6 +871,7 @@ func readOperatorFileStatus(reader io.Reader) (operatorFileStatus, bool) {
 // realOperatorProcess runs through the ACP exec helper.
 type realOperatorProcess struct {
 	uid    int
+	tag    int
 	cmd    *exec.Cmd
 	master *os.File
 	stdin  io.WriteCloser
@@ -807,8 +880,8 @@ type realOperatorProcess struct {
 }
 
 func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
-	cfg := acp.OperatorCommandConfig{UID: launch.UID, GID: launch.GID, Argv: launch.Argv, Environment: launch.Env, Dir: launch.Dir}
-	process := &realOperatorProcess{uid: launch.UID}
+	cfg := acp.OperatorCommandConfig{UID: launch.UID, GID: launch.GID, TagGID: launch.Tag, Argv: launch.Argv, Environment: launch.Env, Dir: launch.Dir}
+	process := &realOperatorProcess{uid: launch.UID, tag: launch.Tag}
 	var closeAfterStart []*os.File
 	closeAll := func() {
 		for _, file := range closeAfterStart {
@@ -897,8 +970,7 @@ func (p *realOperatorProcess) Resize(rows, cols uint16) error {
 
 func (p *realOperatorProcess) Signal(name string) error {
 	if name == "KILL" {
-		// SIGKILL on the group would kill the subreaper shim first and let
-		// its descendants reparent away; kill the whole tree instead.
+		// Kill the whole tagged operation, not just the process group.
 		p.Kill()
 		return nil
 	}
@@ -929,7 +1001,10 @@ func (p *realOperatorProcess) Kill() {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
-	acp.KillOperatorTree(p.cmd.Process.Pid, p.uid)
+	// The tag reaches every descendant, wherever it moved; killing the
+	// leader directly also unblocks Wait if it left its own group.
+	acp.KillOperatorTag(p.uid, p.tag)
+	_ = p.cmd.Process.Kill()
 }
 
 type nopWriteCloser struct{ io.Writer }

@@ -4,141 +4,28 @@ package acp
 
 import (
 	"bytes"
-	"fmt"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
-// OperatorShimSubcommand is the hidden orka-acp-runtime subcommand that runs
-// one operator command as a child subreaper. Every descendant, including one
-// that changes its process group or session, stays in the shim's process tree
-// while the shim lives, and the shim kills and reaps all of them before it
-// exits. The supervisor is itself a subreaper shared with the ACP adapter, so
-// without the shim an escaped operator descendant would be indistinguishable
-// from adapter processes.
-const OperatorShimSubcommand = "__orka_operator_exec"
+const operatorTagKillRounds = 200
 
-const operatorTreeKillRounds = 100
-
-// RunOperatorShim runs argv (argv[0] absolute) and returns its exit status.
-func RunOperatorShim(argv []string) int {
-	if len(argv) == 0 || !filepath.IsAbs(argv[0]) {
-		_, _ = fmt.Fprintln(os.Stderr, "operator shim: an absolute command is required")
-		return 126
-	}
-	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "operator shim: subreaper is unavailable")
-		return 126
-	}
-	// Terminal and group signals reach the command directly (it shares the
-	// shim's process group). Handled, not ignored, so the command does not
-	// inherit SIG_IGN across exec.
-	interactive := make(chan os.Signal, 8)
-	signal.Notify(interactive, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU)
-	terminate := make(chan os.Signal, 2)
-	signal.Notify(terminate, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		for signal := range interactive {
-			_ = signal
-		}
-	}()
-
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
-	if err := cmd.Start(); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "operator shim: %v\n", err)
-		return 127
-	}
-	done := make(chan struct{})
-	go func() {
-		<-terminate
-		killOperatorChildren(os.Getpid())
-		close(done)
-	}()
-	err := cmd.Wait()
-	killOperatorChildren(os.Getpid())
-	select {
-	case <-done:
-		return 143
-	default:
-	}
-	if err == nil {
-		return 0
-	}
-	if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		return 128 + int(status.Signal())
-	}
-	if code := cmd.ProcessState.ExitCode(); code >= 0 {
-		return code
-	}
-	return 126
+type procCredentials struct {
+	pid    int
+	uid    int
+	groups []int
 }
 
-// killOperatorChildren kills every child of the subreaper until none remain.
-// Orphaned descendants are reparented to the subreaper, so repeated rounds
-// reach the whole tree.
-func killOperatorChildren(self int) {
-	for range operatorTreeKillRounds {
-		children := processChildren("/proc", self, -1)
-		for _, pid := range children {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		reaped := false
-		for {
-			pid, err := syscall.Wait4(-1, nil, syscall.WNOHANG, nil)
-			if pid <= 0 || err != nil {
-				break
-			}
-			reaped = true
-		}
-		if len(children) == 0 && !reaped {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// KillOperatorTree kills every descendant of leader that runs as uid, then
-// the leader itself. While the leader (a subreaper shim) lives, descendants
-// cannot leave its tree, so repeated rounds are complete.
-func KillOperatorTree(leader, uid int) {
-	if leader <= 0 {
-		return
-	}
-	for range operatorTreeKillRounds {
-		descendants := processDescendants("/proc", leader, uid)
-		if len(descendants) == 0 {
-			break
-		}
-		for _, pid := range descendants {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	_ = syscall.Kill(-leader, syscall.SIGKILL)
-	_ = syscall.Kill(leader, syscall.SIGKILL)
-}
-
-type procParent struct {
-	pid  int
-	ppid int
-	uid  int
-}
-
-func readProcParents(procRoot string) []procParent {
+func readProcCredentials(procRoot string) ([]procCredentials, bool) {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	parents := make([]procParent, 0, len(entries))
+	processes := make([]procCredentials, 0, len(entries))
 	for _, entry := range entries {
 		if !isDecimalPIDName(entry.Name()) {
 			continue
@@ -149,57 +36,72 @@ func readProcParents(procRoot string) []procParent {
 		}
 		data, err := os.ReadFile(filepath.Join(procRoot, entry.Name(), "status"))
 		if err != nil {
-			continue
+			continue // exited between ReadDir and ReadFile
 		}
-		ppid, uid := -1, -1
+		process := procCredentials{pid: pid, uid: -1}
 		for line := range bytes.SplitSeq(data, []byte("\n")) {
 			switch {
-			case bytes.HasPrefix(line, []byte("PPid:")):
-				ppid, _ = strconv.Atoi(string(bytes.TrimSpace(line[len("PPid:"):])))
 			case bytes.HasPrefix(line, []byte("Uid:")):
 				if fields := bytes.Fields(line[len("Uid:"):]); len(fields) > 0 {
-					uid, _ = strconv.Atoi(string(fields[0]))
+					process.uid, _ = strconv.Atoi(string(fields[0]))
+				}
+			case bytes.HasPrefix(line, []byte("Groups:")):
+				for field := range bytes.FieldsSeq(line[len("Groups:"):]) {
+					if group, err := strconv.Atoi(string(field)); err == nil {
+						process.groups = append(process.groups, group)
+					}
 				}
 			}
 		}
-		if ppid >= 0 {
-			parents = append(parents, procParent{pid: pid, ppid: ppid, uid: uid})
-		}
+		processes = append(processes, process)
 	}
-	return parents
+	return processes, true
 }
 
-// processChildren returns direct children of parent (any uid when uid < 0).
-func processChildren(procRoot string, parent, uid int) []int {
-	var children []int
-	for _, process := range readProcParents(procRoot) {
-		if process.ppid == parent && (uid < 0 || process.uid == uid) {
-			children = append(children, process.pid)
+func taggedProcesses(procRoot string, uid, tag int) ([]int, bool) {
+	processes, ok := readProcCredentials(procRoot)
+	if !ok {
+		return nil, false
+	}
+	var tagged []int
+	for _, process := range processes {
+		if uid >= 0 && process.uid != uid {
+			continue
+		}
+		if slices.Contains(process.groups, tag) {
+			tagged = append(tagged, process.pid)
 		}
 	}
-	return children
+	return tagged, true
 }
 
-// processDescendants returns the transitive descendants of root running as uid.
-func processDescendants(procRoot string, root, uid int) []int {
-	byParent := map[int][]procParent{}
-	for _, process := range readProcParents(procRoot) {
-		byParent[process.ppid] = append(byParent[process.ppid], process)
+// OperatorTagInUse reports whether any live process carries the tag group.
+// An unreadable process table counts as in use.
+func OperatorTagInUse(tag int) bool {
+	tagged, ok := taggedProcesses("/proc", -1, tag)
+	return !ok || len(tagged) > 0
+}
+
+// KillOperatorTag kills every process of uid carrying the operation's tag
+// group until none remain, and reports whether that was proven. Because the
+// tag cannot be dropped and is inherited, this reaches every descendant,
+// including ones that changed process group, session, or parent.
+func KillOperatorTag(uid, tag int) bool {
+	if uid <= 0 || tag < OperatorTagFirstGID || tag > OperatorTagLastGID {
+		return false
 	}
-	var descendants []int
-	queue := []int{root}
-	seen := map[int]bool{root: true}
-	for len(queue) > 0 {
-		next := queue[0]
-		queue = queue[1:]
-		for _, child := range byParent[next] {
-			if seen[child.pid] || child.uid != uid {
-				continue
-			}
-			seen[child.pid] = true
-			descendants = append(descendants, child.pid)
-			queue = append(queue, child.pid)
+	for range operatorTagKillRounds {
+		tagged, ok := taggedProcesses("/proc", uid, tag)
+		if !ok {
+			return false
 		}
+		if len(tagged) == 0 {
+			return true
+		}
+		for _, pid := range tagged {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return descendants
+	return false
 }

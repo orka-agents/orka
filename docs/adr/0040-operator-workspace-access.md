@@ -99,16 +99,25 @@ directly.
   `O_NOFOLLOW` beneath the workspace root, and traversal segments are
   rejected before any request is made. Uploads commit only after exactly the
   declared size arrives.
-- Each command runs under a subreaper shim, also as the child identity. While
-  the shim lives, no descendant can leave its tree, even after changing its
-  process group or session. The shim kills and reaps every descendant before
-  it exits. The supervisor's own teardown kills the descendant tree before the
-  shim. This matters because the supervisor is a subreaper it shares with the
-  ACP adapter.
-- Admission registers each operator process on its session under the
+- Each operation runs with one supplementary tag group, reserved from a
+  dedicated range and unique among live processes. Changing supplementary
+  groups needs `CAP_SETGID`, and descendants inherit them, so the tag cannot
+  be dropped. On timeout, disconnect, output limit, or revocation, the
+  supervisor kills every process of the session UID that carries the tag, and
+  repeats until none remain. This reaches descendants that changed process
+  group, session, or parent, or that killed the command first. The agent
+  shares the UID but has no tag, so it is never touched. The tag grants no
+  file access.
+- Admission registers each operator operation on its session under the
   supervisor lock, and re-checks the state after the process starts. Every
-  transition out of `idle`, `prompt_running`, or `poisoned` (validation freeze,
-  publication, deletion) revokes and kills the registered processes.
+  transition out of `idle`, `prompt_running`, or `poisoned` revokes and kills
+  the registered operations. Before the validation freeze and before session
+  deletion, a synchronous barrier does three things:
+  - closes admission,
+  - kills bound operations,
+  - waits until in-flight launches have been refused and killed.
+
+  If the barrier cannot finish, the session and pool fail closed.
 - The WebSocket reader never blocks on child stdin. Up to 8 MiB is queued
   ahead of the command, end-of-input stays in order, and overflow terminates
   the command. Disconnects and control frames are always observed.
@@ -167,7 +176,9 @@ content, token, or credential enters a record.
   published, and its Session cannot continue from that workspace. Operators who
   only need to read should use `orka task cp` out.
 - Operator processes share the session's child UID. Session teardown and
-  adapter restarts also reap them, as a backstop to the shim and to revocation.
+  adapter restarts also reap them, as a backstop to tag containment and
+  revocation. Up to 4000 operations can be live per runtime at once, the size
+  of the tag range.
 - Substrate native-process workspaces are not supported until the provider
   route can carry authenticated streaming. Retained workspaces whose compute is
   suspended are unreachable. Only directly bound Pod-backed runtimes are
