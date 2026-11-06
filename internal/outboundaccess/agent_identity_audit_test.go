@@ -139,6 +139,25 @@ func TestAgentIdentityUseRecordsCarryOnlyAClassifiedReason(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityDelegationEndedWhileIssuingIsADelegationRefusal(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	resolver := auditedResolver(t, now, &fakeAgentIdentitySource{token: "obo-token"}, &lines)
+	checks := 0
+	resolver.DelegationLive = func(context.Context, AgentIdentityBinding) error {
+		if checks++; checks > 1 {
+			return errors.New("a Task it was delegated from was cancelled")
+		}
+		return nil
+	}
+	if _, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalDelegation+`"`) || strings.Contains(lines[0], "obo-token") {
+		t.Fatalf("records = %v, want one delegation refusal without the credential", lines)
+	}
+}
+
 func TestAgentIdentityRefusalsBeforeDispatchAreRecordedOnce(t *testing.T) {
 	now := time.Now()
 	for name, mutate := range map[string]func(*ResolveRequest){

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,18 @@ type fakeAgentIdentitySource struct {
 func (f *fakeAgentIdentitySource) AgentIdentityToken(_ context.Context, req AgentIdentityTokenRequest) (string, error) {
 	f.request = req
 	return f.token, f.err
+}
+
+// endingConnectionSource ends the delegation while it refreshes the
+// requester's token, as cancelling a parent Task during a slow refresh does.
+type endingConnectionSource struct {
+	*fakeConnectionSource
+	end func()
+}
+
+func (f *endingConnectionSource) ResolveConnectionCredential(ctx context.Context, req ConnectionCredentialRequest) (ConnectionCredential, error) {
+	f.end()
+	return f.fakeConnectionSource.ResolveConnectionCredential(ctx, req)
 }
 
 func agentIdentityPolicySpec() corev1alpha1.OutboundAccessPolicySpec {
@@ -292,6 +305,27 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		}
 		if len(resolution.SensitiveValues) != 2 {
 			t.Fatalf("both tokens must be redacted: %v", resolution.SensitiveValues)
+		}
+	})
+
+	t.Run("refuses a delegation that ended during a slow refresh", func(t *testing.T) {
+		var ended atomic.Bool
+		refreshing := &endingConnectionSource{fakeConnectionSource: connection(), end: func() { ended.Store(true) }}
+		identity := &fakeAgentIdentitySource{token: "obo-token"}
+		r := resolver(delegatedPolicySpec(nil), nil, identity)
+		r.Connections = refreshing
+		r.DelegationLive = func(context.Context, AgentIdentityBinding) error {
+			if ended.Load() {
+				return errors.New("a Task it was delegated from was cancelled")
+			}
+			return nil
+		}
+		resolution, err := r.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		if err == nil || !strings.Contains(err.Error(), "ended while its credential was issued") {
+			t.Fatalf("Resolve() = %v, want the ended delegation refused", err)
+		}
+		if resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+			t.Fatalf("no credential may be returned: %#v", resolution)
 		}
 	})
 
