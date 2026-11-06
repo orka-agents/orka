@@ -104,6 +104,8 @@ type ServerConfig struct {
 	// port serve the embedded web dashboard and answer unrouted non-API
 	// paths with its index page.
 	DashboardEnabled bool
+	// MCP configures the control-plane MCP endpoint (--mcp-server-enabled).
+	MCP MCPServerConfig
 }
 
 // Server is the REST API server
@@ -117,6 +119,7 @@ type Server struct {
 	openaiHandler       *OpenAICompatHandler
 	anthropicHandler    *AnthropicCompatHandler
 	internalHandlers    *InternalHandlers
+	mcpServer           *mcpServer
 	ResultStore         store.ResultStore
 	SessionStore        store.SessionStore
 	PlanStore           store.PlanStore
@@ -536,6 +539,15 @@ func (s *Server) setupRoutes() {
 	anthropic.Post("/messages", s.anthropicHandler.HandleMessages)
 	anthropic.Get("/models", s.anthropicHandler.HandleListModels)
 
+	// Control-plane MCP endpoint. The route only authenticates; each tool
+	// replays its REST route in process, which authorizes it.
+	if s.config.MCP.Enabled {
+		app := s.app
+		s.mcpServer = newMCPServer(func(ctx *fasthttp.RequestCtx) { app.Server().Handler(ctx) }, s.config.MCP)
+		mcp := s.externalAPIGroup(mcpEndpointPath, externalAuth)
+		mcp.Post("", s.mcpServer.Handle)
+	}
+
 	// Internal API for worker communication.
 	if s.hasInternalStores() {
 		s.internalHandlers = NewInternalHandlers(
@@ -635,7 +647,7 @@ func (s *Server) Start(ctx context.Context) error {
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve. Lower case and without
 // a trailing slash, matched against a normalized path: see routeLookupPath.
-var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", mcpEndpointPath}
 
 // routeLookupPath normalizes path the way the router matches it. Fiber is
 // case-insensitive and non-strict about a trailing slash by default, so
