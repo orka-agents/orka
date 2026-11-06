@@ -54,7 +54,13 @@ func ForwardOrigin(raw string) (string, error) {
 		strings.ContainsAny(parsed.Host, "{}") {
 		return "", fmt.Errorf("forwarding origin must be an https origin with no path")
 	}
-	return "https://" + strings.ToLower(parsed.Host), nil
+	return "https://" + ForwardHost(parsed.Host), nil
+}
+
+// ForwardHost lowercases a host and drops the default HTTPS port, so
+// https://host and https://host:443 name the same origin.
+func ForwardHost(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ":443")
 }
 
 // MCPForwardRequest is the argument object of a forwarding Tool call.
@@ -105,7 +111,7 @@ func (r MCPForwardRequest) Target(origin string) (*url.URL, error) {
 		return nil, fmt.Errorf("forwarding path is not a valid URL path")
 	}
 	target.RawQuery = r.Query
-	if "https://"+target.Host != base {
+	if "https://"+ForwardHost(target.Host) != base {
 		return nil, fmt.Errorf("forwarding request left the Tool's origin")
 	}
 	return target, nil

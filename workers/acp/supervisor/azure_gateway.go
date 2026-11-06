@@ -441,7 +441,7 @@ var azureNextLinkFields = map[string]bool{"nextLink": true, "@odata.nextLink": t
 func (g *azureGateway) rewriteLink(value string) string {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.User != nil || !strings.EqualFold(parsed.Scheme, providerProxyTLSScheme) ||
-		!strings.EqualFold("https://"+parsed.Host, g.origin) {
+		"https://"+harnessv2.ForwardHost(parsed.Host) != g.origin {
 		return value
 	}
 	rewritten := *parsed

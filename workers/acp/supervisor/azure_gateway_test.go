@@ -359,3 +359,18 @@ func TestAzureGatewayHeadReportsTheUpstreamLength(t *testing.T) {
 		t.Fatalf("HEAD status = %d, length = %d", response.StatusCode, response.ContentLength)
 	}
 }
+
+func TestAzureGatewayRewritesLinksOnTheSameOriginWithOrWithoutTheDefaultPort(t *testing.T) {
+	gateway := &azureGateway{origin: "https://management.azure.com", base: "https://127.0.0.1:4000"}
+	for link, want := range map[string]string{
+		"https://management.azure.com/subscriptions?x=1":     "https://127.0.0.1:4000/subscriptions?x=1",
+		"https://MANAGEMENT.azure.com:443/subscriptions?x=1": "https://127.0.0.1:4000/subscriptions?x=1",
+		"https://management.azure.com:8443/subscriptions":    "https://management.azure.com:8443/subscriptions",
+		"https://management.azure.com.evil.example/x":        "https://management.azure.com.evil.example/x",
+		"http://management.azure.com/x":                      "http://management.azure.com/x",
+	} {
+		if got := gateway.rewriteLink(link); got != want {
+			t.Errorf("rewriteLink(%q) = %q, want %q", link, got, want)
+		}
+	}
+}

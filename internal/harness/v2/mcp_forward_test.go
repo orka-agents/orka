@@ -50,6 +50,8 @@ func TestForwardOriginAcceptsOnlyHTTPSOrigins(t *testing.T) {
 	for raw, want := range map[string]string{
 		"https://management.azure.com":      "https://management.azure.com",
 		"https://Management.Azure.com/":     "https://management.azure.com",
+		"https://management.azure.com:443":  "https://management.azure.com",
+		"https://management.azure.com:8443": "https://management.azure.com:8443",
 		"http://management.azure.com":       "",
 		"https://management.azure.com/x":    "",
 		"https://user@management.azure.com": "",
