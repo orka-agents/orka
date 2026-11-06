@@ -94,3 +94,28 @@ func TestBindingRefFreezesIssuerInstance(t *testing.T) {
 		t.Fatalf("BindingRef() = %+v, want %+v", *ref, want)
 	}
 }
+
+func TestEntraAuthorityIsPartOfTheIssuerInstance(t *testing.T) {
+	public, _ := configuredConfig().Instance("entra")
+	explicit := configuredConfig()
+	explicit.Entra.Authority = "https://login.microsoftonline.com/"
+	if got, _ := explicit.Instance("entra"); got != public {
+		t.Fatalf("explicit public authority instance = %q, want %q", got, public)
+	}
+	sovereign := configuredConfig()
+	sovereign.Entra.Authority = "https://login.microsoftonline.us"
+	if err := sovereign.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := sovereign.Instance("entra")
+	if got == public || !strings.HasSuffix(got, "@https://login.microsoftonline.us") {
+		t.Fatalf("sovereign instance = %q, want it to name the authority", got)
+	}
+	for _, authority := range []string{"http://login.microsoftonline.us", "https://user@login.example", "https://login.example?x=1", "login.example"} {
+		bad := configuredConfig()
+		bad.Entra.Authority = authority
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("authority %q: Validate() = nil, want an error", authority)
+		}
+	}
+}

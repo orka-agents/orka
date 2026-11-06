@@ -3424,6 +3424,11 @@ func validateHarnessV2RuntimeRefAgentTaskRestrictions(task *corev1alpha1.Task, a
 
 // validateTaskAgentCompatibility validates that the task type and agent configuration are compatible.
 func (r *TaskReconciler) validateTaskAgentCompatibility(task *corev1alpha1.Task, agent *corev1alpha1.Agent) error {
+	// An identity-bound Agent this controller cannot honor runs no Task of
+	// any type, not only the runtime Tasks that freeze its identity.
+	if err := r.Identity.ValidateAgent(agent); err != nil {
+		return err
+	}
 	switch task.Spec.Type {
 	case corev1alpha1.TaskTypeAgent:
 		return r.validateAgentRuntimeTaskCompatibility(task, agent)

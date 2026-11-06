@@ -82,6 +82,12 @@ func TestEntraOnBehalfOfExchange(t *testing.T) {
 		t.Fatalf("another user's token is exchanged on its own: err=%v requests=%d", err, fake.count())
 	}
 
+	edited := request
+	edited.Policy = outboundaccess.PolicyIdentity{UID: "policy-uid", Generation: 2}
+	if _, err := source.AgentIdentityToken(context.Background(), edited); err != nil || fake.count() != 4 {
+		t.Fatalf("an edited or recreated policy never reuses its predecessor's token: err=%v requests=%d", err, fake.count())
+	}
+
 	wrongAudience := request
 	wrongAudience.UserAssertion = userToken(t, "00000003-0000-0000-c000-000000000000")
 	if _, err := source.AgentIdentityToken(context.Background(), wrongAudience); err == nil || !strings.Contains(err.Error(), "blueprint") {
