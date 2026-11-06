@@ -56,6 +56,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	workerpkg "github.com/orka-agents/orka/internal/worker"
@@ -405,6 +406,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.syncACPWaitingForCapacity(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -3746,7 +3750,9 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 			return ctrl.Result{}, fmt.Errorf("listing child tasks: %w", err)
 		}
 		for i := range childList.Items {
-			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) {
+			// A parked run still owns its unfinished work through its
+			// continuation chain, so it counts as active.
+			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) || taskwait.Active(childList.Items[i].Status.Wait) {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)
@@ -3860,6 +3866,10 @@ func (r *TaskReconciler) enforceHistoryLimits(ctx context.Context, task *corev1a
 	var succeeded, failed []*corev1alpha1.Task
 	for i := range childList.Items {
 		child := &childList.Items[i]
+		if taskwait.Active(child.Status.Wait) {
+			// Deleting a parked run would cancel its pending continuation.
+			continue
+		}
 		switch child.Status.Phase {
 		case corev1alpha1.TaskPhaseSucceeded:
 			succeeded = append(succeeded, child)
@@ -4792,7 +4802,9 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 		return err
 	}
 	// Brokered approvals carry an expiry; one past it no longer blocks.
-	pending := approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC())
+	// A parked sign-off never blocks the running turn: the agent ends the
+	// turn and the decision starts a continuation instead.
+	pending := withoutParkedApprovals(approvals.Pending(approvals.FilterEventsForTaskUID(listed, string(task.UID)), time.Now().UTC()))
 	if !setWaitingForApprovalCondition(task.DeepCopy(), pending) {
 		return nil
 	}
@@ -4812,6 +4824,17 @@ func (r *TaskReconciler) syncACPWaitingForApproval(ctx context.Context, task *co
 		task.ResourceVersion, task.Status = current.ResourceVersion, current.Status
 		return nil
 	})
+}
+
+func withoutParkedApprovals(pending []approvals.Approval) []approvals.Approval {
+	kept := pending[:0]
+	for _, approval := range pending {
+		if approval.Binding == nil && approval.Action == taskwait.ParkedApprovalAction {
+			continue
+		}
+		kept = append(kept, approval)
+	}
+	return kept
 }
 
 func (r *TaskReconciler) handleAutonomousApprovalState(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {

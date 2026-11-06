@@ -530,6 +530,12 @@ type TaskStatus struct {
 	// +optional
 	ChildTasks []ChildTaskStatus `json:"childTasks,omitempty"`
 
+	// Wait records a data-only park requested by this Task's agent turn: the
+	// awaited event, its deadline, and the continuation Task that resumes the
+	// Session once the event arrives. Process memory is never preserved.
+	// +optional
+	Wait *TaskWaitStatus `json:"wait,omitempty"`
+
 	// Conditions represent the current state of the Task
 	// +listType=map
 	// +listMapKey=type

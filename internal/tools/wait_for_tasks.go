@@ -26,6 +26,7 @@ import (
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwait"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -71,6 +72,11 @@ type TaskResultInfo struct {
 	ExecutionOutcome *corev1alpha1.TaskWorkloadExecutionOutcome `json:"executionOutcome,omitempty"`
 	WorkspaceStatus  *corev1alpha1.ExecutionWorkspaceStatus     `json:"workspaceStatus,omitempty"`
 	Delivery         *corev1alpha1.TaskDeliveryStatus           `json:"delivery,omitempty"`
+	// ContinuationTask names the newest Task of the child's continuation
+	// chain when the child parked its turn; the other fields describe it.
+	ContinuationTask string `json:"continuationTask,omitempty"`
+	// WaitState is the parked-turn state of the reported Task, if any.
+	WaitState string `json:"waitState,omitempty"`
 }
 
 func waitTaskTerminal(phase corev1alpha1.TaskPhase) bool {
@@ -228,6 +234,25 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			if err := validateBrokeredWaitTarget(ctx, toolCtx, parent, &task); err != nil {
 				return "", err
 			}
+			// A child that parked its turn continues in a controller-created
+			// continuation Task linked from its own status. Report the newest
+			// Task of that chain and treat the child as finished only when
+			// that Task is terminal and holds no active wait.
+			tail, chainErr := taskwait.ResolveTail(ctx, t.k8sClient, &task)
+			if chainErr != nil {
+				allTerminal = false
+				results[taskName].Phase = taskPhaseErrorString
+				results[taskName].Result = fmt.Sprintf("error: %v", chainErr)
+				continue
+			}
+			if tail.Name != task.Name {
+				results[taskName].ContinuationTask = tail.Name
+			}
+			if tail.Status.Wait != nil {
+				results[taskName].WaitState = string(tail.Status.Wait.State)
+			}
+			resultTaskName := tail.Name
+			task = *tail
 
 			phase := task.Status.Phase
 
@@ -248,7 +273,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			results[taskName].WorkspaceStatus = task.Status.ExecutionWorkspace
 			results[taskName].Delivery = task.Status.Delivery
 
-			if !waitTaskTerminal(phase) {
+			if !waitTaskTerminal(phase) || taskwait.Active(task.Status.Wait) {
 				allTerminal = false
 				continue
 			}
@@ -271,7 +296,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// provide ResultStore through ToolContext; worker calls fall back to the
 			// internal HTTP result endpoint.
 			if task.Status.ResultRef != nil && task.Status.ResultRef.Available {
-				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, taskName)
+				resultStr, fetchErr := fetchTaskResultForNamespace(ctx, ns, resultTaskName)
 				if fetchErr == nil {
 					// Parse structured result and strip diff to avoid context bloat.
 					sr := common.ParseStructuredResult(resultStr)

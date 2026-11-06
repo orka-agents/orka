@@ -4783,7 +4783,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited task was not nonterminal: %#v", updated.Status.Execution)
 	}
 	cancelEpoch()
@@ -4871,7 +4871,7 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
-		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity ||
+		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReasonWaitingForCapacity ||
 		updated.Status.Execution.AgentRuntimeName != "external-v2" || taskExecutionStateTerminal(updated.Status.Execution.State) {
 		t.Fatalf("rate-limited external task was not released for retry: %#v", updated.Status.Execution)
 	}

@@ -1747,6 +1747,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Task")
 		os.Exit(1)
 	}
+	// Parked turns resume through continuation Tasks on the same Session.
+	if err := (&controller.TaskWaitReconciler{
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ExecutionEvents: appStorage,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "TaskWait")
+		os.Exit(1)
+	}
 
 	// Session settlement commits terminal Task status through the Kubernetes outbox.
 	agentOutboxProjector := &controller.ACPOutboxProjector{
@@ -2216,7 +2223,8 @@ func main() {
 				SealTaskCreate: controller.ACPChildTaskSealer(mgr.GetAPIReader(), task.Namespace, task.Name, task.UID),
 				TaskUID:        task.UID, ParentTaskID: task.ParentTaskID, AgentName: task.AgentName,
 				OperationID: string(request.Metadata.OperationID), ExternalEffects: kubeControlStore,
-				Tenant: request.Namespace, WatchNamespace: watchNamespace,
+				ExecutionEvents: appStorage,
+				Tenant:          request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
 				TaskProvenanceProtected:      taskProvenanceProtected,
 				RepositoryValidationBindings: appStorage,

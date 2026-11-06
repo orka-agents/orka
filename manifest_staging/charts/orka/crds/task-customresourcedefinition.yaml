@@ -3102,6 +3102,113 @@ spec:
                 description: StartTime is when the task started running
                 format: date-time
                 type: string
+              wait:
+                description: |-
+                  Wait records a data-only park requested by this Task's agent turn: the
+                  awaited event, its deadline, and the continuation Task that resumes the
+                  Session once the event arrives. Process memory is never preserved.
+                properties:
+                  attempt:
+                    description: |-
+                      Attempt and PromptID identify the exact turn that requested the wait.
+                      The wait is armed only when that turn settled Succeeded.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  chainIndex:
+                    description: ChainIndex is the number of continuations before
+                      this Task in its chain.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  continuationTaskName:
+                    description: |-
+                      ContinuationTaskName is the deterministic name reserved for the
+                      continuation Task before it is created.
+                    maxLength: 253
+                    type: string
+                  continuationTaskUID:
+                    description: ContinuationTaskUID is the UID of the created continuation
+                      Task.
+                    maxLength: 253
+                    type: string
+                  deadline:
+                    description: |-
+                      Deadline bounds the wait. It never exceeds the deadline of the chain's
+                      first Task.
+                    format: date-time
+                    type: string
+                  kind:
+                    description: Kind is the awaited condition.
+                    enum:
+                    - Approval
+                    - Tasks
+                    - Timer
+                    type: string
+                  lastTransitionTime:
+                    description: LastTransitionTime is the last state transition time.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a bounded, sanitized description of the
+                      current state.
+                    maxLength: 1024
+                    type: string
+                  operationDigest:
+                    description: |-
+                      OperationDigest binds the brokered tool call that requested the wait, so
+                      an exact replay is idempotent and a different call is rejected.
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  promptID:
+                    maxLength: 253
+                    type: string
+                  reason:
+                    description: Reason is the agent's bounded, sanitized explanation
+                      of the wait.
+                    maxLength: 512
+                    type: string
+                  references:
+                    description: |-
+                      References identifies what is awaited: the approval ID for Approval and
+                      child Task names for Tasks. Timer waits carry none.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 16
+                    type: array
+                  requestedAt:
+                    description: RequestedAt is when the turn requested the wait.
+                    format: date-time
+                    type: string
+                  resumeAt:
+                    description: ResumeAt is the wake time for Timer waits.
+                    format: date-time
+                    type: string
+                  state:
+                    description: State is the current wait lifecycle state.
+                    enum:
+                    - Requested
+                    - Waiting
+                    - Resuming
+                    - Resumed
+                    - Expired
+                    - Cancelled
+                    - Abandoned
+                    type: string
+                  waitingSince:
+                    description: WaitingSince is when the wait was armed and capacity
+                      released.
+                    format: date-time
+                    type: string
+                required:
+                - attempt
+                - deadline
+                - kind
+                - promptID
+                - requestedAt
+                - state
+                type: object
               webhookDelivered:
                 description: WebhookDelivered indicates whether the webhook was successfully
                   called
