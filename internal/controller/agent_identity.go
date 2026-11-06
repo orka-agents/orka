@@ -693,17 +693,20 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 	return errors.New("the delegating Task chain is too deep")
 }
 
-// requireLiveSessions refuses once a Session the Task runs in is gone: its
-// spec.sessionRef, or the chat Session the chat API recorded in the
-// orka.ai/chat-session label. A chat Session must also be the incarnation
-// the chat API pinned in orka.ai/chat-session-epoch when it created the
-// Task, so a chat deleted and recreated under its name does not keep the
-// Task acting for the requester; admission keeps both labels immutable. It
-// reads Session metadata only, never the transcript.
+// requireLiveSessions refuses once a Session the Task runs in is gone or
+// being deleted: its spec.sessionRef, or the chat Session the chat API
+// recorded in the orka.ai/chat-session label. A chat Session must also be the
+// incarnation the chat API pinned in orka.ai/chat-session-epoch when it
+// created the Task, so a chat deleted and recreated under its name does not
+// keep the Task acting for the requester; admission keeps both labels
+// immutable. It reads Session metadata only, never the transcript.
 func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
 	if task.Spec.SessionRef != nil {
 		if name := strings.TrimSpace(task.Spec.SessionRef.Name); name != "" {
 			if err := d.requireSessionExists(ctx, task.Namespace, name, subject); err != nil {
+				return err
+			}
+			if err := d.requireNoSessionCleanup(ctx, task.Namespace, name, subject); err != nil {
 				return err
 			}
 		}
@@ -729,6 +732,30 @@ func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev
 	}
 	if labels.SessionEpoch(createdAt) != pinned {
 		return fmt.Errorf("%s was deleted and replaced", subject)
+	}
+	return d.requireNoSessionCleanup(ctx, task.Namespace, chat, subject)
+}
+
+// sessionCleanupIntentReader reports whether a Session's deletion has
+// recorded its durable cleanup intent.
+type sessionCleanupIntentReader interface {
+	HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error)
+}
+
+// requireNoSessionCleanup refuses once the Session's deletion has started: its
+// record stays until runtime retirement finishes, but the requester already
+// deleted it. A store that cannot tell fails closed.
+func (d DelegationLiveness) requireNoSessionCleanup(ctx context.Context, namespace, name, subject string) error {
+	reader, ok := d.Sessions.(sessionCleanupIntentReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot tell whether %s is being deleted", subject)
+	}
+	pending, err := reader.HasSessionCleanupIntent(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("read the deletion state of %s: %w", subject, err)
+	}
+	if pending {
+		return fmt.Errorf("%s is being deleted", subject)
 	}
 	return nil
 }

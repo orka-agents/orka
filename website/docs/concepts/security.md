@@ -272,6 +272,14 @@ Task's requester with their own linked grant: only the provider's curated tools,
 only on built-in RuntimePools, only within `maxDelegationAge` of the requester's
 last action, and every write needs the requester's own approval.
 
+The controller's blueprint credential is a projected token on the node that
+runs it. AI workers can create Jobs in the release namespace, and a privileged
+Pod, or one with a `hostPath` volume, can read any token on its node, this one
+included, whichever ServiceAccount it runs as. Before you turn on agent
+identities, enforce at least the `baseline` Pod Security profile on the release
+namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
+admission control; the chart does not label a namespace it does not create.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,
