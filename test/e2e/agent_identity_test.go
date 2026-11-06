@@ -139,13 +139,19 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 
 	It("verifies the identity and calls the Tool with the identity's own token", func() {
 		By("waiting for the Agent to claim the identity and the issuer to verify it")
+		var grantedAt time.Time
 		Eventually(func(g Gomega) {
 			var agent corev1alpha1.Agent
 			g.Expect(getE2EJSON(&agent, "agent", agentIdentityE2EAgent)).To(Succeed())
 			g.Expect(agent.Status.IdentityClaim).NotTo(BeNil())
 			g.Expect(agent.Status.IdentityClaim.ID).To(Equal(fakeEntraIdentity))
+			g.Expect(agent.Status.IdentityClaim.GrantedAt).NotTo(BeNil())
 			g.Expect(agentCondition(agent, "IdentityVerified")).To(HaveField("Status", BeEquivalentTo("True")))
+			grantedAt = agent.Status.IdentityClaim.GrantedAt.Time
 		}, 2*time.Minute, time.Second).Should(Succeed())
+		// Only a Task created in a later second than the grant may bind the
+		// identity, and both times have one-second precision.
+		time.Sleep(time.Until(grantedAt.Add(2 * time.Second)))
 		Eventually(func(g Gomega) {
 			var tool corev1alpha1.Tool
 			g.Expect(getE2EJSON(&tool, "tool", agentIdentityE2ETool)).To(Succeed())
