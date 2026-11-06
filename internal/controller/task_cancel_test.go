@@ -16,12 +16,14 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
@@ -295,4 +297,78 @@ func cancelTaskForTest(ctx context.Context, c client.Client, task *corev1alpha1.
 		current.Status.Message = message
 		return c.Status().Update(ctx, current)
 	})
+}
+
+// Cancelling a class-backed Agent Task while its workspace attachment is
+// pending, before any execution status exists, still settles the attachment.
+func TestCancelledTaskSettlesItsPendingClassWorkspaceAttachment(t *testing.T) {
+	ctx := context.Background()
+	fixture := newACPClassFixture(t, RuntimeProviderBackendAgentSandbox)
+	task := acpClassTestTask()
+	r := acpClassTestReconciler(t, append(fixture.objects(), task)...)
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatalf("resolve class: %v", err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatalf("resolve binding: %v", err)
+	}
+	plan := ACPRuntimePlan{PoolName: acpTestSandboxPoolName, Workspace: binding}
+	if _, _, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	workspaceName := acpClassWorkspaceName(task, binding)
+	workspaceKey := types.NamespacedName{Namespace: task.Namespace, Name: workspaceName}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil {
+		t.Fatalf("read workspace: %v", err)
+	}
+	admitTestACPWorkspace(t, r, workspace)
+	// The attach pass writes the attachment; the adapter has not acknowledged it.
+	if _, ready, err := r.ensureACPClassWorkspace(ctx, task, plan); err != nil || ready {
+		t.Fatalf("attach pass = (%v, %v), want a pending attachment", ready, err)
+	}
+	if err := r.Get(ctx, workspaceKey, workspace); err != nil || workspace.Spec.Attachment == nil ||
+		workspace.Spec.Attachment.TaskRef.UID != task.UID {
+		t.Fatalf("workspace attachment = %+v, %v; want this Task's pending attachment", workspace.Spec.Attachment, err)
+	}
+
+	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
+	if err := r.Get(ctx, key, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Labels[acpExecutionWorkspaceLinkLabel] != workspaceName || task.Status.Execution != nil {
+		t.Fatalf("task link = %q, execution = %+v; want a linked Task without execution status",
+			task.Labels[acpExecutionWorkspaceLinkLabel], task.Status.Execution)
+	}
+	task.Annotations[labels.AnnotationCancelRequested] = "cancelled by alice: wrong repository"
+	if err := r.Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	task.Status.Phase = corev1alpha1.TaskPhasePending
+	if err := r.Status().Update(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.cancelRequestedAgentTask(ctx, task); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if err := r.Get(ctx, key, task); err != nil {
+		t.Fatal(err)
+	}
+	if task.Status.Phase != corev1alpha1.TaskPhaseCancelled || task.Status.Execution == nil ||
+		task.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled {
+		t.Fatalf("status = %+v, want Cancelled with a terminal execution record", task.Status)
+	}
+
+	if _, err := r.reconcileACPClassWorkspaceSettlement(ctx, task); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	err = r.Get(ctx, workspaceKey, workspace)
+	if err == nil && workspace.Spec.Attachment != nil {
+		t.Fatalf("workspace attachment = %+v, want it revoked", workspace.Spec.Attachment)
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
 }

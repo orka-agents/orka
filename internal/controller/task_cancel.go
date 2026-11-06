@@ -26,7 +26,9 @@ import (
 // Task's job authority first, and a Task with ACP execution is written under
 // the controller epoch guard, as every ACP terminal projection must be. The
 // ACP dispatcher sees the Cancelled phase, stops the run, and settles it; the
-// MCP broker refuses further calls for the Task.
+// MCP broker refuses further calls for the Task. A Task cancelled before its
+// execution started but after its class workspace was linked gets a terminal
+// execution record, so the workspace is settled like a failed Task's.
 func cancelTaskStatus(
 	ctx context.Context,
 	c client.Client,
@@ -46,6 +48,15 @@ func cancelTaskStatus(
 		task.Status.Phase = corev1alpha1.TaskPhaseCancelled
 		task.Status.CompletionTime = &now
 		task.Status.Message = reason
+		if task.Status.Execution == nil && strings.TrimSpace(task.Labels[acpExecutionWorkspaceLinkLabel]) != "" {
+			// Cancelled while its class workspace was being admitted or
+			// attached: record the terminal execution, as a planning failure
+			// does, so terminal settlement revokes the linked attachment.
+			task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionStateCancelled, Outcome: corev1alpha1.TaskExecutionOutcomeCancelled,
+				Reason: acpCancelledReason, Message: reason, LastTransitionTime: &now,
+			}
+		}
 		return c.Status().Update(writeCtx, task)
 	}
 	if task.Status.Execution != nil && task.Status.Execution.ControllerEpoch > 0 {
