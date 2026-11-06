@@ -27,7 +27,8 @@ import (
 // parkedDelegatedChild returns a delegated child that parked its turn and the
 // continuation the controller created for it: the continuation inherits the
 // coordinator parent labels but is owned, not controlled, by the child.
-func parkedDelegatedChild(childName, coordinator string) (*corev1alpha1.Task, *corev1alpha1.Task) {
+func parkedDelegatedChild(childName string) (*corev1alpha1.Task, *corev1alpha1.Task) {
+	const coordinator = "coordinator-a"
 	child := internalCallerAuthTaskObject(childName, childName+"-uid", "", coordinator, "")
 	child.Status.Phase = corev1alpha1.TaskPhaseSucceeded
 	continuation := internalCallerAuthTaskObject(childName+"-resume", childName+"-resume-uid", "", "", "")
@@ -55,9 +56,9 @@ func requireFiberStatus(t *testing.T, err error, status int) {
 func TestContinuationOfADelegatedChildKeepsItsCoordinationParent(t *testing.T) {
 	scheme := internalCallerAuthScheme(t)
 	coordinator := internalCallerAuthTaskObject("coordinator-a", "coordinator-a-uid", "", "", "")
-	child, continuation := parkedDelegatedChild("worker", "coordinator-a")
+	child, continuation := parkedDelegatedChild("worker")
 	sibling := internalCallerAuthTaskObject("peer", "peer-uid", "", "coordinator-a", "")
-	siblingParked, siblingContinuation := parkedDelegatedChild("peer-parked", "coordinator-a")
+	siblingParked, siblingContinuation := parkedDelegatedChild("peer-parked")
 	other := internalCallerAuthTaskObject("coordinator-b", "coordinator-b-uid", "", "", "")
 	stranger := internalCallerAuthTaskObject("stranger", "stranger-uid", "", "coordinator-b", "")
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
@@ -90,7 +91,7 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 
 	// The predecessor's controller-written wait does not name this Task, so
 	// its lineage annotations prove nothing.
-	child, forged := parkedDelegatedChild("worker", "coordinator-a")
+	child, forged := parkedDelegatedChild("worker")
 	child.Status.Wait.ContinuationTaskUID = "someone-else"
 	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
 		WithObjects(coordinator, child, forged).Build()
@@ -99,7 +100,7 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	requireFiberStatus(t, err, http.StatusForbidden)
 
 	// A predecessor delegated by another coordinator does not grant this one.
-	child, continuation := parkedDelegatedChild("worker", "coordinator-a")
+	child, continuation := parkedDelegatedChild("worker")
 	child.Annotations[labels.AnnotationParentTaskName] = "coordinator-b"
 	child.Labels[labels.LabelParentTask] = labels.SelectorValue("coordinator-b")
 	child.OwnerReferences[0].Name, child.OwnerReferences[0].UID = "coordinator-b", "coordinator-b-uid"
@@ -110,7 +111,7 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	requireFiberStatus(t, err, http.StatusForbidden)
 
 	// A failed predecessor read never grants the parent.
-	child, continuation = parkedDelegatedChild("worker", "coordinator-a")
+	child, continuation = parkedDelegatedChild("worker")
 	failing := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).
 		WithObjects(coordinator, child, continuation).
 		WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
