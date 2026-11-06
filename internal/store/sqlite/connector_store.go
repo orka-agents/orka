@@ -650,6 +650,32 @@ func (s *Store) GetConnectorCredential(ctx context.Context, ref store.ConnectorC
 	return credential, nil
 }
 
+// GetConnectorCredentialGrant implements store.ConnectorGrantReader. It reads
+// the grant column, written in the same statement as the sealed body, and
+// never opens the material.
+func (s *Store) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (int64, error) {
+	if err := ref.Validate(); err != nil {
+		return 0, err
+	}
+	var (
+		grantSequence int64
+		tombstoned    bool
+	)
+	err := s.db.QueryRowContext(ctx, `SELECT c.grant_sequence,
+		EXISTS(SELECT 1 FROM connector_credential_tombstones t WHERE t.connection_uid = c.connection_uid)
+		FROM connector_credentials c WHERE c.connection_uid = ?`, ref.ConnectionUID).Scan(&grantSequence, &tombstoned)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, store.ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read connector credential grant: %w", err)
+	}
+	if tombstoned {
+		return 0, store.ErrConnectorCustodyTombstoned
+	}
+	return grantSequence, nil
+}
+
 // openConnectorCredentialRow unwraps a row's data key and opens its sealed
 // body, both bound to ref.
 func (s *Store) openConnectorCredentialRow(ref store.ConnectorCredentialRef, dekNonce, dekCiphertext, nonce, ciphertext []byte) (store.ConnectorCredential, error) {
