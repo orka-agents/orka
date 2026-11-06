@@ -91,6 +91,7 @@ func TestStaticChartProtectsTheControllerServiceAccountWithAgentIdentities(t *te
 			var expected admissionregistrationv1.ValidatingAdmissionPolicy
 			require.NoError(t, yaml.UnmarshalStrict([]byte(strings.NewReplacer(
 				"ORKA_NAMESPACE", tc.namespace, "CONTROLLER_SA", tc.controllerAccount,
+				"CONTROLLER_DEPLOYMENT", tc.fullname+"-controller",
 			).Replace(canonicalPolicy)), &expected))
 			require.Equal(t, expected.Spec, actual.Spec, "Helm must preserve the canonical controller ServiceAccount rules")
 

@@ -305,6 +305,11 @@ type KubernetesResolver struct {
 	// closing the Session stops the Agent acting for the requester at once.
 	// Nil fails every Delegated call closed.
 	DelegationLive func(context.Context, AgentIdentityBinding) error
+	// ReservedServiceAccount is the controller's own ServiceAccount. No
+	// policy may request a token for it: the token would carry the
+	// controller's authority, and the Entra agent identity blueprint trusts
+	// it, to whatever endpoint the policy names.
+	ReservedServiceAccount ReservedServiceAccount
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -705,6 +710,11 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
 	}
+	// Deleting the Agent stops its Tasks' calls at once, even while a
+	// finalizer keeps the object readable.
+	if !live.DeletionTimestamp.IsZero() {
+		return Resolution{}, errors.New("the Task's bound Agent is being deleted")
+	}
 	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
@@ -969,6 +979,9 @@ func (r *KubernetesResolver) resolveTokenSource(ctx context.Context, namespace s
 	case corev1alpha1.OutboundTokenSourceServiceAccount:
 		if r.KubeClient == nil {
 			return resolvedToken{}, errors.New("ServiceAccount token source requires a Kubernetes client")
+		}
+		if r.ReservedServiceAccount.Reserves(namespace, source.ServiceAccountRef.Name) {
+			return resolvedToken{}, errReservedServiceAccount
 		}
 		expiration := int64(600)
 		if source.ServiceAccountRef.ExpirationSeconds != nil {

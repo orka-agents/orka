@@ -93,6 +93,7 @@ import (
 const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	serviceAccountTokenFile     = "/var/run/secrets/kubernetes.io/serviceaccount/token" // #nosec G101 -- a path, not a credential.
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
 )
 
@@ -830,6 +831,13 @@ func main() {
 		setupLog.Error(err, "invalid agent identity configuration")
 		os.Exit(1)
 	}
+	// No OutboundAccessPolicy may mint tokens for the controller's own
+	// ServiceAccount, which the agent identity blueprint trusts.
+	controllerServiceAccount, controllerServiceAccountErr := currentServiceAccount()
+	if controllerServiceAccountErr != nil && agentIdentityConfig.Entra != nil {
+		setupLog.Error(controllerServiceAccountErr, "agent identities require the controller to know its own ServiceAccount")
+		os.Exit(1)
+	}
 	var agentIdentitySource *agentidentity.Source
 	if agentIdentityConfig.Entra != nil {
 		agentIdentitySource = &agentidentity.Source{
@@ -1294,10 +1302,11 @@ func main() {
 
 	// The clientset is reused for pod log and broker operations.
 	outboundAccessResolver := &outboundaccess.KubernetesResolver{
-		Reader:     mgr.GetAPIReader(),
-		KubeClient: kubeClient,
-		Trust:      outboundAccessTrust,
-		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		Reader:                 mgr.GetAPIReader(),
+		ReservedServiceAccount: controllerServiceAccount,
+		KubeClient:             kubeClient,
+		Trust:                  outboundAccessTrust,
+		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -1819,6 +1828,7 @@ func main() {
 	if err := (&controller.OutboundAccessPolicyReconciler{
 		Client:                     mgr.GetClient(),
 		APIReader:                  mgr.GetAPIReader(),
+		ReservedServiceAccount:     controllerServiceAccount,
 		Scheme:                     mgr.GetScheme(),
 		Trust:                      outboundAccessTrust,
 		AIWorkerServiceAccountName: aiWorkerServiceAccountName,
@@ -2745,6 +2755,16 @@ func validateAgentExecutionSnapshotOptions(
 		return errors.New("agent execution snapshot retention and retention interval must be positive")
 	}
 	return nil
+}
+
+// currentServiceAccount returns the ServiceAccount this Pod runs as, from its
+// mounted API token.
+func currentServiceAccount() (outboundaccess.ReservedServiceAccount, error) {
+	token, err := os.ReadFile(serviceAccountTokenFile)
+	if err != nil {
+		return outboundaccess.ReservedServiceAccount{}, fmt.Errorf("read the controller's ServiceAccount token: %w", err)
+	}
+	return outboundaccess.ServiceAccountFromToken(string(token))
 }
 
 // envStringDefault returns the trimmed environment value, or fallback when unset.
