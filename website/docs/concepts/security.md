@@ -235,9 +235,12 @@ ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
 RepositoryMonitors, and GatewayBindings that newly name an Agent. Orka's own
 components (the controller, API, gateways, monitors, and workers) hold `use`
 broadly, because they create Tasks only for callers they have already checked.
-A parent Agent can still hand work only to the Agents its owner listed in
-`spec.coordination.allowedAgents`. The check is off by default, because turning
-it on denies every caller without a `use` grant.
+Delegation is the exception: a worker creates a child Task for any Agent the
+parent Agent's owner listed in `spec.coordination.allowedAgents`, without
+checking the root caller's `use` on the child Agent. Whoever may use a parent
+Agent can therefore run the Agents its owner listed, so list only Agents its
+callers may run. The check is off by default, because turning it on denies
+every caller without a `use` grant.
 
 ## Secret management
 
