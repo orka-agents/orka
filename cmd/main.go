@@ -817,10 +817,12 @@ func main() {
 	}
 	taskProvenanceProtected := taskProvenanceAdmissionEnabled || taskProvenanceAdmissionExternal
 	agentIdentityConfig := agentidentity.Config{AgentUseAuthorization: agentUseAuthorizationEnabled}
+	agentIdentityEntraTenantID = strings.TrimSpace(agentIdentityEntraTenantID)
+	agentIdentityEntraBlueprintClientID = strings.TrimSpace(agentIdentityEntraBlueprintClientID)
 	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
 		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
 			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
-			Authority: agentIdentityEntraAuthority,
+			Authority: strings.TrimSpace(agentIdentityEntraAuthority),
 		}
 	}
 	if err := agentIdentityConfig.Validate(); err != nil {
