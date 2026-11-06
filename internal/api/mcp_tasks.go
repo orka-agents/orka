@@ -168,12 +168,23 @@ func (s mcpTaskState) coreTaskFields() map[string]any {
 	return fields
 }
 
+// extensionStatus is the io.modelcontextprotocol/tasks status. The extension
+// reserves failed for a JSON-RPC error and requires a failed tool call to be
+// completed with an isError result, so a failed Orka Task is completed there.
+// The 2025-11-25 core status keeps failed, which covers isError results.
+func (s mcpTaskState) extensionStatus() string {
+	if status := s.status(); status != mcpStatusFailed {
+		return status
+	}
+	return mcpStatusCompleted
+}
+
 // extensionTaskFields is the io.modelcontextprotocol/tasks task object.
 func (s mcpTaskState) extensionTaskFields(resultType string) map[string]any {
 	fields := map[string]any{
 		"resultType":      resultType,
 		"taskId":          encodeMCPTaskID(s.response.Namespace, s.response.Name, string(s.response.UID)),
-		"status":          s.status(),
+		"status":          s.extensionStatus(),
 		mcpFieldCreatedAt: mcpTimeValue(s.response.CreationTimestamp.Time),
 		"lastUpdatedAt":   s.lastUpdated(),
 		"ttlMs":           nil,
@@ -274,11 +285,13 @@ func (m *mcpServer) getTask(call *mcpCall) (any, error) {
 	if !call.tasksExtension {
 		return state.coreTaskFields(), nil
 	}
+	// DetailedTask: inputRequests only when input_required, result only when
+	// completed (isError for a failed Orka Task), nothing more when cancelled.
 	fields := state.extensionTaskFields("complete")
-	switch state.status() {
+	switch fields["status"] {
 	case mcpStatusInputRequired:
 		fields["inputRequests"] = state.inputRequests()
-	case mcpStatusCompleted, mcpStatusFailed, mcpStatusCancelled:
+	case mcpStatusCompleted:
 		fields["result"] = m.terminalToolResult(call.c, state)
 	}
 	return fields, nil
@@ -291,7 +304,7 @@ func (m *mcpServer) taskResult(call *mcpCall) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	state, _, err := m.waitForTerminal(call.c, ref)
+	state, _, err := m.waitForTerminal(call, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -303,10 +316,11 @@ func (m *mcpServer) taskResult(call *mcpCall) (any, error) {
 	return result, nil
 }
 
-// waitForTerminal waits, bounded and under a single wait permit, until the
-// Task finishes; a pending approval does not end the wait.
-func (m *mcpServer) waitForTerminal(c fiber.Ctx, ref mcpTaskRef) (mcpTaskState, bool, error) {
-	state, timedOut, err := m.pollTask(c, ref.Namespace, ref.Name, ref.UID, m.resultWait, func(state mcpTaskState) bool {
+// waitForTerminal waits, bounded and under a wait permit in place of the
+// request permit, until the Task finishes; a pending approval does not end
+// the wait.
+func (m *mcpServer) waitForTerminal(call *mcpCall, ref mcpTaskRef) (mcpTaskState, bool, error) {
+	state, timedOut, err := m.pollTask(call, ref.Namespace, ref.Name, ref.UID, m.resultWait, func(state mcpTaskState) bool {
 		status := state.status()
 		return status != mcpStatusWorking && status != mcpStatusInputRequired
 	})

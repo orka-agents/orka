@@ -25,8 +25,10 @@ The endpoint is off by default. Start the controller with:
 
 or set `ORKA_MCP_SERVER_ENABLED=true`. It is served at `POST /mcp` on the API port
 (`8080`). `--mcp-max-concurrent` (default `16`) bounds concurrent MCP requests per API
-replica; long waits may hold at most half of them. Excess requests receive HTTP 429
-with `Retry-After`.
+replica. Long waits (`wait_for_task`, `tasks/result`) give up their request slot and
+use a separate pool of half as many wait slots (at least one), so waits never block
+approvals, cancellations, or other requests. Excess requests and waits receive HTTP 429
+with `Retry-After`, or a busy error for a wait.
 
 The endpoint is a stateless [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
 server. It answers every request with one JSON body, issues no `Mcp-Session-Id`, and
@@ -164,8 +166,10 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
 
 - The **`io.modelcontextprotocol/tasks` extension.** When a request's `_meta`
   client capabilities declare the extension, `create_task` returns a task
-  (`resultType: "task"`). `tasks/get` reports its status; once it finishes it
-  includes the `create_task` result. While a human decision is pending the status is
+  (`resultType: "task"`). `tasks/get` reports its status; once it completes it
+  includes the `create_task` result. The extension reserves `failed` for JSON-RPC
+  errors, so a failed Task is `completed` with an `isError: true` result, and a
+  cancelled Task carries no result. While a human decision is pending the status is
   `input_required` and `inputRequests` holds one form elicitation per pending
   approval, keyed by approval ID, asking for `decision` (`approve` or `decline`)
   and an optional `reason`. Answer with `tasks/update`: `accept` records the chosen
@@ -183,7 +187,7 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
 | `Pending`, `Scheduled`, `Running`, `Finalizing` | `working` |
 | Running with a pending approval request | `input_required` |
 | `Succeeded` | `completed` |
-| `Failed` | `failed` |
+| `Failed` | `failed`; `completed` with an `isError` result under the extension |
 | `Cancelled`, or being deleted | `cancelled` |
 
 A task ID names the Task's namespace and name and pins its UID. A later Task created

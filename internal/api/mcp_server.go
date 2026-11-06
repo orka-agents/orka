@@ -154,6 +154,41 @@ type mcpCall struct {
 	// tasksExtension is true when the request's client capabilities declare
 	// the MCP Tasks extension.
 	tasksExtension bool
+	// permit is the request's admission.
+	permit *mcpPermit
+}
+
+// mcpPermit is the admission one request holds until it ends: a request
+// permit, or, once the request starts a long poll, a wait permit in its
+// place. Waits therefore never occupy request permits, so short requests,
+// including the decisions and cancellations that end a wait, stay admitted
+// while every wait permit is in use. Waits beyond the wait permits are
+// refused, never queued.
+type mcpPermit struct {
+	server  *mcpServer
+	waiting bool
+}
+
+// enterWait trades the request permit for a wait permit. It reports false,
+// keeping the request permit, when every wait permit is in use.
+func (p *mcpPermit) enterWait() bool {
+	if p.waiting {
+		return true
+	}
+	if !tryAcquire(p.server.waitSlots) {
+		return false
+	}
+	p.waiting = true
+	<-p.server.slots
+	return true
+}
+
+func (p *mcpPermit) release() {
+	if p.waiting {
+		<-p.server.waitSlots
+		return
+	}
+	<-p.server.slots
 }
 
 func newMCPServer(handler fasthttp.RequestHandler, cfg MCPServerConfig) *mcpServer {
@@ -225,7 +260,8 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 		c.Set(fiber.HeaderRetryAfter, "1")
 		return m.writeError(c, fiber.StatusTooManyRequests, nil, newMCPError(mcpCodeServerBusy, "too many concurrent MCP requests"))
 	}
-	defer func() { <-m.slots }()
+	permit := &mcpPermit{server: m}
+	defer permit.release()
 
 	body := c.Body()
 	if len(body) > mcpMaxRequestBytes {
@@ -248,7 +284,7 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 		return c.Status(fiber.StatusAccepted).Send(nil)
 	}
 
-	call := &mcpCall{c: c, method: request.Method, params: request.Params}
+	call := &mcpCall{c: c, method: request.Method, params: request.Params, permit: permit}
 	if err := call.readMeta(); err != nil {
 		return m.writeError(c, fiber.StatusOK, request.ID, err)
 	}

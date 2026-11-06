@@ -1189,3 +1189,127 @@ func TestMCPCORSPreflightAllowsMCPHeaders(t *testing.T) {
 	allowed = strings.ToLower(preflight(NewServer(f.kube, nil, f.config)).Get("Access-Control-Allow-Headers"))
 	require.NotContains(t, allowed, "mcp-")
 }
+
+// requireExtensionDetailedTask checks a tasks/get result against the
+// io.modelcontextprotocol/tasks 2026-07-28 GetTaskResult (Result &
+// DetailedTask): the common Task fields, then exactly the payload field of the
+// status variant.
+func requireExtensionDetailedTask(t *testing.T, task map[string]any) {
+	t.Helper()
+	require.Equal(t, "complete", task["resultType"])
+	for _, field := range []string{"taskId", "createdAt", "lastUpdatedAt"} {
+		require.IsType(t, "", task[field], field)
+	}
+	require.Contains(t, task, "ttlMs")
+	payload := map[string]string{mcpStatusInputRequired: "inputRequests", mcpStatusCompleted: "result", mcpStatusFailed: "error"}
+	status, _ := task["status"].(string)
+	require.Contains(t, []string{mcpStatusWorking, mcpStatusInputRequired, mcpStatusCompleted, mcpStatusFailed, mcpStatusCancelled}, status)
+	for variant, field := range payload {
+		if variant == status {
+			require.IsType(t, map[string]any{}, task[field], "%s requires %s", status, field)
+			continue
+		}
+		require.NotContains(t, task, field, "%s must not carry %s", status, field)
+	}
+	if status == mcpStatusFailed {
+		errorObject := task["error"].(map[string]any)
+		require.IsType(t, float64(0), errorObject["code"])
+		require.IsType(t, "", errorObject["message"])
+	}
+}
+
+// The extension reserves failed for JSON-RPC errors: a failed tool call is
+// completed with an isError result, and a cancelled task carries no result.
+// The 2025-11-25 core status keeps failed, which covers isError results.
+func TestMCPExtensionTaskShapesFollowTheSchema(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "broken", corev1alpha1.TaskPhaseFailed, func(task *corev1alpha1.Task) {
+		task.Status.Message = "agent exited with status 1"
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "broken", []byte("stack trace")))
+	createMCPTestTask(t, f, "stopped", corev1alpha1.TaskPhaseCancelled)
+	createMCPTestTask(t, f, "busy", corev1alpha1.TaskPhaseRunning)
+	createMCPTestTask(t, f, "asking", corev1alpha1.TaskPhaseRunning)
+	appendMCPTestApproval(t, f, "asking", "pending")
+	createMCPTestTask(t, f, "done", corev1alpha1.TaskPhaseSucceeded)
+
+	get := func(name string, meta map[string]any) map[string]any {
+		params := map[string]any{"taskId": encodeMCPTaskID("default", name, "uid-"+name)}
+		if meta != nil {
+			params["_meta"] = meta
+		}
+		response := f.mcpRPC(t, "tasks/get", params)
+		require.Nil(t, response.Error, response.body)
+		var task map[string]any
+		require.NoError(t, json.Unmarshal(response.Result, &task))
+		return task
+	}
+	for name, status := range map[string]string{
+		"broken": mcpStatusCompleted, "stopped": mcpStatusCancelled, "busy": mcpStatusWorking,
+		"asking": mcpStatusInputRequired, "done": mcpStatusCompleted,
+	} {
+		task := get(name, extensionMeta())
+		requireExtensionDetailedTask(t, task)
+		require.Equal(t, status, task["status"], name)
+	}
+
+	failed := get("broken", extensionMeta())
+	result := failed["result"].(map[string]any)
+	require.Equal(t, true, result["isError"], "a failed Task is a tool result with isError")
+	require.Contains(t, fmt.Sprint(result), "stack trace")
+	require.Equal(t, "agent exited with status 1", failed["statusMessage"])
+	require.NotContains(t, get("done", extensionMeta())["result"], "isError")
+
+	core := get("broken", nil)
+	require.Equal(t, mcpStatusFailed, core["status"], "the core status keeps failed")
+	require.NotContains(t, core, "result")
+	response := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "broken", "uid-broken")})
+	require.Nil(t, response.Error, response.body)
+	require.Contains(t, string(response.Result), `"isError":true`)
+}
+
+// Waits trade their request permit for a wait permit, so with a single
+// request permit a pending tasks/result wait never blocks the approval
+// decision or cancellation that ends it, and waits beyond the wait permits are
+// refused rather than queued.
+func TestMCPWaitsNeverStarveShortRequests(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	f.config.MCP.MaxConcurrent = 1
+	f.server = NewServer(f.kube, nil, f.config)
+	mcp := f.server.mcpServer
+	require.Equal(t, 1, cap(mcp.slots))
+	require.Equal(t, 1, cap(mcp.waitSlots))
+	mcp.resultWait = 30 * time.Second
+	createMCPTestTask(t, f, "parked", corev1alpha1.TaskPhaseRunning)
+	appendMCPTestApproval(t, f, "parked", "pending")
+	taskID := encodeMCPTaskID("default", "parked", "uid-parked")
+
+	done := make(chan mcpTestResponse, 1)
+	go func() { done <- f.mcpRPC(t, "tasks/result", map[string]any{"taskId": taskID}) }()
+	require.Eventually(t, func() bool { return len(mcp.waitSlots) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Empty(t, mcp.slots, "the wait gave back its request permit")
+
+	second := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": taskID})
+	require.Equal(t, http.StatusOK, second.status, second.body)
+	require.NotNil(t, second.Error, second.body)
+	require.Equal(t, mcpCodeServerBusy, second.Error.Code, "a wait beyond the wait permits is refused")
+	waited := f.mcpTool(t, mcpToolWaitForTask, map[string]any{"name": "parked", "timeoutSeconds": 1})
+	require.Equal(t, float64(http.StatusTooManyRequests), mcpErrorStatus(t, waited))
+
+	decided := f.mcpTool(t, mcpToolDecideApproval, map[string]any{"task": "parked", "approvalId": "pending", "decision": "approve"})
+	require.False(t, decided.IsError, decided.Content)
+	cancelled := f.mcpRPC(t, "tasks/cancel", map[string]any{"taskId": taskID})
+	require.Nil(t, cancelled.Error, cancelled.body)
+
+	select {
+	case response := <-done:
+		require.NotNil(t, response.Error, "the cancelled Task ends the wait: %s", response.body)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wait did not end after its Task was cancelled")
+	}
+	require.Empty(t, mcp.slots)
+	require.Empty(t, mcp.waitSlots)
+}

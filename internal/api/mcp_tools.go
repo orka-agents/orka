@@ -936,18 +936,18 @@ func (m *mcpServer) toolListTasks(call *mcpCall, raw json.RawMessage) (any, erro
 }
 
 // waitForTask polls a Task until it finishes, needs input, or the wait ends.
-func (m *mcpServer) waitForTask(c fiber.Ctx, namespace, name, uid string, timeout time.Duration) (mcpTaskState, bool, error) {
-	return m.pollTask(c, namespace, name, uid, timeout, func(state mcpTaskState) bool { return state.status() != mcpStatusWorking })
+func (m *mcpServer) waitForTask(call *mcpCall, namespace, name, uid string, timeout time.Duration) (mcpTaskState, bool, error) {
+	return m.pollTask(call, namespace, name, uid, timeout, func(state mcpTaskState) bool { return state.status() != mcpStatusWorking })
 }
 
-// pollTask holds one wait permit for the whole wait and polls a Task until
-// done reports true or the wait ends. uid, when set, pins the Task identity
-// so a replacement is never reported.
-func (m *mcpServer) pollTask(c fiber.Ctx, namespace, name, uid string, timeout time.Duration, done func(mcpTaskState) bool) (mcpTaskState, bool, error) {
-	if !tryAcquire(m.waitSlots) {
+// pollTask trades the request permit for a wait permit, held for the rest of
+// the request, and polls a Task until done reports true or the wait ends.
+// uid, when set, pins the Task identity so a replacement is never reported.
+func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout time.Duration, done func(mcpTaskState) bool) (mcpTaskState, bool, error) {
+	if !call.permit.enterWait() {
 		return mcpTaskState{}, false, &mcpRESTError{Status: fiber.StatusTooManyRequests, Message: "too many concurrent waits; poll get_task instead"}
 	}
-	defer func() { <-m.waitSlots }()
+	c := call.c
 	deadline := time.Now().Add(timeout)
 	for {
 		state, err := m.loadTaskState(c, namespace, name)
@@ -989,7 +989,7 @@ func (m *mcpServer) toolWaitForTask(call *mcpCall, raw json.RawMessage) (any, er
 	if err != nil {
 		return nil, err
 	}
-	state, timedOut, err := m.waitForTask(call.c, args.Namespace, args.Name, "", time.Duration(seconds)*time.Second)
+	state, timedOut, err := m.waitForTask(call, args.Namespace, args.Name, "", time.Duration(seconds)*time.Second)
 	if err != nil {
 		return nil, err
 	}

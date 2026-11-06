@@ -488,7 +488,7 @@ func main() {
 	flag.BoolVar(&mcpServerEnabled, "mcp-server-enabled", envBool("ORKA_MCP_SERVER_ENABLED"),
 		"Serve the control-plane MCP endpoint at /mcp on the API port. Every tool runs with the caller's own REST API permissions.")
 	flag.IntVar(&mcpMaxConcurrent, "mcp-max-concurrent", api.DefaultMCPMaxConcurrent,
-		"Max concurrent MCP requests per API replica; waiting tools may use at most half.")
+		"Max concurrent MCP requests per API replica; waiting tools use a separate pool of half as many wait slots.")
 	flag.StringVar(&connectorsAllowPrivateEndpointsAck, "connectors-allow-private-endpoints", os.Getenv("ORKA_CONNECTORS_ALLOW_PRIVATE_ENDPOINTS"),
 		"FIXTURE USE ONLY: accept private, loopback, and cluster-local connector provider and tool endpoints, "+
 			"and let linked-account requests reach them. A person's token would be sent to such an address, so the flag takes only the literal "+

@@ -53,9 +53,10 @@ an `input_required` state when a human must answer.
   Secret references, transaction metadata, and runtime identifiers. Text fields,
   results, and artifacts pass through `redact.SensitiveText`; results and
   artifacts are redacted whole before being chunked (at most 256 KiB per call).
-- Concurrency is bounded per replica (`--mcp-max-concurrent`), with bounded waits
-  (at most 50 seconds) that may hold at most half of the slots, matching how chat
-  bounds its concurrency.
+- Concurrency is bounded per replica (`--mcp-max-concurrent`). Bounded waits (at
+  most 50 seconds) trade their request slot for one of a separate pool of half as
+  many wait slots (at least one), so waits can never starve the approval decisions
+  and cancellations that end them; waits beyond that pool are refused.
 
 ## Consequences
 
