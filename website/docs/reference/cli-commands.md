@@ -4028,8 +4028,9 @@ Use "orka session [command] --help" for more information about a command.
 ## `orka session cancel`
 
 ```text
-Cancel the session's Pending and Running tasks. The session keeps its
-history and accepts the next message.
+Stop the session's in-flight chat request, if any, and cancel its
+Pending and Running tasks. The session keeps its history and accepts the next
+message.
 
 Usage:
   orka session cancel <name> [flags]

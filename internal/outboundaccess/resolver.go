@@ -97,6 +97,10 @@ type ResolveRequest struct {
 	// rather than its declared URL; connection mode refuses it before any
 	// credential work.
 	MCPBacked bool
+	// TaskUID is the executing Task's UID as the caller authenticated it. It
+	// only attributes identity use records, including refusals for a Task
+	// that has no identity binding.
+	TaskUID string
 	// AgentIdentity is the identity frozen into the executing Task's binding.
 	// agentIdentity-mode policies act as this identity and no other; nil
 	// fails them closed.
@@ -314,6 +318,11 @@ type KubernetesResolver struct {
 	// closing the Session stops the Agent acting for the requester at once.
 	// Nil fails every Delegated call closed.
 	DelegationLive func(context.Context, AgentIdentityBinding) error
+	// ReservedServiceAccount is the controller's own ServiceAccount. No
+	// policy may request a token for it: the token would carry the
+	// controller's authority, and the Entra agent identity blueprint trusts
+	// it, to whatever endpoint the policy names.
+	ReservedServiceAccount ReservedServiceAccount
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -631,10 +640,12 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	return credential, declared, nil
 }
 
-// unfrozenConnectionReason explains why a Task started without the
-// requester's Connection to a provider: their link was missing, expired, or
-// not Ready when the Task was bound. It reads only, and returns "" when it
-// cannot tell, so the caller keeps its generic refusal.
+// unfrozenConnectionReason explains why the Task carries no Connection of
+// the requester's for a provider, from the state of their links now: none,
+// several, or one that is expired, not Ready, or Ready but not bound (for
+// example consent or granted scopes that did not match the provider when the
+// Task was bound). It reads only, and returns "" when it cannot tell, so the
+// caller keeps its generic refusal.
 func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, namespace, provider string, requester *corev1alpha1.RequestedBy) string {
 	if r.Reader == nil {
 		return ""
@@ -644,22 +655,30 @@ func (r *KubernetesResolver) unfrozenConnectionReason(ctx context.Context, names
 		return ""
 	}
 	relink := fmt.Sprintf("link it with `orka connect %s` and run the Task again", provider)
+	var links []*corev1alpha1.Connection
 	for i := range connections.Items {
 		connection := &connections.Items[i]
-		if connection.Spec.ProviderRef.Name != provider || connection.Spec.Subject.Issuer != requester.Issuer ||
-			connection.Spec.Subject.Subject != requester.Subject {
-			continue
-		}
-		switch state := connection.Status.State; state {
-		case corev1alpha1.ConnectionStateExpired:
-			return fmt.Sprintf("the requester's link to %q expired before this Task started; %s", provider, relink)
-		case corev1alpha1.ConnectionStateReady:
-			return fmt.Sprintf("the requester's link to %q became Ready after this Task started; run the Task again", provider)
-		default:
-			return fmt.Sprintf("the requester's link to %q was not Ready (%s) when this Task started; %s", provider, state, relink)
+		if connection.Spec.ProviderRef.Name == provider && connection.Spec.Subject.Issuer == requester.Issuer &&
+			connection.Spec.Subject.Subject == requester.Subject {
+			links = append(links, connection)
 		}
 	}
-	return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
+	switch {
+	case len(links) == 0:
+		return fmt.Sprintf("the requester has no link to %q; %s", provider, relink)
+	case len(links) > 1:
+		return fmt.Sprintf("the requester has %d links to %q and none is bound while that is ambiguous; keep one and run the Task again",
+			len(links), provider)
+	}
+	switch state := links[0].Status.State; state {
+	case corev1alpha1.ConnectionStateExpired:
+		return fmt.Sprintf("the requester's link to %q is expired; %s", provider, relink)
+	case corev1alpha1.ConnectionStateReady:
+		return fmt.Sprintf("the requester's link to %q is Ready but is not bound to this Task; "+
+			"check that its consent and granted scopes match the provider, then run the Task again", provider)
+	default:
+		return fmt.Sprintf("the requester's link to %q is not Ready (%s); %s", provider, state, relink)
+	}
 }
 
 // credentialOutput returns the header and prefix an output selects, with the
@@ -707,6 +726,11 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
+	}
+	// Deleting the Agent stops its Tasks' calls at once, even while a
+	// finalizer keeps the object readable.
+	if !live.DeletionTimestamp.IsZero() {
+		return Resolution{}, errors.New("the Task's bound Agent is being deleted")
 	}
 	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
@@ -972,6 +996,9 @@ func (r *KubernetesResolver) resolveTokenSource(ctx context.Context, namespace s
 	case corev1alpha1.OutboundTokenSourceServiceAccount:
 		if r.KubeClient == nil {
 			return resolvedToken{}, errors.New("ServiceAccount token source requires a Kubernetes client")
+		}
+		if r.ReservedServiceAccount.Reserves(namespace, source.ServiceAccountRef.Name) {
+			return resolvedToken{}, errReservedServiceAccount
 		}
 		expiration := int64(600)
 		if source.ServiceAccountRef.ExpirationSeconds != nil {

@@ -159,10 +159,16 @@ func TestCancelSessionCancelsOnlyItsRunningTurn(t *testing.T) {
 func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	chatTurn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
 	chatTurn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	// create_ai_task sets both: the conversation label and a continuity Session.
+	withContinuity := cancelTestTask("chat-turn-with-continuity", corev1alpha1.TaskPhaseRunning, "continuity")
+	withContinuity.Labels = map[string]string{labels.LabelChatSession: "conversation"}
 	mislabeled := cancelTestTask("mislabeled", corev1alpha1.TaskPhaseRunning, "")
 	mislabeled.Labels = map[string]string{labels.LabelChatSession: "task-session"}
-	h, app := setupCancelTest(t, chatTurn, mislabeled)
-	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task"} {
+	h, app := setupCancelTest(t, chatTurn, withContinuity, mislabeled)
+	// Stopping a turn reads Session metadata, never the transcript.
+	sessions := &metadataOnlySessionStore{SessionStore: h.sessionStore, typeReader: h.sessionStore.(transcriptSessionTypeReader)}
+	h.sessionStore = sessions
+	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task", "continuity": "task"} {
 		if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: name, SessionType: sessionType}); err != nil {
 			t.Fatal(err)
 		}
@@ -171,8 +177,13 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
 	}
-	if got, _ := cancelAnnotation(t, h, "chat-turn"); got != "cancelled by alice" {
-		t.Fatalf("chat turn cancel request = %q", got)
+	for _, name := range []string{"chat-turn", "chat-turn-with-continuity"} {
+		if got, _ := cancelAnnotation(t, h, name); got != "cancelled by alice" {
+			t.Fatalf("%s cancel request = %q", name, got)
+		}
+	}
+	if sessions.getCalls != 0 {
+		t.Fatalf("GetSession calls = %d, want the metadata-only lookup", sessions.getCalls)
 	}
 	// The chat label names a Session only when that Session is a chat.
 	if resp, _ := postCancel(t, app, "/sessions/task-session/cancel", ""); resp.StatusCode != http.StatusConflict {
@@ -181,4 +192,43 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	if _, ok := cancelAnnotation(t, h, "mislabeled"); ok {
 		t.Fatal("a chat label must not tie a Task to a non-chat Session")
 	}
+}
+
+func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
+	h, app := setupCancelTest(t)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	chat := &ChatHandler{}
+	h.chatTurns = chat
+	if resp, _ := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("an idle chat Session: status = %d, want 409", resp.StatusCode)
+	}
+
+	// A chat request that has not started a Task yet still counts as a turn.
+	reservation, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		<-reservation.cancelContext.Done()
+		close(stopped)
+		chat.finishActiveChatReservation(reservation, nil)
+	}()
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK || body["chatTurnStopped"] != true {
+		t.Fatalf("status = %d, body = %v, want the chat turn stopped", resp.StatusCode, body)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("the chat request was not cancelled")
+	}
+	// The reservation is released, so the Session accepts the next message.
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
 }

@@ -1202,6 +1202,7 @@ func BindNativeTaskConnectorAuthority(
 		return errors.New("native connector authority binding requires a Task and executor")
 	}
 	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(FrozenConnectionsFromTaskStatus(task))
 	return bindVerifiedTaskTransactionAuthority(ctx, reader, task, readScopes, enforceCredentialAuth, executor)
 }
@@ -1250,6 +1251,7 @@ func bindFrozenConnections(
 		return errors.New("frozen connection binding requires a Task and executor")
 	}
 	executor.SetRequester(task.Spec.RequestedBy)
+	executor.SetTaskUID(string(task.UID))
 	executor.SetFrozenConnections(nil)
 	identity, err := agentIdentityBindingFromTask(ctx, reader, task)
 	if err != nil {

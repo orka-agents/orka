@@ -9,6 +9,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,5 +52,25 @@ func TestToolExecutorAgentIdentityRequestNeverFollowsRedirects(t *testing.T) {
 	}
 	if followed {
 		t.Fatal("the Agent identity credential followed a redirect")
+	}
+}
+
+// The authenticated Task reaches resolution on its own, so identity use
+// records name it even for a Task with no identity binding.
+func TestToolExecutorPassesTaskUIDToResolution(t *testing.T) {
+	resolver := &fakeOutboundAccessResolver{err: errors.New("refused")}
+	executor := &ToolExecutor{namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
+	executor.SetTaskUID("task-uid")
+	tool := &corev1alpha1.Tool{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph_me", Namespace: "tenant"},
+		Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{
+			URL: "https://graph.example.test/me", Method: "GET", OutboundAccessPolicyRef: &corev1alpha1.LocalObjectReference{Name: "agent"},
+		}},
+	}
+	if _, err := executor.Execute(context.Background(), tool, json.RawMessage(`{}`)); err == nil {
+		t.Fatal("Execute() = nil error, want the refusal")
+	}
+	if resolver.request.TaskUID != "task-uid" || resolver.request.AgentIdentity != nil {
+		t.Fatalf("resolve request TaskUID = %q AgentIdentity = %+v", resolver.request.TaskUID, resolver.request.AgentIdentity)
 	}
 }

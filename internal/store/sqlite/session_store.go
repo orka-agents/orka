@@ -109,6 +109,20 @@ func (s *Store) GetSessionType(ctx context.Context, namespace, name string) (str
 	return sessionType, err
 }
 
+// GetSessionCreatedAt returns when the Session record was created without
+// loading transcript messages.
+func (s *Store) GetSessionCreatedAt(ctx context.Context, namespace, name string) (time.Time, error) {
+	var createdAt time.Time
+	err := s.taskDataExecutor(ctx).QueryRowContext(ctx,
+		`SELECT created_at FROM sessions WHERE namespace = ? AND name = ?`,
+		namespace, name,
+	).Scan(&createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, store.ErrNotFound
+	}
+	return createdAt, err
+}
+
 // ListSessions returns metadata for all sessions in a namespace.
 func (s *Store) ListSessions(ctx context.Context, namespace string) ([]store.SessionMetadata, error) {
 	rows, err := s.db.QueryContext(ctx,

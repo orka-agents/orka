@@ -58,7 +58,8 @@ delegated Tools can only read.
   `az aks show -g <group> -n <cluster> --query oidcIssuerProfile.issuerUrl -o tsv`.
 - Permission to create agent identities in the tenant, for example the
   **Agent ID Administrator** role, and an `az` session for that tenant.
-- Orka with built-in RuntimePools.
+- Orka installed with Helm in the namespace `team-a`, with built-in RuntimePools.
+  A release reconciles only its own namespace, so everything below lives there.
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
   - Entra sign-in configured for Orka (step 8);
@@ -69,7 +70,7 @@ The steps call Microsoft Graph with `curl`. Keep these values in your shell:
 ```bash
 TENANT=<tenant ID>
 ISSUER=<cluster OIDC issuer URL>
-ORKA_SA=system:serviceaccount:orka-system:orka   # the controller ServiceAccount
+ORKA_SA=system:serviceaccount:team-a:orka   # the controller ServiceAccount
 TOKEN=$(az account get-access-token --tenant "$TENANT" \
   --scope https://graph.microsoft.com/.default --query accessToken -o tsv)
 graph() { curl -s -X "$1" -H "Authorization: Bearer $TOKEN" \
@@ -185,8 +186,8 @@ rules:
 
 Bind it to whoever edits the Agent (`bind`) and whoever starts its Tasks
 (`use`). A person signed in through Entra is checked as the `User`
-`<issuer>#<sub>` from their sign-in token, not their email address: `orka whoami
--o json` shows their `issuer` and `subject`.
+`<issuer>#<sub>` from their sign-in token, not their email address:
+`orka auth whoami -o json` shows their `issuer` and `subject`.
 
 ## 5. Bind the identity to an Agent
 
@@ -269,14 +270,15 @@ Each call writes one audit record to the controller log under the
 `agent-identity-audit` logger:
 
 ```bash
-kubectl -n orka-system logs deploy/orka-controller | grep agent-identity-audit
+kubectl -n team-a logs deploy/orka-controller | grep agent-identity-audit
 ```
 
 A record names:
 - the policy, the Agent and its UID, the identity, and the Task UID;
 - the Tool and its method, and a digest of the call's arguments;
 - for Delegated calls, a keyed pseudonym of the requester;
-- the outcome (`issued` or `refused`) with the reason.
+- the outcome (`issued` or `refused`) and, for a refusal, its reason: `policy`,
+  `binding`, `delegation`, `issuer`, or `canceled` (see Troubleshooting).
 
 It never contains a token. `issued` means a token was handed out, not that the
 resource accepted the request.
@@ -331,6 +333,7 @@ Orka. Its redirect URI is Orka's connector callback:
 graph POST v1.0/applications '{
   "displayName": "orka-signin",
   "signInAudience": "AzureADMyOrg",
+  "isFallbackPublicClient": true,
   "web": {"redirectUris": ["https://orka.example.com/api/v1/connections/callback"]},
   "api": {"requestedAccessTokenVersion": 2, "oauth2PermissionScopes": [{
     "id": "'"$(python3 -c "import uuid;print(uuid.uuid4())")"'", "value": "orka.access", "type": "User",
@@ -423,11 +426,23 @@ spec:
   only lowercase letters, digits, and underscores
   ([#1031](https://github.com/orka-agents/orka/issues/1031)).
 
-Each person links once:
+Each person signs in to Orka with a token for the front-end app, here with
+the device-code flow that `isFallbackPublicClient` enables, and then links
+once:
 
 ```bash
-orka connect entra-signin -n team-a
+DC=$(curl -s https://login.microsoftonline.com/$TENANT/oauth2/v2.0/devicecode \
+  -d client_id=$FRONTEND -d scope="api://$FRONTEND/orka.access")
+echo "$DC" | python3 -c "import json,sys;print(json.load(sys.stdin)['message'])"
+# After signing in in the browser:
+ORKA_TOKEN=$(curl -s https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token \
+  -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=$FRONTEND \
+  -d device_code="$(echo "$DC" | python3 -c "import json,sys;print(json.load(sys.stdin)['device_code'])")" |
+  python3 -c "import json,sys;print(json.load(sys.stdin)['access_token'])")
+orka -t "$ORKA_TOKEN" connect entra-signin -n team-a
 ```
+
+They pass the same token with `-t` to create Tasks.
 
 They should sign in with the same Entra account they use for Orka. Orka
 binds the link to their Orka sign-in, but does not check that the Entra
@@ -502,11 +517,11 @@ For each call, the controller:
 | Task fails: `codex ACP runtime cannot exactly enforce provider-native tool restrictions` | A codex Agent must list all eight built-in tools in both `defaultAllowedTools` and the ceiling |
 | Linking fails with `scopes_denied` | Remove `offline_access` from the provider's scopes |
 | Linking fails with `consent_expired` | The consent link expires within minutes; run `orka connect` again and finish promptly |
-| Audit: `the requester's link to "…" expired before this Task started` | Link again with `orka connect` and run the Task again |
-| Audit: `not addressed to the identity's blueprint` | The provider requests a scope other than `api://<blueprint appId>/access_agent` |
-| Audit: `requires a Task with a verified requester` | The Task was not created by a person signed in through Entra |
-| Audit: `the delegation has expired` | `maxDelegationAge` passed; the person starts a new Task or Session turn |
-| The agent sees only `MCP broker call failed` | The reason is in the audit record. Showing a safe reason to the agent is tracked in [#742](https://github.com/orka-agents/orka/issues/742) |
+| Audit reason `policy` | The policy changed since the Tool checked it, its target is not HTTPS, or it sets `authSecretRef` |
+| Audit reason `binding` | The Task's identity no longer holds: the Agent was deleted or its `spec.identity` removed or changed, the claim is being released, or the Task was created before the identity was granted (create it again) |
+| Audit reason `delegation` | A Delegated precondition failed: the Task has no verified requester, the person's link expired or requests a scope other than `api://<blueprint appId>/access_agent`, `maxDelegationAge` passed, or the Task, a Task above it, or its Session was cancelled or deleted |
+| Audit reason `issuer` | Entra refused the token request; check the Agent's `IdentityVerified` condition for the `AADSTS` code |
+| The agent sees only `MCP broker call failed` | The audit record gives the reason category; it records no error text, so arguments and tokens cannot leak into it. Showing a safe reason to the agent is tracked in [#742](https://github.com/orka-agents/orka/issues/742) |
 
 ## Other issuers
 
