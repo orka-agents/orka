@@ -224,6 +224,7 @@ func TestRemovedLines(t *testing.T) {
 		want  map[int64]int64
 	}{
 		{"control patch", controlDeletionPatch, map[int64]int64{33: 33, 34: 33, 35: 33, 36: 33, 37: 33, 38: 33, 39: 33}},
+		{"trailing newline", controlDeletionPatch + "\n", map[int64]int64{33: 33, 34: 33, 35: 33, 36: 33, 37: 33, 38: 33, 39: 33}},
 		// A zero count names the line before the change.
 		{"zero-context deletion", "@@ -11,2 +10,0 @@\n-a\n-b", map[int64]int64{11: 11, 12: 11}},
 		{"deleted file", "@@ -1,2 +0,0 @@\n-a\n-b", map[int64]int64{1: 1, 2: 1}},

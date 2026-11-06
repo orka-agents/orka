@@ -305,7 +305,9 @@ func removedLines(patch string) map[int64]int64 {
 	removed := map[int64]int64{}
 	var base, head, baseLeft, headLeft int64
 	inHunk := false
-	for text := range strings.SplitSeq(patch, "\n") {
+	// A context line starts with a space, so a final newline only ends the
+	// last line; it is not an empty context line.
+	for text := range strings.SplitSeq(strings.TrimSuffix(patch, "\n"), "\n") {
 		if strings.HasPrefix(text, "@@ ") {
 			// A hunk must use exactly the lines its header declares; a
 			// malformed patch credits nothing rather than mapping wrongly.
