@@ -63,8 +63,12 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			if tty {
 				stdin = true
 			}
+			timeoutSeconds, err := operatorExecTimeoutSeconds(timeout)
+			if err != nil {
+				return err
+			}
 			options := operatoraccess.ExecOptions{
-				Argv: argv, TTY: tty, Stdin: stdin, TimeoutSeconds: int64(timeout / time.Second),
+				Argv: argv, TTY: tty, Stdin: stdin, TimeoutSeconds: timeoutSeconds,
 			}
 			if tty {
 				if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -146,6 +150,23 @@ checkpointed for forks, or continued. Every exec is audited.`,
 	cmd.Flags().DurationVar(&timeout, "timeout", operatoraccess.DefaultExecTimeout,
 		fmt.Sprintf("Maximum command duration (at most %s)", operatoraccess.MaxExecTimeout))
 	return cmd
+}
+
+// operatorExecTimeoutSeconds converts --timeout to the whole seconds the API
+// accepts. A sub-second remainder rounds up: truncating it would turn a short
+// timeout into zero, which the server reads as "use the 15 minute default".
+func operatorExecTimeoutSeconds(timeout time.Duration) (int64, error) {
+	if timeout <= 0 {
+		return 0, fmt.Errorf("--timeout must be positive")
+	}
+	if timeout > operatoraccess.MaxExecTimeout {
+		return 0, fmt.Errorf("--timeout must be at most %s", operatoraccess.MaxExecTimeout)
+	}
+	seconds := int64(timeout / time.Second)
+	if timeout%time.Second != 0 {
+		seconds++
+	}
+	return seconds, nil
 }
 
 func clampDimension(value int) uint16 {

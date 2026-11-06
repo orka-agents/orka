@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -144,5 +147,40 @@ func TestCopyInSendsExactSize(t *testing.T) {
 	}
 	if err := copyIntoWorkspace(context.Background(), cmd, copyTo, dir, "t", "patch"); err == nil {
 		t.Fatal("directories must be refused")
+	}
+}
+
+func TestOperatorExecTimeoutSeconds(t *testing.T) {
+	for _, tc := range []struct {
+		timeout time.Duration
+		want    int64
+		ok      bool
+	}{
+		{500 * time.Millisecond, 1, true}, // never truncated to 0, the server default
+		{time.Second, 1, true},
+		{1500 * time.Millisecond, 2, true},
+		{operatoraccess.MaxExecTimeout, int64(operatoraccess.MaxExecTimeout / time.Second), true},
+		{0, 0, false},
+		{-time.Second, 0, false},
+		{operatoraccess.MaxExecTimeout + time.Nanosecond, 0, false},
+		{time.Duration(math.MaxInt64), 0, false},
+	} {
+		got, err := operatorExecTimeoutSeconds(tc.timeout)
+		if (err == nil) != tc.ok || got != tc.want {
+			t.Errorf("operatorExecTimeoutSeconds(%s) = %d, %v; want %d ok=%v", tc.timeout, got, err, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestTaskExecRejectsAnInvalidTimeoutBeforeConnecting(t *testing.T) {
+	for _, timeout := range []string{"0s", "-5s", "2h"} {
+		root := newRootCmd()
+		root.SetArgs([]string{"task", "exec", "--quiet", "--server", "http://127.0.0.1:1", "--timeout", timeout, "my-task", "--", "ls"})
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), "--timeout") {
+			t.Fatalf("--timeout %s = %v, want a timeout validation error", timeout, err)
+		}
 	}
 }
