@@ -415,6 +415,12 @@ rules:
     resources: ["repositorymonitors/status"]
     verbs: ["get"]
 
+  # EvalRun permissions: orka eval run creates runs and reads them and their
+  # trial records.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
   # Tool permissions (read-only)
   - apiGroups: ["core.orka.ai"]
     resources: ["tools"]

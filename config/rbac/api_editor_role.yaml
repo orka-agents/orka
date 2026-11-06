@@ -98,3 +98,7 @@ rules:
   resources:
   - repositorymonitors
   verbs: [get, list, create, update, patch, delete]
+- apiGroups: [core.orka.ai]
+  resources:
+  - evalruns
+  verbs: [get, list, create, delete]

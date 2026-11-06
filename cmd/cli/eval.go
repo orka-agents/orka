@@ -66,7 +66,7 @@ func newEvalRunCmd() *cobra.Command {
 				return err
 			}
 			if wait || output != "" {
-				if err := checkEvalRunTTLForWait(body); err != nil {
+				if err := checkEvalRunTTLForWait(body, output != ""); err != nil {
 					return err
 				}
 			}
@@ -166,13 +166,22 @@ func evalRunRequestFromFile(path string) ([]byte, error) {
 const evalRunMinWaitTTL = 300
 
 // checkEvalRunTTLForWait refuses a TTL that could delete the run and its
-// trial records before --wait reads them.
-func checkEvalRunTTLForWait(body []byte) error {
+// trial records before the command reads them. An export reads trial records
+// and events after the run finishes, for as long as that takes, so it needs
+// the run kept: no TTL at all.
+func checkEvalRunTTLForWait(body []byte, export bool) error {
 	var request evalRunRequest
 	if err := json.Unmarshal(body, &request); err != nil {
 		return err
 	}
-	if ttl := request.Spec.TTLSecondsAfterFinished; ttl != nil && *ttl < evalRunMinWaitTTL {
+	ttl := request.Spec.TTLSecondsAfterFinished
+	switch {
+	case ttl == nil:
+		return nil
+	case export:
+		return errors.New("--output-dir needs the run kept until the export finishes; remove ttlSecondsAfterFinished " +
+			"and delete the run afterwards")
+	case *ttl < evalRunMinWaitTTL:
 		return fmt.Errorf("ttlSecondsAfterFinished %d could delete the run before --wait reads it; use at least %d or leave it unset",
 			*ttl, evalRunMinWaitTTL)
 	}

@@ -334,7 +334,9 @@ a cluster-scoped binding, such as the existing `orka-gatewayclass-viewer-role`.
 A namespaced RoleBinding cannot grant those cluster-scoped reads.
 
 The Helm client Role includes virtual reads, chat creation and continuation,
-approval decisions, and monitor actions alongside its existing resource grants.
+approval decisions, monitor actions, and EvalRun create, read and delete
+alongside its existing resource grants. The API viewer reads EvalRuns and their
+trial records; the API editor also creates and deletes EvalRuns.
 Memory review/apply, security mutations, and Gateway retry require separate
 operator grants. Its read-only Agent, Tool, and Provider permissions do not
 authorize nested chat tools to mutate those resources.

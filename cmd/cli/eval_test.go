@@ -284,11 +284,21 @@ func TestEvalRunFollowsTheRunNamespaceAndPagesEvents(t *testing.T) {
 
 func TestEvalRunRefusesAShortTTLWhenWaiting(t *testing.T) {
 	manifest := evalTestManifest + "  ttlSecondsAfterFinished: 0\n"
-	for _, args := range [][]string{{"--wait"}, {"--output-dir", t.TempDir()}} {
-		full := append([]string{"eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", "http://127.0.0.1:1", "--token", "tok"}, args...)
+	for _, test := range []struct {
+		manifest string
+		args     []string
+		want     string
+	}{
+		{manifest, []string{"--wait"}, "ttlSecondsAfterFinished 0"},
+		{manifest, []string{"--output-dir", t.TempDir()}, "remove ttlSecondsAfterFinished"},
+		// An export needs the run kept however long the TTL.
+		{evalTestManifest + "  ttlSecondsAfterFinished: 86400\n", []string{"--output-dir", t.TempDir()}, "remove ttlSecondsAfterFinished"},
+	} {
+		full := append([]string{"eval", "run", "-f", writeEvalTestManifest(t, test.manifest), "--server", "http://127.0.0.1:1",
+			"--token", "tok"}, test.args...)
 		_, err := runEvalCommand(t, full...)
-		if err == nil || !strings.Contains(err.Error(), "ttlSecondsAfterFinished 0") {
-			t.Fatalf("eval run %v: %v", args, err)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("eval run %v: %v", test.args, err)
 		}
 	}
 	// Without waiting, a short TTL is the caller's choice: the create is
