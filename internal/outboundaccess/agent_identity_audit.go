@@ -6,8 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
+	"os"
 
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"github.com/go-logr/logr/funcr"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -15,6 +18,16 @@ import (
 // agentIdentityAuditLogName names the logger that carries identity use
 // records, so a log pipeline can route and retain them on their own.
 const agentIdentityAuditLogName = "agent-identity-audit"
+
+// agentIdentityAuditOutput receives records from a resolver without an
+// AuditLog, such as an AI worker's, which configures no logger of its own.
+var agentIdentityAuditOutput io.Writer = os.Stderr
+
+// defaultAgentIdentityAuditLog writes one JSON line per record. Like the
+// controller's audit sink, no log level filters it and it is never sampled.
+var defaultAgentIdentityAuditLog = funcr.NewJSON(func(record string) {
+	_, _ = fmt.Fprintln(agentIdentityAuditOutput, record)
+}, funcr.Options{LogTimestamp: true})
 
 // Refusal reasons in identity use records. A record carries only one of
 // these, never the error text: errors can quote call arguments, issuer
@@ -76,7 +89,7 @@ func (r *KubernetesResolver) auditAgentIdentityUse(policy *corev1alpha1.Outbound
 	req, err := *call, *result
 	logger := r.AuditLog
 	if logger.GetSink() == nil {
-		logger = ctrllog.Log
+		logger = defaultAgentIdentityAuditLog
 	}
 	logger = logger.WithName(agentIdentityAuditLogName)
 	mode := AgentIdentityMode(policy.Spec.AgentIdentity)
