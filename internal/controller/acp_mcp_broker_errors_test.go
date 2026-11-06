@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
@@ -320,6 +322,28 @@ func newMCPExecutionErrorTestBroker(
 		Effects: effects,
 	}
 	return broker, request
+}
+
+// A missing or unusable linked account stops the call before anything is
+// sent, so the broker returns Orka's reason, which names the fix, as a tool
+// result instead of an opaque failed call.
+func TestACPMCPToolExecutionResultReportsAConnectionTheRequesterMustLink(t *testing.T) {
+	descriptor := harnessv2.MCPToolDescriptor{Name: "azure_arm", Source: harnessv2.MCPToolSourceBrokeredCustom, Effect: harnessv2.MCPToolEffectReadOnly}
+	reason := "the requester has no link to \"azure\"; link it with `orka connect azure` and run the Task again"
+	err := &tools.NoEffectError{Summary: "The tool stopped before sending its request.", Err: fmt.Errorf("resolve outbound access policy: %w",
+		&outboundaccess.ConnectionRequiredError{Reason: reason})}
+	result, resultErr := acpMCPToolExecutionResult(context.Background(), descriptor, "", err)
+	if resultErr != nil {
+		t.Fatalf("acpMCPToolExecutionResult() error = %v, want a tool result", resultErr)
+	}
+	var got struct {
+		IsError bool   `json:"isError"`
+		Code    string `json:"code"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal(result, &got); err != nil || !got.IsError || got.Code != harnessv2.MCPToolErrorCodeConnectionRequired || got.Error != reason {
+		t.Fatalf("acpMCPToolExecutionResult() = %s", result)
+	}
 }
 
 // A registry argument rejection happens before the tool runs, so the broker

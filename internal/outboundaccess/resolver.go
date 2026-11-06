@@ -609,7 +609,7 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	frozen, ok := req.FrozenConnections[policy.Name]
 	if !ok || strings.TrimSpace(frozen.UID) == "" {
 		if reason := r.unfrozenConnectionReason(ctx, policy.Namespace, providerName, requester); reason != "" {
-			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, errors.New(reason)
+			return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, &ConnectionRequiredError{Reason: reason}
 		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("connection outbound access policy %q has no Connection frozen into the execution snapshot", policy.Name)
 	}
@@ -652,6 +652,16 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	}
 	return credential, declared, nil
 }
+
+// ConnectionRequiredError refuses a call that the requester fixes by
+// linking, re-linking, or running the Task again. Reason is built by Orka from
+// the provider name and the link's state, never from a credential or an
+// upstream response, so it can be shown to the agent and logged.
+type ConnectionRequiredError struct {
+	Reason string
+}
+
+func (e *ConnectionRequiredError) Error() string { return e.Reason }
 
 // unfrozenConnectionReason explains why the Task carries no Connection of
 // the requester's for a provider, from the state of their links now: none,

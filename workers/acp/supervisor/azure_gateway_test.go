@@ -86,7 +86,11 @@ func newAzureGatewayFixture(t *testing.T) *azureGatewayFixture {
 		if respond != nil {
 			result = respond(request)
 		}
-		return harnessv2.MCPBrokerCallResponse{Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: result}, nil
+		var failure struct {
+			IsError bool `json:"isError"`
+		}
+		_ = json.Unmarshal(result, &failure)
+		return harnessv2.MCPBrokerCallResponse{Protocol: harnessv2.ProtocolVersion, CallID: request.Call.CallID, Result: result, IsError: failure.IsError}, nil
 	})
 	proxy, err := newMCPProxy(broker)
 	if err != nil {
@@ -238,6 +242,27 @@ func TestAzureGatewayPassesUpstreamErrorsThrough(t *testing.T) {
 	response, body := fixture.do(t, http.MethodGet, "/subscriptions/s1/resourcegroups?api-version=1", http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "AuthorizationFailed") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
+	}
+}
+
+func TestAzureGatewayTellsTheAgentWhenThePersonMustLinkTheirAccount(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"the requester has no link to \"azure\"; link it with ` +
+			"`orka connect azure`" + ` and run the Task again"}`)
+	}
+	token := fixture.token(t)
+	response, body := fixture.do(t, http.MethodGet, "/subscriptions?api-version=1", http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaConnectionRequired") ||
+		!strings.Contains(body, "orka connect azure") {
+		t.Fatalf("status = %d: %s", response.StatusCode, body)
+	}
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		return json.RawMessage(`{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}`)
+	}
+	response, body = fixture.do(t, http.MethodGet, "/subscriptions?api-version=1", http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusBadGateway || !strings.Contains(body, "OrkaToolRefused") {
+		t.Fatalf("other tool errors: status = %d: %s", response.StatusCode, body)
 	}
 }
 

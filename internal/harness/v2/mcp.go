@@ -44,6 +44,10 @@ const (
 	MCPToolEffectConsequential MCPToolEffect = "consequential"
 )
 
+// MCPToolErrorCodeConnectionRequired marks an error result the requester
+// fixes by linking or re-linking their account; its message says how.
+const MCPToolErrorCodeConnectionRequired = "connection_required"
+
 type MCPToolDescriptor struct {
 	Name             string          `json:"name"`
 	Description      string          `json:"description,omitempty"`

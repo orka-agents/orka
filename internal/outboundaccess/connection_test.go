@@ -180,9 +180,12 @@ func TestKubernetesResolverConnectionModePreconditions(t *testing.T) {
 		resolver := &KubernetesResolver{Reader: newReader().Build(), Connections: source}
 		req := base
 		req.FrozenConnections = nil
-		if _, err := resolver.Resolve(context.Background(), req); err == nil || !strings.Contains(err.Error(), "the requester has no link to") ||
-			!strings.Contains(err.Error(), "orka connect") {
+		_, err := resolver.Resolve(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "the requester has no link to") || !strings.Contains(err.Error(), "orka connect") {
 			t.Fatalf("err = %v, want the missing link named", err)
+		}
+		if _, ok := errors.AsType[*ConnectionRequiredError](err); !ok {
+			t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
 		}
 		for state, want := range map[string]string{
 			corev1alpha1.ConnectionStateExpired: "is expired",

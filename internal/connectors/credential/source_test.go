@@ -286,8 +286,12 @@ func TestResolveRevokedRefreshShredsCustody(t *testing.T) {
 	}
 	// The link is now not Ready, so the next call fails before any refresh.
 	calls := h.refresher.calls.Load()
-	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil || !strings.Contains(err.Error(), "not ready") {
+	_, err = h.source.ResolveConnectionCredential(context.Background(), h.request())
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("err after revocation = %v", err)
+	}
+	if _, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok {
+		t.Fatalf("err = %#v, want a ConnectionRequiredError the broker can show", err)
 	}
 	if h.refresher.calls.Load() != calls {
 		t.Fatal("a revoked connection must not be refreshed again")

@@ -80,6 +80,7 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 	if err == nil || !strings.Contains(output, "OrkaReadOnly") {
 		t.Fatalf("az group create should be refused as a write: %v\n%s", err, output)
 	}
+	checkAzNamesTheMissingLink(t, fixture, run)
 	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {
 		// Outside a running prompt the wrapper's sign-in fails, and it says why.
 		fixture.session.deactivate(fixture.authorize.PromptID, harnessv2.RuntimeSessionStateIdle)
@@ -96,4 +97,34 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 			t.Fatal("the refused write reached the broker")
 		}
 	}
+}
+
+// checkAzNamesTheMissingLink checks that with no usable linked account the
+// error names the fix, both when az is already signed in and, through the
+// wrapper, when it signs in.
+func checkAzNamesTheMissingLink(t *testing.T, fixture *azureGatewayFixture, run func(...string) (string, error)) {
+	t.Helper()
+	fixture.mu.Lock()
+	linked := fixture.respond
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		return json.RawMessage(`{"isError":true,"code":"connection_required","error":"the requester has no link to \"azure\"; link it with ` +
+			"`orka connect azure`" + ` and run the Task again"}`)
+	}
+	fixture.mu.Unlock()
+	output, err := run("group", "list")
+	if err == nil || !strings.Contains(output, "OrkaConnectionRequired") || !strings.Contains(output, "orka connect azure") {
+		t.Fatalf("az group list without a link should name the fix: %v\n%s", err, output)
+	}
+	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {
+		if output, err := run("account", "clear"); err != nil {
+			t.Fatalf("az account clear: %v\n%s", err, output)
+		}
+		output, err := run("group", "list")
+		if err == nil || !strings.Contains(output, "Orka could not sign az in") || !strings.Contains(output, "OrkaConnectionRequired") {
+			t.Fatalf("az sign-in without a link should name the fix: %v\n%s", err, output)
+		}
+	}
+	fixture.mu.Lock()
+	fixture.respond = linked
+	fixture.mu.Unlock()
 }

@@ -399,6 +399,11 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if response.IsError {
+		if brokerErrorCode(response.Result) == harnessv2.MCPToolErrorCodeConnectionRequired {
+			writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired",
+				"The person who asked has no usable linked Azure account: "+brokerErrorMessage(response.Result)+".")
+			return
+		}
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
 		return
 	}
@@ -492,6 +497,16 @@ func brokerErrorMessage(result json.RawMessage) string {
 		return strings.TrimSuffix(strings.TrimSpace(failure.Error), ".")
 	}
 	return "the tool returned an unexpected result"
+}
+
+func brokerErrorCode(result json.RawMessage) string {
+	var failure struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(result, &failure) != nil {
+		return ""
+	}
+	return failure.Code
 }
 
 func newAzureCallID() (string, error) {

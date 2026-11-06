@@ -120,7 +120,7 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 	credential, err := s.Credentials.GetConnectorCredential(ctx, ref)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return outboundaccess.ConnectionCredential{}, errors.New("connection holds no credential; the person must reconnect")
+			return outboundaccess.ConnectionCredential{}, &outboundaccess.ConnectionRequiredError{Reason: "connection holds no credential; the person must reconnect"}
 		}
 		return outboundaccess.ConnectionCredential{}, err
 	}
@@ -193,7 +193,7 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 	// frozen-binding check could pass against stale readiness.
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: name}, connection); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, errors.New("the requester has no connection to this provider")
+			return nil, &outboundaccess.ConnectionRequiredError{Reason: "the requester has no connection to this provider"}
 		}
 		return nil, fmt.Errorf("load connection: %w", err)
 	}
@@ -202,16 +202,16 @@ func (s *Source) loadLiveConnection(ctx context.Context, req outboundaccess.Conn
 		return nil, errors.New("connection does not belong to the requester")
 	}
 	if !connection.DeletionTimestamp.IsZero() {
-		return nil, errors.New("connection is being deleted")
+		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection is being deleted"}
 	}
 	if string(connection.UID) != req.Frozen.UID || connection.Generation != req.Frozen.Generation {
-		return nil, errors.New("connection changed since the task was dispatched; re-dispatch to use it")
+		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection changed since the task was dispatched; re-dispatch to use it"}
 	}
 	if !connectors.ConnectionLinked(connection) {
-		return nil, errors.New("connection is not ready")
+		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection is not ready"}
 	}
 	if req.Frozen.GrantSequence <= 0 || connection.Status.GrantSequence != req.Frozen.GrantSequence {
-		return nil, errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+		return nil, &outboundaccess.ConnectionRequiredError{Reason: "connection was re-linked since the task was dispatched; re-dispatch to use it"}
 	}
 	return connection, nil
 }
@@ -690,7 +690,7 @@ func oauthReason(err error) string {
 // produced.
 func frozenGrantHolds(req outboundaccess.ConnectionCredentialRequest, credential store.ConnectorCredential) error {
 	if req.Frozen.GrantSequence <= 0 || credential.GrantSequence != req.Frozen.GrantSequence {
-		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+		return &outboundaccess.ConnectionRequiredError{Reason: "connection was re-linked since the task was dispatched; re-dispatch to use it"}
 	}
 	return nil
 }
