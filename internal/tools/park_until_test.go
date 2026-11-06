@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -216,5 +217,40 @@ func TestContinuationKeepsAuthorityOverItsPredecessorsChildren(t *testing.T) {
 	toolCtx.TaskProvenanceProtected = true
 	if _, err := executePark(t, toolCtx, `{"kind":"tasks","reason":"r","tasks":["child"]}`); err == nil {
 		t.Fatal("an unverified predecessor link must not grant child authority")
+	}
+}
+
+func TestParkUntilBoundsTheReasonInCharacters(t *testing.T) {
+	// A schema-valid multibyte reason is accepted even though it exceeds
+	// MaxReasonLength bytes.
+	multibyte := strings.Repeat("é", taskwait.MaxReasonLength)
+	c := newFakeClient(parkTestTask())
+	args, _ := json.Marshal(map[string]string{"kind": "timer", "reason": multibyte, "duration": "10m"})
+	if _, err := executePark(t, parkToolContext(c, "op-1"), string(args)); err != nil {
+		t.Fatalf("a %d-character multibyte reason must be accepted: %v", taskwait.MaxReasonLength, err)
+	}
+	if got := loadParkTask(t, c).Status.Wait.Reason; got != multibyte {
+		t.Fatalf("the multibyte reason must be kept intact, got %d characters", utf8.RuneCountInString(got))
+	}
+
+	tooLong, _ := json.Marshal(map[string]string{"kind": "timer", "reason": multibyte + "é", "duration": "10m"})
+	if _, err := executePark(t, parkToolContext(newFakeClient(parkTestTask()), "op-1"), string(tooLong)); err == nil {
+		t.Fatal("a reason over the character limit must be rejected")
+	}
+
+	// Redaction placeholders are longer than the short secrets they replace,
+	// so a valid reason can grow past the limit; the persisted value stays bounded.
+	secrets := strings.Repeat("password=x ", taskwait.MaxReasonLength/len("password=x "))
+	expanding, _ := json.Marshal(map[string]string{"kind": "timer", "reason": secrets, "duration": "10m"})
+	c = newFakeClient(parkTestTask())
+	if _, err := executePark(t, parkToolContext(c, "op-1"), string(expanding)); err != nil {
+		t.Fatalf("a reason within the limit must be accepted after redaction: %v", err)
+	}
+	got := loadParkTask(t, c).Status.Wait.Reason
+	if n := utf8.RuneCountInString(got); n > taskwait.MaxReasonLength {
+		t.Fatalf("the redacted reason must stay within %d characters, got %d", taskwait.MaxReasonLength, n)
+	}
+	if strings.Contains(got, "password=x") {
+		t.Fatal("the persisted reason must be redacted")
 	}
 }

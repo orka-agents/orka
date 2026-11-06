@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -121,12 +122,9 @@ func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	reason := strings.TrimSpace(redact.SensitiveText(args.Reason))
-	if reason == "" {
-		return "", fmt.Errorf("reason is required")
-	}
-	if len(reason) > taskwait.MaxReasonLength {
-		return "", fmt.Errorf("reason must be at most %d characters", taskwait.MaxReasonLength)
+	reason, err := parkReason(args.Reason)
+	if err != nil {
+		return "", err
 	}
 
 	task := &corev1alpha1.Task{}
@@ -198,6 +196,24 @@ func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (strin
 		}
 	}
 	return parkUntilResponse(recorded)
+}
+
+// parkReason validates the agent's reason in characters, as the schema and
+// the Task status field count them, and bounds the redacted value persisted
+// in status: redaction placeholders can be longer than what they replace.
+func parkReason(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("reason is required")
+	}
+	if utf8.RuneCountInString(raw) > taskwait.MaxReasonLength {
+		return "", fmt.Errorf("reason must be at most %d characters", taskwait.MaxReasonLength)
+	}
+	reason := strings.TrimSpace(redact.SensitiveText(raw))
+	if runes := []rune(reason); len(runes) > taskwait.MaxReasonLength {
+		reason = strings.TrimSpace(string(runes[:taskwait.MaxReasonLength]))
+	}
+	return reason, nil
 }
 
 func parseParkKind(raw string) (corev1alpha1.TaskWaitKind, error) {
