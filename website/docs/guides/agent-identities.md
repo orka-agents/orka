@@ -91,11 +91,12 @@ graph POST v1.0/applications '{
   "owners@odata.bind": ["https://graph.microsoft.com/v1.0/users/'"$SPONSOR"'"]
 }'
 BLUEPRINT=<appId from the response>
+BLUEPRINT_OBJ=<id from the response>
 
 graph POST v1.0/serviceprincipals/microsoft.graph.agentIdentityBlueprintPrincipal \
   '{"appId": "'"$BLUEPRINT"'"}'
 
-graph POST "v1.0/applications/$BLUEPRINT/federatedIdentityCredentials" '{
+graph POST "v1.0/applications/$BLUEPRINT_OBJ/federatedIdentityCredentials" '{
   "name": "orka-controller",
   "issuer": "'"$ISSUER"'",
   "subject": "'"$ORKA_SA"'",
@@ -114,8 +115,12 @@ graph POST beta/serviceprincipals/Microsoft.Graph.AgentIdentity '{
   "agentIdentityBlueprintId": "'"$BLUEPRINT"'",
   "sponsors@odata.bind": ["https://graph.microsoft.com/v1.0/users/'"$SPONSOR"'"]
 }'
-IDENTITY=<appId from the response>
+IDENTITY=<id from the response>
 ```
+
+An agent identity's object ID and its client ID (`appId`) are the same value,
+so `$IDENTITY` serves both as the service principal in Graph URLs and as the
+`agentIdentityID` and RBAC resource name below.
 
 Grant it the app roles its Tools need, as for any service principal. For
 example, Microsoft Graph's `User.ReadBasic.All`:
@@ -289,7 +294,7 @@ blueprint an API with one scope:
 
 ```bash
 SCOPE_ID=$(python3 -c "import uuid;print(uuid.uuid4())")
-graph PATCH "v1.0/applications/$BLUEPRINT" '{
+graph PATCH "v1.0/applications/$BLUEPRINT_OBJ" '{
   "identifierUris": ["api://'"$BLUEPRINT"'"],
   "api": {"oauth2PermissionScopes": [{
     "id": "'"$SCOPE_ID"'", "value": "access_agent", "type": "User", "isEnabled": true,
@@ -306,7 +311,7 @@ may use, and consent to them. For Microsoft Graph's `User.Read`:
 BLUEPRINT_SP=<object ID of the blueprint principal from step 1>
 graph POST v1.0/oauth2PermissionGrants '{"clientId": "'"$BLUEPRINT_SP"'",
   "consentType": "AllPrincipals", "resourceId": "'"$GRAPH_SP"'", "scope": "User.Read"}'
-graph POST "v1.0/applications/microsoft.graph.agentIdentityBlueprint/$BLUEPRINT/inheritablePermissions" '{
+graph POST "v1.0/applications/microsoft.graph.agentIdentityBlueprint/$BLUEPRINT_OBJ/inheritablePermissions" '{
   "resourceAppId": "00000003-0000-0000-c000-000000000000",
   "inheritableScopes": {"@odata.type": "#microsoft.graph.allAllowedScopes", "kind": "allAllowed"},
   "inheritableRoles": {"@odata.type": "#microsoft.graph.noRoles", "kind": "none"}
