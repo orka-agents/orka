@@ -84,6 +84,11 @@ func admitsAgentUse(
 	t.Helper()
 	compiler, err := admissioncel.NewCompositedCompiler(environment.MustBaseEnvSet(environment.DefaultCompatibilityVersion()))
 	require.NoError(t, err)
+	for _, variable := range policy.Spec.Variables {
+		compiled := compiler.CompileAndStoreVariable(&validating.Variable{Name: variable.Name, Expression: variable.Expression},
+			admissioncel.OptionalVariableDeclarations{HasAuthorizer: true}, environment.NewExpressions)
+		require.Nil(t, compiled.Error, "variable %s", variable.Name)
+	}
 	expressions := make([]admissioncel.ExpressionAccessor, 0, len(policy.Spec.Validations))
 	for _, validation := range policy.Spec.Validations {
 		expressions = append(expressions, &validating.ValidationCondition{Expression: validation.Expression})
@@ -207,4 +212,77 @@ func TestAgentUsePolicyRepositoryScanAndGatewayBinding(t *testing.T) {
 	require.False(t, admitsAgentUse(t, policies["gatewaybindings"], bindingKind, "gatewaybindings", &agentUseGrants{}, binding, nil))
 	support := &agentUseGrants{allowed: map[string]bool{admissionTestNamespace + "/support": true}}
 	require.True(t, admitsAgentUse(t, policies["gatewaybindings"], bindingKind, "gatewaybindings", support, binding, nil))
+}
+
+func TestAgentUsePolicyExplicitEmptyNamespaceIsTheObjectNamespace(t *testing.T) {
+	policies := loadAgentUsePolicies(t)
+	local := admissionTestNamespace + "/reviewer"
+	emptyRef := map[string]any{"name": "reviewer", "namespace": ""}
+
+	taskKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "Task"}
+	task := agentUseObject("Task", "core.orka.ai/v1alpha1", map[string]any{"type": "agent", "prompt": "hi", "agentRef": emptyRef})
+	grants := &agentUseGrants{allowed: map[string]bool{local: true}}
+	require.True(t, admitsAgentUse(t, policies["tasks"], taskKind, "tasks", grants, task, nil))
+	require.Equal(t, []string{local}, grants.checked, "an empty namespace resolves in the Task namespace")
+
+	scanKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "RepositoryScan"}
+	scan := agentUseObject("RepositoryScan", "core.orka.ai/v1alpha1", map[string]any{
+		"repoURL": "https://github.com/example/repo", "analysisAgentRef": emptyRef, "patchAgentRef": emptyRef,
+	})
+	grants = &agentUseGrants{allowed: map[string]bool{local: true}}
+	require.True(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", grants, scan, nil))
+	require.Equal(t, []string{local, local}, grants.checked)
+
+	monitorKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "RepositoryMonitor"}
+	monitor := agentUseObject("RepositoryMonitor", "core.orka.ai/v1alpha1", map[string]any{
+		"repoURL": "https://github.com/example/repo", "agents": map[string]any{"reviewer": emptyRef},
+	})
+	grants = &agentUseGrants{allowed: map[string]bool{local: true}}
+	require.True(t, admitsAgentUse(t, policies["repositorymonitors"], monitorKind, "repositorymonitors", grants, monitor, nil))
+	require.Equal(t, []string{local}, grants.checked)
+}
+
+func TestAgentUsePolicyKeepsAgentsTheObjectAlreadyNamed(t *testing.T) {
+	policies := loadAgentUsePolicies(t)
+
+	monitorKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "RepositoryMonitor"}
+	monitor := func(agents map[string]any) map[string]any {
+		return agentUseObject("RepositoryMonitor", "core.orka.ai/v1alpha1",
+			map[string]any{"repoURL": "https://github.com/example/repo", "agents": agents})
+	}
+	before := monitor(map[string]any{"planner": map[string]any{"name": "planner"}})
+	moved := monitor(map[string]any{
+		"planner":  map[string]any{"name": "planner"},
+		"reviewer": map[string]any{"name": "planner", "namespace": admissionTestNamespace},
+	})
+	none := &agentUseGrants{}
+	require.True(t, admitsAgentUse(t, policies["repositorymonitors"], monitorKind, "repositorymonitors", none, moved, before),
+		"reusing an Agent the monitor already names, even with its namespace made explicit, needs no new grant")
+	require.Empty(t, none.checked)
+	added := monitor(map[string]any{"reviewer": map[string]any{"name": "planner"}, "planner": map[string]any{"name": "other"}})
+	require.False(t, admitsAgentUse(t, policies["repositorymonitors"], monitorKind, "repositorymonitors", &agentUseGrants{}, added, before),
+		"an Agent the monitor did not name before still needs a grant")
+
+	scanKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "RepositoryScan"}
+	scan := func(analysis, patch string) map[string]any {
+		return agentUseObject("RepositoryScan", "core.orka.ai/v1alpha1", map[string]any{
+			"repoURL":          "https://github.com/example/repo",
+			"analysisAgentRef": map[string]any{"name": analysis},
+			"patchAgentRef":    map[string]any{"name": patch},
+		})
+	}
+	none = &agentUseGrants{}
+	require.True(t, admitsAgentUse(t, policies["repositoryscans"], scanKind, "repositoryscans", none,
+		scan("patcher", "analyst"), scan("analyst", "patcher")), "swapping the scan's Agents needs no new grant")
+	require.Empty(t, none.checked)
+
+	taskKind := schema.GroupVersionKind{Group: "core.orka.ai", Version: "v1alpha1", Kind: "Task"}
+	task := func(agentRef map[string]any) map[string]any {
+		return agentUseObject("Task", "core.orka.ai/v1alpha1", map[string]any{"type": "agent", "prompt": "hi", "agentRef": agentRef})
+	}
+	none = &agentUseGrants{}
+	require.True(t, admitsAgentUse(t, policies["tasks"], taskKind, "tasks", none,
+		task(map[string]any{"name": "reviewer", "namespace": admissionTestNamespace}), task(map[string]any{"name": "reviewer"})),
+		"making the Task's Agent namespace explicit needs no new grant")
+	require.Empty(t, none.checked)
 }
