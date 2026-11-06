@@ -79,6 +79,9 @@ upgrading:
   default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
   use `workers.ai.rbacProfile: restricted` if receivers rely on signatures. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- With signing enabled but no usable key (the Secret cannot be read or holds a malformed
+  key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
+  key is available.
 - With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
   their deliveries are marked `Failed`; enabling signing later does not retry them.
 - Destinations are checked at connect time. A DNS failure, any non-public resolved
