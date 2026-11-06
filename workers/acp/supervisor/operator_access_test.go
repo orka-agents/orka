@@ -600,3 +600,69 @@ func TestOperatorQuiesceFailsClosedOnStuckLaunch(t *testing.T) {
 		t.Fatal("a launch that never settles must fail the barrier closed")
 	}
 }
+
+// Every teardown path applies the operator barrier before it accepts
+// termination proofs, so an admitted launch that never settles keeps the
+// session's resources instead of racing descendant cleanup.
+func TestOperatorBarrierPrecedesEveryTeardownPath(t *testing.T) {
+	admitStuckLaunch := func(t *testing.T) (*Server, harnessv2.RuntimeSessionID, *sessionState) {
+		t.Helper()
+		supervisor, _, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, nil)
+		supervisor.cfg.CancelGrace = 50 * time.Millisecond
+		fence := operatorTestFence()
+		fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+		if _, status, message := supervisor.operatorTargetFor(sessionID, harnessv2.MutationMetadata{Fence: fence}); status != 0 {
+			t.Fatalf("admission failed: %d %s", status, message)
+		}
+		return supervisor, sessionID, supervisor.sessions[sessionID]
+	}
+	requireRetained := func(t *testing.T, supervisor *Server, sessionID harnessv2.RuntimeSessionID, state *sessionState) {
+		t.Helper()
+		supervisor.mu.Lock()
+		present := supervisor.sessions[sessionID] == state
+		poisoned := supervisor.poisoned
+		supervisor.mu.Unlock()
+		if !present || !poisoned {
+			t.Fatalf("an unquiesced session must be retained and the pool poisoned: present=%v poisoned=%v", present, poisoned)
+		}
+		if _, err := os.Stat(state.paths.Workspace); err != nil {
+			t.Fatalf("session files were removed before operators quiesced: %v", err)
+		}
+	}
+
+	t.Run("drain cleanup", func(t *testing.T) {
+		supervisor, sessionID, state := admitStuckLaunch(t)
+		supervisor.mu.Lock()
+		state.drainCleanupScheduled = true
+		supervisor.mu.Unlock()
+		supervisor.cleanupDrainedSession(sessionID, state)
+		requireRetained(t, supervisor, sessionID, state)
+		if state.descriptor.State != harnessv2.RuntimeSessionStatePoisoned {
+			t.Fatalf("state = %s, want poisoned", state.descriptor.State)
+		}
+	})
+	t.Run("native capture", func(t *testing.T) {
+		supervisor, sessionID, state := admitStuckLaunch(t)
+		if _, err := supervisor.captureNativeSession(context.Background(), state, 1<<20); err == nil ||
+			!strings.Contains(err.Error(), "operator") {
+			t.Fatalf("capture with an unquiesced operator = %v, want refusal", err)
+		}
+		requireRetained(t, supervisor, sessionID, state)
+	})
+	t.Run("supervisor close", func(t *testing.T) {
+		supervisor, sessionID, state := admitStuckLaunch(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := supervisor.Close(ctx); err == nil || !strings.Contains(err.Error(), "operator quiesce") {
+			t.Fatalf("close with an unquiesced operator = %v, want an error", err)
+		}
+		if _, err := os.Stat(state.paths.Workspace); err != nil {
+			t.Fatalf("session files were removed before operators quiesced: %v", err)
+		}
+		supervisor.mu.Lock()
+		defer supervisor.mu.Unlock()
+		if supervisor.sessions[sessionID] != state {
+			t.Fatal("the session was dropped before operators quiesced")
+		}
+	})
+}

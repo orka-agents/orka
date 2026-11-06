@@ -1388,7 +1388,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	// No operator operation may run, or still be launching, when the session
 	// is torn down. An unfinished barrier fails deletion closed and keeps the
 	// session resources; the pool is replaced instead.
-	if err := s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace)); err != nil {
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
 		s.poisonPool("operator_quiesce_unproven")
 		s.mu.Lock()
 		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)

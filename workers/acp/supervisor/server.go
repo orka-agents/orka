@@ -1671,6 +1671,10 @@ func (s *Server) cleanupDrainedSession(sessionID harnessv2.RuntimeSessionID, sta
 	setSessionState(state, harnessv2.RuntimeSessionStateDeleting)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	s.mu.Unlock()
+	if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+		s.failDrainCleanup(sessionID, state, "operator_quiesce_unproven")
+		return
+	}
 	if state.mcpProxy != nil {
 		state.mcpProxy.close()
 	}
@@ -1774,6 +1778,13 @@ func (s *Server) Close(ctx context.Context) error {
 			case <-capture.done:
 			case <-ctx.Done():
 				errs = append(errs, fmt.Errorf("native session capture still in progress: %w", ctx.Err()))
+				continue
+			}
+		}
+		if state.runtime != nil {
+			if err := s.quiesceOperatorsBeforeTeardown(state); err != nil {
+				// Keep the session's resources; the pool is replaced instead.
+				errs = append(errs, fmt.Errorf("runtime session operator quiesce: %w", err))
 				continue
 			}
 		}

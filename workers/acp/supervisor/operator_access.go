@@ -139,6 +139,15 @@ func (s *Server) quiesceOperators(state *sessionState, timeout time.Duration) er
 	}
 }
 
+// quiesceOperatorsBeforeTeardown is the barrier every runtime teardown path
+// applies before it accepts termination proofs: drain cleanup, supervisor
+// shutdown, native capture, and explicit deletion. An admitted launch could
+// otherwise start after descendant cleanup was proven, while session files
+// are removed or captured.
+func (s *Server) quiesceOperatorsBeforeTeardown(state *sessionState) error {
+	return s.quiesceOperators(state, defaultDuration(s.cfg.CancelGrace, acp.DefaultStopGrace))
+}
+
 // operatorLease owns everything one operator operation holds.
 type operatorLease struct {
 	target      operatorTarget
