@@ -267,6 +267,10 @@ type sessionState struct {
 	publicationFinalization *harnessv2.PublicationFinalizationReceipt
 	nativeCapture           *nativeSessionCapture
 	nativeCaptureReceipts   map[harnessv2.OperationID]*nativeSessionCapture
+	// operators registers admitted operator processes (nil while starting).
+	// Leaving an operator-admitting state revokes and kills all of them.
+	operators   map[uint64]operatorProcess
+	operatorSeq uint64
 }
 
 type promptState struct {

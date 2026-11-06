@@ -55,6 +55,49 @@ type operatorTarget struct {
 	gid       int
 	paths     acp.SessionPaths
 	childPath string
+	sessionID harnessv2.RuntimeSessionID
+	state     *sessionState
+	token     uint64
+}
+
+// revokeSessionOperatorsLocked removes every operator registration and kills
+// started processes. The caller holds s.mu; kills run asynchronously.
+func revokeSessionOperatorsLocked(state *sessionState) {
+	for token, process := range state.operators {
+		delete(state.operators, token)
+		if process != nil {
+			go process.Kill()
+		}
+	}
+}
+
+// bindOperatorProcess atomically re-checks the session and records a
+// started process. A false result means the session left an admitting
+// state (or was replaced) while the process started; the caller kills it.
+func (s *Server) bindOperatorProcess(target operatorTarget, process operatorProcess) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.sessions[target.sessionID]
+	if current != target.state {
+		return false
+	}
+	if _, registered := current.operators[target.token]; !registered {
+		return false
+	}
+	if _, admitted := operatorAccessStates[current.descriptor.State]; !admitted || current.creating {
+		delete(current.operators, target.token)
+		return false
+	}
+	current.operators[target.token] = process
+	return true
+}
+
+func (s *Server) releaseOperator(target operatorTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if target.state != nil {
+		delete(target.state.operators, target.token)
+	}
 }
 
 // operatorLaunch is one operator process request.
@@ -91,8 +134,9 @@ type operatorAccessState struct {
 	// validity window, so a captured request cannot be replayed.
 	usedMu sync.Mutex
 	used   map[harnessv2.OperationID]time.Time
-	// fileHelper is the absolute command that implements file operations.
-	fileHelper string
+	// runtimeExecutable is the absolute orka-acp-runtime binary that hosts the
+	// operator command shim and the file helper.
+	runtimeExecutable string
 }
 
 func (s *Server) operatorState() *operatorAccessState {
@@ -103,9 +147,9 @@ func (s *Server) operatorState() *operatorAccessState {
 		if s.operator.starter == nil {
 			s.operator.starter = startOperatorProcess
 		}
-		if s.operator.fileHelper == "" {
+		if s.operator.runtimeExecutable == "" {
 			if executable, err := os.Executable(); err == nil {
-				s.operator.fileHelper = executable
+				s.operator.runtimeExecutable = executable
 			}
 		}
 	})
@@ -154,9 +198,15 @@ func (s *Server) operatorTargetFor(sessionID harnessv2.RuntimeSessionID, metadat
 	if uid <= 0 || gid <= 0 {
 		return operatorTarget{}, http.StatusConflict, "runtime session child identity is unavailable"
 	}
+	if state.operators == nil {
+		state.operators = map[uint64]operatorProcess{}
+	}
+	state.operatorSeq++
+	state.operators[state.operatorSeq] = nil
 	return operatorTarget{
 		uid: uid, gid: gid, paths: state.paths,
 		childPath: harnessv2.RuntimeToolboxChildPath(acp.DefaultChildPath, s.cfg.Toolboxes),
+		sessionID: sessionID, state: state, token: state.operatorSeq,
 	}, 0, ""
 }
 
@@ -260,6 +310,7 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 		writeOperatorError(w, status, message)
 		return
 	}
+	defer s.releaseOperator(target)
 	command, err := resolveOperatorCommand(request.Exec.Argv[0], target.childPath)
 	if err != nil {
 		writeOperatorError(w, http.StatusBadRequest, err.Error())
@@ -279,13 +330,26 @@ func (s *Server) handleOperatorExec(w http.ResponseWriter, r *http.Request) {
 		writeOperatorError(w, http.StatusConflict, "operator environment is unavailable")
 		return
 	}
-	argv := append([]string{command}, request.Exec.Argv[1:]...)
+	runtimeExecutable := s.operatorState().runtimeExecutable
+	if runtimeExecutable == "" || !filepath.IsAbs(runtimeExecutable) {
+		writeOperatorError(w, http.StatusServiceUnavailable, "operator command shim is unavailable")
+		return
+	}
+	// The command runs under the subreaper shim so no descendant can escape
+	// the operation's timeout, disconnect, or concurrency bound.
+	argv := append([]string{runtimeExecutable, acp.OperatorShimSubcommand, command}, request.Exec.Argv[1:]...)
 	process, err := s.operatorState().starter(operatorLaunch{
 		UID: target.uid, GID: target.gid, Argv: argv, Env: env, Dir: target.paths.Workspace,
 		TTY: request.Exec.TTY, Rows: request.Exec.Rows, Cols: request.Exec.Cols, Stdin: request.Exec.Stdin,
 	})
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "start operator command: "+err.Error())
+		return
+	}
+	if !s.bindOperatorProcess(target, process) {
+		process.Kill()
+		_, _, _ = process.Wait()
+		writeOperatorError(w, http.StatusConflict, "runtime session left an operator-admitting state")
 		return
 	}
 	// The listener's whole-request read deadline protects small control
@@ -406,9 +470,11 @@ func runOperatorExec(parent context.Context, conn *websocket.Conn, process opera
 	case <-drained:
 	case <-time.After(operatorOutputDrainGrace):
 	}
-	for _, reader := range []io.ReadCloser{process.Stdout(), process.Stderr()} {
-		if reader != nil {
-			_ = reader.Close()
+	for _, closer := range []io.Closer{process.Stdin(), process.Stdout(), process.Stderr()} {
+		if closer != nil {
+			// Closing also interrupts a stdin write blocked on a command that
+			// never read its input.
+			_ = closer.Close()
 		}
 	}
 
@@ -443,19 +509,45 @@ func operatorFinalStatus(exitCode int, signaled bool, waitErr error, reason stri
 	return final
 }
 
+// maxOperatorStdinBuffered bounds stdin accepted ahead of a command that is
+// not reading it. The WebSocket reader never blocks on the child's stdin, so
+// disconnects and control frames are always observed.
+const maxOperatorStdinBuffered = 8 << 20
+
 // relayOperatorInput forwards stdin and control frames until the stream ends.
 func relayOperatorInput(
 	streamCtx context.Context, conn *websocket.Conn, process operatorProcess,
 	options operatoraccess.ExecOptions, setReason func(string),
 ) {
-	stdin := process.Stdin()
-	closeStdin := func() {
-		if stdin != nil {
-			_ = stdin.Close()
-			stdin = nil
+	queue := make(chan []byte, 1024)
+	var buffered atomic.Int64
+	go func() {
+		stdin := process.Stdin()
+		defer func() {
+			if stdin != nil {
+				_ = stdin.Close()
+			}
+		}()
+		for chunk := range queue {
+			if chunk == nil {
+				return // ordered EOF
+			}
+			buffered.Add(-int64(len(chunk)))
+			if stdin == nil {
+				continue
+			}
+			if _, err := stdin.Write(chunk); err != nil {
+				_ = stdin.Close()
+				stdin = nil
+			}
 		}
-	}
-	defer closeStdin()
+	}()
+	eof := false
+	defer func() {
+		if !eof {
+			close(queue)
+		}
+	}()
 	for {
 		kind, payload, err := conn.Read(streamCtx)
 		if err != nil {
@@ -469,10 +561,19 @@ func relayOperatorInput(
 		}
 		switch payload[0] {
 		case operatoraccess.ChannelStdin:
-			if stdin != nil {
-				if _, err := stdin.Write(payload[1:]); err != nil {
-					closeStdin()
-				}
+			if eof || len(payload) == 1 {
+				continue
+			}
+			chunk := append([]byte(nil), payload[1:]...)
+			if buffered.Add(int64(len(chunk))) > maxOperatorStdinBuffered {
+				setReason(operatoraccess.ExitReasonStdinOverflow)
+				return
+			}
+			select {
+			case queue <- chunk:
+			default:
+				setReason(operatoraccess.ExitReasonStdinOverflow)
+				return
 			}
 		case operatoraccess.ChannelControl:
 			var control operatoraccess.Control
@@ -480,7 +581,16 @@ func relayOperatorInput(
 				continue
 			}
 			if control.Type == operatoraccess.ControlEOF {
-				closeStdin()
+				if !eof {
+					eof = true
+					select {
+					case queue <- nil:
+					default:
+						setReason(operatoraccess.ExitReasonStdinOverflow)
+						return
+					}
+					close(queue)
+				}
 				continue
 			}
 			applyOperatorControl(process, options, control)
@@ -520,7 +630,8 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 		writeOperatorError(w, status, message)
 		return
 	}
-	helper := s.operatorState().fileHelper
+	defer s.releaseOperator(target)
+	helper := s.operatorState().runtimeExecutable
 	if helper == "" || !filepath.IsAbs(helper) {
 		writeOperatorError(w, http.StatusServiceUnavailable, "operator file helper is unavailable")
 		return
@@ -545,6 +656,12 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "start operator file helper: "+err.Error())
+		return
+	}
+	if !s.bindOperatorProcess(target, process) {
+		process.Kill()
+		_, _, _ = process.Wait()
+		writeOperatorError(w, http.StatusConflict, "runtime session left an operator-admitting state")
 		return
 	}
 	defer func() {
@@ -681,6 +798,7 @@ func readOperatorFileStatus(reader io.Reader) (operatorFileStatus, bool) {
 
 // realOperatorProcess runs through the ACP exec helper.
 type realOperatorProcess struct {
+	uid    int
 	cmd    *exec.Cmd
 	master *os.File
 	stdin  io.WriteCloser
@@ -690,7 +808,7 @@ type realOperatorProcess struct {
 
 func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
 	cfg := acp.OperatorCommandConfig{UID: launch.UID, GID: launch.GID, Argv: launch.Argv, Environment: launch.Env, Dir: launch.Dir}
-	process := &realOperatorProcess{}
+	process := &realOperatorProcess{uid: launch.UID}
 	var closeAfterStart []*os.File
 	closeAll := func() {
 		for _, file := range closeAfterStart {
@@ -778,6 +896,12 @@ func (p *realOperatorProcess) Resize(rows, cols uint16) error {
 }
 
 func (p *realOperatorProcess) Signal(name string) error {
+	if name == "KILL" {
+		// SIGKILL on the group would kill the subreaper shim first and let
+		// its descendants reparent away; kill the whole tree instead.
+		p.Kill()
+		return nil
+	}
 	signal, ok := acp.OperatorSignal(name)
 	if !ok {
 		return fmt.Errorf("signal %q is not allowed", name)
@@ -802,11 +926,10 @@ func (p *realOperatorProcess) Wait() (int, bool, error) {
 }
 
 func (p *realOperatorProcess) Kill() {
-	if p.cmd == nil {
+	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
-	signal, _ := acp.OperatorSignal("KILL")
-	_ = acp.SignalOperatorCommand(p.cmd, signal)
+	acp.KillOperatorTree(p.cmd.Process.Pid, p.uid)
 }
 
 type nopWriteCloser struct{ io.Writer }

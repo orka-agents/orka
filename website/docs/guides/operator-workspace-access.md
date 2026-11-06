@@ -152,7 +152,12 @@ directory must already exist.
 `-t` allocates a terminal. Because `-t` means `--tty` on `orka task exec`, use
 `--token` there for a bearer token. Without a terminal, the first Ctrl-C is
 forwarded to the remote command as `SIGINT` and a second abandons the stream.
-Closing the stream kills the remote command's process group.
+Closing the stream kills the remote command and every process it started. The
+command runs under a small subreaper shim, so even descendants that start a new
+session or process group cannot outlive the timeout, a disconnect, or the
+session's validation freeze. When a prompt settles and the workspace is frozen
+for validation, or the session is deleted, running operator commands are
+killed.
 
 | Limit | Default | Maximum |
 | --- | --- | --- |
@@ -160,6 +165,7 @@ Closing the stream kills the remote command's process group.
 | Exec output (stdout + stderr) | 64 MiB | 512 MiB |
 | `--max-bytes` (copy out) | 64 MiB | 256 MiB |
 | Copy-in file size | — | 256 MiB |
+| Stdin buffered ahead of the command | 8 MiB | — |
 | Concurrent operations per runtime | 4 | — |
 
 `orka task exec` exits with the remote command's status. Orka-side outcomes
@@ -168,7 +174,7 @@ use these exit codes:
 | Exit code | Meaning |
 | --- | --- |
 | `124` | Timeout |
-| `125` | Output limit |
+| `125` | Output or stdin buffer limit |
 | `126` | Refused or failed to start |
 | `130` | Interrupted locally |
 

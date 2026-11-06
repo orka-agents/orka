@@ -27,6 +27,11 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == supervisor.OperatorFileHelperSubcommand {
 		os.Exit(supervisor.RunOperatorFileHelper(os.Args[2:], os.Stdin, os.Stdout))
 	}
+	// The operator command shim also runs as the child identity: it is a
+	// subreaper that contains and reaps every descendant of the command.
+	if len(os.Args) > 1 && os.Args[1] == acp.OperatorShimSubcommand {
+		os.Exit(acp.RunOperatorShim(os.Args[2:]))
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

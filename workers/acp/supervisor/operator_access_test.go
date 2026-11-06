@@ -281,7 +281,8 @@ func TestOperatorExecStreamsStdinAndExitStatus(t *testing.T) {
 	if result.stdout != "hello" || result.status.ExitCode != 3 || result.status.Reason != operatoraccess.ExitReasonExited {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if launched.UID != 20001 || launched.GID != 20000 || !filepath.IsAbs(launched.Argv[0]) || launched.Argv[1] != "-c" {
+	if launched.UID != 20001 || launched.GID != 20000 || !filepath.IsAbs(launched.Argv[0]) ||
+		launched.Argv[1] != acp.OperatorShimSubcommand || !filepath.IsAbs(launched.Argv[2]) || launched.Argv[3] != "-c" {
 		t.Fatalf("operator command must run as the session child identity with a resolved command: %+v", launched)
 	}
 	if !strings.HasSuffix(launched.Dir, "workspace") {
@@ -380,5 +381,82 @@ func TestOperatorCapabilityIsSingleUse(t *testing.T) {
 	}
 	if statuses[1] != http.StatusConflict {
 		t.Fatalf("statuses = %v", statuses)
+	}
+}
+
+func TestOperatorExecIsKilledWhenTheSessionFreezes(t *testing.T) {
+	process := newFakeOperatorProcess()
+	started := make(chan struct{})
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStatePromptRunning,
+		func(operatorLaunch) (operatorProcess, error) { close(started); return process, nil })
+	go func() {
+		<-started
+		// Wait until the process is bound, then settle the prompt.
+		for {
+			supervisor.mu.Lock()
+			state := supervisor.sessions[sessionID]
+			bound := false
+			for _, registered := range state.operators {
+				bound = bound || registered != nil
+			}
+			if bound {
+				setSessionState(state, harnessv2.RuntimeSessionStateValidating)
+				supervisor.mu.Unlock()
+				return
+			}
+			supervisor.mu.Unlock()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
+		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}}), nil)
+	if !process.killed.Load() || result.status.ExitCode == 0 {
+		t.Fatalf("operator process survived the session freeze: %+v", result.status)
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	if len(supervisor.sessions[sessionID].operators) != 0 {
+		t.Fatal("operator registration leaked after revocation")
+	}
+}
+
+func TestOperatorExecRefusedWhenSessionFreezesDuringStart(t *testing.T) {
+	process := newFakeOperatorProcess()
+	var supervisor *Server
+	var sessionID harnessv2.RuntimeSessionID
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStatePromptRunning,
+		func(operatorLaunch) (operatorProcess, error) {
+			supervisor.mu.Lock()
+			setSessionState(supervisor.sessions[sessionID], harnessv2.RuntimeSessionStateValidating)
+			supervisor.mu.Unlock()
+			return process, nil
+		})
+	request, _ := http.NewRequest(http.MethodGet, operatorExecURL(server, sessionID), nil)
+	request.Header = signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	if response.StatusCode != http.StatusConflict || !process.killed.Load() {
+		t.Fatalf("status = %d killed = %v; a process started across a freeze must be killed", response.StatusCode, process.killed.Load())
+	}
+}
+
+func TestOperatorExecObservesControlsWhileStdinIsBlocked(t *testing.T) {
+	// The fake never reads stdin, so every stdin write blocks.
+	process := newFakeOperatorProcess()
+	_, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	result := runOperatorTestStream(t, operatorExecURL(server, sessionID),
+		signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, Stdin: true}),
+		func(ctx context.Context, conn *websocket.Conn) {
+			for range 4 {
+				_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelStdin, bytes.Repeat([]byte("x"), 1024)))
+			}
+			_ = conn.Write(ctx, websocket.MessageBinary, operatoraccess.ControlFrame(operatoraccess.Control{Type: operatoraccess.ControlSignal, Signal: "INT"}))
+		})
+	if result.status.ExitCode != 130 {
+		t.Fatalf("interrupt was not observed behind blocked stdin: %+v", result.status)
 	}
 }

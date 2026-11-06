@@ -171,6 +171,8 @@ func operatorStatusError(status operatoraccess.Status) error {
 		return &operatorExitError{code: 124, message: "command exceeded its timeout and was killed"}
 	case operatoraccess.ExitReasonOutputLimit:
 		return &operatorExitError{code: 125, message: "command exceeded the output limit and was killed"}
+	case operatoraccess.ExitReasonStdinOverflow:
+		return &operatorExitError{code: 125, message: "stdin arrived faster than the command read it and exceeded the buffer; the command was killed"}
 	default:
 		message := strings.TrimSpace(status.Message)
 		if message == "" {

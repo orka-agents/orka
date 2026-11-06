@@ -99,6 +99,19 @@ directly.
   `O_NOFOLLOW` beneath the workspace root, and traversal segments are
   rejected before any request is made. Uploads commit only after exactly the
   declared size arrives.
+- Each command runs under a subreaper shim, also as the child identity. While
+  the shim lives, no descendant can leave its tree, even after changing its
+  process group or session. The shim kills and reaps every descendant before
+  it exits. The supervisor's own teardown kills the descendant tree before the
+  shim. This matters because the supervisor is a subreaper it shares with the
+  ACP adapter.
+- Admission registers each operator process on its session under the
+  supervisor lock, and re-checks the state after the process starts. Every
+  transition out of `idle`, `prompt_running`, or `poisoned` (validation freeze,
+  publication, deletion) revokes and kills the registered processes.
+- The WebSocket reader never blocks on child stdin. Up to 8 MiB is queued
+  ahead of the command, end-of-input stays in order, and overflow terminates
+  the command. Disconnects and control frames are always observed.
 - Exec is bounded by a timeout (default 15 minutes, maximum 1 hour), an output
   cap (default 64 MiB, maximum 512 MiB), and a per-supervisor concurrency cap.
   Interactive terminals get a PTY. Without a terminal, the CLI forwards Ctrl-C
@@ -154,8 +167,7 @@ content, token, or credential enters a record.
   published, and its Session cannot continue from that workspace. Operators who
   only need to read should use `orka task cp` out.
 - Operator processes share the session's child UID. Session teardown and
-  adapter restarts reap them, and a workspace freeze for validation stops them
-  too.
+  adapter restarts also reap them, as a backstop to the shim and to revocation.
 - Substrate native-process workspaces are not supported until the provider
   route can carry authenticated streaming. Retained workspaces whose compute is
   suspended are unreachable. Only directly bound Pod-backed runtimes are

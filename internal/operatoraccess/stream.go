@@ -60,7 +60,10 @@ const (
 	ExitReasonTimeout     = "timeout"
 	ExitReasonOutputLimit = "output_limit"
 	ExitReasonDisconnect  = "disconnected"
-	ExitReasonError       = "error"
+	// ExitReasonStdinOverflow means stdin arrived faster than the command
+	// consumed it beyond the bounded buffer.
+	ExitReasonStdinOverflow = "stdin_overflow"
+	ExitReasonError         = "error"
 )
 
 // Status is the final server-to-client message.
