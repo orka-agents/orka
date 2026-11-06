@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	apiserveradmission "k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 const (
@@ -83,6 +84,17 @@ func serviceAccountTokenSecret(serviceAccount, secretType string) *unstructured.
 	}}
 }
 
+func withReplicas(object *unstructured.Unstructured, replicas int64) *unstructured.Unstructured {
+	object.Object["spec"].(map[string]any)["replicas"] = replicas
+	return object
+}
+
+func withTemplateImage(object *unstructured.Unstructured, image string) *unstructured.Unstructured {
+	spec := object.Object["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	spec["containers"] = []any{map[string]any{"name": "c", "image": image}}
+	return object
+}
+
 func withReplicaSetOwner(object *unstructured.Unstructured) *unstructured.Unstructured {
 	object.Object["metadata"].(map[string]any)["ownerReferences"] = []any{map[string]any{
 		"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "orka-controller-abc", "uid": "rs-uid", "controller": true,
@@ -117,6 +129,18 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		{
 			name: "update of a ReplicaSet already running as the controller", username: "system:serviceaccount:kube-system:generic-garbage-collector",
 			object: asController("ReplicaSet", "orka-controller-abc"), oldObject: asController("ReplicaSet", "orka-controller-abc"), allowed: true,
+		},
+		{
+			name: "controller ReplicaSet scaled without touching its template", username: "namespace-editor",
+			object: withReplicas(asController("ReplicaSet", "orka-controller-abc"), 2), oldObject: asController("ReplicaSet", "orka-controller-abc"), allowed: true,
+		},
+		{
+			name: "controller ReplicaSet template changed by someone else", username: "namespace-editor",
+			object: withTemplateImage(asController("ReplicaSet", "orka-controller-abc"), "attacker"), oldObject: asController("ReplicaSet", "orka-controller-abc"),
+		},
+		{
+			name: "controller ReplicaSet template changed by the Deployment controller", username: deploymentControllerUsername,
+			object: withTemplateImage(asController("ReplicaSet", "orka-controller-abc"), "next"), oldObject: asController("ReplicaSet", "orka-controller-abc"), allowed: true,
 		},
 		{
 			name: "ReplicaSet retargeted to the controller", username: aiWorkerUsername,
@@ -165,6 +189,35 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 	job := asController("Job", "j")
 	require.True(t, elsewhere.admits(t, job.GroupVersionKind(), controllerSAResources["Job"], "j", apiserveradmission.Create,
 		aiWorkerUsername, "", job, nil))
+}
+
+func TestControllerServiceAccountProtectionAdmitsOnlyTheKubeletTokenRequests(t *testing.T) {
+	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
+	kind := schema.GroupVersionKind{Group: "authentication.k8s.io", Version: "v1", Kind: "TokenRequest"}
+	resource := schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}
+	request := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
+		"spec": map[string]any{"audiences": []any{"api://AzureADTokenExchange"}},
+	}}
+	kubelet := &user.DefaultInfo{Name: "system:node:node-a", Groups: []string{"system:nodes", "system:authenticated"}}
+	worker := &user.DefaultInfo{Name: aiWorkerUsername, Groups: []string{"system:serviceaccounts", "system:authenticated"}}
+	controller := &user.DefaultInfo{Name: "system:serviceaccount:" + admissionTestNamespace + ":" + protectedControllerSA}
+	for name, tc := range map[string]struct {
+		requester user.Info
+		account   string
+		allowed   bool
+	}{
+		"kubelet for the controller Pod":    {requester: kubelet, account: protectedControllerSA, allowed: true},
+		"worker for the controller":         {requester: worker, account: protectedControllerSA},
+		"controller for itself":             {requester: controller, account: protectedControllerSA},
+		"worker for another account":        {requester: worker, account: "code-exec-run", allowed: true},
+		"controller for a policy's account": {requester: controller, account: "workload", allowed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.allowed, policy.admitsAs(t, kind, resource, tc.account, apiserveradmission.Create,
+				tc.requester, "token", request, nil))
+		})
+	}
 }
 
 func TestControllerServiceAccountProtectionTreatsDefaultAsAnAccount(t *testing.T) {
