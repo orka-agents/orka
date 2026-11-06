@@ -298,3 +298,40 @@ func TestEvalRunRefusesAShortTTLWhenWaiting(t *testing.T) {
 		t.Fatalf("eval run without --wait: %v", err)
 	}
 }
+
+// Only a missing Task gets a placeholder events file; any other download
+// failure fails the export.
+func TestEvalRunOutputFailsOnEventErrorsOtherThanNotFound(t *testing.T) {
+	for name, status := range map[string]int{"not found": http.StatusNotFound, "forbidden": http.StatusForbidden, "server error": http.StatusInternalServerError} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/evals/runs":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+				case "/api/v1/evals/runs/r":
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded"}}`))
+				case "/api/v1/evals/runs/r/trials":
+					_, _ = w.Write([]byte(`{"caseID":"c","trial":1,"taskName":"eval-c","outcome":"fail"}` + "\n"))
+				default:
+					w.WriteHeader(status)
+				}
+			}))
+			defer srv.Close()
+			dir := filepath.Join(t.TempDir(), "out")
+			_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+				"--token", "tok", "--output-dir", dir)
+			if status == http.StatusNotFound {
+				raw, readErr := os.ReadFile(filepath.Join(dir, "events", "eval-c.json"))
+				if err != nil || readErr != nil || !strings.Contains(string(raw), "no longer exists") {
+					t.Fatalf("Execute() = %v, events file %q, %v", err, raw, readErr)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "read events of failed trial Task eval-c") {
+				t.Fatalf("Execute() error = %v", err)
+			}
+		})
+	}
+}

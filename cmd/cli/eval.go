@@ -336,9 +336,14 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 			return fmt.Errorf("trial %d of case %q names an invalid Task", trial.Trial, trial.CaseID)
 		}
 		events, err := allTaskEvents(ctx, c, run.Namespace, trial.TaskName)
-		if err != nil {
-			// Trial Tasks can be gone already; the record still names them.
-			events = fmt.Appendf(nil, "{\"error\": %q}\n", err.Error())
+		switch {
+		case err == nil:
+		case strings.Contains(err.Error(), "HTTP 404"):
+			// The trial Task is gone already; the record still names it.
+			events = fmt.Appendf(nil, "{\"taskName\": %q, \"missing\": \"the Task no longer exists\"}\n", trial.TaskName)
+		default:
+			// Any other failure leaves the export incomplete, so it fails.
+			return fmt.Errorf("read events of failed trial Task %s: %w", trial.TaskName, err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "events", trial.TaskName+".json"), events, 0o644); err != nil {
 			return err
