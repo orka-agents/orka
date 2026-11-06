@@ -9,7 +9,6 @@ package outboundaccess
 import (
 	"bytes"
 	"context"
-
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -114,6 +113,10 @@ type AgentIdentityBinding struct {
 	TaskNamespace   string
 	TaskName        string
 	TaskUID         string
+	// TaskCreated is the Task's creation time. Only a Task created after the
+	// claim was granted was checked for Agent use while the Agent named the
+	// identity.
+	TaskCreated time.Time
 	// DelegationStart is the root requester's last authenticated action in
 	// the Task chain; Delegated mode refuses calls past the delegation age.
 	DelegationStart time.Time
@@ -304,8 +307,9 @@ type KubernetesResolver struct {
 	MaxDelegationAge time.Duration
 	// Now reports the current time; time.Now when nil.
 	Now func() time.Time
-	// AuditLog receives identity use records; the agent-identity-audit
-	// logger when unset.
+	// AuditLog is the sink for identity use records, which are written on
+	// its agent-identity-audit child; the controller-runtime logger when
+	// unset. The controller passes a sink no diagnostic log level filters.
 	AuditLog logr.Logger
 	// AuditPseudonymKey keys the requester pseudonym in Delegated-mode
 	// records. Without it, records name no requester.
@@ -321,7 +325,7 @@ type KubernetesResolver struct {
 }
 
 // Resolve returns a direct credential or trusted gateway dial target.
-func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (Resolution, error) {
+func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (resolution Resolution, err error) {
 	if r == nil || r.Reader == nil {
 		return Resolution{}, errors.New("outbound access resolver is not configured")
 	}
@@ -334,6 +338,9 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: policyName}, policy); err != nil {
 		return Resolution{}, fmt.Errorf("resolve outbound access policy: %w", err)
 	}
+	// One record per identity-backed call, issued or refused, including
+	// refusals before the identity is considered (ADR 0039).
+	defer r.auditAgentIdentityUse(policy, &req, &err)
 	if issue := ValidateSpec(policy); issue != nil {
 		return Resolution{}, issue
 	}
@@ -386,7 +393,8 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 	case policy.Spec.Connection != nil:
 		return r.resolveConnection(ctx, policy, req)
 	case policy.Spec.AgentIdentity != nil:
-		return r.resolveAgentIdentity(ctx, policy, req)
+		resolution, err = r.resolveAgentIdentity(ctx, policy, req)
+		return resolution, refuseAgentIdentity(agentIdentityRefusalBinding, err)
 	}
 	return r.resolveGateway(ctx, policy)
 }
@@ -693,8 +701,7 @@ func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
 	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
 }
 
-func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (resolution Resolution, err error) {
-	defer func() { r.auditAgentIdentityUse(policy, req, AgentIdentityMode(policy.Spec.AgentIdentity), err) }()
+func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
 	if r.AgentIdentities == nil {
 		return Resolution{}, errors.New("agent identity credentials are issued only by the controller")
 	}
@@ -702,11 +709,13 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if binding == nil || strings.TrimSpace(binding.Identity.ID) == "" {
 		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
 	}
-	// The bound Agent must still exist and hold the identity: deleting the
-	// Agent, a claim that moved to another Agent, or the owner removing the
-	// identity stops its Tasks' calls. A claim being released is still held,
-	// so no other Agent can take the identity while bound Tasks run, but it
-	// is no longer used.
+	// The bound Agent must still exist, hold the identity, and name it:
+	// deleting the Agent, a claim that moved to another Agent, or the owner
+	// removing or changing the identity stops its Tasks' calls at once. The
+	// spec is checked as well as the claim because the claim is marked
+	// releasing only when the Agent next reconciles. A claim being released
+	// is still held, so no other Agent can take the identity while bound
+	// Tasks run, but it is no longer used.
 	live := &corev1alpha1.Agent{}
 	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
 		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
@@ -715,8 +724,17 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
 	}
-	if live.Status.IdentityClaim.Releasing {
+	issuer, id, named := live.IdentityRef()
+	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
 		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
+	}
+	// A claim granted again, for example after it was released or Agent use
+	// authorization was re-enabled, covers only Tasks created since; an
+	// older Task's creation was never checked for this grant. Both times
+	// have one-second precision, so a Task from the grant's own second may
+	// predate it and is refused too.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
+		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
 	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
@@ -745,17 +763,17 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if tokenRequest.Mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
 		credential, declared, err := r.resolveDelegation(ctx, policy, req)
 		if err != nil {
-			return Resolution{}, err
+			return Resolution{}, refuseAgentIdentity(agentIdentityRefusalDelegation, err)
 		}
 		tokenRequest.UserAssertion = credential.AccessToken
 		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
 	}
 	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
 	if err != nil {
-		return Resolution{}, fmt.Errorf("issue agent identity credential: %w", err)
+		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, fmt.Errorf("issue agent identity credential: %w", err))
 	}
 	if strings.TrimSpace(token) == "" {
-		return Resolution{}, errors.New("agent identity issuer returned an empty credential")
+		return Resolution{}, refuseAgentIdentity(agentIdentityRefusalIssuer, errors.New("agent identity issuer returned an empty credential"))
 	}
 	header, prefix := credentialOutput(identity.Output)
 	return Resolution{

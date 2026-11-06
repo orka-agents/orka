@@ -32,6 +32,15 @@ func identityClaimMatches(claim *corev1alpha1.AgentIdentityClaim, issuer, id str
 	return claim != nil && claim.Issuer == issuer && claim.ID == id
 }
 
+// identityClaimCoversTask reports whether the Task was created strictly after
+// the claim was granted. Only such a Task was checked for Agent use while the
+// Agent named the identity and the check was enforced (ADR 0039, stage 1).
+// Both times have one-second precision, so a Task created in the grant's
+// second may predate the grant and is refused.
+func identityClaimCoversTask(claim *corev1alpha1.AgentIdentityClaim, task *corev1alpha1.Task) bool {
+	return claim != nil && claim.GrantedAt != nil && task.CreationTimestamp.After(claim.GrantedAt.Time)
+}
+
 // identityClaimBindable reports whether new Task bindings may use the claim:
 // it must name the identity and not be on its way out.
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
@@ -68,9 +77,17 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
 	claim := live.Status.IdentityClaim.DeepCopy()
 	issuer, id, declared := live.IdentityRef()
-	if claim != nil && identityClaimMatches(claim, issuer, id) {
-		// The spec names the held identity again; it is no longer leaving.
+	if declared && !r.Identity.AgentUseAuthorization {
+		// Claims exist only while Agent use authorization is enforced; without
+		// it a held claim is released like one the spec no longer names.
+		issuer, id, declared = "", "", false
+	}
+	if claim != nil && identityClaimMatches(claim, issuer, id) && (claim.Releasing || claim.GrantedAt == nil) {
+		// The spec names the held identity again, or use authorization is back
+		// on. Tasks created while it was leaving were not checked for it, so
+		// the claim counts as granted now.
 		claim.Releasing = false
+		claim.GrantedAt = identityClaimGrantTime()
 	}
 	if claim != nil && !identityClaimMatches(claim, issuer, id) {
 		if !claim.Releasing {
@@ -105,7 +122,23 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 			return nil, fmt.Errorf("identity %s/%s is already bound to Agent %s/%s", issuer, id, other.Namespace, other.Name)
 		}
 	}
-	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}, nil
+	// A deleted Agent's claim goes with it, but its bound Tasks still hold the
+	// identity until they finish, so it stays taken until then.
+	if holder, err := identityTaskOfOtherAgent(ctx, reader, agent, issuer, id); err != nil || holder != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("identity %s/%s is still held by Task %s/%s of Agent %s until it finishes",
+			issuer, id, holder.Namespace, holder.Name, holder.Status.AgentExecutionBinding.Agent.Name)
+	}
+	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id, GrantedAt: identityClaimGrantTime()}, nil
+}
+
+// identityClaimGrantTime is the grant time recorded now, at the second
+// precision the API server stores it with.
+func identityClaimGrantTime() *metav1.Time {
+	now := metav1.Now().Rfc3339Copy()
+	return &now
 }
 
 // errIdentityClaimReleasing reports the first release pass. It is an error only
@@ -125,17 +158,37 @@ func activeIdentityTasks(ctx context.Context, reader client.Reader, agent *corev
 	}
 	count := 0
 	for i := range tasks.Items {
-		task := &tasks.Items[i]
-		binding := task.Status.AgentExecutionBinding
-		if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil ||
-			binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-			continue
-		}
-		if binding.Agent.Identity.Issuer == claim.Issuer && binding.Agent.Identity.ID == claim.ID {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], claim.Issuer, claim.ID); bound != nil && bound.UID == agent.UID {
 			count++
 		}
 	}
 	return count, nil
+}
+
+// identityTaskOfOtherAgent returns an unfinished Task bound to the identity
+// through any Agent UID other than agent's, such as a deleted Agent's.
+func identityTaskOfOtherAgent(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent, issuer, id string) (*corev1alpha1.Task, error) {
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(agent.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Tasks bound to identity %s/%s: %w", issuer, id, err)
+	}
+	for i := range tasks.Items {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], issuer, id); bound != nil && bound.UID != agent.UID {
+			return &tasks.Items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// unfinishedIdentityBinding returns the Agent an unfinished Task is bound to
+// when that binding froze the identity.
+func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *corev1alpha1.AgentExecutionAgentRef {
+	binding := task.Status.AgentExecutionBinding
+	if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
+		return nil
+	}
+	return binding.Agent
 }
 
 // agentIdentityReverifyInterval bounds how long a verified identity stays
@@ -266,24 +319,40 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
+	if !identityClaimCoversTask(live.Status.IdentityClaim, task) {
+		return nil, permanentACPAgentConfiguration(fmt.Errorf(
+			"the Task was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; create the Task again",
+			agent.Name, issuer, id))
+	}
+	ref, err := r.Identity.BindingRef(agent)
+	if err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
-		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent); err != nil {
+		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref, live.Status.IdentityClaim); err != nil {
 			return nil, err
 		}
 	}
-	return r.Identity.BindingRef(agent)
+	return ref, nil
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an
 // identity-bound Agent only when the parent is bound to that exact Agent and
-// identity, so a child can never borrow an identity its root requester was not
-// checked against, including through an Agent recreated under the same name.
+// identity, issuer instance included, so a child can never borrow an identity
+// its root requester was not checked against, including through an Agent
+// recreated under the same name. The parent must be the Task that controls
+// the child, not one recreated under its name. A scheduled run is not
+// delegation: it runs its scheduled Task's own Agent, which that Task's
+// creator was checked for. Its scheduled Task never binds, so the scheduled
+// Task itself must have been created after the claim was granted.
 func requireParentOwnsIdentityAgent(
 	ctx context.Context,
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	parentName string,
 	agent *corev1alpha1.Agent,
+	ref *corev1alpha1.AgentExecutionIdentityRef,
+	claim *corev1alpha1.AgentIdentityClaim,
 ) error {
 	parent := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: parentName}, parent); err != nil {
@@ -292,15 +361,37 @@ func requireParentOwnsIdentityAgent(
 		}
 		return fmt.Errorf("resolve the parent Task: %w", err)
 	}
-	refuse := permanentACPAgentConfiguration(fmt.Errorf(
-		"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
-	binding := parent.Status.AgentExecutionBinding
-	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-		return refuse
+	owner := metav1.GetControllerOf(task)
+	recorded := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
+	if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		owner.Name != parentName || owner.UID != parent.UID || (recorded != "" && recorded != string(parent.UID)) {
+		if owner == nil && strings.TrimSpace(task.Annotations[labels.AnnotationForkSourceTask]) != "" {
+			// The message only explains the refusal; the decision above
+			// never depends on the fork annotation.
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a fork does not carry its source Task's identity-bound Agent %q; create a new Task to use it", agent.Name))
+		}
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
-	issuer, id, _ := agent.IdentityRef()
-	if binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
-		return refuse
+	if parent.Spec.Schedule != "" {
+		if parent.Spec.AgentRef == nil || task.Spec.AgentRef == nil || *parent.Spec.AgentRef != *task.Spec.AgentRef {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
+		}
+		if !identityClaimCoversTask(claim, parent) {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"scheduled Task %q was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; re-create the scheduled Task",
+				parent.Name, agent.Name, ref.Issuer, ref.ID))
+		}
+		return nil
+	}
+	binding := parent.Status.AgentExecutionBinding
+	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != ref.Issuer || binding.Agent.Identity.ID != ref.ID ||
+		binding.Agent.Identity.Instance != ref.Instance {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
 	}
 	return nil
 }
@@ -325,6 +416,7 @@ func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, tas
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
 		AgentUID: string(agent.UID), AgentGeneration: agent.Generation,
 		TaskNamespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
+		TaskCreated:     task.CreationTimestamp.Time,
 		DelegationStart: start,
 		ManagedEgress:   binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool && !workspaceBacked,
 	}, nil
@@ -336,41 +428,109 @@ const maxDelegationChainDepth = 32
 // delegationStart returns when the root requester last acted in the Task
 // chain: the creation of the chain's root Task, which the requester created
 // directly or with a Session message. Child Tasks, retries, and agents woken
-// later never move it. A broken chain returns the zero time, which Delegated
-// mode refuses.
+// later never move it. A chain that cannot be proven (including a fork, which
+// names its source without a UID pin), or that passes through a Task acting
+// for another requester, returns the zero time, which Delegated mode refuses.
 func delegationStart(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (time.Time, error) {
 	current := task
 	for range maxDelegationChainDepth {
-		parentName := labels.ParentTaskName(current.Labels, current.Annotations)
-		if parentName == "" {
+		if !sameRequester(current.Spec.RequestedBy, task.Spec.RequestedBy) {
+			return time.Time{}, nil
+		}
+		if !namesDelegatingTask(current) {
 			return current.CreationTimestamp.Time, nil
 		}
 		if reader == nil {
 			return time.Time{}, nil
 		}
-		parent := &corev1alpha1.Task{}
-		if err := reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: parentName}, parent); err != nil {
-			if apierrors.IsNotFound(err) {
-				return time.Time{}, nil
-			}
-			return time.Time{}, fmt.Errorf("resolve the delegating Task chain: %w", err)
+		parent, err := delegatingTask(ctx, reader, current)
+		if errors.Is(err, errDelegationChainBroken) {
+			return time.Time{}, nil
+		}
+		if err != nil {
+			return time.Time{}, err
 		}
 		current = parent
 	}
 	return time.Time{}, nil
 }
 
+// errDelegationChainBroken marks a Task chain that cannot be proven.
+var errDelegationChainBroken = errors.New("the delegation chain is broken")
+
+// namesDelegatingTask reports whether a Task names a Task it was delegated
+// from, by parent metadata, a pinned parent UID, or a Task controller owner.
+func namesDelegatingTask(task *corev1alpha1.Task) bool {
+	return labels.ParentTaskName(task.Labels, task.Annotations) != "" ||
+		strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID]) != "" ||
+		taskControllerOwner(task) != nil
+}
+
+func taskControllerOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != taskResourceKind {
+		return nil
+	}
+	return owner
+}
+
+// delegatingTask returns the Task current was delegated from. The link counts
+// only when an immutable UID pins it: the parent UID a brokered delegation
+// records, or the controller owner reference. A parent named without a pin
+// (such as a child Kubernetes orphaned), gone, or recreated under its name
+// cannot be proven, and fails with errDelegationChainBroken.
+func delegatingTask(ctx context.Context, reader client.Reader, current *corev1alpha1.Task) (*corev1alpha1.Task, error) {
+	name := labels.ParentTaskName(current.Labels, current.Annotations)
+	pinned := strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskUID])
+	if owner := taskControllerOwner(current); owner != nil {
+		if name == "" {
+			name = owner.Name
+		}
+		if owner.Name != name || (pinned != "" && pinned != string(owner.UID)) {
+			return nil, fmt.Errorf("%w: a Task it was delegated from is named inconsistently", errDelegationChainBroken)
+		}
+		pinned = string(owner.UID)
+	}
+	if name == "" || pinned == "" {
+		return nil, fmt.Errorf("%w: no UID pins a Task it was delegated from", errDelegationChainBroken)
+	}
+	parent := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: name}, parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: a Task it was delegated from is gone", errDelegationChainBroken)
+		}
+		return nil, fmt.Errorf("read the delegating Task: %w", err)
+	}
+	if string(parent.UID) != pinned {
+		return nil, fmt.Errorf("%w: a Task it was delegated from was replaced", errDelegationChainBroken)
+	}
+	return parent, nil
+}
+
+func sameRequester(a, b *corev1alpha1.RequestedBy) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Issuer == b.Issuer && a.Subject == b.Subject
+}
+
 // requireBoundIdentityClaim re-checks, after the binding is persisted and
-// until the Task starts, that the Agent still holds the identity the binding
-// froze. A claim released between the binding decision and its write could
-// otherwise leave two Agents with Tasks acting as one identity; once the
-// binding is persisted, any later release sees it and keeps the claim.
+// until the Task is admitted to a runtime, that the Agent still holds the
+// identity the binding froze. A claim released between the binding decision
+// and its write could otherwise leave two Agents with Tasks acting as one
+// identity; once the binding is persisted, any later release sees it and
+// keeps the claim. A Task still Queued or Reserved for capacity has not been
+// admitted, so it is checked on every pass until dispatch.
 func (r *TaskReconciler) requireBoundIdentityClaim(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (ctrl.Result, error, bool) {
-	if task.Status.Execution != nil || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
+	if execution := task.Status.Execution; execution != nil &&
+		execution.State != corev1alpha1.TaskExecutionStateQueued && execution.State != corev1alpha1.TaskExecutionStateReserved {
+		return ctrl.Result{}, nil, false
+	}
+	if binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
 		return ctrl.Result{}, nil, false
 	}
 	frozen := binding.Agent
@@ -380,11 +540,16 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
 	}
+	message := fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
 	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
-		return ctrl.Result{}, nil, false
+		if identityClaimCoversTask(live.Status.IdentityClaim, task) {
+			return ctrl.Result{}, nil, false
+		}
+		// The claim was released and granted again after the Task was created.
+		message = fmt.Sprintf("Agent %s/%s was granted identity %s/%s again after the Task was created",
+			frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID)
 	}
-	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"),
-		fmt.Sprintf("Agent %s/%s no longer holds identity %s/%s", frozen.Namespace, frozen.Name, frozen.Identity.Issuer, frozen.Identity.ID))
+	result, failErr := r.failACPPlanningTask(ctx, task, corev1alpha1.TaskExecutionReason("IdentityUnavailable"), message)
 	return result, failErr, true
 }
 
@@ -414,25 +579,19 @@ type DelegationLiveness struct {
 
 // requireLiveAncestors refuses a delegated call from a child Task once any
 // Task above it in the delegation chain was cancelled, had its cancellation
-// requested, is being deleted, or is gone: stopping a parent stops every
-// child acting for the same requester. A parent that finished normally does
-// not stop its children.
+// requested, is being deleted, is gone, or had its Session deleted: stopping
+// a parent stops every child acting for the same requester. A parent that
+// finished normally does not stop its children. A link no UID proves, such
+// as a fork's or an orphaned child's, fails closed.
 func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *corev1alpha1.Task) error {
 	current := task
 	for range maxDelegationChainDepth {
-		parentName := labels.ParentTaskName(current.Labels, current.Annotations)
-		if parentName == "" {
+		if !namesDelegatingTask(current) {
 			return nil
 		}
-		parent := &corev1alpha1.Task{}
-		if err := d.Reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: parentName}, parent); err != nil {
-			if apierrors.IsNotFound(err) {
-				return errors.New("a Task it was delegated from is gone")
-			}
-			return fmt.Errorf("read the delegating Task: %w", err)
-		}
-		if owner := metav1.GetControllerOf(current); owner != nil && owner.UID != parent.UID {
-			return errors.New("a Task it was delegated from was replaced")
+		parent, err := delegatingTask(ctx, d.Reader, current)
+		if err != nil {
+			return err
 		}
 		switch {
 		case !parent.DeletionTimestamp.IsZero():
@@ -443,9 +602,48 @@ func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *core
 		if _, requested := parent.Annotations[labels.AnnotationCancelRequested]; requested {
 			return errors.New("the cancellation of a Task it was delegated from was requested")
 		}
+		if err := d.requireLiveSessions(ctx, parent, "the Session of a Task it was delegated from"); err != nil {
+			return err
+		}
 		current = parent
 	}
 	return errors.New("the delegating Task chain is too deep")
+}
+
+// requireLiveSessions refuses once a Session the Task runs in is gone: its
+// spec.sessionRef, or the chat Session the chat API recorded in the
+// orka.ai/chat-session label. It reads Session metadata only, never the
+// transcript.
+func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
+	names := make([]string, 0, 2)
+	if task.Spec.SessionRef != nil {
+		names = append(names, strings.TrimSpace(task.Spec.SessionRef.Name))
+	}
+	names = append(names, strings.TrimSpace(task.Labels[labels.LabelChatSession]))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		if d.Sessions == nil {
+			return errors.New("no Session store is configured")
+		}
+		var err error
+		if reader, ok := d.Sessions.(sessionTypeReader); ok {
+			_, err = reader.GetSessionType(ctx, task.Namespace, name)
+		} else {
+			var session *store.SessionRecord
+			if session, err = d.Sessions.GetSession(ctx, task.Namespace, name); err == nil && session == nil {
+				err = store.ErrNotFound
+			}
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("%s was deleted", subject)
+		}
+		if err != nil {
+			return fmt.Errorf("read %s: %w", subject, err)
+		}
+	}
+	return nil
 }
 
 // Check implements outboundaccess.KubernetesResolver.DelegationLive.
@@ -471,24 +669,8 @@ func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.Ag
 	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
 		return errors.New("the Task's cancellation was requested")
 	}
-	if err := d.requireLiveAncestors(ctx, task); err != nil {
+	if err := d.requireLiveSessions(ctx, task, "the Task's Session"); err != nil {
 		return err
 	}
-	if task.Spec.SessionRef == nil || strings.TrimSpace(task.Spec.SessionRef.Name) == "" {
-		return nil
-	}
-	if d.Sessions == nil {
-		return errors.New("no Session store is configured")
-	}
-	session, err := d.Sessions.GetSession(ctx, task.Namespace, task.Spec.SessionRef.Name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return errors.New("the Task's Session was deleted")
-		}
-		return fmt.Errorf("read the Task's Session: %w", err)
-	}
-	if session == nil {
-		return errors.New("the Task's Session was deleted")
-	}
-	return nil
+	return d.requireLiveAncestors(ctx, task)
 }

@@ -516,6 +516,13 @@ type AgentIdentityClaim struct {
 	// no unfinished Task is bound to it.
 	// +optional
 	Releasing bool `json:"releasing,omitempty"`
+	// GrantedAt is when the controller granted the claim, while Agent use
+	// authorization was enforced. A Task binds the identity only if it was
+	// created strictly after this time (both have one-second precision), so
+	// its creation was checked for Agent use while the Agent named the
+	// identity.
+	// +optional
+	GrantedAt *metav1.Time `json:"grantedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

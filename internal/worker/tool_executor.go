@@ -463,7 +463,10 @@ func (e *ToolExecutor) executeToolRequest(ctx context.Context, tool *corev1alpha
 }
 
 func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared preparedToolRequest) (string, error) {
-	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway, prepared.connection)
+	// An Agent identity credential, like a linked-account one, is bound to
+	// the declared destination, so neither follows any redirect.
+	httpClient, err := toolHTTPClient(e.client, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway,
+		prepared.connection || prepared.agentIdentity)
 	if err != nil {
 		return "", err
 	}
@@ -632,9 +635,9 @@ func toolHTTPClient(base *http.Client, timeout *metav1.Duration, gatewayTLS toke
 			return http.ErrUseLastResponse
 		}
 		if connection {
-			// A linked-account credential travels only to the origin the
-			// provider declared: Go forwards custom headers on redirects,
-			// so the redirect is returned unfollowed instead.
+			// A linked-account or Agent identity credential travels only
+			// to the declared origin: Go forwards custom headers on
+			// redirects, so the redirect is returned unfollowed instead.
 			return http.ErrUseLastResponse
 		}
 		if len(via) == 0 {
@@ -881,7 +884,9 @@ type preparedToolRequest struct {
 	direct           bool
 	// connection marks a request carrying a person's linked-account
 	// credential: it is never followed across a redirect.
-	connection        bool
+	connection bool
+	// agentIdentity marks a request carrying an Agent identity credential.
+	agentIdentity     bool
 	mcp               bool
 	trustedActorRoute bool
 	// forward marks a forwarding Tool's request, whose upstream answer is
@@ -1114,6 +1119,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		if err := agentIdentityOriginError(resolution.Adapter, tool, prepared.request.URL); err != nil {
 			return err
 		}
+		prepared.agentIdentity = resolution.Adapter == outboundaccess.AdapterAgentIdentity
 		if resolution.Adapter == outboundaccess.AdapterConnection {
 			prepared.connection = true
 			// The linked-account credential is bound to the destination the

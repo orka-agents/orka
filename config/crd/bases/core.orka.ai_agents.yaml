@@ -1692,6 +1692,15 @@ spec:
                   grants a claim only when no other Agent holds it, and keeps it after the
                   spec changes until every Task bound to it has finished.
                 properties:
+                  grantedAt:
+                    description: |-
+                      GrantedAt is when the controller granted the claim, while Agent use
+                      authorization was enforced. A Task binds the identity only if it was
+                      created strictly after this time (both have one-second precision), so
+                      its creation was checked for Agent use while the Agent named the
+                      identity.
+                    format: date-time
+                    type: string
                   id:
                     minLength: 1
                     type: string

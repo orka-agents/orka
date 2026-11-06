@@ -68,8 +68,9 @@ binding, which froze it, with the issuer instance, when the Task was bound. Only
 controller issues these tokens. It authenticates to Entra as the installation's agent
 identity blueprint with its own projected ServiceAccount token, requests an exchange token
 for the agent identity, and then an app-only token for `<resource>/.default`. Tokens are
-injected per Tool call, cached for at most five minutes, and never reach the runtime, the
-Task, the execution snapshot, events, or logs. ACP runtimes reach these Tools through the
+injected per Tool call, cached for at most five minutes per policy UID and generation, and
+never reach the runtime, the Task, the execution snapshot, events, or logs. Neither the
+token requests nor the Tool call follow redirects. ACP runtimes reach these Tools through the
 MCP broker; native `type: ai` workers fail closed. The Tool URL must be HTTPS without
 template placeholders, and requests must go to the Tool's declared origin. Permissions are
 the agent identity's app roles in Entra. Removing the identity from the Agent, or
@@ -109,12 +110,14 @@ spec:
 - **For how long:** calls stop `maxDelegationAge` (default one hour, capped by
   `--agent-identity-max-delegation-age`) after the root requester's last action in the
   Task chain, that is, creating the root Task or sending the Session message that started
-  it. Child Tasks, retries, and woken agents do not extend it. Calls also stop at once
-  when the Task, or any Task above it in the delegation chain, is cancelled or
-  deleted (`orka task cancel`, or `orka session cancel` for a Session's turn), when the
-  Task finishes, or when its Session is deleted: the controller checks them live before
-  every call. A parent that finished normally does
-  not stop its children.
+  it. Child Tasks, retries, and woken agents do not extend it, and a child whose link to
+  its parent no immutable UID proves, such as one Kubernetes orphaned, fails closed. A
+  fork of an identity-bound Task does not carry the identity; create a new Task instead.
+  Calls also stop at once when the Task, or any Task above it in the delegation chain, is
+  cancelled or deleted (`orka task cancel`, or `orka session cancel` for a Session's
+  turn), when the Task finishes, or when its Session, or that of any Task it was
+  delegated from, is deleted: the controller checks them live before every call. A
+  parent that finished normally does not stop its children.
 - **Where:** only Tasks on built-in RuntimePools, whose Pods reach the network only
   through Orka. External `runtimeRef` runtimes, workspace-backed sessions, and native
   `type: ai` workers fail closed.

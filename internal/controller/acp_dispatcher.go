@@ -6497,10 +6497,18 @@ func (d *ACPDispatcher) handlePromptStreamError(
 		)
 	}
 	if runtimeContextErr != nil {
+		// A requested cancellation settles with the request, which names who
+		// cancelled and why; a deadline keeps its timeout message.
+		requested := ""
+		if !errors.Is(runtimeContextErr, context.DeadlineExceeded) {
+			requested = d.requestedCancellationMessage(ctx, task)
+		}
 		if !accepted && writeEvidence.SafeToResendSameIdentity() {
 			operation, terminalReason, message := "cancelled-before-acceptance", corev1alpha1.TaskExecutionReason("Cancelled"), "prompt cancelled before acceptance"
 			if errors.Is(runtimeContextErr, context.DeadlineExceeded) {
 				operation, terminalReason, message = "timeout-before-acceptance", acpTaskTimeoutReason, "task deadline exceeded before prompt acceptance"
+			} else if requested != "" {
+				message = requested
 			}
 			if transitionErr := d.transitionAttemptToCancelled(
 				ctx, attemptID, fence, operation, terminalReason, message,
@@ -6519,6 +6527,8 @@ func (d *ACPDispatcher) handlePromptStreamError(
 			reason = harnessv2.CancelReasonTaskTimeout
 			terminalReason = acpTaskTimeoutReason
 			terminalMessage = acpTaskTimeoutCancellationSettledMessage
+		} else if requested != "" {
+			terminalMessage = requested
 		}
 		if cancellation == nil {
 			cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpPromptCancellationTimeout)

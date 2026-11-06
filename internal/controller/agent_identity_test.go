@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -76,14 +77,26 @@ func TestAgentReconcileReportsDeclaredIdentity(t *testing.T) {
 	}
 }
 
+// testClaimGrantedAt is when test claims were granted, before any test Task.
+var testClaimGrantedAt = metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+
 func claimedAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
-	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID}
+	granted := testClaimGrantedAt
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, GrantedAt: &granted}
 	return agent
+}
+
+// identityAgentReconciler is an AgentReconciler with Agent use authorization
+// enforced, so it grants identity claims.
+func identityAgentReconciler(objs ...runtime.Object) *AgentReconciler {
+	r := setupAgentReconciler(objs...)
+	r.Identity = testIdentityConfig()
+	return r
 }
 
 func boundTask(name string, agent *corev1alpha1.Agent, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
 	return &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, CreationTimestamp: metav1.Now()},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
 		Status: corev1alpha1.TaskStatus{Phase: phase, AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
@@ -112,7 +125,7 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 	}
 
 	fresh := identityBoundTestAgent("fresh", now)
-	r = setupAgentReconciler(fresh)
+	r = identityAgentReconciler(fresh)
 	claim, err = r.reconcileIdentityClaim(context.Background(), fresh)
 	if err != nil || claim == nil {
 		t.Fatalf("an unheld identity is claimed: claim=%v err=%v", claim, err)
@@ -120,7 +133,8 @@ func TestIdentityClaimIsFirstComeAndExclusive(t *testing.T) {
 }
 
 func releasingAgent(agent *corev1alpha1.Agent) *corev1alpha1.Agent {
-	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, Releasing: true}
+	granted := testClaimGrantedAt
+	agent.Status.IdentityClaim = &corev1alpha1.AgentIdentityClaim{Issuer: "entra", ID: testAgentIdentityID, Releasing: true, GrantedAt: &granted}
 	return agent
 }
 
@@ -145,9 +159,10 @@ func TestIdentityClaimIsReleasedInTwoPasses(t *testing.T) {
 	}
 
 	renamed := releasingAgent(identityBoundTestAgent("holder", time.Now()))
-	r = setupAgentReconciler(renamed)
-	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing {
-		t.Fatalf("naming the held identity again cancels the release: claim=%+v err=%v", claim, err)
+	r = identityAgentReconciler(renamed)
+	if claim, err := r.reconcileIdentityClaim(context.Background(), renamed); err != nil || claim == nil || claim.Releasing ||
+		claim.GrantedAt == nil || !claim.GrantedAt.After(testClaimGrantedAt.Time) {
+		t.Fatalf("naming the held identity again cancels the release and grants it anew: claim=%+v err=%v", claim, err)
 	}
 
 	switched := releasingAgent(identityBoundTestAgent("holder", time.Now()))
@@ -187,39 +202,106 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", now))
 	unclaimed := identityBoundTestAgent("unclaimed", now)
 	unclaimed.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+	instance := "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222"
 	parentOwn := boundTask("parent-own", agent, corev1alpha1.TaskPhaseRunning)
+	parentOwn.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
 	recreated := agent.DeepCopy()
 	recreated.UID = "earlier-reviewer-uid"
 	parentRecreated := boundTask("parent-recreated", recreated, corev1alpha1.TaskPhaseRunning)
+	parentRecreated.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
+	parentOtherInstance := boundTask("parent-other-instance", agent, corev1alpha1.TaskPhaseRunning)
+	parentOtherInstance.Status.AgentExecutionBinding.Agent.Identity.Instance = "entra:99999999-9999-9999-9999-999999999999/22222222-2222-2222-2222-222222222222"
 	parentUnbound := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent-unbound", Namespace: testNS},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
 	}
-	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).
-		WithObjects(agent, unclaimed, parentOwn, parentRecreated, parentUnbound).Build()
-	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	scheduled := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: testNS, CreationTimestamp: metav1.NewTime(testClaimGrantedAt.Add(time.Second))},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Schedule: "0 2 * * *",
+			AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+	}
+	// A scheduled Task created before the grant was never checked for the
+	// identity, though its runs are new.
+	unchecked := scheduled.DeepCopy()
+	unchecked.Name = "nightly-unchecked"
+	unchecked.CreationTimestamp = testClaimGrantedAt
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled, unchecked}
+	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
+	for _, parent := range parents {
+		parent.UID = types.UID(parent.Name + "-uid")
+		builder = builder.WithObjects(parent)
+	}
+	r := &TaskReconciler{Client: builder.Build(), Identity: testIdentityConfig()}
 
+	// task returns a child controlled by the named parent, as delegate_task
+	// and scheduled runs create them.
 	task := func(parent string) *corev1alpha1.Task {
-		task := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNS, Labels: map[string]string{}}}
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNS, Labels: map[string]string{}, CreationTimestamp: metav1.Now()},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+		}
 		if parent != "" {
 			task.Labels[labels.LabelParentTask] = parent
+			controller := true
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: parent,
+				UID: types.UID(parent + "-uid"), Controller: &controller,
+			}}
 		}
 		return task
 	}
 	ref, err := r.agentExecutionIdentity(context.Background(), task(""), agent)
-	if err != nil || ref == nil || ref.Issuer != "entra" || ref.ID != testAgentIdentityID ||
-		ref.Instance != "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222" {
+	if err != nil || ref == nil || ref.Issuer != "entra" || ref.ID != testAgentIdentityID || ref.Instance != instance {
 		t.Fatalf("root Task identity = %+v, %v", ref, err)
 	}
 	if _, err := r.agentExecutionIdentity(context.Background(), task("parent-own"), agent); err != nil {
 		t.Fatalf("child of the same bound Agent: %v", err)
 	}
-	for _, parent := range []string{"parent-recreated", "parent-unbound"} {
+	if _, err := r.agentExecutionIdentity(context.Background(), task("nightly"), agent); err != nil {
+		t.Fatalf("scheduled run of the scheduled Task's own Agent: %v", err)
+	}
+	for _, parent := range []string{"parent-recreated", "parent-unbound", "parent-other-instance"} {
 		_, err = r.agentExecutionIdentity(context.Background(), task(parent), agent)
 		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
 			t.Fatalf("child of %s: error = %v, want a permanent refusal", parent, err)
 		}
 	}
+
+	if _, err := r.agentExecutionIdentity(context.Background(), task("nightly-unchecked"), agent); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "re-create the scheduled Task") {
+		t.Fatalf("run of a scheduled Task created before the grant: error = %v, want a permanent refusal", err)
+	}
+	otherAgentRun := task("nightly")
+	otherAgentRun.Spec.AgentRef.Name = "other"
+	if _, err := r.agentExecutionIdentity(context.Background(), otherAgentRun, agent); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "scheduled Task names it") {
+		t.Fatalf("scheduled run naming another Agent: error = %v, want a permanent refusal", err)
+	}
+	orphan := task("parent-own")
+	orphan.OwnerReferences = nil
+	replaced := task("parent-own")
+	replaced.OwnerReferences[0].UID = "deleted-parent-uid"
+	misrecorded := task("parent-own")
+	misrecorded.Annotations = map[string]string{labels.AnnotationParentTaskUID: "deleted-parent-uid"}
+	for name, child := range map[string]*corev1alpha1.Task{"orphan": orphan, "replaced parent": replaced, "recorded parent": misrecorded} {
+		_, err = r.agentExecutionIdentity(context.Background(), child, agent)
+		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "still controls it") {
+			t.Fatalf("%s: error = %v, want a permanent refusal", name, err)
+		}
+	}
+
+	// An API fork names its source as parent but is not controlled by it, so
+	// it never binds the source's identity: the requester creates a new Task.
+	fork := task("parent-own")
+	fork.OwnerReferences = nil
+	fork.Annotations = map[string]string{
+		labels.AnnotationParentTaskName: "parent-own", labels.AnnotationForkSourceTask: "parent-own",
+	}
+	if _, err := r.agentExecutionIdentity(context.Background(), fork, agent); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "a fork does not carry") {
+		t.Fatalf("fork of an identity-bound Task: error = %v, want a permanent refusal naming the fork", err)
+	}
+
 	_, err = r.agentExecutionIdentity(context.Background(), task(""), unclaimed)
 	if err == nil || isPermanentACPAgentConfigurationError(err) || !errors.Is(err, errIdentityClaimPending) {
 		t.Fatalf("Agent without its claim yet: error = %v, want a retryable wait", err)
@@ -275,6 +357,80 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 	}
 }
 
+type identityVerifierFunc func(context.Context, *corev1alpha1.Agent) error
+
+func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
+	return f(ctx, agent)
+}
+
+func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+	// While the issuer proves the original identity, an editor names another.
+	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
+		edited := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(agent), edited); err != nil {
+			return err
+		}
+		edited.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+		edited.Generation = 2
+		return r.Update(ctx, edited)
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err == nil {
+		t.Fatal("Reconcile() = nil error, want the pass retried for the edited Agent")
+	}
+	stored := &corev1alpha1.Agent{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Generation != 2 {
+		t.Fatalf("Generation = %d, want the edit stored", stored.Generation)
+	}
+	if condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified); condition != nil {
+		t.Fatalf("IdentityVerified = %+v, want nothing recorded for the unverified identity", condition)
+	}
+	if stored.Status.IdentityClaim != nil {
+		t.Fatalf("IdentityClaim = %+v, want no claim decided from the old spec", stored.Status.IdentityClaim)
+	}
+}
+
+func TestIdentityClaimWaitsForADeletedHoldersTasks(t *testing.T) {
+	now := time.Now()
+	deleted := claimedAgent(identityBoundTestAgent("deleted", now)) // only its Tasks remain
+	claimant := identityBoundTestAgent("claimant", now)
+	r := identityAgentReconciler(claimant, boundTask("still-running", deleted, corev1alpha1.TaskPhaseRunning))
+	claim, err := r.reconcileIdentityClaim(context.Background(), claimant)
+	if claim != nil || err == nil || !strings.Contains(err.Error(), "still held by Task") {
+		t.Fatalf("a deleted holder's running Task keeps the identity taken: claim=%v err=%v", claim, err)
+	}
+
+	r = identityAgentReconciler(claimant, boundTask("done", deleted, corev1alpha1.TaskPhaseSucceeded),
+		boundTask("own", claimant, corev1alpha1.TaskPhaseRunning))
+	claim, err = r.reconcileIdentityClaim(context.Background(), claimant)
+	if err != nil || claim == nil || claim.ID != testAgentIdentityID {
+		t.Fatalf("finished Tasks and the claimant's own Tasks do not hold it: claim=%v err=%v", claim, err)
+	}
+}
+
+func TestIdentityAgentFailsEveryTaskTypeItCannotHonor(t *testing.T) {
+	native := identityBoundTestAgent("native", time.Now())
+	native.Spec.Runtime = nil
+	r := &TaskReconciler{Identity: testIdentityConfig()}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "ai", Namespace: testNS},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI, AgentRef: &corev1alpha1.AgentReference{Name: "native"}},
+	}
+	if err := r.validateTaskAgentCompatibility(task, native); err == nil || !strings.Contains(err.Error(), "only on runtime Agents") {
+		t.Fatalf("native AI Task with an identity-bound Agent: error = %v, want a refusal", err)
+	}
+	native.Spec.Identity = nil
+	if err := r.validateTaskAgentCompatibility(task, native); err != nil {
+		t.Fatalf("native AI Task without an identity: %v", err)
+	}
+}
+
 func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing.T) {
 	holder := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	released := identityBoundTestAgent("reviewer", time.Now())
@@ -293,7 +449,7 @@ func TestRequireBoundIdentityClaimFailsATaskWhoseAgentLostTheIdentity(t *testing
 			task := boundTask("work", holder, corev1alpha1.TaskPhasePending)
 			task.UID = "work-uid"
 			if tc.executing {
-				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{}
+				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{State: corev1alpha1.TaskExecutionStateRunning}
 			}
 			builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task)
 			if tc.agent != nil {
@@ -338,9 +494,13 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	rootCreated := metav1.NewTime(time.Now().Add(-30 * time.Minute).Truncate(time.Second))
 	root := boundTask("root", agent, corev1alpha1.TaskPhaseRunning)
+	root.UID = "root-uid"
 	root.CreationTimestamp = rootCreated
 	child := boundTask("child", agent, corev1alpha1.TaskPhaseRunning)
 	child.Labels = map[string]string{labels.LabelParentTask: "root"}
+	child.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "root", UID: root.UID, Controller: new(true),
+	}}
 	child.CreationTimestamp = metav1.Now()
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build()
 
@@ -362,8 +522,98 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	}
 	orphan := child.DeepCopy()
 	orphan.Labels[labels.LabelParentTask] = "gone"
+	orphan.OwnerReferences[0].Name = "gone"
 	if binding, err := agentIdentityBindingFromTask(context.Background(), reader, orphan); err != nil || !binding.DelegationStart.IsZero() {
 		t.Fatalf("a broken chain has no delegation start: %+v %v", binding, err)
+	}
+}
+
+// delegationTestTask is a Task the requester's chain is built from: stamped
+// for alice, and created at created.
+func delegationTestTask(name string, created time.Time, mutate func(*corev1alpha1.Task)) *corev1alpha1.Task {
+	requester := &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: testNS, UID: types.UID(name + "-uid"), CreationTimestamp: metav1.NewTime(created),
+			Annotations: map[string]string{labels.AnnotationRequestedBySource: labels.RequestedBySourceAPI},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, RequestedBy: requester},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	if mutate != nil {
+		mutate(task)
+	}
+	return task
+}
+
+func delegatedFrom(parent string, pinned bool) func(*corev1alpha1.Task) {
+	return func(task *corev1alpha1.Task) {
+		task.Labels = map[string]string{labels.LabelParentTask: parent}
+		task.Annotations[labels.AnnotationParentTaskName] = parent
+		if pinned {
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent,
+				UID: types.UID(parent + "-uid"), Controller: new(true),
+			}}
+		}
+	}
+}
+
+func TestDelegationStartFollowsOnlyProvenLineage(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	rootCreated, childCreated, forkCreated := now.Add(-3*time.Hour), now.Add(-2*time.Hour), now.Add(-time.Minute)
+	root := delegationTestTask("root", rootCreated, nil)
+	child := delegationTestTask("child", childCreated, delegatedFrom("root", true))
+	recreated := delegationTestTask("recreated", now.Add(-time.Hour), nil)
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child, recreated).Build()
+
+	tests := map[string]struct {
+		task *corev1alpha1.Task
+		want time.Time
+	}{
+		"an inherited child keeps its root's start": {
+			task: delegationTestTask("grandchild", now, delegatedFrom("child", true)),
+			want: rootCreated,
+		},
+		"a parent pinned by the brokered parent UID": {
+			task: delegationTestTask("brokered", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", false)(task)
+				task.Annotations[labels.AnnotationParentTaskUID] = "child-uid"
+			}),
+			want: rootCreated,
+		},
+		"a fork names its source without a UID pin and cannot be traced": {
+			task: delegationTestTask("fork", forkCreated, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", false)(task)
+				task.Annotations[labels.AnnotationForkSourceTask] = "child"
+			}),
+		},
+		"an orphaned child cannot be traced": {
+			task: delegationTestTask("orphan", now, delegatedFrom("child", false)),
+		},
+		"a parent recreated under its name": {
+			task: delegationTestTask("stale", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("recreated", true)(task)
+				task.OwnerReferences[0].UID = "an-older-uid"
+			}),
+		},
+		"a parent acting for another requester": {
+			task: delegationTestTask("borrowed", now, func(task *corev1alpha1.Task) {
+				delegatedFrom("child", true)(task)
+				task.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "mallory"}
+			}),
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := delegationStart(context.Background(), reader, tc.task)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("delegationStart() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -385,6 +635,7 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	sessions := sqlite.NewStore(db, ":memory:")
 	for _, session := range []*store.SessionRecord{
 		{Namespace: testNS, Name: "open", SessionType: "task"},
+		{Namespace: testNS, Name: "chat-open", SessionType: store.SessionTypeChat},
 	} {
 		if err := sessions.CreateSession(context.Background(), session); err != nil {
 			t.Fatal(err)
@@ -404,7 +655,12 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	withSession := func(name string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) { task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name} }
 	}
+	inChat := func(name string) func(*corev1alpha1.Task) {
+		return func(task *corev1alpha1.Task) { task.Labels = map[string]string{labels.LabelChatSession: name} }
+	}
 	deleting := metav1.Now()
+	fork := delegationTestTask("fork-of-running", time.Now(), delegatedFrom("parent-running", false))
+	fork.Annotations[labels.AnnotationForkSourceTask] = "parent-running"
 	childOf := func(parent string) func(*corev1alpha1.Task) {
 		return func(task *corev1alpha1.Task) {
 			task.Labels = map[string]string{labels.LabelParentTask: parent}
@@ -434,6 +690,26 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 		task("running", nil),
 		task("in-open-session", withSession("open")),
 		task("cancelled", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseCancelled }),
+		task("in-open-chat", inChat("chat-open")),
+		task("in-deleted-chat", inChat("chat-deleted")),
+		task("parent-in-deleted-session", withSession("deleted")),
+		task("parent-in-deleted-chat", inChat("chat-deleted")),
+		task("child-of-parent-in-deleted-session", childOf("parent-in-deleted-session")),
+		task("child-of-parent-in-deleted-chat", childOf("parent-in-deleted-chat")),
+		task("child-in-open-session-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			withSession("open")(t)
+		}),
+		task("orphan-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			t.OwnerReferences = nil
+		}),
+		task("pinned-orphan-of-running", func(t *corev1alpha1.Task) {
+			childOf("parent-running")(t)
+			t.OwnerReferences = nil
+			t.Annotations = map[string]string{labels.AnnotationParentTaskUID: "parent-running-uid"}
+		}),
+		fork,
 		task("in-deleted-session", withSession("deleted")),
 		task("finished", func(t *corev1alpha1.Task) { t.Status.Phase = corev1alpha1.TaskPhaseSucceeded }),
 		task("cancel-requested", func(t *corev1alpha1.Task) {
@@ -446,27 +722,35 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	}
 	check := DelegationLiveness{
 		Reader:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build(),
-		Sessions: sessions,
+		Sessions: metadataOnlySessions{sessions},
 	}.Check
 	binding := func(name string) outboundaccess.AgentIdentityBinding {
 		return outboundaccess.AgentIdentityBinding{TaskNamespace: testNS, TaskName: name, TaskUID: name + "-uid"}
 	}
 	for name, want := range map[string]string{
-		"running":                   "",
-		"in-open-session":           "",
-		"cancelled":                 "Cancelled",
-		"in-deleted-session":        "deleted",
-		"finished":                  "Succeeded",
-		"cancel-requested":          "cancellation",
-		"deleting":                  "being deleted",
-		"gone":                      "gone",
-		"child-of-running":          "",
-		"child-of-succeeded":        "",
-		"child-of-cancelled":        "was cancelled",
-		"child-of-cancel-requested": "cancellation of a Task it was delegated from",
-		"child-of-gone":             "is gone",
-		"grandchild-of-cancelled":   "was cancelled",
-		"child-of-replaced":         "was replaced",
+		"running":                            "",
+		"in-open-session":                    "",
+		"cancelled":                          "Cancelled",
+		"in-open-chat":                       "",
+		"in-deleted-chat":                    "Session was deleted",
+		"child-of-parent-in-deleted-session": "Session of a Task it was delegated from was deleted",
+		"child-of-parent-in-deleted-chat":    "Session of a Task it was delegated from was deleted",
+		"child-in-open-session-of-running":   "",
+		"orphan-of-running":                  "no UID pins",
+		"pinned-orphan-of-running":           "",
+		"fork-of-running":                    "no UID pins",
+		"in-deleted-session":                 "deleted",
+		"finished":                           "Succeeded",
+		"cancel-requested":                   "cancellation",
+		"deleting":                           "being deleted",
+		"gone":                               "gone",
+		"child-of-running":                   "",
+		"child-of-succeeded":                 "",
+		"child-of-cancelled":                 "was cancelled",
+		"child-of-cancel-requested":          "cancellation of a Task it was delegated from",
+		"child-of-gone":                      "is gone",
+		"grandchild-of-cancelled":            "was cancelled",
+		"child-of-replaced":                  "was replaced",
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := check(context.Background(), binding(name))
@@ -486,6 +770,14 @@ func TestDelegationLivenessStopsWhenTheTaskOrSessionEnds(t *testing.T) {
 	if err := check(context.Background(), replaced); err == nil || !strings.Contains(err.Error(), "replaced") {
 		t.Fatalf("a recreated Task: %v", err)
 	}
+}
+
+// metadataOnlySessions refuses to load a Session with its transcript, so the
+// liveness check that runs before every Delegated call must read metadata only.
+type metadataOnlySessions struct{ *sqlite.Store }
+
+func (metadataOnlySessions) GetSession(context.Context, string, string) (*store.SessionRecord, error) {
+	return nil, errors.New("the liveness check loaded the Session transcript")
 }
 
 func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
@@ -525,5 +817,146 @@ func TestIdentityClaimListsOnlyWithinTheAgentNamespace(t *testing.T) {
 	}
 	if requests := r.agentsSharingIdentity(context.Background(), agent); requests != nil {
 		t.Fatalf("requests = %v", requests)
+	}
+}
+
+func TestRequireBoundIdentityClaimRechecksAQueuedTask(t *testing.T) {
+	fixture := newACPQueuePlanningFailureFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	queued, attempt := fixture.queueValidTask(t, ctx)
+	if queued.Status.Execution == nil || queued.Status.Execution.State != corev1alpha1.TaskExecutionStateQueued {
+		t.Fatalf("execution = %+v, want Queued for capacity", queued.Status.Execution)
+	}
+	// The binding froze an identity its Agent no longer holds: the Agent is gone.
+	binding := queued.Status.AgentExecutionBinding.DeepCopy()
+	binding.Agent.Identity = &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"}
+	fixture.reconciler.Identity = testIdentityConfig()
+	if _, err, handled := fixture.reconciler.requireBoundIdentityClaim(ctx, queued, binding); err != nil || !handled {
+		t.Fatalf("queued Task: handled=%v err=%v, want it failed before dispatch", handled, err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(ctx, client.ObjectKeyFromObject(queued), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || current.Status.Execution == nil ||
+		current.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("IdentityUnavailable") {
+		t.Fatalf("Task status = %+v, want Failed/IdentityUnavailable", current.Status)
+	}
+	persisted, err := fixture.controlStore.GetPromptAttempt(ctx, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.ExecutionState != store.PromptExecutionFailed {
+		t.Fatalf("PromptAttempt state = %s, want Failed so it is never dispatched", persisted.ExecutionState)
+	}
+}
+
+func TestIdentityClaimsAreGrantedOnlyWhileAgentUseIsEnforced(t *testing.T) {
+	declared := identityBoundTestAgent("reviewer", time.Now())
+	r := setupAgentReconciler(declared) // --agent-use-authorization-enabled is off
+	if claim, err := r.reconcileIdentityClaim(context.Background(), declared); err != nil || claim != nil {
+		t.Fatalf("no claim is granted without the use check: claim=%+v err=%v", claim, err)
+	}
+	held := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r = setupAgentReconciler(held)
+	if claim, err := r.reconcileIdentityClaim(context.Background(), held); err != nil || claim == nil || !claim.Releasing {
+		t.Fatalf("a held claim is released without the use check: claim=%+v err=%v", claim, err)
+	}
+
+	before := time.Now().Truncate(time.Second)
+	r = identityAgentReconciler(declared)
+	claim, err := r.reconcileIdentityClaim(context.Background(), declared)
+	if err != nil || claim == nil || claim.GrantedAt == nil || claim.GrantedAt.Time.Before(before) {
+		t.Fatalf("a granted claim records when: claim=%+v err=%v", claim, err)
+	}
+}
+
+func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	kube := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	r := &TaskReconciler{Client: kube, Identity: testIdentityConfig()}
+	task := func(created time.Time) *corev1alpha1.Task {
+		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: testNS, CreationTimestamp: metav1.NewTime(created)}}
+	}
+	if _, err := r.agentExecutionIdentity(context.Background(), task(testClaimGrantedAt.Add(time.Second)), agent); err != nil {
+		t.Fatalf("Task created the second after the grant: %v", err)
+	}
+	// Times have one-second precision, so a Task recorded in the grant's own
+	// second may predate it.
+	for name, created := range map[string]time.Time{
+		"in the grant's second": testClaimGrantedAt.Time, "before the grant": testClaimGrantedAt.Add(-time.Second),
+	} {
+		_, err := r.agentExecutionIdentity(context.Background(), task(created), agent)
+		if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "create the Task again") {
+			t.Fatalf("Task created %s: error = %v, want a permanent refusal", name, err)
+		}
+	}
+
+	// A claim released and granted again after a bound Task was created no
+	// longer covers that Task.
+	regranted := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	later := metav1.NewTime(time.Now().Add(time.Hour).Truncate(time.Second))
+	regranted.Status.IdentityClaim.GrantedAt = &later
+	bound := boundTask("work", claimedAgent(identityBoundTestAgent("reviewer", time.Now())), corev1alpha1.TaskPhasePending)
+	bound.UID = "work-uid"
+	r = &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(bound, regranted).WithStatusSubresource(bound).Build(),
+		Identity: testIdentityConfig(), Recorder: record.NewFakeRecorder(8),
+	}
+	if _, err, handled := r.requireBoundIdentityClaim(context.Background(), bound, bound.Status.AgentExecutionBinding); err != nil || !handled {
+		t.Fatalf("Task bound before a re-grant: handled=%v err=%v, want it failed", handled, err)
+	}
+}
+
+func TestAgentIdentityBindingFromTaskCarriesTheTaskCreationTime(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	task := boundTask("bound", agent, corev1alpha1.TaskPhaseRunning)
+	task.UID = "bound-uid"
+	binding, err := agentIdentityBindingFromTask(context.Background(), nil, task)
+	if err != nil || binding == nil || binding.TaskUID != "bound-uid" || !binding.TaskCreated.Equal(task.CreationTimestamp.Time) {
+		t.Fatalf("binding = %+v, want the Task's UID and creation time for the grant check", binding)
+	}
+	if none, err := agentIdentityBindingFromTask(context.Background(), nil, &corev1alpha1.Task{}); err != nil || none != nil {
+		t.Fatal("a Task without an identity binding must yield none")
+	}
+}
+
+// The issuer instance names a non-default authority, so a parent bound before
+// the controller moved to another authority cannot hand its identity to a
+// child bound after.
+func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	instance, _ := testIdentityConfig().Instance("entra")
+	parent := boundTask("parent", agent, corev1alpha1.TaskPhaseRunning)
+	parent.UID = "parent-uid"
+	parent.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
+	sovereign := testIdentityConfig()
+	sovereign.Entra.Authority = "https://login.microsoftonline.us"
+	r := &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, parent).Build(),
+		Identity: sovereign,
+	}
+	controller := true
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: testNS, CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{labels.LabelParentTask: "parent"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: "parent",
+				UID: "parent-uid", Controller: &controller,
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+	}
+	root := child.DeepCopy()
+	root.Labels, root.OwnerReferences = nil, nil
+	ref, err := r.agentExecutionIdentity(context.Background(), root, agent)
+	if err != nil || ref == nil || ref.Instance != instance+"@https://login.microsoftonline.us" {
+		t.Fatalf("root Task identity under another authority = %+v, %v", ref, err)
+	}
+	_, err = r.agentExecutionIdentity(context.Background(), child, agent)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
+		t.Fatalf("child after an authority change: error = %v, want a permanent refusal", err)
 	}
 }
