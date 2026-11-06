@@ -184,8 +184,9 @@ rules:
 ```
 
 Bind it to whoever edits the Agent (`bind`) and whoever starts its Tasks
-(`use`). A RoleBinding subject for a person signed in through Entra is a
-`User` with their username, for example their email address.
+(`use`). A person signed in through Entra is checked as the `User`
+`<issuer>#<sub>` from their sign-in token, not their email address: `orka whoami
+-o json` shows their `issuer` and `subject`.
 
 ## 5. Bind the identity to an Agent
 
