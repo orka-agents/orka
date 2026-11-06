@@ -18,7 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/operatoraccess"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func operatorTaintTestClient(t *testing.T, objects ...client.Object) client.Client {
@@ -86,9 +88,12 @@ func TestPublicationRefusedForOperatorTaintedTask(t *testing.T) {
 			task := operatorTaintTestTask(tc.annotations)
 			c := operatorTaintTestClient(t, task)
 			d := &ACPDispatcher{Client: c, APIReader: c}
-			refused, err := d.taskPublicationRefused(context.Background(), task)
+			refused, reason, err := d.taskPublicationRefused(context.Background(), task)
 			if err != nil || refused != tc.want {
 				t.Fatalf("taskPublicationRefused = %v, %v; want %v", refused, err, tc.want)
+			}
+			if wantReason := map[bool]string{true: operatorTaintedPublicationMessage}[tc.want]; reason != wantReason {
+				t.Fatalf("refusal reason = %q, want %q", reason, wantReason)
 			}
 		})
 	}
@@ -287,5 +292,39 @@ func TestAttachmentAttemptRefusesAWorkspaceTaintedAfterTheInitialRead(t *testing
 	tainted.Annotations[operatoraccess.TaintAnnotation] = operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1"})
 	if err := validateACPClassWorkspaceAttachmentAttempt(tainted, task, binding, "pool", time.Now()); !errors.Is(err, operatoraccess.ErrTainted) {
 		t.Fatalf("attachment attempt on a tainted workspace = %v, want ErrTainted", err)
+	}
+}
+
+// A publication refused because operator access tainted the workspace must be
+// distinguishable from a user cancellation in the delivery status and the
+// final Task message.
+func TestOperatorTaintRefusalIsVisibleInDeliveryAndTaskStatus(t *testing.T) {
+	refused := &store.Publication{State: store.PublicationCancelledBeforePublish, TerminalReason: operatorTaintedPublicationMessage}
+	status := publicationTaskDeliveryStatus(&corev1alpha1.WorkspaceConfig{}, harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{}}, refused, "")
+	if status.Reason != corev1alpha1.TaskDeliveryReasonOperatorTainted || status.Message != operatorTaintedPublicationMessage {
+		t.Fatalf("taint refusal delivery = reason %q message %q", status.Reason, status.Message)
+	}
+	if got := cancelledBeforePublishMessage(status, "publication cancelled before push"); got != operatorTaintedPublicationMessage {
+		t.Fatalf("Task message = %q", got)
+	}
+	cancelled := publicationTaskDeliveryStatus(&corev1alpha1.WorkspaceConfig{}, harnessv2.WorkspaceBaseline{}, harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{}},
+		&store.Publication{State: store.PublicationCancelledBeforePublish}, "")
+	if cancelled.Reason != "" {
+		t.Fatalf("a user cancellation must not carry the taint reason: %q", cancelled.Reason)
+	}
+	if got := cancelledBeforePublishMessage(cancelled, "publication cancelled before push"); got != "publication cancelled before push" {
+		t.Fatalf("user cancellation message = %q", got)
+	}
+}
+
+// A user cancellation of a tainted Task stays a cancellation.
+func TestPublicationRefusalPrefersUserCancellation(t *testing.T) {
+	task := operatorTaintTestTask(map[string]string{operatoraccess.TaintAnnotation: "x"})
+	task.Status.Phase = corev1alpha1.TaskPhaseCancelled
+	c := operatorTaintTestClient(t, task)
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	refused, reason, err := d.taskPublicationRefused(context.Background(), task)
+	if err != nil || !refused || reason != "" {
+		t.Fatalf("taskPublicationRefused = %v, %q, %v; want a plain cancellation", refused, reason, err)
 	}
 }

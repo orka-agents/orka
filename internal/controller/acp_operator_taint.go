@@ -49,21 +49,32 @@ func acpTaskOperatorTainted(ctx context.Context, reader client.Reader, task *cor
 	return string(workspace.UID) == uid && operatoraccess.Tainted(workspace.Annotations), nil
 }
 
+// operatorTaintedPublicationMessage is the bounded terminal message recorded
+// on the publication, delivery status, and Task when operator access tainted
+// the workspace, so the refusal is distinguishable from a user cancellation.
+const operatorTaintedPublicationMessage = "publication refused: operator access (orka task exec or cp) tainted the workspace"
+
 // taskPublicationRefused is the single pre-publishing decision shared by the
 // fresh and recovery publication paths: a cancelled Task and a Task whose
 // session was tainted by operator access both settle as cancelled before
-// publish, so tainted workspace contents never reach a forge.
-func (d *ACPDispatcher) taskPublicationRefused(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+// publish, so tainted workspace contents never reach a forge. terminalReason
+// is empty for a user cancellation and operatorTaintedPublicationMessage for
+// a taint refusal.
+func (d *ACPDispatcher) taskPublicationRefused(ctx context.Context, task *corev1alpha1.Task) (refused bool, terminalReason string, err error) {
 	cancelled, err := d.taskCancellationRequested(ctx, task)
 	if err != nil || cancelled {
-		return cancelled, err
+		return cancelled, "", err
 	}
 	tainted, err := acpTaskOperatorTainted(ctx, uncachedReader(d.APIReader, d.Client), task)
-	if err != nil {
-		return false, err
+	if err != nil || !tainted {
+		return false, "", err
 	}
-	if tainted {
-		log.FromContext(ctx).Info("refusing publication of an operator-tainted workspace", "task", task.Name, "namespace", task.Namespace)
-	}
-	return tainted, nil
+	log.FromContext(ctx).Info("refusing publication of an operator-tainted workspace", "task", task.Name, "namespace", task.Namespace)
+	return true, operatorTaintedPublicationMessage, nil
+}
+
+// operatorTaintedDelivery reports whether a delivery status records a taint
+// refusal.
+func operatorTaintedDelivery(status corev1alpha1.TaskDeliveryStatus) bool {
+	return status.Reason == corev1alpha1.TaskDeliveryReasonOperatorTainted
 }
