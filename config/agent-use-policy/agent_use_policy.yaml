@@ -12,11 +12,16 @@ spec:
       apiVersions: ["v1alpha1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["tasks"]
+  variables:
+  - name: previousAgents
+    expression: >-
+      oldObject == null ? [] :
+      [?oldObject.spec.?agentRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
   validations:
   - expression: >-
       !has(object.spec.agentRef) ||
-      (oldObject != null && has(oldObject.spec.agentRef) && oldObject.spec.agentRef == object.spec.agentRef) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agentRef.?namespace.orValue(request.namespace)).name(object.spec.agentRef.name).check('use').allowed()
+      ((object.spec.agentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.agentRef.namespace) + '/' + object.spec.agentRef.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.agentRef.namespace)).name(object.spec.agentRef.name).check('use').allowed()
     message: caller is not authorized to use the Task's Agent
     reason: Forbidden
 ---
@@ -40,17 +45,22 @@ spec:
       apiVersions: ["v1alpha1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["repositoryscans"]
+  variables:
+  - name: previousAgents
+    expression: >-
+      oldObject == null ? [] :
+      [?oldObject.spec.?analysisAgentRef, ?oldObject.spec.?patchAgentRef].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
   validations:
   - expression: >-
       !has(object.spec.analysisAgentRef) ||
-      (oldObject != null && has(oldObject.spec.analysisAgentRef) && oldObject.spec.analysisAgentRef == object.spec.analysisAgentRef) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.analysisAgentRef.?namespace.orValue(request.namespace)).name(object.spec.analysisAgentRef.name).check('use').allowed()
+      ((object.spec.analysisAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.analysisAgentRef.namespace) + '/' + object.spec.analysisAgentRef.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.analysisAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.analysisAgentRef.namespace)).name(object.spec.analysisAgentRef.name).check('use').allowed()
     message: caller is not authorized to use the analysis Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.patchAgentRef) ||
-      (oldObject != null && has(oldObject.spec.patchAgentRef) && oldObject.spec.patchAgentRef == object.spec.patchAgentRef) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.patchAgentRef.?namespace.orValue(request.namespace)).name(object.spec.patchAgentRef.name).check('use').allowed()
+      ((object.spec.patchAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.patchAgentRef.namespace) + '/' + object.spec.patchAgentRef.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.patchAgentRef.?namespace.orValue('') == '' ? request.namespace : object.spec.patchAgentRef.namespace)).name(object.spec.patchAgentRef.name).check('use').allowed()
     message: caller is not authorized to use the patch Agent
     reason: Forbidden
 ---
@@ -74,41 +84,46 @@ spec:
       apiVersions: ["v1alpha1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["repositorymonitors"]
+  variables:
+  - name: previousAgents
+    expression: >-
+      oldObject == null ? [] :
+      [?oldObject.spec.?agents.?reviewer, ?oldObject.spec.?agents.?triager, ?oldObject.spec.?agents.?researcher, ?oldObject.spec.?agents.?planner, ?oldObject.spec.?agents.?repairer, ?oldObject.spec.?agents.?implementer].map(r, (r.?namespace.orValue('') == '' ? request.namespace : r.namespace) + '/' + r.name)
   validations:
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.reviewer) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.reviewer) && oldObject.spec.agents.reviewer == object.spec.agents.reviewer) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.reviewer.?namespace.orValue(request.namespace)).name(object.spec.agents.reviewer.name).check('use').allowed()
+      ((object.spec.agents.reviewer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.reviewer.namespace) + '/' + object.spec.agents.reviewer.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.reviewer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.reviewer.namespace)).name(object.spec.agents.reviewer.name).check('use').allowed()
     message: caller is not authorized to use the reviewer Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.triager) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.triager) && oldObject.spec.agents.triager == object.spec.agents.triager) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.triager.?namespace.orValue(request.namespace)).name(object.spec.agents.triager.name).check('use').allowed()
+      ((object.spec.agents.triager.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.triager.namespace) + '/' + object.spec.agents.triager.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.triager.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.triager.namespace)).name(object.spec.agents.triager.name).check('use').allowed()
     message: caller is not authorized to use the triager Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.researcher) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.researcher) && oldObject.spec.agents.researcher == object.spec.agents.researcher) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.researcher.?namespace.orValue(request.namespace)).name(object.spec.agents.researcher.name).check('use').allowed()
+      ((object.spec.agents.researcher.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.researcher.namespace) + '/' + object.spec.agents.researcher.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.researcher.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.researcher.namespace)).name(object.spec.agents.researcher.name).check('use').allowed()
     message: caller is not authorized to use the researcher Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.planner) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.planner) && oldObject.spec.agents.planner == object.spec.agents.planner) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.planner.?namespace.orValue(request.namespace)).name(object.spec.agents.planner.name).check('use').allowed()
+      ((object.spec.agents.planner.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.planner.namespace) + '/' + object.spec.agents.planner.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.planner.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.planner.namespace)).name(object.spec.agents.planner.name).check('use').allowed()
     message: caller is not authorized to use the planner Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.repairer) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.repairer) && oldObject.spec.agents.repairer == object.spec.agents.repairer) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.repairer.?namespace.orValue(request.namespace)).name(object.spec.agents.repairer.name).check('use').allowed()
+      ((object.spec.agents.repairer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.repairer.namespace) + '/' + object.spec.agents.repairer.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.repairer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.repairer.namespace)).name(object.spec.agents.repairer.name).check('use').allowed()
     message: caller is not authorized to use the repairer Agent
     reason: Forbidden
   - expression: >-
       !has(object.spec.agents) || !has(object.spec.agents.implementer) ||
-      (oldObject != null && has(oldObject.spec.agents) && has(oldObject.spec.agents.implementer) && oldObject.spec.agents.implementer == object.spec.agents.implementer) ||
-      authorizer.group('core.orka.ai').resource('agents').namespace(object.spec.agents.implementer.?namespace.orValue(request.namespace)).name(object.spec.agents.implementer.name).check('use').allowed()
+      ((object.spec.agents.implementer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.implementer.namespace) + '/' + object.spec.agents.implementer.name) in variables.previousAgents ||
+      authorizer.group('core.orka.ai').resource('agents').namespace((object.spec.agents.implementer.?namespace.orValue('') == '' ? request.namespace : object.spec.agents.implementer.namespace)).name(object.spec.agents.implementer.name).check('use').allowed()
     message: caller is not authorized to use the implementer Agent
     reason: Forbidden
 ---

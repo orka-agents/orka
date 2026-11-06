@@ -39,35 +39,23 @@ func authorizeAgentUse(
 		return nil
 	}
 	namespace = strings.TrimSpace(namespace)
-	username := ""
-	if userInfo != nil {
-		username = strings.TrimSpace(userInfo.Username)
-	}
-	logValues := []any{"user", username, "agentNamespace", namespace, "agentName", agentName, "objectKind", objectKind, "object", objectName}
-	if namespace == "" || username == "" || kubernetesClientsetIsNil(clientset) {
+	spec, ok := agentUseReviewSubject(userInfo)
+	logValues := []any{"user", spec.User, "agentNamespace", namespace, "agentName", agentName, "objectKind", objectKind, "object", objectName}
+	if namespace == "" || !ok || kubernetesClientsetIsNil(clientset) {
 		log.Info("agent use authorization unavailable", logValues...)
 		return agentUseForbidden(agentName)
 	}
 
-	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
-	for key, values := range userInfo.Extra {
-		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+	spec.ResourceAttributes = &authorizationv1.ResourceAttributes{
+		Namespace: namespace,
+		Verb:      agentUseVerb,
+		Group:     corev1alpha1.GroupVersion.Group,
+		Version:   corev1alpha1.GroupVersion.Version,
+		Resource:  "agents",
+		Name:      agentName,
 	}
 	review, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{
-		Spec: authorizationv1.SubjectAccessReviewSpec{
-			User:   username,
-			UID:    userInfo.UID,
-			Groups: append([]string(nil), userInfo.Groups...),
-			Extra:  extra,
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace: namespace,
-				Verb:      agentUseVerb,
-				Group:     corev1alpha1.GroupVersion.Group,
-				Version:   corev1alpha1.GroupVersion.Version,
-				Resource:  "agents",
-				Name:      agentName,
-			},
-		},
+		Spec: spec,
 	}, metav1.CreateOptions{})
 	if err != nil {
 		log.Error(err, "agent use authorization check failed", logValues...)
@@ -78,6 +66,50 @@ func authorizeAgentUse(
 		return agentUseForbidden(agentName)
 	}
 	return nil
+}
+
+// agentUseReviewSubject returns the principal an Agent use review is made for.
+// A Kubernetes-authenticated caller is reviewed exactly as the API server
+// authenticated it. An OIDC or transaction-token caller is reviewed as
+// "<issuer>#<sub>", the form kube-apiserver gives OIDC users by default, and
+// its groups carry the same prefix: the token's display claims are not unique
+// or stable, and an unprefixed name or group could match a Kubernetes user, a
+// ServiceAccount, or a system: group. Any other caller has no reviewable
+// identity.
+func agentUseReviewSubject(userInfo *UserInfo) (authorizationv1.SubjectAccessReviewSpec, bool) {
+	if userInfo == nil {
+		return authorizationv1.SubjectAccessReviewSpec{}, false
+	}
+	switch userInfo.AuthType {
+	case AuthTypeTokenReview:
+		if userInfo.Username == "" {
+			return authorizationv1.SubjectAccessReviewSpec{}, false
+		}
+		extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
+		for key, values := range userInfo.Extra {
+			extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+		}
+		return authorizationv1.SubjectAccessReviewSpec{
+			User:   userInfo.Username,
+			UID:    userInfo.UID,
+			Groups: append([]string(nil), userInfo.Groups...),
+			Extra:  extra,
+		}, true
+	case AuthTypeOIDC, AuthTypeContextToken:
+		if userInfo.Issuer == "" || userInfo.Subject == "" {
+			return authorizationv1.SubjectAccessReviewSpec{}, false
+		}
+		prefix := userInfo.Issuer + "#"
+		groups := make([]string, 0, len(userInfo.Groups))
+		for _, group := range userInfo.Groups {
+			if group != "" {
+				groups = append(groups, prefix+group)
+			}
+		}
+		return authorizationv1.SubjectAccessReviewSpec{User: prefix + userInfo.Subject, Groups: groups}, true
+	default:
+		return authorizationv1.SubjectAccessReviewSpec{}, false
+	}
 }
 
 func agentUseForbidden(agentName string) error {
