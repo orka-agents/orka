@@ -147,6 +147,15 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 			agent.Status.IdentityClaim.GrantedAt = &sameSecond
 			return agent
 		}(),
+		// A finalizer keeps a deleted Agent readable; deletion still stops
+		// its Tasks' calls.
+		"Agent being deleted": func() *corev1alpha1.Agent {
+			agent := identityHolder("agent-uid", true)
+			deleting := metav1.Now()
+			agent.DeletionTimestamp = &deleting
+			agent.Finalizers = []string{"example.com/hold"}
+			return agent
+		}(),
 		"claim without a grant time": func() *corev1alpha1.Agent {
 			agent := identityHolder("agent-uid", true)
 			agent.Status.IdentityClaim.GrantedAt = nil
