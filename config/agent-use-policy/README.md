@@ -12,6 +12,12 @@ controller, which applies the same rule to API callers. The Helm value
 worker ServiceAccounts hold `use` on every Agent, so Orka-created Tasks are
 not affected.
 
+These bindings match every namespace. With more than one installation on a
+cluster, add a `matchResources.namespaceSelector` on
+`kubernetes.io/metadata.name` for this installation's watched namespace, as
+the Helm chart does, so the check does not reach installations that leave it
+off.
+
 Grant `use` with a Role rule:
 
 ```yaml

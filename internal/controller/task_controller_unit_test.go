@@ -6392,6 +6392,35 @@ func TestCompleteTask_WithPlanStore(t *testing.T) {
 	}
 }
 
+func TestCompleteTask_CancelledKeepsPlan(t *testing.T) {
+	scheme := newTestScheme()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cancel-plan", Namespace: "default",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAI},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(scheme, task)
+	if err := r.PlanStore.SavePlan(context.Background(), "default", "cancel-plan", &store.PlanState{
+		Summary: "step 2 of 4", ProgressPct: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message, ok := requestedTaskCancellation(task)
+	if !ok {
+		t.Fatal("the cancel request was not recognized")
+	}
+	if _, err := r.completeTask(context.Background(), task, corev1alpha1.TaskPhaseCancelled, message); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	plan, err := r.PlanStore.GetPlan(context.Background(), "default", "cancel-plan")
+	if err != nil || plan.Summary != "step 2 of 4" || plan.ProgressPct != 50 {
+		t.Fatalf("plan = %+v, %v; want the plan kept after cancellation", plan, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleCompleted — webhook success path
 // ---------------------------------------------------------------------------

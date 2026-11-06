@@ -218,7 +218,7 @@ describe('TaskDetail', () => {
     expect(back.querySelector('button')).toBeNull()
   })
 
-  it('closes the cancel dialog when the task is recreated under the same name', async () => {
+  it('closes and resets the cancel dialog when the task is recreated under the same name', async () => {
     let uid = 'uid-first'
     let cancelled: unknown = null
     server.use(
@@ -242,14 +242,17 @@ describe('TaskDetail', () => {
       </QueryClientProvider>,
     )
     await user.click(await screen.findByRole('button', { name: /Cancel task/ }))
-    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    await user.type(within(await screen.findByRole('dialog')).getByRole('textbox'), 'wrong repository')
 
     uid = 'uid-second'
     await act(() => queryClient.refetchQueries({ queryKey: ['task', 'rerun'] }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 
     await user.click(screen.getByRole('button', { name: /Cancel task/ }))
-    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel task' }))
+    const dialog = await screen.findByRole('dialog')
+    // The reason typed for the replaced Task is not carried over.
+    expect(within(dialog).getByRole('textbox')).toHaveValue('')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel task' }))
     await waitFor(() => expect(cancelled).toEqual({ uid: 'uid-second' }))
   })
 

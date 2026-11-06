@@ -155,3 +155,30 @@ func TestCancelSessionCancelsOnlyItsRunningTurn(t *testing.T) {
 		t.Fatalf("a missing Session: status = %d, want 404", resp.StatusCode)
 	}
 }
+
+func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
+	chatTurn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
+	chatTurn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+	mislabeled := cancelTestTask("mislabeled", corev1alpha1.TaskPhaseRunning, "")
+	mislabeled.Labels = map[string]string{labels.LabelChatSession: "task-session"}
+	h, app := setupCancelTest(t, chatTurn, mislabeled)
+	for name, sessionType := range map[string]string{"conversation": store.SessionTypeChat, "task-session": "task"} {
+		if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: name, SessionType: sessionType}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, body := postCancel(t, app, "/sessions/conversation/cancel", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if got, _ := cancelAnnotation(t, h, "chat-turn"); got != "cancelled by alice" {
+		t.Fatalf("chat turn cancel request = %q", got)
+	}
+	// The chat label names a Session only when that Session is a chat.
+	if resp, _ := postCancel(t, app, "/sessions/task-session/cancel", ""); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a chat label on a task Session: status = %d, want 409", resp.StatusCode)
+	}
+	if _, ok := cancelAnnotation(t, h, "mislabeled"); ok {
+		t.Fatal("a chat label must not tie a Task to a non-chat Session")
+	}
+}

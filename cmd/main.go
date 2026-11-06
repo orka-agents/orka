@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -823,6 +826,7 @@ func main() {
 	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
 		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
 			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: agentIdentityEntraAuthority,
 		}
 	}
 	if err := agentIdentityConfig.Validate(); err != nil {
@@ -831,15 +835,10 @@ func main() {
 	}
 	var agentIdentitySource *agentidentity.Source
 	if agentIdentityConfig.Entra != nil {
-		if !strings.HasPrefix(agentIdentityEntraAuthority, "https://") {
-			setupLog.Error(fmt.Errorf("must be an https URL"), "invalid --agent-identity-entra-authority")
-			os.Exit(1)
-		}
 		agentIdentitySource = &agentidentity.Source{
 			Config: agentIdentityConfig,
 			Entra: &agentidentity.EntraIssuer{
 				Config:     *agentIdentityConfig.Entra,
-				Authority:  agentIdentityEntraAuthority,
 				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
 			},
 		}
@@ -935,6 +934,7 @@ func main() {
 		}, ",")
 	}
 
+	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 
@@ -1302,6 +1302,7 @@ func main() {
 		KubeClient: kubeClient,
 		Trust:      outboundAccessTrust,
 		Exchanger:  tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		AuditLog:   agentIdentityAuditLog,
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -2727,6 +2728,15 @@ func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapsh
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// agentIdentityAuditLogger returns the sink for agent identity use records.
+// It writes where and how the diagnostic logger does, but no
+// --zap-log-level filters it and it is never sampled: an audit record must
+// not depend on how verbose the controller's diagnostics are.
+func agentIdentityAuditLogger(opts zap.Options) logr.Logger {
+	opts.Level = uberzap.LevelEnablerFunc(func(zapcore.Level) bool { return true })
+	return zap.New(zap.UseFlagOptions(&opts))
+}
 
 // agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
 // requesters in agent identity use records.
