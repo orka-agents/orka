@@ -140,20 +140,22 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		defer release()
 		result.ChatTurnStopped = stopped
 	}
-	// Read live: the cache can miss a Task the stopped request just created.
-	tasks := &corev1alpha1.TaskList{}
-	if err := h.uncachedReader().List(ctx, tasks, client.InNamespace(namespace)); err != nil {
+	tasks, err := h.sessionTaskCandidates(ctx, namespace, name, sessionType == store.SessionTypeChat)
+	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
-	for i := range tasks.Items {
-		task := &tasks.Items[i]
-		// A chat-created Task may name its continuity Session in
-		// spec.sessionRef and the conversation in the chat label; either
-		// ties it to this Session, the label only for a chat Session.
-		inChat := sessionType == store.SessionTypeChat && strings.TrimSpace(task.Labels[labels.LabelChatSession]) == name
-		if !cancellableTaskPhase(task.Status.Phase) || (sessionNameForTask(task) != name && !inChat) {
+	for i := range tasks {
+		task := &tasks[i]
+		if !cancellableTaskPhase(task.Status.Phase) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat) {
 			continue
+		}
+		if task.Namespace != namespace {
+			// The route authorized the Session's namespace only.
+			if err := authorizeKubernetesResourceAction(ctx, h.clientset, GetUserInfo(c), task.Namespace,
+				apiVerbUpdate, corev1alpha1.GroupVersion.Group, "tasks/cancel", task.Name); err != nil {
+				return err
+			}
 		}
 		cancelled, err := h.requestTaskCancellation(c, task, message)
 		if err != nil {
@@ -169,6 +171,54 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "session has no running turn")
 	}
 	return c.JSON(result)
+}
+
+// sessionTaskCandidates lists, live, the Tasks that may belong to a Session:
+// those in its namespace and, for a chat Session, the Tasks its chat created
+// in other namespaces, which only happens when the API may act outside the
+// Session's namespace. The cache can miss a Task a stopped request just
+// created, so the API reader is used.
+func (h *Handlers) sessionTaskCandidates(ctx context.Context, namespace, name string, chat bool) ([]corev1alpha1.Task, error) {
+	reader := h.uncachedReader()
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+	if !chat || h.watchNamespace != "" || h.enforceNamespaceIsolation {
+		return tasks.Items, nil
+	}
+	created := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, created, client.MatchingLabels{
+		labels.LabelChatSession: name, labels.LabelChatSessionNamespace: namespace,
+	}); err != nil {
+		return nil, err
+	}
+	candidates := tasks.Items
+	for i := range created.Items {
+		if created.Items[i].Namespace != namespace {
+			candidates = append(candidates, created.Items[i])
+		}
+	}
+	return candidates, nil
+}
+
+// taskInSession reports whether task belongs to the Session namespace/name:
+// through spec.sessionRef, which names a Session in the Task's namespace, or,
+// for a chat Session, through the chat labels. A chat-created Task may carry
+// both, naming its continuity Session in spec.sessionRef. A chat Task without
+// the chat namespace label belongs to a chat in its own namespace.
+func taskInSession(task *corev1alpha1.Task, namespace, name string, chat bool) bool {
+	if task.Namespace == namespace && sessionNameForTask(task) == name {
+		return true
+	}
+	if !chat || strings.TrimSpace(task.Labels[labels.LabelChatSession]) != name {
+		return false
+	}
+	chatNamespace := strings.TrimSpace(task.Labels[labels.LabelChatSessionNamespace])
+	if chatNamespace == "" {
+		chatNamespace = task.Namespace
+	}
+	return chatNamespace == namespace
 }
 
 // requestTaskCancellation records a cancel request on task. A second request
