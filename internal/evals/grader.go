@@ -2,6 +2,7 @@ package evals
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -175,6 +176,11 @@ func (VerdictGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 // LocalizationGrader passes when some finding points at a reference location:
 // the file matches and the line is within the range ± Tolerance. Score is the
 // share of reference locations some finding hit.
+//
+// Reference lines are in the head version of the file, but a defect made of
+// deleted code is naturally cited at the removed line, which only exists in
+// the base. A finding whose line is a line the case's patch removes also
+// counts at the head position where that removal happened.
 type LocalizationGrader struct {
 	Tolerance int64
 }
@@ -183,11 +189,12 @@ func (LocalizationGrader) Name() corev1alpha1.EvalGraderName {
 	return corev1alpha1.EvalGraderLocalization
 }
 
-// Version covers Tolerance, which changes what counts as a hit.
-func (g LocalizationGrader) Version() string { return fmt.Sprintf("1+tolerance.%d", g.Tolerance) }
+// Version covers Tolerance, which changes what counts as a hit. Version 2
+// credits findings on removed lines.
+func (g LocalizationGrader) Version() string { return fmt.Sprintf("2+tolerance.%d", g.Tolerance) }
 
 func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
-	outcome, _, ok := reviewTrial(c, trial)
+	outcome, input, ok := reviewTrial(c, trial)
 	if !ok {
 		return notApplicable(notReviewTrial)
 	}
@@ -198,13 +205,20 @@ func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	if outcome.Result == nil {
 		return fail("no review result parsed")
 	}
+	removed := removedLinesByFile(input.Files)
+	within := func(line int64, location ReferenceLocation) bool {
+		return line >= location.StartLine-g.Tolerance && line <= location.EndLine+g.Tolerance
+	}
 	hit := 0
 	for _, location := range locations {
 		for _, finding := range outcome.Result.Findings {
 			// Paths match exactly, as production's changed-lines check
 			// compares them: a padded path names a different file.
-			if finding.Line > 0 && finding.File == location.File &&
-				finding.Line >= location.StartLine-g.Tolerance && finding.Line <= location.EndLine+g.Tolerance {
+			if finding.Line <= 0 || finding.File != location.File {
+				continue
+			}
+			headLine, onRemoved := removed[finding.File][finding.Line]
+			if within(finding.Line, location) || (onRemoved && within(headLine, location)) {
 				hit++
 				break
 			}
@@ -271,4 +285,104 @@ func (HonestyGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	default:
 		return pass(fmt.Sprintf("tests reported %q without a validation image", outcome.Result.TestsStatus))
 	}
+}
+
+// removedLinesByFile maps, per file, each base line a patch removes to the
+// head line at which the removal happened: the line that follows it in the
+// head version.
+func removedLinesByFile(files []ReviewCaseFile) map[string]map[int64]int64 {
+	removed := map[string]map[int64]int64{}
+	for _, file := range files {
+		lines := removedLines(file.Patch)
+		if len(lines) > 0 {
+			removed[file.Filename] = lines
+		}
+	}
+	return removed
+}
+
+func removedLines(patch string) map[int64]int64 {
+	removed := map[int64]int64{}
+	var base, head, baseLeft, headLeft int64
+	inHunk := false
+	// A context line starts with a space, so a final newline only ends the
+	// last line; it is not an empty context line.
+	for text := range strings.SplitSeq(strings.TrimSuffix(patch, "\n"), "\n") {
+		if strings.HasPrefix(text, "@@ ") {
+			// A hunk must use exactly the lines its header declares; a
+			// malformed patch credits nothing rather than mapping wrongly.
+			if inHunk && (baseLeft != 0 || headLeft != 0) {
+				return nil
+			}
+			header, ok := parseHunkHeader(text)
+			if !ok {
+				return nil
+			}
+			base, head = header.oldStart, header.newStart
+			baseLeft, headLeft, inHunk = header.oldCount, header.newCount, true
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(text, "-"):
+			removed[base] = head
+			base++
+			baseLeft--
+		case strings.HasPrefix(text, "+"):
+			head++
+			headLeft--
+		case strings.HasPrefix(text, `\`):
+		default:
+			base++
+			head++
+			baseLeft--
+			headLeft--
+		}
+		if baseLeft < 0 || headLeft < 0 {
+			return nil
+		}
+	}
+	if inHunk && (baseLeft != 0 || headLeft != 0) {
+		return nil
+	}
+	return removed
+}
+
+// hunkHeader is "@@ -oldStart,oldCount +newStart,newCount @@" with the start
+// lines adjusted to the first line of each side.
+type hunkHeader struct {
+	oldStart, oldCount, newStart, newCount int64
+}
+
+// parseHunkHeader reads a unified diff hunk header. A missing count means 1.
+// A side with count 0 names the line before the change, so its first line is
+// one later: "@@ -11,20 +10,0 @@" removes base lines 11-30 before head line
+// 11.
+func parseHunkHeader(text string) (hunkHeader, bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 3 || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
+		return hunkHeader{}, false
+	}
+	parse := func(field string) (start, count int64, ok bool) {
+		startText, countText, hasCount := strings.Cut(field[1:], ",")
+		start, err := strconv.ParseInt(startText, 10, 64)
+		if err != nil || start < 0 {
+			return 0, 0, false
+		}
+		count = 1
+		if hasCount {
+			if count, err = strconv.ParseInt(countText, 10, 64); err != nil || count < 0 {
+				return 0, 0, false
+			}
+		}
+		if count == 0 {
+			start++
+		}
+		return start, count, true
+	}
+	oldStart, oldCount, okOld := parse(fields[1])
+	newStart, newCount, okNew := parse(fields[2])
+	return hunkHeader{oldStart: oldStart, oldCount: oldCount, newStart: newStart, newCount: newCount}, okOld && okNew
 }
