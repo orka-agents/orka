@@ -5,6 +5,7 @@ package agentidentity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -317,5 +318,42 @@ func TestSourceCachesTokensPerPolicyUIDAndGeneration(t *testing.T) {
 		if fake.count() != step.wantRequests {
 			t.Fatalf("%s: requests = %d, want %d", step.name, fake.count(), step.wantRequests)
 		}
+	}
+}
+
+func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status      int
+		body        map[string]any
+		unavailable bool
+	}{
+		"server error":            {status: http.StatusServiceUnavailable, body: map[string]any{"error": "server_error"}, unavailable: true},
+		"throttled":               {status: http.StatusTooManyRequests, body: map[string]any{}, unavailable: true},
+		"temporarily unavailable": {status: http.StatusBadRequest, body: map[string]any{"error": "temporarily_unavailable"}, unavailable: true},
+		"refused":                 {status: http.StatusBadRequest, body: map[string]any{"error": "unauthorized_client", "error_codes": []int{7000112}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(tc.body)
+			}))
+			t.Cleanup(server.Close)
+			issuer := &EntraIssuer{
+				Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
+				Credential: func() (string, error) { return testControllerToken, nil },
+				HTTPClient: server.Client(),
+			}
+			_, err := issuer.ExchangeToken(context.Background(), testIdentity)
+			if err == nil || errors.Is(err, ErrIssuerUnavailable) != tc.unavailable {
+				t.Fatalf("error = %v, want unavailable=%v", err, tc.unavailable)
+			}
+		})
+	}
+	unreachable := &EntraIssuer{
+		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: "https://127.0.0.1:1"},
+		Credential: func() (string, error) { return testControllerToken, nil },
+	}
+	if _, err := unreachable.ExchangeToken(context.Background(), testIdentity); !errors.Is(err, ErrIssuerUnavailable) {
+		t.Fatalf("unreachable endpoint: error = %v, want ErrIssuerUnavailable", err)
 	}
 }
