@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -363,10 +364,6 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 	}
 }
 
-type fakeIdentityVerifier struct{ err error }
-
-func (f fakeIdentityVerifier) Verify(context.Context, *corev1alpha1.Agent) error { return f.err }
-
 func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err        error
@@ -381,11 +378,25 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			agent := identityBoundTestAgent("reviewer", time.Now())
 			r := setupAgentReconciler()
 			r.Identity = testIdentityConfig()
-			r.IdentityVerifier = fakeIdentityVerifier{err: tc.err}
-			r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
-			result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			verifier := &countingIdentityVerifier{err: tc.err}
+			r.IdentityVerifier = verifier
+			r.Client = apiServerClockClient(fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build())
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}
+			// The first pass records the claim; its grant time comes from the
+			// API server's record of that write on the next pass. The issuer
+			// is asked only once the claim is granted.
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			if verifier.calls != 0 {
+				t.Fatalf("Verify() called %d times while the claim was pending", verifier.calls)
+			}
+			result, err := r.Reconcile(context.Background(), request)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if verifier.calls != 1 {
+				t.Fatalf("Verify() called %d times, want once the claim is granted", verifier.calls)
 			}
 			if result.RequeueAfter <= 0 || result.RequeueAfter > agentIdentityReverifyInterval {
 				t.Fatalf("RequeueAfter = %v, want re-verification within an hour", result.RequeueAfter)
@@ -407,6 +418,35 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 	}
 }
 
+type countingIdentityVerifier struct {
+	err   error
+	calls int
+}
+
+func (v *countingIdentityVerifier) Verify(context.Context, *corev1alpha1.Agent) error {
+	v.calls++
+	return v.err
+}
+
+// apiServerClockClient stamps every Agent it reads with a managedFields write
+// time, as the API server records one for each write.
+func apiServerClockClient(base client.WithWatch) client.WithWatch {
+	written := metav1.NewTime(time.Now().Truncate(time.Second))
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*corev1alpha1.Agent); ok {
+				obj.SetManagedFields([]metav1.ManagedFieldsEntry{{
+					Manager: "manager", Operation: metav1.ManagedFieldsOperationUpdate, Time: &written,
+				}})
+			}
+			return nil
+		},
+	})
+}
+
 type identityVerifierFunc func(context.Context, *corev1alpha1.Agent) error
 
 func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
@@ -414,7 +454,8 @@ func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Ag
 }
 
 func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
-	agent := identityBoundTestAgent("reviewer", time.Now())
+	// The claim is already granted, so this pass asks the issuer.
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
 	r := setupAgentReconciler()
 	r.Identity = testIdentityConfig()
 	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
@@ -441,8 +482,8 @@ func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
 	if condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified); condition != nil {
 		t.Fatalf("IdentityVerified = %+v, want nothing recorded for the unverified identity", condition)
 	}
-	if stored.Status.IdentityClaim != nil {
-		t.Fatalf("IdentityClaim = %+v, want no claim decided from the old spec", stored.Status.IdentityClaim)
+	if !reflect.DeepEqual(stored.Status.IdentityClaim, agent.Status.IdentityClaim) {
+		t.Fatalf("IdentityClaim = %+v, want the claim left as it was (%+v)", stored.Status.IdentityClaim, agent.Status.IdentityClaim)
 	}
 }
 
