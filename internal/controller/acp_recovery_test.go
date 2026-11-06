@@ -180,23 +180,22 @@ func TestACPDispatcherMakesAcceptedOldEpochAttemptOutcomeUnknown(t *testing.T) {
 	}
 }
 
-// A cancel request recorded just before the controller restarted is honored
-// by recovery of the in-flight prompt, whether or not the controller already
-// wrote the Cancelled phase.
-func TestACPDispatcherRecoveryHonorsACancelRequestedBeforeRestart(t *testing.T) {
+// A cancel request recorded just before the controller restarted does not
+// prove the in-flight prompt stopped: recovery keeps the outcome unknown and
+// carries the request in the terminal message, whether or not the controller
+// already wrote the Cancelled phase.
+func TestACPDispatcherRecoveryKeepsACancelRequestedBeforeRestart(t *testing.T) {
 	const request = "cancelled by alice: wrong repository"
+	const wantMessage = request + "; controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
 	for _, test := range []struct {
 		name           string
 		state          store.PromptExecutionState
 		phaseCancelled bool
-		wantAttempt    store.PromptExecutionState
-		wantPhase      corev1alpha1.TaskPhase
 	}{
-		{name: "running", state: store.PromptExecutionRunning, wantAttempt: store.PromptExecutionCancelled, wantPhase: corev1alpha1.TaskPhaseCancelled},
-		{name: "running-already-cancelled", state: store.PromptExecutionRunning, phaseCancelled: true,
-			wantAttempt: store.PromptExecutionCancelled, wantPhase: corev1alpha1.TaskPhaseCancelled},
-		{name: "accepted", state: store.PromptExecutionAccepted, wantAttempt: store.PromptExecutionCancelled, wantPhase: corev1alpha1.TaskPhaseCancelled},
-		{name: "settling", state: store.PromptExecutionSettling, wantAttempt: store.PromptExecutionCancelled, wantPhase: corev1alpha1.TaskPhaseCancelled},
+		{name: "accepted", state: store.PromptExecutionAccepted},
+		{name: "running", state: store.PromptExecutionRunning},
+		{name: "running-already-cancelled", state: store.PromptExecutionRunning, phaseCancelled: true},
+		{name: "settling", state: store.PromptExecutionSettling},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newACPRecoveryFixture(t, test.state)
@@ -228,20 +227,18 @@ func TestACPDispatcherRecoveryHonorsACancelRequestedBeforeRestart(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if attempt.ExecutionState != test.wantAttempt {
-				t.Fatalf("attempt state = %s, want %s", attempt.ExecutionState, test.wantAttempt)
+			if attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.OutcomeMarker != wantMessage {
+				t.Fatalf("attempt = %s %q, want OutcomeUnknown carrying the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
 			}
 			if err := fixture.kubeClient.Get(fixture.ctx, key, task); err != nil {
 				t.Fatal(err)
 			}
-			if task.Status.Phase != test.wantPhase || task.Status.Execution == nil {
-				t.Fatalf("task status = %#v, want phase %s", task.Status, test.wantPhase)
-			}
-			if attempt.OutcomeMarker != request || task.Status.Message != request ||
-				task.Status.Execution.State != corev1alpha1.TaskExecutionStateCancelled ||
-				task.Status.Execution.Outcome != corev1alpha1.TaskExecutionOutcomeCancelled ||
-				task.Status.Execution.Message != request {
-				t.Fatalf("attempt marker %q, task status %#v; want Cancelled with the cancel request", attempt.OutcomeMarker, task.Status)
+			execution := task.Status.Execution
+			if task.Status.Phase != corev1alpha1.TaskPhaseFailed || task.Status.Message != wantMessage || execution == nil ||
+				execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+				execution.Outcome != corev1alpha1.TaskExecutionOutcomeOutcomeUnknown ||
+				execution.Reason != "RuntimeLost" || execution.Message != wantMessage {
+				t.Fatalf("task status = %#v, want Failed with OutcomeUnknown carrying the cancel request", task.Status)
 			}
 		})
 	}
