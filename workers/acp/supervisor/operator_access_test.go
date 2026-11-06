@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -676,5 +678,103 @@ func TestResolveOperatorCommandErrorsNeverEchoArgv0(t *testing.T) {
 		if err == nil || strings.Contains(err.Error(), secret) {
 			t.Fatalf("resolveOperatorCommand(%q) = %v; must fail without echoing argv[0]", argv0, err)
 		}
+	}
+}
+
+func signedOperatorFileHeaders(t *testing.T, operationID string) http.Header {
+	t.Helper()
+	fence := operatorTestFence()
+	fence.RuntimeSessionUID, fence.RuntimeSessionGeneration = "session-uid", 2
+	request := harnessv2.OperatorFileRequest{
+		Protocol: harnessv2.ProtocolVersion, AuditID: "op-test", Path: "notes.txt", MaxBytes: 1024,
+		Metadata: harnessv2.MutationMetadata{Fence: fence, OperationID: harnessv2.OperationID(operationID), ExpiresAt: time.Now().UTC().Add(time.Minute)},
+	}
+	header, capability, err := harnessv2.SealOperatorRequest(operatorTestSecret, &request, &request.Metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+operatorTestToken)
+	headers.Set(OperationCapabilityHeader, capability)
+	headers.Set(harnessv2.OperatorRequestHeader, header)
+	return headers
+}
+
+// The file helper reopens the workspace by path while the child, which may own
+// the session root, is running; it is always given the workspace identity
+// recorded before the child started, and a session without one is refused.
+func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
+	launches := make(chan operatorLaunch, 1)
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle, func(launch operatorLaunch) (operatorProcess, error) {
+		launches <- launch
+		return nil, errors.New("not started in tests")
+	})
+	supervisor.operatorState().runtimeExecutable = "/orka-acp-runtime"
+	filesURL := func() string {
+		path, _ := harnessv2.OperatorFilesPath(sessionID)
+		return server.URL + path
+	}
+	request, _ := http.NewRequest(http.MethodGet, filesURL(), nil)
+	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-1")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict || len(launches) != 0 {
+		t.Fatalf("a session without a pinned workspace identity = %d (launches %d), want 409 and no helper", response.StatusCode, len(launches))
+	}
+
+	state := supervisor.sessions[sessionID]
+	if err := acp.RecordWorkspaceIdentity(&state.paths); err != nil {
+		t.Fatal(err)
+	}
+	request, _ = http.NewRequest(http.MethodGet, filesURL(), nil)
+	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-2")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	launch := <-launches
+	want := strconv.FormatUint(state.paths.WorkspaceDevice, 10) + ":" + strconv.FormatUint(state.paths.WorkspaceInode, 10)
+	if len(launch.Argv) != 7 || launch.Argv[3] != state.paths.Workspace || launch.Argv[4] != want {
+		t.Fatalf("helper argv = %q, want the workspace %s with identity %s", launch.Argv, state.paths.Workspace, want)
+	}
+}
+
+// A client that disconnects mid-exec gets the whole operation killed, and the
+// operation's registration, concurrency slot, and tag group are released.
+func TestOperatorExecDisconnectKillsAndReleasesTheOperation(t *testing.T) {
+	process := newFakeOperatorProcess()
+	supervisor, server, sessionID := newOperatorTestServer(t, harnessv2.RuntimeSessionStateIdle,
+		func(operatorLaunch) (operatorProcess, error) { return process, nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(operatorExecURL(server, sessionID), "http"), &websocket.DialOptions{
+		HTTPHeader:   signedOperatorExecHeaders(t, 2, operatoraccess.ExecOptions{Argv: []string{"sh"}, Stdin: true}),
+		Subprotocols: []string{operatoraccess.WebSocketSubprotocol},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.CloseNow()
+	state := supervisor.sessions[sessionID]
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		supervisor.mu.Lock()
+		registrations := len(state.operators)
+		supervisor.mu.Unlock()
+		supervisor.operatorState().tagMu.Lock()
+		tags := len(supervisor.operatorState().tags)
+		supervisor.operatorState().tagMu.Unlock()
+		if process.killed.Load() && registrations == 0 && tags == 0 && len(supervisor.operatorState().slots) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("disconnect left the operation running or held: killed=%v registrations=%d tags=%d slots=%d",
+				process.killed.Load(), registrations, tags, len(supervisor.operatorState().slots))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

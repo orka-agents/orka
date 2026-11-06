@@ -16,8 +16,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// workspaceIdentityArg is the identity the supervisor would have recorded for
+// root (following a symbolic link, the strongest case for refusal tests).
+func workspaceIdentityArg(root string) string {
+	var stat unix.Stat_t
+	if unix.Stat(root, &stat) != nil {
+		return "1:1"
+	}
+	return operatorWorkspaceIdentity{dev: uint64(stat.Dev), ino: stat.Ino}.String() //nolint:unconvert // Dev is uint32 on some Linux architectures.
+}
+
+// runFileHelper accepts the pre-identity argument form (mode, root, path,
+// bound) and inserts root's identity, so cases read naturally.
 func runFileHelper(t *testing.T, args []string, stdin io.Reader) (operatorFileStatus, []byte) {
 	t.Helper()
+	if len(args) == 4 {
+		args = []string{args[0], args[1], workspaceIdentityArg(args[1]), args[2], args[3]}
+	}
 	var stdout bytes.Buffer
 	RunOperatorFileHelper(args, stdin, &stdout)
 	reader := bufio.NewReader(&stdout)
@@ -205,5 +220,98 @@ func TestOperatorFileHelperAppliesTheIntendedModeDespiteUmask(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(root, "fresh.txt")); err != nil || info.Mode().Perm() != 0o644 {
 		t.Fatalf("new file mode = %v (%v), want 0644", info.Mode().Perm(), err)
+	}
+}
+
+// The child owns the directories beneath the workspace and can move one into
+// its private home between the helper resolving a parent directory and
+// opening or committing the final entry. The operation must fail and nothing
+// outside the workspace may be read or written.
+func TestOperatorFileHelperRefusesADirectoryMovedOutDuringResolution(t *testing.T) {
+	setup := func(t *testing.T) (root, outside string) {
+		t.Helper()
+		session := t.TempDir()
+		root, outside = filepath.Join(session, "workspace"), filepath.Join(session, "home")
+		for _, dir := range []string{filepath.Join(root, "a"), outside} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, "a", "notes"), []byte("public"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return root, outside
+	}
+	moveOut := func(t *testing.T, root, outside string) func() {
+		return func() {
+			// Swap the workspace's a with a directory of the same name in
+			// the private home whose notes holds a secret.
+			if err := os.Rename(filepath.Join(root, "a"), filepath.Join(outside, "a")); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, "a", "notes"), []byte("secret"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	t.Cleanup(func() { operatorFileHelperResolvedHook = nil })
+
+	t.Run("read", func(t *testing.T) {
+		root, outside := setup(t)
+		operatorFileHelperResolvedHook = moveOut(t, root, outside)
+		defer func() { operatorFileHelperResolvedHook = nil }()
+		status, content := runFileHelper(t, []string{OperatorFileHelperRead, root, "a/notes", "1024"}, nil)
+		if status.OK || strings.Contains(string(content), "secret") {
+			t.Fatalf("read followed a directory moved out of the workspace: %+v %q", status, content)
+		}
+	})
+	t.Run("write", func(t *testing.T) {
+		root, outside := setup(t)
+		operatorFileHelperResolvedHook = moveOut(t, root, outside)
+		defer func() { operatorFileHelperResolvedHook = nil }()
+		status, _ := runFileHelper(t, []string{OperatorFileHelperWrite, root, "a/notes", "3"}, strings.NewReader("pwn"))
+		if status.OK {
+			t.Fatal("write committed into a directory moved out of the workspace")
+		}
+		if data, _ := os.ReadFile(filepath.Join(outside, "a", "notes")); string(data) != "secret" {
+			t.Fatalf("the file outside the workspace was modified: %q", data)
+		}
+		entries, _ := os.ReadDir(filepath.Join(outside, "a"))
+		if len(entries) != 1 {
+			t.Fatalf("temporary upload files were left outside the workspace: %v", entries)
+		}
+	})
+}
+
+// The child owns its session root, so it can rename the workspace aside and
+// put another directory it can read in its place.
+func TestOperatorFileHelperRefusesAReplacedWorkspaceRoot(t *testing.T) {
+	session := t.TempDir()
+	root, home := filepath.Join(session, "workspace"), filepath.Join(session, "home")
+	for _, dir := range []string{root, home} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "credentials"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity := workspaceIdentityArg(root)
+	if err := os.Rename(root, filepath.Join(session, "aside")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(home, root); err != nil {
+		t.Fatal(err)
+	}
+	status, content := runFileHelper(t, []string{OperatorFileHelperRead, root, identity, "credentials", "1024"}, nil)
+	if status.OK || strings.Contains(string(content), "secret") || status.Code != operatorFileCodeDenied {
+		t.Fatalf("a replaced workspace root was used: %+v %q", status, content)
+	}
+	status, _ = runFileHelper(t, []string{OperatorFileHelperWrite, root, identity, "planted", "1"}, strings.NewReader("x"))
+	if status.OK {
+		t.Fatal("a write into a replaced workspace root must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "planted")); !os.IsNotExist(err) {
+		t.Fatalf("write landed in the replacement directory: %v", err)
 	}
 }

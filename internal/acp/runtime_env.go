@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/orka-agents/orka/internal/taskterminal"
 )
@@ -47,6 +48,28 @@ type SessionPaths struct {
 	Cache     string
 	Data      string
 	State     string
+	// WorkspaceDevice and WorkspaceInode identify the workspace directory as
+	// recorded by RecordWorkspaceIdentity before the session child starts.
+	// The child may own the session root and rename entries in it, so code
+	// that reopens Workspace by path later verifies this identity.
+	WorkspaceDevice uint64
+	WorkspaceInode  uint64
+}
+
+// RecordWorkspaceIdentity records the workspace directory's device and inode.
+// Call it only while the supervisor still exclusively controls the tree, that
+// is before the session child starts.
+func RecordWorkspaceIdentity(paths *SessionPaths) error {
+	info, err := os.Lstat(paths.Workspace)
+	if err != nil {
+		return fmt.Errorf("inspect session workspace: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || stat.Ino == 0 {
+		return fmt.Errorf("session workspace is not a directory")
+	}
+	paths.WorkspaceDevice, paths.WorkspaceInode = uint64(stat.Dev), stat.Ino //nolint:unconvert // Dev is uint32 on some platforms.
+	return nil
 }
 
 func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {

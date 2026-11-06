@@ -145,7 +145,9 @@ Workspace paths are relative to the workspace root, which is the agent's
 working directory. A leading `/` names that root, so `my-task:/src/a.go` and
 `my-task:src/a.go` are the same file. Paths with `..`, NUL bytes, or control
 characters are rejected. Symbolic links are never followed, in any path
-component. Copies transfer exactly one regular file. Copying in replaces the
+component, and a path the session moves out of the workspace during a copy is
+refused. Copies require Linux 5.6 or later on the runtime node. Copies transfer
+exactly one regular file. Copying in replaces the
 destination atomically, and only after the complete upload arrives. The parent
 directory must already exist.
 

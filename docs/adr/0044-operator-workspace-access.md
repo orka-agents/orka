@@ -96,10 +96,15 @@ directly.
   (below). They start in the session
   workspace with only the session's minimal environment. Operators never get
   the supervisor's identity or credentials.
-- Copies move exactly one regular file. Every path component is opened with
-  `O_NOFOLLOW` beneath the workspace root, and traversal segments are
-  rejected before any request is made. Uploads commit only after exactly the
-  declared size arrives.
+- Copies move exactly one regular file. The workspace root is opened without
+  following symbolic links and must match the directory identity the
+  supervisor recorded before the session child started. Every path beneath
+  it is resolved in one `openat2` call with `RESOLVE_BENEATH`, and no
+  symbolic links, magic links, or mount crossings, so a directory the session
+  moves out mid-copy fails the resolution. Without `openat2` copies are
+  refused. Uploads re-verify their parent directory before committing.
+  Traversal segments are rejected before any request is made. Uploads commit
+  only after exactly the declared size arrives.
 - Each operation runs with one supplementary tag group, reserved from a
   dedicated range and unique among live processes. Changing supplementary
   groups needs `CAP_SETGID`, and descendants inherit them, so the tag cannot

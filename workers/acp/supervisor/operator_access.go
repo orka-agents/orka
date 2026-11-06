@@ -774,6 +774,11 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	if request.Write {
 		mode = OperatorFileHelperWrite
 	}
+	if target.paths.WorkspaceInode == 0 {
+		writeOperatorError(w, http.StatusConflict, "runtime session workspace identity is unavailable")
+		return
+	}
+	identity := strconv.FormatUint(target.paths.WorkspaceDevice, 10) + ":" + strconv.FormatUint(target.paths.WorkspaceInode, 10)
 	env, err := acp.BuildChildEnvironment(target.paths, acp.EnvironmentConfig{PATH: target.childPath})
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "operator environment is unavailable")
@@ -787,7 +792,8 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	lease.tag = tag
 	process, err := s.operatorState().starter(operatorLaunch{
 		UID: target.uid, GID: target.gid, Tag: tag, Env: env, Dir: target.paths.Workspace, Stdin: request.Write,
-		Argv: []string{helper, OperatorFileHelperSubcommand, mode, target.paths.Workspace, request.Path, strconv.FormatInt(operatorFileHelperBound(request), 10)},
+		Argv: []string{helper, OperatorFileHelperSubcommand, mode, target.paths.Workspace, identity, request.Path,
+			strconv.FormatInt(operatorFileHelperBound(request), 10)},
 	})
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "start operator file helper: "+err.Error())
