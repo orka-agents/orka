@@ -138,7 +138,8 @@ func TestStaticChartDefaultStorageKeepsSQLiteFlags(t *testing.T) {
 			}
 			controller := rendered.controller(t)
 			if !slices.Contains(controller.Args, "--store-backend=sqlite") ||
-				!slices.Contains(controller.Args, "--store-path=/data/orka.db") {
+				!slices.Contains(controller.Args, "--store-path=/data/orka.db") ||
+				!slices.Contains(controller.Args, "--store-sqlite-synchronous=normal") {
 				t.Fatalf("controller args %v lack the default SQLite flags", controller.Args)
 			}
 			for _, arg := range controller.Args {
