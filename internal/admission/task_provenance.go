@@ -218,7 +218,7 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 // Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
-		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch})
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace})
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
 	oldOwner, newOwner := taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
