@@ -219,7 +219,7 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	}
 	// Notifications and client responses need no answer. This server sends
 	// no requests, so a response can only be stray.
-	if len(request.ID) == 0 || string(request.ID) == "null" || request.Method == "" {
+	if len(request.ID) == 0 || string(request.ID) == responsesJSONNull || request.Method == "" {
 		return c.Status(fiber.StatusAccepted).Send(nil)
 	}
 
@@ -329,7 +329,7 @@ func (m *mcpServer) dispatch(call *mcpCall) (any, error) {
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": mcpToolDefinitions()}, nil
+		return map[string]any{mcpFieldTools: mcpToolDefinitions()}, nil
 	case "tools/call":
 		return m.callTool(call)
 	case "tasks/get":
@@ -351,11 +351,11 @@ func mcpServerInfo() map[string]any {
 
 func mcpServerCapabilities() map[string]any {
 	return map[string]any{
-		"tools": map[string]any{"listChanged": false},
+		mcpFieldTools: map[string]any{"listChanged": false},
 		// 2025-11-25 task-augmented tools/call.
 		"tasks": map[string]any{
 			"cancel":   map[string]any{},
-			"requests": map[string]any{"tools": map[string]any{"call": map[string]any{}}},
+			"requests": map[string]any{mcpFieldTools: map[string]any{"call": map[string]any{}}},
 		},
 		"extensions": map[string]any{mcpTasksExtension: map[string]any{}},
 	}
@@ -406,7 +406,7 @@ func (m *mcpServer) writeResult(c fiber.Ctx, id json.RawMessage, result any) err
 
 func (m *mcpServer) writeError(c fiber.Ctx, status int, id json.RawMessage, rpcErr *mcpError) error {
 	if len(id) == 0 {
-		id = json.RawMessage("null")
+		id = json.RawMessage(responsesJSONNull)
 	}
 	return c.Status(status).JSON(mcpResponse{JSONRPC: mcpJSONRPCVersion, ID: id, Error: rpcErr})
 }

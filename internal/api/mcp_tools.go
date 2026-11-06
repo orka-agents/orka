@@ -27,6 +27,20 @@ import (
 	"github.com/orka-agents/orka/internal/redact"
 )
 
+// MCP JSON field and schema keyword names shared across tool definitions and
+// results.
+const (
+	mcpFieldDecision  = "decision"
+	mcpFieldReason    = "reason"
+	mcpFieldSession   = "session"
+	mcpFieldTools     = "tools"
+	mcpFieldCreatedAt = "createdAt"
+	mcpFieldArtifacts = "artifacts"
+	mcpFieldLimit     = "limit"
+	mcpFieldOffset    = "offset"
+	mcpSchemaDefault  = "default"
+)
+
 const (
 	mcpToolListAgents           = "list_agents"
 	mcpToolGetAgent             = "get_agent"
@@ -123,18 +137,18 @@ var (
 	}
 	mcpTaskNameProperty = map[string]any{"type": "string", "maxLength": 253, "description": "Task name."}
 	mcpLimitProperty    = map[string]any{
-		"type": "integer", "minimum": 1, "maximum": mcpMaxListLimit, "default": mcpDefaultListLimit,
+		"type": "integer", "minimum": 1, "maximum": mcpMaxListLimit, mcpSchemaDefault: mcpDefaultListLimit,
 		"description": "Maximum items to return.",
 	}
 	mcpContinueProperty = map[string]any{
 		"type": "string", "maxLength": 4096, "description": "Continue token from a previous page.",
 	}
 	mcpOffsetProperty = map[string]any{
-		"type": "integer", "minimum": 0, "default": 0,
+		"type": "integer", "minimum": 0, mcpSchemaDefault: 0,
 		"description": "Byte offset into the redacted output. Use nextOffset from a previous call to read more.",
 	}
 	mcpMaxBytesProperty = map[string]any{
-		"type": "integer", "minimum": 1, "maximum": mcpMaxOutputBytes, "default": mcpDefaultOutputBytes,
+		"type": "integer", "minimum": 1, "maximum": mcpMaxOutputBytes, mcpSchemaDefault: mcpDefaultOutputBytes,
 		"description": "Maximum bytes of output to return.",
 	}
 )
@@ -147,7 +161,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Name: mcpToolListAgents, Title: "List Orka Agents",
 			Description: "List the Agents you can see in a namespace. Pass an Agent name to create_task to delegate work to it.",
 			InputSchema: objectSchema(nil, map[string]any{
-				"namespace": mcpNamespaceProperty, "limit": mcpLimitProperty, "continue": mcpContinueProperty,
+				"namespace": mcpNamespaceProperty, mcpFieldLimit: mcpLimitProperty, "continue": mcpContinueProperty,
 			}),
 			Annotations: readOnlyToolAnnotations("List Orka Agents"),
 			REST:        []string{"GET /api/v1/agents"},
@@ -203,7 +217,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 						"createPR":                 map[string]any{"type": "boolean"},
 					},
 				},
-				"session": map[string]any{
+				mcpFieldSession: map[string]any{
 					"type":        "object",
 					"description": "Optional Orka Session to continue (Task spec.sessionRef).",
 					"properties": map[string]any{
@@ -231,7 +245,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Name: mcpToolListTasks, Title: "List Orka Tasks",
 			Description: "List Tasks you can see in a namespace, newest pages first as returned by the API.",
 			InputSchema: objectSchema(nil, map[string]any{
-				"namespace": mcpNamespaceProperty, "limit": mcpLimitProperty, "continue": mcpContinueProperty,
+				"namespace": mcpNamespaceProperty, mcpFieldLimit: mcpLimitProperty, "continue": mcpContinueProperty,
 				"labelSelector": map[string]any{"type": "string", "maxLength": 1024, "description": "Kubernetes label selector, e.g. orka.ai/agent=reviewer."},
 			}),
 			Annotations: readOnlyToolAnnotations("List Orka Tasks"),
@@ -244,7 +258,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 				"Returns the current status when the wait ends; call again to keep waiting.", mcpMaxWaitSeconds),
 			InputSchema: objectSchema([]string{"name"}, map[string]any{
 				"name": mcpTaskNameProperty, "namespace": mcpNamespaceProperty,
-				"timeoutSeconds": map[string]any{"type": "integer", "minimum": 1, "maximum": mcpMaxWaitSeconds, "default": mcpDefaultWaitSeconds},
+				"timeoutSeconds": map[string]any{"type": "integer", "minimum": 1, "maximum": mcpMaxWaitSeconds, mcpSchemaDefault: mcpDefaultWaitSeconds},
 			}),
 			Annotations: readOnlyToolAnnotations("Wait for an Orka Task"),
 			REST:        []string{"GET /api/v1/tasks/:id", "GET /api/v1/tasks/:id/approvals"},
@@ -263,7 +277,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Description: "List the approval requests of a Task. A human must decide pending requests before the Task can continue.",
 			InputSchema: objectSchema([]string{"task"}, map[string]any{
 				"task": mcpTaskNameProperty, "namespace": mcpNamespaceProperty,
-				"includeDecided": map[string]any{"type": "boolean", "default": false, "description": "Also return decided, expired, and cancelled requests."},
+				"includeDecided": map[string]any{"type": "boolean", mcpSchemaDefault: false, "description": "Also return decided, expired, and cancelled requests."},
 			}),
 			Annotations: readOnlyToolAnnotations("List a Task's approval requests"),
 			REST:        []string{"GET /api/v1/tasks/:id/approvals"},
@@ -274,11 +288,11 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Description: "Record a human's approve or decline decision for a pending approval request. " +
 				"Only call this after the human user has reviewed the request and explicitly told you their decision; " +
 				"never decide on your own. The decision is recorded under your Orka identity.",
-			InputSchema: objectSchema([]string{"task", "approvalId", "decision"}, map[string]any{
+			InputSchema: objectSchema([]string{"task", "approvalId", mcpFieldDecision}, map[string]any{
 				"task": mcpTaskNameProperty, "namespace": mcpNamespaceProperty,
-				"approvalId": map[string]any{"type": "string", "maxLength": mcpMaxApprovalIDLength, "description": "Approval request ID from list_pending_approvals."},
-				"decision":   map[string]any{"type": "string", "enum": []string{approvalDecisionApprove, approvalDecisionDecline}},
-				"reason":     map[string]any{"type": "string", "maxLength": mcpMaxReasonLength, "description": "The human's reason, recorded with the decision."},
+				"approvalId":     map[string]any{"type": "string", "maxLength": mcpMaxApprovalIDLength, "description": "Approval request ID from list_pending_approvals."},
+				mcpFieldDecision: map[string]any{"type": "string", "enum": []string{approvalDecisionApprove, approvalDecisionDecline}},
+				mcpFieldReason:   map[string]any{"type": "string", "maxLength": mcpMaxReasonLength, "description": "The human's reason, recorded with the decision."},
 			}),
 			Annotations: mutatingToolAnnotations("Approve or decline an Orka approval request", true, true),
 			REST:        []string{"POST /api/v1/tasks/:id/approvals/:approvalID/decision"},
@@ -288,7 +302,7 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Name: mcpToolGetTaskResult, Title: "Read an Orka Task result",
 			Description: "Read a finished Task's result text. Output is redacted for credential-like values and returned in bounded chunks.",
 			InputSchema: objectSchema([]string{"name"}, map[string]any{
-				"name": mcpTaskNameProperty, "namespace": mcpNamespaceProperty, "offset": mcpOffsetProperty, "maxBytes": mcpMaxBytesProperty,
+				"name": mcpTaskNameProperty, "namespace": mcpNamespaceProperty, mcpFieldOffset: mcpOffsetProperty, "maxBytes": mcpMaxBytesProperty,
 			}),
 			Annotations: readOnlyToolAnnotations("Read an Orka Task result"),
 			REST:        []string{"GET /api/v1/tasks/:id/result"},
@@ -307,8 +321,8 @@ func mcpToolDefinitions() []mcpToolDefinition {
 			Description: "Read a text artifact in bounded, redacted chunks. Binary artifacts must be downloaded through the REST API.",
 			InputSchema: objectSchema([]string{"name", "filename"}, map[string]any{
 				"name": mcpTaskNameProperty, "namespace": mcpNamespaceProperty,
-				"filename": map[string]any{"type": "string", "maxLength": 255, "description": "Artifact filename from list_task_artifacts."},
-				"offset":   mcpOffsetProperty, "maxBytes": mcpMaxBytesProperty,
+				"filename":     map[string]any{"type": "string", "maxLength": 255, "description": "Artifact filename from list_task_artifacts."},
+				mcpFieldOffset: mcpOffsetProperty, "maxBytes": mcpMaxBytesProperty,
 			}),
 			Annotations: readOnlyToolAnnotations("Read an Orka Task artifact"),
 			REST:        []string{"GET /api/v1/tasks/:id/artifacts/:filename"},
@@ -387,13 +401,13 @@ func mcpToolErrorResult(err error) (any, error) {
 	}
 	return mcpToolResult{
 		Content:           []mcpContent{{Type: "text", Text: text}},
-		StructuredContent: map[string]any{"error": structured},
+		StructuredContent: map[string]any{apiFieldError: structured},
 		IsError:           true,
 	}, nil
 }
 
 func decodeMCPArguments(raw json.RawMessage, target any) error {
-	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == responsesJSONNull {
 		raw = json.RawMessage(`{}`)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -413,7 +427,7 @@ type mcpInt struct {
 
 func (v *mcpInt) UnmarshalJSON(data []byte) error {
 	text := strings.TrimSpace(string(data))
-	if text == "null" {
+	if text == responsesJSONNull {
 		*v = mcpInt{}
 		return nil
 	}
@@ -445,7 +459,7 @@ type mcpBool struct {
 
 func (v *mcpBool) UnmarshalJSON(data []byte) error {
 	text := strings.TrimSpace(string(data))
-	if text == "null" {
+	if text == responsesJSONNull {
 		*v = mcpBool{}
 		return nil
 	}
@@ -520,7 +534,7 @@ func (a mcpListArgs) query() (url.Values, error) {
 	if err := validateMCPNamespace(a.Namespace); err != nil {
 		return nil, err
 	}
-	limit, err := a.Limit.bounded("limit", 1, mcpMaxListLimit, mcpDefaultListLimit)
+	limit, err := a.Limit.bounded(mcpFieldLimit, 1, mcpMaxListLimit, mcpDefaultListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +542,7 @@ func (a mcpListArgs) query() (url.Values, error) {
 		return nil, mcpArgumentError("continue is too long")
 	}
 	query := mcpNamespaceQuery(a.Namespace)
-	query.Set("limit", strconv.FormatInt(limit, 10))
+	query.Set(mcpFieldLimit, strconv.FormatInt(limit, 10))
 	if a.Continue != "" {
 		query.Set("continue", a.Continue)
 	}
@@ -1100,7 +1114,7 @@ func validateMCPApprovalID(id string) error {
 // decision wins, and refusal for finished or deleting Tasks.
 func (m *mcpServer) decideApproval(c fiber.Ctx, namespace, task, approvalID, decision, reason string) (approvals.Approval, error) {
 	var decided approvals.Approval
-	path := mcpTaskPath(task, "approvals", url.PathEscape(approvalID), "decision")
+	path := mcpTaskPath(task, "approvals", url.PathEscape(approvalID), mcpFieldDecision)
 	err := m.restJSON(c, fiber.MethodPost, path, mcpNamespaceQuery(namespace),
 		ApprovalDecisionRequest{Decision: decision, Reason: reason}, &decided)
 	return decided, err
@@ -1145,7 +1159,7 @@ type mcpOutputArgs struct {
 }
 
 func (a mcpOutputArgs) window() (int64, int64, error) {
-	offset, err := a.Offset.bounded("offset", 0, 1<<40, 0)
+	offset, err := a.Offset.bounded(mcpFieldOffset, 0, 1<<40, 0)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1167,7 +1181,7 @@ func mcpOutputChunk(text string, offset, limit int64) map[string]any {
 		end--
 	}
 	chunk := map[string]any{
-		"content": redacted[start:end], "offset": start, "returnedBytes": end - start,
+		"content": redacted[start:end], mcpFieldOffset: start, "returnedBytes": end - start,
 		"totalBytes": total, "truncated": end < total,
 	}
 	if end < total {
@@ -1222,7 +1236,7 @@ func (m *mcpServer) toolListTaskArtifacts(call *mcpCall, raw json.RawMessage) (a
 			CreatedAt   time.Time `json:"createdAt"`
 		} `json:"artifacts"`
 	}
-	if err := m.restJSON(call.c, fiber.MethodGet, mcpTaskPath(args.Name, "artifacts"), mcpNamespaceQuery(args.Namespace), nil, &response); err != nil {
+	if err := m.restJSON(call.c, fiber.MethodGet, mcpTaskPath(args.Name, mcpFieldArtifacts), mcpNamespaceQuery(args.Namespace), nil, &response); err != nil {
 		return nil, err
 	}
 	artifacts := make([]mcpArtifactSummary, 0, min(len(response.Artifacts), mcpMaxCollectionEntries))
@@ -1235,7 +1249,7 @@ func (m *mcpServer) toolListTaskArtifacts(call *mcpCall, raw json.RawMessage) (a
 		})
 	}
 	return map[string]any{
-		"name": args.Name, "artifacts": artifacts, "truncated": len(response.Artifacts) > len(artifacts),
+		"name": args.Name, mcpFieldArtifacts: artifacts, "truncated": len(response.Artifacts) > len(artifacts),
 	}, nil
 }
 
@@ -1269,7 +1283,7 @@ func (m *mcpServer) toolGetTaskArtifact(call *mcpCall, raw json.RawMessage) (any
 	if err != nil {
 		return nil, err
 	}
-	response, err := m.rest(call.c, fiber.MethodGet, mcpTaskPath(args.Name, "artifacts", args.Filename), mcpNamespaceQuery(args.Namespace), nil)
+	response, err := m.rest(call.c, fiber.MethodGet, mcpTaskPath(args.Name, mcpFieldArtifacts, args.Filename), mcpNamespaceQuery(args.Namespace), nil)
 	if err != nil {
 		return nil, err
 	}

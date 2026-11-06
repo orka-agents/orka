@@ -155,12 +155,12 @@ func (s mcpTaskState) statusMessage() string {
 // coreTaskFields is the 2025-11-25 Task object.
 func (s mcpTaskState) coreTaskFields() map[string]any {
 	fields := map[string]any{
-		"taskId":        encodeMCPTaskID(s.response.Namespace, s.response.Name, string(s.response.UID)),
-		"status":        s.status(),
-		"createdAt":     mcpTimeValue(s.response.CreationTimestamp.Time),
-		"lastUpdatedAt": s.lastUpdated(),
-		"ttl":           nil,
-		"pollInterval":  mcpTaskPollIntervalMS,
+		"taskId":          encodeMCPTaskID(s.response.Namespace, s.response.Name, string(s.response.UID)),
+		"status":          s.status(),
+		mcpFieldCreatedAt: mcpTimeValue(s.response.CreationTimestamp.Time),
+		"lastUpdatedAt":   s.lastUpdated(),
+		"ttl":             nil,
+		"pollInterval":    mcpTaskPollIntervalMS,
 	}
 	if message := s.statusMessage(); message != "" {
 		fields["statusMessage"] = message
@@ -171,13 +171,13 @@ func (s mcpTaskState) coreTaskFields() map[string]any {
 // extensionTaskFields is the io.modelcontextprotocol/tasks task object.
 func (s mcpTaskState) extensionTaskFields(resultType string) map[string]any {
 	fields := map[string]any{
-		"resultType":     resultType,
-		"taskId":         encodeMCPTaskID(s.response.Namespace, s.response.Name, string(s.response.UID)),
-		"status":         s.status(),
-		"createdAt":      mcpTimeValue(s.response.CreationTimestamp.Time),
-		"lastUpdatedAt":  s.lastUpdated(),
-		"ttlMs":          nil,
-		"pollIntervalMs": mcpTaskPollIntervalMS,
+		"resultType":      resultType,
+		"taskId":          encodeMCPTaskID(s.response.Namespace, s.response.Name, string(s.response.UID)),
+		"status":          s.status(),
+		mcpFieldCreatedAt: mcpTimeValue(s.response.CreationTimestamp.Time),
+		"lastUpdatedAt":   s.lastUpdated(),
+		"ttlMs":           nil,
+		"pollIntervalMs":  mcpTaskPollIntervalMS,
 	}
 	if message := s.statusMessage(); message != "" {
 		fields["statusMessage"] = message
@@ -207,13 +207,13 @@ func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) mcpToolR
 var mcpApprovalInputSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"decision": map[string]any{
+		mcpFieldDecision: map[string]any{
 			"type": "string", "title": "Decision", "enum": []string{approvalDecisionApprove, approvalDecisionDecline},
 			"enumNames": []string{"Approve", "Decline"},
 		},
-		"reason": map[string]any{"type": "string", "title": "Reason", "maxLength": mcpMaxReasonLength},
+		mcpFieldReason: map[string]any{"type": "string", "title": "Reason", "maxLength": mcpMaxReasonLength},
 	},
-	"required": []string{"decision"},
+	"required": []string{mcpFieldDecision},
 }
 
 func mcpApprovalInputMessage(approval approvals.Approval) string {
