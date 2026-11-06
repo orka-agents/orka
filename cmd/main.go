@@ -826,6 +826,7 @@ func main() {
 	if agentIdentityEntraTenantID != "" || agentIdentityEntraBlueprintClientID != "" {
 		agentIdentityConfig.Entra = &agentidentity.EntraConfig{
 			TenantID: agentIdentityEntraTenantID, BlueprintClientID: agentIdentityEntraBlueprintClientID,
+			Authority: agentIdentityEntraAuthority,
 		}
 	}
 	if err := agentIdentityConfig.Validate(); err != nil {
@@ -834,15 +835,10 @@ func main() {
 	}
 	var agentIdentitySource *agentidentity.Source
 	if agentIdentityConfig.Entra != nil {
-		if !strings.HasPrefix(agentIdentityEntraAuthority, "https://") {
-			setupLog.Error(fmt.Errorf("must be an https URL"), "invalid --agent-identity-entra-authority")
-			os.Exit(1)
-		}
 		agentIdentitySource = &agentidentity.Source{
 			Config: agentIdentityConfig,
 			Entra: &agentidentity.EntraIssuer{
 				Config:     *agentIdentityConfig.Entra,
-				Authority:  agentIdentityEntraAuthority,
 				Credential: agentidentity.FileCredential(agentIdentityTokenFile),
 			},
 		}

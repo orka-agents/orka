@@ -562,9 +562,17 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 
 	activeCount := activeTasks // capture for closure
 	lastUsed := agent.Status.LastUsed
+	decidedUID, decidedGeneration := agent.UID, agent.Generation
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, agent); err != nil {
 			return err
+		}
+		// Validation, the claim, and identity verification judged one
+		// generation of one Agent. Never record them on a recreated or
+		// edited Agent, which could name another identity; the edit
+		// requeues the Agent, and the error retries this pass.
+		if agent.UID != decidedUID || agent.Generation != decidedGeneration {
+			return fmt.Errorf("agent changed while its status was being decided")
 		}
 		agent.Status.ActiveTasks = activeCount
 		agent.Status.Ready = validationErr == nil

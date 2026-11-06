@@ -29,29 +29,22 @@ func authorizeAgentIdentityBind(
 	if previousIssuer, previousID, had := previous.IdentityRef(); had && previousIssuer == issuer && previousID == id {
 		return nil
 	}
-	username := ""
-	if userInfo != nil {
-		username = strings.TrimSpace(userInfo.Username)
-	}
-	logValues := []any{"user", username, "agentNamespace", agent.Namespace, "agentName", agent.Name, "identityIssuer", issuer, "identityID", id}
+	// Review the same principal an Agent use check does, so `bind` and `use`
+	// grants name one subject.
+	spec, reviewable := agentUseReviewSubject(userInfo)
+	logValues := []any{"user", spec.User, "agentNamespace", agent.Namespace, "agentName", agent.Name, "identityIssuer", issuer, "identityID", id}
 	forbidden := fiber.NewError(fiber.StatusForbidden, "not authorized to bind agent identity "+issuer+"/"+id)
-	if username == "" || strings.TrimSpace(agent.Namespace) == "" || kubernetesClientsetIsNil(clientset) {
+	if !reviewable || strings.TrimSpace(agent.Namespace) == "" || kubernetesClientsetIsNil(clientset) {
 		log.Info("agent identity bind authorization unavailable", logValues...)
 		return forbidden
 	}
-	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
-	for key, values := range userInfo.Extra {
-		extra[key] = authorizationv1.ExtraValue(append([]string(nil), values...))
+	spec.ResourceAttributes = &authorizationv1.ResourceAttributes{
+		Namespace: agent.Namespace, Verb: "bind",
+		Group: corev1alpha1.GroupVersion.Group, Version: corev1alpha1.GroupVersion.Version,
+		Resource: "agentidentities", Subresource: issuer, Name: id,
 	}
 	review, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, &authorizationv1.SubjectAccessReview{
-		Spec: authorizationv1.SubjectAccessReviewSpec{
-			User: username, UID: userInfo.UID, Groups: append([]string(nil), userInfo.Groups...), Extra: extra,
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace: agent.Namespace, Verb: "bind",
-				Group: corev1alpha1.GroupVersion.Group, Version: corev1alpha1.GroupVersion.Version,
-				Resource: "agentidentities", Subresource: issuer, Name: id,
-			},
-		},
+		Spec: spec,
 	}, metav1.CreateOptions{})
 	if err != nil {
 		log.Error(err, "agent identity bind authorization check failed", logValues...)
