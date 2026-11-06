@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,7 +45,23 @@ func (f *externalRuntimePoolFixture) advertiseSubstrateV1Backend(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider.Status.Backend = &workspacev1alpha1.ExecutionWorkspaceBackendStatus{Version: "b34fbee7", APIVersions: []string{"ateapi.v1.0.0"}}
-	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressAllowlist)
+	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressAllowlist, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
+	if err := f.r.Update(t.Context(), provider); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// withdrawEgressCredentialInjection models a gateway-enforcing provider that
+// cannot inject the provider-proxy token.
+func (f *externalRuntimePoolFixture) withdrawEgressCredentialInjection(t *testing.T) {
+	t.Helper()
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.provider), provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Status.SupportedFeatures = slices.DeleteFunc(provider.Status.SupportedFeatures, func(feature workspacev1alpha1.ExecutionWorkspaceFeature) bool {
+		return feature == workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection
+	})
 	if err := f.r.Update(t.Context(), provider); err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +105,7 @@ func newRoutedRuntimeFixture(t *testing.T, substrateV1 bool, mutate func(*worksp
 func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *testing.T) {
 	r := &RuntimePoolReconciler{ControllerAPIURL: "https://Orka-API.orka-system.svc"}
 	cfg := runtimePoolConfig{providerProxy: runtimePoolProviderProxyConfig{baseURL: "http://provider-auth-proxy.orka-system.svc:8080"}}
-	policy, err := r.externalRuntimeEgress(cfg)
+	policy, err := r.externalRuntimeEgress(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +119,7 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 
 	// One origin serving both roles yields one grant.
 	r.ControllerAPIURL = "http://provider-auth-proxy.orka-system.svc:8080/api"
-	if policy, err = r.externalRuntimeEgress(cfg); err != nil || len(policy.Rules) != 1 {
+	if policy, err = r.externalRuntimeEgress(cfg, nil); err != nil || len(policy.Rules) != 1 {
 		t.Fatalf("shared origin = %#v, %v", policy, err)
 	}
 	for name, controllerURL := range map[string]string{
@@ -112,7 +129,7 @@ func TestExternalRuntimeEgressAdmitsCoreOriginsAndRejectsInexpressibleOnes(t *te
 		"unsupported scheme":   "ftp://orka-api.orka-system.svc",
 	} {
 		r.ControllerAPIURL = controllerURL
-		if _, err := r.externalRuntimeEgress(cfg); err == nil {
+		if _, err := r.externalRuntimeEgress(cfg, nil); err == nil {
 			t.Errorf("%s: inexpressible controller origin was admitted", name)
 		}
 	}
@@ -170,12 +187,19 @@ func TestExternalRuntimePoolPublishesEgressAllowlistForSubstrateV1Native(t *test
 	if runtime.NetworkPolicy != nil || runtime.Egress == nil || runtime.BootstrapPort != workspacev1alpha1.NativeRouterTargetPort {
 		t.Fatalf("Substrate v1 native request network = %#v / %#v, port %d", runtime.NetworkPolicy, runtime.Egress, runtime.BootstrapPort)
 	}
+	providerSecret := findExternalProviderSecret(t, f)
 	want := []workspacev1alpha1.RuntimeEgressRule{
 		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "orka-api.default.svc", Ports: []int32{8080}},
-		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc", Ports: []int32{8080}},
+		{Protocol: workspacev1alpha1.RuntimeEgressHTTP, Host: "provider-auth-proxy.orka-system.svc", Ports: []int32{8080}, ReplaceHeaders: []workspacev1alpha1.RuntimeEgressCredentialHeader{{
+			Header: "Authorization", Prefix: "Bearer ",
+			SecretKeyRef: workspacev1alpha1.RuntimeEgressSecretKeyReference{Namespace: providerSecret.Namespace, Name: providerSecret.Name, Key: runtimePoolProviderTokenKey},
+		}}},
 	}
 	if !reflect.DeepEqual(runtime.Egress.Rules, want) {
 		t.Fatalf("admitted egress = %#v, want provider proxy and controller API origins", runtime.Egress.Rules)
+	}
+	if !slices.Contains(runtime.RequiredFeatures, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection) {
+		t.Fatal("injecting request does not require the provider's credential injection feature")
 	}
 }
 

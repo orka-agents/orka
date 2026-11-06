@@ -424,8 +424,11 @@ func (r *ToolReconciler) validateSubstrateMCPTool(ctx context.Context, tool *cor
 	if err := validateSubstrateMCPToolHeaders(tool); err != nil {
 		return err
 	}
-	if err := workspace.ValidateSubstrateEgressRules(substrateMCPEgressRules(tool)); err != nil {
+	if err := workspace.ValidateSubstrateEgressRules(substrateMCPEgressRules(tool, r.SubstrateConfig.EgressCredentialProvider)); err != nil {
 		return fmt.Errorf("invalid mcp.substrateActor.egress: %w", err)
+	}
+	if err := r.validateSubstrateMCPEgressCredentials(ctx, tool); err != nil {
+		return err
 	}
 	templateRequest := r.substrateMCPTemplateRequest(tool)
 	if r.EnforceNamespaceIsolation && templateRequest.TemplateNamespace != tool.Namespace {
@@ -1797,7 +1800,7 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(
 }
 
 func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool *corev1alpha1.Tool, actorID string) error {
-	rules := substrateMCPEgressRules(tool)
+	rules := substrateMCPEgressRules(tool, r.SubstrateConfig.EgressCredentialProvider)
 	if err := workspace.ValidateSubstrateEgressRules(rules); err != nil {
 		return err
 	}
@@ -1820,15 +1823,57 @@ func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateCon
 	return api.EnsureActorEgressPolicy(ctx, actorID, rules)
 }
 
-func substrateMCPEgressRules(tool *corev1alpha1.Tool) []workspace.SubstrateEgressRule {
+// substrateMCPEgressRules converts the Tool allowlist. A credential names a
+// Secret key in the Tool's namespace; credentialProvider is the gateway's
+// configured credential provider class, and an empty value makes any
+// credential rule fail validation instead of compiling without it.
+func substrateMCPEgressRules(tool *corev1alpha1.Tool, credentialProvider string) []workspace.SubstrateEgressRule {
 	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
 		return nil
 	}
 	rules := make([]workspace.SubstrateEgressRule, 0, len(tool.Spec.MCP.SubstrateActor.Egress))
 	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
-		rules = append(rules, workspace.SubstrateEgressRule{Scheme: string(rule.Scheme), Host: rule.Host, Ports: append([]int32(nil), rule.Ports...)})
+		converted := workspace.SubstrateEgressRule{Scheme: string(rule.Scheme), Host: rule.Host, Ports: append([]int32(nil), rule.Ports...)}
+		if credential := rule.Credential; credential != nil {
+			header := credential.Header
+			if header == "" {
+				header = "Authorization"
+			}
+			converted.Credential = &workspace.SubstrateEgressCredential{
+				Header: header, Prefix: credential.Prefix, Provider: strings.TrimSpace(credentialProvider),
+				Namespace: tool.Namespace, Name: credential.SecretRef.Name, Key: credential.SecretRef.Key,
+			}
+		}
+		rules = append(rules, converted)
 	}
 	return rules
+}
+
+// validateSubstrateMCPEgressCredentials requires every referenced credential
+// Secret key to exist and be non-empty, so a misconfigured Tool reports a
+// condition instead of an actor whose requests the gateway denies. The value
+// itself is never copied into the actor or its egress policy.
+func (r *ToolReconciler) validateSubstrateMCPEgressCredentials(ctx context.Context, tool *corev1alpha1.Tool) error {
+	if tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
+		return nil
+	}
+	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
+		if rule.Credential == nil {
+			continue
+		}
+		ref := rule.Credential.SecretRef
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: tool.Namespace, Name: ref.Name}, secret); err != nil {
+			if errors.IsNotFound(err) {
+				return fmt.Errorf("mcp.substrateActor.egress credential Secret %q not found", ref.Name)
+			}
+			return fmt.Errorf("failed to get mcp.substrateActor.egress credential Secret %q: %w", ref.Name, err)
+		}
+		if strings.TrimSpace(string(secret.Data[ref.Key])) == "" {
+			return fmt.Errorf("mcp.substrateActor.egress credential Secret %q key %q is empty or missing", ref.Name, ref.Key)
+		}
+	}
+	return nil
 }
 
 // validateSubstrateMCPToolHeaders rejects Tool headers that would override
