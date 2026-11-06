@@ -113,10 +113,13 @@ authenticated identity, including OIDC and transaction-token callers, needs `use
 on `agents` in `core.orka.ai`, with the Agent name and the Agent's namespace, to
 create a Task that names the Agent, or to create or edit a RepositoryScan or
 RepositoryMonitor so that it names the Agent. Agents an edited object already
-named are not checked again. OIDC callers are checked as the username Orka derives
-from the token (`preferred_username`, then `email`, `name`, and `sub`) and its
-groups, so bind Roles to that name. Permission to read, create, or edit an Agent
-does not grant `use`.
+named are not checked again. Kubernetes-authenticated callers are checked exactly
+as the API server authenticated them. OIDC and transaction-token callers are
+checked as the user `<issuer>#<sub>`, using the token's `iss` and `sub` claims,
+with each OIDC group prefixed the same way, so bind Roles to, for example,
+`https://token.actions.githubusercontent.com#repo:my-org/my-repo:ref:refs/heads/main`.
+Display claims such as `preferred_username`, `email`, and `name` are not used.
+Permission to read, create, or edit an Agent does not grant `use`.
 
 Gateway-owned Tasks and ledger records retain their current namespace/Gateway UID
 checks. General session APIs continue to exclude Gateway-owned sessions.
