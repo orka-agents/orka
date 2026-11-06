@@ -127,8 +127,11 @@ lowercase FQDN (or a single leftmost `*.` wildcard), and its ports. Bare `*`, IP
 addresses, and CIDRs are rejected, and an empty list denies all egress. Core always
 adds its in-cluster provider-auth-proxy origin. The provider applies the allowlist
 before every native Resume and does not resume if it cannot. `HTTPS` rules are
-intercepted by the gateway, so the provider mounts the `egress-mitm.ate.dev` and
-`system-roots.ate.dev` trust bundles into the runtime.
+intercepted by the gateway, so only allowlists with an `HTTPS` rule get the
+`egress-mitm.ate.dev` and `system-roots.ate.dev` trust bundles and seven CA
+variables. Upstream allows at most 32 environment variables per container and the
+Orka supervisor uses 31, so core admits only `HTTP` and `TLSPassthrough` rules for
+workspaces today.
 
 The infrastructure ActorTemplate must select exactly one operator-owned
 WorkerPool (`ate.dev/v1`, one `gvisor` sandbox class, no `template.resources`).

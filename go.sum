@@ -272,6 +272,8 @@ github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106124653-af9ace1909
 github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106124653-af9ace1909ab/go.mod h1:A7AOLVPVDjML2NJi5EVZoAzVwT8myggI41R6SiFHU8E=
 github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106130057-267b89209dc8 h1:bx41hfqLb24Gzi3tw4dd7SJskvAx0zWao/U/HZl26PM=
 github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106130057-267b89209dc8/go.mod h1:A7AOLVPVDjML2NJi5EVZoAzVwT8myggI41R6SiFHU8E=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106150457-dd4970df4295 h1:jd3+ksmgpt1iv9oM616dR1o6GWad19HNCLg8vOD8dGM=
+github.com/orka-agents/orka-workspace v0.1.0-alpha.5.0.20261106150457-dd4970df4295/go.mod h1:A7AOLVPVDjML2NJi5EVZoAzVwT8myggI41R6SiFHU8E=
 github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553 h1:tkRU85/CPGF8fe5X1V4+dmvbiSAR7rd5bUolli2gVKc=
 github.com/orka-agents/sessionkit v0.0.0-20261009211105-8c7dfc5d9553/go.mod h1:byFCN9LyfKhU61EIAYHl8KhgER3F5/HfdOHv9kqhr7c=
 github.com/pb33f/ordered-map/v2 v2.3.1 h1:5319HDO0aw4DA4gzi+zv4FXU9UlSs3xGZ40wcP1nBjY=
