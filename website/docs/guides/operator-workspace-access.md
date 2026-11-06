@@ -246,5 +246,5 @@ Each record includes:
 | `not supported for native-process (Substrate) execution workspaces` | Not available yet for Substrate. |
 | `runtime supervisor does not support operator access` | The runtime image predates this feature. Upgrade it. |
 
-See [ADR 0040](https://github.com/orka-agents/orka/blob/main/docs/adr/0040-operator-workspace-access.md)
+See [ADR 0044](https://github.com/orka-agents/orka/blob/main/docs/adr/0044-operator-workspace-access.md)
 for the design rationale.

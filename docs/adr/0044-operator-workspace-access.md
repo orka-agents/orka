@@ -1,4 +1,4 @@
-# 40. Audited, taint-on-write operator access to ACP execution workspaces
+# 44. Audited, taint-on-write operator access to ACP execution workspaces
 
 Date: 2026-11-06
 
