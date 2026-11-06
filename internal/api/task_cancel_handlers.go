@@ -113,7 +113,17 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
-		if task.Spec.SessionRef == nil || task.Spec.SessionRef.Name != name || !cancellableTaskPhase(task.Status.Phase) {
+		if !cancellableTaskPhase(task.Status.Phase) ||
+			(sessionNameForTask(task) != name && strings.TrimSpace(task.Labels[labels.LabelChatSession]) != name) {
+			continue
+		}
+		// A chat-created Task names its Session by label instead of
+		// spec.sessionRef; the label counts only for a chat Session.
+		sessionName, err := executionEventSessionName(ctx, h.sessionStore, namespace, task)
+		if err != nil {
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to resolve task session: %v", err))
+		}
+		if sessionName != name {
 			continue
 		}
 		cancelled, err := h.requestTaskCancellation(c, task, message)
