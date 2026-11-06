@@ -385,9 +385,11 @@ func (s *Server) setupRoutes() {
 	// Operator workspace debugging. Disabled unless --operator-workspace-access-enabled;
 	// each call also needs the class opt-in and the dedicated tasks/exec or
 	// tasks/files permission.
-	api.Get("/tasks/:id/exec", s.HandleOperatorExec)
-	api.Get("/tasks/:id/files", s.HandleOperatorFileDownload)
-	api.Put("/tasks/:id/files", s.HandleOperatorFileUpload)
+	// Their audit envelope precedes route authorization so dedicated
+	// permission denials are audited too.
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationExec)).Get("/tasks/:id/exec", s.HandleOperatorExec)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyOut)).Get("/tasks/:id/files", s.HandleOperatorFileDownload)
+	api.withPreAuthorization(s.operatorRouteAudit(operatoraccess.OperationCopyIn)).Put("/tasks/:id/files", s.HandleOperatorFileUpload)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)

@@ -29,6 +29,13 @@ import (
 // refusals are ordinary HTTP errors. The command arrives as the first stream
 // message, keeping argv out of URLs and request headers (and access logs).
 func (s *Server) HandleOperatorExec(c fiber.Ctx) error {
+	envelope := operatorRequestAudit(c, operatoraccess.OperationExec)
+	err := s.handleOperatorExec(c, envelope)
+	s.auditOperatorRefusal(c, envelope, err)
+	return err
+}
+
+func (s *Server) handleOperatorExec(c fiber.Ctx, envelope *operatorAuditEnvelope) error {
 	if !websocketUpgradeRequested(c) {
 		return fiber.NewError(fiber.StatusUpgradeRequired, "operator exec requires a WebSocket upgrade")
 	}
@@ -36,6 +43,8 @@ func (s *Server) HandleOperatorExec(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
+	// The relay owns every later record of this request.
+	envelope.recorded = true
 	return hijackWebSocket(c, func(conn *websocket.Conn) {
 		s.relayOperatorExec(conn, target)
 	})
@@ -190,7 +199,24 @@ func (s *Server) relayOperatorExec(client *websocket.Conn, target *operatorTarge
 		s.operatorAudit(ctx, failed)
 		sendOperatorStatus(ctx, client, operatoraccess.Status{ExitCode: -1, Reason: operatoraccess.ExitReasonError, Message: message})
 	}
+	refuse := func(err error) {
+		denied := target.record
+		denied.Phase = OperatorAuditDenied
+		denied.Outcome = operatorFailureOutcome(err)
+		s.operatorAudit(ctx, denied)
+		sendOperatorStatus(ctx, client, operatoraccess.Status{ExitCode: -1, Reason: operatoraccess.ExitReasonError, Message: denied.Outcome})
+	}
+	// The client chose when to send argv; the authorization it was resolved
+	// under must still hold now.
+	if err := s.revalidateOperatorTarget(ctx, target, operatoraccess.OperationExec); err != nil {
+		refuse(err)
+		return
+	}
 	if err := s.taintOperatorTarget(ctx, target); err != nil {
+		if _, refused := errors.AsType[*fiber.Error](err); refused {
+			refuse(err)
+			return
+		}
 		log.Error(err, "operator exec refused: taint could not be persisted", "auditID", record.AuditID)
 		fail("operator exec refused: the workspace taint could not be persisted")
 		return
@@ -311,6 +337,13 @@ func relayOperatorFrames(parent context.Context, client, upstream *websocket.Con
 // HandleOperatorFileDownload streams one regular workspace file out of the
 // Task's RuntimeSession. Read-only copies never taint the session.
 func (s *Server) HandleOperatorFileDownload(c fiber.Ctx) error {
+	envelope := operatorRequestAudit(c, operatoraccess.OperationCopyOut)
+	err := s.handleOperatorFileDownload(c, envelope)
+	s.auditOperatorRefusal(c, envelope, err)
+	return err
+}
+
+func (s *Server) handleOperatorFileDownload(c fiber.Ctx, envelope *operatorAuditEnvelope) error {
 	target, err := s.resolveOperatorTarget(c, operatoraccess.OperationCopyOut)
 	if err != nil {
 		return err
@@ -324,12 +357,17 @@ func (s *Server) HandleOperatorFileDownload(c fiber.Ctx) error {
 		return err
 	}
 	target.record.Path = cleaned
+	envelope.record = target.record
+	if err := s.revalidateOperatorTarget(c.Context(), target, operatoraccess.OperationCopyOut); err != nil {
+		return err
+	}
 	request := harnessv2.OperatorFileRequest{
 		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationCopyOut),
 		AuditID: target.record.AuditID, Path: cleaned, MaxBytes: operatoraccess.ClampFileBytes(maxBytes),
 	}
 	started := target.record
 	started.Phase = OperatorAuditStarted
+	envelope.recorded = true
 	s.operatorAudit(c.Context(), started)
 	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, http.MethodGet, nil)
 	if err != nil {
@@ -359,6 +397,13 @@ func (s *Server) HandleOperatorFileDownload(c fiber.Ctx) error {
 // HandleOperatorFileUpload writes one regular file into the Task's
 // RuntimeSession workspace. The session is tainted before the upload starts.
 func (s *Server) HandleOperatorFileUpload(c fiber.Ctx) error {
+	envelope := operatorRequestAudit(c, operatoraccess.OperationCopyIn)
+	err := s.handleOperatorFileUpload(c, envelope)
+	s.auditOperatorRefusal(c, envelope, err)
+	return err
+}
+
+func (s *Server) handleOperatorFileUpload(c fiber.Ctx, envelope *operatorAuditEnvelope) error {
 	target, err := s.resolveOperatorTarget(c, operatoraccess.OperationCopyIn)
 	if err != nil {
 		return err
@@ -367,18 +412,29 @@ func (s *Server) HandleOperatorFileUpload(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusBadRequest, err.Error())
 	}
+	target.record.Path = cleaned
+	envelope.record = target.record
 	size, err := strconv.ParseInt(strings.TrimSpace(c.Query("size")), 10, 64)
 	if err != nil || size < 0 || size > operatoraccess.MaxFileBytes {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("size must be between 0 and %d bytes", operatoraccess.MaxFileBytes))
 	}
-	if length := c.Request().Header.ContentLength(); length >= 0 && int64(length) != size {
-		return fiber.NewError(fiber.StatusBadRequest, "Content-Length does not match the declared size")
+	// The body is forwarded through a reader bounded to size, which would hide
+	// any excess of a chunked or unframed upload from the helper's exact-size
+	// check. Only an upload whose framing proves exactly size bytes is accepted.
+	if length := c.Request().Header.ContentLength(); length < 0 || int64(length) != size {
+		return fiber.NewError(fiber.StatusLengthRequired, "a Content-Length equal to the declared size is required")
 	}
-	target.record.Path = cleaned
+	if err := s.revalidateOperatorTarget(c.Context(), target, operatoraccess.OperationCopyIn); err != nil {
+		return err
+	}
 	if err := s.taintOperatorTarget(c.Context(), target); err != nil {
+		if _, refused := errors.AsType[*fiber.Error](err); refused {
+			return err
+		}
 		log.Error(err, "operator copy refused: taint could not be persisted", "auditID", target.record.AuditID)
 		return fiber.NewError(fiber.StatusServiceUnavailable, "operator copy refused: the workspace taint could not be persisted")
 	}
+	envelope.record = target.record
 	request := harnessv2.OperatorFileRequest{
 		Protocol: harnessv2.ProtocolVersion, Metadata: target.metadata(operatoraccess.OperationCopyIn),
 		AuditID: target.record.AuditID, Path: cleaned, Write: true, MaxBytes: max(size, 1), Size: size,
@@ -391,6 +447,7 @@ func (s *Server) HandleOperatorFileUpload(c fiber.Ctx) error {
 	}
 	started := target.record
 	started.Phase = OperatorAuditStarted
+	envelope.recorded = true
 	s.operatorAudit(c.Context(), started)
 	response, err := s.sendOperatorFileRequest(c.Context(), target, &request, http.MethodPut, io.LimitReader(body, size))
 	if err != nil {

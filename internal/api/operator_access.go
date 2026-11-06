@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -98,6 +97,7 @@ type OperatorAuditSink interface {
 type operatorTarget struct {
 	task      *corev1alpha1.Task
 	workspace *workspacev1alpha1.ExecutionWorkspace
+	class     *workspacev1alpha1.ExecutionWorkspaceClass
 	pool      *corev1alpha1.RuntimePool
 	endpoint  string
 	bearer    string
@@ -185,6 +185,59 @@ func newOperatorAuditID() string {
 	return "op-" + hex.EncodeToString(raw)
 }
 
+// operatorAuditEnvelopeKey stores the request's audit envelope in fiber
+// Locals so the route middleware and the handler share one audit ID.
+const operatorAuditEnvelopeKey = "orka.operatorAuditEnvelope"
+
+// operatorAuditEnvelope carries the safe actor/target identity of one
+// operator request from before route authorization until a handler takes
+// over its started/finished lifecycle. Any refusal before that point is
+// recorded exactly once as denied.
+type operatorAuditEnvelope struct {
+	record   OperatorAuditRecord
+	recorded bool
+}
+
+// operatorRequestAudit returns the request's audit envelope, creating it from
+// the authenticated identity and the requested namespace and Task name. The
+// Task UID stays empty until the Task has actually been read.
+func operatorRequestAudit(c fiber.Ctx, operation operatoraccess.Operation) *operatorAuditEnvelope {
+	if envelope, ok := c.Locals(operatorAuditEnvelopeKey).(*operatorAuditEnvelope); ok && envelope != nil {
+		return envelope
+	}
+	actor, authType := operatorActor(GetUserInfo(c))
+	envelope := &operatorAuditEnvelope{record: OperatorAuditRecord{
+		AuditID: newOperatorAuditID(), Operation: operation, Actor: actor, AuthType: authType,
+		Namespace: strings.TrimSpace(c.Query(toolNamespaceArg)), Task: c.Params("id"), StartedAt: time.Now().UTC(),
+	}}
+	c.Locals(operatorAuditEnvelopeKey, envelope)
+	return envelope
+}
+
+// auditOperatorRefusal records err as a denied attempt unless a record for
+// this request was already written.
+func (s *Server) auditOperatorRefusal(c fiber.Ctx, envelope *operatorAuditEnvelope, err error) {
+	if err == nil || envelope == nil || envelope.recorded {
+		return
+	}
+	envelope.recorded = true
+	record := envelope.record
+	record.Phase = OperatorAuditDenied
+	record.Outcome = operatorFailureOutcome(err)
+	s.operatorAudit(c.Context(), record)
+}
+
+// operatorRouteAudit runs before route authorization, so dedicated
+// permission denials are audited like every later refusal.
+func (s *Server) operatorRouteAudit(operation operatoraccess.Operation) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		envelope := operatorRequestAudit(c, operation)
+		err := c.Next()
+		s.auditOperatorRefusal(c, envelope, err)
+		return err
+	}
+}
+
 func operatorScopeFor(operation operatoraccess.Operation) string {
 	switch operation {
 	case operatoraccess.OperationExec:
@@ -246,42 +299,37 @@ func operatorConflict(message string) error {
 //
 //nolint:gocyclo // Every link of the identity chain is verified in one auditable place.
 func (s *Server) resolveOperatorTarget(c fiber.Ctx, operation operatoraccess.Operation) (*operatorTarget, error) {
+	// Every refusal below is audited as denied by the caller with whatever
+	// identity was established; the Task UID is recorded only once read.
+	envelope := operatorRequestAudit(c, operation)
+	target := &operatorTarget{record: envelope.record}
+	defer func() { envelope.record = target.record }()
+	deny := func(err error) (*operatorTarget, error) { return nil, err }
 	if !s.config.OperatorAccess.Enabled {
-		return nil, fiber.NewError(fiber.StatusForbidden,
-			"operator workspace access is disabled on this Orka installation (--operator-workspace-access-enabled)")
+		return deny(fiber.NewError(fiber.StatusForbidden,
+			"operator workspace access is disabled on this Orka installation (--operator-workspace-access-enabled)"))
 	}
 	namespace, err := s.handlers.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {
-		return nil, err
+		return deny(err)
 	}
+	target.record.Namespace = namespace
 	ui := GetUserInfo(c)
 	if err := authorizeOperatorCaller(ui, operation, namespace); err != nil {
-		return nil, err
+		return deny(err)
 	}
 	loaded, err := s.handlers.taskAccess().loadReadable(c, operatorAccessTaskAction, namespace, c.Params("id"))
 	if err != nil {
-		return nil, err
+		return deny(err)
 	}
 	ctx := c.Context()
 	reader := s.authorizationReader()
 	task := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, client.ObjectKeyFromObject(loaded), task); err != nil || task.UID != loaded.UID {
-		return nil, fiber.NewError(fiber.StatusNotFound, "task not found")
+		return deny(fiber.NewError(fiber.StatusNotFound, "task not found"))
 	}
-	actor, authType := operatorActor(ui)
-	target := &operatorTarget{task: task, record: OperatorAuditRecord{
-		AuditID: newOperatorAuditID(), Operation: operation, Actor: actor, AuthType: authType,
-		Namespace: task.Namespace, Task: task.Name, TaskUID: string(task.UID), StartedAt: time.Now().UTC(),
-	}}
-	deny := func(err error) (*operatorTarget, error) {
-		record := target.record
-		record.Phase = OperatorAuditDenied
-		if fiberErr, ok := errors.AsType[*fiber.Error](err); ok {
-			record.Outcome = fiberErr.Message
-		}
-		s.operatorAudit(ctx, record)
-		return nil, err
-	}
+	target.task = task
+	target.record.Namespace, target.record.Task, target.record.TaskUID = task.Namespace, task.Name, string(task.UID)
 	if !task.DeletionTimestamp.IsZero() {
 		return deny(operatorConflict("task is being deleted"))
 	}
@@ -336,6 +384,7 @@ func (s *Server) resolveOperatorTarget(c fiber.Ctx, operation operatoraccess.Ope
 	if class.UID != workspace.Spec.ClassBinding.UID {
 		return deny(fiber.NewError(fiber.StatusForbidden, "execution workspace class was replaced"))
 	}
+	target.class = class
 	if !operatoraccess.ParseClassAccess(class.Annotations).Allowed(operation) {
 		return deny(fiber.NewError(fiber.StatusForbidden, fmt.Sprintf(
 			"ExecutionWorkspaceClass %s does not allow operator %s; an administrator must set the %s annotation",
@@ -425,6 +474,76 @@ func operatorWorkspaceOwnedByTask(workspace *workspacev1alpha1.ExecutionWorkspac
 	return err == nil && epoch > 0 && epoch == workspace.Spec.AttachmentEpoch
 }
 
+// operatorWorkspaceStillTargeted reports whether workspace is still the exact
+// incarnation, attachment, and attachment epoch the request was authorized
+// against. A handoff to a continuation advances the attachment epoch, so a
+// request authorized for the old Task can never act on its successor's
+// workspace even when the successor reuses the same RuntimeSession.
+func operatorWorkspaceStillTargeted(workspace *workspacev1alpha1.ExecutionWorkspace, target *operatorTarget) error {
+	switch {
+	case workspace.UID != target.workspace.UID || !workspace.DeletionTimestamp.IsZero():
+		return fiber.NewError(fiber.StatusGone, "task execution workspace was replaced")
+	case workspace.Spec.DesiredState != workspacev1alpha1.ExecutionWorkspaceDesiredReady:
+		return operatorConflict("execution workspace is not running")
+	case workspace.Spec.AttachmentEpoch != target.workspace.Spec.AttachmentEpoch || !operatorWorkspaceOwnedByTask(workspace, target.task):
+		return operatorConflict("execution workspace attachment changed; operator access is refused")
+	}
+	return nil
+}
+
+// revalidateOperatorTarget re-reads the Task, its workspace attachment, and
+// the class opt-in immediately before anything is forwarded to the runtime.
+// The target was resolved before the exec request arrived, which a client
+// may delay; the class opt-in may have been withdrawn or the workspace handed
+// to a continuation in the meantime.
+func (s *Server) revalidateOperatorTarget(ctx context.Context, target *operatorTarget, operation operatoraccess.Operation) error {
+	reader := s.authorizationReader()
+	task := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(target.task), task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusGone, "task no longer exists")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "task is unavailable")
+	}
+	execution, resolved := task.Status.Execution, target.task.Status.Execution
+	switch {
+	case task.UID != target.task.UID:
+		return fiber.NewError(fiber.StatusGone, "task was replaced")
+	case !task.DeletionTimestamp.IsZero():
+		return operatorConflict("task is being deleted")
+	case execution == nil || resolved == nil || execution.RuntimeSessionUID != resolved.RuntimeSessionUID ||
+		execution.RuntimeSessionGeneration != resolved.RuntimeSessionGeneration || execution.RuntimeInstanceID != resolved.RuntimeInstanceID:
+		return fiber.NewError(fiber.StatusGone, "task runtime session changed")
+	case execution.State == corev1alpha1.TaskExecutionStateSettling:
+		return operatorConflict("task workspace is being validated for publication; operator access is refused")
+	}
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(target.workspace), workspace); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusGone, "task execution workspace no longer exists")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "execution workspace is unavailable")
+	}
+	if err := operatorWorkspaceStillTargeted(workspace, target); err != nil {
+		return err
+	}
+	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(target.class), class); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusForbidden, "execution workspace class no longer exists")
+		}
+		return fiber.NewError(fiber.StatusServiceUnavailable, "execution workspace class is unavailable")
+	}
+	if class.UID != target.class.UID {
+		return fiber.NewError(fiber.StatusForbidden, "execution workspace class was replaced")
+	}
+	if !operatoraccess.ParseClassAccess(class.Annotations).Allowed(operation) {
+		return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf(
+			"ExecutionWorkspaceClass %s no longer allows operator %s", class.Name, operation))
+	}
+	return nil
+}
+
 func (s *Server) verifyOperatorSupervisor(ctx context.Context, target *operatorTarget) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.endpoint+harnessv2.CapabilitiesPath, nil)
 	if err != nil {
@@ -472,8 +591,12 @@ func (s *Server) taintOperatorTarget(ctx context.Context, target *operatorTarget
 		if err := s.authorizationReader().Get(ctx, client.ObjectKeyFromObject(target.workspace), workspace); err != nil {
 			return fmt.Errorf("read execution workspace: %w", err)
 		}
-		if workspace.UID != target.workspace.UID || !workspace.DeletionTimestamp.IsZero() {
-			return fmt.Errorf("execution workspace was replaced")
+		// The ownership check and the taint write are one optimistic-lock
+		// step: an attachment handoff either lands first and refuses the
+		// taint, or the taint lands first and the attachment manager, which
+		// revalidates every attempt, refuses to hand a tainted workspace on.
+		if err := operatorWorkspaceStillTargeted(workspace, target); err != nil {
+			return err
 		}
 		if operatoraccess.Tainted(workspace.Annotations) {
 			break

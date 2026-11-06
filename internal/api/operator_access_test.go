@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -453,10 +455,12 @@ func TestOperatorExecEndToEndThroughTheAPI(t *testing.T) {
 	require.Equal(t, "printenv SECRET=hunter2", stdout.String())
 	require.True(t, f.workspaceTainted(t))
 	require.True(t, f.taskTainted(t))
-	require.Eventually(t, func() bool { return len(f.audit.phases()) == 2 }, 5*time.Second, 10*time.Millisecond)
+	// The refused plain-HTTP attempt is audited as denied before the exec.
+	require.Eventually(t, func() bool { return len(f.audit.phases()) == 3 }, 5*time.Second, 10*time.Millisecond)
 	f.audit.mu.Lock()
 	defer f.audit.mu.Unlock()
-	finished := f.audit.records[1]
+	require.Equal(t, OperatorAuditDenied, f.audit.records[0].Phase)
+	finished := f.audit.records[2]
 	require.Equal(t, OperatorAuditFinished, finished.Phase)
 	require.Equal(t, "printenv", finished.Command)
 	require.Equal(t, 2, finished.Argc)
@@ -516,4 +520,208 @@ func TestPublicationCredentialRefusedForOperatorTaintedTask(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
+}
+
+func (r *operatorAuditRecorder) snapshot() []OperatorAuditRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]OperatorAuditRecord(nil), r.records...)
+}
+
+func TestOperatorCopyInRequiresAnExactContentLength(t *testing.T) {
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	conn, err := net.DialTimeout("tcp", listener.Addr().String(), 5*time.Second)
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	require.NoError(t, conn.SetDeadline(time.Now().Add(10*time.Second)))
+	// A chunked upload declaring three bytes while sending eight.
+	_, err = io.WriteString(conn, "PUT /api/v1/tasks/t1/files?namespace=team&path=notes.txt&size=3 HTTP/1.1\r\n"+
+		"Host: orka\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n")
+	require.NoError(t, err)
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	defer response.Body.Close() //nolint:errcheck
+	body, _ := io.ReadAll(response.Body)
+	require.Equal(t, http.StatusLengthRequired, response.StatusCode, string(body))
+	require.False(t, f.workspaceTainted(t), "an unframed upload must be refused before the taint")
+	for _, call := range f.calls() {
+		require.NotContains(t, call, "operator-files")
+	}
+	records := f.audit.snapshot()
+	require.Len(t, records, 1)
+	require.Equal(t, OperatorAuditDenied, records[0].Phase)
+	require.Equal(t, "notes.txt", records[0].Path)
+}
+
+func TestOperatorAccessAuditsEveryRefusal(t *testing.T) {
+	t.Run("route authorization denial", func(t *testing.T) {
+		f := newOperatorFixture(t, true, "exec")
+		f.app.Put("/denied/:id/files", f.server.operatorRouteAudit(operatoraccess.OperationCopyIn),
+			func(fiber.Ctx) error { return fiber.NewError(fiber.StatusForbidden, "not authorized") },
+			f.server.HandleOperatorFileUpload)
+		status, body := f.do(t, http.MethodPut, "/denied/t1/files?namespace=team&path=a&size=1", strings.NewReader("x"))
+		require.Equal(t, http.StatusForbidden, status, body)
+		records := f.audit.snapshot()
+		require.Len(t, records, 1)
+		require.Equal(t, OperatorAuditDenied, records[0].Phase)
+		require.Equal(t, "alice", records[0].Actor)
+		require.Equal(t, "t1", records[0].Task)
+		require.Equal(t, "team", records[0].Namespace)
+		require.Empty(t, records[0].TaskUID, "the Task was never read")
+		require.Equal(t, "not authorized", records[0].Outcome)
+	})
+	t.Run("caller type refusal", func(t *testing.T) {
+		f := newOperatorFixture(t, true, "exec")
+		f.user = &UserInfo{AuthType: AuthTypeOIDC, Subject: "bob"}
+		status, body := f.do(t, http.MethodGet, "/api/v1/tasks/t1/files?namespace=team&path=a", nil)
+		require.Equal(t, http.StatusForbidden, status, body)
+		records := f.audit.snapshot()
+		require.Len(t, records, 1)
+		require.Equal(t, OperatorAuditDenied, records[0].Phase)
+		require.Equal(t, "bob", records[0].Actor)
+		require.Empty(t, records[0].TaskUID)
+	})
+	t.Run("malformed path", func(t *testing.T) {
+		f := newOperatorFixture(t, true, "exec")
+		status, body := f.do(t, http.MethodGet, "/api/v1/tasks/t1/files?namespace=team&path=../etc/passwd", nil)
+		require.Equal(t, http.StatusBadRequest, status, body)
+		records := f.audit.snapshot()
+		require.Len(t, records, 1)
+		require.Equal(t, OperatorAuditDenied, records[0].Phase)
+		require.Equal(t, "task-uid", records[0].TaskUID)
+	})
+	t.Run("malformed size", func(t *testing.T) {
+		f := newOperatorFixture(t, true, "exec")
+		status, body := f.do(t, http.MethodPut, "/api/v1/tasks/t1/files?namespace=team&path=a&size=-1", strings.NewReader("x"))
+		require.Equal(t, http.StatusBadRequest, status, body)
+		require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
+	})
+	t.Run("successful copy is not also denied", func(t *testing.T) {
+		f := newOperatorFixture(t, true, "exec")
+		status, body := f.do(t, http.MethodPut, "/api/v1/tasks/t1/files?namespace=team&path=a&size=1", strings.NewReader("x"))
+		require.Equal(t, http.StatusOK, status, body)
+		records := f.audit.snapshot()
+		require.Equal(t, []string{OperatorAuditStarted, OperatorAuditFinished}, f.audit.phases())
+		require.Equal(t, records[0].AuditID, records[1].AuditID)
+	})
+}
+
+func operatorTestTarget(t *testing.T, f *operatorFixture) *operatorTarget {
+	t.Helper()
+	ctx := context.Background()
+	target := &operatorTarget{
+		task: &corev1alpha1.Task{}, workspace: &workspacev1alpha1.ExecutionWorkspace{},
+		class: &workspacev1alpha1.ExecutionWorkspaceClass{}, record: OperatorAuditRecord{Operation: operatoraccess.OperationExec},
+	}
+	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "t1"}, target.task))
+	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "ws1"}, target.workspace))
+	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "cls"}, target.class))
+	return target
+}
+
+// A target resolved before the exec request arrived must be refused if the
+// class opt-in is withdrawn or the workspace is handed to another Task first.
+func TestOperatorTargetRevalidationRefusesChangedAuthorization(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string]struct {
+		mutate func(*testing.T, client.Client)
+		status int
+	}{
+		"class opt-in withdrawn": {func(t *testing.T, c client.Client) {
+			class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "cls"}, class))
+			delete(class.Annotations, operatoraccess.ClassAccessAnnotation)
+			require.NoError(t, c.Update(ctx, class))
+		}, http.StatusForbidden},
+		"workspace handed to a continuation": {func(t *testing.T, c client.Client) {
+			workspace := &workspacev1alpha1.ExecutionWorkspace{}
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "ws1"}, workspace))
+			workspace.Spec.AttachmentEpoch = 2
+			workspace.Spec.Attachment = &workspacev1alpha1.ExecutionWorkspaceAttachment{
+				TaskRef: workspacev1alpha1.ObjectIdentityReference{Name: "t2", UID: "successor-uid"}, Epoch: 2,
+			}
+			require.NoError(t, c.Update(ctx, workspace))
+		}, http.StatusConflict},
+		"runtime session replaced": {func(t *testing.T, c client.Client) {
+			task := &corev1alpha1.Task{}
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "t1"}, task))
+			task.Status.Execution.RuntimeSessionGeneration = 3
+			require.NoError(t, c.Status().Update(ctx, task))
+		}, http.StatusGone},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newOperatorFixture(t, true, "exec")
+			target := operatorTestTarget(t, f)
+			require.NoError(t, f.server.revalidateOperatorTarget(ctx, target, operatoraccess.OperationExec))
+			tc.mutate(t, f.client)
+			err := f.server.revalidateOperatorTarget(ctx, target, operatoraccess.OperationExec)
+			fiberErr, ok := errors.AsType[*fiber.Error](err)
+			require.True(t, ok, "%v", err)
+			require.Equal(t, tc.status, fiberErr.Code, fiberErr.Message)
+		})
+	}
+}
+
+// The ownership check and the taint write share one optimistic-lock step, so
+// a handoff that lands first refuses the taint instead of tainting (and
+// writing into) the successor's workspace.
+func TestOperatorTaintRefusesAWorkspaceHandedToAnotherTask(t *testing.T) {
+	ctx := context.Background()
+	f := newOperatorFixture(t, true, "exec")
+	target := operatorTestTarget(t, f)
+	workspace := &workspacev1alpha1.ExecutionWorkspace{}
+	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "ws1"}, workspace))
+	workspace.Spec.Attachment = nil
+	workspace.Spec.AttachmentEpoch = 2
+	require.NoError(t, f.client.Update(ctx, workspace))
+	err := f.server.taintOperatorTarget(ctx, target)
+	_, refused := errors.AsType[*fiber.Error](err)
+	require.True(t, refused, "%v", err)
+	require.False(t, f.workspaceTainted(t))
+	require.False(t, f.taskTainted(t))
+}
+
+func TestOperatorExecRevalidatesAfterTheDelayedExecRequest(t *testing.T) {
+	f := newOperatorFixture(t, true, "exec")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = f.app.Listener(listener, fiber.ListenConfig{DisableStartupMessage: true}) }()
+	t.Cleanup(func() { _ = f.app.Shutdown() })
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws://"+listener.Addr().String()+"/api/v1/tasks/t1/exec?namespace=team",
+		&websocket.DialOptions{Subprotocols: []string{operatoraccess.WebSocketSubprotocol}})
+	require.NoError(t, err)
+	defer conn.CloseNow() //nolint:errcheck
+
+	// The class opt-in is withdrawn after the upgrade but before argv arrives.
+	class := &workspacev1alpha1.ExecutionWorkspaceClass{}
+	require.NoError(t, f.client.Get(ctx, types.NamespacedName{Namespace: operatorTestNamespace, Name: "cls"}, class))
+	delete(class.Annotations, operatoraccess.ClassAccessAnnotation)
+	require.NoError(t, f.client.Update(ctx, class))
+
+	request, err := json.Marshal(map[string]any{"type": "exec", "exec": operatoraccess.ExecOptions{Argv: []string{"sh"}}})
+	require.NoError(t, err)
+	require.NoError(t, conn.Write(ctx, websocket.MessageBinary, operatoraccess.Frame(operatoraccess.ChannelControl, request)))
+	var status operatoraccess.Status
+	for {
+		_, payload, err := conn.Read(ctx)
+		require.NoError(t, err)
+		if len(payload) > 0 && payload[0] == operatoraccess.ChannelStatus {
+			require.NoError(t, json.Unmarshal(payload[1:], &status))
+			break
+		}
+	}
+	require.Equal(t, operatoraccess.ExitReasonError, status.Reason)
+	require.Contains(t, status.Message, "no longer allows")
+	require.False(t, f.workspaceTainted(t))
+	for _, call := range f.calls() {
+		require.NotContains(t, call, "operator-exec")
+	}
+	require.Equal(t, []string{OperatorAuditDenied}, f.audit.phases())
 }

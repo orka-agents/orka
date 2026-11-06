@@ -259,3 +259,33 @@ func TestSettlementDeletesTaintedSuspendWorkspace(t *testing.T) {
 		t.Fatal("settlement must delete a tainted workspace")
 	}
 }
+
+// The attachment manager revalidates the exact object version of every
+// optimistic-lock attempt, so a taint orka-api commits after the reconciler's
+// initial read must still refuse to hand the workspace to another Task.
+func TestAttachmentAttemptRefusesAWorkspaceTaintedAfterTheInitialRead(t *testing.T) {
+	ctx := context.Background()
+	r, _, _, _ := externalACPFixture(t, true)
+	r.Scheme = r.Client.Scheme()
+	task := acpClassTestTask()
+	resolved, err := r.resolveACPWorkspaceClass(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolveACPWorkspaceBindingWithClass(task, "", resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := r.createACPClassWorkspace(ctx, task, binding, "pool", "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateACPClassWorkspaceAttachmentAttempt(workspace, task, binding, "pool", time.Now()); errors.Is(err, operatoraccess.ErrTainted) {
+		t.Fatalf("an untainted workspace was refused as tainted: %v", err)
+	}
+	tainted := workspace.DeepCopy()
+	tainted.Annotations[operatoraccess.TaintAnnotation] = operatoraccess.EncodeTaint(operatoraccess.Taint{AuditID: "op-1"})
+	if err := validateACPClassWorkspaceAttachmentAttempt(tainted, task, binding, "pool", time.Now()); !errors.Is(err, operatoraccess.ErrTainted) {
+		t.Fatalf("attachment attempt on a tainted workspace = %v, want ErrTainted", err)
+	}
+}

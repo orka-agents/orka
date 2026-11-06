@@ -423,6 +423,13 @@ func validateACPClassWorkspaceAttachmentAttempt(
 	if err := verifyACPClassWorkspace(workspace, task, binding, poolName); err != nil {
 		return err
 	}
+	// The attachment manager calls this for the exact object version of
+	// every optimistic-lock attempt, so a taint that orka-api committed after
+	// ensureACPClassWorkspace read the workspace still refuses the handoff.
+	if operatoraccess.Tainted(workspace.Annotations) &&
+		(workspace.Spec.Attachment == nil || workspace.Spec.Attachment.TaskRef.UID != task.UID) {
+		return fmt.Errorf("workspace %s: %w", workspace.Name, operatoraccess.ErrTainted)
+	}
 	err := validateWorkspaceAttachmentAttempt(workspace, task, now)
 	if err == nil || binding.Class.ControllerName == "" || workspace.Spec.Attachment != nil {
 		return err

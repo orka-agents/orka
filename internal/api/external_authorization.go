@@ -272,26 +272,47 @@ type externalAPIRouter struct {
 	router fiber.Router
 	prefix string
 	h      *Handlers
+	// pre runs before route authorization; nil for ordinary routes.
+	pre fiber.Handler
 }
 
 func (s *Server) externalAPIGroup(prefix string, auth fiber.Handler) externalAPIRouter {
 	return externalAPIRouter{router: s.app.Group(prefix, auth), prefix: prefix, h: s.handlers}
 }
 
+// withPreAuthorization returns a router whose routes run pre before route
+// authorization, for example to audit refused calls. pre must call Next.
+func (r externalAPIRouter) withPreAuthorization(pre fiber.Handler) externalAPIRouter {
+	r.pre = pre
+	return r
+}
+
+func (r externalAPIRouter) handlers(method, path string, handler fiber.Handler) (any, []any) {
+	authorize := r.h.authorizeExternalRoute(method + " " + r.prefix + path)
+	if r.pre != nil {
+		return r.pre, []any{authorize, handler}
+	}
+	return authorize, []any{handler}
+}
+
 func (r externalAPIRouter) Get(path string, handler fiber.Handler) {
-	r.router.Get(path, r.h.authorizeExternalRoute(fiber.MethodGet+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodGet, path, handler)
+	r.router.Get(path, first, rest...)
 }
 
 func (r externalAPIRouter) Post(path string, handler fiber.Handler) {
-	r.router.Post(path, r.h.authorizeExternalRoute(fiber.MethodPost+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPost, path, handler)
+	r.router.Post(path, first, rest...)
 }
 
 func (r externalAPIRouter) Put(path string, handler fiber.Handler) {
-	r.router.Put(path, r.h.authorizeExternalRoute(fiber.MethodPut+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodPut, path, handler)
+	r.router.Put(path, first, rest...)
 }
 
 func (r externalAPIRouter) Delete(path string, handler fiber.Handler) {
-	r.router.Delete(path, r.h.authorizeExternalRoute(fiber.MethodDelete+" "+r.prefix+path), handler)
+	first, rest := r.handlers(fiber.MethodDelete, path, handler)
+	r.router.Delete(path, first, rest...)
 }
 
 func (h *Handlers) authorizeExternalRoute(route string) fiber.Handler {
