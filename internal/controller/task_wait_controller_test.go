@@ -60,7 +60,10 @@ func newTaskWaitHarness(t *testing.T, objs ...client.Object) *taskWaitHarness {
 			}
 			return c.Create(ctx, obj, opts...)
 		}}).Build()
-	h.r = &TaskWaitReconciler{Client: h.client, APIReader: h.client, ExecutionEvents: h.events, Now: func() time.Time { return taskWaitTestNow }}
+	h.r = &TaskWaitReconciler{
+		Client: h.client, APIReader: h.client, ExecutionEvents: h.events, TaskProvenanceProtected: true,
+		Now: func() time.Time { return taskWaitTestNow },
+	}
 	return h
 }
 
@@ -655,5 +658,21 @@ func TestTaskWaitReleasesTheLinkOnceResumed(t *testing.T) {
 	}
 	if finalizers := h.task(wait.ContinuationTaskName).Finalizers; len(finalizers) != 0 {
 		t.Fatalf("a linked continuation must not keep the link finalizer: %v", finalizers)
+	}
+}
+
+func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	// Without provenance admission this lineage annotation may be forged.
+	forged := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	forged.UID, forged.Finalizers = "uid-forged", nil
+	h := newTaskWaitHarness(t, task, forged)
+	h.r.TaskProvenanceProtected = false
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
+		t.Fatalf("an unprovable continuation must never be linked, got %+v", wait)
 	}
 }

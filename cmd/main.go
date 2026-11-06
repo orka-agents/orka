@@ -1750,6 +1750,7 @@ func main() {
 	// Parked turns resume through continuation Tasks on the same Session.
 	if err := (&controller.TaskWaitReconciler{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ExecutionEvents: appStorage,
+		TaskProvenanceProtected: taskProvenanceProtected,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TaskWait")
 		os.Exit(1)

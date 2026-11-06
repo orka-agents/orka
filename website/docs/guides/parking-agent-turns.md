@@ -89,7 +89,11 @@ Abandoned
   creates one continuation Task. It copies the parked Task's agent, runtime, workspace,
   requester, and Session. It changes three things: a controller-authored prompt describing
   the event, `sessionRef.create: false`, and `timeout` set to the time remaining before the
-  original deadline. The parked prompt is never sent again.
+  original deadline. The parked prompt is never sent again. If the controller restarts after
+  creating the continuation, it adopts that Task instead of creating another. That recovery
+  requires Task provenance admission, which reserves the continuation lineage annotations to
+  the controller; without it, Orka abandons the wait rather than trust an annotation that
+  could be forged.
 - When `timeout` expires but the Task deadline still leaves time, the wait resumes anyway and
   tells the agent it timed out. An undecided sign-off is marked expired.
 

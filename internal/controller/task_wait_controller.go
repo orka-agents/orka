@@ -65,6 +65,10 @@ type TaskWaitReconciler struct {
 	APIReader client.Reader
 	// ExecutionEvents holds parked approval requests and decisions.
 	ExecutionEvents store.DeduplicatingExecutionEventStore
+	// TaskProvenanceProtected reports that Task provenance admission reserves
+	// the continuation lineage annotations to the controller. Only then can an
+	// existing Task with the reserved name be proven to be Orka's continuation.
+	TaskProvenanceProtected bool
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -408,6 +412,13 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		if existing.Annotations[labels.AnnotationContinuationOfUID] != string(task.UID) {
 			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
 				"the continuation name is held by an unrelated Task")
+		}
+		if !r.TaskProvenanceProtected {
+			// Without provenance admission anyone who can create Tasks could
+			// forge the lineage annotation; linking it would hand that Task
+			// this one's authority. Fail closed.
+			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
+				"an existing continuation cannot be proven to be Orka's because Task provenance admission is disabled")
 		}
 		return r.markResumed(ctx, task, existing)
 	case !apierrors.IsNotFound(err):

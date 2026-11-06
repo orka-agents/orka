@@ -77,6 +77,11 @@ var (
 		labels.AnnotationParentTaskUID,
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
+		// Continuation lineage lets a resumed turn act for its parked
+		// predecessor, so only the controller may write it.
+		labels.AnnotationContinuationOfName,
+		labels.AnnotationContinuationOfUID,
+		labels.AnnotationContinuationIndex,
 	}
 )
 

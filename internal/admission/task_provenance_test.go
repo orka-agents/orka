@@ -90,6 +90,19 @@ func TestTaskProvenanceValidator_Create(t *testing.T) {
 			contains: labels.AnnotationParentTaskUID,
 		},
 		{
+			name: "untrusted create with continuation lineage denied",
+			user: untrustedUsername,
+			task: func() *corev1alpha1.Task {
+				task := newAdmissionTestTask()
+				if task.Annotations == nil {
+					task.Annotations = map[string]string{}
+				}
+				task.Annotations[labels.AnnotationContinuationOfUID] = "victim-uid"
+				return task
+			}(),
+			contains: labels.AnnotationContinuationOfUID,
+		},
+		{
 			name:     "untrusted create with workspace settlement marker denied",
 			user:     untrustedUsername,
 			task:     withWorkspaceSettledAnnotation(newAdmissionTestTask()),
