@@ -580,3 +580,35 @@ func TestHistoryLimitsKeepPredecessorsOfRunningContinuations(t *testing.T) {
 		t.Fatalf("settled runs beyond the history limit are still pruned: %v", remaining)
 	}
 }
+
+func TestTaskWaitContinuationWaitsOnItsPredecessorsChild(t *testing.T) {
+	predecessor := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	predecessor.Name, predecessor.UID = "first", "uid-first"
+	predecessor.Status.Wait.State = corev1alpha1.TaskWaitStateResumed
+	predecessor.Status.Wait.ContinuationTaskName, predecessor.Status.Wait.ContinuationTaskUID = "parked", "uid-parked"
+	parked := parkedTestTask(corev1alpha1.TaskWaitKindTasks, corev1alpha1.TaskPhaseSucceeded, "child")
+	parked.Annotations[labels.AnnotationContinuationOfName] = "first"
+	parked.Annotations[labels.AnnotationContinuationOfUID] = "uid-first"
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: taskWaitTestNamespace, UID: "uid-child",
+			Annotations: map[string]string{labels.AnnotationParentTaskName: "first", labels.AnnotationParentTaskUID: "uid-first"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	h := newTaskWaitHarness(t, predecessor, parked, child)
+	h.settle("parked")
+	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateWaiting {
+		t.Fatalf("the predecessor's running child must keep the continuation waiting, got %s", got)
+	}
+	current := h.task("child")
+	current.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	if err := h.client.Status().Update(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed || !strings.Contains(h.task(wait.ContinuationTaskName).Spec.Prompt, "child: Succeeded") {
+		t.Fatalf("unexpected resume %+v", wait)
+	}
+}

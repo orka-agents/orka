@@ -417,7 +417,37 @@ func (t *WaitForTasksTool) validateBrokeredCaller(ctx context.Context, toolCtx *
 	return parent, nil
 }
 
+// validateBrokeredWaitTarget authorizes a child of the authenticated Task or,
+// for a continuation, a child of any verified predecessor in its chain: a
+// resumed coordinator keeps authority over the children it delegated before
+// it parked.
 func validateBrokeredWaitTarget(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
+	err := validateBrokeredWaitTargetForParent(ctx, toolCtx, parent, task)
+	if err == nil || toolCtx == nil || !toolCtx.Brokered {
+		return err
+	}
+	var reader = toolCtx.PolicyReader
+	if reader == nil && toolCtx.Client != nil {
+		reader = toolCtx.Client
+	}
+	current := parent
+	for range taskwait.MaxChainLength {
+		previous, ok, lookupErr := taskwait.Predecessor(ctx, reader, current)
+		if lookupErr != nil {
+			return fmt.Errorf("verify continuation predecessor: %w", lookupErr)
+		}
+		if !ok {
+			break
+		}
+		if validateBrokeredWaitTargetForParent(ctx, toolCtx, previous, task) == nil {
+			return nil
+		}
+		current = previous
+	}
+	return err
+}
+
+func validateBrokeredWaitTargetForParent(ctx context.Context, toolCtx *ToolContext, parent, task *corev1alpha1.Task) error {
 	if toolCtx == nil || !toolCtx.Brokered {
 		return nil
 	}

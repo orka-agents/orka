@@ -176,3 +176,44 @@ func TestParkUntilTasksRequiresAuthorizedChildren(t *testing.T) {
 		t.Fatalf("unexpected references %+v", wait.References)
 	}
 }
+
+func TestContinuationKeepsAuthorityOverItsPredecessorsChildren(t *testing.T) {
+	predecessor := parkTestTask()
+	predecessor.Name, predecessor.UID = "coord-prev", "uid-prev"
+	predecessor.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	predecessor.Status.Wait = &corev1alpha1.TaskWaitStatus{
+		State: corev1alpha1.TaskWaitStateResumed, ContinuationTaskName: "coord", ContinuationTaskUID: "uid-coord",
+	}
+	continuation := parkTestTask()
+	continuation.Annotations = map[string]string{
+		labels.AnnotationContinuationOfName: "coord-prev", labels.AnnotationContinuationOfUID: "uid-prev",
+	}
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "child", Namespace: defaultNamespace, UID: "uid-child",
+		Labels:      map[string]string{labels.LabelParentTask: "coord-prev"},
+		Annotations: map[string]string{labels.AnnotationParentTaskUID: "uid-prev"},
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(predecessor, corev1alpha1.GroupVersion.WithKind("Task")),
+		},
+	}}
+	c := newFakeClient(predecessor, continuation, child)
+	toolCtx := parkToolContext(c, "op-1")
+	toolCtx.TaskProvenanceProtected = true
+	if _, err := executePark(t, toolCtx, `{"kind":"tasks","reason":"r","tasks":["child"]}`); err != nil {
+		t.Fatalf("a continuation must keep authority over its predecessor's children: %v", err)
+	}
+
+	// The annotation alone proves nothing: without the predecessor's resumed
+	// status naming this Task, the child stays out of scope.
+	forgedPredecessor := predecessor.DeepCopy()
+	forgedPredecessor.ResourceVersion = ""
+	forgedPredecessor.Status.Wait.ContinuationTaskUID = "uid-someone-else"
+	fresh := parkTestTask()
+	fresh.Annotations = continuation.Annotations
+	c = newFakeClient(forgedPredecessor, fresh, child.DeepCopy())
+	toolCtx = parkToolContext(c, "op-1")
+	toolCtx.TaskProvenanceProtected = true
+	if _, err := executePark(t, toolCtx, `{"kind":"tasks","reason":"r","tasks":["child"]}`); err == nil {
+		t.Fatal("an unverified predecessor link must not grant child authority")
+	}
+}

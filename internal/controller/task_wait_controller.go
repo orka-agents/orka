@@ -298,6 +298,10 @@ func (r *TaskWaitReconciler) evaluateApproval(ctx context.Context, task *corev1a
 
 func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alpha1.Task) (string, bool, time.Duration, error) {
 	wait := task.Status.Wait
+	owners, err := r.taskWaitChildOwners(ctx, task)
+	if err != nil {
+		return "", false, taskWaitPollInterval, err
+	}
 	lines := make([]string, 0, len(wait.References))
 	for _, name := range wait.References {
 		if len(validation.IsDNS1123Subdomain(name)) > 0 {
@@ -312,7 +316,7 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 			}
 			return "", false, taskWaitPollInterval, err
 		}
-		if !taskWaitChildBelongs(task, child) {
+		if !taskWaitChildBelongsToAny(owners, child) {
 			lines = append(lines, name+": is no longer this task's child")
 			continue
 		}
@@ -338,6 +342,34 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 	}
 	return "The child tasks you waited for have finished: " + strings.Join(lines, "; ") +
 		". Call wait_for_tasks with the same names to read their results.", true, 0, nil
+}
+
+// taskWaitChildOwners returns the parked Task and its verified predecessors.
+// A continuation keeps authority over the children its predecessors delegated.
+func (r *TaskWaitReconciler) taskWaitChildOwners(ctx context.Context, task *corev1alpha1.Task) ([]*corev1alpha1.Task, error) {
+	owners := []*corev1alpha1.Task{task}
+	current := task
+	for range taskwait.MaxChainLength {
+		previous, ok, err := taskwait.Predecessor(ctx, r.reader(), current)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		owners = append(owners, previous)
+		current = previous
+	}
+	return owners, nil
+}
+
+func taskWaitChildBelongsToAny(owners []*corev1alpha1.Task, child *corev1alpha1.Task) bool {
+	for _, owner := range owners {
+		if taskWaitChildBelongs(owner, child) {
+			return true
+		}
+	}
+	return false
 }
 
 // taskWaitChildBelongs re-checks the parent link verified when the wait was

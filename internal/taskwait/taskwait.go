@@ -104,6 +104,30 @@ func Continuation(ctx context.Context, reader client.Reader, task *corev1alpha1.
 	return next, nil
 }
 
+// Predecessor loads the parked Task that task continues, and verifies the link
+// from the predecessor's controller-written status: its resumed wait must
+// name exactly this Task incarnation. Annotations alone never prove a link.
+func Predecessor(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*corev1alpha1.Task, bool, error) {
+	if task == nil || reader == nil {
+		return nil, false, nil
+	}
+	name := strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfName])
+	uid := strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID])
+	if name == "" || uid == "" {
+		return nil, false, nil
+	}
+	previous := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, previous); err != nil {
+		return nil, false, client.IgnoreNotFound(err)
+	}
+	wait := previous.Status.Wait
+	if string(previous.UID) != uid || wait == nil || wait.State != corev1alpha1.TaskWaitStateResumed ||
+		wait.ContinuationTaskName != task.Name || wait.ContinuationTaskUID != string(task.UID) {
+		return nil, false, nil
+	}
+	return previous, true, nil
+}
+
 // ResolveTail follows resumed waits from task to the newest Task of its chain.
 // It returns task itself when it has not resumed.
 func ResolveTail(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*corev1alpha1.Task, error) {
