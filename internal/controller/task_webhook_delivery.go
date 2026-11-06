@@ -108,7 +108,12 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	}
 
 	// Claim the attempt durably before sending. Loading keys can block on
-	// Secret reads, so the lease starts from a fresh clock reading.
+	// Secret reads, so the lease starts from a fresh clock reading. The claim
+	// write and the send run under a timer started no later than that
+	// reading, so this replica cannot begin a POST after its persisted lease
+	// lets another replica claim the next attempt.
+	leaseCtx, cancelLease := context.WithTimeout(ctx, w.attemptLease)
+	defer cancelLease()
 	now = w.now()
 	attempt := delivery.Attempts + 1
 	claimedAt := metav1.NewTime(now)
@@ -117,11 +122,11 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	delivery.LastAttemptTime = &claimedAt
 	delivery.NextAttemptTime = &lease
 	task.Status.WebhookDelivery = delivery
-	if err := status.Update(ctx, task); err != nil {
+	if err := status.Update(leaseCtx, task); err != nil {
 		return 0, err
 	}
 
-	result := w.deliver(ctx, task, notice, attempt, keys.Current)
+	result := w.deliver(leaseCtx, task, notice, attempt, keys.Current)
 
 	delivery = task.Status.WebhookDelivery
 	delivery.LastStatusCode = result.StatusCode

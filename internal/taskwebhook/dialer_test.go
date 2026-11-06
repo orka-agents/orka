@@ -14,8 +14,10 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type resolverFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
@@ -239,5 +241,32 @@ func TestPinnedAddressesBypassDNSAndAllowOnlyPinnedTargets(t *testing.T) {
 	request, _ = http.NewRequestWithContext(empty, http.MethodPost, target, nil)
 	if _, err := client.Do(request); !errors.Is(err, ErrAddressNotAllowed) {
 		t.Fatalf("empty pin POST error = %v, want ErrAddressNotAllowed", err)
+	}
+}
+
+// Unreachable candidates listed before a reachable one must not each consume
+// a full connect timeout: one deadline covers the whole connect.
+func TestDialerSharesOneDeadlineAcrossCandidates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(server.Close)
+	// TEST-NET addresses are never routed, so connects to them stall or fail.
+	unreachable := []string{"192.0.2.1", "198.51.100.1", "203.0.113.1"}
+	allowed := func(address netip.Addr) bool {
+		return address == netip.MustParseAddr("127.0.0.1") || slices.Contains(unreachable, address.String())
+	}
+	const timeout = 600 * time.Millisecond
+	dialer := &Dialer{
+		Resolver: staticResolver(append(slices.Clone(unreachable), "127.0.0.1")...),
+		Policy:   allowed,
+		Timeout:  timeout,
+	}
+	started := time.Now()
+	connection, err := dialer.DialContext(context.Background(), "tcp", net.JoinHostPort("receiver.example", serverPort(t, server)))
+	if err != nil {
+		t.Fatalf("reachable candidate was not dialed: %v", err)
+	}
+	_ = connection.Close()
+	if elapsed := time.Since(started); elapsed > timeout+300*time.Millisecond {
+		t.Fatalf("connect took %v; unreachable candidates exceeded the shared %v deadline", elapsed, timeout)
 	}
 }

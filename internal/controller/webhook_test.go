@@ -723,3 +723,38 @@ func TestWebhookDeliveryLeaseStartsAfterKeyLoading(t *testing.T) {
 		t.Fatalf("claimed lease ends at %v, want %v (a full lease after slow key loading)", leaseEnd.Time, want)
 	}
 }
+
+// stalledClaimWrites delays the claim write past the attempt lease, as a
+// stalled API server would, then lets it land.
+type stalledClaimWrites struct {
+	ctrlclient.SubResourceWriter
+	stall  time.Duration
+	writes int
+}
+
+func (w *stalledClaimWrites) Update(ctx context.Context, obj ctrlclient.Object, opts ...ctrlclient.SubResourceUpdateOption) error {
+	w.writes++
+	if w.writes == 1 {
+		time.Sleep(w.stall)
+	}
+	return w.SubResourceWriter.Update(context.WithoutCancel(ctx), obj, opts...)
+}
+
+func TestWebhookDeliveryNeverSendsAfterItsLeaseExpires(t *testing.T) {
+	t.Parallel()
+	receiver := newWebhookReceiver(t)
+	task := newWebhookTask(receiver.server.URL)
+	client := newWebhookTestClient(t, task)
+	notifier := newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
+	notifier.attemptLease = 100 * time.Millisecond
+	writes := &stalledClaimWrites{SubResourceWriter: client.Status(), stall: 300 * time.Millisecond}
+	if _, err := notifier.reconcileDelivery(context.Background(), writes, reloadWebhookTask(t, client, task)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(receiver.all()); got != 0 {
+		t.Fatalf("expired owner sent %d webhook(s) after another replica could claim the attempt", got)
+	}
+	if delivery := reloadWebhookTask(t, client, task).Status.WebhookDelivery; delivery == nil || delivery.State == corev1alpha1.TaskWebhookDeliveryDelivered {
+		t.Fatalf("delivery = %+v, want a pending retry", delivery)
+	}
+}
