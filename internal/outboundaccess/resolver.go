@@ -97,6 +97,10 @@ type ResolveRequest struct {
 	// rather than its declared URL; connection mode refuses it before any
 	// credential work.
 	MCPBacked bool
+	// TaskUID is the executing Task's UID as the caller authenticated it. It
+	// only attributes identity use records, including refusals for a Task
+	// that has no identity binding.
+	TaskUID string
 	// AgentIdentity is the identity frozen into the executing Task's binding.
 	// agentIdentity-mode policies act as this identity and no other; nil
 	// fails them closed.

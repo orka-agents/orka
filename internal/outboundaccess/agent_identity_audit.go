@@ -86,13 +86,14 @@ func (r *KubernetesResolver) auditAgentIdentityUse(policy *corev1alpha1.Outbound
 		"policyUID", string(policy.UID), "policyGeneration", policy.Generation,
 		"mode", mode, "tool", req.Tool.Name, "toolMethod", req.Tool.Method,
 		"argumentsDigest", argumentsDigest(req.Tool.Name, req.Arguments),
+		"taskUID", auditTaskUID(req),
 	}
 	if binding := req.AgentIdentity; binding != nil {
 		values = append(values,
 			"agentNamespace", binding.AgentNamespace, "agentName", binding.AgentName,
 			"agentUID", binding.AgentUID, "agentGeneration", binding.AgentGeneration,
 			"identityIssuer", binding.Identity.Issuer, "identityID", binding.Identity.ID,
-			"issuerInstance", binding.Identity.Instance, "taskUID", binding.TaskUID,
+			"issuerInstance", binding.Identity.Instance,
 		)
 	}
 	if mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
@@ -103,6 +104,15 @@ func (r *KubernetesResolver) auditAgentIdentityUse(policy *corev1alpha1.Outbound
 		return
 	}
 	logger.Info("agent identity call issued", append(values, "outcome", "issued")...)
+}
+
+// auditTaskUID names the calling Task whether or not it has an identity
+// binding; both come from the same authenticated Task.
+func auditTaskUID(req ResolveRequest) string {
+	if req.TaskUID != "" || req.AgentIdentity == nil {
+		return req.TaskUID
+	}
+	return req.AgentIdentity.TaskUID
 }
 
 // requesterPseudonym joins records per person without naming them. Without
