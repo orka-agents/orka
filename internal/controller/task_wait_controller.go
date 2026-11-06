@@ -313,7 +313,7 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 		return "", false, taskWaitPollInterval, err
 	}
 	lines := make([]string, 0, len(wait.References))
-	for _, name := range wait.References {
+	for i, name := range wait.References {
 		if len(validation.IsDNS1123Subdomain(name)) > 0 {
 			lines = append(lines, "an invalid task reference")
 			continue
@@ -325,6 +325,12 @@ func (r *TaskWaitReconciler) evaluateTasks(ctx context.Context, task *corev1alph
 				continue
 			}
 			return "", false, taskWaitPollInterval, err
+		}
+		// Only the exact child authorized when the wait was recorded counts;
+		// a same-named replacement never controls when this Task resumes.
+		if len(wait.ReferenceUIDs) != len(wait.References) || string(child.UID) != wait.ReferenceUIDs[i] {
+			lines = append(lines, name+": is no longer the task this wait was authorized for")
+			continue
 		}
 		if !taskWaitChildBelongsToAny(owners, child) {
 			lines = append(lines, name+": is no longer this task's child")

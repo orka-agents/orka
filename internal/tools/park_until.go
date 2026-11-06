@@ -166,7 +166,7 @@ func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (strin
 		return "", fmt.Errorf("too little time remains before the Task deadline to park; finish the work in this turn instead")
 	}
 
-	references, resumeAt, err := t.kindInputs(ctx, toolCtx, task, kind, args, now, deadline)
+	references, referenceUIDs, resumeAt, err := t.kindInputs(ctx, toolCtx, task, kind, args, now, deadline)
 	if err != nil {
 		return "", err
 	}
@@ -177,7 +177,7 @@ func (t *ParkUntilTool) Execute(ctx context.Context, raw json.RawMessage) (strin
 		references = []string{taskwait.ParkedApprovalID(namespace, taskUID, execution.Attempt, execution.PromptID, digest)}
 	}
 	wait := &corev1alpha1.TaskWaitStatus{
-		State: corev1alpha1.TaskWaitStateRequested, Kind: kind, References: references, Reason: reason,
+		State: corev1alpha1.TaskWaitStateRequested, Kind: kind, References: references, ReferenceUIDs: referenceUIDs, Reason: reason,
 		Attempt: execution.Attempt, PromptID: execution.PromptID, OperationDigest: digest,
 		RequestedAt: metav1.NewTime(now), Deadline: metav1.NewTime(deadline.Truncate(time.Second)),
 		ChainIndex: taskwait.ChainIndex(task), Message: "waiting for this turn to finish",
@@ -220,51 +220,58 @@ func (t *ParkUntilTool) kindInputs(
 	kind corev1alpha1.TaskWaitKind,
 	args parkUntilArgs,
 	now, deadline time.Time,
-) ([]string, *time.Time, error) {
+) ([]string, []string, *time.Time, error) {
 	switch kind {
 	// Fields that belong to another kind are ignored.
 	case corev1alpha1.TaskWaitKindApproval:
 		if toolCtx.ExecutionEvents == nil {
-			return nil, nil, fmt.Errorf("parked approvals require execution event storage")
+			return nil, nil, nil, fmt.Errorf("parked approvals require execution event storage")
 		}
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	case corev1alpha1.TaskWaitKindTimer:
 		duration, err := time.ParseDuration(strings.TrimSpace(args.Duration))
 		if err != nil || duration < time.Second || duration > maxParkTimerDuration {
-			return nil, nil, fmt.Errorf("kind=timer requires duration between 1s and %s", maxParkTimerDuration)
+			return nil, nil, nil, fmt.Errorf("kind=timer requires duration between 1s and %s", maxParkTimerDuration)
 		}
 		resumeAt := now.Add(duration)
 		if !resumeAt.Add(taskwait.MinContinuationBudget).Before(deadline) {
-			return nil, nil, fmt.Errorf("the timer would end too close to the Task deadline; finish the work in this turn instead")
+			return nil, nil, nil, fmt.Errorf("the timer would end too close to the Task deadline; finish the work in this turn instead")
 		}
-		return nil, &resumeAt, nil
+		return nil, nil, &resumeAt, nil
 	case corev1alpha1.TaskWaitKindTasks:
 		names := make([]string, 0, len(args.Tasks))
 		for _, name := range args.Tasks {
 			name = strings.TrimSpace(name)
 			if name == "" || slices.Contains(names, name) {
-				return nil, nil, fmt.Errorf("tasks must be distinct, non-empty child task names")
+				return nil, nil, nil, fmt.Errorf("tasks must be distinct, non-empty child task names")
 			}
 			names = append(names, name)
 		}
 		if len(names) == 0 || len(names) > corev1alpha1.MaxTaskWaitReferences {
-			return nil, nil, fmt.Errorf("kind=tasks requires between 1 and %d child task names", corev1alpha1.MaxTaskWaitReferences)
+			return nil, nil, nil, fmt.Errorf("kind=tasks requires between 1 and %d child task names", corev1alpha1.MaxTaskWaitReferences)
 		}
+		// Record each authorized child's UID so the wait never follows a
+		// same-named Task created after this one is deleted.
+		uids := make([]string, 0, len(names))
 		for _, name := range names {
 			child := &corev1alpha1.Task{}
 			if err := toolCtx.PolicyReader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, child); err != nil {
 				if apierrors.IsNotFound(err) {
-					return nil, nil, fmt.Errorf("task %q is not an authorized child of this task", name)
+					return nil, nil, nil, fmt.Errorf("task %q is not an authorized child of this task", name)
 				}
-				return nil, nil, fmt.Errorf("load child task %q: %w", name, err)
+				return nil, nil, nil, fmt.Errorf("load child task %q: %w", name, err)
 			}
 			if err := validateBrokeredWaitTarget(ctx, toolCtx, task, child); err != nil {
-				return nil, nil, fmt.Errorf("task %q: %w", name, err)
+				return nil, nil, nil, fmt.Errorf("task %q: %w", name, err)
 			}
+			if child.UID == "" {
+				return nil, nil, nil, fmt.Errorf("task %q has no identity to wait on", name)
+			}
+			uids = append(uids, string(child.UID))
 		}
-		return names, nil, nil
+		return names, uids, nil, nil
 	default:
-		return nil, nil, fmt.Errorf("unsupported wait kind %q", kind)
+		return nil, nil, nil, fmt.Errorf("unsupported wait kind %q", kind)
 	}
 }
 

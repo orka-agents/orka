@@ -172,8 +172,9 @@ func TestParkUntilTasksRequiresAuthorizedChildren(t *testing.T) {
 	if _, err := executePark(t, toolCtx, `{"kind":"tasks","reason":"waiting for review","tasks":["child"]}`); err != nil {
 		t.Fatalf("park on an authorized child: %v", err)
 	}
-	if wait := loadParkTask(t, c).Status.Wait; len(wait.References) != 1 || wait.References[0] != "child" {
-		t.Fatalf("unexpected references %+v", wait.References)
+	if wait := loadParkTask(t, c).Status.Wait; len(wait.References) != 1 || wait.References[0] != "child" ||
+		len(wait.ReferenceUIDs) != 1 || wait.ReferenceUIDs[0] != "uid-child" {
+		t.Fatalf("unexpected references %+v %+v", wait.References, wait.ReferenceUIDs)
 	}
 }
 

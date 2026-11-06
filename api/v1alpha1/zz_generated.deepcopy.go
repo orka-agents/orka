@@ -5376,6 +5376,11 @@ func (in *TaskWaitStatus) DeepCopyInto(out *TaskWaitStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.ReferenceUIDs != nil {
+		in, out := &in.ReferenceUIDs, &out.ReferenceUIDs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	in.RequestedAt.DeepCopyInto(&out.RequestedAt)
 	if in.WaitingSince != nil {
 		in, out := &in.WaitingSince, &out.WaitingSince

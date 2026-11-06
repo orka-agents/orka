@@ -96,6 +96,14 @@ type TaskWaitStatus struct {
 	// +optional
 	References []string `json:"references,omitempty"`
 
+	// ReferenceUIDs holds the UID of each child Task in References, in the
+	// same order, recorded when the wait was authorized. A Tasks wait follows
+	// only those exact incarnations, never a same-named replacement.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=253
+	// +optional
+	ReferenceUIDs []string `json:"referenceUIDs,omitempty"`
+
 	// Reason is the agent's bounded, sanitized explanation of the wait.
 	// +kubebuilder:validation:MaxLength=512
 	// +optional

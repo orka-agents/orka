@@ -162,6 +162,11 @@ func parkedTestTask(kind corev1alpha1.TaskWaitKind, phase corev1alpha1.TaskPhase
 			},
 		},
 	}
+	for _, reference := range references {
+		if kind == corev1alpha1.TaskWaitKindTasks {
+			task.Status.Wait.ReferenceUIDs = append(task.Status.Wait.ReferenceUIDs, "uid-"+reference)
+		}
+	}
 	if kind == corev1alpha1.TaskWaitKindApproval && len(references) == 0 {
 		task.Status.Wait.References = []string{"approval-1"}
 	}
@@ -674,5 +679,27 @@ func TestTaskWaitRefusesToAdoptWithoutProvenanceAdmission(t *testing.T) {
 	wait := h.task("parked").Status.Wait
 	if wait.State != corev1alpha1.TaskWaitStateAbandoned || wait.ContinuationTaskUID != "" {
 		t.Fatalf("an unprovable continuation must never be linked, got %+v", wait)
+	}
+}
+
+func TestTaskWaitIgnoresASameNamedReplacementChild(t *testing.T) {
+	// The authorized child was deleted and an unrelated Task took its name,
+	// carrying only the parent label that admission allows on any create.
+	replacement := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: taskWaitTestNamespace, UID: "uid-replacement",
+			Labels: map[string]string{labels.LabelParentTask: "parked"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
+	}
+	h := newTaskWaitHarness(t, parkedTestTask(corev1alpha1.TaskWaitKindTasks, corev1alpha1.TaskPhaseSucceeded, "child"), replacement)
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed {
+		t.Fatalf("state = %s, want Resumed", wait.State)
+	}
+	prompt := h.task(wait.ContinuationTaskName).Spec.Prompt
+	if strings.Contains(prompt, "child: Failed") || !strings.Contains(prompt, "child: is no longer the task this wait was authorized for") {
+		t.Fatalf("a replacement child must not supply the outcome, got %s", prompt)
 	}
 }
