@@ -81,6 +81,11 @@ const (
 	// RuntimePoolConditionRolloutReady reports whether the immutable runtime
 	// profile has been installed without version skew.
 	RuntimePoolConditionRolloutReady = "RolloutReady"
+	// RuntimePoolConditionWorkerEviction reports a graceful termination of the
+	// worker hosting an execution-workspace runtime (an infrastructure upgrade
+	// roll, node drain, or Spot reclaim) and how the controller is handling it.
+	// It is absent until an eviction is observed.
+	RuntimePoolConditionWorkerEviction = "WorkerEviction"
 )
 
 const (
@@ -95,6 +100,20 @@ const (
 	// not be bound into the runtime Pod. Tasks waiting on the pool fail with the
 	// same reason instead of waiting for a rollout that cannot complete.
 	RuntimePoolReasonToolboxUnavailable = "ToolboxUnavailable"
+	// RuntimePoolReasonEvictionDraining: admission is closed and the runtime is
+	// draining toward a data-only suspension before the eviction window ends.
+	RuntimePoolReasonEvictionDraining = "EvictionDraining"
+	// RuntimePoolReasonEvictionSuspended: the evicted runtime was suspended with
+	// its data and resumes on a new worker.
+	RuntimePoolReasonEvictionSuspended = "EvictionSuspended"
+	// RuntimePoolReasonEvictionDeadlineExceeded: the runtime did not drain before
+	// the eviction window ended. Suspension is never authorized afterward; the
+	// instance is lost, its last checkpoint is retained, and uncertain work is
+	// never replayed.
+	RuntimePoolReasonEvictionDeadlineExceeded = "EvictionDeadlineExceeded"
+	// RuntimePoolReasonEvictionNotSuspendable: the workspace class cannot
+	// preserve data across an eviction, so the instance is lost with its worker.
+	RuntimePoolReasonEvictionNotSuspendable = "EvictionNotSuspendable"
 )
 
 // RuntimePoolTrustDomain identifies the logical same-trust-domain boundary

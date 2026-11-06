@@ -260,7 +260,24 @@ const (
 	// DrainReasonToolboxUnavailable drains a supervisor whose pool lost
 	// toolbox admission so its workload can be stopped once idle.
 	DrainReasonToolboxUnavailable = "toolbox_unavailable"
+	// DrainReasonWorkspaceRetirement drains a workspace runtime before a
+	// controller-authorized Stop or Delete. Nothing on the instance is
+	// preserved, so a later termination signal may exit promptly.
+	DrainReasonWorkspaceRetirement = "workspace_retirement"
+	// DrainReasonWorkspaceSuspend drains a workspace runtime before a
+	// controller-authorized data-only suspension.
+	DrainReasonWorkspaceSuspend = "workspace_suspend"
+	// DrainReasonWorkerEviction is self-reported by a supervisor whose host
+	// worker began graceful termination (an upgrade roll, node drain, or Spot
+	// reclaim). The supervisor keeps serving so the controller can drain it
+	// and have the provider suspend its data before the eviction window ends.
+	DrainReasonWorkerEviction = "worker_eviction"
 )
+
+// WorkerEvictionSuspendWindow is the Agent Substrate worker shutdown budget:
+// after a worker Pod receives SIGTERM, each hosted Actor has this long to be
+// suspended before the worker kills it.
+const WorkerEvictionSuspendWindow = 30 * time.Minute
 
 type DrainStatus struct {
 	AcceptingNewSessions bool      `json:"acceptingNewSessions"`

@@ -484,7 +484,7 @@ func (r *RuntimePoolReconciler) validateExternalNativeRetirement(ctx context.Con
 	if err := workspacev1alpha1.ValidateStartup(*request, *a); err != nil {
 		return fmt.Errorf("external native runtime retirement has invalid startup evidence: %w", err)
 	}
-	observed, err := r.attestExternalWorkspaceStartup(ctx, request, a.Startup)
+	observed, err := r.attestExternalRetiringWorkspaceStartup(ctx, request, a.Startup)
 	if err != nil || observed.UID != pod.UID || observed.Namespace != pod.Namespace || observed.Name != pod.Name {
 		return fmt.Errorf("external native runtime retirement failed independent materialization verification")
 	}
