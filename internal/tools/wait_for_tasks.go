@@ -111,6 +111,9 @@ func NewWaitForTasksTool(k8sClient client.Client) *WaitForTasksTool {
 // before a caller's context deadline expires.
 const waitForTasksDeadlineGrace = 2 * time.Second
 
+// waitForTasksPollInterval is how often wait_for_tasks re-reads its children.
+var waitForTasksPollInterval = 5 * time.Second
+
 // Name returns the tool name
 func (t *WaitForTasksTool) Name() string {
 	return waitForTasksToolName
@@ -207,7 +210,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	deadline := time.Now().Add(timeout)
-	pollInterval := 5 * time.Second
+	pollInterval := waitForTasksPollInterval
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -245,6 +248,8 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 				results[taskName].Result = fmt.Sprintf("error: %v", chainErr)
 				continue
 			}
+			// Results persist across polls; describe only the Task reported now.
+			results[taskName].ContinuationTask, results[taskName].WaitState = "", ""
 			if tail.Name != task.Name {
 				results[taskName].ContinuationTask = tail.Name
 			}
