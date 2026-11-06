@@ -200,7 +200,9 @@ type PromptMCPAuthorization struct {
 	MCPConfigurationDigest string            `json:"mcpConfigurationDigest"`
 	ToolPolicy             MCPToolPolicy     `json:"toolPolicy"`
 	ApprovalPolicy         MCPApprovalPolicy `json:"approvalPolicy"`
-	ExpiresAt              time.Time         `json:"expiresAt"`
+	// NativePermissions must equal the RuntimeSession's launch mode.
+	NativePermissions NativePermissionMode `json:"nativePermissions,omitempty"`
+	ExpiresAt         time.Time            `json:"expiresAt"`
 }
 
 func (a PromptMCPAuthorization) ValidateFor(metadata MutationMetadata, lease PromptLease) error {
@@ -243,6 +245,7 @@ func (a PromptMCPAuthorization) Configuration() MCPPolicyConfiguration {
 		ToolPolicyDigest: a.ToolPolicyDigest, ApprovalPolicyDigest: a.ApprovalPolicyDigest,
 		MCPConfigurationDigest: a.MCPConfigurationDigest,
 		ToolPolicy:             a.ToolPolicy, ApprovalPolicy: a.ApprovalPolicy,
+		NativePermissions: a.NativePermissions,
 	}
 }
 

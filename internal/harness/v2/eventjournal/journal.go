@@ -709,9 +709,16 @@ func (s *State) appendUpdateIfNew(
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
-	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk {
+	if event.Update.Kind == harnessv2.UpdateAssistantMessageChunk || event.Update.Kind == harnessv2.UpdateAssistantThoughtChunk {
 		// The complete terminal transcript is persisted once redaction can see
-		// all chunk boundaries. Advance only the bounded sequence high-water.
+		// all chunk boundaries, and reasoning is never persisted. Advance only
+		// the bounded sequence high-water.
+		s.markProcessed(identity)
+		return nil, false, nil
+	}
+	if isLiveOnlyToolUpdate(event) && s.toolStartPersisted(event) {
+		// Raw input and file edits are live-only; once the start is durable an
+		// update carrying nothing else adds no telemetry.
 		s.markProcessed(identity)
 		return nil, false, nil
 	}
@@ -803,6 +810,17 @@ func isBufferedToolContentUpdate(event harnessv2.Event) bool {
 	content, multipleBlocks := toolContentFragment(tool.Content)
 	return (tool.ContentOmitted || tool.ContentReplace || content != "" || multipleBlocks) &&
 		tool.Status != harnessv2.ToolCallStatusCompleted && tool.Status != harnessv2.ToolCallStatusFailed
+}
+
+// isLiveOnlyToolUpdate reports a non-terminal tool update whose only payload
+// is live-update fields.
+func isLiveOnlyToolUpdate(event harnessv2.Event) bool {
+	if event.Update == nil || event.Update.ToolCall == nil || isTerminalToolUpdate(event) {
+		return false
+	}
+	tool := event.Update.ToolCall
+	return tool.Title == "" && tool.Kind == "" && len(tool.Content) == 0 && !tool.ContentReplace && !tool.ContentOmitted &&
+		(tool.Name != "" || len(tool.RawInput) > 0 || len(tool.Diffs) > 0)
 }
 
 func isNonTerminalToolUpdate(event harnessv2.Event) bool {

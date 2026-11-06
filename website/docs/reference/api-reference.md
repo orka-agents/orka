@@ -61,6 +61,7 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 | `/api/v1/tasks` | GET | List tasks (paginated; `labelSelector` narrows by label with `kubectl -l` syntax, invalid selectors return 400) |
 | `/api/v1/tasks/:id` | GET | Get task details |
 | `/api/v1/tasks/:id` | DELETE | Cancel/delete task |
+| `/api/v1/tasks/:id/cancel` | POST | Cancel a queued or running task and keep it |
 | `/api/v1/tasks/:id/logs` | GET | Stream task logs |
 | `/api/v1/tasks/:id/result` | GET | Get task result |
 | `/api/v1/tasks/:id/artifacts` | GET | List task artifacts |
@@ -74,6 +75,17 @@ The controller requires `ORKA_GITHUB_WEBHOOK_SECRET` and verifies the `X-Hub-Sig
 `workspace`, `agentRuntime`, `sessionRef`, `schedule`, and a few more — can also go at the
 top level, as in the [example](#example-usage) below. Fields outside that set, such as
 `resources` or the schedule history limits, take effect only under `spec`.
+
+`POST /api/v1/tasks/:id/cancel` records a cancel request and returns `202` with
+`{"status":"cancellation requested"}`, or `{"status":"Cancelled"}` if the Task is already
+cancelled; a Task that already succeeded or failed returns `409`, and so does a scheduled
+Task, which is stopped by setting `spec.suspend` instead. The Task reaches
+`Cancelled` asynchronously, unless it finished first. For an agent Task the controller
+answers its pending permission requests as cancelled, cancels the prompt, and stops the
+agent if the cancel does not settle in time; the Task keeps its history and result, and
+its Session can continue with another Task. A signed-in person may cancel only the Tasks
+they requested; ServiceAccounts need `patch` on the Task. Agent Tasks can be cancelled
+only in the `harness-v2` execution mode.
 
 Task and Session event history, live streams, traces, forks, and approvals have their own
 endpoints, described in [Execution events](execution-events.md).
@@ -212,6 +224,21 @@ These routes manage [Connections](resources.md#connection) to a
 | `/api/v1/connections/:name/complete` | POST | Body `{"completion": "<token from the fragment>"}`. Commits the parked tokens. Only the Connection's owner can call it and only with the one-time token the completing browser received, so a consent link forwarded to someone else can never bind their account to the sender's Connection. Requires the controller's custody finalizer to be present; after a disconnect the UID is tombstoned and completion is refused. A short-lived token without a refresh token that expired while the browser held the completion is refused (`409`) and the completion discarded, never committed as Ready. If a `PUT` changed the mode between the completion fence and the status write, the link is judged again from the committed material against the new mode. A Connection keeps at most 16 superseded grants for revocation at disconnect; a completion past that bound is refused (`409`) and the person disconnects and links again. |
 
 The consent `state` and the completion token are HMACs over random single-use nonces, keyed by a value derived from the controller's snapshot key. The pending consent row, sealed with the controller key, binds the nonce to the Connection UID, owner digest, provider, and a 10 minute expiry. Token material is sealed under a per-Connection data key that is itself wrapped by the controller key. Disconnect deletes both halves and tombstones the Connection, so the live store and later backups hold nothing; a backup taken before the disconnect still contains the sealed material and must be protected like the store itself. See [ADR 0033](https://github.com/orka-agents/orka/blob/main/docs/adr/0033-user-connectors.md). A Connection holds one pending consent at a time: a new authorize replaces the earlier one. A `ConnectorProvider` name is at most 63 characters, since it labels every Connection.
+
+## Agent Host Protocol
+
+With `--enable-ahp-api`, `/ahp` serves the [Agent Host Protocol](https://github.com/microsoft/agent-host-protocol) (versions `1.0.0` and `0.9.0`) over WebSocket, one JSON-RPC message per text frame. See [ADR 0034](https://github.com/orka-agents/orka/blob/main/docs/adr/0034-agent-host-protocol-api.md). In the `harness-v2` execution mode, Orka's built-in runtimes are offered as AHP agents and each message runs as an agent Task; see [Agent Host Protocol clients](../operations/agent-host-protocol.md).
+
+`/ahp` does not accept Orka bearer tokens. A client presents an AHP connection token as `?tkn=<token>` or `Authorization: Bearer <token>`; desktop clients that connect by URL alone use `wss://<API host>/ahp?tkn=<token>`, which `orka ahp connect` prints. A missing, unknown, revoked or expired token gets 401 before the upgrade, and a browser (`http` or `https`) `Origin` gets 403. So does a token whose owner the API would no longer sign in: the token needs the configured OIDC issuer and a subject `--oidc-allowed-subjects` still admits. Orka logs the path of `/ahp` requests, never the query. Revoking or expiring a token, or its owner losing sign-in, closes every connection that uses it; open connections are rechecked every 30 seconds.
+
+The token routes require a person's own verified OIDC sign-in carrying an issuer and subject; ServiceAccount bearer tokens and delegated context tokens are refused with 403. Orka stores only a hash of each token.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/ahp-tokens` | POST | Body `{"ttl": "720h", "description": "laptop"}`, both optional. `ttl` defaults to `720h` and is at most `--ahp-token-max-ttl`. `description` names the token for its owner, such as the device it is for: at most 256 characters, trimmed, no control characters. Returns `201` with `{"id", "token", "description", "namespace", "expiresAt"}`. The token is shown only in this response. |
+| `/api/v1/ahp-tokens` | GET | List the caller's tokens, newest first, without their secrets: `{"items": [{"id", "description", "namespace", "createdAt", "expiresAt", "revokedAt"}]}`. Expired and revoked tokens stay listed. |
+| `/api/v1/ahp-tokens/:id` | DELETE | Revoke one of the caller's tokens and close its connections. Another person's token reads as 404. |
+| `/ahp` | GET | The AHP WebSocket endpoint. |
 
 ## Security
 

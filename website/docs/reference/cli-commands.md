@@ -24,6 +24,7 @@ Usage:
 Available Commands:
   agent         Manage agents
   agent-runtime Manage external orka.harness.v2 AgentRuntime registrations
+  ahp           Connect desktop Agent Host Protocol clients to Orka
   audit         Inspect audit and transaction traces
   auth          Inspect authentication
   completion    Generate the autocompletion script for the specified shell
@@ -324,6 +325,127 @@ Usage:
 Flags:
   -f, --file string   Path to YAML/JSON manifest (use - for stdin)
   -h, --help          help for update
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ahp`
+
+```text
+Desktop Agent Host Protocol (AHP) clients connect to Orka as a remote agent host by a WebSocket URL that carries a connection token. 'orka ahp connect' mints one for the signed-in person and prints the URL; 'orka ahp tokens' lists and revokes them.
+
+Usage:
+  orka ahp [command]
+
+Available Commands:
+  connect     Mint an AHP connection token and print the URL to paste into a desktop AHP client
+  tokens      List and revoke your AHP connection tokens
+
+Flags:
+  -h, --help   help for ahp
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka ahp [command] --help" for more information about a command.
+```
+
+## `orka ahp connect`
+
+```text
+Mint an AHP connection token for the signed-in person and print the WebSocket URL a desktop AHP client connects to. The token you use must be your own OIDC sign-in; context tokens and ServiceAccount tokens cannot mint AHP tokens. The URL is shown once and carries the token: anyone holding it acts as you on Orka until it expires or you revoke it.
+
+The URL is built from --url, or else from the server the CLI talks to. Use --url with the public https address people reach the Orka API on when the CLI reaches it another way, such as a port-forward.
+
+Usage:
+  orka ahp connect [flags]
+
+Flags:
+  -h, --help            help for connect
+      --insecure        Allow a plaintext ws:// URL to a host other than this machine; the token then crosses the network unencrypted
+      --name string     Name for this token, such as the device it is for (default: this machine's host name)
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --ttl string      Token lifetime as a Go duration such as 720h (default: the server's, 720h unless configured)
+      --url string      Public address of the Orka API to build the URL from, such as https://orka.example.com (default: --server)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ahp tokens`
+
+```text
+List and revoke your AHP connection tokens
+
+Usage:
+  orka ahp tokens [command]
+
+Available Commands:
+  list        List your AHP connection tokens
+  revoke      Revoke AHP connection tokens and close their connections
+
+Flags:
+  -h, --help   help for tokens
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka ahp tokens [command] --help" for more information about a command.
+```
+
+## `orka ahp tokens list`
+
+```text
+List your AHP connection tokens without their secrets. Expired and revoked tokens are shown with --all.
+
+Usage:
+  orka ahp tokens list [flags]
+
+Flags:
+      --all             Include expired and revoked tokens
+  -h, --help            help for list
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ahp tokens revoke`
+
+```text
+Revoke one or more of your AHP connection tokens. Clients connected with a revoked token are disconnected, and its URL stops working.
+
+Usage:
+  orka ahp tokens revoke <id>... [flags]
+
+Flags:
+  -h, --help   help for revoke
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

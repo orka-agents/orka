@@ -1,0 +1,13 @@
+# Opt-in namespace for AHP workspaces. Apply after the controller install and
+# before starting the controller with --ahp-workspace-image. Each AHP user gets
+# one Pod here: git checkouts of their projects and sessions, and their
+# terminals. The Pods accept no inbound traffic. With
+# --ahp-workspace-connector-provider, a Pod also holds its person's own GitHub
+# token in /tmp/orka-git/github-token, readable by anyone who can exec into it.
+# Helm installs render the same objects with controller.ahp.workspaceImage.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - networkpolicy.yaml

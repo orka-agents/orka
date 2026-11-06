@@ -17,7 +17,9 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/liveevents"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -80,9 +82,13 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	if err := h.taskAccess().ensureReadable(c, "streamTaskEvents", namespace, taskName); err != nil {
+	task, err := h.taskAccess().loadReadable(c, "streamTaskEvents", namespace, taskName)
+	if err != nil {
 		return err
 	}
+	// Live events are published by name; only the Task authorized here is
+	// streamed, never one created again under its name meanwhile.
+	taskUID := string(task.UID)
 	if h.executionEventStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
 	}
@@ -90,6 +96,12 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	query, err := parseExecutionEventListQuery(c)
 	if err != nil {
 		return err
+	}
+	live := false
+	if rawLive := strings.TrimSpace(c.Query("live", "")); rawLive != "" {
+		if live, err = strconv.ParseBool(rawLive); err != nil {
+			return fiber.NewError(fiber.StatusBadRequest, "live must be a boolean")
+		}
 	}
 	pollInterval := h.eventStreamPollInterval
 	if pollInterval <= 0 {
@@ -104,6 +116,7 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 	// from fiber.Ctx before Fiber can recycle request buffers.
 	namespace = strings.Clone(namespace)
 	taskName = strings.Clone(taskName)
+	liveEvents := h.liveEvents
 
 	c.Set("Content-Type", "text/event-stream")
 	c.Set("Cache-Control", "no-cache")
@@ -118,6 +131,14 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 		defer cancelStream()
 		done := metrics.RecordExecutionEventStreamOpen("task", query.afterSeq > 0)
 		defer done()
+		// Live events are a best-effort tap on the running prompt, subscribed
+		// before the replay so none is missed while it is written.
+		var liveC <-chan liveevents.Event
+		if live && liveEvents != nil {
+			subscription := liveEvents.Subscribe(namespace, taskName)
+			defer subscription.Close()
+			liveC = subscription.C()
+		}
 		lastSeq := query.afterSeq
 		terminalScanSeq := query.afterSeq
 		var pendingTerminal *store.ExecutionEvent
@@ -230,6 +251,18 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 			select {
 			case <-ctx.Done():
 				return
+			case event, ok := <-liveC:
+				if ok && event.TaskUID != taskUID {
+					continue
+				}
+				if !writeLiveExecutionEventSSEFrame(w, event, ok) {
+					metrics.RecordExecutionEventStreamError("task", "write")
+					return
+				}
+				if !ok {
+					// A dropped subscriber is told once; durable events continue.
+					liveC = nil
+				}
 			case <-poll.C:
 				if !writeAvailable() {
 					return
@@ -246,6 +279,58 @@ func (h *Handlers) StreamTaskEvents(c fiber.Ctx) error {
 			}
 		}
 	})
+}
+
+// LiveExecutionEventResponse is one live event of a running Task, sent as an
+// SSE "live" frame. Runtime is the redacted runtime event; Approval reports a
+// permission request held for the Task's requester.
+type LiveExecutionEventResponse struct {
+	TaskUID  string                `json:"taskUID,omitempty"`
+	Runtime  *harnessv2.Event      `json:"runtime,omitempty"`
+	Approval *LiveApprovalResponse `json:"approval,omitempty"`
+}
+
+// LiveApprovalResponse is a held permission request or how it ended.
+type LiveApprovalResponse struct {
+	ID         string                       `json:"id"`
+	State      string                       `json:"state"`
+	ToolCallID string                       `json:"toolCallID,omitempty"`
+	ToolName   string                       `json:"toolName,omitempty"`
+	Title      string                       `json:"title,omitempty"`
+	Options    []harnessv2.PermissionOption `json:"options,omitempty"`
+	ExpiresAt  *time.Time                   `json:"expiresAt,omitempty"`
+	OptionID   string                       `json:"optionID,omitempty"`
+}
+
+// writeLiveExecutionEventSSEFrame writes a live frame, or, once the
+// subscription closed, a live_lagged frame telling the client that live
+// events stopped and the durable events remain authoritative.
+func writeLiveExecutionEventSSEFrame(w *bufio.Writer, event liveevents.Event, open bool) bool {
+	if !open {
+		if _, err := fmt.Fprint(w, "event: live_lagged\ndata: {}\n\n"); err != nil {
+			return false
+		}
+		return w.Flush() == nil
+	}
+	response := LiveExecutionEventResponse{TaskUID: event.TaskUID, Runtime: event.Runtime}
+	if approval := event.Approval; approval != nil {
+		response.Approval = &LiveApprovalResponse{
+			ID: approval.ID, State: string(approval.State), ToolCallID: approval.ToolCallID, ToolName: approval.ToolName,
+			Title: approval.Title, Options: approval.Options, OptionID: approval.OptionID,
+		}
+		if !approval.ExpiresAt.IsZero() {
+			expires := approval.ExpiresAt
+			response.Approval.ExpiresAt = &expires
+		}
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		return true
+	}
+	if _, err := fmt.Fprintf(w, "event: live\ndata: %s\n\n", data); err != nil {
+		return false
+	}
+	return w.Flush() == nil
 }
 
 // ListSessionEvents handles GET /api/v1/sessions/{id}/events.

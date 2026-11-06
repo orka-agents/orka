@@ -382,7 +382,8 @@ func buildPromptMCPAuthorization(
 		ApprovalPolicyDigest:   configuration.ApprovalPolicyDigest,
 		MCPConfigurationDigest: configuration.MCPConfigurationDigest,
 		ToolPolicy:             configuration.ToolPolicy, ApprovalPolicy: configuration.ApprovalPolicy,
-		ExpiresAt: expiresAt,
+		NativePermissions: configuration.NativePermissions,
+		ExpiresAt:         expiresAt,
 	}
 	if err := authorization.ValidateForAt(metadata, lease, time.Now().UTC()); err != nil {
 		return harnessv2.PromptMCPAuthorization{}, err
