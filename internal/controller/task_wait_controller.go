@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -99,6 +100,11 @@ func (r *TaskWaitReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	task := &corev1alpha1.Task{}
 	if err := r.reader().Get(ctx, req.NamespacedName, task); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if controllerutil.ContainsFinalizer(task, labels.ContinuationLinkFinalizer) {
+		if err := r.releaseContinuationLink(ctx, task.Namespace, task.Name); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	wait := task.Status.Wait
 	if wait == nil {
@@ -444,7 +450,46 @@ func (r *TaskWaitReconciler) markResumed(ctx context.Context, task *corev1alpha1
 		return taskWaitRetry(done), err
 	}
 	metrics.RecordTaskWaitTransition(string(wait.Kind), string(corev1alpha1.TaskWaitStateResumed), taskWaitedFor(wait, now))
+	// The UID is durable now; the continuation may be deleted like any Task.
+	if err := r.releaseContinuationLink(ctx, continuation.Namespace, continuation.Name); err != nil {
+		return ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil //nolint:nilerr // The continuation's own reconcile retries the release.
+	}
 	return ctrl.Result{}, nil
+}
+
+// releaseContinuationLink removes the link finalizer once the predecessor no
+// longer needs it: it recorded this continuation, ended its wait without it,
+// or no longer exists. While the predecessor is still Resuming with this
+// name, the finalizer stays so that recovery adopts this Task instead of
+// creating another one.
+func (r *TaskWaitReconciler) releaseContinuationLink(ctx context.Context, namespace, name string) error {
+	continuation := &corev1alpha1.Task{}
+	if err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, continuation); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !controllerutil.ContainsFinalizer(continuation, labels.ContinuationLinkFinalizer) {
+		return nil
+	}
+	predecessorName := strings.TrimSpace(continuation.Annotations[labels.AnnotationContinuationOfName])
+	predecessorUID := strings.TrimSpace(continuation.Annotations[labels.AnnotationContinuationOfUID])
+	if predecessorName != "" {
+		predecessor := &corev1alpha1.Task{}
+		err := r.authoritativeReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: predecessorName}, predecessor)
+		switch {
+		case err == nil && string(predecessor.UID) == predecessorUID && predecessor.Status.Wait != nil &&
+			predecessor.Status.Wait.State == corev1alpha1.TaskWaitStateResuming &&
+			predecessor.Status.Wait.ContinuationTaskName == continuation.Name:
+			return nil
+		case err != nil && !apierrors.IsNotFound(err):
+			return err
+		}
+	}
+	base := continuation.DeepCopy()
+	controllerutil.RemoveFinalizer(continuation, labels.ContinuationLinkFinalizer)
+	if err := r.Patch(ctx, continuation, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
 }
 
 // cancel ends a non-terminal wait. A continuation created in the same window
@@ -645,6 +690,7 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 				labels.AnnotationContinuationOfUID:  string(parked.UID),
 				labels.AnnotationContinuationIndex:  strconv.Itoa(int(taskwait.ChainIndex(parked)) + 1),
 			},
+			Finalizers: []string{labels.ContinuationLinkFinalizer},
 			// A non-controller owner: deleting the parked Task cancels its
 			// continuation without making it a coordination child.
 			OwnerReferences: []metav1.OwnerReference{{
@@ -736,8 +782,13 @@ func taskWaitRequestsFor(_ context.Context, object client.Object) []reconcile.Re
 		return nil
 	}
 	names := map[string]struct{}{}
-	if task.Status.Wait != nil {
+	if task.Status.Wait != nil || controllerutil.ContainsFinalizer(task, labels.ContinuationLinkFinalizer) {
 		names[task.Name] = struct{}{}
+	}
+	if task.Status.Wait != nil {
+		if next := strings.TrimSpace(task.Status.Wait.ContinuationTaskName); next != "" {
+			names[next] = struct{}{}
+		}
 	}
 	if parent := labels.ParentTaskName(task.Labels, task.Annotations); parent != "" {
 		names[parent] = struct{}{}

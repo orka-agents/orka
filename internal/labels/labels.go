@@ -134,6 +134,11 @@ const (
 	// AnnotationContinuationIndex is the number of continuations before this
 	// Task in its chain.
 	AnnotationContinuationIndex = "orka.ai/continuation-index"
+	// ContinuationLinkFinalizer keeps a continuation Task from disappearing
+	// before its parked predecessor durably records its UID. Without it, a
+	// continuation created and then deleted in that window would look as if
+	// it had never been created, and recovery would start the work again.
+	ContinuationLinkFinalizer = "orka.ai/continuation-link"
 	// AnnotationCancelWait asks the controller to cancel a parked wait without
 	// deleting the Task. Its value is a short reason.
 	AnnotationCancelWait = "orka.ai/cancel-wait"

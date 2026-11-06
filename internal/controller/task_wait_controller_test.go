@@ -424,6 +424,8 @@ func TestTaskWaitDeletionCancelsAContinuationBeingCreated(t *testing.T) {
 	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateCancelled {
 		t.Fatalf("deleting the parked Task must cancel its wait, got %s", got)
 	}
+	// The cancelled continuation's link is released, so its deletion completes.
+	h.settle(continuation.Name)
 	if len(h.tasks()) != 1 {
 		t.Fatal("the continuation created in the same window must be cancelled")
 	}
@@ -610,5 +612,48 @@ func TestTaskWaitContinuationWaitsOnItsPredecessorsChild(t *testing.T) {
 	wait := h.task("parked").Status.Wait
 	if wait.State != corev1alpha1.TaskWaitStateResumed || !strings.Contains(h.task(wait.ContinuationTaskName).Spec.Prompt, "child: Succeeded") {
 		t.Fatalf("unexpected resume %+v", wait)
+	}
+}
+
+func TestTaskWaitAdoptsAContinuationDeletedBeforeItWasLinked(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	h := newTaskWaitHarness(t, task)
+
+	// The create landed but the controller lost the response before linking it.
+	continuation := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	if err := h.client.Create(context.Background(), continuation); err != nil {
+		t.Fatal(err)
+	}
+	// History pruning or a person deletes it before the link is recorded.
+	if err := h.client.Delete(context.Background(), h.task(continuation.Name)); err != nil {
+		t.Fatal(err)
+	}
+	h.settle(continuation.Name)
+	if deleting := h.task(continuation.Name); deleting.DeletionTimestamp.IsZero() {
+		t.Fatal("the unlinked continuation must stay visible while its predecessor is Resuming")
+	}
+
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed || wait.ContinuationTaskUID != string(continuation.UID) {
+		t.Fatalf("recovery must adopt the continuation that already ran, got %+v", wait)
+	}
+	h.settle(continuation.Name)
+	if names := h.tasks(); len(names) != 1 {
+		t.Fatalf("no second continuation may be created, have %d Tasks", len(names))
+	}
+}
+
+func TestTaskWaitReleasesTheLinkOnceResumed(t *testing.T) {
+	h := newTaskWaitHarness(t, parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded))
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed {
+		t.Fatalf("state = %s", wait.State)
+	}
+	if finalizers := h.task(wait.ContinuationTaskName).Finalizers; len(finalizers) != 0 {
+		t.Fatalf("a linked continuation must not keep the link finalizer: %v", finalizers)
 	}
 }

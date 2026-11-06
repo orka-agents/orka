@@ -79,7 +79,12 @@ parked turn is that continuation, created by Orka when the awaited event arrives
 - When the event arrives, the reconciler first writes `Resuming` with a deterministic
   continuation name derived from the parked Task's UID. Only then does it create the Task.
 - A restart adopts an existing Task of that name only if it carries the parked Task's UID
-  annotation; an unrelated holder abandons the wait. `Resumed` records the continuation's
+  annotation; an unrelated holder abandons the wait.
+- The continuation is created with the `orka.ai/continuation-link` finalizer. That
+  finalizer is removed only after the predecessor records the continuation's UID, ends its
+  wait without it, or is gone. A continuation deleted while the wait is still `Resuming`
+  therefore stays visible and is adopted. Name absence alone never leads Orka to start the
+  work a second time. `Resumed` records the continuation's
   UID, and readers verify that UID before following the chain.
 - The continuation copies the parked spec, including agent, runtime overrides, workspace,
   and requester, and changes only three things:
