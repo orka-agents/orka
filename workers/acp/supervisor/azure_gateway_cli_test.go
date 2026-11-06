@@ -62,6 +62,15 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 	if err != nil || strings.Fields(output)[0] != "rg-one" || !strings.Contains(output, "rg-two") {
 		t.Fatalf("az group list (with a second page): %v\n%s", err, output)
 	}
+	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {
+		// The wrapper signs in again after the login is cleared.
+		if output, err := run("account", "clear"); err != nil {
+			t.Fatalf("az account clear: %v\n%s", err, output)
+		}
+		if output, err := run("group", "list", "--query", "[].name", "--output", "tsv"); err != nil || !strings.Contains(output, "rg-one") {
+			t.Fatalf("az group list after account clear: %v\n%s", err, output)
+		}
+	}
 	output, err = run("account", "show", "--query", "{tenant:tenantId,subscription:id}", "--output", "json")
 	if err != nil || !strings.Contains(output, "11111111-1111-1111-1111-111111111111") {
 		t.Fatalf("az account show: %v\n%s", err, output)
