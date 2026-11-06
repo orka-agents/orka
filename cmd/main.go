@@ -1076,24 +1076,8 @@ func main() {
 
 	processCtx, stopProcess := context.WithCancel(ctrl.SetupSignalHandler())
 	defer stopProcess()
-	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
-		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
-		Opencode: acpOpencodeRuntimeImage,
-	}, nil)
-	if err != nil {
-		// Not fatal: AI and container Tasks do not need these images.
-		// Agent Tasks fail closed until the controller restarts with
-		// registry access or digest-pinned runtime images.
-		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
-			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
-			"digests, or set them to empty strings to run without coding agents")
-	}
-	acpCodexRuntimeImage = images.Codex
-	acpClaudeRuntimeImage = images.Claude
-	acpCopilotRuntimeImage = images.Copilot
-	acpOpencodeRuntimeImage = images.Opencode
 	restConfig := ctrl.GetConfigOrDie()
-	acpToolboxPolicy, err := resolveACPToolboxPolicy(restConfig, acpToolboxesEnabled, acpToolboxAllowedRegistries,
+	acpToolboxPolicy, err := resolveACPToolboxPolicy(acpToolboxesEnabled, acpToolboxAllowedRegistries,
 		acpToolboxImagePullSecrets, acpToolboxNodeSelector, acpToolboxMountMethod)
 	if err != nil {
 		setupLog.Error(err, "invalid ACP toolbox configuration")
@@ -1124,11 +1108,19 @@ func main() {
 		mgrOptions.Cache = agentHostCacheOptions(mgrOptions.Cache, agentHostNamespace)
 	}
 
-	mgr, err := ctrl.NewManager(restConfig, mgrOptions)
+	// Manager construction makes the first API server request: the cache
+	// resolves each per-object setting through discovery.
+	startupRetries := newStartupRetry(setupLog, time.Now())
+	mgr, err := retryStartupStep(processCtx, startupRetries, "Kubernetes API server", isTransientConnectError,
+		func() (ctrl.Manager, error) {
+			return ctrl.NewManager(restConfig, mgrOptions)
+		})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Reads the API server version, so it runs once the API server is reachable.
+	acpToolboxPolicy = checkACPToolboxImageVolumeSupport(restConfig, acpToolboxPolicy)
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
 	if err != nil {
 		setupLog.Error(err, "unable to set up webhook certificate rotation")
@@ -1539,11 +1531,30 @@ func main() {
 		setupLog.Error(err, "unable to add ACP artifact retention")
 		os.Exit(1)
 	}
-	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv()
+	publisherClient, artifactCapabilitySecret, publisherWorkspaceArtifactMaxBytes, err := workspacePublisherClientFromEnv(
+		processCtx, startupRetries)
 	if err != nil {
 		setupLog.Error(err, "unable to configure Workspace/Publisher client")
 		os.Exit(1)
 	}
+	// Tag resolution needs cluster DNS, which comes up with the node like the
+	// API server and the Publisher, so it runs after both are reachable.
+	images, err := resolveACPRuntimeImagesOrDisable(processCtx, controller.ACPRuntimeImages{
+		Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+		Opencode: acpOpencodeRuntimeImage,
+	}, nil)
+	if err != nil {
+		// Not fatal: AI and container Tasks do not need these images.
+		// Agent Tasks fail closed until the controller restarts with
+		// registry access or digest-pinned runtime images.
+		setupLog.Error(err, "unable to resolve ACP runtime images; coding-agent runtimes are unavailable "+
+			"for this controller process. Allow HTTPS access to the registry, pin the runtime images to "+
+			"digests, or set them to empty strings to run without coding agents")
+	}
+	acpCodexRuntimeImage = images.Codex
+	acpClaudeRuntimeImage = images.Claude
+	acpCopilotRuntimeImage = images.Copilot
+	acpOpencodeRuntimeImage = images.Opencode
 
 	sessionManager.SetGatewayEventStore(appStorage)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
@@ -2319,7 +2330,9 @@ func workspacePublicationReclaimer(publisherClient *publisherservice.Client) con
 	return publisherClient
 }
 
-func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64, error) {
+func workspacePublisherClientFromEnv(
+	ctx context.Context, retry startupRetry,
+) (*publisherservice.Client, []byte, int64, error) {
 	artifactSecretPath := strings.TrimSpace(os.Getenv("ORKA_ACP_ARTIFACT_CAPABILITY_SECRET_FILE"))
 	var artifactSecret []byte
 	if artifactSecretPath != "" {
@@ -2353,9 +2366,13 @@ func workspacePublisherClientFromEnv() (*publisherservice.Client, []byte, int64,
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	capabilities, err := client.Capabilities(ctx)
+	// The Publisher can restart with the node and be unreachable for a while.
+	capabilities, err := retryStartupStep(ctx, retry, "Workspace/Publisher", isTransientPublisherError,
+		func() (publisherservice.CapabilitiesResponse, error) {
+			readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return client.Capabilities(readCtx)
+		})
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("read Workspace/Publisher capabilities: %w", err)
 	}
@@ -2379,12 +2396,9 @@ func envDurationDefault(name string, fallback time.Duration) time.Duration {
 	return value
 }
 
-// resolveACPToolboxPolicy builds the controller-wide toolbox policy. With the
-// imageVolume mount method it reads the API server version through discovery
-// (readable by every authenticated client) and, below 1.36, marks toolbox
-// mounting unavailable instead of silently falling back to copying.
+// resolveACPToolboxPolicy builds the controller-wide toolbox policy from flags.
+// It needs no API server, so invalid flags fail before startup waits for one.
 func resolveACPToolboxPolicy(
-	restConfig *rest.Config,
 	enabled bool,
 	allowedRegistries, imagePullSecrets, nodeSelector, mountMethod string,
 ) (controller.ACPToolboxPolicy, error) {
@@ -2408,8 +2422,18 @@ func resolveACPToolboxPolicy(
 		}
 		policy.NodeSelector = selector
 	}
-	if !enabled || method != controller.ACPToolboxMountImageVolume {
-		return policy, nil
+	return policy, nil
+}
+
+// checkACPToolboxImageVolumeSupport applies to the imageVolume mount method:
+// it reads the API server version through discovery (readable by every
+// authenticated client) and, below 1.36, marks toolbox mounting unavailable
+// instead of silently falling back to copying.
+func checkACPToolboxImageVolumeSupport(
+	restConfig *rest.Config, policy controller.ACPToolboxPolicy,
+) controller.ACPToolboxPolicy {
+	if !policy.Enabled || policy.MountMethod != controller.ACPToolboxMountImageVolume {
+		return policy
 	}
 	// Only imageVolume toolboxes depend on this capability check, so a failed
 	// discovery read must not take the whole controller down: fail closed by
@@ -2424,15 +2448,15 @@ func resolveACPToolboxPolicy(
 	}
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
 	if err != nil {
-		return unavailable(fmt.Errorf("create discovery client: %w", err)), nil
+		return unavailable(fmt.Errorf("create discovery client: %w", err))
 	}
 	serverVersion, err := discoveryClient.ServerVersion()
 	if err != nil {
-		return unavailable(fmt.Errorf("read API server version: %w", err)), nil
+		return unavailable(fmt.Errorf("read API server version: %w", err))
 	}
 	parsed, err := version.ParseGeneric(serverVersion.GitVersion)
 	if err != nil {
-		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err)), nil
+		return unavailable(fmt.Errorf("parse API server version %q: %w", serverVersion.GitVersion, err))
 	}
 	if parsed.LessThan(version.MustParseGeneric(controller.ACPToolboxImageVolumeMinimumServerVersion)) {
 		policy.UnavailableReason = fmt.Sprintf(
@@ -2441,7 +2465,7 @@ func resolveACPToolboxPolicy(
 		)
 		setupLog.Error(errors.New(policy.UnavailableReason), "toolbox image volumes are unavailable; Agents with toolboxes are rejected")
 	}
-	return policy, nil
+	return policy
 }
 
 func parseExactLabels(raw string) (map[string]string, error) {
