@@ -361,6 +361,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             </Button>
           ) : null}
           <TaskCancelDialog
+            // Remount per Task identity so a reason or error typed for a
+            // replaced Task is not carried over to its successor.
+            key={deleteIdentity}
             taskName={task.metadata.name}
             taskUID={task.metadata.uid}
             open={cancelFor === deleteIdentity}

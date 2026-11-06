@@ -6,6 +6,7 @@ package agentidentity
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -21,6 +22,19 @@ type EntraConfig struct {
 	// BlueprintClientID is the agent identity blueprint every bound identity
 	// must be a child of.
 	BlueprintClientID string
+	// Authority is the Entra authority URL tokens are requested from;
+	// DefaultEntraAuthority when empty.
+	Authority string
+}
+
+// authority returns the canonical authority: no surrounding space or
+// trailing slash, lower case, and DefaultEntraAuthority when unset.
+func (c EntraConfig) authority() string {
+	authority := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.Authority), "/"))
+	if authority == "" {
+		return DefaultEntraAuthority
+	}
+	return authority
 }
 
 // Config is the controller-wide identity configuration.
@@ -28,7 +42,9 @@ type Config struct {
 	// Entra is nil when no Entra issuer is configured.
 	Entra *EntraConfig
 	// AgentUseAuthorization mirrors --agent-use-authorization-enabled, which
-	// identity-bound Agents require.
+	// identity-bound Agents require. Setting it asserts that the agent-use
+	// ValidatingAdmissionPolicies are installed, which the Helm value does
+	// together with the flag; the controller does not detect them.
 	AgentUseAuthorization bool
 }
 
@@ -44,6 +60,11 @@ func (c Config) Validate() error {
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
 		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs")
 	}
+	authority, err := url.Parse(c.Entra.authority())
+	if err != nil || authority.Scheme != "https" || authority.Host == "" || authority.User != nil ||
+		authority.RawQuery != "" || authority.Fragment != "" {
+		return fmt.Errorf("the Entra authority must be an https URL without credentials, query, or fragment")
+	}
 	return nil
 }
 
@@ -55,8 +76,14 @@ func (c Config) Instance(issuer string) (string, bool) {
 		if c.Entra == nil {
 			return "", false
 		}
-		return "entra:" + strings.ToLower(strings.TrimSpace(c.Entra.TenantID)) + "/" +
-			strings.ToLower(strings.TrimSpace(c.Entra.BlueprintClientID)), true
+		instance := "entra:" + strings.ToLower(strings.TrimSpace(c.Entra.TenantID)) + "/" +
+			strings.ToLower(strings.TrimSpace(c.Entra.BlueprintClientID))
+		// Tokens come from the authority too, so restarting against another
+		// one must fail bound Tasks closed. The public cloud stays implicit.
+		if authority := c.Entra.authority(); authority != DefaultEntraAuthority {
+			instance += "@" + authority
+		}
+		return instance, true
 	default:
 		return "", false
 	}

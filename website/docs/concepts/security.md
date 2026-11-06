@@ -248,8 +248,12 @@ Microsoft Entra agent identity (ADR 0039). Binding it requires `bind` on
 identity belongs to one Agent: the first Agent the controller grants it to
 records it in `status.identityClaim`, and any other Agent naming it is not Ready.
 An Agent that stops naming an identity keeps the claim until every Task bound to
-it has finished. An
-identity-bound Agent also requires `--agent-use-authorization-enabled` and a
+it has finished, and a deleted Agent's identity stays taken by its bound Tasks
+until they finish. A claim records when it was granted, is granted only while
+`--agent-use-authorization-enabled` is set, and binds only Tasks created at or
+after that time; create Tasks once the Agent is Ready. An identity-bound Agent also requires `--agent-use-authorization-enabled` with the
+`config/agent-use-policy` policies installed (the Helm value does both; the
+controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
 it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
@@ -349,9 +353,11 @@ Security-relevant events are logged at the API layer:
 - Cross-namespace worker access attempts
 - Every call made with an Agent identity, issued or refused, on the
   `agent-identity-audit` logger: the Agent, identity, issuer instance, mode,
-  Task, policy, Tool, a digest of the arguments, and the outcome. Records hold
-  no tokens or request bodies, and a Delegated call's requester appears only as
-  a keyed pseudonym. Route and retain this logger in your log pipeline.
+  Task, policy, Tool, a digest of the arguments, the outcome, and for a refusal
+  a reason category. Records hold no tokens, request bodies, or error text, and
+  a Delegated call's requester appears only as a keyed pseudonym. The
+  controller's log level does not filter this logger. Route and retain it in
+  your log pipeline.
 
 ## Generic gateway trust boundary
 

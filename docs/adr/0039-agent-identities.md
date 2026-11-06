@@ -103,11 +103,26 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   Agent. Delegation between Agents stays bounded by the parent Agent's
   `coordination.allowedAgents`.
 - The check is mandatory for every Agent that declares an identity: such an
-  Agent is not Ready unless the policies are installed, and a Task naming it
-  fails closed otherwise. For other Agents it is opt-in, with
-  `--agent-use-authorization-enabled` and the `config/agent-use-policy`
-  policies (Helm: `controller.agentUseAuthorization.enabled`), because
-  turning it on breaks every caller that lacks a `use` grant.
+  Agent is not Ready, holds no claim, and binds no Task unless the controller
+  runs with `--agent-use-authorization-enabled`. The flag asserts that the
+  `config/agent-use-policy` policies are installed; the Helm value
+  `controller.agentUseAuthorization.enabled` sets the flag and installs the
+  policies together, and the controller does not detect the policies itself.
+  For other Agents the check is opt-in, because turning it on breaks every
+  caller that lacks a `use` grant.
+- The check runs when an object is created or edited, but the controller
+  resolves a Task's Agent only when it binds the Task. A Task created while
+  the check was off, or before its Agent declared an identity, was never
+  checked for that identity. So a claim (stage 2) records when it was
+  granted (`status.identityClaim.grantedAt`); claims are granted only while
+  the check is enforced and are released when the controller runs without
+  it; and a Task binds an identity only if it was created at or after the
+  claim was granted, to the second the API server records. A claim that
+  stops releasing, because the Agent names the identity again or the check
+  is back on, counts as granted at that moment. An older queued Task fails
+  closed and must be created again, as does a Task created together with a
+  new identity-bound Agent before its claim was granted, so such Tasks are
+  created once the Agent is Ready.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
@@ -143,9 +158,16 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   frozen issuer instance that no longer matches the controller's fails the
   call closed.
 - An Agent with an identity must set `ceiling.allowedTools` (ADR 0034). Every
-  outbound channel a Task could use to carry identity-backed data onward,
-  such as a brokered fetch, an HTTP Tool, or a gateway reply, is then one the
-  Agent owner listed explicitly.
+  tool a Task could use to carry identity-backed data out of Orka, such as a
+  brokered fetch, an HTTP Tool, or a gateway reply, is then one the Agent
+  owner listed explicitly. The ceiling does not cover the coordination tools
+  Orka injects into delegated children (`send_message` and `check_messages`,
+  ADR 0034), so an identity-bound child can pass data to its siblings,
+  including Tasks whose Agent has no identity. A sibling is another child of
+  the same parent, and an identity-bound child's parent runs the same Agent
+  (stage 1), so those messages reach only Agents that Agent's
+  `coordination.allowedAgents` lists. That list, which its owner also sets,
+  bounds them, not the ceiling.
 - Emit `gen_ai.agent.id` as the Agent UID, not its reusable name, on Task and
   Tool-call spans, and write an identity use record for every identity-backed
   call (see below). Issuer logs and Orka records then share a join key.
@@ -157,9 +179,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 - Add a fourth `OutboundAccessPolicy` adapter, `agentIdentity`, exclusive with
   `direct`, `gateway`, and `connection`. It selects a mode (this stage adds
   `Self`) and holds the target in one issuer-typed block, such as
-  `entra.resource` for Entra. It
-  never names an identity: the identity always comes from the Task's frozen
-  Agent binding, not from the policy, the Tool, or the Task spec.
+  `entra.resource` for Entra. It never names an identity: the identity always
+  comes from the Task's frozen Agent binding, not from the policy, the Tool,
+  or the Task spec.
 - Only the controller implements the credential source, as with Connections,
   whose source "exists only in the controller; worker Pods have no
   implementation" (`internal/outboundaccess/resolver.go`). ACP Tasks reach it
@@ -192,10 +214,27 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   controller performs the two app-only requests above.
 - Tokens are injected per Tool call. They never enter the ACP process tree,
   the Task spec or status, the execution snapshot, events, logs, or metrics.
-  The cache is keyed by a digest of the identity, mode, target, and policy
-  UID and generation, and an entry lives at most five minutes. Because nothing
-  else holds the token, disabling the identity at the issuer stops new calls
-  within that bound.
+  The cache is keyed by a digest of the identity, mode, and target. In
+  delegated mode (stage 4) the key also holds a digest of the requester's own
+  user token from their Connection, so two requesters never share an entry,
+  and a refreshed or relinked Connection starts a new one. An entry lives at
+  most five minutes. Because nothing else holds the token, disabling the
+  identity at the issuer stops new calls within that bound.
+- Before every token request, including one the cache answers, the
+  controller checks the live Agent: it must still exist with the bound UID
+  and hold a claim on the frozen identity that is not being released.
+  Removing `spec.identity` or deleting the Agent therefore stops new calls at
+  once, without changing the identity the Task's binding froze. The claim
+  itself is kept, marked releasing, until every Task bound to it has
+  finished, so the identity cannot be given to another Agent while those
+  Tasks run.
+- A token goes only to the destination the Tool fixes. The audience names
+  the resource a token is for, not the host that receives it, so the broker
+  refuses an `agentIdentity` policy on a Tool whose URL has template
+  placeholders, which a call's arguments would fill, and on MCP-backed Tools,
+  as the `connection` adapter already does. Whoever may edit a Tool that the
+  Agent's ceiling lists still decides where that Agent's token goes, so that
+  permission is as sensitive as the identity.
 - Reserve `fmi_path`, `user_id`, `username`, and
   `user_federated_identity_credential` in `DirectOutboundAccess`
   `additionalParameters`, so the direct adapter can never select an identity.
@@ -238,16 +277,25 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   child Task, retry, or parked agent woken later does not reset it; only the
   requester acting again does. Cancelling or deleting any Task in the chain
   stops delegated calls from every Task below it; a parent that finished
-  normally does not. After it elapses, delegated calls fail closed
-  and the Task can ask the requester to continue. A policy that asks for more
-  than the controller's maximum gets the maximum, and its `Accepted` condition
-  says so.
+  normally does not. A parent link no immutable UID proves fails closed. A
+  fork of an identity-bound Task does not carry the identity, because its
+  source does not control it; the requester creates a new Task. After it
+  elapses, delegated calls fail closed and the Task can ask the requester to
+  continue. A policy that asks for more than the controller's maximum gets the
+  maximum, and its `Accepted` condition says so.
 - Delegated mode runs only where Orka controls the runtime's network. Built-in
-  RuntimePool Pods deny all egress except DNS, the model provider proxy, and
-  the controller, so identity-backed data can leave only through brokered
-  channels that the Agent ceiling bounds. External `runtimeRef` runtimes and
-  workspace-backed sessions are refused until their egress governance is
-  verified. This depends on the cluster enforcing NetworkPolicy.
+  RuntimePool Pods deny all egress except cluster DNS, the model provider
+  proxy, and the controller, so identity-backed data cannot reach an
+  arbitrary host directly; tools leave through brokered channels that the
+  Agent ceiling bounds. DNS is not such a channel: cluster DNS forwards names
+  it does not serve, so a runtime that can run commands or resolve arbitrary
+  names can encode data in lookups of a domain an attacker controls. Orka
+  does not restrict DNS names, and this residual risk remains. Where it
+  matters, deny Bash and native fetch tools in the ceiling, or serve the
+  runtime namespace a DNS that refuses external names. External `runtimeRef`
+  runtimes and workspace-backed sessions are refused until their egress
+  governance is verified. This depends on the cluster enforcing
+  NetworkPolicy.
 - Write-class calls in delegated mode always require approval, and only the
   requester can approve them: the approver must match the Task's
   `requestedBy` issuer and subject. Other authorized reviewers may deny but
@@ -268,12 +316,13 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
 - Orka's Session or Task is the application session the token is bound to.
   Before every exchange and every Tool call, the controller checks that the
   Task is running with no cancellation requested, its Session still exists,
-  its binding still names this identity, and the Connection is Ready.
-  Cancelling or deleting the Task, stopping the Session's turn (which cancels
-  its Task), deleting the Connection, or unbinding the identity stops new
-  calls. A token already
-  issued is still valid at the issuer until it expires; because it never
-  leaves the controller, the residual exposure is the cache bound above. Orka
+  the live Agent still holds this identity as stage 3 requires, and the
+  Connection is Ready. Cancelling or deleting the Task, stopping the
+  Session's turn (which cancels its Task), deleting the Session, deleting
+  the Connection, or removing the identity from the Agent or deleting the
+  Agent stops new calls. A token already issued is still valid at the issuer
+  until it expires; because it never leaves the controller, the residual
+  exposure is the cache bound above. Orka
   does not claim issuer-side per-session revocation, and does not rely on
   Continuous Access Evaluation.
 - A delegated policy names the requester's `ConnectorProvider` in
@@ -305,14 +354,17 @@ digests, and Task cleanup removes them, so they cannot serve as attribution.
   alike, issued or refused: Agent UID and generation, issuer type, issuer
   instance and identity ID, mode, Task UID, policy UID and generation, the
   Tool and method that were called, a digest of the Tool name and arguments,
-  outcome, and the refusal reason. Records never contain tokens, request
-  bodies, or full URLs.
+  outcome, and for a refusal a reason category (policy, binding, delegation,
+  issuer, or canceled). Records never contain tokens, request bodies, full
+  URLs, or error text, which can quote arguments or issuer responses.
 - In delegated mode the requester appears only as a keyed (HMAC-SHA-256)
   pseudonym, under a key the controller derives from its snapshot key, so
   records can be joined per person without naming them.
 - Records are structured log entries on the `agent-identity-audit` logger, so
   they outlive Task deletion and the operator's log pipeline sets their
-  retention and who may read them. The controller's SQLite store would give
+  retention and who may read them. That logger shares the controller log's
+  destination and format, but the diagnostic log level does not filter it and
+  it is never sampled. The controller's SQLite store would give
   Orka-owned retention and a read permission of its own, but it needs a
   schema version that another change already claims; a store-backed record
   can follow that change without altering the record's fields.
