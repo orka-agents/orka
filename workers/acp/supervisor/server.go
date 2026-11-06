@@ -48,6 +48,13 @@ type Server struct {
 	operator           operatorAccessState
 }
 
+// Session-creation filesystem steps, replaceable in tests that check their
+// order.
+var (
+	recordSessionWorkspaceIdentity = acp.RecordWorkspaceIdentity
+	finalizeSessionOwnership       = acp.FinalizeSessionOwnership
+)
+
 const e2ePromptWriteAmbiguityLedgerDir = ".orka-e2e-prompt-write-ambiguity"
 
 func prepareE2EPromptWriteAmbiguityLedger(identityStateDir string) (string, error) {
@@ -1271,7 +1278,16 @@ func (s *Server) createSession(
 		}
 		resumeSessionID = snapshot.ProviderSessionID
 	}
-	if err := acp.FinalizeSessionOwnership(paths.Root, uid, gid); err != nil {
+	// Operator file copies reopen the workspace by path once the child, which
+	// may own the session root, is running, so its identity is pinned here.
+	// It must precede the ownership handoff: afterwards the 0700 child-owned
+	// session root is no longer traversable by a supervisor that runs without
+	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not
+	// change the directory's identity, and nothing later replaces it.
+	if err := recordSessionWorkspaceIdentity(&paths); err != nil {
+		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
+	}
+	if err := finalizeSessionOwnership(paths.Root, uid, gid); err != nil {
 		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("ownership finalization", err)
 	}
 	if projection.Instructions != nil {
@@ -1283,7 +1299,7 @@ func (s *Server) createSession(
 		// The durable workspace lives outside the session root, and each cold
 		// resume allocates a fresh non-reused child identity, so the preserved
 		// tree is re-assigned to exactly this session's UID.
-		if err := acp.FinalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
+		if err := finalizeSessionOwnership(paths.Workspace, uid, gid); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace ownership finalization", err)
 		}
 	}
@@ -1312,11 +1328,6 @@ func (s *Server) createSession(
 		); err != nil {
 			return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("durable workspace pending mark", err)
 		}
-	}
-	// Operator file copies reopen the workspace by path once the child,
-	// which may own the session root, is running; pin its identity now.
-	if err := acp.RecordWorkspaceIdentity(&paths); err != nil {
-		return nil, harnessv2.RuntimeSessionDescriptor{}, acp.SessionPaths{}, nil, nil, nil, nil, sessionCreationFailed("workspace identity", err)
 	}
 	runtimeSession, err := acp.NewRuntimeSession(ctx, acp.RuntimeSessionConfig{
 		ID:            string(request.RuntimeSessionID),
