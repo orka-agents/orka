@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -223,6 +224,10 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	allTerminal := false
+	// A missing continuation is final only when a second poll confirms it,
+	// so a cache that has not yet observed a just-created continuation does
+	// not end the wait.
+	missingContinuation := make(map[string]bool, len(waitArgs.Tasks))
 	for {
 		allTerminal = true
 		for _, taskName := range waitArgs.Tasks {
@@ -243,11 +248,16 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// that Task is terminal and holds no active wait.
 			tail, chainErr := taskwait.ResolveTail(ctx, t.k8sClient, &task)
 			if chainErr != nil {
-				allTerminal = false
-				results[taskName].Phase = taskPhaseErrorString
-				results[taskName].Result = fmt.Sprintf("error: %v", chainErr)
+				missing := apierrors.IsNotFound(chainErr)
+				confirmed := errors.Is(chainErr, taskwait.ErrChainBroken) || (missing && missingContinuation[taskName])
+				missingContinuation[taskName] = missing
+				reportBrokenWaitChain(results[taskName], &task, chainErr, confirmed)
+				if !confirmed {
+					allTerminal = false
+				}
 				continue
 			}
+			missingContinuation[taskName] = false
 			// Results persist across polls; describe only the Task reported now.
 			results[taskName].ContinuationTask, results[taskName].WaitState = "", ""
 			if tail.Name != task.Name {
@@ -377,6 +387,24 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+// reportBrokenWaitChain describes a child whose continuation chain cannot be
+// followed. A confirmed break is final: the parked turn's own success is not
+// the child's outcome, and no later Task of the chain can be found.
+func reportBrokenWaitChain(result *TaskResultInfo, task *corev1alpha1.Task, chainErr error, confirmed bool) {
+	result.Phase = taskPhaseErrorString
+	if !confirmed {
+		result.Result = fmt.Sprintf("error: %v", chainErr)
+		return
+	}
+	result.ContinuationTask, result.WaitState = "", ""
+	if wait := task.Status.Wait; wait != nil {
+		result.ContinuationTask = wait.ContinuationTaskName
+		result.WaitState = string(wait.State)
+	}
+	result.Result = fmt.Sprintf("the continuation chain is broken (%v): %s parked its turn and resumed, "+
+		"but its continuation can no longer be followed, so the work it continued has no reported outcome", chainErr, task.Name)
 }
 
 // Publication happens after the agent exits. Its output cannot supply the

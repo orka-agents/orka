@@ -9,6 +9,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,5 +140,62 @@ func TestWaitForTasksClearsAnEarlierPollsWaitState(t *testing.T) {
 	got := result.Results[0]
 	if !result.Completed || got.ContinuationTask != "child-next" || got.WaitState != "" {
 		t.Fatalf("the result must describe only the reported continuation, got completed=%v %+v", result.Completed, got)
+	}
+}
+
+func TestWaitForTasksReportsAMissingContinuationAsAFinalChainError(t *testing.T) {
+	previous := waitForTasksPollInterval
+	waitForTasksPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { waitForTasksPollInterval = previous })
+	t.Setenv(envOrkaTaskNamespace, testNamespace)
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNamespace, UID: "uid-child"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Wait: &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateResumed, Kind: corev1alpha1.TaskWaitKindTimer,
+				ContinuationTaskName: "child-next", ContinuationTaskUID: "uid-next",
+			},
+		},
+	}
+	// The continuation was deleted while its predecessor remains.
+	started := time.Now()
+	out, err := NewWaitForTasksTool(newFakeClient(child)).Execute(context.Background(), json.RawMessage(`{"tasks":["child"],"timeout":"30s"}`))
+	if err != nil {
+		t.Fatalf("wait_for_tasks: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("a confirmed broken chain must end the wait, not poll until timeout (took %s)", elapsed)
+	}
+	var result WaitForTasksResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	got := result.Results[0]
+	if !result.Completed || got.Phase != taskPhaseErrorString || got.ContinuationTask != "child-next" ||
+		!strings.Contains(got.Result, "continuation chain is broken") {
+		t.Fatalf("a missing continuation must be a final chain error, got completed=%v %+v", result.Completed, got)
+	}
+}
+
+func TestWaitForTasksReportsAReplacedContinuationAsAFinalChainError(t *testing.T) {
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNamespace, UID: "uid-child"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Wait: &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateResumed, Kind: corev1alpha1.TaskWaitKindTimer,
+				ContinuationTaskName: "child-next", ContinuationTaskUID: "uid-next",
+			},
+		},
+	}
+	impostor := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-next", Namespace: testNamespace, UID: "uid-other"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+	}
+	result := runWaitForTasks(t, child, impostor)
+	got := result.Results[0]
+	if !result.Completed || got.Phase != taskPhaseErrorString || got.Phase == string(corev1alpha1.TaskPhaseSucceeded) {
+		t.Fatalf("a replaced continuation must be a final chain error, got completed=%v %+v", result.Completed, got)
 	}
 }
