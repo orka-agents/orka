@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
@@ -46,6 +48,10 @@ const (
 // error. Callers may retry it later.
 var ErrIssuerUnavailable = errors.New("the identity issuer is unavailable")
 
+// entraFlightDeadline bounds one shared fetch: an app token needs the
+// exchange token first, so two requests.
+const entraFlightDeadline = 2 * defaultEntraHTTPDeadline
+
 // maxCachedTokens bounds the token cache however many identities, targets,
 // and policies the controller serves.
 const maxCachedTokens = 1024
@@ -66,6 +72,12 @@ type EntraIssuer struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedToken
+	// flights coalesces concurrent misses for one cache key into a single
+	// issuer request.
+	flights singleflight.Group
+	// flightJoined, when set, runs once a caller has started or joined a
+	// flight; tests use it to order callers.
+	flightJoined func()
 }
 
 type cachedToken struct {
@@ -95,7 +107,7 @@ func (i *EntraIssuer) ExchangeToken(ctx context.Context, identityID string) (str
 	if !guidPattern.MatchString(identityID) {
 		return "", errors.New("Entra agent identity IDs must be GUIDs") //nolint:staticcheck // Product name begins the message.
 	}
-	return i.cached("exchange\x00"+identityID, func() (string, time.Duration, error) {
+	return i.cached(ctx, "exchange\x00"+identityID, func(ctx context.Context) (string, time.Duration, error) {
 		credential, err := i.credential()
 		if err != nil {
 			return "", 0, err
@@ -126,7 +138,7 @@ func (i *EntraIssuer) appToken(ctx context.Context, identityID, resource string,
 	if resource == "" || strings.HasSuffix(resource, "/.default") {
 		return "", errors.New("an Entra resource without the /.default suffix is required")
 	}
-	return i.cached(appTokenCacheKey("app", identityID, resource, policy), func() (string, time.Duration, error) {
+	return i.cached(ctx, appTokenCacheKey("app", identityID, resource, policy), func(ctx context.Context) (string, time.Duration, error) {
 		exchange, err := i.ExchangeToken(ctx, identityID)
 		if err != nil {
 			return "", 0, err
@@ -171,34 +183,72 @@ func (i *EntraIssuer) now() time.Time {
 // cached returns a live cached token or fetches one. An entry lives at most
 // five minutes, and never past a minute before the token expires. Every
 // flow's tokens share this cache and its bound.
-func (i *EntraIssuer) cached(key string, fetch func() (string, time.Duration, error)) (string, error) {
+//
+// Concurrent misses for one key share a single fetch. The fetch runs under a
+// context no caller can cancel, bounded by entraFlightDeadline, so a caller
+// that gives up does not fail the others; each caller still returns when its
+// own context ends. A caller whose deadline passes while it waits gets
+// ErrIssuerUnavailable. A failed fetch is returned to every waiter and
+// nothing is cached.
+func (i *EntraIssuer) cached(ctx context.Context, key string, fetch func(context.Context) (string, time.Duration, error)) (string, error) {
 	digest := sha256.Sum256([]byte(key))
 	cacheKey := hex.EncodeToString(digest[:])
-	now := i.now()
-	i.mu.Lock()
-	if entry, ok := i.cache[cacheKey]; ok {
-		if now.Before(entry.expires) {
-			i.mu.Unlock()
-			return entry.value, nil
+	if token, ok := i.lookup(cacheKey); ok {
+		return token, nil
+	}
+	results := i.flights.DoChan(cacheKey, func() (any, error) {
+		if token, ok := i.lookup(cacheKey); ok {
+			return token, nil
 		}
-		delete(i.cache, cacheKey)
+		flightCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), entraFlightDeadline)
+		defer cancel()
+		now := i.now()
+		token, lifetime, err := fetch(flightCtx)
+		if err != nil {
+			return "", err
+		}
+		lifetime -= tokenExpirySafetyMargin
+		if lifetime > maxCachedTokenLifetime {
+			lifetime = maxCachedTokenLifetime
+		}
+		if lifetime > 0 {
+			i.mu.Lock()
+			i.storeLocked(cacheKey, cachedToken{value: token, expires: now.Add(lifetime)}, i.now())
+			i.mu.Unlock()
+		}
+		return token, nil
+	})
+	if i.flightJoined != nil {
+		i.flightJoined()
 	}
-	i.mu.Unlock()
+	select {
+	case result := <-results:
+		if result.Err != nil {
+			return "", result.Err
+		}
+		token, _ := result.Val.(string)
+		return token, nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("the Entra token request did not finish in time: %w", ErrIssuerUnavailable)
+		}
+		return "", ctx.Err()
+	}
+}
 
-	token, lifetime, err := fetch()
-	if err != nil {
-		return "", err
+// lookup returns a live cached token, dropping an expired one.
+func (i *EntraIssuer) lookup(cacheKey string) (string, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	entry, ok := i.cache[cacheKey]
+	if !ok {
+		return "", false
 	}
-	lifetime -= tokenExpirySafetyMargin
-	if lifetime > maxCachedTokenLifetime {
-		lifetime = maxCachedTokenLifetime
+	if i.now().Before(entry.expires) {
+		return entry.value, true
 	}
-	if lifetime > 0 {
-		i.mu.Lock()
-		i.storeLocked(cacheKey, cachedToken{value: token, expires: now.Add(lifetime)}, i.now())
-		i.mu.Unlock()
-	}
-	return token, nil
+	delete(i.cache, cacheKey)
+	return "", false
 }
 
 // storeLocked caches one entry. It first drops every expired entry, so keys
