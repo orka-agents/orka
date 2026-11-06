@@ -30,9 +30,13 @@ func desiredWaitingForCapacityCondition(task *corev1alpha1.Task) *metav1.Conditi
 	}
 	condition := &metav1.Condition{Type: corev1alpha1.TaskConditionWaitingForCapacity, ObservedGeneration: task.Generation}
 	if task.Status.Phase == corev1alpha1.TaskPhasePending {
+		// A built-in RuntimePool's prompt 429 is reconciled in place while the
+		// execution is still Submitting: the runtime proved it did not accept
+		// the prompt, and the Task stays Pending until one is accepted.
 		if execution := task.Status.Execution; execution != nil &&
 			execution.Reason == corev1alpha1.TaskExecutionReasonWaitingForCapacity &&
-			(execution.State == corev1alpha1.TaskExecutionStateQueued || execution.State == corev1alpha1.TaskExecutionStateReserved) {
+			(execution.State == corev1alpha1.TaskExecutionStateQueued || execution.State == corev1alpha1.TaskExecutionStateReserved ||
+				execution.State == corev1alpha1.TaskExecutionStateSubmitting) {
 			condition.Status = metav1.ConditionTrue
 			condition.Reason = corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable
 			condition.Message = execution.Message

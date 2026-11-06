@@ -132,3 +132,45 @@ func TestACPAdmissionRetryReasonTreatsANonAdmittingPoolAsACapacityWait(t *testin
 		}
 	}
 }
+
+// promptRateLimitedTestTask is the status the built-in RuntimePool prompt-429
+// path in executeReservedTask writes: still Submitting and Pending, since the
+// runtime proved it did not accept the prompt.
+func promptRateLimitedTestTask() *corev1alpha1.Task {
+	task := capacityTestTask()
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting
+	task.Status.Execution.Message = "RuntimePool prompt admission was rate limited and will be reconciled"
+	return task
+}
+
+func TestPromptRateLimitedSubmittingTaskIsWaitingForCapacity(t *testing.T) {
+	if got := desiredWaitingForCapacityCondition(promptRateLimitedTestTask()); got == nil || got.Status != metav1.ConditionTrue ||
+		got.Reason != corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable {
+		t.Fatalf("a prompt-429 Submitting Task must wait for capacity, got %+v", got)
+	}
+	submitting := promptRateLimitedTestTask()
+	submitting.Status.Execution.Reason = ""
+	if got := desiredWaitingForCapacityCondition(submitting); got != nil {
+		t.Fatalf("a Submitting Task without a capacity reason must not wait for capacity, got %+v", got)
+	}
+
+	task := promptRateLimitedTestTask()
+	task.Status.Conditions = []metav1.Condition{{
+		Type: corev1alpha1.TaskConditionWaitingForCapacity, Status: metav1.ConditionTrue,
+		Reason: corev1alpha1.TaskWaitingForCapacityReasonRuntimeCapacityUnavailable, Message: "RuntimePool is at capacity",
+		LastTransitionTime: metav1.Now(),
+	}}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	current := &corev1alpha1.Task{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.syncACPWaitingForCapacity(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if condition := meta.FindStatusCondition(current.Status.Conditions, corev1alpha1.TaskConditionWaitingForCapacity); condition == nil ||
+		condition.Status != metav1.ConditionTrue {
+		t.Fatalf("a prompt 429 must not clear the capacity wait, got %+v", condition)
+	}
+}
