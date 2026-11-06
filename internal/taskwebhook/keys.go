@@ -74,7 +74,10 @@ type SecretKeySource struct {
 	CacheTTL time.Duration
 	Now      func() time.Time
 
-	mu        sync.Mutex
+	// lock serializes cache access; unlike a mutex, a waiter gives up when
+	// its context ends.
+	lock      chan struct{}
+	lockOnce  sync.Once
 	cached    KeySet
 	cachedAt  time.Time
 	hasCached bool
@@ -110,6 +113,10 @@ func (s *SecretKeySource) now() time.Time {
 	return time.Now()
 }
 
+// keyLoadTimeout bounds one signing Secret load, including any create or mint
+// writes. It matches the connect bound of a delivery attempt.
+var keyLoadTimeout = 10 * time.Second
+
 func (s *SecretKeySource) load(ctx context.Context, mint bool) (KeySet, error) {
 	if s == nil || s.Reader == nil || strings.TrimSpace(s.Namespace) == "" || strings.TrimSpace(s.Name) == "" {
 		return KeySet{}, ErrSigningUnavailable
@@ -118,12 +125,21 @@ func (s *SecretKeySource) load(ctx context.Context, mint bool) (KeySet, error) {
 	if ttl <= 0 {
 		ttl = defaultKeyCacheTTL
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockOnce.Do(func() { s.lock = make(chan struct{}, 1) })
+	select {
+	case s.lock <- struct{}{}:
+	case <-ctx.Done():
+		return KeySet{}, fmt.Errorf("%w: waiting for the signing key cache: %v", ErrSigningUnavailable, ctx.Err())
+	}
+	defer func() { <-s.lock }()
 	if s.hasCached && s.now().Sub(s.cachedAt) < ttl && (!mint || s.cached.Current != nil) {
 		return s.cached, nil
 	}
-	keys, err := s.read(ctx, mint)
+	// A stalled Secret read must not hold the caller (a Task reconcile
+	// worker, or a JWKS request) or the cache lock indefinitely.
+	readCtx, cancel := context.WithTimeout(ctx, keyLoadTimeout)
+	defer cancel()
+	keys, err := s.read(readCtx, mint)
 	if err != nil {
 		return KeySet{}, err
 	}

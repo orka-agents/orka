@@ -187,3 +187,57 @@ func TestSecretKeySourceWithoutConfigurationIsUnavailable(t *testing.T) {
 		t.Fatalf("empty static source error = %v", err)
 	}
 }
+
+// stalledReader blocks every Get until its context ends, as a stalled API
+// server read would.
+type stalledReader struct {
+	ctrlclient.Reader
+	started chan struct{}
+}
+
+func (r stalledReader) Get(ctx context.Context, _ ctrlclient.ObjectKey, _ ctrlclient.Object, _ ...ctrlclient.GetOption) error {
+	select {
+	case r.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// Not parallel: it overrides the package's key load bound.
+func TestSecretKeySourceBoundsStalledLoadsAndCancellableWaits(t *testing.T) {
+	previous := keyLoadTimeout
+	keyLoadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { keyLoadTimeout = previous })
+	reader := stalledReader{started: make(chan struct{}, 1)}
+	source := &SecretKeySource{Reader: reader, Namespace: "orka-system", Name: "signing"}
+
+	// A stalled read is bounded even when the caller has no deadline.
+	done := make(chan error, 1)
+	go func() {
+		_, err := source.PublishedKeys(context.Background())
+		done <- err
+	}()
+	<-reader.started
+
+	// While that load holds the cache lock, a caller with a short deadline
+	// stops waiting instead of queueing behind the stalled read.
+	waitCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := source.PublishedKeys(waitCtx); !errors.Is(err, ErrSigningUnavailable) {
+		t.Fatalf("waiting caller error = %v, want ErrSigningUnavailable", err)
+	}
+	if waited := time.Since(started); waited > 150*time.Millisecond {
+		t.Fatalf("waiting caller blocked %v past its deadline", waited)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSigningUnavailable) {
+			t.Fatalf("stalled load error = %v, want ErrSigningUnavailable", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled Secret read was not bounded")
+	}
+}
