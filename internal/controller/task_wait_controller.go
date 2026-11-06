@@ -49,6 +49,9 @@ const (
 	// taskWaitStepInterval runs the next durable step, or retries a lost
 	// optimistic-concurrency race, promptly.
 	taskWaitStepInterval = 100 * time.Millisecond
+	// taskWaitLinkAttempts bounds how often one reconcile retries linking a
+	// continuation it created when the status write loses a race.
+	taskWaitLinkAttempts = 4
 
 	taskWaitReasonPrefix = "Awaiting"
 )
@@ -464,10 +467,47 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		logf.FromContext(ctx).Info("Continuation requester was not sealed; its connector tools fail closed",
 			"task", task.Name, "continuation", name, "reason", err.Error())
 	}
-	return r.markResumed(ctx, task, continuation)
+	return r.markCreatedResumed(ctx, task, continuation)
+}
+
+// markCreatedResumed links the continuation this reconcile created. Creating
+// it is the proof that it is Orka's, and a later reconcile can re-prove that
+// only with provenance admission, so a status write that loses a race is
+// retried here against the authoritative Task while its wait still reserves
+// this continuation and has not been cancelled.
+func (r *TaskWaitReconciler) markCreatedResumed(ctx context.Context, task, continuation *corev1alpha1.Task) (ctrl.Result, error) {
+	for attempt := range taskWaitLinkAttempts {
+		if attempt > 0 {
+			latest := &corev1alpha1.Task{}
+			if err := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+				return ctrl.Result{}, client.IgnoreNotFound(err)
+			}
+			wait := latest.Status.Wait
+			if latest.UID != task.UID || wait == nil || wait.State != corev1alpha1.TaskWaitStateResuming ||
+				wait.ContinuationTaskName != continuation.Name {
+				return ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil
+			}
+			if reason, cancelled := taskWaitCancellation(latest); cancelled {
+				return r.cancel(ctx, latest, reason)
+			}
+			task = latest
+		}
+		linked, result, err := r.linkContinuation(ctx, task, continuation)
+		if err != nil || linked {
+			return result, err
+		}
+	}
+	return ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil
 }
 
 func (r *TaskWaitReconciler) markResumed(ctx context.Context, task *corev1alpha1.Task, continuation *corev1alpha1.Task) (ctrl.Result, error) {
+	_, result, err := r.linkContinuation(ctx, task, continuation)
+	return result, err
+}
+
+// linkContinuation records the continuation on the parked Task. It reports
+// false when the fenced status write lost a race.
+func (r *TaskWaitReconciler) linkContinuation(ctx context.Context, task, continuation *corev1alpha1.Task) (bool, ctrl.Result, error) {
 	wait := task.Status.Wait
 	now := r.now()
 	done, err := r.transition(ctx, task, func(next *corev1alpha1.TaskWaitStatus) {
@@ -476,14 +516,14 @@ func (r *TaskWaitReconciler) markResumed(ctx context.Context, task *corev1alpha1
 		next.Message = boundTaskWaitText("resumed as "+continuation.Name+": "+next.Message, maxTaskWaitMessageLength)
 	})
 	if err != nil || !done {
-		return taskWaitRetry(done), err
+		return false, taskWaitRetry(done), err
 	}
 	metrics.RecordTaskWaitTransition(string(wait.Kind), string(corev1alpha1.TaskWaitStateResumed), taskWaitedFor(wait, now))
 	// The UID is durable now; the continuation may be deleted like any Task.
 	if err := r.releaseContinuationLink(ctx, continuation.Namespace, continuation.Name); err != nil {
-		return ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil //nolint:nilerr // The continuation's own reconcile retries the release.
+		return true, ctrl.Result{RequeueAfter: taskWaitStepInterval}, nil //nolint:nilerr // The continuation's own reconcile retries the release.
 	}
-	return ctrl.Result{}, nil
+	return true, ctrl.Result{}, nil
 }
 
 // releaseContinuationLink removes the link finalizer once the predecessor no

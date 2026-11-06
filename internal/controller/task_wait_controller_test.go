@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -866,5 +868,90 @@ func TestContinuationOfAPublishedWriteTurnUsesTheSessionBaseline(t *testing.T) {
 	workspace, err := runtimeWorkspaceForSessionContinuation(continuation.Spec.Workspace, baseline)
 	if err != nil || workspace.Ref != baseline.Ref {
 		t.Fatalf("the continuation must prepare its workspace from the published baseline, got %+v, %v", workspace, err)
+	}
+}
+
+func TestTaskWaitLinksTheContinuationItCreatedDespiteAStatusConflict(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	h := newTaskWaitHarness(t, task)
+	created, conflicts := 0, 0
+	h.client = fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				created++
+				obj.SetUID(types.UID(fmt.Sprintf("created-uid-%d", created)))
+				return c.Create(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				// A concurrent writer wins the first link attempt.
+				if obj.GetName() == "parked" && created > 0 && conflicts == 0 {
+					conflicts++
+					return apierrors.NewConflict(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, obj.GetName(), errors.New("modified"))
+				}
+				return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	h.r.Client, h.r.APIReader = h.client, h.client
+	// Without provenance admission a later reconcile cannot prove an existing
+	// continuation is Orka's, so the reconcile that created it must link it.
+	h.r.TaskProvenanceProtected = false
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if conflicts != 1 || created != 1 {
+		t.Fatalf("expected one create and one lost race, got %d and %d", created, conflicts)
+	}
+	if wait.State != corev1alpha1.TaskWaitStateResumed || wait.ContinuationTaskUID != "created-uid-1" {
+		t.Fatalf("the created continuation must be linked after a status conflict, got %+v", wait)
+	}
+	if finalizers := h.task(wait.ContinuationTaskName).Finalizers; len(finalizers) != 0 {
+		t.Fatalf("a linked continuation must not keep the link finalizer: %v", finalizers)
+	}
+}
+
+func TestTaskWaitCancelsTheContinuationItCreatedWhenCancelledDuringALostLink(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	h := newTaskWaitHarness(t, task)
+	created := 0
+	h.client = fake.NewClientBuilder().WithScheme(newTestScheme()).WithStatusSubresource(&corev1alpha1.Task{}).
+		WithObjects(task).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				created++
+				obj.SetUID(types.UID(fmt.Sprintf("created-uid-%d", created)))
+				return c.Create(ctx, obj, opts...)
+			},
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if obj.GetName() == "parked" && created > 0 {
+					current := &corev1alpha1.Task{}
+					if err := c.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+						return err
+					}
+					if current.Annotations[labels.AnnotationCancelWait] == "" {
+						// The user cancels the wait while the link is being written.
+						current.Annotations[labels.AnnotationCancelWait] = "no longer needed"
+						if err := c.Update(ctx, current); err != nil {
+							return err
+						}
+						return apierrors.NewConflict(schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}, obj.GetName(), errors.New("modified"))
+					}
+				}
+				return c.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	h.r.Client, h.r.APIReader = h.client, h.client
+	h.r.TaskProvenanceProtected = false
+	h.settle("parked")
+	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateCancelled {
+		t.Fatalf("a cancellation that raced the link must cancel the wait, got %+v", wait)
+	}
+	for _, existing := range h.tasks() {
+		if existing.Name != "parked" && existing.DeletionTimestamp.IsZero() {
+			t.Fatalf("the continuation created for a cancelled wait must be deleted, found %s", existing.Name)
+		}
 	}
 }
