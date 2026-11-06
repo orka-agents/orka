@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,14 +41,18 @@ const (
 	defaultEntraHTTPDeadline  = 15 * time.Second
 )
 
+// maxCachedTokens bounds the token cache however many identities, targets,
+// and policies the controller serves.
+const maxCachedTokens = 1024
+
 // EntraIssuer acquires Entra agent identity tokens with the blueprint flow:
 // the blueprint authenticates with the controller's federated credential and
 // receives an exchange token for one agent identity (fmi_path), which that
 // identity then presents to get a token for the target resource.
 type EntraIssuer struct {
+	// Config names the tenant, blueprint, and authority, the same values the
+	// issuer instance frozen into Task bindings is derived from.
 	Config EntraConfig
-	// Authority is the Entra authority URL; DefaultEntraAuthority when empty.
-	Authority string
 	// Credential returns the controller's federated credential. Defaults to
 	// reading DefaultTokenFile on every call, since the kubelet rotates it.
 	Credential func() (string, error)
@@ -101,14 +106,22 @@ func (i *EntraIssuer) ExchangeToken(ctx context.Context, identityID string) (str
 	})
 }
 
-// AppToken returns an app-only token for the agent identity and resource.
+// AppToken returns an app-only token for the agent identity and resource,
+// cached apart from any policy's tokens. It is how an identity is verified.
 func (i *EntraIssuer) AppToken(ctx context.Context, identityID, resource string) (string, error) {
+	return i.appToken(ctx, identityID, resource, outboundaccess.PolicyIdentity{})
+}
+
+// appToken returns an app-only token for the agent identity and resource,
+// cached under the policy that asked for it, so an edited or recreated
+// policy never reuses its predecessor's token.
+func (i *EntraIssuer) appToken(ctx context.Context, identityID, resource string, policy outboundaccess.PolicyIdentity) (string, error) {
 	identityID = strings.ToLower(strings.TrimSpace(identityID))
 	resource = strings.TrimSpace(resource)
 	if resource == "" || strings.HasSuffix(resource, "/.default") {
 		return "", errors.New("an Entra resource without the /.default suffix is required")
 	}
-	return i.cached("app\x00"+identityID+"\x00"+resource, func() (string, time.Duration, error) {
+	return i.cached(appTokenCacheKey("app", identityID, resource, policy), func() (string, time.Duration, error) {
 		exchange, err := i.ExchangeToken(ctx, identityID)
 		if err != nil {
 			return "", 0, err
@@ -116,11 +129,24 @@ func (i *EntraIssuer) AppToken(ctx context.Context, identityID, resource string)
 		return i.requestToken(ctx, "entra_app", url.Values{
 			"grant_type":            {"client_credentials"},
 			"client_id":             {identityID},
-			"scope":                 {strings.TrimSuffix(resource, "/") + "/.default"},
+			"scope":                 {entraScope(resource)},
 			"client_assertion_type": {jwtBearerAssertionType},
 			"client_assertion":      {exchange},
 		})
 	})
+}
+
+// entraScope is the resource's .default scope. The resource is kept exactly
+// as configured: one registered with a trailing slash, such as
+// https://database.windows.net/, needs it to select that audience.
+func entraScope(resource string) string {
+	return resource + "/.default"
+}
+
+// appTokenCacheKey identifies a token by flow, identity, target, and the
+// policy UID and generation it was issued for (ADR 0039).
+func appTokenCacheKey(flow, identityID, resource string, policy outboundaccess.PolicyIdentity) string {
+	return flow + "\x00" + identityID + "\x00" + resource + "\x00" + policy.UID + "\x00" + strconv.FormatInt(policy.Generation, 10)
 }
 
 func (i *EntraIssuer) credential() (string, error) {
@@ -138,15 +164,19 @@ func (i *EntraIssuer) now() time.Time {
 }
 
 // cached returns a live cached token or fetches one. An entry lives at most
-// five minutes, and never past a minute before the token expires.
+// five minutes, and never past a minute before the token expires. Every
+// flow's tokens share this cache and its bound.
 func (i *EntraIssuer) cached(key string, fetch func() (string, time.Duration, error)) (string, error) {
 	digest := sha256.Sum256([]byte(key))
 	cacheKey := hex.EncodeToString(digest[:])
 	now := i.now()
 	i.mu.Lock()
-	if entry, ok := i.cache[cacheKey]; ok && now.Before(entry.expires) {
-		i.mu.Unlock()
-		return entry.value, nil
+	if entry, ok := i.cache[cacheKey]; ok {
+		if now.Before(entry.expires) {
+			i.mu.Unlock()
+			return entry.value, nil
+		}
+		delete(i.cache, cacheKey)
 	}
 	i.mu.Unlock()
 
@@ -160,13 +190,36 @@ func (i *EntraIssuer) cached(key string, fetch func() (string, time.Duration, er
 	}
 	if lifetime > 0 {
 		i.mu.Lock()
-		if i.cache == nil {
-			i.cache = map[string]cachedToken{}
-		}
-		i.cache[cacheKey] = cachedToken{value: token, expires: now.Add(lifetime)}
+		i.storeLocked(cacheKey, cachedToken{value: token, expires: now.Add(lifetime)}, i.now())
 		i.mu.Unlock()
 	}
 	return token, nil
+}
+
+// storeLocked caches one entry. It first drops every expired entry, so keys
+// never looked up again are reclaimed, and when the cache is still full it
+// evicts the entries closest to expiry. The caller holds i.mu.
+func (i *EntraIssuer) storeLocked(key string, entry cachedToken, now time.Time) {
+	if i.cache == nil {
+		i.cache = map[string]cachedToken{}
+	}
+	for existing, cached := range i.cache {
+		if !now.Before(cached.expires) {
+			delete(i.cache, existing)
+		}
+	}
+	if _, replacing := i.cache[key]; !replacing {
+		for len(i.cache) >= maxCachedTokens {
+			oldest, oldestExpiry := "", time.Time{}
+			for existing, cached := range i.cache {
+				if oldest == "" || cached.expires.Before(oldestExpiry) {
+					oldest, oldestExpiry = existing, cached.expires
+				}
+			}
+			delete(i.cache, oldest)
+		}
+	}
+	i.cache[key] = entry
 }
 
 type entraTokenResponse struct {
@@ -188,11 +241,7 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 		}
 		metrics.RecordTokenExchange("agentIdentity", step, result, reason, time.Since(started).Seconds())
 	}()
-	authority := strings.TrimSuffix(strings.TrimSpace(i.Authority), "/")
-	if authority == "" {
-		authority = DefaultEntraAuthority
-	}
-	endpoint := authority + "/" + url.PathEscape(strings.ToLower(i.Config.TenantID)) + "/oauth2/v2.0/token"
+	endpoint := i.Config.authority() + "/" + url.PathEscape(strings.ToLower(i.Config.TenantID)) + "/oauth2/v2.0/token"
 	ctx, cancel := context.WithTimeout(ctx, defaultEntraHTTPDeadline)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -201,10 +250,16 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("Accept", "application/json")
-	client := i.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: defaultEntraHTTPDeadline}
+	client := &http.Client{Timeout: defaultEntraHTTPDeadline}
+	if i.HTTPClient != nil {
+		copied := *i.HTTPClient
+		client = &copied
 	}
+	// A redirect would replay the form, which carries the controller's
+	// federated credential or the blueprint's exchange token, to wherever
+	// the response points. Entra's token endpoint never redirects, so the
+	// 3xx is returned as a refusal instead.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)
 	if err != nil {
 		reason = "unreachable"
@@ -275,7 +330,7 @@ func (s *Source) AgentIdentityToken(ctx context.Context, req outboundaccess.Agen
 		if s.Entra == nil {
 			return "", errors.New("the Entra issuer is not configured on this controller")
 		}
-		return s.Entra.AppToken(ctx, req.Identity.ID, req.Resource)
+		return s.Entra.appToken(ctx, req.Identity.ID, req.Resource, req.Policy)
 	default:
 		return "", fmt.Errorf("identity issuer %q is not supported", req.Identity.Issuer)
 	}

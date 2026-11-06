@@ -5,6 +5,7 @@ package agentidentity
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -70,8 +71,7 @@ func newTestIssuer(t *testing.T, fake *fakeEntra, now *time.Time) *EntraIssuer {
 	server := httptest.NewTLSServer(fake.handler(t))
 	t.Cleanup(server.Close)
 	return &EntraIssuer{
-		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint},
-		Authority:  server.URL,
+		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
 		Credential: func() (string, error) { return testControllerToken, nil },
 		HTTPClient: server.Client(),
 		Now:        func() time.Time { return *now },
@@ -211,5 +211,111 @@ func TestSourceVerifyFailsForADisabledIdentity(t *testing.T) {
 	}
 	if fake.count() != 2 || fake.requests[0].Get("client_id") != testBlueprint {
 		t.Fatalf("requests = %v, want the blueprint's exchange to succeed first", fake.requests)
+	}
+}
+
+func TestEntraTokenRequestsNeverFollowRedirects(t *testing.T) {
+	var replayed sync.Mutex
+	replays := 0
+	elsewhere := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		replayed.Lock()
+		replays++
+		replayed.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "stolen", "expires_in": 3599})
+	}))
+	t.Cleanup(elsewhere.Close)
+	redirecting := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/token", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirecting.Close)
+	client := redirecting.Client()
+	client.Transport.(*http.Transport).TLSClientConfig.RootCAs.AddCert(elsewhere.Certificate())
+	issuer := &EntraIssuer{
+		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: redirecting.URL},
+		Credential: func() (string, error) { return testControllerToken, nil },
+		HTTPClient: client,
+	}
+	_, err := issuer.ExchangeToken(context.Background(), testIdentity)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("error = %v, want the redirect refused", err)
+	}
+	replayed.Lock()
+	defer replayed.Unlock()
+	if replays != 0 {
+		t.Fatal("the federated credential was replayed to the redirect target")
+	}
+	if client.CheckRedirect != nil {
+		t.Fatal("the caller's HTTP client must not be modified")
+	}
+}
+
+func TestEntraScopeKeepsTheResourceAsConfigured(t *testing.T) {
+	fake := &fakeEntra{}
+	now := time.Now()
+	issuer := newTestIssuer(t, fake, &now)
+	if _, err := issuer.AppToken(context.Background(), testIdentity, "https://database.windows.net/"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.requests[1].Get("scope"); got != "https://database.windows.net//.default" {
+		t.Fatalf("scope = %q, want the trailing slash kept", got)
+	}
+}
+
+func TestEntraTokenCacheIsBounded(t *testing.T) {
+	now := time.Now()
+	issuer := &EntraIssuer{Now: func() time.Time { return now }}
+	fetch := func() (string, time.Duration, error) { return "t", time.Hour, nil }
+	for i := range 10 {
+		if _, err := issuer.cached(fmt.Sprint("expiring-", i), fetch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(maxCachedTokenLifetime)
+	if _, err := issuer.cached("fresh", fetch); err != nil {
+		t.Fatal(err)
+	}
+	if len(issuer.cache) != 1 {
+		t.Fatalf("cache holds %d entries, want expired entries reclaimed", len(issuer.cache))
+	}
+	for i := range maxCachedTokens + 10 {
+		now = now.Add(time.Millisecond)
+		if _, err := issuer.cached(fmt.Sprint("key-", i), fetch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(issuer.cache) != maxCachedTokens {
+		t.Fatalf("cache holds %d entries, want at most %d", len(issuer.cache), maxCachedTokens)
+	}
+}
+
+func TestSourceCachesTokensPerPolicyUIDAndGeneration(t *testing.T) {
+	fake := &fakeEntra{}
+	now := time.Now()
+	source := &Source{Config: configuredConfig(), Entra: newTestIssuer(t, fake, &now)}
+	instance, _ := source.Config.Instance("entra")
+	request := func(uid string, generation int64) outboundaccess.AgentIdentityTokenRequest {
+		return outboundaccess.AgentIdentityTokenRequest{
+			Identity: corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: strings.ToLower(testIdentity), Instance: instance},
+			Mode:     corev1alpha1.OutboundAgentIdentityModeSelf,
+			Resource: "https://graph.microsoft.com",
+			Policy:   outboundaccess.PolicyIdentity{UID: uid, Generation: generation},
+		}
+	}
+	for _, step := range []struct {
+		name         string
+		request      outboundaccess.AgentIdentityTokenRequest
+		wantRequests int
+	}{
+		{"first call fetches the exchange and app tokens", request("policy-a", 1), 2},
+		{"the same policy reuses its token", request("policy-a", 1), 2},
+		{"an edited policy gets a fresh token", request("policy-a", 2), 3},
+		{"a recreated policy gets a fresh token", request("policy-b", 2), 4},
+	} {
+		if _, err := source.AgentIdentityToken(context.Background(), step.request); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		if fake.count() != step.wantRequests {
+			t.Fatalf("%s: requests = %d, want %d", step.name, fake.count(), step.wantRequests)
+		}
 	}
 }
