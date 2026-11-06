@@ -426,6 +426,11 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 			return r.finishWithoutResume(ctx, task, corev1alpha1.TaskWaitStateAbandoned,
 				"an existing continuation cannot be proven to be Orka's because Task provenance admission is disabled")
 		}
+		// A restart may have landed between creation and sealing. Seal before
+		// linking so the retry happens while this Task is still Resuming.
+		if err := r.ensureContinuationRequesterSealed(ctx, task, existing); err != nil && !errors.Is(err, ErrChildSealRefused) {
+			return ctrl.Result{}, fmt.Errorf("seal adopted continuation requester: %w", err)
+		}
 		return r.markResumed(ctx, task, existing)
 	case !apierrors.IsNotFound(err):
 		return ctrl.Result{}, err
@@ -438,6 +443,12 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 			"the Task deadline leaves no time for a continuation turn")
 	}
 	continuation := buildTaskContinuation(task, name, remaining)
+	if continuationRequesterSealable(task) {
+		// Mark the requester as API-sourced from creation so admission waits
+		// for the seal instead of freezing a snapshot without the requester's
+		// connectors.
+		continuation.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	}
 	tracing.StampTaskTraceContext(ctx, continuation)
 	if err := r.Create(ctx, continuation); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -446,9 +457,10 @@ func (r *TaskWaitReconciler) reconcileResuming(ctx context.Context, task *corev1
 		return ctrl.Result{}, fmt.Errorf("create continuation task: %w", err)
 	}
 	logf.FromContext(ctx).Info("Created continuation for parked task", "task", task.Name, "continuation", name, "kind", wait.Kind)
-	if err := sealContinuationRequesterStamp(ctx, r.Client, requesterStampKey, task, continuation); err != nil {
-		// An unsealed continuation's connector tools fail closed, exactly
-		// like an unsealed scheduled run.
+	if err := r.ensureContinuationRequesterSealed(ctx, task, continuation); err != nil {
+		// Linking the continuation that now exists matters more than its
+		// connectors. Admission waits out the stamp grace period and then
+		// fails its connector tools closed, like an unsealed scheduled run.
 		logf.FromContext(ctx).Info("Continuation requester was not sealed; its connector tools fail closed",
 			"task", task.Name, "continuation", name, "reason", err.Error())
 	}
@@ -743,6 +755,42 @@ func taskContinuationPrompt(parked *corev1alpha1.Task) string {
 	return b.String()
 }
 
+// continuationRequesterSealable reports whether the parked Task carries a
+// verified requester that its continuation must be sealed with.
+func continuationRequesterSealable(parked *corev1alpha1.Task) bool {
+	return len(requesterStampKey) >= connectors.MinRequesterStampKeyBytes && parked != nil &&
+		parked.Spec.RequestedBy != nil && connectors.RequesterStampValid(requesterStampKey, parked)
+}
+
+// ensureContinuationRequesterSealed seals the continuation's requester stamp
+// unless it is already valid, re-reading the continuation when a concurrent
+// write fences the patch.
+func (r *TaskWaitReconciler) ensureContinuationRequesterSealed(ctx context.Context, parked, continuation *corev1alpha1.Task) error {
+	if !continuationRequesterSealable(parked) {
+		return nil
+	}
+	current := continuation
+	var err error
+	for attempt := range acpChildSealAttempts {
+		if attempt > 0 {
+			current = &corev1alpha1.Task{}
+			if err = r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(continuation), current); err != nil {
+				return err
+			}
+			if current.UID != continuation.UID {
+				return fmt.Errorf("%w: the continuation was replaced", ErrChildSealRefused)
+			}
+		}
+		if connectors.RequesterStampValid(requesterStampKey, current) {
+			return nil
+		}
+		if err = sealContinuationRequesterStamp(ctx, r.Client, requesterStampKey, parked, current); err == nil || !apierrors.IsConflict(err) {
+			return err
+		}
+	}
+	return err
+}
+
 // sealContinuationRequesterStamp binds the parked Task's verified requester to
 // its continuation. It mirrors SealChildRequesterStamp, but proves the link by
 // the parked Task's owner reference and continuation annotation.
@@ -763,6 +811,9 @@ func sealContinuationRequesterStamp(ctx context.Context, c client.Client, key []
 		return errors.New("the continuation has no UID to bind the requester stamp to")
 	}
 	original := continuation.DeepCopy()
+	if continuation.Annotations == nil {
+		continuation.Annotations = map[string]string{}
+	}
 	continuation.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
 	continuation.Annotations[labels.AnnotationRequestedByStamp] = stamp
 	return c.Patch(ctx, continuation, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))

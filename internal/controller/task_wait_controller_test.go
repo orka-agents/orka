@@ -25,6 +25,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/approvals"
+	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
@@ -701,5 +702,57 @@ func TestTaskWaitIgnoresASameNamedReplacementChild(t *testing.T) {
 	prompt := h.task(wait.ContinuationTaskName).Spec.Prompt
 	if strings.Contains(prompt, "child: Failed") || !strings.Contains(prompt, "child: is no longer the task this wait was authorized for") {
 		t.Fatalf("a replacement child must not supply the outcome, got %s", prompt)
+	}
+}
+
+// requesterParkedTestTask is a parked Task whose requester the API sealed.
+func requesterParkedTestTask(t *testing.T) *corev1alpha1.Task {
+	t.Helper()
+	SetRequesterStampKey(testRequesterStampKey)
+	task := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	task.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "https://issuer.example.test", Subject: "alice"}
+	task.Annotations[labels.AnnotationRequestedBySource] = labels.RequestedBySourceAPI
+	task.Annotations[labels.AnnotationRequestedByStamp] = connectors.RequesterStamp(testRequesterStampKey, task.UID, "https://issuer.example.test", "alice")
+	return task
+}
+
+func TestTaskWaitContinuationWaitsForItsRequesterSeal(t *testing.T) {
+	h := newTaskWaitHarness(t, requesterParkedTestTask(t))
+	// Sealing keeps failing, as if the API server were briefly unavailable.
+	h.r.Client = interceptor.NewClient(h.client.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			return errors.New("api unavailable")
+		},
+	})
+	h.settle("parked")
+	wait := h.task("parked").Status.Wait
+	if wait.State != corev1alpha1.TaskWaitStateResumed {
+		t.Fatalf("an unsealed continuation must still be linked, got %s", wait.State)
+	}
+	continuation := h.task(wait.ContinuationTaskName)
+	if continuation.Annotations[labels.AnnotationRequestedByStamp] != "" ||
+		continuation.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI {
+		t.Fatalf("the continuation must be created marked as awaiting its seal: %v", continuation.Annotations)
+	}
+	continuation.CreationTimestamp = metav1.NewTime(taskWaitTestNow)
+	if !requesterStampPending(continuation, taskWaitTestNow.Add(time.Second)) {
+		t.Fatal("admission must wait for the requester seal instead of freezing without connectors")
+	}
+}
+
+func TestTaskWaitSealsTheRequesterOfAnAdoptedContinuation(t *testing.T) {
+	task := requesterParkedTestTask(t)
+	task.Status.Wait.State = corev1alpha1.TaskWaitStateResuming
+	task.Status.Wait.ContinuationTaskName = taskwait.ContinuationTaskName(task)
+	// The controller restarted after creating the continuation, before sealing it.
+	existing := buildTaskContinuation(task, task.Status.Wait.ContinuationTaskName, time.Hour)
+	existing.UID = "uid-existing"
+	h := newTaskWaitHarness(t, task, existing)
+	h.settle("parked")
+	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateResumed {
+		t.Fatalf("state = %s, want Resumed", got)
+	}
+	if adopted := h.task(existing.Name); !connectors.RequesterStampValid(testRequesterStampKey, adopted) {
+		t.Fatalf("adoption must seal the continuation's requester: %v", adopted.Annotations)
 	}
 }
