@@ -438,3 +438,66 @@ func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1
 
 	return r, task, workspaceKey, retirer
 }
+
+// A recorded cancel request stops a prepared publication before the
+// controller writes the Cancelled phase.
+func TestPublicationHonorsARecordedCancelRequest(t *testing.T) {
+	running := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "running", Namespace: testNS, UID: "running-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	requested := running.DeepCopy()
+	requested.Name, requested.UID = "requested", "requested-uid"
+	requested.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice: wrong repository"}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(running, requested).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c}
+	for task, want := range map[*corev1alpha1.Task]bool{running: false, requested: true} {
+		got, err := d.taskCancellationRequested(context.Background(), task)
+		if err != nil || got != want {
+			t.Fatalf("%s: taskCancellationRequested() = %v, %v; want %v", task.Name, got, err, want)
+		}
+	}
+}
+
+// A write Task cancelled after its prompt succeeded but before publication
+// pushed keeps who cancelled it and why.
+func TestCancelTaskAfterExecutionKeepsTheCancelRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controls := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controls, "controller")
+	done := make(chan error, 1)
+	go func() { done <- epochs.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	const request = "cancelled by alice: wrong repository"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "write", Namespace: testNS, UID: "write-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: request},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning, Execution: &corev1alpha1.TaskExecutionStatus{
+			State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: "prompt-1",
+		}},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task).Build()
+	d := &ACPDispatcher{Client: c, APIReader: c, Store: controls, Epochs: epochs}
+	delivery := corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateCancelledBeforePublish, Outcome: corev1alpha1.TaskDeliveryOutcomeCancelledBeforePublish,
+	}
+	if err := d.cancelTaskAfterExecution(ctx, task.DeepCopy(), delivery, "publication cancelled before push"); err != nil {
+		t.Fatal(err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Message != request {
+		t.Fatalf("status = %s %q, want Cancelled with the cancel request", current.Status.Phase, current.Status.Message)
+	}
+}
