@@ -971,8 +971,12 @@ func openCodeSessionConfig(
 	}
 	if skills := harnessv2.RuntimeSkillNames(request.Profile.Skills); len(skills) > 0 {
 		// OpenCode checks the skill permission with the skill name, so only
-		// the Orka skills are allowed; its built-in skills stay denied.
-		skillPermissions := map[string]string{"*": openCodePermissionDeny}
+		// the Orka skills are allowed; its built-in skills fall through to the
+		// top-level "*" deny. No nested "*" deny: OpenCode evaluates rules in
+		// JavaScript object order, which lists integer-like keys (a valid
+		// skill name such as "123") before "*", so a nested wildcard would
+		// win the last match and deny that skill.
+		skillPermissions := map[string]string{}
 		for _, name := range skills {
 			skillPermissions[name] = openCodePermissionAllow
 		}

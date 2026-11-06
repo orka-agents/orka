@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -395,9 +397,68 @@ func TestOpenCodeSkillPermissionAllowsOnlyOrkaSkills(t *testing.T) {
 		t.Fatalf("skill permission without skills = %#v", got)
 	}
 	got, ok := permission(t, supervisorTestSkills()).(map[string]any)
-	if !ok || len(got) != 3 || got["*"] != openCodePermissionDeny ||
-		got["code-review"] != openCodePermissionAllow || got["release-notes"] != openCodePermissionAllow {
+	if !ok || len(got) != 2 || got["code-review"] != openCodePermissionAllow || got["release-notes"] != openCodePermissionAllow {
 		t.Fatalf("skill permission with skills = %#v", got)
+	}
+}
+
+// jsObjectKeyOrder orders keys as JavaScript enumerates an object parsed from
+// JSON: canonical array-index keys ascending, then the rest in source order.
+func jsObjectKeyOrder(keys []string) []string {
+	var indices, others []string
+	for _, key := range keys {
+		if n, err := strconv.ParseUint(key, 10, 32); err == nil && n < 1<<32-1 && strconv.FormatUint(n, 10) == key {
+			indices = append(indices, key)
+		} else {
+			others = append(others, key)
+		}
+	}
+	sort.Slice(indices, func(i, j int) bool {
+		a, _ := strconv.ParseUint(indices[i], 10, 32)
+		b, _ := strconv.ParseUint(indices[j], 10, 32)
+		return a < b
+	})
+	return append(indices, others...)
+}
+
+func TestOpenCodeSkillPermissionAllowsNumericSkillNames(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
+	request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
+		ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{"Read"}},
+	}}
+	request.Profile.Skills = []harnessv2.RuntimeSkill{
+		{Name: "123", Image: "registry.example.com/skills/numeric@" + supervisorTestToolboxDigest, Path: "/skills/numeric"},
+		{Name: "code-review", Image: "registry.example.com/skills/review@" + supervisorTestToolboxDigest, Path: "/skills/code-review"},
+	}
+	data, err := openCodeSessionConfig("openai/gpt-test", testOpenCodeModelLimits(), harnessv2.WorkspaceIntentRead, request, paths, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// OpenCode flattens the top-level permissions first ("*" sorts first),
+	// then each permission's own rules in JavaScript key order, and the last
+	// matching rule decides.
+	topLevel := openCodeConfigRules(t, data, "*")
+	skillRules := openCodeConfigRules(t, data, "skill")
+	keys := make([]string, 0, len(skillRules))
+	actions := map[string]string{}
+	for _, rule := range skillRules {
+		keys = append(keys, rule[0])
+		actions[rule[0]] = rule[1]
+	}
+	decide := func(name string) string {
+		action := topLevel[0][1]
+		for _, key := range jsObjectKeyOrder(keys) {
+			if key == "*" || key == name {
+				action = actions[key]
+			}
+		}
+		return action
+	}
+	for name, want := range map[string]string{"123": openCodePermissionAllow, "code-review": openCodePermissionAllow, "builtin-skill": openCodePermissionDeny} {
+		if got := decide(name); got != want {
+			t.Fatalf("OpenCode skill %q resolves to %s, want %s (rules %v)", name, got, want, skillRules)
+		}
 	}
 }
 
