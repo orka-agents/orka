@@ -139,6 +139,11 @@ func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAcces
 	if strings.HasSuffix(resource, "/.default") {
 		return invalid("agentIdentity entra.resource names the resource; Orka appends /.default")
 	}
+	// Orka appends /.default, so a query or fragment would leave a scope
+	// Entra refuses on every call.
+	if strings.ContainsAny(resource, "?#") {
+		return invalid("agentIdentity entra.resource must not contain a query or fragment")
+	}
 	return validateCredentialOutput(identity.Output)
 }
 
