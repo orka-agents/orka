@@ -100,7 +100,7 @@ spec:
                           https://graph.microsoft.com. Orka requests the <resource>/.default scope.
                         maxLength: 512
                         minLength: 1
-                        pattern: ^(https://|api://)[^\s/]+(/[^\s]*)?$
+                        pattern: ^(https://|api://)[^\s/?#]+(/[^\s?#]*)?$
                         type: string
                     required:
                     - resource
