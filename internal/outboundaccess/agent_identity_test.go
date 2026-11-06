@@ -308,6 +308,30 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		}
 	})
 
+	t.Run("refuses a delegation that expired during the exchange", func(t *testing.T) {
+		identity := &fakeAgentIdentitySource{token: "obo-token"}
+		r := resolver(delegatedPolicySpec(nil), nil, identity)
+		r.Connections = connection()
+		r.DelegationLive = func(context.Context, AgentIdentityBinding) error { return nil }
+		start := now.Add(-time.Hour + time.Second)
+		calls := 0
+		// The first clock reading is before the exchange; the second, after
+		// it, is past the policy's one-hour maxDelegationAge.
+		r.Now = func() time.Time {
+			if calls++; calls > 1 {
+				return start.Add(time.Hour + time.Second)
+			}
+			return now
+		}
+		resolution, err := r.Resolve(context.Background(), delegatedRequest(start))
+		if err == nil || !strings.Contains(err.Error(), "expired") {
+			t.Fatalf("Resolve() = %v, want the expired delegation refused", err)
+		}
+		if resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+			t.Fatalf("no credential may be returned: %#v", resolution)
+		}
+	})
+
 	t.Run("refuses a delegation that ended during a slow refresh", func(t *testing.T) {
 		var ended atomic.Bool
 		refreshing := &endingConnectionSource{fakeConnectionSource: connection(), end: func() { ended.Store(true) }}
