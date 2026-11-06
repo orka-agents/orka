@@ -969,9 +969,9 @@ then records the outcome as unknown, as it did before record holds existed,
 and the condition becomes `False` with reason `RecoveryAcknowledged`. An
 annotation naming another hold releases nothing. The Gateway Task admission
 policy admits an update of a Gateway-owned Task that changes only this
-annotation. A recovery pass that starts while the installation is held acts
-on no Task, so record holds are placed and released once the installation
-hold clears.
+annotation, from a user who may also update that Task's status. A recovery
+pass that starts while the installation is held acts on no Task, so record
+holds are placed and released once the installation hold clears.
 
 **Not yet covered.** Record holds for a finalized turn without its store
 record and for reclamation without the turn cleanup receipt come with the

@@ -3508,7 +3508,10 @@ spec:
       (!has(oldObject.metadata.annotations) ||
 
         oldObject.metadata.annotations.all(k, k == 'storage.orka.ai/recovery-acknowledged' ||
-          k in object.metadata.annotations))
+          k in object.metadata.annotations)) &&
+      authorizer.group('core.orka.ai').resource('tasks').subresource('status')
+
+        .namespace(request.namespace).name(request.name).check('update').allowed()
     name: storageRecoveryAcknowledgement
 ---
 apiVersion: admissionregistration.k8s.io/v1

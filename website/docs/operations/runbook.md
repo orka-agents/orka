@@ -184,11 +184,22 @@ kubectl -n <namespace> annotate task <name> \
 
 Recovery then records the prompt's outcome as unknown, without running it
 again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
-An annotation that names any other hold releases nothing. The Gateway Task
-admission policy admits this change on Gateway-owned Tasks too, as long as
-the annotation is the only thing it changes. As with any update of a Task
-that selects an execution workspace class, the operator also needs `use`
-permission on that class, and on the checkpoint the Task restores from.
+An annotation that names any other hold releases nothing.
+
+On a Gateway-owned Task, the Gateway Task admission policy admits this change
+only when the annotation is the only thing it changes and you may also update
+that Task's status: `update` on `tasks/status` in the Task's namespace.
+The Task roles Orka ships do not grant it: `orka-task-editor-role`,
+`orka-task-admin-role` and the Helm chart's client Role (`orka-client` for a
+release named `orka`) allow only `get` on `tasks/status`. Check with:
+
+```bash
+kubectl auth can-i update tasks.core.orka.ai/<name> --subresource=status -n <namespace>
+```
+
+As with any update of a Task that selects an execution workspace class, the
+operator also needs `use` permission on that class, and on the checkpoint the
+Task restores from.
 
 ## Security scan operations
 
