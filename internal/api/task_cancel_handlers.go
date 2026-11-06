@@ -123,6 +123,11 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
+	// Gateway-owned Sessions are outside the general Session API: answer as
+	// for a missing one, before any conflict check or Task is touched.
+	if sessionType == store.SessionTypeGateway {
+		return fiber.NewError(fiber.StatusNotFound, "session not found")
+	}
 	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
 	if sessionType == store.SessionTypeChat && h.chatTurns != nil {
 		// Stop the chat request first so it starts no Task after the list
