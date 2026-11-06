@@ -15,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/valyala/fasthttp"
@@ -99,6 +100,8 @@ type mcpServer struct {
 	slots          chan struct{}
 	waitSlots      chan struct{}
 	allowedOrigins []string
+	// resultWait bounds how long tasks/result waits for a Task to finish.
+	resultWait time.Duration
 }
 
 type mcpRequest struct {
@@ -149,6 +152,7 @@ func newMCPServer(handler fasthttp.RequestHandler, cfg MCPServerConfig) *mcpServ
 		slots:          make(chan struct{}, maxConcurrent),
 		waitSlots:      make(chan struct{}, max(1, maxConcurrent/2)),
 		allowedOrigins: mcpAllowedOrigins(os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")),
+		resultWait:     mcpMaxWaitSeconds * time.Second,
 	}
 }
 

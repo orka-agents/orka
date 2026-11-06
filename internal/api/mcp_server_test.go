@@ -878,3 +878,29 @@ func TestMCPWaitForTaskIsBounded(t *testing.T) {
 	busy := f.mcpTool(t, mcpToolWaitForTask, map[string]any{"name": "slow", "timeoutSeconds": 1})
 	require.Equal(t, float64(http.StatusTooManyRequests), mcpErrorStatus(t, busy))
 }
+
+// tasks/result keeps waiting through input_required under one wait permit,
+// so result waits can never hold more than the reserved share of requests.
+func TestMCPTaskResultHoldsItsWaitPermitWhileInputIsRequired(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "parked", corev1alpha1.TaskPhaseRunning)
+	appendMCPTestApproval(t, f, "parked", "pending")
+	mcp := f.server.mcpServer
+	mcp.resultWait = 3 * time.Second
+
+	type outcome struct{ response mcpTestResponse }
+	done := make(chan outcome, 1)
+	go func() {
+		done <- outcome{f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "parked", "uid-parked")})}
+	}()
+	require.Eventually(t, func() bool { return len(mcp.waitSlots) == 1 }, 2*time.Second, 10*time.Millisecond)
+	for range 10 {
+		require.Len(t, mcp.waitSlots, 1, "the permit is held while the approval is pending")
+		time.Sleep(150 * time.Millisecond)
+	}
+	result := <-done
+	require.NotNil(t, result.response.Error, result.response.body)
+	require.Equal(t, mcpCodeServerBusy, result.response.Error.Code)
+	require.Empty(t, mcp.waitSlots)
+}

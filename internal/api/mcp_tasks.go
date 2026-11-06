@@ -302,29 +302,17 @@ func (m *mcpServer) taskResult(call *mcpCall) (any, error) {
 	return result, nil
 }
 
+// waitForTerminal waits, bounded and under a single wait permit, until the
+// Task finishes; a pending approval does not end the wait.
 func (m *mcpServer) waitForTerminal(c fiber.Ctx, ref mcpTaskRef) (mcpTaskState, bool, error) {
-	deadline := time.Now().Add(mcpMaxWaitSeconds * time.Second)
-	for {
-		state, timedOut, err := m.waitForTask(c, ref.Namespace, ref.Name, ref.UID, time.Until(deadline))
-		if err != nil {
-			return state, false, mcpTaskRPCError(err)
-		}
-		if timedOut || state.status() != mcpStatusInputRequired {
-			return state, timedOut, nil
-		}
-		// An input_required Task is not finished; keep waiting for the
-		// decision until the bound.
-		if time.Until(deadline) <= mcpPollInterval {
-			return state, true, nil
-		}
-		timer := time.NewTimer(mcpPollInterval)
-		select {
-		case <-timer.C:
-		case <-c.RequestCtx().Done():
-			timer.Stop()
-			return state, true, nil
-		}
+	state, timedOut, err := m.pollTask(c, ref.Namespace, ref.Name, ref.UID, m.resultWait, func(state mcpTaskState) bool {
+		status := state.status()
+		return status != mcpStatusWorking && status != mcpStatusInputRequired
+	})
+	if err != nil {
+		return state, false, mcpTaskRPCError(err)
 	}
+	return state, timedOut, nil
 }
 
 // updateTask serves the extension's tasks/update: each input response

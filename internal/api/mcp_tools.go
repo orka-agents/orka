@@ -922,8 +922,14 @@ func (m *mcpServer) toolListTasks(call *mcpCall, raw json.RawMessage) (any, erro
 }
 
 // waitForTask polls a Task until it finishes, needs input, or the wait ends.
-// uid, when set, pins the Task identity so a replacement is never reported.
 func (m *mcpServer) waitForTask(c fiber.Ctx, namespace, name, uid string, timeout time.Duration) (mcpTaskState, bool, error) {
+	return m.pollTask(c, namespace, name, uid, timeout, func(state mcpTaskState) bool { return state.status() != mcpStatusWorking })
+}
+
+// pollTask holds one wait permit for the whole wait and polls a Task until
+// done reports true or the wait ends. uid, when set, pins the Task identity
+// so a replacement is never reported.
+func (m *mcpServer) pollTask(c fiber.Ctx, namespace, name, uid string, timeout time.Duration, done func(mcpTaskState) bool) (mcpTaskState, bool, error) {
 	if !tryAcquire(m.waitSlots) {
 		return mcpTaskState{}, false, &mcpRESTError{Status: fiber.StatusTooManyRequests, Message: "too many concurrent waits; poll get_task instead"}
 	}
@@ -937,7 +943,7 @@ func (m *mcpServer) waitForTask(c fiber.Ctx, namespace, name, uid string, timeou
 		if uid != "" && string(state.response.UID) != uid {
 			return state, false, &mcpRESTError{Status: fiber.StatusNotFound, Message: "task not found"}
 		}
-		if status := state.status(); status != mcpStatusWorking {
+		if done(state) {
 			return state, false, nil
 		}
 		remaining := time.Until(deadline)
