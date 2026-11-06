@@ -1126,3 +1126,34 @@ func TestLinkedContinuationIsNotHeld(t *testing.T) {
 		t.Fatalf("an ordinary Task must not be held, got pending=%v orphaned=%v err=%v", pending, orphaned, err)
 	}
 }
+
+func TestDeletingAParkedTaskErasesHistoryOnlyAfterItsWaitEnds(t *testing.T) {
+	task := parkedTestTask(corev1alpha1.TaskWaitKindApproval, corev1alpha1.TaskPhaseSucceeded)
+	task.Finalizers = []string{labels.TaskFinalizer}
+	h := newTaskWaitHarness(t, task)
+	h.settle("parked")
+	if got := h.task("parked").Status.Wait.State; got != corev1alpha1.TaskWaitStateWaiting {
+		t.Fatalf("state = %s", got)
+	}
+	if err := h.client.Delete(context.Background(), h.task("parked")); err != nil {
+		t.Fatal(err)
+	}
+	deleting := h.task("parked")
+	r := &TaskReconciler{Client: h.client, APIReader: h.client, ExecutionEventStore: h.events}
+	result, err := r.handleDeletion(context.Background(), deleting)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("deletion must wait for the parked wait to end, got %+v, %v", result, err)
+	}
+	if len(h.parkedApprovals()) != 1 {
+		t.Fatal("history must not be erased while the wait reconciler may still write to it")
+	}
+	// The wait reconciler ends the wait of the deleting Task and closes its
+	// sign-off; after that it never writes history again.
+	h.settle("parked")
+	if wait := h.task("parked").Status.Wait; wait.State != corev1alpha1.TaskWaitStateCancelled {
+		t.Fatalf("a deleting Task's wait must be cancelled, got %+v", wait)
+	}
+	if active, err := r.parkedWaitActive(context.Background(), h.task("parked")); err != nil || active {
+		t.Fatalf("an ended wait must not hold deletion, got %v, %v", active, err)
+	}
+}

@@ -622,6 +622,12 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 	log := logf.FromContext(ctx)
 
 	if controllerutil.ContainsFinalizer(task, labels.TaskFinalizer) {
+		if active, err := r.parkedWaitActive(ctx, task); err != nil || active {
+			// The wait reconciler cancels the wait of a deleting Task and closes
+			// its parked approval in the execution history first, so that history
+			// is erased after that last write and never recreated behind it.
+			return ctrl.Result{RequeueAfter: time.Second}, err
+		}
 		prepared, err := r.prepareACPClassWorkspaceDeletion(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -5098,4 +5104,17 @@ func taskAgentRevisionChanged(ctx context.Context, reader client.Reader, task *c
 		return false, fmt.Errorf("recheck Task Agent revision: %w", err)
 	}
 	return latest.UID != agent.UID || latest.Generation != agent.Generation || !latest.DeletionTimestamp.IsZero(), nil
+}
+
+// parkedWaitActive reports, from an authoritative read, whether task still
+// holds a parked wait that the wait reconciler has not ended yet.
+func (r *TaskReconciler) parkedWaitActive(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if task == nil {
+		return false, nil
+	}
+	latest := &corev1alpha1.Task{}
+	if err := uncachedReader(r.APIReader, r.Client).Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return latest.UID == task.UID && taskwait.Active(latest.Status.Wait), nil
 }
