@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -102,6 +103,15 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 			return nil, fmt.Errorf("identity %s/%s is already bound to Agent %s/%s", issuer, id, other.Namespace, other.Name)
 		}
 	}
+	// A deleted Agent's claim goes with it, but its bound Tasks still hold the
+	// identity until they finish, so it stays taken until then.
+	if holder, err := identityTaskOfOtherAgent(ctx, reader, agent, issuer, id); err != nil || holder != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("identity %s/%s is still held by Task %s/%s of Agent %s until it finishes",
+			issuer, id, holder.Namespace, holder.Name, holder.Status.AgentExecutionBinding.Agent.Name)
+	}
 	return &corev1alpha1.AgentIdentityClaim{Issuer: issuer, ID: id}, nil
 }
 
@@ -122,17 +132,37 @@ func activeIdentityTasks(ctx context.Context, reader client.Reader, agent *corev
 	}
 	count := 0
 	for i := range tasks.Items {
-		task := &tasks.Items[i]
-		binding := task.Status.AgentExecutionBinding
-		if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil ||
-			binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-			continue
-		}
-		if binding.Agent.Identity.Issuer == claim.Issuer && binding.Agent.Identity.ID == claim.ID {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], claim.Issuer, claim.ID); bound != nil && bound.UID == agent.UID {
 			count++
 		}
 	}
 	return count, nil
+}
+
+// identityTaskOfOtherAgent returns an unfinished Task bound to the identity
+// through any Agent UID other than agent's, such as a deleted Agent's.
+func identityTaskOfOtherAgent(ctx context.Context, reader client.Reader, agent *corev1alpha1.Agent, issuer, id string) (*corev1alpha1.Task, error) {
+	tasks := &corev1alpha1.TaskList{}
+	if err := reader.List(ctx, tasks, client.InNamespace(agent.Namespace)); err != nil {
+		return nil, fmt.Errorf("list Tasks bound to identity %s/%s: %w", issuer, id, err)
+	}
+	for i := range tasks.Items {
+		if bound := unfinishedIdentityBinding(&tasks.Items[i], issuer, id); bound != nil && bound.UID != agent.UID {
+			return &tasks.Items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// unfinishedIdentityBinding returns the Agent an unfinished Task is bound to
+// when that binding froze the identity.
+func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *corev1alpha1.AgentExecutionAgentRef {
+	binding := task.Status.AgentExecutionBinding
+	if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
+		return nil
+	}
+	return binding.Agent
 }
 
 // setAgentIdentityCondition reports that a declared identity is not yet
@@ -218,24 +248,33 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
+	ref, err := r.Identity.BindingRef(agent)
+	if err != nil {
+		return nil, permanentACPAgentConfiguration(err)
+	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
-		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent); err != nil {
+		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref); err != nil {
 			return nil, err
 		}
 	}
-	return r.Identity.BindingRef(agent)
+	return ref, nil
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an
 // identity-bound Agent only when the parent is bound to that exact Agent and
-// identity, so a child can never borrow an identity its root requester was not
-// checked against, including through an Agent recreated under the same name.
+// identity, issuer instance included, so a child can never borrow an identity
+// its root requester was not checked against, including through an Agent
+// recreated under the same name. The parent must be the Task that controls
+// the child, not one recreated under its name. A scheduled run is not
+// delegation: it runs its scheduled Task's own Agent, which that Task's
+// creator was checked for, and its scheduled Task never binds.
 func requireParentOwnsIdentityAgent(
 	ctx context.Context,
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	parentName string,
 	agent *corev1alpha1.Agent,
+	ref *corev1alpha1.AgentExecutionIdentityRef,
 ) error {
 	parent := &corev1alpha1.Task{}
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: parentName}, parent); err != nil {
@@ -244,30 +283,47 @@ func requireParentOwnsIdentityAgent(
 		}
 		return fmt.Errorf("resolve the parent Task: %w", err)
 	}
-	refuse := permanentACPAgentConfiguration(fmt.Errorf(
-		"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
-	binding := parent.Status.AgentExecutionBinding
-	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil {
-		return refuse
+	owner := metav1.GetControllerOf(task)
+	recorded := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
+	if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		owner.Name != parentName || owner.UID != parent.UID || (recorded != "" && recorded != string(parent.UID)) {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
-	issuer, id, _ := agent.IdentityRef()
-	if binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
-		return refuse
+	if parent.Spec.Schedule != "" {
+		if parent.Spec.AgentRef != nil && task.Spec.AgentRef != nil && *parent.Spec.AgentRef == *task.Spec.AgentRef {
+			return nil
+		}
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
+	}
+	binding := parent.Status.AgentExecutionBinding
+	if binding == nil || binding.Agent == nil || binding.Agent.UID != agent.UID || binding.Agent.Identity == nil ||
+		binding.Agent.Identity.Issuer != ref.Issuer || binding.Agent.Identity.ID != ref.ID ||
+		binding.Agent.Identity.Instance != ref.Instance {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
 	}
 	return nil
 }
 
 // requireBoundIdentityClaim re-checks, after the binding is persisted and
-// until the Task starts, that the Agent still holds the identity the binding
-// froze. A claim released between the binding decision and its write could
-// otherwise leave two Agents with Tasks acting as one identity; once the
-// binding is persisted, any later release sees it and keeps the claim.
+// until the Task is admitted to a runtime, that the Agent still holds the
+// identity the binding froze. A claim released between the binding decision
+// and its write could otherwise leave two Agents with Tasks acting as one
+// identity; once the binding is persisted, any later release sees it and
+// keeps the claim. A Task still Queued or Reserved for capacity has not been
+// admitted, so it is checked on every pass until dispatch.
 func (r *TaskReconciler) requireBoundIdentityClaim(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (ctrl.Result, error, bool) {
-	if task.Status.Execution != nil || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
+	if execution := task.Status.Execution; execution != nil &&
+		execution.State != corev1alpha1.TaskExecutionStateQueued && execution.State != corev1alpha1.TaskExecutionStateReserved {
+		return ctrl.Result{}, nil, false
+	}
+	if binding == nil || binding.Agent == nil || binding.Agent.Identity == nil {
 		return ctrl.Result{}, nil, false
 	}
 	frozen := binding.Agent
