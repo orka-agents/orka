@@ -264,8 +264,11 @@ func isOperatorFileUpload(header *fasthttp.RequestHeader) bool {
 	if uri.Parse(header.Host(), header.RequestURI()) != nil {
 		return false
 	}
+	// Fiber routes case-insensitively, so this must match every spelling the
+	// upload route accepts.
 	parts := strings.Split(strings.Trim(string(uri.PathOriginal()), "/"), "/")
-	return len(parts) == 5 && parts[0] == "api" && parts[1] == "v1" && parts[2] == externalToolTaskResource && parts[4] == "files"
+	return len(parts) == 5 && strings.EqualFold(parts[0], "api") && strings.EqualFold(parts[1], "v1") &&
+		strings.EqualFold(parts[2], externalToolTaskResource) && strings.EqualFold(parts[4], "files")
 }
 
 // isGatewayIngressPath matches /api/v1/gateways/{gateway}/{channel}/events,

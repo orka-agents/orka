@@ -19,6 +19,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -771,4 +772,24 @@ func TestOperatorExecAuditNeverCarriesARawCredentialArgv0(t *testing.T) {
 	raw, err := json.Marshal(f.audit.snapshot())
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), token)
+}
+
+// Fiber routes case-insensitively, so every spelling of the upload route must
+// get the upload's bounded body size and read timeout.
+func TestOperatorFileUploadRequestConfigIgnoresPathCase(t *testing.T) {
+	for _, path := range []string{"/api/v1/tasks/t1/files", "/API/V1/TASKS/t1/FILES", "/Api/v1/Tasks/t1/Files?path=a&size=1"} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(fiber.MethodPut)
+		header.SetRequestURI(path)
+		header.SetHost("orka")
+		if !isOperatorFileUpload(&header) {
+			t.Fatalf("%s is routed to the upload handler but not given its request bounds", path)
+		}
+	}
+	var get fasthttp.RequestHeader
+	get.SetMethod(fiber.MethodGet)
+	get.SetRequestURI("/API/V1/TASKS/t1/FILES")
+	if isOperatorFileUpload(&get) {
+		t.Fatal("a download must not get the upload bounds")
+	}
 }
