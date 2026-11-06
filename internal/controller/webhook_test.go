@@ -491,25 +491,33 @@ func TestWebhookDeliveryRejectsPolicyViolationsWithoutNetwork(t *testing.T) {
 func TestWebhookDeliveryNeverSendsUnsigned(t *testing.T) {
 	t.Parallel()
 	receiver := newWebhookReceiver(t, http.StatusOK)
+
+	// Disabled signing fails the notice terminally rather than requeueing a
+	// finished Task forever.
+	disabledTask := newWebhookTask(receiver.server.URL)
+	disabledClient := newWebhookTestClient(t, disabledTask)
+	disabled := newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil)
+	requeue, err := disabled.reconcileDelivery(context.Background(), disabledClient.Status(), reloadWebhookTask(t, disabledClient, disabledTask))
+	if err != nil || requeue != 0 {
+		t.Fatalf("disabled: reconcileDelivery() = %v, %v", requeue, err)
+	}
+	if delivery := reloadWebhookTask(t, disabledClient, disabledTask).Status.WebhookDelivery; delivery == nil ||
+		delivery.State != corev1alpha1.TaskWebhookDeliveryFailed || delivery.Attempts != 0 || delivery.LastError == "" {
+		t.Fatalf("disabled: delivery = %#v, want Failed without attempts", delivery)
+	}
+
+	// A configured key source whose keys are temporarily unavailable retries.
 	task := newWebhookTask(receiver.server.URL)
 	client := newWebhookTestClient(t, task)
-	for name, notifier := range map[string]*WebhookNotifier{
-		"unconfigured": newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil),
-		"unavailable": func() *WebhookNotifier {
-			n := newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil)
-			n.SetKeySource(taskwebhook.StaticKeySource{})
-			return n
-		}(),
-	} {
-		current := reloadWebhookTask(t, client, task)
-		requeue, err := notifier.reconcileDelivery(context.Background(), client.Status(), current)
-		if err != nil || requeue != webhookSigningRetryInterval {
-			t.Fatalf("%s: reconcileDelivery() = %v, %v", name, requeue, err)
-		}
-		delivery := reloadWebhookTask(t, client, task).Status.WebhookDelivery
-		if delivery == nil || delivery.State != corev1alpha1.TaskWebhookDeliveryPending || delivery.Attempts != 0 || delivery.LastError == "" {
-			t.Fatalf("%s: delivery = %#v", name, delivery)
-		}
+	unavailable := newTestWebhookNotifier(t, taskwebhook.KeySet{}, nil)
+	unavailable.SetKeySource(taskwebhook.StaticKeySource{})
+	requeue, err = unavailable.reconcileDelivery(context.Background(), client.Status(), reloadWebhookTask(t, client, task))
+	if err != nil || requeue != webhookSigningRetryInterval {
+		t.Fatalf("unavailable: reconcileDelivery() = %v, %v", requeue, err)
+	}
+	if delivery := reloadWebhookTask(t, client, task).Status.WebhookDelivery; delivery == nil ||
+		delivery.State != corev1alpha1.TaskWebhookDeliveryPending || delivery.Attempts != 0 || delivery.LastError == "" {
+		t.Fatalf("unavailable: delivery = %#v", delivery)
 	}
 	if got := len(receiver.all()); got != 0 {
 		t.Fatalf("receipts = %d, want 0", got)
@@ -663,5 +671,55 @@ func TestWebhookBackoffIsBounded(t *testing.T) {
 	}
 	if notifier.attemptLease <= taskwebhook.DefaultRequestTimeout {
 		t.Fatal("the attempt lease must outlast one request")
+	}
+}
+
+// slowWebhookKeySource advances the clock while loading keys, as a slow Secret
+// read or key-source lock would.
+type slowWebhookKeySource struct {
+	taskwebhook.StaticKeySource
+	clock *webhookTestClock
+	delay time.Duration
+}
+
+func (s slowWebhookKeySource) SigningKeys(ctx context.Context) (taskwebhook.KeySet, error) {
+	s.clock.now = s.clock.now.Add(s.delay)
+	return s.StaticKeySource.SigningKeys(ctx)
+}
+
+func TestWebhookDeliveryLeaseStartsAfterKeyLoading(t *testing.T) {
+	t.Parallel()
+	clock := &webhookTestClock{now: time.Unix(1_800_000_100, 0)}
+	var (
+		mu       sync.Mutex
+		leaseEnd *metav1.Time
+		client   ctrlclient.Client
+		task     *corev1alpha1.Task
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The attempt is claimed before sending; record the claimed lease.
+		claimed := &corev1alpha1.Task{}
+		if err := client.Get(r.Context(), ctrlclient.ObjectKeyFromObject(task), claimed); err == nil && claimed.Status.WebhookDelivery != nil {
+			mu.Lock()
+			leaseEnd = claimed.Status.WebhookDelivery.NextAttemptTime
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	task = newWebhookTask(server.URL)
+	client = newWebhookTestClient(t, task)
+	notifier := newTestWebhookNotifier(t, taskwebhook.KeySet{}, clock)
+	notifier.SetKeySource(slowWebhookKeySource{StaticKeySource: taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)}, clock: clock, delay: 3 * notifier.attemptLease})
+	if _, err := notifier.reconcileDelivery(context.Background(), client.Status(), reloadWebhookTask(t, client, task)); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if leaseEnd == nil {
+		t.Fatal("the attempt was sent without a claimed lease")
+	}
+	if want := clock.now.Add(notifier.attemptLease); !leaseEnd.Time.Equal(want) {
+		t.Fatalf("claimed lease ends at %v, want %v (a full lease after slow key loading)", leaseEnd.Time, want)
 	}
 }

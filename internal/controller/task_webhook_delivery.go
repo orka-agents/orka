@@ -92,14 +92,24 @@ func (w *WebhookNotifier) reconcileDelivery(ctx context.Context, status taskStat
 	}
 
 	if w.keys == nil {
-		return w.recordSigningUnavailable(ctx, status, task, delivery, superseded, errors.New("webhook signing is not configured"))
+		// Signing is disabled (no signing Secret is configured). Nothing is
+		// ever sent unsigned, so the notice fails terminally instead of
+		// requeueing a finished Task forever.
+		delivery.State = corev1alpha1.TaskWebhookDeliveryFailed
+		delivery.NextAttemptTime = nil
+		delivery.LastError = boundedWebhookError(errors.New("webhook signing is disabled"))
+		task.Status.WebhookDelivery = delivery
+		logf.FromContext(ctx).Info("webhook delivery skipped: signing is disabled", "deliveryID", delivery.DeliveryID)
+		return 0, status.Update(ctx, task)
 	}
 	keys, err := w.keys.SigningKeys(ctx)
 	if err != nil {
 		return w.recordSigningUnavailable(ctx, status, task, delivery, superseded, err)
 	}
 
-	// Claim the attempt durably before sending.
+	// Claim the attempt durably before sending. Loading keys can block on
+	// Secret reads, so the lease starts from a fresh clock reading.
+	now = w.now()
 	attempt := delivery.Attempts + 1
 	claimedAt := metav1.NewTime(now)
 	lease := metav1.NewTime(now.Add(w.attemptLease))
