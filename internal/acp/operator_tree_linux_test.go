@@ -200,3 +200,51 @@ func TestKillOperatorTagProvesContainmentBeforeReapAsRoot(t *testing.T) {
 		t.Fatal("an exited, unreaped operation must count as contained")
 	}
 }
+
+func TestTaggedProcessesCountZombieLeadersWithLiveThreads(t *testing.T) {
+	root := t.TempDir()
+	write := func(path, state string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		status := "Name:\tworker\nState:\t" + state + "\nUid:\t20001\t20001\t20001\t20001\nGroups:\t61007\n"
+		if err := os.WriteFile(path, []byte(status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Leader 20 called pthread_exit; thread 21 still runs.
+	write(filepath.Join(root, "20", "status"), "Z (zombie)")
+	write(filepath.Join(root, "20", "task", "20", "status"), "Z (zombie)")
+	write(filepath.Join(root, "20", "task", "21", "status"), "S (sleeping)")
+	// Leader 30 and all its threads have exited.
+	write(filepath.Join(root, "30", "status"), "Z (zombie)")
+	write(filepath.Join(root, "30", "task", "30", "status"), "Z (zombie)")
+	tagged, ok := taggedProcesses(root, 20001, 61007)
+	if !ok || !slices.Equal(tagged, []int{20}) {
+		t.Fatalf("tagged = %v ok=%v; a zombie leader with live threads must count", tagged, ok)
+	}
+}
+
+// TestKillOperatorTagStopsForkAndExitChainAsRoot runs a descendant chain in
+// which every process forks its successor and exits immediately.
+func TestKillOperatorTagStopsForkAndExitChainAsRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to assign supplementary groups")
+	}
+	const uid, tag = 23460, OperatorTagLastGID - 4
+	cmd := exec.Command("/bin/sh", "-c", "c() { c & }; c")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: &syscall.Credential{Uid: uid, Gid: uid, Groups: []uint32{tag}}}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Wait() }()
+	time.Sleep(200 * time.Millisecond)
+	if !KillOperatorTag(uid, tag) {
+		t.Fatal("containment of the chain was not proven")
+	}
+	time.Sleep(500 * time.Millisecond)
+	if OperatorTagInUse(tag) {
+		_ = KillOperatorTag(uid, tag)
+		t.Fatal("a fork-and-exit chain survived proven containment")
+	}
+}

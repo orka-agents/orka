@@ -105,8 +105,14 @@ directly.
   groups needs `CAP_SETGID`, and descendants inherit them, so the tag cannot
   be dropped. On timeout, disconnect, output limit, or revocation, the
   supervisor kills every process of the session UID that carries the tag, and
-  repeats until no live process carries it. Terminated processes waiting to be
-  reaped cannot run again, so they do not count. This reaches descendants that changed process
+  repeats until no live process carries it.
+  - Terminated processes waiting to be reaped cannot run again, so they do
+    not count.
+  - A zombie leader whose threads still run does count.
+  - Each scan re-lists the process table until no PID appears that was not
+    already inspected, so processes forked mid-scan are caught.
+  - Containment requires two consecutive settled empty scans, the same
+    standard as the RuntimeSession UID cleanup proof. This reaches descendants that changed process
   group, session, or parent, or that killed the command first. The agent
   shares the UID but has no tag, so it is never touched. The tag grants no
   file access.
@@ -183,6 +189,10 @@ content, token, or credential enters a record.
 - Writing to a workspace is a one-way decision. A tainted Task's work is never
   published, and its Session cannot continue from that workspace. Operators who
   only need to read should use `orka task cp` out.
+- Without a cgroup or PID namespace, containment is a `/proc` scan, not an
+  atomic freeze. Two independent backstops cover integrity and cleanup. The
+  validation freeze stops every process of the session UID before the delta is
+  captured, and session teardown kills every process of that UID.
 - Operator processes share the session's child UID. Session teardown and
   adapter restarts also reap them, as a backstop to tag containment and
   revocation. Up to 4000 operations can be live per runtime at once, the size
