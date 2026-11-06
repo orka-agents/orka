@@ -187,6 +187,16 @@ func runWriteOrder[P writeCaseProvider](t *testing.T, newProvider func(t *testin
 		w.requireSees(t, []byte("issued third"))
 	})
 
+	t.Run("a new write with the stored stamp never replaces it", func(t *testing.T) {
+		w := newOrderWriter(t, newProvider(t), target)
+		require.NoError(t, w.saveAt(t, 10, []byte("stored")))
+		before := target.observe(t, w.p)
+		require.NoError(t, w.saveAt(t, 10, []byte("same stamp")),
+			"another operation with the same epoch and sequence succeeds")
+		require.Equal(t, before, target.observe(t, w.p), "and changes nothing")
+		w.requireSees(t, []byte("stored"))
+	})
+
 	t.Run("a later controller's write is newer than any sequence of an earlier one", func(t *testing.T) {
 		w := newOrderWriter(t, newProvider(t), target)
 		require.NoError(t, w.saveAt(t, 1000, []byte("epoch 1")))
