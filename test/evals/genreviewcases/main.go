@@ -81,7 +81,9 @@ func run(sourcePath, outPath, repo string, check bool) error {
 	}
 	var source Source
 	if err := yaml.UnmarshalStrict(raw, &source); err != nil {
-		return fmt.Errorf("%s: %w", sourcePath, err)
+		// The YAML error quotes unknown keys, which may be a pasted
+		// credential, so it is not passed on.
+		return fmt.Errorf("%s is not a valid case source: check for unknown, repeated or mistyped fields", sourcePath)
 	}
 	// Check the URL before Git sees it, so a credential pasted into it never
 	// reaches a clone or an error message.
@@ -126,6 +128,12 @@ func Generate(source Source, repo string) ([]byte, error) {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	if _, err := git("", "clone", "--quiet", "--mirror", "--no-hardlinks", repo, dir); err != nil {
+		// Git's message names the source. The fixture URL is validated and
+		// safe to show; a local path is not validated, so its message is
+		// not passed on.
+		if repo != source.RepoURL {
+			return nil, errors.New("git clone of the -repo directory failed; check that it is a Git repository")
+		}
 		return nil, err
 	}
 	repo = dir

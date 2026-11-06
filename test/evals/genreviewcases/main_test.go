@@ -610,3 +610,32 @@ func TestGenerateRejectsInvalidUTF8(t *testing.T) {
 		t.Fatalf("Generate with an invalid UTF-8 patch: %v", err)
 	}
 }
+
+func TestRunKeepsCredentialsOutOfSourceAndCloneErrors(t *testing.T) {
+	dir := t.TempDir()
+	secret := "ghp_" + strings.Repeat("e", 36)
+	source := filepath.Join(dir, "cases.yaml")
+	content := "repoURL: https://github.com/orka-agents/orka-eval-fixtures\n" + secret + ": x\ncases: []\n"
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(source, filepath.Join(dir, "out.jsonl"), "", false)
+	if err == nil || !strings.Contains(err.Error(), "not a valid case source") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("run with a credential key: %v", err)
+	}
+
+	valid := filepath.Join(dir, "valid.yaml")
+	content = "repoURL: https://github.com/orka-agents/orka-eval-fixtures\ncases:\n" +
+		"  - {id: x, branch: case/x, title: t, reference: {verdict: passed}}\n"
+	if err := os.WriteFile(valid, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notRepo := filepath.Join(dir, "not-a-repo-"+secret)
+	if err := os.Mkdir(notRepo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err = run(valid, filepath.Join(dir, "out.jsonl"), notRepo, false)
+	if err == nil || !strings.Contains(err.Error(), "-repo directory") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("run with a non-repository directory: %v", err)
+	}
+}
