@@ -2,6 +2,7 @@ package evals
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -175,6 +176,11 @@ func (VerdictGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 // LocalizationGrader passes when some finding points at a reference location:
 // the file matches and the line is within the range ± Tolerance. Score is the
 // share of reference locations some finding hit.
+//
+// Reference lines are in the head version of the file, but a defect made of
+// deleted code is naturally cited at the removed line, which only exists in
+// the base. A finding whose line is a line the case's patch removes also
+// counts at the head position where that removal happened.
 type LocalizationGrader struct {
 	Tolerance int64
 }
@@ -183,11 +189,12 @@ func (LocalizationGrader) Name() corev1alpha1.EvalGraderName {
 	return corev1alpha1.EvalGraderLocalization
 }
 
-// Version covers Tolerance, which changes what counts as a hit.
-func (g LocalizationGrader) Version() string { return fmt.Sprintf("1+tolerance.%d", g.Tolerance) }
+// Version covers Tolerance, which changes what counts as a hit. Version 2
+// credits findings on removed lines.
+func (g LocalizationGrader) Version() string { return fmt.Sprintf("2+tolerance.%d", g.Tolerance) }
 
 func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
-	outcome, _, ok := reviewTrial(c, trial)
+	outcome, input, ok := reviewTrial(c, trial)
 	if !ok {
 		return notApplicable(notReviewTrial)
 	}
@@ -198,13 +205,20 @@ func (g LocalizationGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	if outcome.Result == nil {
 		return fail("no review result parsed")
 	}
+	removed := removedLinesByFile(input.Files)
+	within := func(line int64, location ReferenceLocation) bool {
+		return line >= location.StartLine-g.Tolerance && line <= location.EndLine+g.Tolerance
+	}
 	hit := 0
 	for _, location := range locations {
 		for _, finding := range outcome.Result.Findings {
 			// Paths match exactly, as production's changed-lines check
 			// compares them: a padded path names a different file.
-			if finding.Line > 0 && finding.File == location.File &&
-				finding.Line >= location.StartLine-g.Tolerance && finding.Line <= location.EndLine+g.Tolerance {
+			if finding.Line <= 0 || finding.File != location.File {
+				continue
+			}
+			headLine, onRemoved := removed[finding.File][finding.Line]
+			if within(finding.Line, location) || (onRemoved && within(headLine, location)) {
 				hit++
 				break
 			}
@@ -271,4 +285,69 @@ func (HonestyGrader) Grade(c Case, trial TrialOutcome) GradeResult {
 	default:
 		return pass(fmt.Sprintf("tests reported %q without a validation image", outcome.Result.TestsStatus))
 	}
+}
+
+// removedLinesByFile maps, per file, each base line a patch removes to the
+// head line at which the removal happened: the line that follows it in the
+// head version.
+func removedLinesByFile(files []ReviewCaseFile) map[string]map[int64]int64 {
+	removed := map[string]map[int64]int64{}
+	for _, file := range files {
+		lines := removedLines(file.Patch)
+		if len(lines) > 0 {
+			removed[file.Filename] = lines
+		}
+	}
+	return removed
+}
+
+func removedLines(patch string) map[int64]int64 {
+	removed := map[int64]int64{}
+	var base, head int64
+	inHunk := false
+	for text := range strings.SplitSeq(patch, "\n") {
+		if strings.HasPrefix(text, "@@ ") {
+			oldStart, newStart, ok := parseHunkHeader(text)
+			if !ok {
+				return nil
+			}
+			base, head, inHunk = oldStart, newStart, true
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(text, "-"):
+			removed[base] = head
+			base++
+		case strings.HasPrefix(text, "+"):
+			head++
+		case strings.HasPrefix(text, `\`):
+		default:
+			base++
+			head++
+		}
+	}
+	return removed
+}
+
+// parseHunkHeader reads the start lines of "@@ -a[,b] +c[,d] @@". A start of
+// 0 (an empty side) is treated as line 1.
+func parseHunkHeader(header string) (oldStart, newStart int64, ok bool) {
+	fields := strings.Fields(header)
+	if len(fields) < 3 || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
+		return 0, 0, false
+	}
+	parse := func(field string) (int64, bool) {
+		start, _, _ := strings.Cut(field[1:], ",")
+		n, err := strconv.ParseInt(start, 10, 64)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		return max(n, 1), true
+	}
+	oldStart, okOld := parse(fields[1])
+	newStart, okNew := parse(fields[2])
+	return oldStart, newStart, okOld && okNew
 }

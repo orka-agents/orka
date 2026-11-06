@@ -22,7 +22,10 @@ a small Go utility package.
 | `truncate-ascii-fast-path` | passed | Cuts ASCII prefixes by byte, which is safe, and falls back to the rune walk otherwise |
 
 Half the cases are clean, so a reviewer that holds back everything or passes
-everything scores 50% on `verdict`. Two clean cases look like their defective
+everything scores 50% on `verdict`. For a defect made of deleted code, such as
+`retry-ignores-cancel`, `localization` also credits a finding on the removed
+line itself. The grader controls in `internal/evals/grader_controls_test.go`
+pin how each grader judges sample results. Two clean cases look like their defective
 neighbors (`truncate-ascii-fast-path`, `retry-jitter`).
 
 ## Files
