@@ -832,3 +832,39 @@ func TestHistoryLimitsPruneAContinuationChainAsOneRun(t *testing.T) {
 		t.Fatalf("a chain is pruned through its head by its tail's outcome: %v", remaining)
 	}
 }
+
+func TestContinuationOfAPublishedWriteTurnUsesTheSessionBaseline(t *testing.T) {
+	const preparedSHA, publishedSHA = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	parked := parkedTestTask(corev1alpha1.TaskWaitKindTimer, corev1alpha1.TaskPhaseSucceeded)
+	parked.Spec.Workspace = &corev1alpha1.WorkspaceConfig{
+		GitRepo: "https://github.com/orka-agents/example", Intent: corev1alpha1.WorkspaceIntentWrite,
+		PushBranch: "orka/release", ExpectedRemoteSHA: preparedSHA,
+	}
+	chainDeadline := taskwait.Deadline(parked)
+	unpublished := buildTaskContinuation(parked, taskwait.ContinuationTaskName(parked), time.Hour, chainDeadline)
+	if got := unpublished.Spec.Workspace.ExpectedRemoteSHA; got != preparedSHA {
+		t.Fatalf("a turn that published nothing keeps its precondition, got %q", got)
+	}
+
+	parked.Status.Delivery = &corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateVerifiedExact, Outcome: corev1alpha1.TaskDeliveryOutcomeVerifiedExact,
+		ExpectedCommitSHA: publishedSHA, VerifiedRemoteSHA: publishedSHA,
+	}
+	continuation := buildTaskContinuation(parked, taskwait.ContinuationTaskName(parked), time.Hour, chainDeadline)
+	if parked.Spec.Workspace.ExpectedRemoteSHA != preparedSHA {
+		t.Fatal("building the continuation must not mutate the parked Task")
+	}
+	// The Session records the published commit as its verified baseline. The
+	// continuation must start from it instead of failing on the old SHA.
+	baseline := &store.VerifiedBranchBaseline{RepositoryID: "github.com/orka-agents/example", Ref: "refs/heads/orka/release", SHA: publishedSHA}
+	if err := validateSessionExpectedRemoteSHA(unpublished.Spec.Workspace, baseline); err == nil {
+		t.Fatal("the pre-publication precondition conflicts with the published baseline")
+	}
+	if err := validateSessionExpectedRemoteSHA(continuation.Spec.Workspace, baseline); err != nil {
+		t.Fatalf("the continuation of a published turn must accept the Session baseline: %v", err)
+	}
+	workspace, err := runtimeWorkspaceForSessionContinuation(continuation.Spec.Workspace, baseline)
+	if err != nil || workspace.Ref != baseline.Ref {
+		t.Fatalf("the continuation must prepare its workspace from the published baseline, got %+v, %v", workspace, err)
+	}
+}

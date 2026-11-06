@@ -707,6 +707,13 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 	spec.PriorTaskRef = nil
 	spec.Suspend = nil
 	spec.Timeout = &metav1.Duration{Duration: remaining}
+	if workspace := spec.Workspace; workspace != nil && taskWaitTurnPublished(parked) {
+		// The parked turn moved the branch, and its Session recorded the
+		// published commit as the verified baseline that now governs the
+		// next publication. The pre-publication precondition would conflict
+		// with that baseline and fail the continuation before it resumes.
+		workspace.ExpectedRemoteSHA = ""
+	}
 	if ref := parked.Spec.SessionRef; ref != nil {
 		spec.SessionRef = &corev1alpha1.SessionReference{
 			Name: ref.Name, Create: false, Append: true, MaxMessages: ref.MaxMessages,
@@ -744,6 +751,21 @@ func buildTaskContinuation(parked *corev1alpha1.Task, name string, remaining tim
 		}
 	}
 	return continuation
+}
+
+// taskWaitTurnPublished reports whether the parked turn published a verified
+// commit to its write workspace's branch.
+func taskWaitTurnPublished(parked *corev1alpha1.Task) bool {
+	delivery := parked.Status.Delivery
+	if delivery == nil || strings.TrimSpace(delivery.VerifiedRemoteSHA) == "" {
+		return false
+	}
+	switch delivery.State {
+	case corev1alpha1.TaskDeliveryStateVerifiedExact, corev1alpha1.TaskDeliveryStateDeliveredSuperseded:
+		return true
+	default:
+		return false
+	}
 }
 
 // taskContinuationPrompt is controller-authored. It describes the event and
