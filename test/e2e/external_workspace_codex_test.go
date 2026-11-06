@@ -24,8 +24,8 @@ import (
 
 const (
 	externalCodexReadMarker               = "[e2e:runtime-codex-external-workspace-read]"
-	externalFakeWorkspaceProviderVersion  = "v0.1.0-alpha.5.0.20261106191157-5c9338df1659"
-	externalFakeWorkspaceProviderRevision = "5c9338df16596a9b8a34e40559840cbc54c7cc22"
+	externalFakeWorkspaceProviderVersion  = "v0.1.0-alpha.5.0.20261106195836-c9bf968abc68"
+	externalFakeWorkspaceProviderRevision = "c9bf968abc68b6555f020c6bd9dff6957a7e9a28"
 )
 
 func externalCodexReadTaskManifest(taskName, agentName, className string) map[string]any {
