@@ -57,14 +57,19 @@ type externalACPDispatchFixture struct {
 }
 
 type externalACPDispatchFixtureOptions struct {
-	beforeTerminal                  func(harnessv2.StartPromptRequest, harnessv2.Event)
-	onCancel                        func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
-	contextTimeout                  time.Duration
-	statusTransform                 func(*harnessv2.StatusResponse)
-	profileTransform                func(*harnessv2.RuntimeProfile)
-	terminalEvents                  map[harnessv2.PromptID]harnessv2.EventType
-	promptObserver                  func(harnessv2.StartPromptRequest)
-	workspaceDeltaObserver          func(harnessv2.CreateWorkspaceDeltaRequest)
+	beforeTerminal         func(harnessv2.StartPromptRequest, harnessv2.Event)
+	onCancel               func(harnessv2.CancelPromptRequest) harnessv2.CancelPromptResponse
+	contextTimeout         time.Duration
+	statusTransform        func(*harnessv2.StatusResponse)
+	profileTransform       func(*harnessv2.RuntimeProfile)
+	terminalEvents         map[harnessv2.PromptID]harnessv2.EventType
+	promptObserver         func(harnessv2.StartPromptRequest)
+	workspaceDeltaObserver func(harnessv2.CreateWorkspaceDeltaRequest)
+	// rejectPrompt answers a prompt with a retryable 429 rate_limited
+	// rejection, before the runtime sees it, while it returns true.
+	rejectPrompt func() bool
+	// failDelete fails RuntimeSession deletion as unproven while it returns true.
+	failDelete                      func() bool
 	supportsPublicationFinalization bool
 	// registry is the broker registry the runtime's descriptors and the
 	// reconciler classify against; nil means the default registry.
@@ -281,6 +286,10 @@ func newExternalACPDispatchFixtureWithOptions(
 	if options.workspaceDeltaObserver != nil {
 		deltaProxy := newExternalRuntimeWorkspaceDeltaProxy(t, runtimeEndpoint, options.workspaceDeltaObserver)
 		runtimeEndpoint = deltaProxy.URL
+	}
+	if options.rejectPrompt != nil || options.failDelete != nil {
+		faultProxy := newExternalRuntimeFaultProxy(t, runtimeEndpoint, options.rejectPrompt, options.failDelete)
+		runtimeEndpoint = faultProxy.URL
 	}
 
 	config := conformancetest.Config{
@@ -548,6 +557,36 @@ func newExternalRuntimePromptProxy(
 			observe(prompt)
 		}
 		proxy.ServeHTTP(w, request)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// newExternalRuntimeFaultProxy rejects prompts with a retryable 429 and
+// fails RuntimeSession deletion as unproven while the given hooks return true.
+func newExternalRuntimeFaultProxy(t *testing.T, upstream string, rejectPrompt, failDelete func() bool) *httptest.Server {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	writeFault := func(w http.ResponseWriter, status int, code harnessv2.ErrorCode, message string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(harnessv2.ErrorResponse{Protocol: harnessv2.ProtocolVersion, Code: code, Message: message, Retryable: true})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPut && strings.Contains(request.URL.Path, "/prompts/") && rejectPrompt != nil && rejectPrompt():
+			_, _ = io.Copy(io.Discard, request.Body)
+			writeFault(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining")
+		case request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/runtime-sessions/") && failDelete != nil && failDelete():
+			_, _ = io.Copy(io.Discard, request.Body)
+			writeFault(w, http.StatusConflict, harnessv2.ErrorCodeCleanupUnproven, "runtime session cleanup is unproven")
+		default:
+			proxy.ServeHTTP(w, request)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -3088,5 +3127,89 @@ func TestExternalRuntimeCandidateFreezesLinkedBuiltins(t *testing.T) {
 	candidate, err = writeFixture.reconciler.resolveExternalAgentExecutionCandidate(writeFixture.ctx, writeTask, writeFixture.agent)
 	if err == nil || candidate != nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "registered approvalRequiredTools") {
 		t.Fatalf("resolveExternalAgentExecutionCandidate() with an unregistered write approval = (%#v, %v), want a permanent refusal", candidate, err)
+	}
+}
+
+// A task-scoped prompt rejected with a retryable 429 is requeued only after
+// its RuntimeSession is retired and the cleanup receipt is recorded against
+// the binding that names it; the Task then retries on a fresh session.
+func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *testing.T) {
+	var rejections atomic.Int32
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
+		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
+	})
+	queued := fixture.queueTask(t, "external-rate-limited-task-scoped", types.UID("external-rate-limited-task-scoped-uid"), "retry after admission", nil)
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	created := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+	go func() { created <- <-fixture.createRequests }()
+	if err := fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target); err != nil {
+		t.Fatalf("rate-limited task-scoped prompt was not requeued cleanly: %v", err)
+	}
+	first := <-created
+	requeued := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), requeued); err != nil {
+		t.Fatal(err)
+	}
+	execution := requeued.Status.Execution
+	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved || execution.Reason != corev1alpha1.TaskExecutionReasonAtCapacity {
+		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved", execution)
+	}
+	if fixture.deleteCalls.Load() != 1 {
+		t.Fatalf("task-scoped RuntimeSession DELETE calls before requeue = %d, want 1", fixture.deleteCalls.Load())
+	}
+	receipt, err := taskScopedRuntimeSessionCleanupDigest(acpTaskControlUID(requeued), execution.Attempt,
+		string(first.Metadata.Fence.RuntimeInstanceID), string(first.Metadata.Fence.RuntimeSessionUID), int64(first.Metadata.Fence.RuntimeSessionGeneration))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.RuntimeSessionCleanupDigest != receipt {
+		t.Fatalf("requeue did not record the retired session's cleanup receipt: %#v", execution)
+	}
+	if execution.RuntimeSessionUID != "" || execution.RuntimeInstanceID != "" {
+		t.Fatalf("requeue kept a retired task-scoped binding: %#v", execution)
+	}
+	completed := fixture.dispatch(t, requeued)
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("requeued task-scoped Task status = %#v", completed.Status)
+	}
+}
+
+// When the rejected task-scoped RuntimeSession cannot be proven retired, the
+// requeued Task keeps naming it so its cleanup obligation is not lost.
+func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testing.T) {
+	var rejections atomic.Int32
+	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
+		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
+		failDelete:   func() bool { return true },
+	})
+	queued := fixture.queueTask(t, "external-rate-limited-unretired", types.UID("external-rate-limited-unretired-uid"), "retry after admission", nil)
+	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
+	if err != nil || reserved == nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	created := make(chan harnessv2.CreateRuntimeSessionRequest, 1)
+	go func() { created <- <-fixture.createRequests }()
+	_ = fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target)
+	first := <-created
+	requeued := &corev1alpha1.Task{}
+	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), requeued); err != nil {
+		t.Fatal(err)
+	}
+	execution := requeued.Status.Execution
+	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved {
+		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved", execution)
+	}
+	if execution.RuntimeInstanceID != string(first.Metadata.Fence.RuntimeInstanceID) || execution.RuntimeSessionUID != string(first.Metadata.Fence.RuntimeSessionUID) ||
+		execution.RuntimeSessionGeneration != int64(first.Metadata.Fence.RuntimeSessionGeneration) {
+		t.Fatalf("requeue dropped the unretired task-scoped binding: %#v", execution)
+	}
+	if runtimeSessionCleanupCompleteForUID(requeued, acpTaskControlUID(requeued)) {
+		t.Fatal("unretired task-scoped RuntimeSession reported its cleanup as complete")
+	}
+	if !taskScopedRuntimeSessionCleanupUnconfirmed(requeued, "replacement-instance") || taskScopedRuntimeSessionCleanupUnconfirmed(requeued, first.Metadata.Fence.RuntimeInstanceID) {
+		t.Fatal("dispatch fence does not hold a replacement instance until the unretired session's receipt is recorded")
 	}
 }

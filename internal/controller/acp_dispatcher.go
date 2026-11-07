@@ -1188,6 +1188,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
 		runtimeFence.RuntimeSessionGeneration = taskScopedGeneration
 		leaseGeneration = int64(taskScopedGeneration)
+		if taskScopedRuntimeSessionCleanupUnconfirmed(task, runtimeFence.RuntimeInstanceID) {
+			// Binding a new instance would overwrite the only record of an
+			// unretired session; wait until its cleanup receipt is recorded.
+			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation,
+				errors.New("a task-scoped RuntimeSession on a previous runtime instance has no cleanup receipt"))
+		}
 	}
 	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionReserved, store.PromptExecutionSessionStarting, "session-starting", nil); err != nil {
@@ -1995,6 +2001,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				var runtimeBinding *ACPRuntimeSessionBinding
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
+				} else if runtimeSessionCleanupPending {
+					// Retire the task-scoped RuntimeSession and record its
+					// cleanup receipt while the Task still names it. If that
+					// cannot be proven, keep naming it: the receipt can still
+					// be recorded later, by the deferred retry or by the
+					// instance's retirement, and no new instance is bound
+					// until it is.
+					if cleanupErr := cleanupRuntimeSession("prompt_admission_requeued"); cleanupErr != nil {
+						runtimeBinding = &ACPRuntimeSessionBinding{
+							SessionUID: string(runtimeFence.RuntimeSessionUID), Generation: runtimeFence.RuntimeSessionGeneration,
+							RuntimeInstanceID: runtimeFence.RuntimeInstanceID, SupervisorBootID: runtimeFence.SupervisorBootID,
+						}
+					}
 				}
 				if err := d.requeueProvenNotAcceptedPromptAdmission(
 					ctx, task, attemptID, fence, streamErr, runtimeBinding, false,
@@ -6019,6 +6038,18 @@ func frozenMCPPermissionDecision(
 		}
 	}
 	return cancelled
+}
+
+// taskScopedRuntimeSessionCleanupUnconfirmed reports whether the Task still
+// names a task-scoped RuntimeSession on another runtime instance whose cleanup
+// receipt has not been recorded.
+func taskScopedRuntimeSessionCleanupUnconfirmed(task *corev1alpha1.Task, runtimeInstanceID harnessv2.RuntimeInstanceID) bool {
+	if task == nil || task.Status.Execution == nil {
+		return false
+	}
+	execution := task.Status.Execution
+	return strings.TrimSpace(execution.RuntimeSessionUID) != "" && strings.TrimSpace(execution.RuntimeInstanceID) != "" &&
+		execution.RuntimeInstanceID != string(runtimeInstanceID) && !runtimeSessionCleanupCompleteForUID(task, acpTaskControlUID(task))
 }
 
 // errACPPromptAdmissionInstanceRetiring reports that the execution-workspace
