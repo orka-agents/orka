@@ -1991,7 +1991,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			break
 		}
 		if !accepted && !summary.Accepted && isACPRateLimitedClientError(streamErr) {
-			if target.external != nil {
+			if promptAdmissionRejectionRequeues(target) {
 				var runtimeBinding *ACPRuntimeSessionBinding
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
@@ -6013,6 +6013,16 @@ func frozenMCPPermissionDecision(
 	return cancelled
 }
 
+// promptAdmissionRejectionRequeues reports whether a proven-unaccepted,
+// retryable rate-limit rejection releases the Task for requeue instead of
+// waiting for capacity on the same exact instance. External runtimes and
+// dedicated execution-workspace pools replace their instance once a drain
+// closes admission, as on a worker eviction, so waiting on the retiring
+// instance would fail a prompt that was never accepted.
+func promptAdmissionRejectionRequeues(target acpDispatchTarget) bool {
+	return target.external != nil || runtimePoolHasExternalWorkspace(target.pool)
+}
+
 func isACPRateLimitedClientError(err error) bool {
 	var clientErr *harnessv2.ClientError
 	return errors.As(err, &clientErr) && clientErr.StatusCode == 429 &&
@@ -6109,7 +6119,7 @@ func (d *ACPDispatcher) requeueProvenNotAcceptedPromptAdmission(
 		return fmt.Errorf("prompt attempt %s cannot requeue rejected admission from state %s: %w", attemptID, attempt.ExecutionState, cause)
 	}
 	proof := "rate_limited_rejection"
-	message := "external runtime prompt admission was rate limited and will be retried"
+	message := "runtime prompt admission was rate limited and will be retried"
 	if preserveBindings {
 		proof = "retryable_zero_write"
 		message = "runtime prompt submission was not sent and will be retried"

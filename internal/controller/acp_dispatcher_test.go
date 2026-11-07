@@ -4881,6 +4881,34 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 	}
 }
 
+// A rate-limited prompt that was never accepted is requeued, not held for
+// capacity on the same exact instance, whenever that instance is replaced
+// once its admission closes: external runtimes and dedicated
+// execution-workspace pools, whose worker eviction suspends the instance and
+// resumes the workspace on a new one. Shared pools keep waiting for capacity.
+func TestPromptAdmissionRejectionRequeuesReplaceableInstances(t *testing.T) {
+	workspacePool := &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{
+		WorkspaceRef: &workspacev1alpha1.ObjectIdentityReference{Name: "workspace", UID: "workspace-uid"},
+		Workload:     &corev1alpha1.RuntimePoolWorkspaceWorkloadSpec{},
+	}}}
+	for _, test := range []struct {
+		name   string
+		target acpDispatchTarget
+		want   bool
+	}{
+		{name: "shared pool", target: acpDispatchTarget{pool: &corev1alpha1.RuntimePool{}}},
+		{name: "unbound workspace pool", target: acpDispatchTarget{pool: &corev1alpha1.RuntimePool{Spec: corev1alpha1.RuntimePoolSpec{ExecutionWorkspace: &corev1alpha1.RuntimePoolExecutionWorkspaceSpec{}}}}},
+		{name: "external runtime", target: acpDispatchTarget{external: &corev1alpha1.AgentRuntime{}}, want: true},
+		{name: "execution workspace pool", target: acpDispatchTarget{pool: workspacePool}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := promptAdmissionRejectionRequeues(test.target); got != test.want {
+				t.Fatalf("promptAdmissionRejectionRequeues = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestACPDispatcherReservedRetryReportsOnlyBoundedStage(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
