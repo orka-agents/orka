@@ -675,7 +675,11 @@ func (r *KubernetesResolver) resolveRequesterConnection(
 	})
 	if err != nil {
 		if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
-			r.describeConnectionRefusal(ctx, refusal, policy.Namespace, providerName, provider)
+			// A shared refresh hands every waiter the same error, so describe
+			// a copy this caller owns.
+			described := *refusal
+			r.describeConnectionRefusal(ctx, &described, policy.Namespace, providerName, provider)
+			err = &described
 		}
 		return ConnectionCredential{}, corev1alpha1.ConnectorTool{}, fmt.Errorf("resolve connection credential: %w", err)
 	}

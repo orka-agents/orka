@@ -59,10 +59,14 @@ func TestKubernetesResolverNamesTheProviderInAConnectionRefusal(t *testing.T) {
 		t.Fatalf("no link: err = %v", err)
 	}
 
-	source := &fakeConnectionSource{err: &ConnectionRequiredError{Kind: ConnectionExpired}}
+	shared := &ConnectionRequiredError{Kind: ConnectionExpired}
+	source := &fakeConnectionSource{err: shared}
 	_, err = (&KubernetesResolver{Reader: reader, Connections: source}).Resolve(context.Background(), f.base)
 	refusal, ok = errors.AsType[*ConnectionRequiredError](err)
 	if !ok || refusal.Error() != "The GitHub link for the person who asked has expired. "+want {
 		t.Fatalf("source refusal: err = %v", err)
+	}
+	if shared.Provider != "" || shared.DisplayName != "" || shared.Namespace != "" {
+		t.Fatalf("the source's shared error was annotated in place: %+v", shared)
 	}
 }

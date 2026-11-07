@@ -125,6 +125,9 @@ func TestForwardingToolNameMustNotShadowABuiltInTool(t *testing.T) {
 		{"azurearm", true, false},
 		{"read", true, true},
 		{"bash", true, true},
+		{"remember", true, true},
+		{"web_fetch", true, true},
+		{"remember", false, false},
 		{"read", false, false},
 	} {
 		errs, _ := validator.Validate(t.Context(), nil, structural, tool(tc.name, tc.forward), nil, celconfig.RuntimeCELCostBudget)
