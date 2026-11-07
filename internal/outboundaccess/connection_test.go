@@ -32,10 +32,15 @@ type fakeConnectionSource struct {
 	// liveErr is what the post-exchange Connection re-check reports.
 	liveErr    error
 	liveChecks []ConnectionCredentialRequest
+	// duringLive runs inside the post-exchange Connection re-check.
+	duringLive func()
 }
 
 func (f *fakeConnectionSource) RequireLiveConnection(_ context.Context, req ConnectionCredentialRequest) error {
 	f.liveChecks = append(f.liveChecks, req)
+	if f.duringLive != nil {
+		f.duringLive()
+	}
 	return f.liveErr
 }
 

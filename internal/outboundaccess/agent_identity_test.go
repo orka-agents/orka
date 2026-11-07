@@ -382,6 +382,25 @@ func TestKubernetesResolverDelegatedRechecksTheRequesterLink(t *testing.T) {
 		}
 	})
 
+	t.Run("judges the delegation after the Connection re-check", func(t *testing.T) {
+		for name, during := range map[string]func(*KubernetesResolver){
+			"ancestor cancelled": func(r *KubernetesResolver) {
+				r.DelegationLive = func(context.Context, AgentIdentityBinding) error { return errors.New("an ancestor Task was cancelled") }
+			},
+			"delegation expired": func(r *KubernetesResolver) {
+				r.Now = func() time.Time { return now.Add(48 * time.Hour) }
+			},
+		} {
+			source := connection()
+			r := resolver(delegatedPolicySpec(nil), source, &fakeAgentIdentitySource{token: "obo-token"})
+			source.duringLive = func() { during(r) }
+			resolution, err := r.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+			if err == nil || resolution.CredentialValue != "" {
+				t.Fatalf("%s while the Connection was re-checked: Resolve() = %#v, %v; want a refusal", name, resolution, err)
+			}
+		}
+	})
+
 	t.Run("refuses when the source cannot re-check the Connection", func(t *testing.T) {
 		r := resolver(delegatedPolicySpec(nil), nil, &fakeAgentIdentitySource{token: "obo-token"})
 		r.Connections = resolveOnlyConnectionSource{connection()}
