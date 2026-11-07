@@ -14,7 +14,8 @@ import (
 // internal/admission tests the canonical policy. Helm must render the same
 // rules with its release's AI worker ServiceAccount, for both worker profiles.
 func TestStaticChartAIWorkerIdentityProtectionMatchesCanonicalPolicy(t *testing.T) {
-	canonical, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "admission", "ai_worker_identity_protection.yaml"))
+	canonical, err := os.ReadFile(filepath.Join(
+		"..", "..", "..", "config", "admission", "ai_worker_identity_protection.yaml"))
 	require.NoError(t, err)
 	canonicalPolicy, _, found := strings.Cut(string(canonical), "\n---\n")
 	require.True(t, found)

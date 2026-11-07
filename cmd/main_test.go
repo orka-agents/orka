@@ -747,7 +747,8 @@ func TestValidateTaskWebhookSigningNamespace(t *testing.T) {
 	if err := validateTaskWebhookSigningNamespace("", "", reserved...); err != nil {
 		t.Fatalf("disabled signing rejected: %v", err)
 	}
-	if err := validateTaskWebhookSigningNamespace("orka-task-webhook-signing", defaultTaskWebhookSigningNamespace, reserved...); err != nil {
+	if err := validateTaskWebhookSigningNamespace(
+		"orka-task-webhook-signing", defaultTaskWebhookSigningNamespace, reserved...); err != nil {
 		t.Fatalf("dedicated namespace rejected: %v", err)
 	}
 	for _, secret := range []string{"a..b", "a-.b", "Bad_Name", strings.Repeat("a.", 127)} {

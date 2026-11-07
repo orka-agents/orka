@@ -399,7 +399,7 @@ func resolveTokenSource(ctx context.Context, reader client.Reader, namespace str
 		// A ServiceAccount source lets the AI worker request that account's
 		// token. Orka's own accounts (the controller, workers, proxies,
 		// publisher) must never be one: the worker would gain their authority.
-		if serviceAccount.Labels[labels.LabelPlatformIdentity] == "true" {
+		if serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue {
 			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}

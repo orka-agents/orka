@@ -57,7 +57,8 @@ func TestStaticChartTaskWebhookSigningKeyLivesInItsOwnNamespace(t *testing.T) {
 func TestStaticChartOnlyTheControllerReachesTheTaskWebhookSigningKey(t *testing.T) {
 	for _, profile := range []string{"default", "restricted"} {
 		t.Run(profile, func(t *testing.T) {
-			values := []string{"--set-string", "workers.ai.rbacProfile=" + profile}
+			values := make([]string, 0, 4)
+			values = append(values, "--set-string", "workers.ai.rbacProfile="+profile)
 			controllerSA := renderedControllerDeployment(t, values...).Spec.Template.Spec.ServiceAccountName
 			docs := decodeWorkerRBACDocuments(t, requireHelmRender(t, append(values, "--show-only", "templates/rbac.yaml")...))
 			roles := map[string]workerRBACDocument{}
@@ -78,13 +79,15 @@ func TestStaticChartOnlyTheControllerReachesTheTaskWebhookSigningKey(t *testing.
 				}
 				role, found := roles[binding.RoleRef.Kind+"/"+roleNamespace+"/"+binding.RoleRef.Name]
 				if !found {
-					t.Fatalf("%s %s binds %s %s, which the chart does not render", binding.Kind, binding.Metadata.Name, binding.RoleRef.Kind, binding.RoleRef.Name)
+					t.Fatalf("%s %s binds %s %s, which the chart does not render",
+						binding.Kind, binding.Metadata.Name, binding.RoleRef.Kind, binding.RoleRef.Name)
 				}
 				if !grantsSecrets(role) {
 					continue
 				}
 				for _, subject := range binding.Subjects {
-					if subject.Kind != "ServiceAccount" || subject.Name != controllerSA || subject.Namespace != staticChartTestNamespace {
+					if subject.Kind != "ServiceAccount" || subject.Name != controllerSA ||
+						subject.Namespace != staticChartTestNamespace {
 						t.Errorf("%s %s grants Secrets in the signing namespace to %#v", binding.Kind, binding.Metadata.Name, subject)
 					}
 				}
@@ -125,7 +128,8 @@ func grantsSecrets(role workerRBACDocument) bool {
 func TestStaticChartTaskWebhookSigningRendersFromReusedValues(t *testing.T) {
 	args := renderedControllerDeployment(t, "--set", "controller.taskWebhooks=null").Spec.Template.Spec.Containers[0].Args
 	if !containsString(args, "--task-webhook-signing-namespace="+taskWebhookSigningTestNamespace) {
-		t.Fatalf("a release without controller.taskWebhooks must default the signing namespace:\n%s", strings.Join(args, "\n"))
+		t.Fatalf("a release without controller.taskWebhooks must default the signing namespace:\n%s",
+			strings.Join(args, "\n"))
 	}
 }
 
@@ -155,7 +159,8 @@ func TestStaticChartRejectsTaskWebhookSigningBesideTasks(t *testing.T) {
 		},
 		{
 			name: "agent-host namespace",
-			args: append(agentHostsEnabled(), "--set-string", "controller.taskWebhooks.signingNamespace="+agentHostTestNamespace),
+			args: append(agentHostsEnabled(),
+				"--set-string", "controller.taskWebhooks.signingNamespace="+agentHostTestNamespace),
 			want: "must differ from the Helm release, client, ACP runtime and agent-host namespaces",
 		},
 		{
@@ -234,7 +239,7 @@ func TestStaticChartTaskWebhookSigningNamespaceIsPerRelease(t *testing.T) {
 func TestStaticChartServiceAccountsCarryPlatformIdentity(t *testing.T) {
 	rendered := requireHelmRender(t, "--set", "client.create=true")
 	var count int
-	for _, document := range strings.Split(rendered, "\n---") {
+	for document := range strings.SplitSeq(rendered, "\n---") {
 		if !strings.Contains(document, "\nkind: ServiceAccount\n") {
 			continue
 		}

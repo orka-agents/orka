@@ -46,7 +46,10 @@ const (
 	// LabelPlatformIdentity marks Orka's own ServiceAccounts. Their tokens
 	// carry platform authority, so OutboundAccessPolicies may not hand them to
 	// workers.
-	LabelPlatformIdentity  = "orka.ai/platform-identity"
+	LabelPlatformIdentity = "orka.ai/platform-identity"
+	// PlatformIdentityValue is the LabelPlatformIdentity value that marks an
+	// Orka ServiceAccount.
+	PlatformIdentityValue  = "true"
 	LabelGitHubEvent       = "orka.ai/github-event"
 	LabelGitHubAction      = "orka.ai/github-action"
 	LabelGitHubRepository  = "orka.ai/github-repository"
