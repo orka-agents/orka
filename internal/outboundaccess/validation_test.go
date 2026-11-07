@@ -245,3 +245,34 @@ func TestValidateSpecRejectsFragmentBearingTokenEndpoint(t *testing.T) {
 		t.Fatalf("ValidateSpec() issue = %#v", issue)
 	}
 }
+
+func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka", Namespace: "tenant",
+			Labels: map[string]string{"app.kubernetes.io/name": "orka"}}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}},
+	).Build()
+	for name, wantDenied := range map[string]bool{"orka": true, "workload": false} {
+		direct := validDirect()
+		direct.Subject = corev1alpha1.OutboundTokenSource{
+			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+			TokenType:         tokenexchange.TokenTypeJWT,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: name},
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
+			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
+		}
+		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{})
+		if err != nil {
+			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
+		}
+		if denied := issue != nil && issue.Reason == ReasonReferenceDenied; denied != wantDenied {
+			t.Fatalf("%s: ResolveReferences() issue = %#v, want denied=%v", name, issue, wantDenied)
+		}
+	}
+}

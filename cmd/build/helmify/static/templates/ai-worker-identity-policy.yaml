@@ -1,9 +1,10 @@
 {{- /*
 Mirrors config/admission/ai_worker_identity_protection.yaml. The default AI
 worker role can create Secrets and Jobs here; without this policy a
-ServiceAccount-token Secret or a Job naming the controller's ServiceAccount
-would give the worker the controller's identity. Rendered for every profile:
-restricted workers cannot make these writes, so it never denies them anything.
+ServiceAccount-token Secret or a Job naming the controller's ServiceAccount, or
+a Job Pod wearing the controller's labels, would let the worker act as the
+controller. Rendered for every profile: restricted workers cannot make these
+writes, so it never denies them anything.
 */ -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -32,6 +33,8 @@ spec:
     expression: "object.spec.template.spec"
   - name: podSecurity
     expression: "variables.pod.?securityContext.orValue({})"
+  - name: podLabels
+    expression: "object.spec.template.?metadata.?labels.orValue({})"
   validations:
   - expression: "request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'"
     message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret would hand it another identity
@@ -45,25 +48,46 @@ spec:
       AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as the
       ServiceAccount of the same name with automountServiceAccountToken false,
       and use only emptyDir and Secret volumes
+  # Only code_exec's own labels and the ones the Job controller adds, so the
+  # Pod matches no Service or NetworkPolicy selector but its own.
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        variables.podLabels.all(k, k in [
+          'app.kubernetes.io/name', 'orka.ai/tool', 'orka.ai/code-exec-job',
+          'batch.kubernetes.io/job-name', 'job-name',
+          'batch.kubernetes.io/controller-uid', 'controller-uid']) &&
+        variables.podLabels[?'app.kubernetes.io/name'].orValue('orka') == 'orka' &&
+        variables.podLabels[?'orka.ai/tool'].orValue('code_exec') == 'code_exec' &&
+        ['orka.ai/code-exec-job', 'batch.kubernetes.io/job-name', 'job-name'].all(k,
+          variables.podLabels[?k].orValue(object.metadata.name) == object.metadata.name) &&
+        !has(variables.pod.subdomain))
+    message: >-
+      AI worker Job Pods may carry only code_exec labels (app.kubernetes.io/name=orka,
+      orka.ai/tool=code_exec, and the Job name) and no subdomain, so they cannot
+      join another component's Service or NetworkPolicy allowance
   - expression: >-
       request.resource.resource != 'jobs' || (
         !variables.pod.?hostNetwork.orValue(false) &&
         !variables.pod.?hostPID.orValue(false) &&
         !variables.pod.?hostIPC.orValue(false) &&
         !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.podSecurity.?seccompProfile.type.orValue('') != 'Unconfined' &&
         variables.pod.?initContainers.orValue([]).size() == 0 &&
         variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
         variables.pod.containers.all(c,
           !c.?securityContext.privileged.orValue(false) &&
           c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
           c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          'ALL' in c.?securityContext.capabilities.drop.orValue([]) &&
+          c.?securityContext.seccompProfile.type.orValue('') != 'Unconfined' &&
           !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
           c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
           c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
     message: >-
-      AI worker Jobs must not reach the node: no host namespaces or ports, no
-      init or ephemeral containers, and every container non-root, unprivileged,
-      with allowPrivilegeEscalation false and no added capabilities
+      AI worker Jobs get no host access or privilege: no host namespaces or
+      ports, no init or ephemeral containers, no Unconfined seccomp, and every
+      container non-root, unprivileged, with allowPrivilegeEscalation false,
+      all capabilities dropped and none added
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

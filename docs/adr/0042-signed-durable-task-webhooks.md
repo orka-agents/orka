@@ -82,9 +82,15 @@ lease.
 - The namespace protects the key from `secretRef` and from worker roles, but
   only while no worker can act as the controller. The default AI worker profile
   can create Secrets and Jobs in the release namespace, and either could name
-  the controller's ServiceAccount. A ValidatingAdmissionPolicy therefore
-  limits the AI worker to Opaque Secrets and to `code_exec` Jobs that run
-  token-less as their own ServiceAccount and cannot reach the node.
+  the controller's ServiceAccount, while a Job Pod with the controller's labels
+  would sit behind the Service that publishes the JWKS. A
+  ValidatingAdmissionPolicy therefore limits the AI worker to Opaque Secrets
+  and to `code_exec` Jobs that run token-less as their own ServiceAccount, carry
+  only `code_exec` labels, and get no host access, privilege or capabilities.
+  OutboundAccessPolicies may not grant TokenRequest for Orka's own
+  ServiceAccounts. Existing ServiceAccount-token Secrets in the release
+  namespace stay readable by default-profile workers; operators must not keep
+  any there.
 - Rotation is an operator edit of one Secret. Replicas reload within 15
   seconds. Receivers must refetch the JWKS on an unknown `kid`, and `previous`
   must stay published for at least the token TTL plus that reload window.

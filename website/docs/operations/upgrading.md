@@ -93,11 +93,21 @@ upgrading:
   ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
   act as the controller. Now it may write only Opaque Secrets and create only
   `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
-  the same name with `automountServiceAccountToken: false`, with only emptyDir and
-  Secret volumes, no host namespaces or ports, no init or ephemeral containers, and
-  non-root, unprivileged containers with `allowPrivilegeEscalation: false` and no added
-  capabilities. Orka's own worker already works this way. Anything else that creates
-  Secrets or Jobs as the AI worker ServiceAccount is now rejected.
+  the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
+  labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
+  subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+  ephemeral containers, no Unconfined seccomp, and non-root, unprivileged containers
+  with `allowPrivilegeEscalation: false`, all capabilities dropped and none added.
+  Orka's own worker already works this way. Anything else that creates Secrets or Jobs
+  as the AI worker ServiceAccount is now rejected.
+- An OutboundAccessPolicy whose `serviceAccountRef` names an Orka ServiceAccount (one
+  labeled `app.kubernetes.io/name: orka`, such as the controller or a worker) now
+  reports `ReferenceDenied`, and the controller no longer grants the AI worker
+  TokenRequest for it. Point such policies at a dedicated ServiceAccount.
+- Check the release namespace for ServiceAccount-token Secrets
+  (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
+  The default AI worker profile can read them; delete any you do not need, and treat a
+  token for a privileged account as exposed.
 - With signing enabled but no usable key (the Secret cannot be read or holds a malformed
   key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
   key is available.

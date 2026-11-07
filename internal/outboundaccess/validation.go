@@ -34,8 +34,13 @@ const (
 	ReasonResolvedRefs      = "ResolvedRefs"
 	ReasonReferenceNotFound = "ReferenceNotFound"
 	ReasonReferenceDenied   = "ReferenceDenied"
-	ReasonReferenceInvalid  = "ReferenceInvalid"
-	ReasonResolutionFailed  = "ResolutionFailed"
+
+	// platformServiceAccountLabel marks Orka's own ServiceAccounts in both the
+	// Helm chart and the kustomize install.
+	platformServiceAccountLabel      = "app.kubernetes.io/name"
+	platformServiceAccountLabelValue = "orka"
+	ReasonReferenceInvalid           = "ReferenceInvalid"
+	ReasonResolutionFailed           = "ResolutionFailed"
 )
 
 // Issue is a status-safe validation failure. Message must never contain
@@ -394,6 +399,12 @@ func resolveTokenSource(ctx context.Context, reader client.Reader, namespace str
 				return unresolved(ReasonReferenceNotFound, "referenced ServiceAccount was not found"), nil
 			}
 			return nil, fmt.Errorf("resolve outbound ServiceAccount reference: %w", err)
+		}
+		// A ServiceAccount source lets the AI worker request that account's
+		// token. Orka's own accounts (the controller, workers, proxies,
+		// publisher) must never be one: the worker would gain their authority.
+		if serviceAccount.Labels[platformServiceAccountLabel] == platformServiceAccountLabelValue {
+			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}
 	return nil, nil

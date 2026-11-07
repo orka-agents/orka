@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	apiserveradmission "k8s.io/apiserver/pkg/admission"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	apiserveradmission "k8s.io/apiserver/pkg/admission"
 )
 
 const aiWorkerIdentityTestWorker = "system:serviceaccount:" + admissionTestNamespace + ":orka-ai-worker"
@@ -54,6 +54,17 @@ func codeExecJob() *unstructured.Unstructured {
 		"metadata":   map[string]any{"name": name, "namespace": admissionTestNamespace},
 		"spec": map[string]any{
 			"template": map[string]any{
+				// The builder's labels plus the selector labels the API server
+				// adds to every Job's Pod template.
+				"metadata": map[string]any{"labels": map[string]any{
+					"app.kubernetes.io/name":             "orka",
+					"orka.ai/tool":                       "code_exec",
+					"orka.ai/code-exec-job":              name,
+					"batch.kubernetes.io/job-name":       name,
+					"job-name":                           name,
+					"batch.kubernetes.io/controller-uid": "0f8b2c4e-1111-2222-3333-444455556666",
+					"controller-uid":                     "0f8b2c4e-1111-2222-3333-444455556666",
+				}},
 				"spec": map[string]any{
 					"restartPolicy":                "Never",
 					"serviceAccountName":           name,
@@ -71,6 +82,7 @@ func codeExecJob() *unstructured.Unstructured {
 							"allowPrivilegeEscalation": false,
 							"readOnlyRootFilesystem":   true,
 							"capabilities":             map[string]any{"drop": []any{"ALL"}},
+							"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
 						},
 					}},
 					"volumes": []any{
@@ -86,6 +98,12 @@ func codeExecJob() *unstructured.Unstructured {
 func setJobField(t *testing.T, job *unstructured.Unstructured, value any, path ...string) *unstructured.Unstructured {
 	t.Helper()
 	require.NoError(t, unstructured.SetNestedField(job.Object, value, append([]string{"spec", "template", "spec"}, path...)...))
+	return job
+}
+
+func setPodLabel(t *testing.T, job *unstructured.Unstructured, key, value string) *unstructured.Unstructured {
+	t.Helper()
+	require.NoError(t, unstructured.SetNestedField(job.Object, value, "spec", "template", "metadata", "labels", key))
 	return job
 }
 
@@ -131,6 +149,9 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		return policy.admits(t, jobKind, jobsResource, job.GetName(), apiserveradmission.Create, username, "", job, nil)
 	}
 	require.True(t, admits(aiWorkerIdentityTestWorker, codeExecJob()), "the code_exec Job")
+	unlabeled := codeExecJob()
+	unstructured.RemoveNestedField(unlabeled.Object, "spec", "template", "metadata")
+	require.True(t, admits(aiWorkerIdentityTestWorker, unlabeled), "a code_exec Job before the API server adds selector labels")
 
 	for name, job := range map[string]*unstructured.Unstructured{
 		"runs as the controller": setJobField(t, codeExecJob(), "orka-controller-manager", "serviceAccountName"),
@@ -170,6 +191,18 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		"root":             setCodeContainerField(t, codeExecJob(), false, "securityContext", "runAsNonRoot"),
 		"hostPort": setCodeContainerField(t, codeExecJob(), []any{map[string]any{
 			"containerPort": int64(80), "hostPort": int64(80)}}, "ports"),
+		// The controller's Service and NetworkPolicy selectors.
+		"controller component label": setPodLabel(t, codeExecJob(), "app.kubernetes.io/component", "controller"),
+		"release instance label":     setPodLabel(t, codeExecJob(), "app.kubernetes.io/instance", "orka"),
+		"network role label":         setPodLabel(t, codeExecJob(), "orka.ai/network-role", "controller"),
+		"other app name":             setPodLabel(t, codeExecJob(), "app.kubernetes.io/name", "vekil"),
+		"other tool":                 setPodLabel(t, codeExecJob(), "orka.ai/tool", "web_fetch"),
+		"another Job's name":         setPodLabel(t, codeExecJob(), "orka.ai/code-exec-job", "orka-code-exec-victim"),
+		"subdomain":                  setJobField(t, codeExecJob(), "orka", "subdomain"),
+		"capabilities kept":          setCodeContainerField(t, codeExecJob(), []any{"NET_RAW"}, "securityContext", "capabilities", "drop"),
+		"pod seccomp Unconfined":     setJobField(t, codeExecJob(), "Unconfined", "securityContext", "seccompProfile", "type"),
+		"container seccomp Unconfined": setCodeContainerField(t, codeExecJob(), "Unconfined",
+			"securityContext", "seccompProfile", "type"),
 		"init container": setJobField(t, codeExecJob(), []any{map[string]any{
 			"name": "init", "image": "busybox", "securityContext": map[string]any{"privileged": true}}}, "initContainers"),
 	} {

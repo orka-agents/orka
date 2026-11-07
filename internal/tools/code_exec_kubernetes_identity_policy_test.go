@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package tools
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,24 @@ func TestKubernetesCodeExecJobMeetsAIWorkerIdentityPolicy(t *testing.T) {
 		if pod.HostNetwork || pod.HostPID || pod.HostIPC || len(pod.InitContainers) > 0 || len(pod.EphemeralContainers) > 0 {
 			t.Error("Pod must not use host namespaces or init/ephemeral containers")
 		}
+		allowedLabels := map[string]string{
+			"app.kubernetes.io/name":       "orka",
+			codeExecKubernetesLabelTool:    codeExecToolName,
+			codeExecKubernetesLabelJob:     job.Name,
+			"batch.kubernetes.io/job-name": job.Name,
+		}
+		for key, value := range job.Spec.Template.Labels {
+			if want, ok := allowedLabels[key]; !ok || value != want {
+				t.Errorf("Pod label %s=%q is not one the policy admits", key, value)
+			}
+		}
+		if pod.Subdomain != "" {
+			t.Errorf("Pod subdomain %q is not admitted", pod.Subdomain)
+		}
+		if pod.SecurityContext != nil && pod.SecurityContext.SeccompProfile != nil &&
+			pod.SecurityContext.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined {
+			t.Error("Pod seccomp must not be Unconfined")
+		}
 		for _, volume := range pod.Volumes {
 			if volume.EmptyDir == nil && volume.Secret == nil {
 				t.Errorf("volume %q is neither emptyDir nor Secret", volume.Name)
@@ -63,7 +82,8 @@ func TestKubernetesCodeExecJobMeetsAIWorkerIdentityPolicy(t *testing.T) {
 			switch {
 			case sc == nil, sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation,
 				sc.Privileged != nil && *sc.Privileged,
-				sc.Capabilities != nil && len(sc.Capabilities.Add) > 0, !nonRoot:
+				sc.Capabilities == nil || len(sc.Capabilities.Add) > 0 || !slices.Contains(sc.Capabilities.Drop, "ALL"),
+				sc.SeccompProfile != nil && sc.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined, !nonRoot:
 				t.Errorf("container %q security context %+v does not meet the policy", container.Name, sc)
 			}
 			for _, port := range container.Ports {
