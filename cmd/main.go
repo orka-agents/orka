@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -972,6 +975,7 @@ func main() {
 		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
 		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
+	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
 	// Read the storage configuration before anything opens storage. It reads
@@ -1356,6 +1360,7 @@ func main() {
 		KubeClient:             kubeClient,
 		Trust:                  outboundAccessTrust,
 		Exchanger:              tokenexchange.NewClient(tokenexchange.ClientOptions{}),
+		AuditLog:               agentIdentityAuditLog,
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
@@ -1459,6 +1464,14 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	// Identity-use records pseudonymize the requester with this key, also for
+	// calls refused while no issuer is configured.
+	auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+	if keyErr != nil {
+		setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+		os.Exit(1)
+	}
+	outboundAccessResolver.AuditPseudonymKey = auditKey
 	if agentIdentitySource != nil {
 		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
 			Reader: mgr.GetAPIReader(), Sessions: appStorage,
@@ -2867,6 +2880,19 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 // connectorStateKeyInfo is the HKDF label separating the connector state
 // signing key from every other use of the controller key.
 const connectorStateKeyInfo = "orka.connector.state.v1"
+
+// agentIdentityAuditLogger returns the sink for agent identity use records.
+// It writes where and how the diagnostic logger does, but no
+// --zap-log-level filters it and it is never sampled: an audit record must
+// not depend on how verbose the controller's diagnostics are.
+func agentIdentityAuditLogger(opts zap.Options) logr.Logger {
+	opts.Level = uberzap.LevelEnablerFunc(func(zapcore.Level) bool { return true })
+	return zap.New(zap.UseFlagOptions(&opts))
+}
+
+// agentIdentityAuditKeyInfo is the HKDF label for the key that pseudonymizes
+// requesters in agent identity use records.
+const agentIdentityAuditKeyInfo = "orka.agent-identity.audit-pseudonym.v1"
 
 // requesterStampKeyInfo is the HKDF label for the requester stamp key.
 const requesterStampKeyInfo = "orka.connector.requester-stamp.v1"
