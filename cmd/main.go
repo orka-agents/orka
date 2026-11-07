@@ -844,7 +844,8 @@ func main() {
 	}
 	if err := validateTaskWebhookSigningNamespace(taskWebhookSigningSecret, taskWebhookSigningNamespace,
 		watchNamespace, currentPodNamespace(), acpRuntimeNamespace, agentHostNamespace); err != nil {
-		setupLog.Error(err, "invalid Task webhook signing configuration")
+		// The logger is not set up yet, so setupLog would drop this.
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
