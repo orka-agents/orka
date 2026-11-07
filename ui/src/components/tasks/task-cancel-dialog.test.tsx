@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { server } from '@/test/mocks/server'
 import { useUIStore } from '@/stores/ui'
 import { TaskCancelDialog } from './task-cancel-dialog'
-import { isTaskCancellable, isTaskCancelling } from './task-state'
+import { isTaskCancellable, isTaskCancelling, nextCancelTarget } from './task-state'
 import type { Task } from '@/schemas/task'
 
 vi.mock('zustand/middleware', () => ({ persist: (fn: unknown) => fn }))
@@ -71,5 +71,15 @@ describe('task cancel state', () => {
     expect(isTaskCancelling(task('Running', { 'orka.ai/cancel-requested': 'cancelled by alice' }))).toBe(true)
     expect(isTaskCancelling(task('Cancelled', { 'orka.ai/cancel-requested': 'cancelled by alice' }))).toBe(false)
     expect(isTaskCancelling(task('Running'))).toBe(false)
+  })
+})
+
+describe('cancel dialog target', () => {
+  it('lets a replaced Task\'s late close leave its successor\'s dialog open', () => {
+    expect(nextCancelTarget(null, 'ns/build/uid-1', true)).toBe('ns/build/uid-1')
+    expect(nextCancelTarget('ns/build/uid-1', 'ns/build/uid-1', false)).toBeNull()
+    // The Task was replaced and its successor's dialog opened before the
+    // old request answered.
+    expect(nextCancelTarget('ns/build/uid-2', 'ns/build/uid-1', false)).toBe('ns/build/uid-2')
   })
 })

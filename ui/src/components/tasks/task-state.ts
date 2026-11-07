@@ -48,3 +48,14 @@ export function isTaskCancelling(task: Task): boolean {
 export function isScheduleSuspended(task: Task): boolean {
   return Boolean(task.spec.schedule) && task.spec.suspend === true
 }
+
+/**
+ * The Task whose cancel dialog is open after a dialog for identity opens or
+ * closes. A dialog closes only itself: a late close from a replaced Task's
+ * dialog, whose request finished after the Task changed, leaves the
+ * successor's dialog open.
+ */
+export function nextCancelTarget(current: string | null, identity: string, open: boolean): string | null {
+  if (open) return identity
+  return current === identity ? null : current
+}
