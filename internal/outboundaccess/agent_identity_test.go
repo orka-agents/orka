@@ -10,6 +10,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -519,6 +520,41 @@ func TestEffectiveMaxDelegationAge(t *testing.T) {
 			got, asked := EffectiveMaxDelegationAge(&corev1alpha1.OutboundAccessPolicy{Spec: spec}, tc.limit)
 			if got != tc.want || asked != tc.wantAsk {
 				t.Fatalf("EffectiveMaxDelegationAge() = %s, %s; want %s, %s", got, asked, tc.want, tc.wantAsk)
+			}
+		})
+	}
+}
+
+// TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential
+// covers an Agent that loses its identity, or is deleted, while the issuer
+// answers: the credential it issued is not released.
+func TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential(t *testing.T) {
+	scheme := resolverScheme(t)
+	for name, change := range map[string]func(context.Context, ctrlclient.Client, *corev1alpha1.Agent) error{
+		"identity removed": func(ctx context.Context, c ctrlclient.Client, agent *corev1alpha1.Agent) error {
+			agent.Spec.Identity = nil
+			return c.Update(ctx, agent)
+		},
+		"agent deleted": func(ctx context.Context, c ctrlclient.Client, agent *corev1alpha1.Agent) error {
+			return c.Delete(ctx, agent)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(readyPolicy("agent", agentIdentityPolicySpec()), identityHolder("agent-uid", true)).
+				WithStatusSubresource(&corev1alpha1.Agent{}).Build()
+			identity := &fakeAgentIdentitySource{token: "agent-token", during: func() {
+				agent := &corev1alpha1.Agent{}
+				if err := reader.Get(context.Background(), ctrlclient.ObjectKey{Namespace: "tenant", Name: "reviewer"}, agent); err != nil {
+					t.Fatal(err)
+				}
+				if err := change(context.Background(), reader, agent); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			resolution, err := (&KubernetesResolver{Reader: reader, AgentIdentities: identity}).Resolve(context.Background(), agentIdentityRequest())
+			if err == nil || resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+				t.Fatalf("Resolve() = %#v, %v; want no credential once the Agent changed", resolution, err)
 			}
 		})
 	}
