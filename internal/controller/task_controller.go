@@ -1538,6 +1538,12 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
 	}
+	// A cancel the cached copy has not seen yet must not start the workload:
+	// the next pass applies it.
+	if _, requested := latest.Annotations[labels.AnnotationCancelRequested]; requested {
+		log.Info("skipping job creation because the task's cancellation was requested")
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
 	if taskJobIdentityRejected(latest) {
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
 			return ctrl.Result{}, err
