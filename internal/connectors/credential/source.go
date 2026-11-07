@@ -217,7 +217,7 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	}
 	// The exchanged credential carried the frozen grant: resolution refuses
 	// any other before it releases material (frozenGrantHolds).
-	if grant != req.Frozen.GrantSequence {
+	if grant.Sequence != req.Frozen.GrantSequence {
 		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	// The provider can change during the exchange too, before the
@@ -240,7 +240,10 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
 	}
-	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) {
+	// A refresh keeps the grant but can narrow its scopes before the status
+	// shows it, so custody's scopes must cover the mode too.
+	required := connectors.ScopesForMode(provider, mode)
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, required) || !connectors.ScopesCover(grant.Scopes, required) {
 		return errors.New("the provider now requires scopes the person did not grant; the person must consent again")
 	}
 	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {

@@ -393,8 +393,8 @@ func TestConnectorCredentialGrantFollowsCommits(t *testing.T) {
 			t.Fatal(err)
 		}
 		grant, err := s.GetConnectorCredentialGrant(ctx, ref)
-		if err != nil || grant != held.GrantSequence || grant != want {
-			t.Fatalf("grant = %d, %v; want %d, the sealed grant %d", grant, err, want, held.GrantSequence)
+		if err != nil || grant.Sequence != held.GrantSequence || grant.Sequence != want {
+			t.Fatalf("grant = %d, %v; want %d, the sealed grant %d", grant.Sequence, err, want, held.GrantSequence)
 		}
 	}
 	if err := s.TombstoneConnectorCustody(ctx, ref.ConnectionUID); err != nil {
