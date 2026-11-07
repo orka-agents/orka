@@ -364,6 +364,13 @@ func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alp
 	return record != nil && !r.now().Before(record.Deadline)
 }
 
+// externalEvictionSettlementPending reports whether the pool's persisted
+// status still holds an eviction drain whose outcome has not been recorded.
+func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool) bool {
+	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
+	return condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
+}
+
 // externalEvictionSettledCondition reports how a draining eviction ended once
 // its exact instance stopped: suspended with verified retained data, or lost.
 func (r *RuntimePoolReconciler) externalEvictionSettledCondition(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, w *workspacev1alpha1.ExecutionWorkspace) {

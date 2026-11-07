@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -11,8 +12,10 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	workspaceprovider "github.com/orka-agents/orka-workspace/sdk"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -338,6 +341,15 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 			if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
 				t.Fatal(err)
 			}
+			// The outcome is recorded while the markers still hold the pool in
+			// retirement; only a later pass that observes it clears them.
+			pool = runtimePoolTestGetPool(t, f.r, f.pool)
+			if pool.Annotations[externalRuntimeEvictionAnnotation] == "" || externalEvictionSettlementPending(&pool) {
+				t.Fatal("eviction markers were removed before its outcome was recorded")
+			}
+			if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
+				t.Fatal(err)
+			}
 			pool = runtimePoolTestGetPool(t, f.r, f.pool)
 			if pool.Annotations[externalRuntimeEvictionAnnotation] != "" || pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" {
 				t.Fatal("stopped pool kept its eviction or retirement record")
@@ -458,5 +470,94 @@ func TestExternalEvictionDuringSuspendRetirementReportsDrainingAndSettles(t *tes
 	}
 	if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionSuspended {
 		t.Fatalf("settled eviction condition = %#v, want EvictionSuspended", condition)
+	}
+}
+
+// runtimePoolStatusConflictClient fails the next RuntimePool status patch
+// with a conflict once armed, as a concurrent status writer would.
+type runtimePoolStatusConflictClient struct {
+	client.Client
+	armed *bool
+}
+
+func (c runtimePoolStatusConflictClient) Status() client.SubResourceWriter {
+	return runtimePoolStatusConflictWriter{SubResourceWriter: c.Client.Status(), armed: c.armed}
+}
+
+type runtimePoolStatusConflictWriter struct {
+	client.SubResourceWriter
+	armed *bool
+}
+
+func (w runtimePoolStatusConflictWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	if pool, ok := obj.(*corev1alpha1.RuntimePool); ok && *w.armed {
+		*w.armed = false
+		return apierrors.NewConflict(schema.GroupResource{Group: corev1alpha1.GroupVersion.Group, Resource: "runtimepools"}, pool.Name, errors.New("injected status conflict"))
+	}
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+}
+
+// An evicted instance that stopped with retained data has its outcome
+// recorded before the pool can cold-boot a replacement, even when the status
+// write conflicts or the controller restarts after the retirement markers
+// were removed.
+func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
+	for _, interruption := range []string{"status conflict", "restart after marker removal"} {
+		t.Run(interruption, func(t *testing.T) {
+			f, w, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+			sequence := w.Spec.Workload.Sequence
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if _, err := f.r.beginExternalRuntimeEviction(t.Context(), &pool, w, externalEvictionSourceWorker, runtimePoolTestNow, runtimePoolTestNow.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				runtimePoolReconcile(t, f.r, f.pool)
+			}
+			f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+			runtimePoolReconcile(t, f.r, f.pool)
+			w = f.currentWorkspace(t)
+			if retirement := w.Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend {
+				t.Fatalf("quiescent evicted runtime did not earn Suspend: %#v", retirement)
+			}
+			w.Status.Allocation.State = workspacev1alpha1.AllocationStopped
+			w.Status.Allocation.Startup = nil
+			w.Status.Allocation.RetainedData = &workspacev1alpha1.RetainedDataReference{ID: "retained", SourceInstance: w.Status.Allocation.Identity, ProofSHA256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+			w.Status.ObservedGeneration = w.Generation
+			if err := f.r.Status().Update(t.Context(), w); err != nil {
+				t.Fatal(err)
+			}
+			if condition := evictionCondition(t, f); condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDraining {
+				t.Fatalf("eviction was not draining before the stop: %#v", condition)
+			}
+			switch interruption {
+			case "status conflict":
+				armed := true
+				f.r.Client = runtimePoolStatusConflictClient{Client: f.r.Client, armed: &armed}
+			case "restart after marker removal":
+				stopped := runtimePoolTestGetPool(t, f.r, f.pool)
+				delete(stopped.Annotations, externalRuntimeRetirementRequestedAnnotation)
+				delete(stopped.Annotations, externalRuntimeEvictionAnnotation)
+				if err := f.r.Update(t.Context(), &stopped); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 12 {
+				runtimePoolReconcile(t, f.r, f.pool)
+				condition := evictionCondition(t, f)
+				if f.currentWorkspace(t).Spec.Workload.Sequence != sequence &&
+					(condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionSuspended) {
+					t.Fatalf("stopped allocation cold-booted before its eviction outcome was recorded: %#v", condition)
+				}
+			}
+			if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionSuspended {
+				t.Fatalf("eviction outcome = %#v, want EvictionSuspended", condition)
+			}
+			if pool := runtimePoolTestGetPool(t, f.r, f.pool); pool.Annotations[externalRuntimeEvictionAnnotation] != "" || pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" {
+				t.Fatal("recorded eviction kept its retirement markers")
+			}
+			if f.currentWorkspace(t).Spec.Workload.Sequence == sequence {
+				t.Fatal("recorded eviction never resumed the workspace on a replacement instance")
+			}
+		})
 	}
 }

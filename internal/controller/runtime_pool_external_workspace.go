@@ -172,6 +172,13 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 			if terminated, err := r.externalObservedInstanceTerminated(ctx, pool, w); err != nil || !terminated {
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
+		}
+		if externalEvictionSettlementPending(pool) {
+			// An eviction whose outcome was never recorded settles against
+			// this stopped allocation before any cold boot replaces it.
+			return r.externalPoolStopped(ctx, pool, w)
+		}
+		if w.Spec.Workload != nil {
 			rotating, err := r.rotateConsumedWorkspaceRuntimePoolAuthSecret(ctx, pool, cfg, auth)
 			if err != nil {
 				return ctrl.Result{}, err
@@ -863,8 +870,16 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 	return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for identity-bound provider termination and disposition")
 }
 
+// externalPoolStopped records a stopped instance. An eviction outcome is
+// persisted before the retirement and eviction markers that hold the pool in
+// retirement are removed: the markers are cleared only by a later reconcile
+// that observes the recorded outcome, so a status conflict or a controller
+// restart retries the recording instead of letting the allocation cold-boot.
 func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (ctrl.Result, error) {
 	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" || pool.Annotations[externalRuntimeEvictionAnnotation] != "" {
+		if externalEvictionSettlementPending(pool) {
+			return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w), time.Second)
+		}
 		before := pool.DeepCopy()
 		delete(pool.Annotations, externalRuntimeRetirementRequestedAnnotation)
 		delete(pool.Annotations, externalRuntimeEvictionAnnotation)
@@ -872,12 +887,16 @@ func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *c
 			return ctrl.Result{}, err
 		}
 	}
+	return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w), runtimePoolRequeue)
+}
+
+func (r *RuntimePoolReconciler) externalPoolStoppedStatus(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) corev1alpha1.RuntimePoolStatus {
 	status := r.baseRuntimePoolStatus(pool, 0)
 	r.externalEvictionSettledCondition(pool, &status, w)
 	status.ActiveInstance = nil
 	status.Lifecycle, status.AdmissionState, status.Message = corev1alpha1.RuntimePoolLifecycleStopped, corev1alpha1.RuntimePoolAdmissionClosed, runtimePoolMessageStopped
 	r.setRuntimePoolCondition(pool, &status, corev1alpha1.RuntimePoolConditionAdmissionReady, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonAdmissionClosed, status.Message)
-	return r.finishRuntimePoolStatus(ctx, pool, status, runtimePoolRequeue)
+	return status
 }
 
 func (r *RuntimePoolReconciler) finalizeExternalWorkspacePool(ctx context.Context, pool *corev1alpha1.RuntimePool) (ctrl.Result, error) {
