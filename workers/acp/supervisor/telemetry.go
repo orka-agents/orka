@@ -67,6 +67,11 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 	}
 	traceEndpoint := supervisorSignalEnv("TRACES", "ENDPOINT")
 	metricsEndpoint := supervisorSignalEnv("METRICS", "ENDPOINT")
+	if strings.TrimSpace(os.Getenv(supervisorMetricsExporterEnv)) == supervisorExporterNone {
+		// The controller drops metrics it cannot project safely; a generic
+		// endpoint kept for traces must not become the metrics collector.
+		metricsEndpoint = ""
+	}
 	if traceEndpoint == "" && metricsEndpoint == "" {
 		return Telemetry{}, noop, nil
 	}
@@ -224,6 +229,12 @@ func (e safeTelemetryExporter) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+const (
+	// supervisorMetricsExporterEnv accepts only "none", which disables metrics.
+	supervisorMetricsExporterEnv = "OTEL_METRICS_EXPORTER"
+	supervisorExporterNone       = "none"
+)
+
 var supervisorTraceResource = resource.NewSchemaless(attribute.String("service.name", "orka-acp-supervisor"))
 
 type supervisorExportSpan struct{ sdktrace.ReadOnlySpan }
@@ -257,6 +268,10 @@ func supervisorTelemetryEnvironmentSafe() bool {
 			}
 		case "OTEL_EXPORTER_OTLP_COMPRESSION", "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION":
 			if value != "gzip" && value != "none" {
+				return false
+			}
+		case supervisorMetricsExporterEnv:
+			if value != supervisorExporterNone {
 				return false
 			}
 		case "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT":

@@ -84,6 +84,32 @@ func TestSupervisorTelemetryGRPCEndpoint(t *testing.T) {
 	}
 }
 
+// The controller projects OTEL_METRICS_EXPORTER=none when it drops metrics; a
+// generic endpoint kept for traces must not become the metrics collector.
+func TestSupervisorTelemetryMetricsExporterNone(t *testing.T) {
+	t.Setenv("ORKA_ENABLE_TELEMETRY", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+	t.Setenv("OTEL_METRICS_EXPORTER", "none")
+	telemetry, shutdown, err := NewSupervisorTelemetryFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	if telemetry.Tracer == nil || telemetry.GenAITracer == nil {
+		t.Fatal("metrics opt-out disabled traces")
+	}
+	if telemetry.Meter != nil {
+		t.Fatal("generic trace endpoint enabled metrics despite OTEL_METRICS_EXPORTER=none")
+	}
+	t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+	if _, _, err := NewSupervisorTelemetryFromEnv(); err == nil {
+		t.Fatal("OTEL_METRICS_EXPORTER other than none was accepted")
+	}
+}
+
 // A separate process captures the SDK's actual initialization diagnostics without
 // changing global logging hooks in the test process.
 func TestSupervisorTelemetryRejectsUnsafeEnvironment(t *testing.T) {

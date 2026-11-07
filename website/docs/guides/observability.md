@@ -103,7 +103,10 @@ endpoints retain their normal SDK semantics; signal-specific settings take prece
 A missing or invalid trace endpoint disables supervisor export. Metrics-only
 configuration enables neither supervisor tracing nor supervisor metrics. A
 metrics-specific endpoint that is not worker-reachable drops supervisor metrics
-rather than falling back to the generic collector. Headers, certificate paths,
+rather than falling back to the generic collector; so does a metrics setting the
+supervisor would reject. When metrics are dropped, the supervisor also receives
+`OTEL_METRICS_EXPORTER=none`, so a generic endpoint kept for traces is not used
+for metrics. Headers, certificate paths,
 resource attributes and content-capture settings are never copied. Adding metrics
 settings changes the supervisor Pod template, so existing RuntimePools roll through
 their normal drained replacement the first time a controller with these settings runs.

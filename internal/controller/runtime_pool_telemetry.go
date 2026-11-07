@@ -17,6 +17,11 @@ const (
 	runtimePoolTelemetryEndpointEnv        = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	runtimePoolTelemetryTracesEndpointEnv  = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	runtimePoolTelemetryMetricsEndpointEnv = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	// runtimePoolTelemetryMetricsExporterEnv=none tells the supervisor to drop
+	// metrics even when a generic endpoint projected for traces would
+	// otherwise resolve as the metrics collector.
+	runtimePoolTelemetryMetricsExporterEnv = "OTEL_METRICS_EXPORTER"
+	runtimePoolTelemetryExporterNone       = "none"
 )
 
 // runtimePoolTelemetryScalarSuffixes are the non-secret exporter settings a
@@ -58,27 +63,34 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 			env = append(env, corev1.EnvVar{Name: name, Value: safeWorkerOTLPEnvValue(name, value)})
 		}
 	}
-	return append(env, runtimePoolMetricsTelemetryEnv(env, getenv)...)
+	metrics, ok := runtimePoolMetricsTelemetryEnv(env, getenv)
+	if !ok {
+		// A generic trace endpoint must not become the metrics collector the
+		// controller just refused to project.
+		return append(env, corev1.EnvVar{Name: runtimePoolTelemetryMetricsExporterEnv, Value: runtimePoolTelemetryExporterNone})
+	}
+	return append(env, metrics...)
 }
 
 // runtimePoolMetricsTelemetryEnv projects the metrics exporter for supervisor
 // GenAI metrics. An unreachable metrics-specific endpoint drops metrics
 // instead of falling back to a different collector, as worker Jobs do. The
 // supervisor disables all telemetry on any setting it does not accept, so a
-// metrics setting it would reject drops metrics rather than traces.
-func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(string) string) []corev1.EnvVar {
+// metrics setting it would reject drops metrics rather than traces. It reports
+// false when metrics are dropped.
+func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(string) string) ([]corev1.EnvVar, bool) {
 	var env []corev1.EnvVar
 	if endpoint := strings.TrimSpace(getenv(runtimePoolTelemetryMetricsEndpointEnv)); endpoint != "" {
 		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryMetricsEndpointEnv, endpoint)
 		if !isWorkerReachableOTLPEndpoint(endpoint) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
-			return nil
+			return nil, false
 		}
 		env = append(env, corev1.EnvVar{Name: runtimePoolTelemetryMetricsEndpointEnv, Value: value})
 	} else {
 		generic := strings.TrimSpace(getenv(runtimePoolTelemetryEndpointEnv))
 		value := safeWorkerOTLPEnvValue(runtimePoolTelemetryEndpointEnv, generic)
 		if !isWorkerReachableOTLPEndpoint(generic) || !supervisorAcceptsOTLPSetting(otlpEndpointSuffix, value) {
-			return nil
+			return nil, false
 		}
 		if !slices.ContainsFunc(projected, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryEndpointEnv }) {
 			// The generic base URL keeps its SDK meaning; a trace-specific
@@ -96,11 +108,11 @@ func runtimePoolMetricsTelemetryEnv(projected []corev1.EnvVar, getenv func(strin
 			continue
 		}
 		if !supervisorAcceptsOTLPSetting(suffix, value) {
-			return nil
+			return nil, false
 		}
 		env = append(env, corev1.EnvVar{Name: name, Value: value})
 	}
-	return env
+	return env, true
 }
 
 // supervisorAcceptsOTLPSetting mirrors the ACP supervisor's fail-closed

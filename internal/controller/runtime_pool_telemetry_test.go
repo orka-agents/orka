@@ -134,6 +134,32 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 			}
 		}
 	}
+	// Traces exported through the generic endpoint keep its base-path
+	// semantics, but dropped metrics are explicitly disabled so the supervisor
+	// cannot fall back to that generic collector for metrics.
+	for name, value := range map[string]string{
+		"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://localhost:4318/v1/metrics",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
+	} {
+		values := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4318/base", name: value}
+		env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(key string) string { return values[key] }))
+		if env["ORKA_ENABLE_TELEMETRY"] != "true" || env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://collector.otel.svc:4318/base" {
+			t.Fatalf("%s=%s changed generic trace projection: %v", name, value, env)
+		}
+		if env["OTEL_METRICS_EXPORTER"] != "none" {
+			t.Fatalf("%s=%s left metrics to fall back to the generic endpoint: %v", name, value, env)
+		}
+		for projected := range env {
+			if strings.HasPrefix(projected, "OTEL_EXPORTER_OTLP_METRICS_") {
+				t.Fatalf("%s=%s projected unsupported metrics setting %s", name, value, projected)
+			}
+		}
+	}
+	// A generic endpoint that serves both signals leaves metrics enabled.
+	generic := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4318"}
+	if env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(key string) string { return generic[key] })); env["OTEL_METRICS_EXPORTER"] != "" {
+		t.Fatalf("generic endpoint disabled metrics: %v", env)
+	}
 	// Metrics alone enable nothing.
 	metricsOnly := map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4318/v1/metrics"}
 	if got := runtimePoolTelemetryEnv(true, func(name string) string { return metricsOnly[name] }); len(got) != 0 {

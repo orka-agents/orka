@@ -301,11 +301,13 @@ func ParsePromptUsage(raw json.RawMessage) *PromptUsage {
 		return nil
 	}
 	count := func(value json.RawMessage) *int64 {
-		var number uint64
-		if len(value) == 0 || json.Unmarshal(value, &number) != nil || number > maxPromptUsageTokens {
+		// Decode through a pointer: JSON null leaves it nil, so a null count
+		// stays unreported instead of becoming an explicit zero.
+		var number *uint64
+		if len(value) == 0 || json.Unmarshal(value, &number) != nil || number == nil || *number > maxPromptUsageTokens {
 			return nil
 		}
-		result := int64(number)
+		result := int64(*number)
 		return &result
 	}
 	usage := &PromptUsage{
