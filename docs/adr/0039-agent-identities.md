@@ -140,9 +140,11 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   `use` grant: a Task controlled by a RepositoryScan or RepositoryMonitor
   binds only if that object, matched by owner UID, was also created after
   the grant, and fails closed with "re-create" otherwise. Task provenance
-  admission keeps that owner from being removed or replaced, and a Task that
-  still carries a scan's or monitor's labels without its owner (as after an
-  orphaning delete) is refused rather than judged as a root Task. GatewayBinding
+  admission keeps that owner and the scan's or monitor's labels from being
+  removed or changed, so the controller refuses to start an identity issuer
+  without that admission. A Task that still carries those labels without its
+  owner (as after an orphaning delete) is refused rather than judged as a
+  root Task. GatewayBinding
   Tasks record their binding only by name, so they cannot prove this and are
   refused for identity-bound Agents. Before every runtime admission the
   dispatcher checks again that the controller still enforces the check, that

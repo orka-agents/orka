@@ -29,6 +29,7 @@ import (
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	"github.com/orka-agents/orka/internal/contexttoken"
 	"github.com/orka-agents/orka/internal/controller"
@@ -832,5 +833,25 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 	}
 	if !wiring.collector.NeedLeaderElection() {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
+	}
+}
+
+func TestValidateAgentIdentityProvenance(t *testing.T) {
+	entra := agentidentity.Config{
+		Entra: &agentidentity.EntraConfig{
+			TenantID:          "11111111-1111-1111-1111-111111111111",
+			BlueprintClientID: "22222222-2222-2222-2222-222222222222",
+		},
+		AgentUseAuthorization: true,
+	}
+	err := validateAgentIdentityProvenance(entra, false)
+	if err == nil || !strings.Contains(err.Error(), "Task provenance admission") {
+		t.Fatalf("an issuer without provenance admission: err = %v", err)
+	}
+	if err := validateAgentIdentityProvenance(entra, true); err != nil {
+		t.Fatalf("an issuer with provenance admission: %v", err)
+	}
+	if err := validateAgentIdentityProvenance(agentidentity.Config{AgentUseAuthorization: true}, false); err != nil {
+		t.Fatalf("no issuer needs no provenance admission: %v", err)
 	}
 }
