@@ -259,7 +259,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   identity at the issuer stops new calls within that bound.
 - Before every token request, including one the cache answers, the
   controller checks the live Agent: it must still exist with the bound UID
-  and hold a claim on the frozen identity that is not being released.
+  and hold a claim on the frozen identity that is not being released. It
+  checks again before releasing the token, since the issuer can take seconds
+  to answer; a Delegated token also needs the requester's Connection and its
+  ConnectorProvider to still be as they were when it was requested.
   Removing `spec.identity` or deleting the Agent therefore stops new calls at
   once, without changing the identity the Task's binding froze. The claim
   itself is kept, marked releasing, until every Task bound to it has
