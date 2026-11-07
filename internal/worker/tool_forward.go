@@ -148,11 +148,7 @@ var forwardContinuationRe = regexp.MustCompile(`(?i)([?&]|\\u0026)((?:\$|%24|\\u
 // request. The credentials Orka injected are still removed everywhere first,
 // continuation parameters included.
 func redactForwardedText(text string, secrets ...string) string {
-	for _, secret := range secrets {
-		if secret = strings.TrimSpace(secret); secret != "" {
-			text = strings.ReplaceAll(text, secret, "[REDACTED]")
-		}
-	}
+	text = redactForwardedSecrets(text, secrets)
 	var kept []string
 	masked := forwardContinuationRe.ReplaceAllStringFunc(text, func(match string) string {
 		parts := forwardContinuationRe.FindStringSubmatch(match)
@@ -164,6 +160,16 @@ func redactForwardedText(text string, secrets ...string) string {
 		redacted = strings.Replace(redacted, "\x00orka-forward-continuation-"+strconv.Itoa(index)+"\x00", value, 1)
 	}
 	return redacted
+}
+
+// redactForwardedSecrets removes the credentials Orka injected from text.
+func redactForwardedSecrets(text string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" {
+			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+		}
+	}
+	return text
 }
 
 // forwardSensitiveKeyRe matches a JSON key whose string value is a
@@ -181,13 +187,9 @@ var forwardContinuationKeyRe = regexp.MustCompile(`(?i)^(?:\$?skiptoken|continua
 // arrays, objects, numbers, and nulls are never rewritten, so a valid
 // response stays valid JSON. Other bodies are redacted as text.
 func redactForwardedBody(body string, secrets ...string) string {
-	for _, secret := range secrets {
-		if secret = strings.TrimSpace(secret); secret != "" {
-			body = strings.ReplaceAll(body, secret, "[REDACTED]")
-		}
-	}
+	body = redactForwardedSecrets(body, secrets)
 	if json.Valid([]byte(body)) {
-		if redacted, ok := redactForwardedJSON(body); ok {
+		if redacted, ok := redactForwardedJSON(body, secrets); ok {
 			return redacted
 		}
 	}
@@ -195,8 +197,10 @@ func redactForwardedBody(body string, secrets ...string) string {
 }
 
 // redactForwardedJSON rewrites only the string literals whose redacted
-// value differs, copying every other byte of body unchanged.
-func redactForwardedJSON(body string) (string, bool) {
+// value differs, copying every other byte of body unchanged. Strings are
+// judged decoded, so a credential the upstream escaped (`\u002d` for "-") is
+// still found, in keys as in values.
+func redactForwardedJSON(body string, secrets []string) (string, bool) {
 	type container struct {
 		object    bool
 		expectKey bool
@@ -206,11 +210,24 @@ func redactForwardedJSON(body string) (string, bool) {
 	decoder.UseNumber()
 	var out strings.Builder
 	var stack []*container
-	copied, previous := 0, 0
+	copied := 0
 	valueDone := func() {
 		if len(stack) > 0 && stack[len(stack)-1].object {
 			stack[len(stack)-1].expectKey = true
 		}
+	}
+	var previous, end int
+	// rewrite replaces the string literal the decoder just read.
+	rewrite := func(replacement string) bool {
+		start := strings.IndexByte(body[previous:end], '"')
+		encoded, err := json.Marshal(replacement)
+		if err != nil || start < 0 {
+			return false
+		}
+		out.WriteString(body[copied : previous+start])
+		out.Write(encoded)
+		copied = end
+		return true
 	}
 	for {
 		token, err := decoder.Token()
@@ -220,7 +237,7 @@ func redactForwardedJSON(body string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		end := int(decoder.InputOffset())
+		end = int(decoder.InputOffset())
 		var top *container
 		if len(stack) > 0 {
 			top = stack[len(stack)-1]
@@ -239,21 +256,19 @@ func redactForwardedJSON(body string) (string, bool) {
 		case string:
 			if top != nil && top.object && top.expectKey {
 				top.key, top.expectKey = value, false
+				if redactedKey := redactForwardedSecrets(value, secrets); redactedKey != value {
+					if !rewrite(redactedKey) {
+						return "", false
+					}
+				}
 				break
 			}
-			redacted := redactForwardedText(value)
+			redacted := redactForwardedText(value, secrets...)
 			if top != nil && top.object && !forwardContinuationKeyRe.MatchString(top.key) && forwardSensitiveKeyRe.MatchString(top.key) {
 				redacted = "[REDACTED]"
 			}
-			if redacted != value {
-				start := previous + strings.IndexByte(body[previous:end], '"')
-				encoded, err := json.Marshal(redacted)
-				if err != nil || start < previous {
-					return "", false
-				}
-				out.WriteString(body[copied:start])
-				out.Write(encoded)
-				copied = end
+			if redacted != value && !rewrite(redacted) {
+				return "", false
 			}
 			valueDone()
 		default:

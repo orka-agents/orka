@@ -267,3 +267,25 @@ func TestRedactForwardedBodyKeepsJSONValid(t *testing.T) {
 		t.Fatalf("a text body was not redacted: %q", text)
 	}
 }
+
+func TestRedactForwardedBodyRemovesAnEscapedInjectedCredential(t *testing.T) {
+	const secret = "opaque-example-value"
+	for _, body := range []string{
+		`{"echo":"opaque-example-value"}`,
+		`{"opaque-example-value":"key"}`,
+		`{"nextLink":"https://x/?a=1&$skiptoken=opaque-example-value"}`,
+	} {
+		got := redactForwardedBody(body, secret)
+		var decoded any
+		if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+			t.Fatalf("redacted body is not JSON: %s", got)
+		}
+		text, err := json.Marshal(decoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(text), secret) {
+			t.Fatalf("decoded %s still holds the credential: %s", body, text)
+		}
+	}
+}
