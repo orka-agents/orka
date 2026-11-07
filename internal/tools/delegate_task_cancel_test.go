@@ -68,3 +68,47 @@ func TestDelegationSeesAParentCancelledAroundChildCreation(t *testing.T) {
 		t.Fatalf("a replaced parent: cancelled = %t, %v; want it treated as gone", cancelled, err)
 	}
 }
+
+// TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements covers
+// the post-create cancel finding a child someone already asked to cancel, or
+// a different Task under the child's name: neither is overwritten.
+func TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "parent", Namespace: "default", UID: "parent-uid",
+		Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+	}}
+	requested := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "requested", Namespace: "other", UID: "requested-uid",
+		Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by bob: wrong repository"},
+	}}
+	replacement := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "replaced", Namespace: "other", UID: "new-uid"}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, requested, replacement).Build()
+	ctx := context.Background()
+
+	if err := cancelChildOfCancelledParent(ctx, c, c, parent, requested.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(requested), got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[labels.AnnotationCancelRequested] != "cancelled by bob: wrong repository" {
+		t.Fatalf("an existing cancel request was overwritten: %q", got.Annotations[labels.AnnotationCancelRequested])
+	}
+
+	created := replacement.DeepCopy()
+	created.UID = "created-uid" // the child this delegation created, since replaced
+	if err := cancelChildOfCancelledParent(ctx, c, c, parent, created); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(replacement), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, cancelled := got.Annotations[labels.AnnotationCancelRequested]; cancelled {
+		t.Fatal("a different Task under the child's name must not be cancelled")
+	}
+}
