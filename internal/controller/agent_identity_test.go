@@ -853,3 +853,29 @@ func TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod(t *testing.
 		t.Fatalf("a Task from before the period must not start: unavailable = %q, %v", unavailable, err)
 	}
 }
+
+// TestIdentityDecisionsWaitForTheEnforcementPeriod covers a controller that
+// has not yet led long enough to start its period of Agent use enforcement:
+// a binding and a pre-start check both wait and retry rather than decide.
+func TestIdentityDecisionsWaitForTheEnforcementPeriod(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	config := testIdentityConfig()
+	config.Enforcement = &agentidentity.EnforcementPeriod{}
+	r := &TaskReconciler{Client: fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(), Identity: config}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "work", Namespace: testNS, CreationTimestamp: metav1.NewTime(testClaimGrantedAt.Add(time.Minute))},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+	}
+	if _, err := r.agentExecutionIdentity(context.Background(), task, agent); !errors.Is(err, errEnforcementPeriodPending) || isPermanentACPAgentConfigurationError(err) {
+		t.Fatalf("binding before the period starts: err = %v, want a retryable wait", err)
+	}
+	bound := boundTask("bound", agent, corev1alpha1.TaskPhasePending)
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	if _, err := boundIdentityUnavailable(context.Background(), reader, config, bound, bound.Status.AgentExecutionBinding); !errors.Is(err, errEnforcementPeriodPending) {
+		t.Fatalf("pre-start check before the period starts: err = %v, want a retryable wait", err)
+	}
+	config.Enforcement.Start(testClaimGrantedAt.Add(-time.Hour))
+	if ref, err := r.agentExecutionIdentity(context.Background(), task, agent); err != nil || ref == nil {
+		t.Fatalf("binding once the period started: ref = %+v, err = %v", ref, err)
+	}
+}
