@@ -33,6 +33,7 @@ import (
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 )
 
 var log = logf.Log.WithName("api-server")
@@ -108,6 +109,9 @@ type ServerConfig struct {
 	// callers then need the `use` verb on every Agent a Task, RepositoryScan,
 	// or RepositoryMonitor they create or edit names.
 	AgentUseAuthorization bool
+	// TaskWebhookKeys publishes Task webhook verification keys at
+	// TaskWebhookJWKSPath. Nil serves an empty key set.
+	TaskWebhookKeys taskwebhook.KeySource
 }
 
 // Server is the REST API server
@@ -333,6 +337,9 @@ func (s *Server) setupRoutes() {
 	// Health endpoints
 	s.app.Get("/healthz", s.handlers.Healthz)
 	s.app.Get("/readyz", s.handlers.Readyz)
+
+	// Task webhook receivers fetch verification keys without credentials.
+	s.app.Get(TaskWebhookJWKSPath, s.taskWebhookJWKS)
 
 	// Gateway ingress uses the Gateway-bound inbound bearer Secret rather than user/OIDC auth.
 	s.app.Post("/api/v1/gateways/:namespace/:name/events", s.handlers.HandleGatewayEvent)
@@ -640,7 +647,7 @@ func (s *Server) Start(ctx context.Context) error {
 // dashboard. A 404 under one of them is a routing answer the caller needs to
 // see, not a client-side route for the SPA to resolve. Lower case and without
 // a trailing slash, matched against a normalized path: see routeLookupPath.
-var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks"}
+var apiPathRoots = []string{"/api", "/openai", "/anthropic", "/internal", "/webhooks", "/.well-known"}
 
 // routeLookupPath normalizes path the way the router matches it. Fiber is
 // case-insensitive and non-strict about a trailing slash by default, so
@@ -698,6 +705,12 @@ func customErrorHandler(c fiber.Ctx, err error) error {
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 		message = e.Message
+	} else if temporary := temporaryStorageHTTPError(err); temporary != nil {
+		code = temporary.Code
+		message = temporary.Message
+	}
+	if code == fiber.StatusServiceUnavailable && len(c.Response().Header.Peek(fiber.HeaderRetryAfter)) == 0 {
+		c.Set(fiber.HeaderRetryAfter, serviceUnavailableRetryAfterSeconds)
 	}
 	// Every error body is JSON or the SPA page; neither may be sniffed.
 	c.Set(fiber.HeaderXContentTypeOptions, "nosniff")

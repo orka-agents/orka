@@ -58,6 +58,15 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Ed25519 keys that sign Task webhook deliveries (spec.webhookURL). The
+  # controller reads Secret <fullname>-task-webhook-signing (or
+  # signingSecretName) in the release namespace, creating it and minting the
+  # "current" key on first use. Rotate by moving "current" to "previous" and
+  # writing a new PEM PKCS#8 Ed25519 key to "current". Receivers verify against
+  # GET /.well-known/orka/task-webhook-jwks.json on the API service.
+  taskWebhooks:
+    signingSecretName: ""
+
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
     existingSecret: ""
@@ -497,6 +506,11 @@ providerProxy:
 # Worker configuration
 workers:
   ai:
+    # default preserves current permissions; restricted grants read-only lookups.
+    # Restricted also enforces context-token authorization controller-wide:
+    # existing off/audit callers must satisfy their issuer grants. It does not
+    # narrow those grants or OIDC authority. See the chart README.
+    rbacProfile: default
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"
@@ -600,6 +614,35 @@ store:
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
+
+# Storage bindings. Each storage contract is served by embedded SQLite
+# ("sqlite", at store.path) or by a storage adapter named in storage.adapters.
+# With both contracts on sqlite and no adapters, the chart renders no storage
+# configuration file and the controller keeps its defaults. Otherwise the chart
+# renders the <release>-storage ConfigMap, passes it with --storage-config and
+# restarts the controller when it changes. The store volume stays required.
+#
+# This controller serves both contracts only from sqlite: it refuses to start
+# with a contract bound to an adapter (reason AdapterTransportUnavailable) and
+# never falls back to SQLite.
+storage:
+  bindings:
+    state: sqlite        # state.v1: sessions, results, gateway and control records
+    artifacts: sqlite    # artifacts.v1: artifact bytes and metadata
+  # Storage adapters in the release namespace, keyed by name. Each adapter must
+  # be bound above, sets exactly one of serviceRef or url (https:// only), and
+  # authenticates with a bearer token of at least 32 visible ASCII characters.
+  # Secret references name Secrets in the release namespace; the controller
+  # reads them directly and never mounts them. For example:
+  #
+  #   postgres:
+  #     serviceRef: {name: orka-storage-postgres, port: 8443}
+  #     tls:
+  #       serverName: orka-storage-postgres.orka-system.svc   # optional
+  #       caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+  #     clientAuth:
+  #       bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+  adapters: {}
 
 # Client ServiceAccount for API access
 client:

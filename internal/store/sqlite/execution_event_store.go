@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,14 +10,10 @@ import (
 	"time"
 
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
 )
 
-const (
-	sqliteUnknownMetricLabel         = "unknown"
-	sqliteExecutionEventSeqBatchSize = 256
-)
+const sqliteExecutionEventSeqBatchSize = 256
 
 var _ store.ExecutionEventStore = (*Store)(nil)
 var _ store.DeduplicatingExecutionEventStore = (*Store)(nil)
@@ -25,6 +22,12 @@ var _ store.AtomicExecutionEventPlanStore = (*Store)(nil)
 // AppendExecutionEvent appends an execution event and allocates the next sequence
 // number transactionally for its (namespace, stream_type, stream_id) stream.
 func (s *Store) AppendExecutionEvent(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
+	return writeOperation(ctx, s, "AppendExecutionEvent", nil, func(ctx context.Context) (*store.ExecutionEvent, error) {
+		return s.appendExecutionEventWrite(ctx, event)
+	})
+}
+
+func (s *Store) appendExecutionEventWrite(ctx context.Context, event *store.ExecutionEvent) (*store.ExecutionEvent, error) {
 	appended, _, err := s.appendExecutionEvent(ctx, event, "", nil)
 	return appended, err
 }
@@ -37,6 +40,18 @@ func (s *Store) AppendExecutionEventIfAbsent(
 	event *store.ExecutionEvent,
 	dedupeKey string,
 ) (*store.ExecutionEvent, bool, error) {
+	result, err := writeOperation(ctx, s, "AppendExecutionEventIfAbsent", nil, func(ctx context.Context) (resultPair[*store.ExecutionEvent, bool], error) {
+		first, second, err := s.appendExecutionEventIfAbsentWrite(ctx, event, dedupeKey)
+		return resultPair[*store.ExecutionEvent, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) appendExecutionEventIfAbsentWrite(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+) (*store.ExecutionEvent, bool, error) {
 	dedupeKey, err := store.NormalizeExecutionEventDedupeKey(dedupeKey)
 	if err != nil {
 		return nil, false, err
@@ -44,10 +59,63 @@ func (s *Store) AppendExecutionEventIfAbsent(
 	return s.appendExecutionEvent(ctx, event, dedupeKey, nil)
 }
 
+// AppendExecutionEventsIfAbsent appends deduplicated events in order in one
+// transaction; a failing entry appends none of them.
+func (s *Store) AppendExecutionEventsIfAbsent(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	return writeOperation(ctx, s, "AppendExecutionEventsIfAbsent", nil, func(ctx context.Context) ([]store.ExecutionEventAppendResult, error) {
+		return s.appendExecutionEventsIfAbsentWrite(ctx, appends)
+	})
+}
+
+func (s *Store) appendExecutionEventsIfAbsentWrite(ctx context.Context, appends []store.ExecutionEventAppend) ([]store.ExecutionEventAppendResult, error) {
+	keys := make([]string, len(appends))
+	for i, entry := range appends {
+		key, err := store.NormalizeExecutionEventDedupeKey(entry.DedupeKey)
+		if err != nil {
+			return nil, err
+		}
+		keys[i] = key
+	}
+	results := make([]store.ExecutionEventAppendResult, len(appends))
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		appendAll := func(txCtx context.Context) error {
+			for i, entry := range appends {
+				persisted, appended, err := s.appendExecutionEventUnfenced(txCtx, entry.Event, keys[i], nil)
+				if err != nil {
+					return err
+				}
+				results[i] = store.ExecutionEventAppendResult{Event: persisted, Appended: appended}
+			}
+			return nil
+		}
+		if s.taskDataTx(ctx) != nil {
+			return appendAll(ctx)
+		}
+		return s.withTaskDataTransaction(ctx, appendAll)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 // AppendExecutionEventWithPlanIfAbsent atomically appends an execution event
 // and updates its task plan projection. Duplicate event keys leave the current
 // plan unchanged.
 func (s *Store) AppendExecutionEventWithPlanIfAbsent(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
+	result, err := writeOperation(ctx, s, "AppendExecutionEventWithPlanIfAbsent", nil, func(ctx context.Context) (resultPair[*store.ExecutionEvent, bool], error) {
+		first, second, err := s.appendExecutionEventWithPlanIfAbsentWrite(ctx, event, dedupeKey, plan)
+		return resultPair[*store.ExecutionEvent, bool]{First: first, Second: second}, err
+	})
+	return result.First, result.Second, err
+}
+
+func (s *Store) appendExecutionEventWithPlanIfAbsentWrite(
 	ctx context.Context,
 	event *store.ExecutionEvent,
 	dedupeKey string,
@@ -70,12 +138,22 @@ func (s *Store) appendExecutionEvent(
 	dedupeKey string,
 	plan *store.PlanState,
 ) (*store.ExecutionEvent, bool, error) {
-	started := time.Now()
-	metricStreamType, metricEventType := sqliteMetricLabelsForExecutionEvent(event)
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventAppend(metricStreamType, metricEventType, success, time.Since(started).Seconds())
-	}()
+	var appended *store.ExecutionEvent
+	var created bool
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		appended, created, err = s.appendExecutionEventUnfenced(ctx, event, dedupeKey, plan)
+		return err
+	})
+	return appended, created, err
+}
+
+func (s *Store) appendExecutionEventUnfenced(
+	ctx context.Context,
+	event *store.ExecutionEvent,
+	dedupeKey string,
+	plan *store.PlanState,
+) (*store.ExecutionEvent, bool, error) {
 	if event == nil {
 		return nil, false, store.ValidationErrorf("execution event is required")
 	}
@@ -128,11 +206,6 @@ func (s *Store) appendExecutionEvent(
 			ctx, copy, dedupeKey, contentJSON, truncationJSON, plan, planUpdatedAt,
 		)
 		if err == nil {
-			if isNew {
-				redacted, truncated := store.ExecutionEventPayloadSanitizationSignals(appended)
-				metrics.RecordExecutionEventPayloadSanitization(metricStreamType, metricEventType, redacted, truncated)
-			}
-			success = true
 			return appended, isNew, nil
 		}
 		if ctx.Err() != nil {
@@ -210,6 +283,10 @@ func appendSQLiteExecutionEvent(
 			return nil, false, err
 		}
 		if found {
+			if !sameExecutionEventIdentity(*existing, event) {
+				return nil, false, fmt.Errorf("%w: execution event dedupe key %q names a different event in stream %s/%s",
+					store.ErrDuplicateMismatch, dedupeKey, event.StreamType, event.StreamID)
+			}
 			return existing, false, nil
 		}
 	}
@@ -253,10 +330,23 @@ func appendSQLiteExecutionEvent(
 			return nil, false, err
 		}
 	}
-	if err := projectUsageEvent(ctx, conn, event); err != nil {
+	if err := recordEventUsage(ctx, conn, event); err != nil {
 		return nil, false, err
 	}
+	event.Usage = nil
 	return &event, true, nil
+}
+
+// sameExecutionEventIdentity reports whether a request with a stored event's
+// dedupe key belongs to that event's Task, Session and tool call. A field
+// left empty on either side matches. The type, content and summary may
+// differ: competing outcomes share one key so the first durable outcome wins,
+// and Orka can derive an event again under newer redaction rules.
+func sameExecutionEventIdentity(stored, requested store.ExecutionEvent) bool {
+	same := func(a, b string) bool { return a == "" || b == "" || a == b }
+	return same(stored.TaskName, requested.TaskName) &&
+		same(stored.SessionName, requested.SessionName) &&
+		same(stored.ToolCallID, requested.ToolCallID)
 }
 
 func existingSQLiteExecutionEventByDedupeKey(
@@ -366,9 +456,9 @@ func nextSQLiteSessionExecutionEventSeq(ctx context.Context, conn sqliteExecutio
 	return next, nil
 }
 
-func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namespace, sessionName string) (int64, error) {
+func latestSQLiteSessionExecutionEventSeq(ctx context.Context, q taskDataExecutor, namespace, sessionName string) (int64, error) {
 	eventSeq := int64(0)
-	if err := s.db.QueryRowContext(ctx,
+	if err := q.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(CASE WHEN session_seq > 0 THEN session_seq ELSE rowid END), 0)
 		 FROM execution_events
 		 WHERE namespace = ? AND session_name = ?`,
@@ -376,7 +466,7 @@ func (s *Store) latestSQLiteSessionExecutionEventSeq(ctx context.Context, namesp
 	).Scan(&eventSeq); err != nil {
 		return 0, err
 	}
-	cursorSeq, err := sqliteSessionCursorSeq(ctx, s.db, namespace, sessionName)
+	cursorSeq, err := sqliteSessionCursorSeq(ctx, q, namespace, sessionName)
 	if err != nil {
 		return 0, err
 	}
@@ -406,11 +496,16 @@ func sqliteSessionCursorSeq(ctx context.Context, querier sqliteSessionCursorQuer
 
 // ListExecutionEvents returns execution events matching filter in stream sequence order.
 func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("task_store", success, time.Since(started).Seconds())
-	}()
+	var listed []store.ExecutionEvent
+	err := s.withTaskDataFence(ctx, func(ctx context.Context) error {
+		var err error
+		listed, err = s.listExecutionEventsUnfenced(ctx, filter)
+		return err
+	})
+	return listed, err
+}
+
+func (s *Store) listExecutionEventsUnfenced(ctx context.Context, filter store.ExecutionEventFilter) ([]store.ExecutionEvent, error) {
 	filter = filter.Normalized()
 	if err := filter.Validate(); err != nil {
 		return nil, err
@@ -471,27 +566,17 @@ func (s *Store) ListExecutionEvents(ctx context.Context, filter store.ExecutionE
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	success = true
 	return out, nil
 }
 
 // ListSessionExecutionEvents returns task-derived events for one session with a deterministic session cursor.
 func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.SessionExecutionEventFilter) ([]store.SessionExecutionEvent, int64, error) {
-	started := time.Now()
-	success := false
-	defer func() {
-		metrics.RecordExecutionEventList("session_store", success, time.Since(started).Seconds())
-	}()
 	filter = filter.Normalized()
 	if err := filter.Validate(); err != nil {
 		return nil, 0, err
 	}
 
 	baseArgs := []any{filter.Namespace, filter.SessionName}
-	latestSeq, err := s.latestSQLiteSessionExecutionEventSeq(ctx, filter.Namespace, filter.SessionName)
-	if err != nil {
-		return nil, 0, err
-	}
 
 	outerWhere := []string{"effective_session_seq > ?"}
 	queryArgs := append([]any{}, baseArgs...)
@@ -519,25 +604,34 @@ func (s *Store) ListSessionExecutionEvents(ctx context.Context, filter store.Ses
 	WHERE ` + strings.Join(outerWhere, " AND ") + `
 	ORDER BY effective_session_seq ASC
 	LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close() //nolint:errcheck
-
 	out := []store.SessionExecutionEvent{}
-	for rows.Next() {
-		event, err := scanSessionExecutionEvent(rows)
+	var latestSeq int64
+	// The watermark, the retained Session cursor and the page read one
+	// snapshot, so a concurrent append and stream deletion cannot produce a
+	// page and latest sequence that never existed together.
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		var err error
+		latestSeq, err = latestSQLiteSessionExecutionEventSeq(ctx, q, filter.Namespace, filter.SessionName)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
-		out = append(out, event)
-		latestSeq = max(latestSeq, event.SessionSeq)
-	}
-	if err := rows.Err(); err != nil {
+		rows, err := q.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close() //nolint:errcheck
+		for rows.Next() {
+			event, err := scanSessionExecutionEvent(rows)
+			if err != nil {
+				return err
+			}
+			out = append(out, event)
+			latestSeq = max(latestSeq, event.SessionSeq)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, 0, err
 	}
-	success = true
 	return out, latestSeq, nil
 }
 
@@ -559,6 +653,7 @@ func (s *Store) GetLatestExecutionEventSeq(ctx context.Context, namespace, strea
 
 // GetLatestExecutionEventSeqs reads stream heads through the existing sequence
 // index, without scanning historical events or issuing one query per stream.
+// Every batch reads from one snapshot.
 func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, streamType string, streamIDs []string) (map[string]int64, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -576,16 +671,24 @@ func (s *Store) GetLatestExecutionEventSeqs(ctx context.Context, namespace, stre
 			requested = append(requested, streamID)
 		}
 	}
-	for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
-		end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
-		if err := s.readLatestExecutionEventSeqBatch(ctx, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
-			return nil, err
+	if len(requested) == 0 {
+		return sequences, nil
+	}
+	if err := s.readSnapshot(ctx, func(q taskDataExecutor) error {
+		for start := 0; start < len(requested); start += sqliteExecutionEventSeqBatchSize {
+			end := min(start+sqliteExecutionEventSeqBatchSize, len(requested))
+			if err := readLatestExecutionEventSeqBatch(ctx, q, filter.Namespace, filter.StreamType, requested[start:end], sequences); err != nil {
+				return err
+			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return sequences, nil
 }
 
-func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
+func readLatestExecutionEventSeqBatch(ctx context.Context, q taskDataExecutor, namespace, streamType string, streamIDs []string, sequences map[string]int64) error {
 	values := make([]string, len(streamIDs))
 	args := make([]any, 0, len(streamIDs)+2)
 	for i, streamID := range streamIDs {
@@ -599,12 +702,10 @@ func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace,
 			WHERE namespace = ? AND stream_type = ? AND stream_id = requested.stream_id
 			ORDER BY seq DESC LIMIT 1
 		), 0) FROM requested`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
-	// Close each bounded batch before returning to recovery, which can append
-	// through this store's single database connection.
 	defer rows.Close() //nolint:errcheck
 	for rows.Next() {
 		var streamID string
@@ -619,6 +720,12 @@ func (s *Store) readLatestExecutionEventSeqBatch(ctx context.Context, namespace,
 
 // DeleteExecutionEvents removes all execution events for one stream.
 func (s *Store) DeleteExecutionEvents(ctx context.Context, namespace, streamType, streamID string) error {
+	return writeOperationErr(ctx, s, "DeleteExecutionEvents", func(ctx context.Context) error {
+		return s.deleteExecutionEventsWrite(ctx, namespace, streamType, streamID)
+	})
+}
+
+func (s *Store) deleteExecutionEventsWrite(ctx context.Context, namespace, streamType, streamID string) error {
 	filter := store.ExecutionEventFilter{Namespace: namespace, StreamType: streamType, StreamID: streamID}.Normalized()
 	if err := filter.Validate(); err != nil {
 		return err
@@ -746,8 +853,14 @@ func normalizeSQLiteExecutionEvent(event *store.ExecutionEvent) error {
 	if !events.IsValidExecutionEventType(event.Type) {
 		return store.ValidationErrorf("unsupported execution event type %q", event.Type)
 	}
-	if err := store.SanitizeExecutionEventPayloadFields(event); err != nil {
-		return store.ValidationErrorf("invalid execution event payload: %v", err)
+	// Orka redacts and bounds the payload above the storage client; the
+	// store only requires that structured content is valid JSON. Content that
+	// is only whitespace is no content.
+	event.Content = bytes.TrimSpace(event.Content)
+	if len(event.Content) == 0 {
+		event.Content = nil
+	} else if !json.Valid(event.Content) {
+		return store.ValidationErrorf("invalid execution event payload: content is not valid JSON")
 	}
 	return nil
 }
@@ -761,24 +874,6 @@ func cloneSQLiteExecutionEvent(event store.ExecutionEvent) store.ExecutionEvent 
 		event.Truncation = &truncation
 	}
 	return event
-}
-
-func sqliteMetricLabelsForExecutionEvent(event *store.ExecutionEvent) (string, string) {
-	if event == nil {
-		return sqliteUnknownMetricLabel, sqliteUnknownMetricLabel
-	}
-	streamType := strings.TrimSpace(event.StreamType)
-	if streamType == "" {
-		streamType = store.ExecutionEventStreamTypeTask
-	}
-	if !events.IsValidExecutionEventStreamType(streamType) {
-		streamType = sqliteUnknownMetricLabel
-	}
-	eventType := strings.TrimSpace(event.Type)
-	if !events.IsValidExecutionEventType(eventType) {
-		eventType = sqliteUnknownMetricLabel
-	}
-	return streamType, eventType
 }
 
 func nullableStringFromRaw(raw json.RawMessage) any {
