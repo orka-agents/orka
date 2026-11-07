@@ -34,6 +34,8 @@ func TestRuntimeJSONRejectsRemovedProtocolAndFields(t *testing.T) {
 		{"observed contract", `{"protocolVersion":"orka.harness.v1"}`, new(AgentRuntimeObservedCapabilities), "only orka.harness.v2"},
 		{"observed capabilities", `{"supportsSuspend":false}`, new(AgentRuntimeObservedCapabilities), "supportsSuspend is no longer supported"},
 		{"task status", `{"harnessRuntime":{}}`, new(TaskStatus), "status.harnessRuntime is no longer supported"},
+		{"misspelled ceiling limit", `{"allowedTool":["Read"]}`, new(AgentRuntimeCeiling), "spec.runtime.ceiling.allowedTool is not supported"},
+		{"nested misspelled ceiling limit", `{"type":"claude","ceiling":{"maxTurn":5}}`, new(AgentCLIRuntime), "spec.runtime.ceiling.maxTurn is not supported"},
 		{"duplicate contract", `{"contractVersion":"orka.harness.v1","contractVersion":"orka.harness.v2"}`, new(AgentRuntimeRegistrySpec), "only orka.harness.v2"},
 	}
 	for _, test := range tests {
