@@ -287,14 +287,16 @@ func TestExecutionEventDTOConversionExcludesInternalOnlyFields(t *testing.T) {
 		Summary:    "created",
 		Content:    json.RawMessage(`{"ok":true}`),
 		CreatedAt:  time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC),
-		Internal:   map[string]any{"rawToken": "secret-internal-token"},
+		Usage: &store.ExecutionEventUsage{Observation: store.UsageObservation{
+			ID: "rawToken", Model: "secret-internal-token",
+		}},
 	}
 	response := NewExecutionEventResponse(storeEvent)
 	data, err := json.Marshal(response)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	if strings.Contains(string(data), "Internal") || strings.Contains(string(data), "rawToken") || strings.Contains(string(data), "secret-internal-token") {
+	if strings.Contains(string(data), "Usage") || strings.Contains(string(data), "rawToken") || strings.Contains(string(data), "secret-internal-token") {
 		t.Fatalf("NewExecutionEventResponse leaked internal fields: %s", data)
 	}
 	if response.Severity != events.ExecutionEventSeverityInfo {

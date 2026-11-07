@@ -328,6 +328,7 @@ How the check reads a policy:
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
   Orka injects into delegated child Tasks are not counted against the ceiling.
+  A Task that lists them in its own `allowedTools` is judged on them as usual.
 - **Gateway replies.** Eligible gateway Tasks without an explicit allowlist
   normally get `reply_in_conversation` implicitly. Under a ceiling, Orka keeps
   that grant only when the resulting policy still fits: the ceiling must list
