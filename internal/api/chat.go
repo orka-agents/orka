@@ -157,6 +157,10 @@ type activeChatRequest struct {
 	done            chan struct{}
 	deleteRequested bool
 	deleteWaiters   int
+	// gate marks a reservation a Session cancel holds on an idle chat to keep
+	// the next message out. It is not a chat request, so another cancel that
+	// finds it reports no running turn.
+	gate bool
 	// keepCreatedSession records that a Session cancel stopped the request:
 	// a Session the request created is kept, empty, rather than deleted as
 	// for a disconnected client, so the cancel's caller can still read it.
@@ -846,8 +850,14 @@ func chatSessionLockError(err error) error {
 }
 
 func (ch *ChatHandler) reserveActiveChat(namespace, sessionID string) (*activeChatReservation, error) {
+	return ch.reserveActiveChatAs(namespace, sessionID, false)
+}
+
+// reserveActiveChatAs reserves the chat for a request, or, with gate, only to
+// keep a request from starting.
+func (ch *ChatHandler) reserveActiveChatAs(namespace, sessionID string, gate bool) (*activeChatReservation, error) {
 	cancelContext, cancel := context.WithCancel(context.Background())
-	request := &activeChatRequest{cancel: cancel, done: make(chan struct{})}
+	request := &activeChatRequest{cancel: cancel, done: make(chan struct{}), gate: gate}
 	reservation := &activeChatReservation{
 		cancelContext: cancelContext,
 		cancel:        cancel,
@@ -1544,7 +1554,7 @@ func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID 
 		if request == nil {
 			// Idle: hold the reservation ourselves. A request that started
 			// meanwhile is stopped on the next pass.
-			reservation, err := ch.reserveActiveChat(namespace, sessionID)
+			reservation, err := ch.reserveActiveChatAs(namespace, sessionID, true)
 			if errors.Is(err, store.ErrConflict) {
 				continue
 			}
@@ -1554,6 +1564,11 @@ func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID 
 			return false, func() { ch.finishActiveChatReservation(reservation, nil) }, nil
 		}
 		release := func() { ch.abandonChatDeletionWaiter(namespace, sessionID, request) }
+		if request.gate {
+			// Another cancel already holds the idle chat; this one joins its
+			// gate and reports no running turn.
+			return false, release, nil
+		}
 		running := true
 		select {
 		case <-request.done:

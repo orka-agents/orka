@@ -2611,21 +2611,24 @@ func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task
 
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		// Work the Task delegated stops with it, at every depth: each child
-		// cascades to its own children once it is Cancelled.
-		if err := r.cancelChildTasks(ctx, task); err != nil {
-			log.Error(err, "failed to cancel the Task's child Tasks")
-			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	// Work the Task delegated stops with it, at every depth. A cancel request
+	// counts even when the Task did not end Cancelled: recovery records an
+	// interrupted cancel as Failed with an unknown outcome.
+	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
+	var cascadeErr error
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
+		if cascadeErr = r.cancelChildTasks(ctx, task); cascadeErr != nil {
+			log.Error(cascadeErr, "failed to cancel the Task's child Tasks")
 		}
 	}
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
+	// The Task's own Job stops even while a child refuses its cancel.
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to clean up terminal task Job")
 		return ctrl.Result{}, err
 	}
-	if waitingForJob {
+	if waitingForJob || cascadeErr != nil {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	if err := r.cleanupDeferredTaskFinalization(ctx, task); err != nil {
@@ -2789,38 +2792,67 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 // Task the cancelled task controls, the same request a person makes, so the
 // children stop the way a cancelled Task does. Children already finished or
 // already asked to cancel are left alone, so it can run on every reconcile.
+// cancelChildTasks requests cancellation of the Tasks a cancelled Task
+// delegated. A child already cancel-requested cascades on its own once it
+// ends. A child that finished is passed through without changing its outcome,
+// because work it delegated can outlive it.
 func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
-	var children corev1alpha1.TaskList
-	if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
-		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name)}); err != nil {
-		return err
-	}
-	message := "cancelled with its parent task " + task.Name
+	visited := map[types.NamespacedName]bool{client.ObjectKeyFromObject(task): true}
+	parents := []*corev1alpha1.Task{task}
 	var errs []error
-	for i := range children.Items {
-		child := &children.Items[i]
-		// A scheduled child is a template; cancelling it would end its future
-		// runs, so it is left for its own owner.
-		if !metav1.IsControlledBy(child, task) || !child.DeletionTimestamp.IsZero() || strings.TrimSpace(child.Spec.Schedule) != "" {
-			continue
+	for len(parents) > 0 {
+		parent := parents[0]
+		parents = parents[1:]
+		message := "cancelled with its parent task " + parent.Name
+		if parent != task {
+			message = "cancelled with its ancestor task " + task.Name
 		}
-		if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
-			continue
-		}
-		if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
-			continue
-		}
-		base := child.DeepCopy()
-		if child.Annotations == nil {
-			child.Annotations = map[string]string{}
-		}
-		child.Annotations[labels.AnnotationCancelRequested] = message
-		if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
-			!apierrors.IsNotFound(err) {
+		// Children in another namespace carry no owner reference, so the
+		// list spans namespaces and delegatedBy keeps only real children.
+		var children corev1alpha1.TaskList
+		if err := r.List(ctx, &children, client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}); err != nil {
 			errs = append(errs, err)
+			continue
+		}
+		for i := range children.Items {
+			child := &children.Items[i]
+			// A scheduled child is a template; cancelling it would end its
+			// future runs, so it is left for its own owner.
+			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) || !child.DeletionTimestamp.IsZero() ||
+				strings.TrimSpace(child.Spec.Schedule) != "" {
+				continue
+			}
+			visited[client.ObjectKeyFromObject(child)] = true
+			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
+				continue
+			}
+			if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+				parents = append(parents, child)
+				continue
+			}
+			base := child.DeepCopy()
+			if child.Annotations == nil {
+				child.Annotations = map[string]string{}
+			}
+			child.Annotations[labels.AnnotationCancelRequested] = message
+			if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
+				!apierrors.IsNotFound(err) {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// delegatedBy reports whether parent delegated child. In the parent's
+// namespace the controller owner reference says so. Owner references cannot
+// cross namespaces, so a child elsewhere must record the parent's UID, an
+// annotation only the controller and trusted workers may write.
+func delegatedBy(child, parent *corev1alpha1.Task) bool {
+	if child.Namespace == parent.Namespace {
+		return metav1.IsControlledBy(child, parent)
+	}
+	return parent.UID != "" && strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID]) == string(parent.UID)
 }
 
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {

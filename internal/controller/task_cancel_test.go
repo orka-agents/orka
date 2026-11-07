@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -660,9 +661,10 @@ func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
 }
 
 // TestCancelledTaskCancelsTheChildrenItControls covers delegated work: a
-// cancelled parent asks its Pending and Running children to cancel, and
-// leaves finished children, children it does not control, and scheduled
-// templates alone.
+// cancelled parent asks its Pending and Running children to cancel, reaching
+// children in other namespaces by the parent UID they record and work that
+// outlived a finished child. It leaves finished children, children it does
+// not control, and scheduled templates alone.
 func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 	parent := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
@@ -682,30 +684,114 @@ func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 		}
 		return task
 	}
+	done := child("done", corev1alpha1.TaskPhaseSucceeded, true, "")
+	done.UID = "done-uid"
+	grandchild := child("grandchild", corev1alpha1.TaskPhaseRunning, false, "")
+	grandchild.Labels[labels.LabelParentTask] = "done"
+	grandchild.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "done", UID: "done-uid", Controller: &controller,
+	}}
+	elsewhere := func(name, parentUID string) *corev1alpha1.Task {
+		task := child(name, corev1alpha1.TaskPhaseRunning, false, "")
+		task.Namespace = "other"
+		task.Annotations = map[string]string{labels.AnnotationParentTaskUID: parentUID}
+		return task
+	}
 	objects := []client.Object{
 		parent,
 		child("running", corev1alpha1.TaskPhaseRunning, true, ""),
 		child("pending", corev1alpha1.TaskPhasePending, true, ""),
-		child("done", corev1alpha1.TaskPhaseSucceeded, true, ""),
+		done,
+		grandchild,
 		child("unowned", corev1alpha1.TaskPhaseRunning, false, ""),
 		child("template", corev1alpha1.TaskPhasePending, true, "*/5 * * * *"),
+		elsewhere("delegated-elsewhere", "parent-uid"),
+		elsewhere("namesake-elsewhere", "another-parent-uid"),
 	}
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
 	r := &TaskReconciler{Client: c}
 	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]bool{"running": true, "pending": true, "done": false, "unowned": false, "template": false} {
+	for key, want := range map[client.ObjectKey]bool{
+		{Namespace: "default", Name: "running"}:           true,
+		{Namespace: "default", Name: "pending"}:           true,
+		{Namespace: "default", Name: "done"}:              false,
+		{Namespace: "default", Name: "grandchild"}:        true,
+		{Namespace: "default", Name: "unowned"}:           false,
+		{Namespace: "default", Name: "template"}:          false,
+		{Namespace: "other", Name: "delegated-elsewhere"}: true,
+		{Namespace: "other", Name: "namesake-elsewhere"}:  false,
+	} {
 		got := &corev1alpha1.Task{}
-		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, got); err != nil {
+		if err := c.Get(context.Background(), key, got); err != nil {
 			t.Fatal(err)
 		}
 		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; requested != want {
-			t.Errorf("%s: cancel requested = %t, want %t", name, requested, want)
+			t.Errorf("%s: cancel requested = %t, want %t", key, requested, want)
 		}
 	}
 	// A second pass changes nothing.
 	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestInterruptedCancelStopsTheJobWhileAChildRefuses covers a parent that
+// recovery recorded as Failed after a cancel request, with a child whose
+// cancel keeps failing: the cascade still runs and is retried, and the
+// parent's own Job is stopped in the same reconcile.
+func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
+	controller := true
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "parent", Namespace: testNS, UID: "parent-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed, JobName: "parent-job"},
+	}
+	owner := []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "parent", UID: "parent-uid", Controller: &controller,
+	}}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: testNS, UID: "child-uid", OwnerReferences: owner,
+			Labels: map[string]string{labels.LabelParentTask: "parent"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-job", Namespace: testNS, OwnerReferences: owner},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	r := newUnitReconciler(newTestScheme(), parent, child, job)
+	watched, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("unit reconciler client does not implement client.WithWatch")
+	}
+	childPatches := 0
+	r.Client = interceptor.NewClient(watched, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if obj.GetName() == "child" {
+				childPatches++
+				return apierrors.NewForbidden(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), "child", errors.New("denied"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	result, err := r.handleCompleted(context.Background(), parent)
+	if err != nil {
+		t.Fatalf("handleCompleted() = %v, want the refused cascade retried", err)
+	}
+	if childPatches == 0 {
+		t.Fatal("a cancel-requested parent that ended Failed must still cancel its children")
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("the refused cascade must be retried")
+	}
+	if err := watched.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("parent Job read = %v, want it deleted while the child refuses", err)
 	}
 }
