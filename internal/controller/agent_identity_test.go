@@ -34,6 +34,9 @@ import (
 
 const testAgentIdentityID = "33333333-3333-3333-3333-33333333aaaa"
 
+// testIdentityInstance is the issuer instance testIdentityConfig configures.
+const testIdentityInstance = "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222"
+
 func testIdentityConfig() agentidentity.Config {
 	return agentidentity.Config{
 		Entra: &agentidentity.EntraConfig{
@@ -105,7 +108,7 @@ func boundTask(name string, agent *corev1alpha1.Agent, phase corev1alpha1.TaskPh
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
 			Agent: &corev1alpha1.AgentExecutionAgentRef{
 				Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: 1,
-				Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+				Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
 			},
 		}},
 	}
@@ -668,7 +671,7 @@ func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
 		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
-		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
 	}
 	if external {
 		task.Status.AgentExecutionBinding.Backend = corev1alpha1.AgentExecutionBackendExternalEndpoint
@@ -711,7 +714,8 @@ func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{
-		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		Identity: testIdentityConfig(),
+		Client:   kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
 		AdmissionGate: NewACPAdmissionGate(), sem: make(chan struct{}, 1), active: make(map[types.UID]struct{}),
 	}
 	if external {
@@ -961,5 +965,127 @@ func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("issuer asked %d times after refusals, want each Agent verified", calls)
+	}
+}
+
+// TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt covers a prompt
+// a RuntimePool turned away for capacity: while the Task waits, its Agent can
+// lose the identity, so the dispatcher checks the claim again before it sends
+// the prompt once more and settles the Task as IdentityUnavailable instead.
+func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("identity-resubmit", "identity-resubmit-uid", "pool-uid")
+	task.CreationTimestamp = metav1.Now()
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
+		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "identity-resubmit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controlStore := sqlite.NewStore(db, "identity-resubmit-test")
+	epochs := NewControllerEpochManager(controlStore, "identity-resubmit-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	t.Cleanup(func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("controller epoch manager shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attemptID, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{Identity: testIdentityConfig(), Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs}
+	states := []store.PromptExecutionState{
+		store.PromptExecutionQueued, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned, store.PromptExecutionSubmitting,
+	}
+	for i := 1; i < len(states); i++ {
+		if err := dispatcher.transitionAttempt(ctx, attemptID, fence, states[i-1], states[i], "test-"+string(states[i]), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unavailable := dispatcher.identityUnavailableBeforeResubmission(ctx, task)
+	if !strings.Contains(unavailable, "no longer holds identity") {
+		t.Fatalf("unavailable = %q, want the lost identity named", unavailable)
+	}
+	if err := dispatcher.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, nil, unavailable); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != string(taskExecutionReasonIdentityUnavailable) {
+		t.Fatalf("attempt = %s/%s, want Failed/IdentityUnavailable", attempt.ExecutionState, attempt.TerminalReason)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || updated.Status.Execution == nil ||
+		updated.Status.Execution.Reason != taskExecutionReasonIdentityUnavailable {
+		t.Fatalf("Task status = %#v, want Failed/IdentityUnavailable", updated.Status)
+	}
+}
+
+// TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured covers a
+// restart without the Entra issuer while Agent use is still enforced: the
+// claim is released, as it is when enforcement is off.
+func TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured(t *testing.T) {
+	held := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r := identityAgentReconciler(held)
+	r.Identity.Entra = nil
+	if claim, err := r.reconcileIdentityClaim(context.Background(), held); err != nil || claim == nil || !claim.Releasing {
+		t.Fatalf("a held claim is released once its issuer is unconfigured: claim=%+v err=%v", claim, err)
+	}
+}
+
+// TestBoundIdentityRequiresTheIssuerConfiguredAsBound covers a controller
+// restarted after a Task bound to an identity: the Task may start only while
+// Agent use is enforced and the issuer instance it froze is still configured.
+func TestBoundIdentityRequiresTheIssuerConfiguredAsBound(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	task := boundTask("work", agent, corev1alpha1.TaskPhasePending)
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	otherTenant := testIdentityConfig()
+	otherTenant.Entra.TenantID = "44444444-4444-4444-4444-444444444444"
+	for name, tc := range map[string]struct {
+		config agentidentity.Config
+		want   string
+	}{
+		"use authorization off": {agentidentity.Config{Entra: testIdentityConfig().Entra}, "agent-use-authorization-enabled"},
+		"issuer removed":        {agentidentity.Config{AgentUseAuthorization: true}, "no longer configured"},
+		"issuer moved":          {otherTenant, "no longer configured"},
+	} {
+		unavailable, err := boundIdentityUnavailable(context.Background(), reader, tc.config, task, task.Status.AgentExecutionBinding)
+		if err != nil || !strings.Contains(unavailable, tc.want) {
+			t.Errorf("%s: unavailable = %q, %v; want it to mention %q", name, unavailable, err, tc.want)
+		}
 	}
 }

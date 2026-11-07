@@ -1536,7 +1536,8 @@ func main() {
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 	}
 	controlStoreOptions := []storekube.Option{
@@ -1830,7 +1831,8 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		Identity: agentIdentityConfig,
+		Client:   mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
 		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
