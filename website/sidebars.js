@@ -77,6 +77,7 @@ const sidebars = {
         },
         'guides/observability',
         'guides/bring-your-own-agent-runtime',
+        'guides/kagent',
       ],
     },
     {

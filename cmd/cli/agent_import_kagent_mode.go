@@ -59,6 +59,15 @@ type kagentMode struct {
 	Revision string
 	// PinProblems explain why a v0 Agent has no Revision to pin.
 	PinProblems []string
+	// ImageDigest is the image digest a v0 Agent's pod reports, which the
+	// wrapper pins beside the config hash; ImageProblem says why it is unknown.
+	ImageDigest  string
+	ImageProblem string
+	// Tools are the Orka tools a governed Agent calls through the relay.
+	Tools []string
+	// AnyTool reports a binding that names no tools, so kagent calls
+	// whatever the relay lists.
+	AnyTool bool
 }
 
 // kagentRevisionEvidence binds a verdict to the pinned revision. The compiled
@@ -102,15 +111,16 @@ func kagentObjectKey(kind, namespace, name string) string {
 }
 
 // indexKagentObjects indexes the objects of one kagent version. A v0 Agent's
-// Deployment and config Secret belong to the v0 index: the wrapper pins the
-// Deployment's config hash, and the Secret holds the configuration it hashes.
+// Deployment, pod, and config Secret belong to the v0 index: the wrapper pins
+// the config hash and the pod's image, and the Secret holds the configuration
+// the hash covers.
 func indexKagentObjects(objects []map[string]any, version string) kagentObjects {
 	index := kagentObjects{}
 	for _, obj := range objects {
 		apiVersion, _ := obj["apiVersion"].(string)
 		kind, _ := obj["kind"].(string)
 		v0Workload := version == kagentV0APIVersion &&
-			((apiVersion == "apps/v1" && kind == "Deployment") || (apiVersion == "v1" && kind == "Secret"))
+			((apiVersion == "apps/v1" && kind == "Deployment") || (apiVersion == "v1" && (kind == "Secret" || kind == "Pod")))
 		if apiVersion != version && !v0Workload {
 			continue
 		}
@@ -176,7 +186,33 @@ func classifyKagentAgent(agent map[string]any, related kagentObjects, relay stri
 		return mode
 	}
 	mode.Mode, mode.RelayOrigin = kagentModeGoverned, relay
+	mode.Tools, mode.AnyTool = kagentV1ToolNames(agent, related, namespace)
 	return mode
+}
+
+// kagentV1ToolNames lists the tools a v1 Agent's template binds, which for a
+// governed Agent are the Orka tools it calls through the relay, and reports a
+// binding that names none.
+func kagentV1ToolNames(agent map[string]any, related kagentObjects, namespace string) ([]string, bool) {
+	template := kagentMap(agent, "spec", "template", "inline")
+	if template == nil {
+		template = kagentMap(related.lookup("AgentTemplate", namespace, kagentString(agent, "spec", "template", "ref", cliNameKey)), "spec")
+	}
+	var names []string
+	anyTool := false
+	bindings, _ := template[kagentFieldTools].([]any)
+	for _, raw := range bindings {
+		binding, _ := raw.(map[string]any)
+		tools, _ := kagentMap(binding, "mcp")[kagentFieldTools].([]any)
+		anyTool = anyTool || len(tools) == 0
+		for _, tool := range tools {
+			if name, ok := tool.(string); ok {
+				names = append(names, name)
+			}
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names), anyTool
 }
 
 func harnessProblems(harness map[string]any, name string) []string {
@@ -445,28 +481,54 @@ type kagentWrapperOptions struct {
 	UserIDPrefix    string
 	UpstreamURL     string
 	UpstreamModel   string
+	// MaxOutputTokens bounds a governed Agent's model calls; 0 leaves them.
+	MaxOutputTokens int64
+	// Unreachable lists addresses the broker must fail to connect to.
+	Unreachable []string
+	// AcceptedCommits adds kagent controller builds the operator verified.
+	AcceptedCommits []string
+	// BundleDir, when set, writes each Agent's deployment bundle instead of
+	// a flat configuration file, and pins the runtime name to the config.
+	BundleDir string
+	// AllowedTools are the Orka tools a governed Agent may call; without
+	// them, the tools its bindings name.
+	AllowedTools []string
+	// ApprovalRequiredTools are the governed tools that need an Orka approval.
+	ApprovalRequiredTools []string
+	// RuntimeRevision, when positive, names new runtimes for unchanged
+	// configurations, so they can be deployed from new images.
+	RuntimeRevision int
 }
 
 // kagentWrapperConfig mirrors the wrapper's /agent/kagent.json.
 type kagentWrapperConfig struct {
-	Model    string                 `json:"model"`
-	Kagent   kagentWrapperTarget    `json:"kagent"`
-	Governed *kagentWrapperGoverned `json:"governed,omitempty"`
+	Model       string                 `json:"model"`
+	Kagent      kagentWrapperTarget    `json:"kagent"`
+	Governed    *kagentWrapperGoverned `json:"governed,omitempty"`
+	Unreachable []string               `json:"unreachable,omitempty"`
 }
 
 type kagentWrapperTarget struct {
 	// Version selects the wrapper's kagent backend; it is omitted for v1.
-	Version          string            `json:"version,omitempty"`
-	ControlPlaneURL  string            `json:"controlPlaneURL"`
-	Agent            map[string]string `json:"agent"`
-	ExpectedRevision string            `json:"expectedRevision"`
-	UserIDPrefix     string            `json:"userIDPrefix"`
+	Version             string            `json:"version,omitempty"`
+	ControlPlaneURL     string            `json:"controlPlaneURL"`
+	Agent               map[string]string `json:"agent"`
+	ExpectedRevision    string            `json:"expectedRevision"`
+	ExpectedImageDigest string            `json:"expectedImageDigest,omitempty"`
+	UserIDPrefix        string            `json:"userIDPrefix"`
+	AcceptedCommits     []string          `json:"acceptedCommits,omitempty"`
 }
 
 type kagentWrapperGoverned struct {
 	UpstreamBaseURL string `json:"upstreamBaseURL"`
 	UpstreamModel   string `json:"upstreamModel"`
+	MaxOutputTokens int64  `json:"maxOutputTokens,omitempty"`
 }
+
+var (
+	kagentGitCommitPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+	kagentImageDigestRef   = regexp.MustCompile(`(?:^|@)(sha256:[0-9a-f]{64})$`)
+)
 
 // kagentUserIDPrefixPattern matches the wrapper's user ID prefix rule.
 var kagentUserIDPrefixPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$`)
@@ -474,8 +536,27 @@ var kagentUserIDPrefixPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,30}[a-
 // validate applies the wrapper's own configuration rules, so the import never
 // writes a file the wrapper refuses to load.
 func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
-	if o.Dir == "" {
+	if o.Dir != "" && o.BundleDir != "" {
+		return fmt.Errorf("--wrapper-config-dir and --bundle-dir are exclusive; a bundle holds the configuration")
+	}
+	if o.Dir == "" && o.BundleDir == "" {
+		if o.MaxOutputTokens != 0 || len(o.Unreachable) > 0 || len(o.AcceptedCommits) > 0 || len(o.ApprovalRequiredTools) > 0 || len(o.AllowedTools) > 0 || o.RuntimeRevision != 0 {
+			return fmt.Errorf("--max-output-tokens, --unreachable, --accept-kagent-commit, --allowed-tool, --approval-required-tool, and --runtime-revision shape the wrapper configuration; pass --wrapper-config-dir or --bundle-dir")
+		}
 		return nil
+	}
+	if o.MaxOutputTokens < 0 {
+		return fmt.Errorf("--max-output-tokens must not be negative")
+	}
+	for _, address := range o.Unreachable {
+		if !kagentHostPort(address) {
+			return fmt.Errorf("--unreachable %q must be a host:port address", address)
+		}
+	}
+	for _, commit := range o.AcceptedCommits {
+		if !kagentGitCommitPattern.MatchString(commit) {
+			return fmt.Errorf("--accept-kagent-commit %q must be 7 to 40 lowercase hex digits", commit)
+		}
 	}
 	if !kagentControlPlaneURL(o.ControlPlaneURL) {
 		return fmt.Errorf("--control-plane-url must be the kagent controller's http(s) base URL with a DNS host name")
@@ -498,6 +579,9 @@ func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
 				}
 				return fmt.Errorf("kagent Agent %s has no config hash to pin (%s); export the Agent and its Deployment with kubectl get -o yaml after the rollout finishes", agent.Source, why)
 			}
+			if agent.Mode.ImageDigest == "" {
+				return fmt.Errorf("kagent Agent %s has no image digest to pin (%s); include its pod: kubectl get pods -n %s -l app=kagent,kagent=%s -o yaml", agent.Source, agent.Mode.ImageProblem, agent.SourceNamespace, agent.SourceName)
+			}
 		} else if !kagentRevisionPattern.MatchString(agent.Mode.Revision) {
 			return fmt.Errorf("kagent Agent %s has no status.latestSuccessfulRevision to pin; export it with kubectl get -o yaml after it is Ready", agent.Source)
 		}
@@ -505,7 +589,20 @@ func (o kagentWrapperOptions) validate(wrapped []kagentWrappedAgent) error {
 			return fmt.Errorf("kagent Agent %s is governed: --model-upstream-url (an http(s) base URL) and --model-upstream-model name the model Orka serves it", agent.Source)
 		}
 	}
-	return nil
+	return o.validateBundle(wrapped)
+}
+
+// kagentHostPort matches the wrapper's host:port rule.
+func kagentHostPort(value string) bool {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || !kagentSafeString(value, 512) {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+		return false
+	}
+	return net.ParseIP(host) != nil || len(utilvalidation.IsDNS1123Subdomain(host)) == 0
 }
 
 func kagentWrapperModel(agent kagentWrappedAgent) string {
@@ -564,30 +661,45 @@ func writeKagentWrapperConfigs(o kagentWrapperOptions, wrapped []kagentWrappedAg
 	defer root.Close() //nolint:errcheck
 	var written []string
 	for _, agent := range wrapped {
-		namespace, name := agent.SourceNamespace, agent.SourceName
-		config := kagentWrapperConfig{
-			Model: kagentWrapperModel(agent),
-			Kagent: kagentWrapperTarget{
-				Version:         agent.Version,
-				ControlPlaneURL: strings.TrimSuffix(o.ControlPlaneURL, "/"), Agent: map[string]string{cliNamespaceQuery: namespace, cliNameKey: name},
-				ExpectedRevision: agent.Mode.Revision, UserIDPrefix: o.UserIDPrefix,
-			},
-		}
-		if agent.Mode.Mode == kagentModeGoverned {
-			config.Governed = &kagentWrapperGoverned{UpstreamBaseURL: o.UpstreamURL, UpstreamModel: o.UpstreamModel}
-		}
-		data, err := json.MarshalIndent(config, "", "  ")
+		data, err := o.wrapperConfig(agent)
 		if err != nil {
 			return nil, err
 		}
 		file := metadataName(agent.Manifest) + ".kagent.json"
-		if err := root.WriteFile(file, append(data, '\n'), 0o600); err != nil {
+		if err := root.WriteFile(file, data, 0o600); err != nil {
 			return nil, err
 		}
 		written = append(written, filepath.Join(o.Dir, file))
 	}
 	slices.Sort(written)
 	return written, nil
+}
+
+// wrapperConfig renders an Agent's /agent/kagent.json. The bytes are
+// deterministic, so the same input always pins the same configuration digest.
+func (o kagentWrapperOptions) wrapperConfig(agent kagentWrappedAgent) ([]byte, error) {
+	namespace, name := agent.SourceNamespace, agent.SourceName
+	config := kagentWrapperConfig{
+		Model: kagentWrapperModel(agent),
+		Kagent: kagentWrapperTarget{
+			Version:         agent.Version,
+			ControlPlaneURL: strings.TrimSuffix(o.ControlPlaneURL, "/"), Agent: map[string]string{cliNamespaceQuery: namespace, cliNameKey: name},
+			ExpectedRevision: agent.Mode.Revision, UserIDPrefix: o.UserIDPrefix,
+			AcceptedCommits: o.AcceptedCommits,
+		},
+		Unreachable: o.Unreachable,
+	}
+	if agent.Version == kagentVersionV0 {
+		config.Kagent.ExpectedImageDigest = agent.Mode.ImageDigest
+	}
+	if agent.Mode.Mode == kagentModeGoverned {
+		config.Governed = &kagentWrapperGoverned{UpstreamBaseURL: o.UpstreamURL, UpstreamModel: o.UpstreamModel, MaxOutputTokens: o.MaxOutputTokens}
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 func describeKagentMode(mode kagentMode) string {
