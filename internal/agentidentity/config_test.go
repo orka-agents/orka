@@ -113,7 +113,18 @@ func TestEntraAuthorityIsPartOfTheIssuerInstance(t *testing.T) {
 	if got == public || !strings.HasSuffix(got, "@https://login.microsoftonline.us") {
 		t.Fatalf("sovereign instance = %q, want it to name the authority", got)
 	}
-	for _, authority := range []string{"http://login.microsoftonline.us", "https://user@login.example", "https://login.example?x=1", "login.example"} {
+	proxied := configuredConfig()
+	proxied.Entra.Authority = "HTTPS://Proxy.Example/Entra/"
+	if err := proxied.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := proxied.Instance("entra"); !strings.HasSuffix(got, "@https://proxy.example/Entra") {
+		t.Fatalf("proxied instance = %q, want the host folded and the path kept", got)
+	}
+	for _, authority := range []string{
+		"http://login.microsoftonline.us", "https://user@login.example", "https://login.example?x=1", "login.example",
+		"https://login.microsoftonline.com?", "https://login.microsoftonline.com#",
+	} {
 		bad := configuredConfig()
 		bad.Entra.Authority = authority
 		if err := bad.Validate(); err == nil {
