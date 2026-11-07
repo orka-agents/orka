@@ -92,16 +92,18 @@ type cachedToken struct {
 	expires time.Time
 }
 
-// FileCredential reads a projected ServiceAccount token from path.
+// FileCredential reads a projected ServiceAccount token from path. A missing
+// or empty token is ErrIssuerUnavailable: Entra was never asked, so it says
+// nothing about the identity.
 func FileCredential(path string) func() (string, error) {
 	return func() (string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return "", fmt.Errorf("read the controller's federated credential: %w", err)
+			return "", fmt.Errorf("read the controller's federated credential: %w: %w", err, ErrIssuerUnavailable)
 		}
 		token := strings.TrimSpace(string(data))
 		if token == "" {
-			return "", errors.New("the controller's federated credential is empty")
+			return "", fmt.Errorf("the controller's federated credential is empty: %w", ErrIssuerUnavailable)
 		}
 		return token, nil
 	}
