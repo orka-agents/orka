@@ -96,6 +96,26 @@ func TestEvictionCleanedSessionRejectsFreshPromptAsRetryable(t *testing.T) {
 	}
 	awaitDeletedRuntimeSession(t, server, create.RuntimeSessionID)
 
+	// A prompt for the retired session under any other fence is stale, never
+	// retryable: Core must not retry it against the wrong instance.
+	for name, stale := range map[string]func(*harnessv2.Fence){
+		"runtime instance": func(f *harnessv2.Fence) { f.RuntimeInstanceID += "-foreign" },
+		"supervisor boot":  func(f *harnessv2.Fence) { f.SupervisorBootID += "-previous" },
+		"controller epoch": func(f *harnessv2.Fence) { f.ControllerEpoch++ },
+		"pool generation":  func(f *harnessv2.Fence) { f.RuntimePoolGeneration++ },
+	} {
+		foreign := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+		stale(&foreign.Metadata.Fence)
+		foreign.Metadata.RequestDigest = ""
+		sealRequest(t, &foreign.Metadata.RequestDigest, foreign)
+		response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", foreign, cfg)
+		var refusal harnessv2.ErrorResponse
+		decodeResponse(t, response, &refusal)
+		if response.Code == http.StatusTooManyRequests || refusal.Retryable || refusal.Code != harnessv2.ErrorCodeStaleFence {
+			t.Fatalf("prompt with a stale %s after eviction cleanup status=%d refusal=%+v; want the non-retryable stale-fence refusal", name, response.Code, refusal)
+		}
+	}
+
 	fresh := testStartPromptRequest(t, cfg, create.Metadata.Fence)
 	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", fresh, cfg)
 	if response.Code != http.StatusTooManyRequests {
