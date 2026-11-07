@@ -132,7 +132,7 @@ func TestCancelRequestedAgentTask(t *testing.T) {
 			if err := c.Get(ctx, key, current); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := reconciler.cancelRequestedAgentTask(ctx, current); err != nil {
+			if err := reconciler.cancelRequestedAgentTask(ctx, current); err != nil {
 				t.Fatal(err)
 			}
 			if err := c.Get(ctx, key, current); err != nil {
@@ -158,7 +158,7 @@ func TestCancelRequestedAgentTask(t *testing.T) {
 		})
 		c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(unguarded).WithStatusSubresource(unguarded).Build()
 		r := &TaskReconciler{Client: c}
-		if _, err := r.cancelRequestedAgentTask(ctx, unguarded.DeepCopy()); err == nil || !strings.Contains(err.Error(), "epoch mutation guard") {
+		if err := r.cancelRequestedAgentTask(ctx, unguarded.DeepCopy()); err == nil || !strings.Contains(err.Error(), "epoch mutation guard") {
 			t.Fatalf("error = %v, want the epoch guard refusal", err)
 		}
 		current := &corev1alpha1.Task{}
@@ -428,7 +428,7 @@ func cancelTaskWithPendingClassWorkspace(t *testing.T) (*TaskReconciler, *corev1
 	if err := r.Status().Update(ctx, task); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.cancelRequestedAgentTask(ctx, task); err != nil {
+	if err := r.cancelRequestedAgentTask(ctx, task); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if err := r.Get(ctx, key, task); err != nil {
@@ -550,7 +550,7 @@ func TestCancelRequestedAgentTaskSettlesAnUnprojectedAttempt(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task).Build()
 	guarded := &cancelGuardStore{DurableControlStore: controls}
 	r := &TaskReconciler{Client: c, DurableControlStore: guarded, ControllerEpochManager: epochs}
-	if _, err := r.cancelRequestedAgentTask(ctx, task.DeepCopy()); err != nil {
+	if err := r.cancelRequestedAgentTask(ctx, task.DeepCopy()); err != nil {
 		t.Fatal(err)
 	}
 	if guarded.entered == 0 {

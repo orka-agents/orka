@@ -331,9 +331,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
 		// Delegated work still stops while usage storage is down: the
-		// cascade needs none of it.
+		// cascade needs none of it, and runs once the Task's own stop has.
+		stopErr := r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 		_ = r.cascadeTaskCancellation(ctx, task)
-		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
+		return ctrl.Result{}, stopErr
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -414,11 +415,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	// Work a cancelled Task delegated stops with it, at every depth, as soon
-	// as the cancel is requested. The cascade runs before anything that can
-	// keep failing, such as result storage or the workspace projection, and a
-	// refused child only requeues a finished Task once its own completion
-	// work is done.
-	cascadeErr := r.cascadeTaskCancellation(ctx, task)
+	// as the cancel is requested. The cascade runs right after the Task's own
+	// stop, which it never delays, and before anything that can keep
+	// failing, such as result storage or the workspace projection. A refused
+	// child only requeues a finished Task once its own completion work is
+	// done.
+	stopThenCascade := func(result ctrl.Result, err error) (ctrl.Result, error) {
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return result, err
+	}
 
 	// A deferred finalization records a stop already decided, so it settles
 	// before a later cancel request. A requested cancellation is applied
@@ -431,15 +436,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			return ctrl.Result{}, err
 		}
 		if intent != nil {
-			return r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+			return stopThenCascade(r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome))
 		}
 	}
 	if message, ok := requestedTaskCancellation(task); ok {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+		return stopThenCascade(r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message))
 	}
 	if _, ok := requestedAgentTaskCancellation(task); ok {
-		return r.cancelRequestedAgentTask(ctx, task)
+		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
 	}
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		return ctrl.Result{}, err
@@ -2788,15 +2794,6 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// completeTask marks a task as completed without asserting that workload execution started.
-// requestedTaskCancellation returns the terminal message of a recorded
-// cancel request that this reconciler may complete through the native
-// terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
-// are cancelled by cancelRequestedAgentTask under the controller epoch guard.
-// cancelChildTasks records a cancel request on every Pending or Running
-// Task the cancelled task controls, the same request a person makes, so the
-// children stop the way a cancelled Task does. Children already finished or
-// already asked to cancel are left alone, so it can run on every reconcile.
 // handleCompletedAfterCascade runs a finished Task's own completion work,
 // then requeues it soon while a child refused its cancel.
 func (r *TaskReconciler) handleCompletedAfterCascade(ctx context.Context, task *corev1alpha1.Task, cascadeErr error) (ctrl.Result, error) {
@@ -2924,6 +2921,10 @@ func delegatedBy(child, parent *corev1alpha1.Task) bool {
 	return parent.UID != "" && strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID]) == string(parent.UID)
 }
 
+// requestedTaskCancellation returns the terminal message of a recorded
+// cancel request that this reconciler may complete through the native
+// terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
+// are cancelled by cancelRequestedAgentTask under the controller epoch guard.
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||
@@ -2939,6 +2940,7 @@ func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	return message, true
 }
 
+// completeTask marks a task as completed without asserting that workload execution started.
 func (r *TaskReconciler) completeTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
