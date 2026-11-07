@@ -256,7 +256,9 @@ profile. Keep that policy installed, and:
   default AI worker profile can read every Secret there, so any such Secret
   hands the worker that account's token.
 
-The chart and the controller both refuse a signing namespace that is the
-release (watch), controller, client, ACP runtime or agent-host namespace. Keep
-the signing namespace free of other workloads and of role bindings beyond the
+The controller refuses to start with a signing namespace that is the watch,
+controller Pod, ACP runtime or agent-host namespace. The chart also refuses the
+client namespace when rendering; the controller cannot see that one, so
+kustomize and other installs must keep it apart themselves. Keep the signing
+namespace free of other workloads and of role bindings beyond the
 controller's and your cluster administrators'.
