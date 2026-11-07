@@ -238,6 +238,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agents
+  verbs:
+  - get
+- apiGroups:
+  - core.orka.ai
+  resources:
   - connections
   - connectorproviders
   verbs:
