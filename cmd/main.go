@@ -968,6 +968,8 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to the same identities.
+	api.SetWorkerServiceAccountNames(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts))
 
 	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
