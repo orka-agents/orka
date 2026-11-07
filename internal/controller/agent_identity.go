@@ -313,8 +313,12 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	r.verifications.Unlock()
 	if found && cached.uid == agent.UID && cached.generation == agent.Generation &&
 		cached.issuer == issuer && cached.id == id {
-		if time.Now().Before(cached.until) {
-			return cached.state
+		if remaining := time.Until(cached.until); remaining > 0 {
+			// The Agent is reconciled again when the answer expires, not a
+			// full interval after this pass, so it is never kept past it.
+			answer := cached.state
+			answer.retryAfter = remaining
+			return answer
 		}
 	}
 	r.issuerBackoff.Lock()
