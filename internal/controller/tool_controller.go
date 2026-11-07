@@ -1846,10 +1846,15 @@ func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, too
 
 // revokeSubstrateMCPToolActorEgress installs a deny-all egress policy on every
 // actor whose Tool or pool lease this Tool still holds; actors leased by
-// another owner are never touched. An actor Substrate no longer has cannot
-// egress, so it counts as revoked. It reports whether any actor was held.
+// another owner are never touched. It only ever revokes: compiled Tool rules
+// are never applied here. It also runs with Substrate MCP Tools disabled, so
+// turning the feature off cannot leave a running actor egressing with
+// gateway-injected credentials; startup validates the recovery configuration
+// whenever a Tool still carries the actor finalizer. An actor Substrate no
+// longer has cannot egress, so it counts as revoked. It reports whether any
+// actor was held.
 func (r *ToolReconciler) revokeSubstrateMCPToolActorEgress(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
-	if tool == nil || !r.SubstrateMCPToolsEnabled || !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
+	if tool == nil || !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
 		return false, nil
 	}
 	leased, err := r.substrateMCPToolActorLeaseDeleteRefs(ctx, tool, "")

@@ -189,6 +189,56 @@ func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
 	}
 }
 
+// Turning Substrate MCP Tools off must not leave a running actor egressing
+// with its gateway-injected credential: the restarted controller revokes it.
+func TestToolReconcilerRevokesCredentialedActorEgressAfterRestartWithMCPToolsDisabled(t *testing.T) {
+	for name, applyErr := range map[string]error{"revoked": nil, "revocation fails": errors.New("substrate unavailable")} {
+		t.Run(name, func(t *testing.T) {
+			enabled, _, _ := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
+			for range 3 {
+				_, _ = enabled.Reconcile(context.Background(), mcpToolRequest())
+			}
+			running := getEgressCredentialTool(t, enabled)
+			if !running.Status.Available || running.Status.Actor == nil {
+				t.Fatalf("status = %+v, want an available credentialed actor", running.Status)
+			}
+
+			var applications []egressPolicyApplication
+			disabled := &ToolReconciler{
+				Client:          enabled.Client,
+				Scheme:          enabled.Scheme,
+				SubstrateConfig: enabled.SubstrateConfig,
+				SubstrateEgressPolicyApplier: func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+					applications = append(applications, egressPolicyApplication{actorID: actorID, rules: rules})
+					return applyErr
+				},
+				SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+					t.Fatal("disabled controller must not claim or resume actors")
+					return nil, nil
+				},
+			}
+			_, err := disabled.Reconcile(context.Background(), mcpToolRequest())
+			if len(applications) != 1 || applications[0].actorID != running.Status.Actor.ActorID || len(applications[0].rules) != 0 {
+				t.Fatalf("applications = %+v, want only a deny-all policy for actor %q", applications, running.Status.Actor.ActorID)
+			}
+			got := getEgressCredentialTool(t, disabled)
+			condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+			if got.Status.Available || condition == nil || condition.Status != metav1.ConditionFalse {
+				t.Fatalf("status = %+v, want an unavailable Tool without ready egress", got.Status)
+			}
+			if applyErr == nil {
+				if err != nil || condition.Reason != "EgressRevoked" {
+					t.Fatalf("Reconcile() error = %v, reason = %q, want a completed revocation", err, condition.Reason)
+				}
+				return
+			}
+			if err == nil || condition.Reason != "EgressRevocationFailed" || !strings.Contains(got.Status.Error, "actor egress was not revoked") {
+				t.Fatalf("Reconcile() error = %v, status = %+v, want a reported and retried revocation failure", err, got.Status)
+			}
+		})
+	}
+}
+
 func TestSubstrateConfigRejectsUnsupportedEgressCredentialProvider(t *testing.T) {
 	cfg, err := SubstrateConfigFromEnv(func(name string) string {
 		if name == EnvSubstrateEgressCredentialProvider {
