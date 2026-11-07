@@ -1113,3 +1113,23 @@ func TestCancelCascadeListsATreeOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestRequestedCancellationMessagesAreBounded covers a cancel request whose
+// message exceeds what the execution status may hold: both cancel paths read
+// it bounded, so the terminal status write cannot be refused for its length.
+func TestRequestedCancellationMessagesAreBounded(t *testing.T) {
+	long := strings.Repeat("x", 4*acpPromptFailureMessageLimit)
+	native := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{labels.AnnotationCancelRequested: long}},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	if message, ok := requestedTaskCancellation(native); !ok || len(message) > acpPromptFailureMessageLimit {
+		t.Fatalf("native cancel message = %d bytes, %t; want at most %d", len(message), ok, acpPromptFailureMessageLimit)
+	}
+	agent := native.DeepCopy()
+	agent.Spec.Type = corev1alpha1.TaskTypeAgent
+	if message, ok := requestedAgentTaskCancellation(agent); !ok || len(message) > acpPromptFailureMessageLimit {
+		t.Fatalf("agent cancel message = %d bytes, %t; want at most %d", len(message), ok, acpPromptFailureMessageLimit)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -348,6 +349,11 @@ func parseCancelRequest(c fiber.Ctx) (cancelRequest, error) {
 
 // cancelMessage names the authenticated caller, never a value from the
 // request body, and the reason they gave.
+// cancelMessageLimit bounds a cancel request's message in bytes, so the
+// Task status it becomes, with any explanation recovery appends, stays
+// within the execution status limit whatever the caller's name.
+const cancelMessageLimit = 512
+
 func cancelMessage(userInfo *UserInfo, reason string) string {
 	message := "cancelled"
 	if actor := approvalDecisionActor(userInfo); actor != "" {
@@ -356,5 +362,12 @@ func cancelMessage(userInfo *UserInfo, reason string) string {
 	if reason != "" {
 		message += ": " + reason
 	}
-	return message
+	if len(message) <= cancelMessageLimit {
+		return message
+	}
+	limit := cancelMessageLimit
+	for limit > 0 && !utf8.RuneStart(message[limit]) {
+		limit--
+	}
+	return message[:limit]
 }

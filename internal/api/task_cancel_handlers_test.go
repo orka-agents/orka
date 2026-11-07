@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -726,4 +727,18 @@ func newCronTemplate(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Ta
 	task := cancelTestTask(name, phase, "")
 	task.Spec.Schedule = "*/5 * * * *"
 	return task
+}
+
+// TestCancelMessageStaysWithinTheStatusLimit covers a caller with a very
+// long name: the cancel request it records stays within the bound, ends on a
+// whole character, and keeps the caller first.
+func TestCancelMessageStaysWithinTheStatusLimit(t *testing.T) {
+	long := strings.Repeat("é", 400)
+	message := cancelMessage(&UserInfo{Username: long}, strings.Repeat("r", 500))
+	if len(message) > cancelMessageLimit || !utf8.ValidString(message) || !strings.HasPrefix(message, "cancelled by ") {
+		t.Fatalf("cancelMessage() = %d bytes (valid UTF-8 %t), want at most %d starting with the caller", len(message), utf8.ValidString(message), cancelMessageLimit)
+	}
+	if got := cancelMessage(&UserInfo{Username: "alice"}, "wrong repository"); got != "cancelled by alice: wrong repository" {
+		t.Fatalf("a short message changed: %q", got)
+	}
 }
