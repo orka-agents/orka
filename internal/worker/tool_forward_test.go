@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -364,5 +365,18 @@ func TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement(t *testing.T
 	}
 	if got := redactForwardedBody(`{"n":42}`, secret); got != `{"n":42}` {
 		t.Fatalf("an unrelated number changed: %s", got)
+	}
+}
+
+// TestRedactForwardedTextRestoresManyContinuationTokens covers a response
+// with thousands of paging links: every kept continuation parameter comes
+// back in place, in one pass over the text.
+func TestRedactForwardedTextRestoresManyContinuationTokens(t *testing.T) {
+	var text strings.Builder
+	for i := range 5000 {
+		text.WriteString("https://management.azure.com/x?api-version=1&$skiptoken=page-" + strconv.Itoa(i) + "\n")
+	}
+	if got := redactForwardedText(text.String(), "opaque-example-value"); got != text.String() {
+		t.Fatal("continuation parameters were not all restored in place")
 	}
 }

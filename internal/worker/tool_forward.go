@@ -163,11 +163,23 @@ func redactForwardedText(text string, secrets ...string) string {
 		return parts[1] + "\x00orka-forward-continuation-" + strconv.Itoa(len(kept)-1) + "\x00"
 	})
 	redacted := redactToolSensitiveText(masked)
-	for index, value := range kept {
-		redacted = strings.Replace(redacted, "\x00orka-forward-continuation-"+strconv.Itoa(index)+"\x00", value, 1)
+	if len(kept) == 0 {
+		return redacted
 	}
-	return redacted
+	// One pass restores every kept parameter, however many links the
+	// response holds.
+	return forwardContinuationMarkerRe.ReplaceAllStringFunc(redacted, func(marker string) string {
+		index, err := strconv.Atoi(marker[len("\x00orka-forward-continuation-") : len(marker)-1])
+		if err != nil || index >= len(kept) {
+			return marker
+		}
+		return kept[index]
+	})
 }
+
+// forwardContinuationMarkerRe matches the placeholder redactForwardedText
+// holds a kept continuation parameter under.
+var forwardContinuationMarkerRe = regexp.MustCompile("\x00orka-forward-continuation-[0-9]+\x00")
 
 // redactForwardedSecrets removes the credentials Orka injected from text,
 // as they are and in any percent encoding a client would undo.
