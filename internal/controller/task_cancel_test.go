@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -1041,5 +1042,74 @@ func TestUsageOutageStillCancelsDelegatedWork(t *testing.T) {
 	}
 	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
 		t.Fatal("a usage storage outage must not keep the delegated child running")
+	}
+}
+
+// TestCancelCascadeListsATreeOnce covers a wide, deep delegation tree: the
+// walk reads it in at most two list requests, however many Tasks it holds,
+// and still reaches every running descendant.
+func TestCancelCascadeListsATreeOnce(t *testing.T) {
+	controller := true
+	root := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "default", UID: "root-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	objects := []client.Object{root}
+	var descendants []string
+	var grow func(parent string, depth int)
+	grow = func(parent string, depth int) {
+		if depth == 0 {
+			return
+		}
+		for i := range 5 {
+			name := fmt.Sprintf("%s-%d", parent, i)
+			objects = append(objects, &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: "default", UID: types.UID(name + "-uid"),
+					Labels: map[string]string{labels.LabelParentTask: labels.SelectorValue(parent)},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent, UID: types.UID(parent + "-uid"), Controller: &controller,
+					}},
+				},
+				Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+			})
+			descendants = append(descendants, name)
+			grow(name, depth-1)
+		}
+	}
+	grow("root", 3)
+	// The deepest Tasks are still running.
+	for _, object := range objects {
+		if task := object.(*corev1alpha1.Task); strings.Count(task.Name, "-") == 3 {
+			task.Status.Phase = corev1alpha1.TaskPhaseRunning
+		}
+	}
+	base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
+	lists := 0
+	counted := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			lists++
+			return c.List(ctx, list, opts...)
+		},
+	})
+	r := &TaskReconciler{Client: base, APIReader: counted}
+	if err := r.cancelChildTasks(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if lists > 2 {
+		t.Fatalf("list requests = %d for %d descendants, want at most 2", lists, len(descendants))
+	}
+	for _, name := range descendants {
+		if strings.Count(name, "-") != 3 {
+			continue
+		}
+		got := &corev1alpha1.Task{}
+		if err := base.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, got); err != nil {
+			t.Fatal(err)
+		}
+		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+			t.Fatalf("running descendant %s was not cancelled", name)
+		}
 	}
 }
