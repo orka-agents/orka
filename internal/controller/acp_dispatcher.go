@@ -1795,6 +1795,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	sessionCompleted = true
 	endSessionTrace(nil)
+	// Admission checked the identity claim before the RuntimeSession
+	// started; that and any wait for capacity can outlast the claim. It is
+	// confirmed again while the attempt is still Planned, so a claim that
+	// cannot be read yet requeues an attempt that was provably never sent.
+	unavailable, requeued, err := d.confirmIdentityWhilePlanned(ctx, task, attemptID, fence, sessionExecution)
+	if err != nil || requeued {
+		return err
+	}
+	if unavailable != "" {
+		_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+		)
+	}
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1844,15 +1859,12 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
 	for {
-		// Admission checked the identity claim before the RuntimeSession
-		// started; that and any wait for capacity can outlast the claim, so
-		// every submission, the first included, is made only while the
-		// claim still covers the Task.
-		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
-		if err != nil {
-			// The claim could not be confirmed either way: nothing is sent,
-			// and the prompt is retried like any other pre-submission error.
-			return fmt.Errorf("confirm the Agent identity claim before the prompt: %w", err)
+		// A resubmission after a rejected admission is made only while the
+		// claim still covers the Task. The attempt is Submitting by then, so
+		// a claim that stays unreadable fails the prompt, which was provably
+		// not accepted, rather than leave it stranded.
+		if admissionRetry > 0 {
+			unavailable = d.identityUnavailableBeforeResubmission(ctx, task)
 		}
 		if unavailable != "" {
 			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
@@ -6977,6 +6989,61 @@ func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context,
 	}
 	return unavailable, nil
 }
+
+// confirmIdentityWhilePlanned confirms the identity claim for an attempt not
+// yet Submitting. A claim that cannot be confirmed requeues the attempt,
+// which was provably never sent; a lost one is returned to fail the prompt.
+func (d *ACPDispatcher) confirmIdentityWhilePlanned(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	sessionExecution *acpTaskSession,
+) (unavailable string, requeued bool, err error) {
+	unavailable, err = d.identityUnavailableBeforeSubmission(ctx, task)
+	if err == nil {
+		return unavailable, false, nil
+	}
+	identityErr := fmt.Errorf("confirm the Agent identity claim before the prompt: %w", err)
+	if sessionExecution != nil {
+		if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+			ctx, task, attemptID, fence, identityErr, &sessionExecution.Binding,
+		); requeueErr != nil {
+			return "", false, errors.Join(identityErr, requeueErr)
+		}
+		sessionExecution.requeued = true
+		return "", true, nil
+	}
+	if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, identityErr); requeueErr != nil {
+		return "", false, errors.Join(identityErr, requeueErr)
+	}
+	return "", true, nil
+}
+
+// identityUnavailableBeforeResubmission is identityUnavailableBeforeSubmission
+// for an attempt already Submitting, which cannot be requeued: a claim that
+// cannot be confirmed within identityConfirmationWait counts as unavailable.
+func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) string {
+	deadline := time.Now().Add(identityConfirmationWait)
+	for {
+		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
+		if err == nil {
+			return unavailable
+		}
+		if !time.Now().Before(deadline) {
+			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+		}
+		select {
+		case <-ctx.Done():
+			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// identityConfirmationWait bounds how long a resubmission retries an
+// unreadable identity claim.
+const identityConfirmationWait = 30 * time.Second
 
 // identityEnforcementPeriodWait bounds how long a prompt waits for a new
 // leader to record its period of Agent use enforcement.
