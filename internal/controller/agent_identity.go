@@ -249,6 +249,17 @@ const (
 	agentIdentityIssuerBackoff = time.Minute
 )
 
+// agentIdentityVerification is an issuer's answer, verified or refused, for
+// one generation of one Agent. It is kept for agentIdentityReverifyInterval;
+// an edit to the Agent asks the issuer again at once.
+type agentIdentityVerification struct {
+	uid        types.UID
+	generation int64
+	issuer, id string
+	state      agentIdentityState
+	until      time.Time
+}
+
 // agentIdentityState is the outcome of verifying an Agent's identity.
 type agentIdentityState struct {
 	declared bool
@@ -280,6 +291,16 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 			issuer, id, wait.Round(time.Second))
 		return state
 	}
+	key := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
+	r.verifications.Lock()
+	cached, found := r.verifications.byAgent[key]
+	r.verifications.Unlock()
+	if found && cached.uid == agent.UID && cached.generation == agent.Generation &&
+		cached.issuer == issuer && cached.id == id {
+		if time.Now().Before(cached.until) {
+			return cached.state
+		}
+	}
 	r.issuerBackoff.Lock()
 	wait := time.Until(r.issuerBackoff.until)
 	r.issuerBackoff.Unlock()
@@ -288,6 +309,18 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, agentIdentityVerifyTimeout)
 	defer cancel()
+	remember := func(answer agentIdentityState) agentIdentityState {
+		r.verifications.Lock()
+		if r.verifications.byAgent == nil {
+			r.verifications.byAgent = map[types.NamespacedName]agentIdentityVerification{}
+		}
+		r.verifications.byAgent[key] = agentIdentityVerification{
+			uid: agent.UID, generation: agent.Generation, issuer: issuer, id: id,
+			state: answer, until: time.Now().Add(agentIdentityReverifyInterval),
+		}
+		r.verifications.Unlock()
+		return answer
+	}
 	if err := r.IdentityVerifier.Verify(verifyCtx, agent); err != nil {
 		if errors.Is(err, agentidentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
 			r.issuerBackoff.Lock()
@@ -296,10 +329,17 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 			return unavailable(agentIdentityIssuerBackoff)
 		}
 		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
-		return state
+		return remember(state)
 	}
 	state.verified = true
-	return state
+	return remember(state)
+}
+
+// forgetAgentIdentityVerification drops a deleted Agent's last answer.
+func (r *AgentReconciler) forgetAgentIdentityVerification(key types.NamespacedName) {
+	r.verifications.Lock()
+	delete(r.verifications.byAgent, key)
+	r.verifications.Unlock()
 }
 
 // setAgentIdentityCondition reports whether a declared identity is verified

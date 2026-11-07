@@ -415,6 +415,30 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			if !tc.wantReady && stored.Status.Ready {
 				t.Fatal("a refused identity must make the Agent not Ready")
 			}
+			// The Agent's own status writes requeue it; those passes reuse
+			// the issuer's answer instead of asking again.
+			for range 3 {
+				if _, err := r.Reconcile(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if verifier.calls != 1 {
+				t.Fatalf("Verify() called %d times across repeated passes, want the answer reused", verifier.calls)
+			}
+			// An edit asks the issuer again at once.
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+				t.Fatal(err)
+			}
+			stored.Generation++
+			if err := r.Update(context.Background(), stored); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			if verifier.calls != 2 {
+				t.Fatalf("Verify() called %d times after an edit, want the issuer asked again", verifier.calls)
+			}
 		})
 	}
 }
