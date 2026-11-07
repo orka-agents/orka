@@ -59,6 +59,14 @@ func TestValidateSpecAgentIdentityMode(t *testing.T) {
 			a.Entra.Resource = "https://graph.microsoft.com/?x=1"
 		},
 		"fragment": func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "api://orka-resource#part" },
+		"no host":  func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "https://:123" },
+		"no app":   func(a *corev1alpha1.AgentIdentityOutboundAccess) { a.Entra.Resource = "api:///path" },
+		"userinfo": func(a *corev1alpha1.AgentIdentityOutboundAccess) {
+			a.Entra.Resource = "https://user@graph.microsoft.com"
+		},
+		"bad port": func(a *corev1alpha1.AgentIdentityOutboundAccess) {
+			a.Entra.Resource = "https://graph.microsoft.com:port"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := agentIdentityPolicySpec()
