@@ -105,7 +105,7 @@ type DelegatedAgentIdentity struct {
 	// is bounded so the value decodes without overflow: one that cannot
 	// decode would keep the controller from reading any OutboundAccessPolicy.
 	// +kubebuilder:validation:Type=string
-	// +kubebuilder:validation:MaxLength=16
+	// +kubebuilder:validation:MaxLength=32
 	// +kubebuilder:validation:Pattern=`^([0-9]{1,4}(\.[0-9]{1,9})?(ns|us|µs|μs|ms|s|m|h)|([0-9]{1,4}h)?([0-9]{1,4}m)?[0-9]{1,4}(\.[0-9]{1,9})?s)$`
 	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s') && duration(self) <= duration('8760h')",message="maxDelegationAge must be a positive duration of at most 8760h"
 	// +optional
