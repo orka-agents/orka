@@ -232,3 +232,38 @@ func TestRedactForwardedTextKeepsJSONEscapedContinuationTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactForwardedBodyKeepsJSONValid(t *testing.T) {
+	body := `{"secrets":[{"name":"example"}],"secret":null,"count":3,` +
+		`"properties":{"password":"hunter2","note":"token=abc rest","accessToken":"tok-1","items":[1,true,null]},` +
+		`"nextLink":"https://management.azure.com/x?api-version=1&$skiptoken=page2","$skipToken":"page3",` +
+		`"echo":"arm-token-secret"}`
+	got := redactForwardedBody(body, "arm-token-secret")
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("redacted body is not JSON: %s", got)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	properties := decoded["properties"].(map[string]any)
+	switch {
+	case decoded["secret"] != nil:
+		t.Fatalf("a null under a sensitive key changed: %v", decoded["secret"])
+	case decoded["secrets"].([]any)[0].(map[string]any)["name"] != "example":
+		t.Fatalf("an array under a sensitive key changed: %v", decoded["secrets"])
+	case properties["password"] != "[REDACTED]" || properties["accessToken"] != "[REDACTED]":
+		t.Fatalf("sensitive string values kept: %v", properties)
+	case strings.Contains(properties["note"].(string), "abc"):
+		t.Fatalf("a secret-shaped string kept its value: %q", properties["note"])
+	case !strings.HasSuffix(decoded["nextLink"].(string), "&$skiptoken=page2") || decoded["$skipToken"] != "page3":
+		t.Fatalf("paging state changed: %v %v", decoded["nextLink"], decoded["$skipToken"])
+	case strings.Contains(got, "arm-token-secret"):
+		t.Fatalf("the injected credential survived: %s", got)
+	case decoded["count"] != float64(3) || len(properties["items"].([]any)) != 3:
+		t.Fatalf("non-string values changed: %s", got)
+	}
+	if text := redactForwardedBody("not json token=abc", "x"); strings.Contains(text, "abc") {
+		t.Fatalf("a text body was not redacted: %q", text)
+	}
+}

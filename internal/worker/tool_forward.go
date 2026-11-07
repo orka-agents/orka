@@ -101,7 +101,7 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 	}
 	response := harnessv2.MCPForwardResponse{
 		Status: resp.StatusCode,
-		Body:   redactForwardedText(string(body), prepared.redactionSecrets...),
+		Body:   redactForwardedBody(string(body), prepared.redactionSecrets...),
 	}
 	for _, name := range harnessv2.ForwardResponseHeaders {
 		value := strings.TrimSpace(resp.Header.Get(name))
@@ -164,4 +164,103 @@ func redactForwardedText(text string, secrets ...string) string {
 		redacted = strings.Replace(redacted, "\x00orka-forward-continuation-"+strconv.Itoa(index)+"\x00", value, 1)
 	}
 	return redacted
+}
+
+// forwardSensitiveKeyRe matches a JSON key whose string value is a
+// credential, as the text redactor's assignment rule does for prose.
+var forwardSensitiveKeyRe = regexp.MustCompile(`(?i)^[a-z0-9_.$-]*(?:api[-_]?key|token|secret|password|passwd|pwd|credential|private[-_]?key|client[-_]?secret)[a-z0-9_.-]*$`)
+
+// forwardContinuationKeyRe matches the JSON keys that carry paging state,
+// whose values are kept so the next page can be requested.
+var forwardContinuationKeyRe = regexp.MustCompile(`(?i)^(?:\$?skiptoken|continuationtoken|nextlink)$`)
+
+// redactForwardedBody redacts a forwarded response body. The credentials Orka
+// injected are removed from the raw bytes first. A JSON body is then redacted
+// value by value: a string under a credential-named key becomes
+// "[REDACTED]" and every other string goes through the text rules, while
+// arrays, objects, numbers, and nulls are never rewritten, so a valid
+// response stays valid JSON. Other bodies are redacted as text.
+func redactForwardedBody(body string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" {
+			body = strings.ReplaceAll(body, secret, "[REDACTED]")
+		}
+	}
+	if json.Valid([]byte(body)) {
+		if redacted, ok := redactForwardedJSON(body); ok {
+			return redacted
+		}
+	}
+	return redactForwardedText(body)
+}
+
+// redactForwardedJSON rewrites only the string literals whose redacted
+// value differs, copying every other byte of body unchanged.
+func redactForwardedJSON(body string) (string, bool) {
+	type container struct {
+		object    bool
+		expectKey bool
+		key       string
+	}
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var out strings.Builder
+	var stack []*container
+	copied, previous := 0, 0
+	valueDone := func() {
+		if len(stack) > 0 && stack[len(stack)-1].object {
+			stack[len(stack)-1].expectKey = true
+		}
+	}
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", false
+		}
+		end := int(decoder.InputOffset())
+		var top *container
+		if len(stack) > 0 {
+			top = stack[len(stack)-1]
+		}
+		switch value := token.(type) {
+		case json.Delim:
+			switch value {
+			case '{':
+				stack = append(stack, &container{object: true, expectKey: true})
+			case '[':
+				stack = append(stack, &container{})
+			default:
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+		case string:
+			if top != nil && top.object && top.expectKey {
+				top.key, top.expectKey = value, false
+				break
+			}
+			redacted := redactForwardedText(value)
+			if top != nil && top.object && !forwardContinuationKeyRe.MatchString(top.key) && forwardSensitiveKeyRe.MatchString(top.key) {
+				redacted = "[REDACTED]"
+			}
+			if redacted != value {
+				start := previous + strings.IndexByte(body[previous:end], '"')
+				encoded, err := json.Marshal(redacted)
+				if err != nil || start < previous {
+					return "", false
+				}
+				out.WriteString(body[copied:start])
+				out.Write(encoded)
+				copied = end
+			}
+			valueDone()
+		default:
+			valueDone()
+		}
+		previous = end
+	}
+	out.WriteString(body[copied:])
+	return out.String(), true
 }
