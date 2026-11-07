@@ -903,7 +903,7 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	// age shortened included; the checks below must judge the policy as it
 	// is now.
 	if err := r.requireUnchangedPolicy(ctx, policy); err != nil {
-		return "", err
+		return "", refuseAgentIdentity(agentIdentityRefusalPolicy, err)
 	}
 	if tokenRequest.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
 		return token, nil
