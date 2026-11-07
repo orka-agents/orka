@@ -968,8 +968,11 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
-	// The API applies admission's worker rules to the same identities.
-	api.SetWorkerServiceAccountNames(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts))
+	// The API applies admission's worker rules to every worker ServiceAccount,
+	// however the provenance trust list is overridden.
+	api.SetWorkerServiceAccountNames(orkaadmission.WorkerServiceAccountNames(
+		workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts),
+		[]string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName}))
 
 	agentIdentityAuditLog := agentIdentityAuditLogger(opts)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -1313,6 +1316,8 @@ func main() {
 				taskProvenanceAdmissionTrustedServiceAccounts,
 				currentPodNamespace(),
 			)
+			admissionConfig.WorkerServiceAccountNames = orkaadmission.WorkerServiceAccountNames(
+				admissionConfig.TrustedServiceAccountNames, []string{aiWorkerServiceAccountName, vendorWorkerServiceAccountName})
 			orkaadmission.RegisterTaskProvenanceWebhook(webhookServer, mgr.GetScheme(), admissionConfig, mgr.GetAPIReader())
 			setupLog.Info("enabled Task provenance validating admission",
 				"trustedUsers", strings.Join(admissionConfig.TrustedUsernames, ","),
