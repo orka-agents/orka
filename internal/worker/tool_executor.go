@@ -89,6 +89,23 @@ func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
 	return context.WithValue(ctx, toolCallIDContextKey{}, toolCallID)
 }
 
+type agentUIDContextKey struct{}
+
+// WithAgentUID records the Agent UID a Task's execution binding froze, so a
+// Tool CRD span joins identity records the way built-in tool spans do
+// (ADR 0039).
+func WithAgentUID(ctx context.Context, agentUID string) context.Context {
+	if strings.TrimSpace(agentUID) == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentUIDContextKey{}, agentUID)
+}
+
+func agentUIDFromContext(ctx context.Context) string {
+	agentUID, _ := ctx.Value(agentUIDContextKey{}).(string)
+	return strings.TrimSpace(agentUID)
+}
+
 func toolCallIDFromContext(ctx context.Context) string {
 	toolCallID, _ := ctx.Value(toolCallIDContextKey{}).(string)
 	return strings.TrimSpace(toolCallID)
@@ -447,7 +464,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, tool *corev1alpha1.Tool, arg
 }
 
 func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string) []attribute.KeyValue {
-	attrs := make([]attribute.KeyValue, 0, 9)
+	attrs := make([]attribute.KeyValue, 0, 10)
 	attrs = append(attrs,
 		executeToolOperationAttr,
 		attribute.String(genai.AttrToolName, toolName),
@@ -466,6 +483,9 @@ func toolExecutorSpanAttributes(ctx context.Context, namespace, toolName string)
 	}
 	if toolCallID := toolCallIDFromContext(ctx); toolCallID != "" {
 		attrs = append(attrs, attribute.String(genai.AttrToolCallID, toolCallID))
+	}
+	if agentUID := agentUIDFromContext(ctx); agentUID != "" {
+		attrs = append(attrs, attribute.String(genai.AttrAgentID, agentUID))
 	}
 	return attrs
 }
