@@ -858,14 +858,16 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if r.DelegationLive == nil {
 		return "", errors.New("delegated agent identity access requires the controller's Task and Session check")
 	}
+	if err := r.requireLiveRequesterConnection(ctx, policy, req); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err)
+	}
+	// The Connection re-check reads custody and Kubernetes and can block, so
+	// the delegation's liveness and age are judged last, as of release.
 	if err := r.DelegationLive(ctx, binding); err != nil {
 		return "", fmt.Errorf("the delegation ended while its credential was issued: %w", err)
 	}
 	if r.delegationExpired(policy, binding) {
 		return "", errDelegationExpired
-	}
-	if err := r.requireLiveRequesterConnection(ctx, policy, req); err != nil {
-		return "", fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err)
 	}
 	return token, nil
 }
