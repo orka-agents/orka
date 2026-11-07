@@ -648,6 +648,9 @@ func TestTaskLabels(t *testing.T) {
 	if taskLabels[labels.LabelChatSession] != "sess-12345678" {
 		t.Errorf("chat-session label = %q", taskLabels[labels.LabelChatSession])
 	}
+	if taskLabels[labels.LabelChatSessionNamespace] != e.namespace || e.namespace == "" {
+		t.Errorf("chat-session-namespace label = %q, want the chat's namespace %q", taskLabels[labels.LabelChatSessionNamespace], e.namespace)
+	}
 	if _, pinned := taskLabels[labels.LabelChatSessionEpoch]; pinned {
 		t.Error("no epoch label without a known chat Session incarnation")
 	}

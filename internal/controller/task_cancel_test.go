@@ -16,12 +16,15 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -499,5 +502,127 @@ func TestCancelTaskAfterExecutionKeepsTheCancelRequest(t *testing.T) {
 	}
 	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Message != request {
 		t.Fatalf("status = %s %q, want Cancelled with the cancel request", current.Status.Phase, current.Status.Message)
+	}
+}
+
+// A PromptAttempt persisted before a lost status write leaves a Task without
+// execution status, which recovery never visits. Cancelling it settles the
+// attempt and binds it to the terminal execution.
+func TestCancelRequestedAgentTaskSettlesAnUnprojectedAttempt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controls := sqlite.NewStore(db, "test")
+	epochs := NewControllerEpochManager(controls, "controller")
+	done := make(chan error, 1)
+	go func() { done <- epochs.Start(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const request = "cancelled by alice: wrong repository"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unprojected", Namespace: testNS, UID: "unprojected-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: request},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	key := store.PromptAttemptKey{Namespace: testNS, TaskUID: string(task.UID), Attempt: 1, PromptID: "prompt-unprojected-uid-1"}
+	attemptID, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controls.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		ID: attemptID, Key: key, RequestDigest: testControlDigestForDispatcher("unprojected-request"),
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested, CreatedAt: time.Now().UTC(),
+	}), fence); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).WithStatusSubresource(task).Build()
+	guarded := &cancelGuardStore{DurableControlStore: controls}
+	r := &TaskReconciler{Client: c, DurableControlStore: guarded, ControllerEpochManager: epochs}
+	if _, err := r.cancelRequestedAgentTask(ctx, task.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	if guarded.entered == 0 {
+		t.Fatal("the status bound to the settled attempt was written outside the epoch guard")
+	}
+
+	attempt, err := controls.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionCancelled || attempt.OutcomeMarker != request {
+		t.Fatalf("attempt = %s %q, want Cancelled with the cancel request", attempt.ExecutionState, attempt.OutcomeMarker)
+	}
+	current := &corev1alpha1.Task{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	execution := current.Status.Execution
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || execution == nil ||
+		execution.State != corev1alpha1.TaskExecutionStateCancelled || execution.Attempt != 1 || execution.PromptID != key.PromptID ||
+		current.Status.Delivery == nil || current.Status.Delivery.State != corev1alpha1.TaskDeliveryStateNotRequested {
+		t.Fatalf("status = %#v, want Cancelled bound to the settled attempt", current.Status)
+	}
+}
+
+// A workspace status projection that keeps failing must not keep a
+// cancelled class-backed Agent Task running: the Cancelled phase, which
+// stops the dispatcher's run, is written first.
+func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
+	const request = "cancelled by alice: wrong repository"
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "class-backed", Namespace: testNS, UID: "class-backed-uid",
+			Finalizers:  []string{labels.TaskFinalizer},
+			Labels:      map[string]string{acpExecutionWorkspaceLinkLabel: "acp-ws-class-backed"},
+			Annotations: map[string]string{labels.AnnotationCancelRequested: request},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning,
+			Execution: &corev1alpha1.TaskExecutionStatus{
+				State: corev1alpha1.TaskExecutionStateRunning, Attempt: 1, PromptID: "prompt-1", RuntimePoolName: "acp-ws-class-backed",
+			},
+			ExecutionWorkspace: &corev1alpha1.ExecutionWorkspaceStatus{Phase: corev1alpha1.ExecutionWorkspacePhaseReady},
+		},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS, UID: "test-ns-uid"}}
+	r := newUnitReconciler(newTestScheme(), task, namespace)
+	watched, ok := r.Client.(client.WithWatch)
+	if !ok {
+		t.Fatal("unit reconciler client does not implement client.WithWatch")
+	}
+	workspaceReads := 0
+	r.Client = interceptor.NewClient(watched, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isWorkspace := obj.(*workspacev1alpha1.ExecutionWorkspace); isWorkspace {
+				workspaceReads++
+				return errors.New("workspace read unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)}); err != nil {
+		t.Fatalf("Reconcile() = %v, want the cancellation applied", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseCancelled || current.Status.Message != request {
+		t.Fatalf("status = %s %q, want Cancelled with the cancel request", current.Status.Phase, current.Status.Message)
+	}
+	if workspaceReads != 0 {
+		t.Fatalf("workspace reads = %d, want the cancellation applied before the workspace projection", workspaceReads)
 	}
 }

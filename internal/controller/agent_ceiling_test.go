@@ -187,6 +187,16 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 			}(),
 		},
 		{
+			name:  "requested coordination tools are counted",
+			agent: ceilingTestAgent(corev1alpha1.AgentRuntimeClaude, &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("Read")}),
+			task: func() *corev1alpha1.Task {
+				task := ceilingTestTask(tools("Read", "send_message"), nil)
+				task.Labels = map[string]string{labels.LabelParentTask: "parent"}
+				return task
+			}(),
+			wantErr: `does not allow tool "send_message"`,
+		},
+		{
 			// Dispatch materializes the native list before injecting messaging
 			// tools, so the exact-match deny entry "bash" leaves "Bash" granted.
 			name:  "delegated child judged on the materialized native list",
@@ -317,6 +327,18 @@ func TestValidateAgentRuntimeCeiling(t *testing.T) {
 				}},
 			},
 			task: ceilingTestTask(tools("bash"), nil),
+		},
+		{
+			name: "external runtime Task without allowedTools is told to set them",
+			agent: &corev1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},
+				Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+					RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+					Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: tools("read-inventory")},
+				}},
+			},
+			task:    ceilingTestTask(nil, nil),
+			wantErr: "the task does not set allowedTools; set allowedTools within the ceiling",
 		},
 	}
 	for _, tt := range tests {

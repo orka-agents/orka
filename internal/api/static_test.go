@@ -257,6 +257,7 @@ func staticTestFS() fstest.MapFS {
 		"assets/index-abc.css":                {Data: []byte(strings.Repeat("body { color: black; }\n", 50))},
 		"assets/inter-latin-400-normal.woff2": {Data: []byte(strings.Repeat("w", 500))},
 		"favicon.svg":                         {Data: []byte("<svg></svg>")},
+		"favicon.png":                         {Data: []byte("\x89PNG\r\n\x1a\n")},
 	}
 }
 
@@ -274,7 +275,8 @@ func TestStaticFiles_CacheAndSecurityHeaders(t *testing.T) {
 		{"hashed script", "/assets/index-abc.js", "application/javascript", staticAssetCacheControl, false},
 		{"hashed stylesheet", "/assets/index-abc.css", "text/css", staticAssetCacheControl, false},
 		{"font", "/assets/inter-latin-400-normal.woff2", "application/octet-stream", staticAssetCacheControl, false},
-		{"favicon", "/favicon.svg", "image/svg+xml", "", false},
+		{"SVG favicon", "/favicon.svg", "image/svg+xml", "", false},
+		{"PNG favicon", "/favicon.png", "image/png", "", false},
 		{"root", "/", "text/html; charset=utf-8", "no-cache", true},
 		{"registered route", "/tasks/task-1", "text/html; charset=utf-8", "no-cache", true},
 	}

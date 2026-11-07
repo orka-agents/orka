@@ -27,6 +27,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -141,6 +142,28 @@ type AgentIdentityTokenRequest struct {
 	Policy   PolicyIdentity
 	// UserAssertion is the requester's token, for Delegated mode only.
 	UserAssertion string
+}
+
+// AgentConditionIdentityVerified is the Agent condition reporting whether its
+// issuer proved the identity, and AgentReasonIdentityVerificationFailed the
+// reason for a definitive refusal, as opposed to an issuer that could not
+// answer or an identity not verified yet.
+const (
+	AgentConditionIdentityVerified        = "IdentityVerified"
+	AgentReasonIdentityVerificationFailed = "VerificationFailed"
+)
+
+// issuerRefusedIdentity fails closed once the issuer has definitively refused
+// the Agent's identity, for example because it was disabled or deleted, so a
+// policy token still cached from before is not served for new calls. An
+// issuer that could not answer, or an identity not verified yet, does not
+// refuse here; the issuer's own answer decides those calls.
+func issuerRefusedIdentity(agent *corev1alpha1.Agent) error {
+	condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionIdentityVerified)
+	if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == AgentReasonIdentityVerificationFailed {
+		return errors.New("the issuer refused the Task's bound Agent identity when it was last verified")
+	}
+	return nil
 }
 
 // AgentIdentityTokenSource issues Agent identity credentials. It exists only
@@ -263,6 +286,14 @@ type ConnectionCredential struct {
 // therefore fail closed on connection-mode policies.
 type ConnectionCredentialSource interface {
 	ResolveConnectionCredential(context.Context, ConnectionCredentialRequest) (ConnectionCredential, error)
+}
+
+// ConnectionLivenessChecker re-checks, without reading or refreshing custody,
+// that the requester's Connection is still exactly the one frozen for the
+// Task: present, not being deleted, Ready, and on the same UID, generation,
+// and grant. Delegated mode requires it of its ConnectionCredentialSource.
+type ConnectionLivenessChecker interface {
+	RequireLiveConnection(context.Context, ConnectionCredentialRequest) error
 }
 
 // Resolution describes how ToolExecutor should modify a prepared request.
@@ -780,6 +811,9 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
 		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
 	}
+	if err := issuerRefusedIdentity(live); err != nil {
+		return Resolution{}, err
+	}
 	identity := policy.Spec.AgentIdentity
 	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
 		return Resolution{}, fmt.Errorf("agent identity outbound access policy %q targets an issuer the Task's identity is not from", policy.Name)
@@ -812,7 +846,7 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 		tokenRequest.UserAssertion = credential.AccessToken
 		connectionUID, parameters = credential.ConnectionUID, declared.Parameters
 	}
-	token, err := r.issueAgentIdentityToken(ctx, policy, *binding, tokenRequest)
+	token, err := r.issueAgentIdentityToken(ctx, policy, req, tokenRequest)
 	if err != nil {
 		return Resolution{}, err
 	}
@@ -834,7 +868,7 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 func (r *KubernetesResolver) issueAgentIdentityToken(
 	ctx context.Context,
 	policy *corev1alpha1.OutboundAccessPolicy,
-	binding AgentIdentityBinding,
+	req ResolveRequest,
 	tokenRequest AgentIdentityTokenRequest,
 ) (string, error) {
 	token, err := r.AgentIdentities.AgentIdentityToken(ctx, tokenRequest)
@@ -847,6 +881,7 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if tokenRequest.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
 		return token, nil
 	}
+	binding := *req.AgentIdentity
 	if r.DelegationLive == nil {
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, errors.New("delegated agent identity access requires the controller's Task and Session check"))
 	}
@@ -856,7 +891,34 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if r.delegationExpired(policy, binding) {
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, errDelegationExpired)
 	}
+	if err := r.requireLiveRequesterConnection(ctx, policy, req); err != nil {
+		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err))
+	}
 	return token, nil
+}
+
+// ErrRequesterLinkChanged refuses a delegated credential whose requester's
+// Connection was unlinked, deleted, re-linked, or stopped being Ready while
+// the credential was issued.
+var ErrRequesterLinkChanged = errors.New("the requester's link changed while the credential was issued")
+
+// requireLiveRequesterConnection re-checks the requester's Connection the
+// exchange used, with the source's own frozen-binding check.
+func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) error {
+	checker, ok := r.Connections.(ConnectionLivenessChecker)
+	if !ok {
+		return errors.New("the connection credential source cannot re-check the Connection")
+	}
+	provider, ok := ConnectionProviderName(policy)
+	frozen, bound := req.FrozenConnections[policy.Name]
+	if !ok || !bound || req.Requester == nil {
+		return errors.New("the Task has no requester Connection frozen for the policy")
+	}
+	return checker.RequireLiveConnection(ctx, ConnectionCredentialRequest{
+		Namespace: policy.Namespace, Provider: provider,
+		Issuer: req.Requester.Issuer, Subject: req.Requester.Subject,
+		Frozen: frozen, Tool: req.Tool,
+	})
 }
 
 var errDelegationExpired = errors.New("the delegation has expired; the requester must act again for the Agent to act for them")

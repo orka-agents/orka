@@ -283,16 +283,23 @@ func TestExternalAPIProposalAppliedMemoryRequiresNamedRead(t *testing.T) {
 	for _, link := range []string{"applied-memory-id", "source-proposal-id"} {
 		t.Run(link, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
-			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal", Status: "accepted"}
+			proposal := &store.MemoryProposal{ID: "reference", Namespace: "default", Type: "memory", Title: "reference", Content: "proposal"}
+			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
+			require.NoError(t, f.store.ReviewMemoryProposal(t.Context(), store.MemoryProposalReview{
+				Namespace: "default", ID: proposal.ID, Status: "accepted", Reviewer: "reviewer",
+			}))
 			if link == "applied-memory-id" {
-				proposal.AppliedMemoryID = "protected"
+				// An accepted proposal that already names a memory exists only in
+				// retained rows: a new proposal cannot carry an apply outcome.
+				_, err := f.db.ExecContext(t.Context(), `UPDATE memory_proposals SET applied_memory_id = ? WHERE namespace = ? AND id = ?`,
+					"protected", "default", proposal.ID)
+				require.NoError(t, err)
 			} else {
 				memory, err := f.store.GetMemory(t.Context(), "default", "protected")
 				require.NoError(t, err)
 				memory.SourceProposalID = proposal.ID
 				require.NoError(t, f.store.UpdateMemory(t.Context(), memory))
 			}
-			require.NoError(t, f.store.CreateMemoryProposal(t.Context(), proposal))
 			permissions := make([]authorizationv1.ResourceAttributes, 0, 3)
 			permissions = append(permissions,
 				authorizationv1.ResourceAttributes{Namespace: "default", Group: "core.orka.ai", Resource: "memoryproposals", Verb: "apply", Name: "reference"},
@@ -470,7 +477,7 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			f := newExternalAuthorizationFixture(t)
 			f.allowRoute(t, "POST "+path)
-			before := f.changes(t)
+			before, beforeReceipts := f.changes(t), f.receipts(t)
 			requestBody := `{"message":"hello","model":"protected/fixture","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`
 			if path == "/openai/v1/responses" {
 				requestBody = `{"model":"protected/fixture","store":false,"input":"hello"}`
@@ -493,7 +500,9 @@ func TestExternalAPIAuthorizedChatProviderInvocation(t *testing.T) {
 				require.Len(t, messages, 2)
 				require.Equal(t, "hello", messages[0].Content)
 			} else {
-				require.Equal(t, before+2, f.changes(t), "only usage start and completion should be retained")
+				receipts := f.receipts(t) - beforeReceipts
+				require.Equal(t, int64(2), receipts, "each retained write stores its operation receipt")
+				require.Equal(t, before+2+receipts, f.changes(t), "only usage start and completion should be retained")
 			}
 		})
 	}

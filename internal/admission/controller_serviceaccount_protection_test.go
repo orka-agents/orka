@@ -191,6 +191,43 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 		aiWorkerUsername, "", job, nil))
 }
 
+// A running controller Pod keeps its spec: an image swap or an ephemeral
+// container would run other code with its projected token.
+func TestControllerServiceAccountProtectionFreezesControllerPods(t *testing.T) {
+	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
+	pods := controllerSAResources["Pod"]
+	running := func() *unstructured.Unstructured {
+		return withReplicaSetOwner(controllerSAWorkload("Pod", "orka-controller-abc-xyz", "serviceAccountName", protectedControllerSA))
+	}
+	labelled := running()
+	labelled.SetLabels(map[string]string{"debug": "true"})
+	swapped := running()
+	swapped.Object["spec"].(map[string]any)["containers"] = []any{map[string]any{"name": "c", "image": "attacker"}}
+	debugged := running()
+	debugged.Object["spec"].(map[string]any)["ephemeralContainers"] = []any{map[string]any{
+		"name": "debugger", "image": "busybox", "targetContainerName": "c",
+	}}
+	other := controllerSAWorkload("Pod", "app", "serviceAccountName", "app")
+	otherSwapped := controllerSAWorkload("Pod", "app", "serviceAccountName", "app")
+	otherSwapped.Object["spec"].(map[string]any)["containers"] = []any{map[string]any{"name": "c", "image": "next"}}
+	for name, tc := range map[string]struct {
+		subresource string
+		object, old *unstructured.Unstructured
+		allowed     bool
+	}{
+		"metadata update":                       {object: labelled, old: running(), allowed: true},
+		"image swap":                            {object: swapped, old: running()},
+		"ephemeral container":                   {subresource: "ephemeralcontainers", object: debugged, old: running()},
+		"image change on another account's Pod": {object: otherSwapped, old: other, allowed: true},
+		"ephemeral container on another Pod":    {subresource: "ephemeralcontainers", object: otherSwapped, old: other, allowed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.allowed, policy.admits(t, tc.object.GroupVersionKind(), pods, tc.object.GetName(),
+				apiserveradmission.Update, "namespace-editor", tc.subresource, tc.object, tc.old))
+		})
+	}
+}
+
 func TestControllerServiceAccountProtectionAdmitsOnlyTheKubeletTokenRequests(t *testing.T) {
 	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
 	kind := schema.GroupVersionKind{Group: "authentication.k8s.io", Version: "v1", Kind: "TokenRequest"}

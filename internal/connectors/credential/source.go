@@ -67,7 +67,10 @@ type Source struct {
 	flightEntered func()
 }
 
-var _ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+var (
+	_ outboundaccess.ConnectionCredentialSource = (*Source)(nil)
+	_ outboundaccess.ConnectionLivenessChecker  = (*Source)(nil)
+)
 
 func (s *Source) now() time.Time {
 	if s.Now != nil {
@@ -177,6 +180,47 @@ func (s *Source) ResolveConnectionCredential(ctx context.Context, req outboundac
 		Generation:    connection.Generation,
 		Mode:          connection.Spec.Mode,
 	}, nil
+}
+
+// RequireLiveConnection implements outboundaccess.ConnectionLivenessChecker:
+// the frozen-binding check ResolveConnectionCredential applies before it
+// releases a credential, and the grant custody holds. Custody, not the
+// Connection's status, is authoritative: a re-consent commits there first,
+// so a status that still shows the frozen grant does not prove the
+// material a credential was derived from is still the person's current
+// grant. It reads the grant only, never the material, and never refreshes.
+func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.ConnectionCredentialRequest) error {
+	if s == nil || s.Client == nil || s.Credentials == nil {
+		return errors.New("connection credential source is not configured")
+	}
+	if strings.TrimSpace(req.Frozen.UID) == "" {
+		return errors.New("connection credential requires a frozen Connection binding")
+	}
+	connection, err := s.loadLiveConnection(ctx, req)
+	if err != nil {
+		return err
+	}
+	grants, ok := s.Credentials.(store.ConnectorGrantReader)
+	if !ok {
+		return errors.New("connector custody cannot report the grant it holds")
+	}
+	ref, err := connectors.CredentialRef(connection)
+	if err != nil {
+		return err
+	}
+	grant, err := grants.GetConnectorCredentialGrant(ctx, ref)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
+		return errors.New("connection holds no credential; the person must reconnect")
+	}
+	if err != nil {
+		return err
+	}
+	// The exchanged credential carried the frozen grant: resolution refuses
+	// any other before it releases material (frozenGrantHolds).
+	if grant != req.Frozen.GrantSequence {
+		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+	}
+	return nil
 }
 
 // loadLiveConnection re-reads the requester's Connection and checks that it

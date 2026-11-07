@@ -89,6 +89,8 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
+| `storage.bindings.state` / `storage.bindings.artifacts` | `sqlite` / `sqlite` | Backend for each storage contract: `sqlite` or a name in `storage.adapters`. See [Storage bindings](#storage-bindings). |
+| `storage.adapters` | `{}` | Storage adapters in the release namespace, keyed by name. |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 | `client.namespace` | Helm release namespace | Client ServiceAccount namespace; must match `controller.watchNamespace`. |
@@ -294,6 +296,43 @@ agent. Never set it in a cluster manifest.
 
 When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publisher, set the same value on the controller Deployment as well. The controller bounds each publisher-backed external-effect call and sizes the effect's ledger lease from this timeout plus a settlement margin; without the controller-side value, publisher operations are clamped to the default four-minute call bound. Brokered custom-Tool calls always keep the fixed four-minute clamp that their Tool descriptors were admitted under.
 
+### Storage bindings
+
+Orka stores application data under two contracts: `state` (Sessions, results,
+gateway and control records) and `artifacts` (artifact bytes and metadata).
+`storage.bindings` names the backend for each. With both on `sqlite` (the
+default) the controller keeps `--store-backend=sqlite` and `--store-path`.
+When a contract names an adapter, the chart renders the
+`<release>-storage` ConfigMap, passes it with `--storage-config`, and restarts
+the controller when it changes:
+
+```yaml
+storage:
+  bindings:
+    state: postgres
+    artifacts: postgres
+  adapters:
+    postgres:
+      serviceRef: {name: orka-storage-postgres, port: 8443}   # or url: https://...
+      tls:
+        serverName: orka-storage-postgres.orka-system.svc     # optional
+        caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+      clientAuth:
+        bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+```
+
+Each adapter sets exactly one of `serviceRef` and an `https://` `url`, and
+must be bound to at least one contract. Services and Secrets are in the
+release namespace. The controller reads the Secrets directly at startup; they
+are not mounted. A bearer token needs at least 32 visible ASCII characters.
+
+:::caution[SQLite only in this release]
+The controller cannot reach a storage adapter yet. With a contract bound to an
+adapter it reports `AdapterTransportUnavailable` and does not start, and it
+never falls back to SQLite. Keep both bindings on `sqlite`. The store volume is
+required either way.
+:::
+
 ### Helm CRD lifecycle
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
@@ -366,7 +405,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--agent-identity-entra-tenant-id` | empty | Entra tenant of the agent identity blueprint. Set together with `--agent-identity-entra-blueprint-client-id` to accept `Agent.spec.identity.entra`; both must be GUIDs. Helm: `controller.agentIdentity.entra.tenantID`. Env: `ORKA_AGENT_IDENTITY_ENTRA_TENANT_ID` |
 | `--agent-identity-entra-blueprint-client-id` | empty | Client ID of the Entra agent identity blueprint that every bound identity belongs to. Helm: `controller.agentIdentity.entra.blueprintClientID`. Env: `ORKA_AGENT_IDENTITY_ENTRA_BLUEPRINT_CLIENT_ID` |
 | `--agent-identity-entra-authority` | `https://login.microsoftonline.com` | Entra authority for agent identity tokens, for example a sovereign cloud's login URL. Must be https, without credentials, query, or fragment. A non-default authority is part of the issuer instance Task bindings freeze, so changing it fails bound Tasks' identity-backed calls closed. Helm: `controller.agentIdentity.entra.authority`. Env: `ORKA_AGENT_IDENTITY_ENTRA_AUTHORITY` |
-| `--agent-identity-token-file` | `/var/run/secrets/orka.ai/agent-identity/token` | Projected ServiceAccount token, audienced to `api://AzureADTokenExchange`, that the controller presents as the blueprint's federated credential. The chart mounts it when `controller.agentIdentity.entra.tenantID` is set, and then also installs a ValidatingAdmissionPolicy for the controller's namespace: only the ReplicaSet controller may create Pods running as the controller ServiceAccount, only the Deployment controller may create such ReplicaSets or change their Pod templates, only the controller Deployment may name it, only the kubelet may request tokens for it, no Job, CronJob, StatefulSet, DaemonSet, or ReplicationController may run as it, and no `kubernetes.io/service-account-token` Secret may be created for it. Delete any such Secret created before you enable agent identities, and enforce at least the `baseline` Pod Security profile on the namespace so no privileged or `hostPath` Pod can read the token from its node. Env: `ORKA_AGENT_IDENTITY_TOKEN_FILE` |
+| `--agent-identity-token-file` | `/var/run/secrets/orka.ai/agent-identity/token` | Projected ServiceAccount token, audienced to `api://AzureADTokenExchange`, that the controller presents as the blueprint's federated credential. The chart mounts it when `controller.agentIdentity.entra.tenantID` is set, and then also installs a ValidatingAdmissionPolicy for the controller's namespace: only the ReplicaSet controller may create Pods running as the controller ServiceAccount and nobody may change their spec or add ephemeral containers, only the Deployment controller may create such ReplicaSets or change their Pod templates, only the controller Deployment may name it, only the kubelet may request tokens for it, no Job, CronJob, StatefulSet, DaemonSet, or ReplicationController may run as it, and no `kubernetes.io/service-account-token` Secret may be created for it. Delete any such Secret created before you enable agent identities, and enforce at least the `baseline` Pod Security profile on the namespace so no privileged or `hostPath` Pod can read the token from its node. Env: `ORKA_AGENT_IDENTITY_TOKEN_FILE` |
 | `--agent-identity-max-delegation-age` | `24h` | Longest `maxDelegationAge` any `agentIdentity` policy in `Delegated` mode may use; longer values are capped. Env: `ORKA_AGENT_IDENTITY_MAX_DELEGATION_AGE` |
 | `--gateway-enabled` | `true` | Enable generic gateway reconciliation and ingress |
 | `--connectors-enabled` | `false` | Enable per-user connector reconciliation (`ConnectorProvider` and `Connection`). Requires Task provenance admission (`--task-provenance-admission-enabled` or `--task-provenance-admission-external`); the controller refuses to start otherwise, because connector use trusts `spec.requestedBy` only when the API server provably stamped it. Env: `ORKA_CONNECTORS_ENABLED` |
@@ -463,8 +502,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
 | `--session-loader-image` | Digest-pinned BusyBox 1.37 multi-platform index | Session transcript fetcher image. Requires a SHA256 digest and BusyBox-compatible `sh`, `cat`, `wget`, `rm`, `mv`, and `sleep`; tag-only references fail startup. Helm: `workers.sessionLoader.image.repository` and `.digest`. No registry resolution is performed. |
-| `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
-| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |
+| `--store-backend` | `sqlite` | Payload/read-model backend when `--storage-config` is not set. Only `sqlite` is accepted, and it cannot be combined with `--storage-config`. ACP control authority remains Kubernetes CRDs and Leases. |
+| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file, used by every storage contract bound to `sqlite`. |
+| `--storage-config` | `""` | Storage configuration file binding each storage contract to `sqlite` or a storage adapter. Empty binds both contracts to SQLite at `--store-path`. See [Storage bindings](#storage-bindings). |
 | `--ai-worker-service-account-name` | `orka-ai-worker` | ServiceAccount name for AI worker Jobs and dynamically ensured worker RBAC |
 | `--vendor-worker-service-account-name` | `orka-vendor-worker` | ServiceAccount name for vendor/agent worker Jobs and dynamically ensured worker RBAC |
 | `--container-worker-service-account-name` | `orka-container-worker` | ServiceAccount name for container worker Jobs and dynamically ensured worker RBAC |

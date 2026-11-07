@@ -265,14 +265,14 @@ func TestEntraScopeKeepsTheResourceAsConfigured(t *testing.T) {
 func TestEntraTokenCacheIsBounded(t *testing.T) {
 	now := time.Now()
 	issuer := &EntraIssuer{Now: func() time.Time { return now }}
-	fetch := func() (string, time.Duration, error) { return "t", time.Hour, nil }
+	fetch := func(context.Context) (string, time.Duration, error) { return "t", time.Hour, nil }
 	for i := range 10 {
-		if _, err := issuer.cached(fmt.Sprint("expiring-", i), fetch); err != nil {
+		if _, err := issuer.cached(context.Background(), fmt.Sprint("expiring-", i), fetch); err != nil {
 			t.Fatal(err)
 		}
 	}
 	now = now.Add(maxCachedTokenLifetime)
-	if _, err := issuer.cached("fresh", fetch); err != nil {
+	if _, err := issuer.cached(context.Background(), "fresh", fetch); err != nil {
 		t.Fatal(err)
 	}
 	if len(issuer.cache) != 1 {
@@ -280,7 +280,7 @@ func TestEntraTokenCacheIsBounded(t *testing.T) {
 	}
 	for i := range maxCachedTokens + 10 {
 		now = now.Add(time.Millisecond)
-		if _, err := issuer.cached(fmt.Sprint("key-", i), fetch); err != nil {
+		if _, err := issuer.cached(context.Background(), fmt.Sprint("key-", i), fetch); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -355,5 +355,99 @@ func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
 	}
 	if _, err := unreachable.ExchangeToken(context.Background(), testIdentity); !errors.Is(err, ErrIssuerUnavailable) {
 		t.Fatalf("unreachable endpoint: error = %v, want ErrIssuerUnavailable", err)
+	}
+}
+
+// blockingEntra answers every token request only once released, counting
+// requests.
+type blockingEntra struct {
+	mu       sync.Mutex
+	requests int
+	release  chan struct{}
+}
+
+func (b *blockingEntra) handler(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	b.mu.Lock()
+	b.requests++
+	b.mu.Unlock()
+	<-b.release
+	token := "exchange-token"
+	if r.PostForm.Get("scope") != entraExchangeScope {
+		token = "app-token"
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"access_token": token, "expires_in": 3599})
+}
+
+func (b *blockingEntra) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.requests
+}
+
+func TestEntraConcurrentMissesShareOneRequest(t *testing.T) {
+	fake := &blockingEntra{release: make(chan struct{})}
+	server := httptest.NewTLSServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(server.Close)
+	joined := make(chan struct{}, 64)
+	issuer := &EntraIssuer{
+		Config:       EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
+		Credential:   func() (string, error) { return testControllerToken, nil },
+		HTTPClient:   server.Client(),
+		flightJoined: func() { joined <- struct{}{} },
+	}
+	const callers = 8
+	cancelled, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		token string
+		err   error
+	}
+	results := make([]chan outcome, callers)
+	start := func(n int, ctx context.Context) {
+		results[n] = make(chan outcome, 1)
+		go func() {
+			token, err := issuer.AppToken(ctx, testIdentity, "https://graph.microsoft.com")
+			results[n] <- outcome{token, err}
+		}()
+	}
+	// The cancelled caller leads: it starts the app-token flight and, inside
+	// it, the exchange-token flight, before anyone else asks.
+	start(0, cancelled)
+	<-joined
+	<-joined
+	for n := 1; n < callers; n++ {
+		start(n, context.Background())
+	}
+	for n := 1; n < callers; n++ {
+		<-joined
+	}
+	cancel()
+	if got := <-results[0]; !errors.Is(got.err, context.Canceled) || errors.Is(got.err, ErrIssuerUnavailable) {
+		t.Fatalf("cancelled caller: %+v, want context.Canceled", got)
+	}
+	close(fake.release)
+	for n := 1; n < callers; n++ {
+		if got := <-results[n]; got.err != nil || got.token != "app-token" {
+			t.Fatalf("caller %d: %+v, want the shared token", n, got)
+		}
+	}
+	if fake.count() != 2 {
+		t.Fatalf("Entra saw %d requests, want one exchange and one app request for every caller", fake.count())
+	}
+}
+
+func TestEntraCallerDeadlineWhileWaitingIsIssuerUnavailable(t *testing.T) {
+	fake := &blockingEntra{release: make(chan struct{})}
+	server := httptest.NewTLSServer(http.HandlerFunc(fake.handler))
+	t.Cleanup(func() { close(fake.release); server.Close() })
+	issuer := &EntraIssuer{
+		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
+		Credential: func() (string, error) { return testControllerToken, nil },
+		HTTPClient: server.Client(),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := issuer.AppToken(ctx, testIdentity, entraVerificationResource); !errors.Is(err, ErrIssuerUnavailable) {
+		t.Fatalf("error = %v, want ErrIssuerUnavailable so verification backs off", err)
 	}
 }

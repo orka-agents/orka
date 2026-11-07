@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package credential
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -28,6 +27,8 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
@@ -75,7 +76,7 @@ func (f *fakeRefresher) Refresh(_ context.Context, cfg connectors.OAuthProviderC
 type harness struct {
 	t          *testing.T
 	client     client.Client
-	store      *sqlite.Store
+	store      *storageclient.Client
 	refresher  *fakeRefresher
 	source     *Source
 	connection *corev1alpha1.Connection
@@ -125,14 +126,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	s := sqlite.NewStore(db, dbPath)
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{1}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	s := storageclienttest.Client(t, sqlite.NewStore(db, dbPath))
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 	refresher := &fakeRefresher{response: connectors.TokenResponse{AccessToken: "gho_new", RefreshToken: "ghr_new", ExpiresAt: now.Add(time.Hour)}}
 	source := &Source{Client: c, APIReader: c, Credentials: s, OAuth: refresher, Now: func() time.Time { return now }}
@@ -416,7 +410,7 @@ func TestRefreshFlightLeavesAnotherGrantAlone(t *testing.T) {
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", ExpiresAt: h.now.Add(-time.Minute)})
 	req := h.request()
 	h.refresher.err = &connectors.OAuthError{StatusCode: 400, Code: "invalid_grant"}
-	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+	h.source.Credentials = &disconnectingCustody{Client: h.store, onRead: func() {
 		h.put(store.ConnectorCredential{AccessToken: "gho_reconsented", RefreshToken: "ghr_reconsented", ExpiresAt: h.now.Add(-time.Second)})
 	}}
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), req); err == nil || !strings.Contains(err.Error(), "re-linked") {
@@ -1015,7 +1009,7 @@ func TestNonrefreshableTokenWithinHorizonKeepsTheLinkReady(t *testing.T) {
 // flakyCustody fails the next replace or the next few retirements, as a
 // transient store error would.
 type flakyCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	failReplace bool
 	failRetire  int
 	blockRetire bool
@@ -1027,7 +1021,7 @@ func (f *flakyCustody) ReplaceConnectorCredential(ctx context.Context, ref store
 		f.failReplace = false
 		return errors.New("database is locked")
 	}
-	return f.Store.ReplaceConnectorCredential(ctx, ref, credential, expectedVersion)
+	return f.Client.ReplaceConnectorCredential(ctx, ref, credential, expectedVersion)
 }
 
 func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef, credential store.ConnectorCredential) error {
@@ -1040,7 +1034,7 @@ func (f *flakyCustody) RetireConnectorCredential(ctx context.Context, ref store.
 		f.failRetire--
 		return errors.New("database is locked")
 	}
-	return f.Store.RetireConnectorCredential(ctx, ref, credential)
+	return f.Client.RetireConnectorCredential(ctx, ref, credential)
 }
 
 // TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails covers a refresh the
@@ -1053,7 +1047,7 @@ func TestRefreshKeepsIssuedMaterialWhenCustodyWriteFails(t *testing.T) {
 	t.Cleanup(func() { refreshRetireBackoff = previous })
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	flaky := &flakyCustody{Store: h.store, failReplace: true, failRetire: 1}
+	flaky := &flakyCustody{Client: h.store, failReplace: true, failRetire: 1}
 	h.source.Credentials = flaky
 	if _, err := h.source.ResolveConnectionCredential(context.Background(), h.request()); err == nil {
 		t.Fatal("a refresh custody could not store must fail the call")
@@ -1081,7 +1075,7 @@ func TestRefreshRetirementIsBounded(t *testing.T) {
 	t.Cleanup(func() { refreshRetireTimeout, refreshRetireBackoff = previousTimeout, previousBackoff })
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	flaky := &flakyCustody{Store: h.store, failReplace: true, blockRetire: true}
+	flaky := &flakyCustody{Client: h.store, failReplace: true, blockRetire: true}
 	h.source.Credentials = flaky
 	done := make(chan error, 1)
 	go func() {
@@ -1104,12 +1098,12 @@ func TestRefreshRetirementIsBounded(t *testing.T) {
 // disconnectingCustody starts a disconnect the moment custody is read, as a
 // finalizer racing a resolution would.
 type disconnectingCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	onRead func()
 }
 
 func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
-	credential, err := d.Store.GetConnectorCredential(ctx, ref)
+	credential, err := d.Client.GetConnectorCredential(ctx, ref)
 	if d.onRead != nil {
 		d.onRead()
 		d.onRead = nil
@@ -1123,7 +1117,7 @@ func (d *disconnectingCustody) GetConnectorCredential(ctx context.Context, ref s
 func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
-	h.source.Credentials = &disconnectingCustody{Store: h.store, onRead: func() {
+	h.source.Credentials = &disconnectingCustody{Client: h.store, onRead: func() {
 		live := h.reload()
 		live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
 		if err := h.client.Update(context.Background(), live); err != nil {
@@ -1138,15 +1132,86 @@ func TestResolveRechecksDisconnectAfterReadingCustody(t *testing.T) {
 	}
 }
 
+// TestRequireLiveConnectionRechecksTheFrozenLink covers the Delegated
+// post-exchange re-check: it passes for the frozen, Ready link and refuses
+// once the link is being deleted, without reading custody.
+func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	custody := &countingCustody{Client: h.store}
+	h.source.Credentials = custody
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("live link: %v", err)
+	}
+	relinked := request
+	relinked.Frozen.GrantSequence++
+	if err := h.source.RequireLiveConnection(context.Background(), relinked); err == nil {
+		t.Fatal("a link re-consented since dispatch must be refused")
+	}
+	live := h.reload()
+	live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
+	if err := h.client.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.client.Delete(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "being deleted") {
+		t.Fatalf("unlinked: err = %v, want refusal", err)
+	}
+	if custody.reads != 0 {
+		t.Fatalf("custody reads = %d, want none", custody.reads)
+	}
+}
+
+// TestRequireLiveConnectionTrustsCustodyOverLaggingStatus covers a
+// re-consent that commits in custody while a delegated exchange runs and
+// before the Connection's status shows it: the status still names the
+// frozen grant, but the credential the exchange used is no longer the
+// person's current grant, so the re-check refuses it.
+func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	used, err := h.source.ResolveConnectionCredential(context.Background(), request)
+	if err != nil || used.AccessToken != "gho_old" {
+		t.Fatalf("credential = %+v, %v", used, err)
+	}
+	// The re-consent commits custody only; its status write is still pending.
+	ref, err := connectors.CredentialRef(h.reload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutConnectorCredential(context.Background(), ref, store.ConnectorCredential{AccessToken: "gho_new", TokenType: "bearer"}); err != nil {
+		t.Fatal(err)
+	}
+	if h.reload().Status.GrantSequence != request.Frozen.GrantSequence {
+		t.Fatal("the status must still show the frozen grant")
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the stale grant refused", err)
+	}
+
+	// Custody that cannot report its grant fails closed.
+	h.source.Credentials = grantlessCustody{h.store}
+	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err == nil {
+		t.Fatal("custody without a grant read must fail closed")
+	}
+}
+
+// grantlessCustody hides the grant read.
+type grantlessCustody struct{ store.ConnectorCredentialStore }
+
 // countingCustody counts custody reads.
 type countingCustody struct {
-	*sqlite.Store
+	*storageclient.Client
 	reads int
 }
 
 func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	c.reads++
-	return c.Store.GetConnectorCredential(ctx, ref)
+	return c.Client.GetConnectorCredential(ctx, ref)
 }
 
 // TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody covers a write tool
@@ -1155,7 +1220,7 @@ func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.
 func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 	h := newHarness(t)
 	h.put(store.ConnectorCredential{AccessToken: "gho_old", RefreshToken: "ghr_old", TokenType: "bearer", ExpiresAt: h.now.Add(30 * time.Second), Scopes: []string{"repo"}})
-	counting := &countingCustody{Store: h.store}
+	counting := &countingCustody{Client: h.store}
 	h.source.Credentials = counting
 	req := h.request()
 	req.Tool.Class = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
