@@ -359,6 +359,9 @@ func (r *ToolReconciler) validateToolHTTPAuth(ctx context.Context, tool *corev1a
 			policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil) {
 			return fmt.Errorf("remote MCP requires a gateway outbound access policy")
 		}
+		if err := forwardingPolicySupported(tool, policy); err != nil {
+			return err
+		}
 		if policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil {
 			if tool.Spec.HTTP.AuthSecretRef != nil {
 				return fmt.Errorf("credential-injecting outbound access policy %q cannot coexist with authSecretRef", ref.Name)

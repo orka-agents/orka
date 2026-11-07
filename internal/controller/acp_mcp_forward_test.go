@@ -102,3 +102,33 @@ func TestForwardingToolCRDCoversEveryBuiltInToolName(t *testing.T) {
 		}
 	}
 }
+
+// TestForwardingToolsNeedACredentialInjectingPolicy covers a forwarding Tool
+// backed by a Gateway policy, which the executor never forwards: it is
+// refused before the agent starts, while Direct, Connection, and
+// AgentIdentity policies are accepted.
+func TestForwardingToolsNeedACredentialInjectingPolicy(t *testing.T) {
+	tool := forwardingDescriptorTool()
+	for name, spec := range map[string]corev1alpha1.OutboundAccessPolicySpec{
+		"direct":         {Direct: &corev1alpha1.DirectOutboundAccess{}},
+		"connection":     {Connection: &corev1alpha1.ConnectionOutboundAccess{}},
+		"agent identity": {AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{}},
+	} {
+		policy := &corev1alpha1.OutboundAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: "azure"}, Spec: spec}
+		if err := forwardingPolicySupported(tool, policy); err != nil {
+			t.Errorf("%s policy: %v", name, err)
+		}
+	}
+	gateway := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "azure"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Gateway: &corev1alpha1.GatewayOutboundAccess{}},
+	}
+	if err := forwardingPolicySupported(tool, gateway); err == nil || !strings.Contains(err.Error(), "Direct, Connection, or AgentIdentity") {
+		t.Fatalf("gateway policy: err = %v, want a refusal", err)
+	}
+	plain := forwardingDescriptorTool()
+	plain.Spec.HTTP.Forward = nil
+	if err := forwardingPolicySupported(plain, gateway); err != nil {
+		t.Fatalf("an ordinary Tool keeps its Gateway policy: %v", err)
+	}
+}

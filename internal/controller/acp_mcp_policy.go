@@ -444,6 +444,18 @@ func buildCanonicalMCPToolDescriptors(
 		if descriptorErr != nil {
 			return nil, descriptorErr
 		}
+		if descriptor.Forward != nil {
+			policy := &corev1alpha1.OutboundAccessPolicy{}
+			if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: custom.Spec.HTTP.OutboundAccessPolicyRef.Name}, policy); err != nil {
+				if apierrors.IsNotFound(err) {
+					return nil, permanentACPAgentConfiguration(fmt.Errorf("forwarding tool %q names a missing outbound access policy", name))
+				}
+				return nil, fmt.Errorf("load the outbound access policy of forwarding tool %q: %w", name, err)
+			}
+			if err := forwardingPolicySupported(custom, policy); err != nil {
+				return nil, permanentACPAgentConfiguration(err)
+			}
+		}
 		// Approval-bound reads share the same execution and receipt lease as
 		// approved writes. Equal timeouts would let the earlier broker deadline
 		// expire first. Ungated reads keep their configured timeout.
@@ -536,6 +548,20 @@ func forwardingToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolForward
 		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q: %w", tool.Name, err)
 	}
 	return harnessv2.MCPToolForward{Protocol: string(spec.Forward.Protocol), Origin: origin}, nil
+}
+
+// forwardingPolicySupported refuses a forwarding Tool whose outbound access
+// policy does not inject a credential: forwarding executes only Direct,
+// Connection, and AgentIdentity policies, so a Gateway policy would expose a
+// Tool whose every request fails.
+func forwardingPolicySupported(tool *corev1alpha1.Tool, policy *corev1alpha1.OutboundAccessPolicy) error {
+	if tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil {
+		return nil
+	}
+	if policy.Spec.Direct == nil && policy.Spec.Connection == nil && policy.Spec.AgentIdentity == nil {
+		return fmt.Errorf("forwarding tool %q needs a Direct, Connection, or AgentIdentity outbound access policy; %q is none", tool.Name, policy.Name)
+	}
+	return nil
 }
 
 func brokeredToolEffect(name string) harnessv2.MCPToolEffect {
