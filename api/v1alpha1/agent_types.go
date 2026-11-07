@@ -306,6 +306,17 @@ func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
 	return AgentIdentityIssuerEntra, id, true
 }
 
+// HoldsIdentity reports whether the Agent declares an external identity or
+// still holds a claim to one. A claim outlives the declaration until the
+// Agent next reconciles, so an identity removed and restored in between is
+// still held throughout.
+func (in *Agent) HoldsIdentity() bool {
+	if _, _, declared := in.IdentityRef(); declared {
+		return true
+	}
+	return in != nil && in.Status.IdentityClaim != nil
+}
+
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""

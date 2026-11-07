@@ -25,8 +25,14 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 		}},
 	}
 	plainAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "helper", Namespace: testDefaultNamespace}}
+	removedAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "between-edits", Namespace: testDefaultNamespace},
+		Status: corev1alpha1.AgentStatus{IdentityClaim: &corev1alpha1.AgentIdentityClaim{
+			Issuer: corev1alpha1.AgentIdentityIssuerEntra, ID: "33333333-3333-3333-3333-33333333aaaa",
+		}},
+	}
 	post := func(username, agent string) (int, string) {
-		handlers, _ := setupTestHandlersWithObjects(identityAgent, plainAgent)
+		handlers, _ := setupTestHandlersWithObjects(identityAgent, plainAgent, removedAgent)
 		app := fiber.New()
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: username, AuthType: AuthTypeTokenReview})
@@ -47,6 +53,10 @@ func TestCreateTaskKeepsWorkersFromRootTasksForIdentityAgents(t *testing.T) {
 
 	status, body = post(worker, "helper")
 	require.False(t, strings.Contains(body, "identity-bound Agent"), "a worker may name another Agent: %d %s", status, body)
+
+	status, body = post(worker, "between-edits")
+	require.Equal(t, http.StatusForbidden, status, body)
+	require.Contains(t, body, "identity-bound Agent", "an Agent still holding an identity claim is identity-bound")
 
 	status, body = post("system:serviceaccount:"+testDefaultNamespace+":editor", "reviewer")
 	require.False(t, strings.Contains(body, "identity-bound Agent"), "a non-worker is judged by the Agent use check: %d %s", status, body)

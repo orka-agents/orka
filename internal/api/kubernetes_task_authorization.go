@@ -173,7 +173,7 @@ func refuseWorkerRootTaskForIdentityAgent(ctx context.Context, reader client.Rea
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, "failed to read the Task's Agent")
 	}
-	if _, _, declared := agent.IdentityRef(); declared {
+	if agent.HoldsIdentity() {
 		return fiber.NewError(fiber.StatusForbidden, "a worker may name an identity-bound Agent only in a Task delegated from its own Task")
 	}
 	return nil
