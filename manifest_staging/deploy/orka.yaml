@@ -3341,7 +3341,7 @@ spec:
       resources:
       - jobs
   validations:
-  - expression: request.resource.resource != 'secrets' || object.type == 'Opaque'
+  - expression: request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'
     message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret
       would hand it another identity
   - expression: |-
