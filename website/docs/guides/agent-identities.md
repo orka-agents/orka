@@ -56,8 +56,16 @@ delegated Tools can only read.
 - A cluster whose ServiceAccount token issuer is reachable by Entra. On AKS,
   enable the OIDC issuer and read its URL with
   `az aks show -g <group> -n <cluster> --query oidcIssuerProfile.issuerUrl -o tsv`.
-- Permission to create agent identities in the tenant, for example the
-  **Agent ID Administrator** role, and an `az` session for that tenant.
+- An `az` session for the tenant, as someone who holds these Entra roles, or an
+  administrator who holds them to run the steps that need them:
+  - **Agent ID Administrator** to create the blueprint and agent identities
+    (steps 1 and 2);
+  - **Privileged Role Administrator** to grant Microsoft Graph app roles
+    (step 2), the least-privileged built-in role for that
+    [assignment](https://learn.microsoft.com/en-us/graph/api/serviceprincipal-post-approleassignments#permissions);
+  - for Delegated mode, **Cloud Application Administrator** or **Application
+    Administrator** to grant the tenant-wide delegated consent in steps 7 and 8
+    ([admin consent roles](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent#prerequisites)).
 - Orka installed with Helm in the namespace `team-a`, with built-in RuntimePools.
   A release reconciles only its own namespace, so everything below lives there.
 - The `baseline` Pod Security profile enforced on that namespace
