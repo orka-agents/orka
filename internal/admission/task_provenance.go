@@ -9,6 +9,7 @@ package admission
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -17,6 +18,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -195,6 +197,19 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		if workerTrusted && task.Spec.SessionRef != nil && taskCoordinationOwner(task) == nil {
 			return ctrladmission.Denied("worker session references require an authorized coordination parent")
 		}
+		if workerTrusted && taskCoordinationOwner(task) == nil {
+			// Workers hold Agent use broadly, so a parentless Task from a
+			// worker would bind an identity-bound Agent as a root Task that
+			// no use check covered. A worker reaches such an Agent only as a
+			// delegated child, where its parent must already hold it.
+			identityBound, err := v.namesIdentityBoundAgent(ctx, req.Namespace, task)
+			if err != nil {
+				return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("read the Task's Agent: %w", err))
+			}
+			if identityBound {
+				return ctrladmission.Denied("a worker may name an identity-bound Agent only in a Task delegated from its own Task")
+			}
+		}
 		allowed, err := v.authorizedTaskCoordinationParent(ctx, req, task)
 		if err != nil {
 			return ctrladmission.Errored(http.StatusInternalServerError, fmt.Errorf("verify Task coordination parent: %w", err))
@@ -210,6 +225,30 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 	}
 
 	return ctrladmission.Allowed("Task provenance fields unchanged")
+}
+
+// namesIdentityBoundAgent reports whether the Task names an Agent that
+// declares an external identity. A missing Agent declares none; any other
+// read failure is returned so admission fails closed.
+func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, namespace string, task *corev1alpha1.Task) (bool, error) {
+	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
+		return false, nil
+	}
+	if v.reader == nil {
+		return false, errors.New("no reader is configured for Agents")
+	}
+	agent := &corev1alpha1.Agent{}
+	if task.Namespace != "" {
+		namespace = task.Namespace
+	}
+	if err := v.reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: task.Spec.AgentRef.Name}, agent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	_, _, declared := agent.IdentityRef()
+	return declared, nil
 }
 
 // A Task's creator establishes its coordination ancestry and, for a chat
