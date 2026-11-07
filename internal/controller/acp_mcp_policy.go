@@ -323,11 +323,6 @@ func buildMCPPolicyConfigurationWithRegistry(
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) (harnessv2.MCPPolicyConfiguration, error) {
-	if len(approval.RequiredTools) > 0 && !runtimeSupportsMCPApprovals(profile) && !onlyForwardingWritesNeedApproval(approval) {
-		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
-			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
-		)
-	}
 	toolDigest, err := harnessv2.CanonicalRuntimeToolPolicyDigest(allowed, disallowed, allowBash)
 	if err != nil || toolDigest != profile.ToolPolicyDigest {
 		return harnessv2.MCPPolicyConfiguration{}, fmt.Errorf("effective MCP tool policy does not match runtime profile")
@@ -337,6 +332,12 @@ func buildMCPPolicyConfigurationWithRegistry(
 	)
 	if err != nil {
 		return harnessv2.MCPPolicyConfiguration{}, err
+	}
+	// Forwarded writes are the one approval-required tool any runtime takes.
+	if approval.NeedsRuntimeApprovals(harnessv2.MCPToolPolicy{Tools: descriptors}) && !runtimeSupportsMCPApprovals(profile) {
+		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
+			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
+		)
 	}
 	descriptorDigest, err := harnessv2.CanonicalMCPToolDescriptorDigest(descriptors)
 	if err != nil {
@@ -578,19 +579,6 @@ func forwardingWriteDescriptor(tool *corev1alpha1.Tool, read harnessv2.MCPToolDe
 	return write, nil
 }
 
-// onlyForwardingWritesNeedApproval reports whether every approval-required
-// tool is a forwarding write tool. A runtime that cannot ask for approval
-// still carries those, because the runtime's gateway, not the agent's MCP
-// client, waits for the decision.
-func onlyForwardingWritesNeedApproval(approval harnessv2.MCPApprovalPolicy) bool {
-	for _, name := range approval.RequiredTools {
-		if !strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
-			return false
-		}
-	}
-	return len(approval.RequiredTools) > 0
-}
-
 // adjustInputsForForwardingWrites returns planning inputs that allow each
 // allowed forwarding Tool's write tool when the Tool allows writes, and that
 // require approval for it unless the Tool waives it. Like the connector
@@ -606,11 +594,20 @@ func adjustInputsForForwardingWrites(
 		return task, agent, nil
 	}
 	allowed := effectiveACPAllowedTools(task, agent)
+	var disallowed []string
+	if task.Spec.AgentRuntime != nil {
+		disallowed = task.Spec.AgentRuntime.DisallowedTools
+	}
 	var writes, approvals []string
 	for _, name := range allowed {
 		if strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
 			// Write tools are derived, never requested by name.
 			return nil, nil, permanentACPAgentConfiguration(fmt.Errorf("allowed tool %q names a forwarding write tool; allow the Tool itself", name))
+		}
+		// A Task that denies the Tool denies its writes; denying only the
+		// write tool keeps the Tool's reads.
+		if slices.Contains(disallowed, name) || slices.Contains(disallowed, harnessv2.MCPForwardWriteToolName(name)) {
+			continue
 		}
 		tool := &corev1alpha1.Tool{}
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, tool); err != nil {

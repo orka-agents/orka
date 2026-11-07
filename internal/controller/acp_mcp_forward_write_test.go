@@ -10,7 +10,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/tools"
 )
 
 // writeForwardingTool is the descriptor test Tool with writes allowed.
@@ -62,6 +64,19 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 			t.Errorf("%s: write tool approval-required = %t, want %t", name, approved, tc.approved)
 		}
 	}
+	for _, denied := range []string{"azure-arm", write} {
+		task := forwardingWriteTask()
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{denied}}
+		reader := fake.NewClientBuilder().WithScheme(newTestScheme()).
+			WithObjects(writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)).Build()
+		task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, forwardingWriteAgent())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(effectiveACPAllowedTools(task, agent), write) || agent.Spec.Coordination != nil {
+			t.Errorf("a Task that denies %q still got the write tool", denied)
+		}
+	}
 	named := forwardingWriteAgent()
 	named.Spec.Runtime.DefaultAllowedTools = []string{write}
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
@@ -93,17 +108,96 @@ func TestForwardingWriteDescriptorIsConsequential(t *testing.T) {
 	}
 }
 
-// TestOnlyForwardingWritesNeedApprovalOnBuiltInRuntimes covers the approval
-// gate: a built-in runtime may carry approval-required forwarding writes,
-// whose gateway waits for the decision, but no other approval-required tool.
-func TestOnlyForwardingWritesNeedApprovalOnBuiltInRuntimes(t *testing.T) {
-	if !onlyForwardingWritesNeedApproval(harnessv2.MCPApprovalPolicy{RequiredTools: []string{"azure-arm:write"}}) {
-		t.Fatal("forwarding writes alone must be accepted")
+// TestForwardingWriteToolIsCheckedAgainstItsTool covers the broker's drift
+// check before an approval is spent: the write tool is held to its
+// forwarding Tool, so it passes while the Tool still allows writes and fails
+// once they are withdrawn.
+func TestForwardingWriteToolIsCheckedAgainstItsTool(t *testing.T) {
+	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	read, err := customACPMCPToolDescriptor(tool)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if onlyForwardingWritesNeedApproval(harnessv2.MCPApprovalPolicy{RequiredTools: []string{"azure-arm:write", "gh_comment"}}) {
-		t.Fatal("another approval-required tool must still need an approval-capable runtime")
+	write, err := forwardingWriteDescriptor(tool, read)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if onlyForwardingWritesNeedApproval(harnessv2.MCPApprovalPolicy{}) {
-		t.Fatal("an empty approval policy is not a forwarding-writes policy")
+	request := harnessv2.MCPBrokerCallRequest{Namespace: "tenant"}
+	executor := RegistryACPMCPToolExecutor{Reader: fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()}
+	if err := executor.ValidateACPMCPTool(context.Background(), request, write); err != nil {
+		t.Fatalf("a current write tool failed revalidation: %v", err)
+	}
+	withdrawn := forwardingDescriptorTool()
+	executor.Reader = fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(withdrawn).Build()
+	if err := executor.ValidateACPMCPTool(context.Background(), request, write); err == nil {
+		t.Fatal("a write tool whose Tool no longer allows writes passed revalidation")
+	}
+}
+
+// TestConnectionFreezeSkipsForwardingWriteTools covers binding a Task whose
+// policy carries a write tool: the freeze covers the forwarding Tool and
+// does not look for a Tool named after the write tool.
+func TestConnectionFreezeSkipsForwardingWriteTools(t *testing.T) {
+	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	read, err := customACPMCPToolDescriptor(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := forwardingWriteDescriptor(tool, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := harnessv2.MCPPolicyConfiguration{ToolPolicy: harnessv2.MCPToolPolicy{Tools: []harnessv2.MCPToolDescriptor{read, write}}}
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "azure", Namespace: "tenant"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool, policy).Build()
+	_, _, names, err := freezeRequesterConnectionsClassified(context.Background(), reader, nil, forwardingWriteTask(), configuration)
+	if err != nil {
+		t.Fatalf("freeze with a write tool: %v", err)
+	}
+	if !slices.Equal(names, []string{"azure-arm"}) {
+		t.Fatalf("frozen tools = %v, want the forwarding Tool only", names)
+	}
+}
+
+// TestForwardingWritesPlanOnABuiltInRuntime covers the planning path a Codex
+// Task with a write-enabled forwarding Tool takes: the adjusted inputs plan,
+// build a policy whose only approval-required tool is the write tool, and
+// freeze without looking for a Tool named after it.
+func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
+	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	policy := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "azure", Namespace: "tenant"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool, policy).Build()
+	agent := forwardingWriteAgent()
+	agent.UID, agent.Generation = "agent-uid", 1
+	agent.Spec.Model = &corev1alpha1.ModelConfig{Name: "model"}
+	agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV2)
+	agent.Spec.Runtime.DefaultAllowedTools = append(acp.BuiltInRuntimeNativeToolNames("codex"), "azure-arm")
+	task := forwardingWriteTask()
+	task.UID = "task-uid"
+	task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanACPRuntime(task, agent, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, task, agent, plan.Profile, tools.NewRegistry())
+	if err != nil {
+		t.Fatalf("policy for a write-enabled forwarding Tool: %v", err)
+	}
+	write, ok := configuration.ToolPolicy.Descriptor("azure-arm:write")
+	if !ok || write.Forward == nil || !write.Forward.Write || !configuration.ApprovalPolicy.Requires("azure-arm:write") ||
+		configuration.ApprovalPolicy.NeedsRuntimeApprovals(configuration.ToolPolicy) {
+		t.Fatalf("write tool = %#v, approval = %#v", write, configuration.ApprovalPolicy)
+	}
+	if _, _, _, err := freezeRequesterConnectionsClassified(context.Background(), reader, nil, task, configuration); err != nil {
+		t.Fatalf("freeze: %v", err)
 	}
 }

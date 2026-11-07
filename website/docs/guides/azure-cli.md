@@ -190,7 +190,9 @@ Add `writes` to let `az` change resources:
 
 - Each write is a separate tool, `azurearm:write`, that Orka derives from the
   Tool. Allowing `azurearm` (and an Agent ceiling that names it) allows both;
-  never name `azurearm:write` yourself. Reads stay unapproved.
+  an allowlist that names `azurearm:write` is refused. A Task keeps the reads
+  and refuses writes with `disallowedTools: [azurearm:write]`. Reads stay
+  unapproved.
 - With `approval: Required`, a write waits in the Task's **Approvals** tab (or
   for `orka task approve`) showing its method, path, and body, while `az`
   waits for the answer. A decision is final: `az` gets Azure's response, or
@@ -200,7 +202,7 @@ Add `writes` to let `az` change resources:
 - `az` resends a request that has had no answer for 5 minutes. The resent
   request joins the pending approval, or gets the recorded result, so a write
   is never sent twice.
-- Write bodies must be JSON. Every write runs once: if Orka cannot tell
+- Write bodies must be a JSON object or array. Every write runs once: if Orka cannot tell
   whether it reached Azure, `az` gets `OrkaOutcomeUnknown` and the write is
   not repeated.
 - `POST` actions can return secrets: `az aks get-credentials` returns a

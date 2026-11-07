@@ -789,7 +789,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "requested provider profile is not available in this image", nil, false)
 		return
 	}
-	if len(request.MCPConfiguration.ApprovalPolicy.RequiredTools) > 0 && !s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
+	if request.MCPConfiguration.ApprovalPolicy.NeedsRuntimeApprovals(request.MCPConfiguration.ToolPolicy) &&
+		!s.cfg.Capabilities.Provider.SupportsBrokeredToolApprovals {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "provider does not support controller-owned brokered tool approvals", nil, false)
 		return
 	}

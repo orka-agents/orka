@@ -1117,6 +1117,11 @@ func freezeRequesterConnectionsClassified(
 ) ([]agentExecutionSnapshotConnection, map[string]connectorToolInfo, []string, error) {
 	var names, custom []string
 	for _, descriptor := range mcpConfiguration.ToolPolicy.Tools {
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarding write tool is no Tool of its own; it acts under
+			// its forwarding Tool's binding, which this loop also covers.
+			continue
+		}
 		if descriptor.Source == harnessv2.MCPToolSourceBrokeredCustom || descriptor.Source == harnessv2.MCPToolSourceBrokeredBuiltin {
 			names = append(names, descriptor.Name)
 		}

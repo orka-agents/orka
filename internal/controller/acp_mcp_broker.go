@@ -179,17 +179,19 @@ func (e RegistryACPMCPToolExecutor) ConnectionDigest(ctx context.Context, reques
 	if e.Reader == nil {
 		return "", errors.New("connector digest resolution requires a reader")
 	}
-	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{descriptor.Name})
+	// A forwarding write tool acts under its forwarding Tool's binding.
+	name := customACPMCPToolResource(descriptor)
+	infos, err := connectorToolsFor(ctx, e.Reader, e.Registry, request.Namespace, []string{name})
 	if err != nil {
-		return "", fmt.Errorf("classify connector tool %q: %w", descriptor.Name, err)
+		return "", fmt.Errorf("classify connector tool %q: %w", name, err)
 	}
-	info, ok := infos[descriptor.Name]
+	info, ok := infos[name]
 	if !ok {
 		// Not connector-backed as read now. If the Task froze a Connection
 		// for this Tool's policy, it was connection mode at dispatch and
 		// has since been retargeted; that drift never executes under the
 		// policy's new credentials.
-		return "", e.refuseConnectorClassificationDrift(ctx, request, descriptor.Name)
+		return "", e.refuseConnectorClassificationDrift(ctx, request, name)
 	}
 	frozen, err := e.taskFrozenConnections(ctx, request)
 	if err != nil {
@@ -354,20 +356,35 @@ func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, requ
 		return errors.New("custom MCP tool reader is unavailable")
 	}
 	tool := &corev1alpha1.Tool{}
-	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: descriptor.Name}, tool); err != nil {
+	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: customACPMCPToolResource(descriptor)}, tool); err != nil {
 		return acpMCPAuthorityReadError(err)
 	}
+	return matchCurrentCustomACPMCPTool(tool, descriptor)
+}
+
+// customACPMCPToolResource names the Tool behind a custom descriptor: a
+// forwarding write tool is derived from its forwarding Tool.
+func customACPMCPToolResource(descriptor harnessv2.MCPToolDescriptor) string {
+	if descriptor.Forward != nil && descriptor.Forward.Write {
+		return harnessv2.MCPForwardToolResource(descriptor.Name)
+	}
+	return descriptor.Name
+}
+
+// matchCurrentCustomACPMCPTool refuses a call whose Tool no longer describes
+// the descriptor the prompt was authorized with.
+func matchCurrentCustomACPMCPTool(tool *corev1alpha1.Tool, descriptor harnessv2.MCPToolDescriptor) error {
 	current, err := customACPMCPToolDescriptor(tool)
+	if err == nil && descriptor.Forward != nil && descriptor.Forward.Write {
+		current, err = forwardingWriteDescriptor(tool, current)
+	}
 	if err != nil {
 		return err
 	}
-	expectedJSON, err := harnessv2.CanonicalValue(descriptor)
-	if err != nil {
-		return err
-	}
-	currentJSON, err := harnessv2.CanonicalValue(current)
-	if err != nil || !bytes.Equal(expectedJSON, currentJSON) {
-		return errors.New("custom MCP tool changed after prompt authorization")
+	expected, expectedErr := harnessv2.CanonicalValue(descriptor)
+	currentJSON, currentErr := harnessv2.CanonicalValue(current)
+	if expectedErr != nil || currentErr != nil || !bytes.Equal(expected, currentJSON) {
+		return fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
 	}
 	return nil
 }
@@ -486,21 +503,12 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		// Descriptor and Task authority mismatches remain definitive.
 		e.Reader = acpMCPAuthorityReader{e.Reader}
 		tool := &corev1alpha1.Tool{}
-		resource := harnessv2.MCPForwardToolResource(descriptor.Name)
+		resource := customACPMCPToolResource(descriptor)
 		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: resource}, tool); getErr != nil {
 			return nil, fmt.Errorf("load custom MCP tool %q: %w", resource, getErr)
 		}
-		currentDescriptor, descriptorErr := customACPMCPToolDescriptor(tool)
-		if descriptorErr == nil && resource != descriptor.Name {
-			currentDescriptor, descriptorErr = forwardingWriteDescriptor(tool, currentDescriptor)
-		}
-		if descriptorErr != nil {
-			return nil, descriptorErr
-		}
-		expected, expectedErr := harnessv2.CanonicalValue(descriptor)
-		current, currentErr := harnessv2.CanonicalValue(currentDescriptor)
-		if expectedErr != nil || currentErr != nil || !bytes.Equal(expected, current) {
-			return nil, fmt.Errorf("custom MCP tool %q changed after prompt authorization", descriptor.Name)
+		if matchErr := matchCurrentCustomACPMCPTool(tool, descriptor); matchErr != nil {
+			return nil, matchErr
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -29,6 +30,7 @@ type azureGatewayFixture struct {
 	mu        sync.Mutex
 	calls     []harnessv2.MCPBrokerCallRequest
 	respond   func(harnessv2.MCPBrokerCallRequest) json.RawMessage
+	fail      error
 	authorize harnessv2.PromptMCPAuthorization
 }
 
@@ -101,8 +103,11 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
 		fixture.mu.Lock()
 		fixture.calls = append(fixture.calls, request)
-		respond := fixture.respond
+		respond, fail := fixture.respond, fixture.fail
 		fixture.mu.Unlock()
+		if fail != nil {
+			return harnessv2.MCPBrokerCallResponse{}, fail
+		}
 		result := json.RawMessage(`{"status":200,"headers":{"Content-Type":"application/json"},"body":"{\"value\":[]}"}`)
 		if respond != nil {
 			result = respond(request)
@@ -254,7 +259,8 @@ func TestAzureGatewayForwardsResourceManagerReadsThroughTheBroker(t *testing.T) 
 		t.Fatalf("broker calls = %#v", calls)
 	}
 	forwarded, err := harnessv2.DecodeMCPForwardRequest(calls[0].Call.Arguments)
-	if err != nil || forwarded != (harnessv2.MCPForwardRequest{Method: http.MethodGet, Path: "/subscriptions", Query: "api-version=2022-12-01"}) {
+	if err != nil || forwarded.Method != http.MethodGet || forwarded.Path != "/subscriptions" ||
+		forwarded.Query != "api-version=2022-12-01" || len(forwarded.Body) != 0 {
 		t.Fatalf("forwarded request = %#v, %v", forwarded, err)
 	}
 	if strings.Contains(string(calls[0].Call.Arguments), token) {
@@ -523,7 +529,7 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 		}
 	}
 	request, err := harnessv2.DecodeMCPForwardRequest(calls[0].Call.Arguments)
-	if err != nil || request.Method != http.MethodPut || request.Body != body || request.Query != "api-version=2021-04-01" {
+	if err != nil || request.Method != http.MethodPut || string(request.Body) != body || request.Query != "api-version=2021-04-01" {
 		t.Fatalf("forwarded write = %+v, %v", request, err)
 	}
 	if calls[0].Call.CallID != calls[1].Call.CallID {
@@ -594,5 +600,17 @@ func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 		if response.StatusCode != want.status || !strings.Contains(body, want.error) {
 			t.Errorf("%s: status = %d: %s", code, response.StatusCode, body)
 		}
+	}
+	// A broker failure on a write is recorded as an unknown outcome.
+	fixture.mu.Lock()
+	fixture.fail = errors.New("broker unavailable")
+	fixture.mu.Unlock()
+	if response, body := fixture.send(t, http.MethodPut, "/subscriptions/s1/resourcegroups/rg1", header, `{"location":"eastus"}`); response.StatusCode != http.StatusConflict ||
+		!strings.Contains(body, "OrkaOutcomeUnknown") {
+		t.Errorf("failed write: status = %d: %s", response.StatusCode, body)
+	}
+	if response, body := fixture.do(t, http.MethodGet, "/subscriptions", http.Header{"Authorization": {"Bearer " + token}}); response.StatusCode != http.StatusBadGateway ||
+		!strings.Contains(body, "OrkaBrokerError") {
+		t.Errorf("failed read: status = %d: %s", response.StatusCode, body)
 	}
 }

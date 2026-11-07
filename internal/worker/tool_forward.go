@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,15 +73,15 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 		return preparedToolRequest{}, err
 	}
 	var body io.Reader
-	if request.Body != "" {
-		body = strings.NewReader(request.Body)
+	if len(request.Body) > 0 {
+		body = bytes.NewReader(request.Body)
 	}
 	req, err := http.NewRequestWithContext(ctx, request.Method, target.String(), body)
 	if err != nil {
 		return preparedToolRequest{}, fmt.Errorf("failed to create forwarded request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if request.Body != "" {
+	if len(request.Body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	prepared := preparedToolRequest{httpConfig: httpConfig, request: req, forward: true}

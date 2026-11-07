@@ -401,7 +401,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, status, code, message)
 		return
 	}
-	request.Body = body
+	request.Body = json.RawMessage(body)
 	if err := request.Validate(); err != nil {
 		writeAzureError(w, http.StatusBadRequest, "OrkaRequestRefused", "Orka refused the request: "+err.Error()+".")
 		return
@@ -440,6 +440,11 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		case errors.Is(err, errMCPCallNotAuthorized):
 			writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
 				"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
+		case write:
+			// The broker records a failed write as an unknown outcome, so a
+			// retry could only replay that; a 5xx would make az retry it.
+			writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+				"The request may have reached Azure. Check the resource before repeating it.")
 		default:
 			writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
 		}

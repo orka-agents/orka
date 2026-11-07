@@ -27,8 +27,10 @@ const (
 var MCPForwardInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["GET","HEAD"]},"path":{"type":"string"},"query":{"type":"string"}}}`)
 
 // MCPForwardWriteInputSchema is the fixed argument schema of a forwarding
-// Tool's write tool: a write method and an optional JSON body.
-var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":"string"}}}`)
+// Tool's write tool: a write method and an optional JSON body. The body is
+// JSON in the arguments, not a string, so the structural redaction that
+// approval previews and events apply reaches its credential-named fields.
+var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":["object","array"]}}}`)
 
 // MCPForwardWriteSuffix ends the name of a forwarding Tool's write tool. A
 // colon cannot appear in a Kubernetes name, so the derived name never meets
@@ -99,7 +101,14 @@ type MCPForwardRequest struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
 	Query  string `json:"query,omitempty"`
-	Body   string `json:"body,omitempty"`
+	// Body is a write's JSON object or array body.
+	Body json.RawMessage `json:"body,omitempty"`
+}
+
+// forwardBodyIsStructured reports whether body is one JSON object or array.
+func forwardBodyIsStructured(body json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(body)
+	return json.Valid(trimmed) && len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
 // ForwardWriteMethod reports whether method is a write a forwarding Tool's
@@ -135,8 +144,8 @@ func (r MCPForwardRequest) Validate() error {
 	if !write && r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return fmt.Errorf("forwarding Tools carry GET, HEAD, PUT, PATCH, DELETE, and POST requests only")
 	}
-	if r.Body != "" && (!write || !json.Valid([]byte(r.Body))) {
-		return fmt.Errorf("only a forwarded write carries a body, and it must be JSON")
+	if len(r.Body) > 0 && (!write || !forwardBodyIsStructured(r.Body)) {
+		return fmt.Errorf("only a forwarded write carries a body, and it must be a JSON object or array")
 	}
 	if err := validateForwardPath(r.Path); err != nil {
 		return err

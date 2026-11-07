@@ -16,12 +16,15 @@ func TestMCPForwardRequestStaysOnTheOrigin(t *testing.T) {
 		{"head", MCPForwardRequest{Method: "HEAD", Path: "/subscriptions/s1/resourcegroups/rg1"}, true},
 		{"encoded space", MCPForwardRequest{Method: "GET", Path: "/subscriptions/s1/resourceGroups/my%20rg"}, true},
 		{"skiptoken", MCPForwardRequest{Method: "GET", Path: "/subscriptions", Query: "api-version=1&$skiptoken=a%3D%3D"}, true},
-		{"put", MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: `{"location":"eastus"}`}, true},
+		{"put", MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: json.RawMessage(`{"location":"eastus"}`)}, true},
+		{"post array", MCPForwardRequest{Method: "POST", Path: "/subscriptions/s1/providers/x/batch", Body: json.RawMessage(`[{"id":1}]`)}, true},
 		{"post without body", MCPForwardRequest{Method: "POST", Path: "/subscriptions/s1/providers/x/listCredential"}, true},
 		{"delete", MCPForwardRequest{Method: "DELETE", Path: "/subscriptions/s1/resourcegroups/rg1"}, true},
 		{"trace", MCPForwardRequest{Method: "TRACE", Path: "/subscriptions"}, false},
-		{"read with body", MCPForwardRequest{Method: "GET", Path: "/subscriptions", Body: `{}`}, false},
-		{"write with non-JSON body", MCPForwardRequest{Method: "PUT", Path: "/subscriptions", Body: "location=eastus"}, false},
+		{"read with body", MCPForwardRequest{Method: "GET", Path: "/subscriptions", Body: json.RawMessage(`{}`)}, false},
+		{"write with non-JSON body", MCPForwardRequest{Method: "PUT", Path: "/subscriptions", Body: json.RawMessage("location=eastus")}, false},
+		{"write with string body", MCPForwardRequest{Method: "PUT", Path: "/subscriptions", Body: json.RawMessage(`"{\"adminPassword\":\"x\"}"`)}, false},
+		{"write with null body", MCPForwardRequest{Method: "PUT", Path: "/subscriptions", Body: json.RawMessage(`null`)}, false},
 		{"relative", MCPForwardRequest{Method: "GET", Path: "subscriptions"}, false},
 		{"scheme relative", MCPForwardRequest{Method: "GET", Path: "//evil.example/x"}, false},
 		{"dot dot", MCPForwardRequest{Method: "GET", Path: "/subscriptions/../tenants"}, false},
@@ -130,7 +133,7 @@ func TestForwardRequestsGoToTheToolForTheirMethod(t *testing.T) {
 	write := read
 	write.Write = true
 	get := MCPForwardRequest{Method: "GET", Path: "/subscriptions"}
-	put := MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: `{"location":"eastus"}`}
+	put := MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: json.RawMessage(`{"location":"eastus"}`)}
 	if err := get.ValidateFor(read); err != nil {
 		t.Fatalf("a read on the read tool: %v", err)
 	}
@@ -175,6 +178,30 @@ func TestForwardingWriteDescriptorMustBeConsequential(t *testing.T) {
 		mutate(&copied)
 		if copied.Validate() == nil {
 			t.Errorf("%s: descriptor was accepted", name)
+		}
+	}
+}
+
+// TestOnlyForwardingWritesSkipRuntimeApprovals covers which approval-required
+// tools need a runtime that waits for brokered approvals: every tool but a
+// forwarding write tool, whose client forwarder waits instead.
+func TestOnlyForwardingWritesSkipRuntimeApprovals(t *testing.T) {
+	write := MCPToolDescriptor{Name: "azure_arm:write", Forward: &MCPToolForward{Write: true}}
+	read := MCPToolDescriptor{Name: "azure_arm", Forward: &MCPToolForward{}}
+	plain := MCPToolDescriptor{Name: "gh_comment"}
+	tools := MCPToolPolicy{Tools: []MCPToolDescriptor{read, write, plain}}
+	for name, tc := range map[string]struct {
+		required []string
+		want     bool
+	}{
+		"none":            {nil, false},
+		"forwarded write": {[]string{"azure_arm:write"}, false},
+		"forwarded read":  {[]string{"azure_arm"}, true},
+		"other tool":      {[]string{"azure_arm:write", "gh_comment"}, true},
+		"unknown tool":    {[]string{"other:write"}, true},
+	} {
+		if got := (MCPApprovalPolicy{RequiredTools: tc.required}).NeedsRuntimeApprovals(tools); got != tc.want {
+			t.Errorf("%s: NeedsRuntimeApprovals = %t, want %t", name, got, tc.want)
 		}
 	}
 }

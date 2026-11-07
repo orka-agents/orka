@@ -92,8 +92,12 @@ http:
   ([#770](https://github.com/orka-agents/orka/issues/770)), but here the
   waiting client is the gateway, not the agent's MCP client, so forwarded
   writes are the one approval-required tool built-in runtimes accept.
-- A write request carries its body, JSON only, up to the broker's argument
-  limit, and `Content-Type: application/json`. Client headers stay dropped.
+- A write request carries its body, a JSON object or array, up to the
+  broker's argument limit, and `Content-Type: application/json`. The body is
+  JSON in the tool arguments, not a string, so the structural redaction of
+  approval previews and events reaches credential-named fields in it. Client
+  headers stay dropped. A Task that disallows the Tool, or only
+  `<name>:write`, gets no write tool.
 - Retries join. The Azure SDK times out a read after 300 seconds and retries,
   keeping the same `x-ms-client-request-id`. The gateway derives a write's
   call ID from that header, the method, the path, the query, and the body's

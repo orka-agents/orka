@@ -248,6 +248,21 @@ func (p MCPApprovalPolicy) Requires(toolName string) bool {
 	return slices.Contains(p.RequiredTools, toolName)
 }
 
+// NeedsRuntimeApprovals reports whether some approval-required tool is one
+// the runtime's own MCP client calls, and so needs a runtime that waits for
+// brokered approvals. A forwarding write tool is not: only a client
+// forwarder in the supervisor calls it, and that forwarder holds the
+// client's request while the broker waits.
+func (p MCPApprovalPolicy) NeedsRuntimeApprovals(toolPolicy MCPToolPolicy) bool {
+	for _, name := range p.RequiredTools {
+		index := slices.IndexFunc(toolPolicy.Tools, func(tool MCPToolDescriptor) bool { return tool.Name == name })
+		if index < 0 || toolPolicy.Tools[index].Forward == nil || !toolPolicy.Tools[index].Forward.Write {
+			return true
+		}
+	}
+	return false
+}
+
 type MCPPolicyConfiguration struct {
 	ToolPolicyDigest       string            `json:"toolPolicyDigest"`
 	ApprovalPolicyDigest   string            `json:"approvalPolicyDigest"`
