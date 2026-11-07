@@ -25,43 +25,29 @@ const enforcementLeaderAnnotation = "orka.ai/created-by-leader"
 
 const enforcementLeaderAnnotationValue = "true"
 
-// EstablishEnforcementPeriod records whether this controller enforces Agent
-// use, before it serves any request. A controller that does not enforce
-// deletes the marker, so the next enforcing run starts a new period, and
-// reports a started period with no start. An enforcing controller keeps the
-// period an earlier enforcing leader started and reports its start. It
-// reports started=false when no such period exists yet; StartEnforcementPeriod
-// then starts one once this controller leads. Tasks and automation sources
-// created before the start are not covered by any identity claim, which keeps
-// work created while the check was off from binding an identity whose claim
-// survived the gap. Errors are returned so the caller can refuse to start:
-// without the marker a later enforcing run would trust a gap.
-func EstablishEnforcementPeriod(ctx context.Context, c client.Client, namespace string, enforced bool) (since time.Time, started bool, err error) {
-	if !enforced {
-		marker := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: EnforcementLeaseName}}
-		if err := c.Delete(ctx, marker); err != nil && !apierrors.IsNotFound(err) {
-			return time.Time{}, false, fmt.Errorf("end the Agent use enforcement period: %w", err)
-		}
-		return time.Time{}, true, nil
+// EndEnforcementPeriod deletes the marker, so the next enforcing leader
+// starts a new period. A controller that does not enforce Agent use calls it
+// before it serves any request and again once it leads, since an enforcing
+// leader may have started a period in between. Tasks and automation sources
+// created before a period's start are not covered by any identity claim,
+// which keeps work created while the check was off from binding an identity
+// whose claim survived the gap. Errors are returned so the caller can refuse
+// to run: a marker left in place would let a later enforcing leader trust
+// the gap.
+func EndEnforcementPeriod(ctx context.Context, c client.Client, namespace string) error {
+	marker := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: EnforcementLeaseName}}
+	if err := c.Delete(ctx, marker); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("end the Agent use enforcement period: %w", err)
 	}
-	marker := &coordinationv1.Lease{}
-	err = c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: EnforcementLeaseName}, marker)
-	if apierrors.IsNotFound(err) || (err == nil && marker.Annotations[enforcementLeaderAnnotation] != enforcementLeaderAnnotationValue) {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("read the Agent use enforcement period: %w", err)
-	}
-	if marker.CreationTimestamp.IsZero() {
-		return time.Time{}, false, fmt.Errorf("the Agent use enforcement marker has no creation time")
-	}
-	return marker.CreationTimestamp.Time, true, nil
+	return nil
 }
 
 // StartEnforcementPeriod starts the period of Agent use enforcement, or
-// returns the one an enforcing leader already started. Call it only while
-// this controller leads. A marker no leader created is replaced: it may date
-// from before the leader that skipped the check stopped serving.
+// returns the one an enforcing leader already started. An enforcing
+// controller calls it each time it wins leadership, never before: the leader
+// it replaces may not have checked Agent use, and a non-enforcing leader
+// that ran since this controller started has ended any earlier period. A
+// marker no leader created is replaced.
 func StartEnforcementPeriod(ctx context.Context, c client.Client, namespace string) (time.Time, error) {
 	key := client.ObjectKey{Namespace: namespace, Name: EnforcementLeaseName}
 	for range 3 {
