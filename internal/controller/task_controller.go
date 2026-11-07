@@ -445,9 +445,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
 	}
-	cascadeErr := r.cascadeTaskCancellation(ctx, task)
-
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		// A projection that keeps failing must not keep delegated work
+		// running.
+		_ = r.cascadeTaskCancellation(ctx, task)
 		return ctrl.Result{}, err
 	}
 
@@ -462,7 +463,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseFinalizing:
 		return r.handleFinalizing(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return r.handleCompletedAfterCascade(ctx, task, cascadeErr)
+		return r.handleCompletedThenCascade(ctx, task)
 	}
 
 	return ctrl.Result{}, nil
@@ -2794,10 +2795,12 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// handleCompletedAfterCascade runs a finished Task's own completion work,
-// then requeues it soon while a child refused its cancel.
-func (r *TaskReconciler) handleCompletedAfterCascade(ctx context.Context, task *corev1alpha1.Task, cascadeErr error) (ctrl.Result, error) {
+// handleCompletedThenCascade runs a finished Task's own completion work, its
+// Job cleanup included, then cancels what it delegated, and requeues it soon
+// while a child refused its cancel.
+func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	result, err := r.handleCompleted(ctx, task)
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
 		result.RequeueAfter = 2 * time.Second
 	}
