@@ -115,9 +115,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   the check was off, or before its Agent declared an identity, was never
   checked for that identity. So a claim (stage 2) records when it was
   granted (`status.identityClaim.grantedAt`); claims are granted only while
-  the check is enforced and are released when the controller runs without
-  it; and a Task binds an identity only if it was created after the claim
-  was granted. The grant time comes from the API server's clock, like
+  the check is enforced and the issuer is configured, and are released when
+  the controller runs without either; and a Task binds an identity only if it
+  was created after the claim was granted. The grant time comes from the API server's clock, like
   creation times, never the controller's: a granted claim first carries no
   grant time and binds nothing, and the controller then records the latest
   write time the API server stamped on the Agent's `managedFields`, which is
@@ -134,12 +134,17 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   holds for every durable object Orka creates Tasks from with its own broad
   `use` grant: a Task controlled by a RepositoryScan or RepositoryMonitor
   binds only if that object, matched by owner UID, was also created after
-  the grant, and fails closed with "re-create" otherwise. GatewayBinding
+  the grant, and fails closed with "re-create" otherwise. Task provenance
+  admission keeps that owner from being removed or replaced, and a Task that
+  still carries a scan's or monitor's labels without its owner (as after an
+  orphaning delete) is refused rather than judged as a root Task. GatewayBinding
   Tasks record their binding only by name, so they cannot prove this and are
   refused for identity-bound Agents. Before every runtime admission the
-  dispatcher checks again that the Agent still holds a non-releasing claim
-  the Task satisfies, and otherwise fails the Task with
-  `IdentityUnavailable`.
+  dispatcher checks again that the controller still enforces the check, that
+  the issuer instance the Task froze is still configured, and that the Agent
+  still holds a non-releasing claim the Task satisfies, and otherwise fails
+  the Task with `IdentityUnavailable`. That includes resending a prompt a
+  RuntimePool turned away for capacity, since the wait can outlast the claim.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
