@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/gateway"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -979,6 +981,94 @@ func TestUnreadableIdentityRequeuesAPlannedPrompt(t *testing.T) {
 	unavailable, requeued, err := dispatcher.confirmIdentityWhilePlanned(ctx, task.DeepCopy(), attemptID, fence, nil)
 	if err != nil || !requeued || unavailable != "" {
 		t.Fatalf("confirmIdentityWhilePlanned() = %q, %t, %v; want the attempt requeued", unavailable, requeued, err)
+	}
+	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionReserved {
+		t.Fatalf("attempt state = %s, want Reserved for another submission", attempt.ExecutionState)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := base.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || updated.Status.Phase == corev1alpha1.TaskPhaseFailed {
+		t.Fatalf("Task execution = %#v, phase %s; want it Reserved for dispatch", updated.Status.Execution, updated.Status.Phase)
+	}
+}
+
+// TestUnreadableIdentityRequeuesARejectedResubmission covers a resubmission
+// after a rate-limited admission whose identity claim stays unreadable: the
+// rejection proves the prompt was not accepted, so the attempt returns to
+// Reserved instead of failing the Task as IdentityUnavailable.
+func TestUnreadableIdentityRequeuesARejectedResubmission(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("identity-resubmission", "identity-resubmission-uid", "pool-uid")
+	task.CreationTimestamp = metav1.Now()
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
+		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
+	}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
+	unreadable := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isAgent := obj.(*corev1alpha1.Agent); isAgent {
+				return errors.New("apiserver unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "identity-resubmission.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controlStore := sqlite.NewStore(db, "identity-resubmission-test")
+	epochs := NewControllerEpochManager(controlStore, "identity-resubmission-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	t.Cleanup(func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("controller epoch manager shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attemptID, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{Identity: testIdentityConfig(), Client: unreadable, APIReader: unreadable, Store: controlStore, ResultStore: controlStore, Epochs: epochs}
+	states := []store.PromptExecutionState{
+		store.PromptExecutionQueued, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned, store.PromptExecutionSubmitting,
+	}
+	for i := 1; i < len(states); i++ {
+		if err := dispatcher.transitionAttempt(ctx, attemptID, fence, states[i-1], states[i], "test-"+string(states[i]), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rejection := &harnessv2.ClientError{StatusCode: http.StatusTooManyRequests, Code: harnessv2.ErrorCodeRateLimited, Retryable: true}
+	if err := dispatcher.requeueRejectedPromptForIdentity(ctx, task.DeepCopy(), attemptID, fence, rejection, nil, nil, errors.New("apiserver unavailable")); err != nil {
+		t.Fatalf("requeueRejectedPromptForIdentity() = %v, want the attempt requeued", err)
 	}
 	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
 	if err != nil {
