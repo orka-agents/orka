@@ -3190,8 +3190,9 @@ metadata:
 spec:
   failurePolicy: Fail
   matchConditions:
-  - expression: request.?name.orValue('').startsWith('acp-suspend-quota-') || request.?name.orValue('').startsWith('acp-retention-fence-')
-      || (request.operation == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
+  - expression: request.?name.orValue('') == 'orka-agent-use-enforcement' || request.?name.orValue('').startsWith('acp-suspend-quota-')
+      || request.?name.orValue('').startsWith('acp-retention-fence-') || (request.operation
+      == 'CREATE' && (object.metadata.?generateName.orValue('').startsWith('acp-suspend-quota-')
       || object.metadata.?generateName.orValue('').startsWith('acp-retention-fence-')))
     name: reserved-acp-workspace-lease-name
   matchConstraints:
