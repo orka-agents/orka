@@ -464,7 +464,17 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 			writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted",
 				"Orka did not send the request: "+brokerErrorMessage(response.Result))
 			return
-		case "tool_outcome_unknown":
+		case "tool_failed_without_effect":
+			// Nothing was sent, and a retry would replay the same refusal.
+			writeAzureError(w, http.StatusForbidden, "OrkaToolRefused",
+				"Orka refused the request without sending it: "+brokerErrorMessage(response.Result))
+			return
+		case "tool_outcome_unknown", "tool_execution_failed":
+			// A failed execution was delivered: for a write, the request may
+			// have reached Azure. A failed read stays a 502 below.
+			if !write && brokerErrorCode(response.Result) == "tool_execution_failed" {
+				break
+			}
 			writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
 				"The request may have reached Azure. Check the resource before repeating it.")
 			return

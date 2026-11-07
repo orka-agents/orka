@@ -124,6 +124,10 @@ func TestForwardingWriteToolIsCheckedAgainstItsTool(t *testing.T) {
 	}
 	request := harnessv2.MCPBrokerCallRequest{Namespace: "tenant"}
 	executor := RegistryACPMCPToolExecutor{Reader: fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tool).Build()}
+	if err := executor.ValidateACPMCPTool(context.Background(), request, write); err == nil {
+		t.Fatal("a write the Tool requires approval for passed under a policy without it")
+	}
+	request.Authorization.ApprovalPolicy = harnessv2.MCPApprovalPolicy{RequiredTools: []string{write.Name}}
 	if err := executor.ValidateACPMCPTool(context.Background(), request, write); err != nil {
 		t.Fatalf("a current write tool failed revalidation: %v", err)
 	}
@@ -199,5 +203,17 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	}
 	if _, _, _, err := freezeRequesterConnectionsClassified(context.Background(), reader, nil, task, configuration); err != nil {
 		t.Fatalf("freeze: %v", err)
+	}
+	// A policy that drops the write tool's approval, as a registered
+	// external runtime's could, is refused while the Tool requires it.
+	unapproved := agent.DeepCopy()
+	unapproved.Spec.Coordination = nil
+	plan, err = PlanACPRuntime(task, unapproved, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, task, unapproved, plan.Profile, tools.NewRegistry()); err == nil ||
+		!strings.Contains(err.Error(), "requires approval") {
+		t.Fatalf("a policy without the write tool's approval: %v", err)
 	}
 }

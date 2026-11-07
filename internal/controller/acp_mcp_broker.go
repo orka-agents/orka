@@ -359,7 +359,7 @@ func (e RegistryACPMCPToolExecutor) ValidateACPMCPTool(ctx context.Context, requ
 	if err := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: customACPMCPToolResource(descriptor)}, tool); err != nil {
 		return acpMCPAuthorityReadError(err)
 	}
-	return matchCurrentCustomACPMCPTool(tool, descriptor)
+	return matchCurrentCustomACPMCPTool(tool, descriptor, request.Authorization.ApprovalPolicy)
 }
 
 // customACPMCPToolResource names the Tool behind a custom descriptor: a
@@ -372,11 +372,15 @@ func customACPMCPToolResource(descriptor harnessv2.MCPToolDescriptor) string {
 }
 
 // matchCurrentCustomACPMCPTool refuses a call whose Tool no longer describes
-// the descriptor the prompt was authorized with.
-func matchCurrentCustomACPMCPTool(tool *corev1alpha1.Tool, descriptor harnessv2.MCPToolDescriptor) error {
+// the descriptor the prompt was authorized with, or a forwarded write the
+// Tool now requires approval for although the prompt's policy does not.
+func matchCurrentCustomACPMCPTool(tool *corev1alpha1.Tool, descriptor harnessv2.MCPToolDescriptor, approval harnessv2.MCPApprovalPolicy) error {
 	current, err := customACPMCPToolDescriptor(tool)
 	if err == nil && descriptor.Forward != nil && descriptor.Forward.Write {
 		current, err = forwardingWriteDescriptor(tool, current)
+		if err == nil && tool.Spec.HTTP.Forward.Writes.WriteApprovalRequired() && !approval.Requires(descriptor.Name) {
+			return fmt.Errorf("forwarding write tool %q now requires approval", descriptor.Name)
+		}
 	}
 	if err != nil {
 		return err
@@ -507,7 +511,7 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: resource}, tool); getErr != nil {
 			return nil, fmt.Errorf("load custom MCP tool %q: %w", resource, getErr)
 		}
-		if matchErr := matchCurrentCustomACPMCPTool(tool, descriptor); matchErr != nil {
+		if matchErr := matchCurrentCustomACPMCPTool(tool, descriptor, request.Authorization.ApprovalPolicy); matchErr != nil {
 			return nil, matchErr
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)

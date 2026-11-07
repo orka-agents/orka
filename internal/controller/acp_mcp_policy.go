@@ -452,6 +452,12 @@ func buildCanonicalMCPToolDescriptors(
 			if descriptor, descriptorErr = forwardingWriteDescriptor(custom, descriptor); descriptorErr != nil {
 				return nil, permanentACPAgentConfiguration(descriptorErr)
 			}
+			// Every path that builds a policy, including registered external
+			// runtimes, honors the Tool's approval setting.
+			if custom.Spec.HTTP.Forward.Writes.WriteApprovalRequired() && !approval.Requires(name) {
+				return nil, permanentACPAgentConfiguration(fmt.Errorf(
+					"forwarding write tool %q requires approval; list it in the approval-required tools", name))
+			}
 		}
 		if descriptor.Forward != nil {
 			policy := &corev1alpha1.OutboundAccessPolicy{}

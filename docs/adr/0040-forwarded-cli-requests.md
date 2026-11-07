@@ -91,7 +91,11 @@ http:
   otherwise cannot ask for approval
   ([#770](https://github.com/orka-agents/orka/issues/770)), but here the
   waiting client is the gateway, not the agent's MCP client, so forwarded
-  writes are the one approval-required tool built-in runtimes accept.
+  writes are the one approval-required tool built-in runtimes accept. A
+  policy that allows a write tool without approval while its Tool requires
+  approval, such as a registered external runtime's, is refused when it is
+  built and again before each call, so a Tool switched to `Required` stops
+  unapproved writes at once.
 - A write request carries its body, a JSON object or array, up to the
   broker's argument limit, and `Content-Type: application/json`. The body is
   JSON in the tool arguments, not a string, so the structural redaction of
@@ -121,7 +125,9 @@ http:
   approval, only the requester can approve it, as ADR 0039 requires.
 - A decided write gets a final answer, never a status the Azure SDK retries:
   a declined, expired, cancelled, or stale approval is `403
-  OrkaApprovalNotGranted`, and a write whose outcome is unknown is `409
+  OrkaApprovalNotGranted`, a write refused before it was sent is `403
+  OrkaToolRefused`, and a write that may have been sent (an unknown outcome,
+  or a failure after delivery such as an oversized response) is `409
   OrkaOutcomeUnknown`. The approval names the method and path.
 
 ## Rejected alternatives

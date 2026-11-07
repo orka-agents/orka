@@ -589,9 +589,11 @@ func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 		status int
 		error  string
 	}{
-		"approval_declined":    {http.StatusForbidden, "OrkaApprovalNotGranted"},
-		"approval_expired":     {http.StatusForbidden, "OrkaApprovalNotGranted"},
-		"tool_outcome_unknown": {http.StatusConflict, "OrkaOutcomeUnknown"},
+		"approval_declined":          {http.StatusForbidden, "OrkaApprovalNotGranted"},
+		"approval_expired":           {http.StatusForbidden, "OrkaApprovalNotGranted"},
+		"tool_outcome_unknown":       {http.StatusConflict, "OrkaOutcomeUnknown"},
+		"tool_execution_failed":      {http.StatusConflict, "OrkaOutcomeUnknown"},
+		"tool_failed_without_effect": {http.StatusForbidden, "OrkaToolRefused"},
 	} {
 		fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
 			return json.RawMessage(`{"isError":true,"code":"` + code + `","error":"decided"}`)
