@@ -17,6 +17,7 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -253,10 +254,15 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 	}
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
+		// A Helm nameOverride changes app.kubernetes.io/name; the platform
+		// marker, not the chart name, decides.
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "renamed", Namespace: "tenant",
+			Labels: map[string]string{"app.kubernetes.io/name": "custom", labels.LabelPlatformIdentity: "true"}}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant",
 			Labels: map[string]string{"app.kubernetes.io/name": "orka"}}},
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}},
 	).Build()
-	for name, wantDenied := range map[string]bool{"orka": true, "workload": false} {
+	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false} {
 		direct := validDirect()
 		direct.Subject = corev1alpha1.OutboundTokenSource{
 			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,

@@ -9,7 +9,8 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const taskWebhookSigningTestNamespace = "orka-task-webhook-signing"
+// The default derives from the release namespace (staticChartTestNamespace).
+const taskWebhookSigningTestNamespace = "orka-test-task-webhook-signing"
 
 func renderedControllerDeployment(t *testing.T, args ...string) appsv1.Deployment {
 	t.Helper()
@@ -167,6 +168,26 @@ func TestStaticChartRejectsTaskWebhookSigningBesideTasks(t *testing.T) {
 			args: []string{"--set-string", "controller.taskWebhooks.signingSecretName=Bad_Name"},
 			want: "must be a Secret name",
 		},
+		{
+			name: "secret with an empty DNS label",
+			args: []string{"--set-string", "controller.taskWebhooks.signingSecretName=a..b"},
+			want: "must be a Secret name",
+		},
+		{
+			name: "secret label ending in a hyphen",
+			args: []string{"--set-string", "controller.taskWebhooks.signingSecretName=a-.b"},
+			want: "must be a Secret name",
+		},
+		{
+			name: "secret label starting with a hyphen",
+			args: []string{"--set-string", "controller.taskWebhooks.signingSecretName=a.-b"},
+			want: "must be a Secret name",
+		},
+		{
+			name: "secret name too long",
+			args: []string{"--set-string", "controller.taskWebhooks.signingSecretName=" + strings.Repeat("a.", 127)},
+			want: "must be a Secret name",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, tt.args...)
@@ -174,5 +195,59 @@ func TestStaticChartRejectsTaskWebhookSigningBesideTasks(t *testing.T) {
 				t.Fatalf("helm render error = %v, want %q:\n%s", err, tt.want, output)
 			}
 		})
+	}
+}
+
+// Each release owns its signing namespace, so a second release elsewhere in
+// the cluster does not collide with the first on Helm ownership.
+func TestStaticChartTaskWebhookSigningNamespaceIsPerRelease(t *testing.T) {
+	namespaces := map[string]string{}
+	for _, release := range []struct{ name, namespace string }{
+		{"orka", "orka-system"},
+		{"secondary", "tenant-b"},
+		{"long", strings.Repeat("n", 63)},
+	} {
+		rendered, err := helmTemplateStaticChartForRelease(t, release.name, release.namespace,
+			"--show-only", "templates/task-webhook-signing-namespace.yaml")
+		if err != nil {
+			t.Fatalf("%s: render: %v\n%s", release.name, err, rendered)
+		}
+		var namespace corev1.Namespace
+		if err := yaml.Unmarshal([]byte(rendered), &namespace); err != nil {
+			t.Fatalf("decode signing Namespace: %v", err)
+		}
+		if len(namespace.Name) > 63 || strings.HasSuffix(namespace.Name, "-") {
+			t.Errorf("%s: signing namespace %q is not a namespace name", release.name, namespace.Name)
+		}
+		if other, ok := namespaces[namespace.Name]; ok {
+			t.Errorf("releases %s and %s share signing namespace %s", other, release.name, namespace.Name)
+		}
+		namespaces[namespace.Name] = release.name
+	}
+	if _, ok := namespaces["orka-system-task-webhook-signing"]; !ok {
+		t.Errorf("default signing namespaces = %v, want orka-system-task-webhook-signing for orka-system", namespaces)
+	}
+}
+
+// OutboundAccessPolicies refuse ServiceAccounts with the platform marker as
+// token sources, so every account the chart creates must carry it.
+func TestStaticChartServiceAccountsCarryPlatformIdentity(t *testing.T) {
+	rendered := requireHelmRender(t, "--set", "client.create=true")
+	var count int
+	for _, document := range strings.Split(rendered, "\n---") {
+		if !strings.Contains(document, "\nkind: ServiceAccount\n") {
+			continue
+		}
+		var serviceAccount corev1.ServiceAccount
+		if err := yaml.Unmarshal([]byte(document), &serviceAccount); err != nil {
+			t.Fatalf("decode ServiceAccount: %v", err)
+		}
+		count++
+		if serviceAccount.Labels["orka.ai/platform-identity"] != "true" {
+			t.Errorf("ServiceAccount %s lacks orka.ai/platform-identity=true", serviceAccount.Name)
+		}
+	}
+	if count < 6 {
+		t.Fatalf("rendered %d ServiceAccounts, want the controller, workers, publisher and client at least", count)
 	}
 }

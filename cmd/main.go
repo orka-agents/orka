@@ -2542,8 +2542,12 @@ const defaultTaskWebhookSigningNamespace = "orka-task-webhook-signing"
 // namespaces are the watch namespace, the controller Pod namespace, and the
 // ACP runtime and agent-host namespaces, whose Pods run agent code.
 func validateTaskWebhookSigningNamespace(secretName, namespace string, reserved ...string) error {
-	if strings.TrimSpace(secretName) == "" {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" {
 		return nil
+	}
+	if problems := validation.IsDNS1123Subdomain(secretName); len(problems) > 0 {
+		return fmt.Errorf("--task-webhook-signing-secret %q is not a Secret name: %s", secretName, strings.Join(problems, "; "))
 	}
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {

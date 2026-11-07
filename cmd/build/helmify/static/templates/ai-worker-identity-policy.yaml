@@ -20,6 +20,10 @@ spec:
       apiVersions: ["v1"]
       operations: ["CREATE", "UPDATE"]
       resources: ["secrets"]
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["serviceaccounts"]
     - apiGroups: ["batch"]
       apiVersions: ["v1"]
       operations: ["CREATE", "UPDATE"]
@@ -38,6 +42,11 @@ spec:
   validations:
   - expression: "request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'"
     message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret would hand it another identity
+  - expression: "request.resource.resource != 'serviceaccounts' || request.name.startsWith('orka-code-exec-')"
+    message: >-
+      the AI worker may only create or delete code_exec ServiceAccounts
+      (orka-code-exec-*); replacing another ServiceAccount would inherit its
+      RoleBindings
   - expression: >-
       request.resource.resource != 'jobs' || (
         object.metadata.name.startsWith('orka-code-exec-') &&

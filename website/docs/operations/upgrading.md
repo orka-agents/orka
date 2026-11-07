@@ -74,9 +74,10 @@ upgrading:
   `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
   against `/.well-known/orka/task-webhook-jwks.json`. See
   [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
-- The signing key lives in a new namespace, `orka-task-webhook-signing` (Helm value
-  `controller.taskWebhooks.signingNamespace`, flag `--task-webhook-signing-namespace`),
-  that holds only that Secret and binds only the controller. The chart and the kustomize
+- The signing key lives in a new namespace that holds only that Secret and binds only
+  the controller: `<release namespace>-task-webhook-signing` for Helm (value
+  `controller.taskWebhooks.signingNamespace`), `orka-task-webhook-signing` for kustomize
+  (flag `--task-webhook-signing-namespace`). The chart and the kustomize
   install create the namespace and a controller Role in it; the controller creates the
   Secret and mints the key on first use. Installs that grant RBAC some other way must
   grant the controller `get` and `update` on that Secret and `create` on Secrets there.
@@ -91,17 +92,20 @@ upgrading:
   (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
   ServiceAccount may create. Before, the default AI worker role could create a
   ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
-  act as the controller. Now it may write only Opaque Secrets and create only
+  act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+  RoleBindings. Now it may write only Opaque Secrets, create or delete only `code_exec`'s
+  own `orka-code-exec-*` ServiceAccounts, and create only
   `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
   the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
   labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
   subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
   ephemeral containers, no Unconfined seccomp, and non-root, unprivileged containers
   with `allowPrivilegeEscalation: false`, all capabilities dropped and none added.
-  Orka's own worker already works this way. Anything else that creates Secrets or Jobs
-  as the AI worker ServiceAccount is now rejected.
-- An OutboundAccessPolicy whose `serviceAccountRef` names an Orka ServiceAccount (one
-  labeled `app.kubernetes.io/name: orka`, such as the controller or a worker) now
+  Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
+  ServiceAccounts as the AI worker ServiceAccount is now rejected.
+- Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
+  and on worker accounts the controller creates. An OutboundAccessPolicy whose
+  `serviceAccountRef` names one (such as the controller or a worker) now
   reports `ReferenceDenied`, and the controller no longer grants the AI worker
   TokenRequest for it. Point such policies at a dedicated ServiceAccount.
 - Check the release namespace for ServiceAccount-token Secrets

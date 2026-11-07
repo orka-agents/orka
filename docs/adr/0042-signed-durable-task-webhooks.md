@@ -87,8 +87,10 @@ lease.
   ValidatingAdmissionPolicy therefore limits the AI worker to Opaque Secrets
   and to `code_exec` Jobs that run token-less as their own ServiceAccount, carry
   only `code_exec` labels, and get no host access, privilege or capabilities.
+  The worker may manage only code_exec's own ServiceAccounts, so it cannot
+  replace a platform account and inherit its RoleBindings, and
   OutboundAccessPolicies may not grant TokenRequest for Orka's own
-  ServiceAccounts. Existing ServiceAccount-token Secrets in the release
+  ServiceAccounts, which carry `orka.ai/platform-identity: "true"`. Existing ServiceAccount-token Secrets in the release
   namespace stay readable by default-profile workers; operators must not keep
   any there.
 - Rotation is an operator edit of one Secret. Replicas reload within 15

@@ -68,9 +68,11 @@ controller:
     signingSecretName: ""
     # Chart-created namespace that holds only the signing Secret, so Task and
     # Agent secretRefs and worker roles in the release namespace cannot reach
-    # the key. Must differ from the release, client, ACP runtime and agent-host
-    # namespaces. Kept on helm uninstall so the key survives a reinstall.
-    signingNamespace: orka-task-webhook-signing
+    # the key. Empty means <release namespace>-task-webhook-signing, so each
+    # release owns its own. Must differ from the release, client, ACP runtime
+    # and agent-host namespaces. Kept on helm uninstall so the key survives a
+    # reinstall.
+    signingNamespace: ""
 
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:

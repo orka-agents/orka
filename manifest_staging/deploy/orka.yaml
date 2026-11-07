@@ -43,6 +43,7 @@ metadata:
     app.kubernetes.io/component: admission
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-admission
   namespace: orka-system
 ---
@@ -52,6 +53,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-ai-worker
   namespace: orka-system
 ---
@@ -61,6 +63,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-container-worker
   namespace: orka-system
 ---
@@ -70,6 +73,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-controller-manager
   namespace: orka-system
 ---
@@ -80,6 +84,7 @@ metadata:
   labels:
     app.kubernetes.io/component: provider-auth-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-provider-auth-proxy
   namespace: orka-system
 ---
@@ -90,6 +95,7 @@ metadata:
   labels:
     app.kubernetes.io/component: scm-egress-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-scm-egress-proxy
   namespace: orka-system
 ---
@@ -99,6 +105,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-vendor-worker
   namespace: orka-system
 ---
@@ -109,6 +116,7 @@ metadata:
   labels:
     app.kubernetes.io/component: workspace-publisher
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-workspace-publisher
   namespace: orka-system
 ---
@@ -3341,6 +3349,16 @@ spec:
       resources:
       - secrets
     - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - serviceaccounts
+    - apiGroups:
       - batch
       apiVersions:
       - v1
@@ -3353,6 +3371,9 @@ spec:
   - expression: request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'
     message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret
       would hand it another identity
+  - expression: request.resource.resource != 'serviceaccounts' || request.name.startsWith('orka-code-exec-')
+    message: the AI worker may only create or delete code_exec ServiceAccounts (orka-code-exec-*);
+      replacing another ServiceAccount would inherit its RoleBindings
   - expression: |-
       request.resource.resource != 'jobs' || (
 

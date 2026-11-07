@@ -43,6 +43,10 @@ const (
 	LabelSecurityScope     = "orka.ai/security-scope"
 	LabelSecuritySliceID   = "orka.ai/security-slice-id"
 	LabelSecurityFindingID = "orka.ai/security-finding-id"
+	// LabelPlatformIdentity marks Orka's own ServiceAccounts. Their tokens
+	// carry platform authority, so OutboundAccessPolicies may not hand them to
+	// workers.
+	LabelPlatformIdentity  = "orka.ai/platform-identity"
 	LabelGitHubEvent       = "orka.ai/github-event"
 	LabelGitHubAction      = "orka.ai/github-action"
 	LabelGitHubRepository  = "orka.ai/github-repository"

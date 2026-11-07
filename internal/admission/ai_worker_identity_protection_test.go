@@ -23,6 +23,8 @@ var (
 	secretKind      = schema.GroupVersionKind{Version: "v1", Kind: "Secret"}
 	jobsResource    = schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
 	jobKind         = schema.GroupVersionKind{Group: "batch", Version: "v1", Kind: "Job"}
+	saResource      = schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}
+	saKind          = schema.GroupVersionKind{Version: "v1", Kind: "ServiceAccount"}
 )
 
 func compileAIWorkerIdentityProtection(t *testing.T) admissionPolicyEvaluator {
@@ -210,5 +212,36 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 			require.False(t, admits(aiWorkerIdentityTestWorker, job))
 			require.True(t, admits(trustedControllerUser, job), "only the AI worker is constrained")
 		})
+	}
+}
+
+// Replacing a platform ServiceAccount with one of the same name would inherit
+// its RoleBindings, so the AI worker may only manage code_exec's own accounts.
+func TestAIWorkerIdentityProtectionServiceAccounts(t *testing.T) {
+	policy := compileAIWorkerIdentityProtection(t)
+	serviceAccount := func(name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "ServiceAccount",
+			"metadata": map[string]any{"name": name, "namespace": admissionTestNamespace},
+		}}
+	}
+	admits := func(operation apiserveradmission.Operation, username, name string) bool {
+		var object, old *unstructured.Unstructured
+		switch operation {
+		case apiserveradmission.Delete:
+			old = serviceAccount(name)
+		case apiserveradmission.Update:
+			object, old = serviceAccount(name), serviceAccount(name)
+		default:
+			object = serviceAccount(name)
+		}
+		return policy.admits(t, saKind, saResource, name, operation, username, "", object, old)
+	}
+	for _, operation := range []apiserveradmission.Operation{apiserveradmission.Create, apiserveradmission.Update, apiserveradmission.Delete} {
+		require.True(t, admits(operation, aiWorkerIdentityTestWorker, "orka-code-exec-run-1"), "code_exec's own account")
+		for _, name := range []string{"orka-controller-manager", "orka-ai-worker", "orka-workspace-publisher", "default"} {
+			require.False(t, admits(operation, aiWorkerIdentityTestWorker, name), "%s %s", operation, name)
+			require.True(t, admits(operation, trustedControllerUser, name), "only the AI worker is constrained")
+		}
 	}
 }

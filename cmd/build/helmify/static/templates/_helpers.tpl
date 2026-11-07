@@ -813,15 +813,24 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{/*
 Namespace holding only the Task webhook signing Secret. Task and Agent
 secretRefs mount any Secret in the Task namespace and worker roles are bound
-there, so the key must live where no Task, runtime or agent host runs.
+there, so the key must live where no Task, runtime or agent host runs. The
+default is derived from the release namespace so that each release owns its
+own signing namespace.
 */}}
 {{- define "orka.taskWebhookSigningNamespace" -}}
-{{- default "orka-task-webhook-signing" (trim (toString (dig "taskWebhooks" "signingNamespace" "" .Values.controller))) -}}
+{{- $namespace := trim (toString (dig "taskWebhooks" "signingNamespace" "" .Values.controller)) -}}
+{{- if not $namespace -}}
+{{- $namespace = printf "%s-task-webhook-signing" .Release.Namespace -}}
+{{- if gt (len $namespace) 63 -}}
+{{- $namespace = printf "%s-%s-task-webhook-signing" (.Release.Namespace | trunc 30 | trimSuffix "-") (sha256sum .Release.Namespace | trunc 8) -}}
+{{- end -}}
+{{- end -}}
+{{- $namespace -}}
 {{- end }}
 
 {{- define "orka.validateTaskWebhooks" -}}
 {{- $secret := include "orka.taskWebhookSigningSecretName" . -}}
-{{- if not (regexMatch `^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$` $secret) -}}
+{{- if or (gt (len $secret) 253) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` $secret)) -}}
 {{- fail (printf "controller.taskWebhooks.signingSecretName %q must be a Secret name" $secret) -}}
 {{- end -}}
 {{- $namespace := include "orka.taskWebhookSigningNamespace" . -}}

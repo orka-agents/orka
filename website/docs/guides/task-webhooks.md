@@ -175,8 +175,9 @@ status:
 ## Signing keys and rotation
 
 The controller signs with the Ed25519 key in the `current` item of a Secret in
-the `orka-task-webhook-signing` namespace (Helm value
-`controller.taskWebhooks.signingNamespace`, flag
+a namespace of its own: `<release namespace>-task-webhook-signing` for the Helm
+chart (override with `controller.taskWebhooks.signingNamespace`), or
+`orka-task-webhook-signing` for the kustomize install (flag
 `--task-webhook-signing-namespace`). The Secret is
 `<fullname>-task-webhook-signing` for the Helm chart, where `<fullname>` is the
 chart's full name (`orka` for a release named `orka`; override the Secret name
@@ -191,7 +192,7 @@ Every replica rereads the Secret at least every 15 seconds, so rotation needs no
 restart. To rotate:
 
 ```bash
-NS=orka-task-webhook-signing
+NS=orka-task-webhook-signing      # <release namespace>-task-webhook-signing for Helm
 SECRET=orka-task-webhook-signing  # <fullname>-task-webhook-signing for Helm
 openssl genpkey -algorithm ed25519 -out new.pem
 OLD=$(kubectl -n "$NS" get secret "$SECRET" -o jsonpath='{.data.current}')
@@ -238,7 +239,9 @@ ServiceAccount, and a Job's Pod could carry the controller's labels, which
 would put it behind the API Service that publishes the JWKS. The
 `<fullname>-ai-worker-identity-protection` ValidatingAdmissionPolicy, which
 both installs ship, blocks all three. The AI worker may only write Opaque
-Secrets, and may only create `code_exec` Jobs: each runs as its own per-run
+Secrets, may only create or delete `code_exec`'s own ServiceAccounts (so it
+cannot replace a platform account and inherit its RoleBindings), and may only
+create `code_exec` Jobs: each runs as its own per-run
 ServiceAccount with no token mounted, carries only `code_exec` labels, uses
 only emptyDir and Secret volumes, and gets no host namespaces, privilege or
 capabilities. Keep that policy installed, and:
@@ -246,7 +249,7 @@ capabilities. Keep that policy installed, and:
 - Do not grant the AI worker other ways to run Pods or request tokens. An
   OutboundAccessPolicy `serviceAccountRef` grants the AI worker TokenRequest
   for that account, so the controller refuses Orka's own ServiceAccounts
-  (labeled `app.kubernetes.io/name: orka`) there.
+  (labeled `orka.ai/platform-identity: "true"`) there.
 - Do not keep ServiceAccount-token Secrets in the release namespace. The
   default AI worker profile can read every Secret there, so any such Secret
   hands the worker that account's token.
