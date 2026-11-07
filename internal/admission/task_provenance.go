@@ -234,7 +234,7 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 }
 
 // namesIdentityBoundAgent reports whether the Task names an Agent that
-// declares an external identity. A missing Agent declares none; any other
+// declares an external identity or still holds a claim to one. A missing Agent declares none; any other
 // read failure is returned so admission fails closed.
 func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, namespace string, task *corev1alpha1.Task) (bool, error) {
 	if task.Spec.AgentRef == nil || strings.TrimSpace(task.Spec.AgentRef.Name) == "" {
@@ -253,8 +253,7 @@ func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, n
 		}
 		return false, err
 	}
-	_, _, declared := agent.IdentityRef()
-	return declared, nil
+	return agent.HoldsIdentity(), nil
 }
 
 // A Task's creator establishes its coordination ancestry. Later metadata

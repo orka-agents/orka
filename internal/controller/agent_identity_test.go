@@ -237,7 +237,22 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	unchecked := scheduled.DeepCopy()
 	unchecked.Name = "nightly-unchecked"
 	unchecked.CreationTimestamp = testClaimGrantedAt
-	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled, unchecked}
+	// Scheduled Tasks a worker delegated: their runs may use the identity
+	// only when the Task that delegated them owns it.
+	delegatedSchedule := func(name, delegator string) *corev1alpha1.Task {
+		delegated := scheduled.DeepCopy()
+		delegated.Name = name
+		delegated.Labels = map[string]string{labels.LabelParentTask: delegator}
+		controller := true
+		delegated.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: delegator,
+			UID: types.UID(delegator + "-uid"), Controller: &controller,
+		}}
+		return delegated
+	}
+	ownedSchedule := delegatedSchedule("nightly-owned", "parent-own")
+	borrowedSchedule := delegatedSchedule("nightly-borrowed", "parent-unbound")
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule}
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
 	for _, parent := range parents {
 		parent.UID = types.UID(parent.Name + "-uid")
@@ -270,6 +285,7 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	for name, child := range map[string]*corev1alpha1.Task{
 		"child of the same bound Agent":                   task("parent-own"),
 		"scheduled run of the scheduled Task's own Agent": task("nightly"),
+		"run of a schedule its bound parent delegated":    task("nightly-owned"),
 	} {
 		if _, err := r.agentExecutionIdentity(ctx, child, agent); err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -294,6 +310,7 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		{"child of a parent frozen under another instance", task("parent-other-instance"), "parent's own bound Agent"},
 		{"run of a scheduled Task created before the grant", task("nightly-unchecked"), "re-create the scheduled Task"},
 		{"scheduled run naming another Agent", otherAgentRun, "scheduled Task names it"},
+		{"run of a schedule an unbound parent delegated", task("nightly-borrowed"), "parent's own bound Agent"},
 		{"orphan", orphan, "still controls it"},
 		{"replaced parent", replaced, "still controls it"},
 		{"recorded parent", misrecorded, "still controls it"},
