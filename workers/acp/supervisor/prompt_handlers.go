@@ -62,6 +62,11 @@ func (s *Server) handleStartPrompt(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	state := s.sessions[sessionID]
+	if state == nil && s.drainCleanedPromptUnacceptedLocked(sessionID, request.Metadata) {
+		s.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, harnessv2.ErrorCodeRateLimited, "runtime pool is draining", nil, true)
+		return
+	}
 	if state == nil || state.creating {
 		s.mu.Unlock()
 		writeError(w, http.StatusNotFound, harnessv2.ErrorCodeInvalidRequest, "runtime session not found", nil, false)
@@ -1500,6 +1505,32 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	setSessionState(state, nextState)
 	state.descriptor.LastTransitionAt = now
 	return true, nil
+}
+
+// drainCleanedPromptUnacceptedLocked reports whether a prompt for a session
+// that drain cleanup already retired is provably unaccepted: the pool is still
+// draining, the request names that exact retired session, and neither the
+// operation nor the prompt was ever admitted on it. Such a prompt is rejected
+// as retryable, like any prompt that reaches a draining pool, so the
+// controller can requeue it. Replays of admitted work keep their existing
+// classification. The caller must hold s.mu.
+func (s *Server) drainCleanedPromptUnacceptedLocked(sessionID harnessv2.RuntimeSessionID, metadata harnessv2.MutationMetadata) bool {
+	if !s.drain.Requested {
+		return false
+	}
+	tombstone, ok := s.tombstones[metadata.Fence.RuntimeSessionUID]
+	if !ok || !tombstone.drainCleaned || tombstone.sessionID != sessionID ||
+		tombstone.RuntimeSessionGeneration != metadata.Fence.RuntimeSessionGeneration ||
+		tombstone.RuntimeProfileDigest != metadata.Fence.RuntimeProfileDigest {
+		return false
+	}
+	if tombstoneOperation(tombstone.RuntimeSessionTombstone, metadata.OperationID) != nil {
+		return false
+	}
+	if _, ok := tombstone.cancellationOperations[metadata.OperationID]; ok {
+		return false
+	}
+	return tombstone.prompt == nil || tombstone.prompt.metadata.PromptID != metadata.PromptID
 }
 
 func tombstoneOperation(tombstone harnessv2.RuntimeSessionTombstone, operationID harnessv2.OperationID) *harnessv2.OperationRecord {

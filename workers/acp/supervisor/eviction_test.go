@@ -81,6 +81,48 @@ func TestBeginEvictionDrainsAndRejectsFreshPromptsWithoutAcceptance(t *testing.T
 	}
 }
 
+// A prompt sent after eviction cleanup already retired its idle session was
+// never accepted, so it is rejected as retryable rather than as a missing
+// session. A replay of a prompt the session already admitted keeps its
+// existing classification and is never offered for retry.
+func TestEvictionCleanedSessionRejectsFreshPromptAsRetryable(t *testing.T) {
+	server, cfg, profile := newTestServer(t, "immediate")
+	create := testCreateSessionRequest(t, cfg, profile)
+	if response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1", create, cfg); response.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !server.BeginEviction(time.Now().UTC()) {
+		t.Fatal("eviction of an undrained supervisor must hold the process for suspension")
+	}
+	awaitDeletedRuntimeSession(t, server, create.RuntimeSessionID)
+
+	fresh := testStartPromptRequest(t, cfg, create.Metadata.Fence)
+	response := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", fresh, cfg)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("fresh prompt after eviction cleanup status=%d body=%s; want a retryable unaccepted rejection", response.Code, response.Body.String())
+	}
+	var rejection harnessv2.ErrorResponse
+	decodeResponse(t, response, &rejection)
+	if rejection.Code != harnessv2.ErrorCodeRateLimited || !rejection.Retryable {
+		t.Fatalf("fresh prompt after eviction cleanup rejection = %+v; want retryable rate_limited", rejection)
+	}
+
+	// The retired session had admitted this prompt before cleanup.
+	server.mu.Lock()
+	tombstone := server.tombstones[create.Metadata.Fence.RuntimeSessionUID]
+	if !tombstone.drainCleaned {
+		server.mu.Unlock()
+		t.Fatal("eviction cleanup did not mark its tombstone")
+	}
+	tombstone.prompt = &retiredPromptSettlement{metadata: fresh.Metadata}
+	server.tombstones[create.Metadata.Fence.RuntimeSessionUID] = tombstone
+	server.mu.Unlock()
+	replay := performMutation(t, server.Handler(), http.MethodPut, "/v2/runtime-sessions/session-1/prompts/prompt-1", fresh, cfg)
+	if replay.Code == http.StatusTooManyRequests {
+		t.Fatalf("replay of an admitted prompt was offered for retry: body=%s", replay.Body.String())
+	}
+}
+
 func TestBeginEvictionReleasesOnlyForControllerStopRetirement(t *testing.T) {
 	for _, test := range []struct {
 		reason   string
