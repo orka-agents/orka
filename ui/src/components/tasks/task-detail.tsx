@@ -34,7 +34,7 @@ import type { ExecutionEvent, PlanState } from '@/schemas/task'
 import { timeAgo } from '@/lib/time'
 import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
-import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval } from './task-state'
+import { isTaskCancellable, isTaskCancelling, isTaskDeleting, isWaitingForApproval, nextCancelTarget } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
@@ -367,7 +367,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             taskName={task.metadata.name}
             taskUID={task.metadata.uid}
             open={cancelFor === deleteIdentity}
-            onOpenChange={(open) => setCancelFor(open ? deleteIdentity : null)}
+            onOpenChange={(open) => setCancelFor((current) => nextCancelTarget(current, deleteIdentity, open))}
           />
           {isTaskDeleting(task) ? (
             // The API accepted the delete; finalizers are still running.
