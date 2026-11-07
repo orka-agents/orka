@@ -374,10 +374,10 @@ func TestConnectorCompletionExpiryAndDisconnect(t *testing.T) {
 	}
 }
 
-// TestConnectorCredentialGrantReadsMetadataOnly covers the grant read the
+// TestConnectorCredentialGrantFollowsCommits covers the grant read the
 // Delegated re-check uses: it follows every commit, and reports a missing or
 // tombstoned row as no grant.
-func TestConnectorCredentialGrantReadsMetadataOnly(t *testing.T) {
+func TestConnectorCredentialGrantFollowsCommits(t *testing.T) {
 	s := newConnectorTestStore(t)
 	ctx := context.Background()
 	ref := testCredentialRef()
