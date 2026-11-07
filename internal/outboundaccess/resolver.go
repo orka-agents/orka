@@ -27,6 +27,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -863,6 +864,12 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if err := r.requireLiveIdentityAgent(ctx, binding); err != nil {
 		return "", fmt.Errorf("the Agent's identity changed while its credential was issued: %w", err)
 	}
+	// The policy can be revoked or narrowed meanwhile too, its delegation
+	// age shortened included; the checks below must judge the policy as it
+	// is now.
+	if err := r.requireUnchangedPolicy(ctx, policy); err != nil {
+		return "", err
+	}
 	if tokenRequest.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
 		return token, nil
 	}
@@ -879,6 +886,26 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 		return "", refuseAgentIdentity(agentIdentityRefusalDelegation, fmt.Errorf("%w: %w", ErrRequesterLinkChanged, err))
 	}
 	return token, nil
+}
+
+// requireUnchangedPolicy re-reads the outbound access policy a credential was
+// issued under and refuses it unless the policy is the same object at the
+// same generation, still accepted with resolved references, and not being
+// deleted.
+func (r *KubernetesResolver) requireUnchangedPolicy(ctx context.Context, issued *corev1alpha1.OutboundAccessPolicy) error {
+	live := &corev1alpha1.OutboundAccessPolicy{}
+	if err := r.Reader.Get(ctx, client.ObjectKeyFromObject(issued), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errors.New("the outbound access policy was deleted while its credential was issued")
+		}
+		return fmt.Errorf("re-check the outbound access policy: %w", err)
+	}
+	if live.UID != issued.UID || live.Generation != issued.Generation || !live.DeletionTimestamp.IsZero() ||
+		!policyConditionCurrentTrue(live, corev1alpha1.OutboundAccessPolicyConditionAccepted) ||
+		!policyConditionCurrentTrue(live, corev1alpha1.OutboundAccessPolicyConditionResolvedRefs) {
+		return errors.New("the outbound access policy changed while its credential was issued; re-dispatch the task")
+	}
+	return nil
 }
 
 // ErrRequesterLinkChanged refuses a delegated credential whose requester's
