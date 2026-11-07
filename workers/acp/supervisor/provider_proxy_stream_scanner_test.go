@@ -147,3 +147,52 @@ func TestSanitizeProviderUpstreamDetailWithholdsPolicyMatchedCredentials(t *test
 		}
 	}
 }
+
+func TestSSETerminalErrorScannerCapturesUsageOnlyWhenAsked(t *testing.T) {
+	line := "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\n"
+	for _, capture := range []bool{false, true} {
+		scanner := &sseTerminalErrorScanner{captureUsage: capture}
+		_, _ = scanner.Write([]byte(line))
+		if !scanner.completed || (scanner.usage != nil) != capture {
+			t.Fatalf("capture=%v: completed=%v usage=%#v", capture, scanner.completed, scanner.usage)
+		}
+		if capture && (scanner.usage.InputTokens != 7 || scanner.usage.OutputTokens != 3) {
+			t.Fatalf("usage = %#v", scanner.usage)
+		}
+	}
+	// An incomplete response is a terminal success, and its tokens count too.
+	incomplete := &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = incomplete.Write([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":9}}}\n"))
+	if !incomplete.completed || incomplete.usage == nil || incomplete.usage.InputTokens != 5 || incomplete.usage.OutputTokens != 9 {
+		t.Fatalf("incomplete: completed=%v usage=%#v", incomplete.completed, incomplete.usage)
+	}
+	// Invalid cache accounting is dropped rather than recorded.
+	scanner := &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = scanner.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n"))
+	if scanner.usage != nil {
+		t.Fatalf("invalid usage recorded: %#v", scanner.usage)
+	}
+}
+
+func TestSSETerminalErrorScannerCapturesUsageFromLongCompletedLines(t *testing.T) {
+	// A real response.completed event carries the whole response object.
+	output := strings.Repeat("model output ", 400)
+	line := "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"text\":\"" + output +
+		"\"}],\"usage\":{\"input_tokens\":70,\"output_tokens\":30}}}\n"
+	if len(line) <= sseScannerDetailPrefixBytes {
+		t.Fatalf("line is only %d bytes", len(line))
+	}
+	scanner := &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = scanner.Write([]byte(line))
+	if !scanner.completed || scanner.usage == nil || scanner.usage.InputTokens != 70 || scanner.usage.OutputTokens != 30 {
+		t.Fatalf("completed=%v usage=%#v", scanner.completed, scanner.usage)
+	}
+	// The buffered line stays bounded.
+	oversized := "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"text\":\"" + strings.Repeat("x", sseScannerUsageLineBytes) +
+		"\"}],\"usage\":{\"input_tokens\":70,\"output_tokens\":30}}}\n"
+	scanner = &sseTerminalErrorScanner{captureUsage: true}
+	_, _ = scanner.Write([]byte(oversized))
+	if scanner.usage != nil || len(scanner.usageLine) > sseScannerUsageLineBytes {
+		t.Fatalf("oversized line recorded usage %#v with a %d-byte buffer", scanner.usage, len(scanner.usageLine))
+	}
+}

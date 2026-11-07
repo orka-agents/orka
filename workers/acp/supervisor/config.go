@@ -155,7 +155,7 @@ func (c Config) Validate() error {
 	if err := c.validateProvider(); err != nil {
 		return err
 	}
-	if c.Capabilities.SupportsFoundryRecovery && (c.Provider.Kind != providerKindFoundry || !c.RequireCapabilities) {
+	if c.Capabilities.SupportsFoundryRecovery && (!usesLifecycleBroker(c.Provider.Kind) || !c.RequireCapabilities) {
 		return fmt.Errorf("foundry recovery requires a Foundry provider and operation capabilities")
 	}
 	if len(c.ControllerBearerToken) < 32 {

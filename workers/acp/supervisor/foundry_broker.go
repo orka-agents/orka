@@ -24,7 +24,7 @@ const (
 	foundryControlResponseLimit = 32 << 10
 )
 
-var errFoundryCleanupUnproven = errors.New("remote Foundry execution cleanup could not be proven")
+var errFoundryCleanupUnproven = errors.New("remote broker execution cleanup could not be proven")
 
 // foundryBrokerContext is constructed solely from authenticated controller
 // requests. The ACP child cannot select an owner, target, lease, or operation.
@@ -75,6 +75,7 @@ type foundryBrokerPrompt struct {
 
 type foundryBrokerSession struct {
 	proxy               *providerProxy
+	label               string
 	owner               harnessv2.Fence
 	ownerDigest         string
 	configurationDigest string
@@ -92,17 +93,33 @@ func foundrySHA256(data []byte) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 }
 
+// usesLifecycleBroker reports whether a provider's remote execution is owned
+// by a broker sidecar speaking the lifecycle broker protocol: fenced sessions,
+// leased prompts, and proven settlement and retirement.
+func usesLifecycleBroker(providerKind string) bool {
+	return providerKind == providerKindFoundry || providerKind == providerKindKagent
+}
+
+func lifecycleBrokerLabel(providerKind string) string {
+	if providerKind == providerKindKagent {
+		return "kagent"
+	}
+	return "Foundry"
+}
+
 func (p *providerProxy) newSessionForRequest(request harnessv2.CreateRuntimeSessionRequest) (*providerProxySession, ProviderProxyBinding, error) {
-	if p.providerKind == providerKindFoundry {
+	brokered := usesLifecycleBroker(p.providerKind)
+	label := lifecycleBrokerLabel(p.providerKind)
+	if brokered {
 		if err := request.Metadata.Fence.Validate(true); err != nil {
-			return nil, ProviderProxyBinding{}, fmt.Errorf("external Foundry sessions require an exact runtime-session fence")
+			return nil, ProviderProxyBinding{}, fmt.Errorf("external %s sessions require an exact runtime-session fence", label)
 		}
 		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(request.Profile.AgentConfigurationDigest)); err != nil {
-			return nil, ProviderProxyBinding{}, fmt.Errorf("external Foundry sessions require a frozen agent configuration digest")
+			return nil, ProviderProxyBinding{}, fmt.Errorf("external %s sessions require a frozen agent configuration digest", label)
 		}
 	}
 	session, binding, err := p.newSession()
-	if err != nil || p.providerKind != providerKindFoundry {
+	if err != nil || !brokered {
 		return session, binding, err
 	}
 	owner, err := json.Marshal(request.Metadata.Fence)
@@ -111,7 +128,7 @@ func (p *providerProxy) newSessionForRequest(request harnessv2.CreateRuntimeSess
 		return nil, ProviderProxyBinding{}, err
 	}
 	session.foundry = &foundryBrokerSession{
-		proxy: p, owner: request.Metadata.Fence, ownerDigest: foundrySHA256(owner),
+		proxy: p, label: label, owner: request.Metadata.Fence, ownerDigest: foundrySHA256(owner),
 		configurationDigest: request.Profile.AgentConfigurationDigest,
 	}
 	return session, binding, nil
@@ -137,7 +154,7 @@ func (s *foundryBrokerSession) beginPrompt(metadata harnessv2.MutationMetadata, 
 		return errFoundryCleanupUnproven
 	}
 	if harnessv2.CompareFence(s.owner, metadata.Fence, true) != harnessv2.FenceMatch || metadata.PromptID == "" || metadata.TaskUID == "" || metadata.TaskAttempt == 0 {
-		return fmt.Errorf("remote Foundry prompt owner does not match the runtime session")
+		return fmt.Errorf("remote %s prompt owner does not match the runtime session", s.label)
 	}
 	s.prompt = &foundryBrokerPrompt{metadata: metadata, lease: lease}
 	return nil
@@ -169,7 +186,7 @@ func (s *foundryBrokerSession) inferenceContext(promptID string, sequence uint64
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.retiring || s.prompt == nil || s.prompt.closed || string(s.prompt.metadata.PromptID) != promptID || sequence == 0 || !time.Now().Before(s.prompt.lease.ExpiresAt) {
-		return "", fmt.Errorf("remote Foundry inference lease is not active")
+		return "", fmt.Errorf("remote %s inference lease is not active", s.label)
 	}
 	value, err := s.contextFor("/v1/responses", s.prompt, sequence, body)
 	if err != nil {
@@ -185,7 +202,7 @@ func (s *foundryBrokerSession) renew(ctx context.Context, promptID string, lease
 	prompt := s.prompt
 	if s.retiring || prompt == nil || prompt.closed || string(prompt.metadata.PromptID) != promptID {
 		s.mu.Unlock()
-		return fmt.Errorf("remote Foundry prompt is no longer active")
+		return fmt.Errorf("remote %s prompt is no longer active", s.label)
 	}
 	candidate := *prompt
 	candidate.lease = lease
@@ -197,18 +214,18 @@ func (s *foundryBrokerSession) renew(ctx context.Context, promptID string, lease
 	proof, err := s.control(ctx, "/internal/v1/renew", value)
 	acknowledgedExpiry, expiryErr := time.Parse(time.RFC3339Nano, proof.LeaseExpiresAt)
 	if err != nil || expiryErr != nil || proof.State != "open" || proof.LeaseGeneration != lease.Generation || !acknowledgedExpiry.Equal(lease.ExpiresAt) {
-		return fmt.Errorf("remote Foundry lease renewal was not proven")
+		return fmt.Errorf("remote %s lease renewal was not proven", s.label)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.prompt != prompt || prompt.closed || s.retiring {
-		return fmt.Errorf("remote Foundry prompt closed during lease renewal")
+		return fmt.Errorf("remote %s prompt closed during lease renewal", s.label)
 	}
 	if lease.Generation <= prompt.lease.Generation {
 		if lease == prompt.lease {
 			return nil
 		}
-		return fmt.Errorf("remote Foundry lease renewal is stale")
+		return fmt.Errorf("remote %s lease renewal is stale", s.label)
 	}
 	prompt.lease = lease
 	return nil
@@ -221,7 +238,7 @@ func (s *foundryBrokerSession) startSettlement(promptID string) (*foundryBrokerP
 	defer s.mu.Unlock()
 	prompt := s.prompt
 	if prompt == nil || string(prompt.metadata.PromptID) != promptID {
-		return nil, fmt.Errorf("remote Foundry settlement prompt does not match")
+		return nil, fmt.Errorf("remote %s settlement prompt does not match", s.label)
 	}
 	prompt.closed = true
 	if prompt.settlementProven {

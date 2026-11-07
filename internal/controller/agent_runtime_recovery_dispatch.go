@@ -145,7 +145,7 @@ func (r *AgentRuntimeReconciler) validateRecoveryAdmissionWitness(ctx context.Co
 	observed.FoundryBroker = witness.FoundryBroker
 	observed.ControllerAuthUID, observed.ControllerAuthVersion = witness.ControllerAuthUID, witness.ControllerAuthVersion
 	observed.CapabilityAuthUID, observed.CapabilityAuthVersion = witness.CapabilityAuthUID, witness.CapabilityAuthVersion
-	if recoveryProviderKind(runtime.Spec) == agentRuntimeFoundryProvider {
+	if agentRuntimeUsesLifecycleBroker(recoveryProviderKind(runtime.Spec)) {
 		authenticated, err := r.authenticateRecoveryBoot(ctx, runtime, backend)
 		if err != nil {
 			return err

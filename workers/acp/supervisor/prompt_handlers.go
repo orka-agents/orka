@@ -2290,6 +2290,9 @@ func (s *Server) buildTerminalEventLocked(
 				Model:   s.cfg.Provider.Model,
 			},
 		}
+		if usage := state.providerProxy.promptUsage(string(prompt.request.Metadata.PromptID)); usage != nil {
+			event.Completed.Result.Usage = *usage
+		}
 	case acp.PromptOutcomeCancelled:
 		event.Type = harnessv2.EventCancelled
 		event.Cancelled = &harnessv2.CancelledEvent{StopReason: harnessv2.ACPStopReasonCancelled, Reason: "prompt cancelled"}
