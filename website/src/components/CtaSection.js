@@ -4,21 +4,24 @@ import {ctaLinks} from '../data/landingPageData';
 
 export default function CtaSection() {
   return (
-    <section className="landing-section cta-section">
-      <h2 className="section-title">Join the community</h2>
-      <p className="section-subtitle">
-        Issues, ideas, and pull requests are all welcome.
-      </p>
-      <div className="cta-buttons">
-        {ctaLinks.map((link) => (
-          <Link
-            key={link.label}
-            to={link.href}
-            className="button button--outline button--lg"
-          >
-            {link.label}
-          </Link>
-        ))}
+    <section className="orka-section">
+      <div className="orka-container">
+        <div className="orka-cta">
+          <div>
+            <h2>Join the community</h2>
+            <p>Issues, ideas, and pull requests are all welcome.</p>
+          </div>
+          <div className="orka-cta__actions">
+            {ctaLinks.map((link, i) => (
+              <Link
+                key={link.label}
+                to={link.href}
+                className={`button button--lg ${i === 0 ? 'button--primary' : 'button--secondary'}`}>
+                {link.label}
+              </Link>
+            ))}
+          </div>
+        </div>
       </div>
     </section>
   );

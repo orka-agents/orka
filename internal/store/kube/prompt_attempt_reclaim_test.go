@@ -11,6 +11,8 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/taskterminal"
@@ -518,9 +520,9 @@ func seedFinalizedSessionReclaimTurn(
 	legacy bool,
 ) finalizedSessionReclaimFixture {
 	t.Helper()
-	persistence, ok := kubeStore.sessionTurns.(*sqlitestore.Store)
+	persistence, ok := kubeStore.sessionTurns.(*storageclient.Client)
 	if !ok {
-		t.Fatalf("SessionTurn persistence = %T, want *sqlite.Store", kubeStore.sessionTurns)
+		t.Fatalf("SessionTurn persistence = %T, want *storageclient.Client", kubeStore.sessionTurns)
 	}
 	const (
 		namespace   = "tenant-a"
@@ -882,10 +884,12 @@ func newPromptAttemptReclaimStore(t *testing.T) (*Store, client.Client, controls
 		t.Fatalf("NewDB: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	kubeStore, err := NewComposite(kubeClient, testControlNamespace, sqlitestore.NewStore(db, ""))
+	persistence := sqlitestore.NewStore(db, "")
+	kubeStore, err := NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence))
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, persistence)
 	return kubeStore, kubeClient, fence
 }
 
