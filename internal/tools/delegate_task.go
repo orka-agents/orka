@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -992,7 +993,7 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 	// the cascade's list saw this child, or this read sees the cancel. It
 	// runs once the child's credentials are adopted, so a failure here
 	// leaves a complete child for the parent's next cascade.
-	if err := cancelChildOfCancelledParent(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
+	if err := ensureLateChildCancelled(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to cancel the child of a cancelled parent task", "child", childTask.Name)
 	}
 
@@ -1066,6 +1067,23 @@ func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Cl
 
 // Ensure DelegateTaskTool implements Tool
 var _ Tool = (*DelegateTaskTool)(nil)
+
+// lateChildCheckTimeout bounds the post-create parent check, which outlives
+// the caller: the broker cancels the call's context when the caller's
+// authority ends, which is when this check matters most.
+const lateChildCheckTimeout = 30 * time.Second
+
+// ensureLateChildCancelled runs cancelChildOfCancelledParent on a context the
+// caller's cancellation cannot end, retrying transient failures, since no
+// later cascade is guaranteed to reach a child in another namespace.
+func ensureLateChildCancelled(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lateChildCheckTimeout)
+	defer cancel()
+	backoff := wait.Backoff{Steps: 6, Duration: 250 * time.Millisecond, Factor: 2, Cap: 5 * time.Second}
+	return retry.OnError(backoff, func(err error) bool { return checkCtx.Err() == nil }, func() error {
+		return cancelChildOfCancelledParent(checkCtx, reader, writer, parent, child)
+	})
+}
 
 // delegationParentCancelled reports whether a delegating Task was asked to
 // stop, or is gone or replaced, as the API server sees it now.

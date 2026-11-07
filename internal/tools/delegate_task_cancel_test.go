@@ -2,12 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
@@ -110,5 +112,47 @@ func TestCancelChildOfCancelledParentKeepsOtherRequestsAndReplacements(t *testin
 	}
 	if _, cancelled := got.Annotations[labels.AnnotationCancelRequested]; cancelled {
 		t.Fatal("a different Task under the child's name must not be cancelled")
+	}
+}
+
+// TestLateChildCancelSurvivesTheCallersCancellation covers the broker
+// cancelling the delegation's context as the caller's authority ends, right
+// after the child was created: the child of the cancelled parent is still
+// cancelled, and a transient write failure is retried.
+func TestLateChildCancelSurvivesTheCallersCancellation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "parent", Namespace: "default", UID: "parent-uid",
+		Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+	}}
+	child := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: "other", UID: "child-uid"}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, child.DeepCopy()).Build()
+	failures := 1
+	flaky := interceptor.NewClient(base, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if failures > 0 {
+				failures--
+				return errors.New("apiserver unavailable")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller's authority already ended
+	if err := ensureLateChildCancelled(ctx, base, flaky, parent, child); err != nil {
+		t.Fatalf("ensureLateChildCancelled() = %v, want the child cancelled", err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(child), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+		t.Fatal("the late child of a cancelled parent was not cancelled")
 	}
 }
