@@ -367,13 +367,10 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 	var parsed entraTokenResponse
 	_ = json.Unmarshal(body, &parsed)
 	if response.StatusCode != http.StatusOK || parsed.AccessToken == "" {
-		code := strings.TrimSpace(parsed.Error)
-		if code == "" {
-			code = "unknown_error"
-		}
+		code := entraOAuthErrorCode(parsed.Error)
 		reason = code
 		if response.StatusCode >= http.StatusInternalServerError || response.StatusCode == http.StatusTooManyRequests ||
-			code == "temporarily_unavailable" {
+			code == "temporarily_unavailable" || code == "server_error" {
 			return "", 0, fmt.Errorf("Entra could not answer the token request: %s (HTTP %d): %w", code, response.StatusCode, ErrIssuerUnavailable) //nolint:staticcheck // Product name begins the message.
 		}
 		if len(parsed.ErrorCodes) > 0 {
@@ -382,6 +379,21 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 		return "", 0, fmt.Errorf("Entra refused the token request: %s (HTTP %d)", code, response.StatusCode) //nolint:staticcheck // Product name begins the message.
 	}
 	return parsed.AccessToken, parseExpiresIn(parsed.ExpiresIn), nil
+}
+
+// entraOAuthErrorCode returns an OAuth error code Orka knows, or
+// "unknown_error". The response is the issuer's or a proxy's text, and the
+// code reaches Agent status, errors, and a metric label, so nothing else is
+// passed through.
+func entraOAuthErrorCode(value string) string {
+	switch code := strings.TrimSpace(value); code {
+	case "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+		"unsupported_grant_type", "invalid_scope", "invalid_target", "access_denied",
+		"interaction_required", "consent_required", "server_error", "temporarily_unavailable":
+		return code
+	default:
+		return "unknown_error"
+	}
 }
 
 // parseExpiresIn accepts expires_in as a number or a numeric string. An
@@ -412,6 +424,11 @@ type Source struct {
 func (s *Source) AgentIdentityToken(ctx context.Context, req outboundaccess.AgentIdentityTokenRequest) (string, error) {
 	if s == nil {
 		return "", errors.New("no agent identity issuer is configured")
+	}
+	// Identities are honored only while Agent use is enforced; a claim that
+	// outlived a restart without the check must not get tokens.
+	if !s.Config.AgentUseAuthorization {
+		return "", errors.New("agent identities require --agent-use-authorization-enabled on the controller")
 	}
 	instance, ok := s.Config.Instance(req.Identity.Issuer)
 	if !ok {
