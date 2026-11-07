@@ -35,7 +35,7 @@ type Config struct {
 	AgentUseAuthorization bool
 	// EnforcedSince is when this controller's current, unbroken period of
 	// Agent use enforcement began, by the API server's clock; see
-	// EstablishEnforcementPeriod. Objects created before it may have been
+	// StartEnforcementPeriod. Objects created before it may have been
 	// created while the check was off, so no claim covers them. Zero leaves
 	// claims judged by their grant time alone.
 	EnforcedSince time.Time
