@@ -326,6 +326,8 @@ How the check reads a policy:
   Likewise,
   `allowBash` defaults to true and `maxTurns` to 50 when nothing sets them.
 - **Explicit empty list.** `ceiling.allowedTools: []` permits no tools.
+- **Unknown keys.** A key `ceiling` does not define, such as a misspelled
+  `allowedTool`, is rejected rather than dropped, so a typo cannot remove a limit.
 - **Coordination tools.** The `send_message` and `check_messages` tools that
   Orka injects into delegated child Tasks are not counted against the ceiling.
   A Task that lists them in its own `allowedTools` is judged on them as usual.
