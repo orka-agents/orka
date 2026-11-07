@@ -508,6 +508,13 @@ workers:
     # existing off/audit callers must satisfy their issuer grants. It does not
     # narrow those grants or OIDC authority. See the chart README.
     rbacProfile: default
+    # ValidatingAdmissionPolicy that holds the AI worker ServiceAccount to the
+    # Secrets, ServiceAccounts and code_exec Jobs Orka itself creates, so it
+    # cannot take on the controller's or another account's identity. Turn it
+    # off only if you run other code as the AI worker ServiceAccount that must
+    # make other writes; that reopens the path to the controller's identity
+    # (and the Task webhook signing key) under the default rbacProfile.
+    identityProtection: true
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"

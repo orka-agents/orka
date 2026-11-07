@@ -805,6 +805,16 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- $image -}}
 {{- end }}
 
+{{/* Whether to install the AI worker identity policy. Absent (for example under
+--reuse-values from an older release) means enabled. */}}
+{{- define "orka.aiWorkerIdentityProtection" -}}
+{{- $value := dig "ai" "identityProtection" true .Values.workers -}}
+{{- if not (kindIs "bool" $value) -}}
+{{- fail "workers.ai.identityProtection must be true or false" -}}
+{{- end -}}
+{{- if $value }}true{{ end -}}
+{{- end }}
+
 {{/* Secret holding the Ed25519 keys that sign Task webhook deliveries. */}}
 {{- define "orka.taskWebhookSigningSecretName" -}}
 {{- default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (toString (dig "taskWebhooks" "signingSecretName" "" .Values.controller))) -}}

@@ -245,13 +245,16 @@ create `code_exec` Jobs: each runs as its own per-run
 ServiceAccount with no token mounted, carries only `code_exec` labels, uses
 only emptyDir and Secret volumes, gets no host namespaces, privilege or
 capabilities, and runs under a `RuntimeDefault` or `Localhost` seccomp
-profile. Keep that policy installed, and:
+profile. Keep that policy installed (Helm `workers.ai.identityProtection`
+defaults to `true`; turning it off reopens the path to the controller's
+identity under the default worker profile), and:
 
 - Do not grant the AI worker other ways to run Pods or request tokens. An
   OutboundAccessPolicy `serviceAccountRef` grants the AI worker TokenRequest
   for that account, so the controller refuses Orka's own ServiceAccounts
   there: any labeled `orka.ai/platform-identity: "true"`, plus the controller
-  and worker accounts it is configured with, labeled or not.
+  and worker accounts it is configured with, labeled or not. The AI worker's
+  own account is allowed, since a token for itself gives it nothing new.
 - Do not keep ServiceAccount-token Secrets in the release namespace. The
   default AI worker profile can read every Secret there, so any such Secret
   hands the worker that account's token.

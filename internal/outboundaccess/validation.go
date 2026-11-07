@@ -399,10 +399,12 @@ func resolveTokenSource(
 			return nil, fmt.Errorf("resolve outbound ServiceAccount reference: %w", err)
 		}
 		// A ServiceAccount source lets the AI worker request that account's
-		// token. Orka's own accounts (the controller, workers, proxies,
+		// token. Orka's own accounts (the controller, other workers, proxies,
 		// publisher) must never be one: the worker would gain their authority.
-		if serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
-			trust.platformServiceAccount(namespace, serviceAccount.Name) {
+		// Its own account is exempt; that token gives it nothing new.
+		platform := serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
+			trust.platformServiceAccount(namespace, serviceAccount.Name)
+		if platform && !trust.tokenRequester(namespace, serviceAccount.Name) {
 			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}

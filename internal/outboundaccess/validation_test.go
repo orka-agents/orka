@@ -261,8 +261,14 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 			Labels: map[string]string{"app.kubernetes.io/name": "custom", labels.LabelPlatformIdentity: "true"}}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant",
 			Labels: map[string]string{"app.kubernetes.io/name": "orka"}}},
+		// The AI worker may exchange its own identity, which grants it nothing
+		// new, but not another worker's.
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-ai-worker", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "orka-vendor-worker", Namespace: "tenant",
+			Labels: map[string]string{labels.LabelPlatformIdentity: "true"}}},
 	).Build()
-	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false} {
+	for name, wantDenied := range map[string]bool{"orka": true, "renamed": true, "workload": false, "orka-ai-worker": false, "orka-vendor-worker": true} {
 		direct := validDirect()
 		direct.Subject = corev1alpha1.OutboundTokenSource{
 			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
@@ -273,7 +279,7 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
 			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
 		}
-		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{})
+		issue, err := ResolveReferences(context.Background(), reader, policy, TrustConfig{TokenRequester: "tenant/orka-ai-worker"})
 		if err != nil {
 			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
 		}
@@ -293,12 +299,16 @@ func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T)
 	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "external-controller", Namespace: "tenant"}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "custom-ai-worker", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "custom-vendor-worker", Namespace: "tenant"}},
 		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}},
 	).Build()
 	trust := TrustConfig{PlatformServiceAccounts: PlatformServiceAccountSet(
 		[]string{"system:serviceaccount:tenant:external-controller", "system:admin", "not-a-username"},
-		"tenant", "custom-ai-worker", "")}
-	for name, wantDenied := range map[string]bool{"external-controller": true, "custom-ai-worker": true, "workload": false} {
+		"tenant", "custom-ai-worker", "custom-vendor-worker", ""),
+		TokenRequester: "tenant/custom-ai-worker"}
+	for name, wantDenied := range map[string]bool{
+		"external-controller": true, "custom-vendor-worker": true, "custom-ai-worker": false, "workload": false,
+	} {
 		direct := validDirect()
 		direct.Subject = corev1alpha1.OutboundTokenSource{
 			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
@@ -317,7 +327,7 @@ func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T)
 			t.Fatalf("%s: ResolveReferences() issue = %#v, want denied=%v", name, issue, wantDenied)
 		}
 	}
-	if got := len(trust.PlatformServiceAccounts); got != 2 {
-		t.Fatalf("PlatformServiceAccountSet kept %d entries %v, want only the ServiceAccount username and the named worker", got, trust.PlatformServiceAccounts)
+	if got := len(trust.PlatformServiceAccounts); got != 3 {
+		t.Fatalf("PlatformServiceAccountSet kept %d entries %v, want only the ServiceAccount username and the named workers", got, trust.PlatformServiceAccounts)
 	}
 }

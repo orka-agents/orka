@@ -54,3 +54,32 @@ func TestStaticChartAIWorkerIdentityProtectionMatchesCanonicalPolicy(t *testing.
 		})
 	}
 }
+
+// The policy is on by default and when an older release's reused values lack
+// the setting; operators can turn it off explicitly, and only with a boolean.
+func TestStaticChartAIWorkerIdentityProtectionOptOut(t *testing.T) {
+	const policyKind = "kind: ValidatingAdmissionPolicy\nmetadata:\n  name: test-orka-ai-worker-identity-protection"
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "default", want: true},
+		{
+			name: "reused values without the setting",
+			args: []string{"--set", "workers.ai.identityProtection=null"}, want: true,
+		},
+		{name: "explicitly enabled", args: []string{"--set", "workers.ai.identityProtection=true"}, want: true},
+		{name: "opted out", args: []string{"--set", "workers.ai.identityProtection=false"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rendered := requireHelmRender(t, tc.args...)
+			require.Equal(t, tc.want, strings.Contains(rendered, policyKind), "policy rendered")
+			require.Equal(t, tc.want, strings.Contains(rendered, "policyName: test-orka-ai-worker-identity-protection"),
+				"binding rendered")
+		})
+	}
+	output, err := helmTemplateStaticChart(t, "--set-string", "workers.ai.identityProtection=false")
+	require.Error(t, err, "a string value must not silently disable the policy")
+	require.Contains(t, output, "workers.ai.identityProtection must be true or false")
+}

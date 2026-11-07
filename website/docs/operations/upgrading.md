@@ -103,14 +103,19 @@ upgrading:
   `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
   `RuntimeDefault` or `Localhost` seccomp profile.
   Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
-  ServiceAccounts as the AI worker ServiceAccount is now rejected.
+  ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+  and cannot move it to its own ServiceAccount, set `workers.ai.identityProtection: false`
+  (Helm) or drop `orka-ai-worker-identity-protection` and its binding from your kustomize
+  build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+  controller again, including reading the webhook signing key.
 - Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
   and on worker accounts the controller creates. An OutboundAccessPolicy whose
   `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
   controller is configured with (labeled or not, for example an externally managed
-  controller account), now
-  reports `ReferenceDenied`, and the controller no longer grants the AI worker
-  TokenRequest for it. Point such policies at a dedicated ServiceAccount.
+  controller account), now reports `ReferenceDenied`, and the controller revokes any
+  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
+  token for itself gives it nothing new. Point other such policies at a dedicated
+  ServiceAccount.
 - Check the release namespace for ServiceAccount-token Secrets
   (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
   The default AI worker profile can read them; delete any you do not need, and treat a

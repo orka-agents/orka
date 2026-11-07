@@ -4,8 +4,10 @@ worker role can create Secrets and Jobs here; without this policy a
 ServiceAccount-token Secret or a Job naming the controller's ServiceAccount, or
 a Job Pod wearing the controller's labels, would let the worker act as the
 controller. Rendered for every profile: restricted workers cannot make these
-writes, so it never denies them anything.
+writes, so it never denies them anything. workers.ai.identityProtection=false
+skips it.
 */ -}}
+{{- if include "orka.aiWorkerIdentityProtection" . }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -115,3 +117,4 @@ metadata:
 spec:
   policyName: {{ include "orka.fullname" . }}-ai-worker-identity-protection
   validationActions: [Deny]
+{{- end }}
