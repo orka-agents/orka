@@ -61,6 +61,18 @@ type Config struct {
 	// created while the check was off, so no claim covers them. Zero leaves
 	// claims judged by their grant time alone.
 	EnforcedSince time.Time
+	// Enforcement, when set, replaces EnforcedSince with a period that starts
+	// once this controller leads; until then no identity binding is decided.
+	Enforcement *EnforcementPeriod
+}
+
+// EnforcementStart returns when the current period of Agent use enforcement
+// began, or started=false while it is not known yet.
+func (c Config) EnforcementStart() (since time.Time, started bool) {
+	if c.Enforcement != nil {
+		return c.Enforcement.Since()
+	}
+	return c.EnforcedSince, true
 }
 
 // Validate rejects a partly or wrongly configured issuer at startup.

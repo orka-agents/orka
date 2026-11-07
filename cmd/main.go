@@ -50,6 +50,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -1207,8 +1208,9 @@ func main() {
 		os.Exit(1)
 	}
 	// Record whether Agent use is enforced before anything serves requests,
-	// so work created while it was off can never bind an Agent identity.
-	if err := establishAgentUseEnforcementPeriod(restConfig, watchNamespace, &agentIdentityConfig); err != nil {
+	// so work created while it was off can never bind an Agent identity. A
+	// new period starts only once this controller leads.
+	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, &agentIdentityConfig); err != nil {
 		setupLog.Error(err, "unable to record the Agent use enforcement period")
 		os.Exit(1)
 	}
@@ -2653,19 +2655,42 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 // establishAgentUseEnforcementPeriod records this run's Agent use
 // enforcement with a direct client, since the manager's cache is not running
 // yet, and stores when the current enforcement period began.
-func establishAgentUseEnforcementPeriod(restConfig *rest.Config, namespace string, config *agentidentity.Config) error {
+func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, config *agentidentity.Config) error {
 	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	since, err := agentidentity.EstablishEnforcementPeriod(ctx, directClient, namespace, config.AgentUseAuthorization)
+	since, started, err := agentidentity.EstablishEnforcementPeriod(ctx, directClient, namespace, config.AgentUseAuthorization)
 	if err != nil {
 		return err
 	}
-	config.EnforcedSince = since
-	return nil
+	period := &agentidentity.EnforcementPeriod{}
+	config.Enforcement = period
+	if started {
+		period.Start(since)
+		return nil
+	}
+	// The leader this controller replaces may not have checked Agent use and
+	// keeps serving until it loses leadership, so the period starts only
+	// once this controller leads. Identity bindings wait until then.
+	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		for {
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace)
+			if err == nil {
+				period.Start(since)
+				setupLog.Info("Agent use enforcement period started", "since", since)
+				return nil
+			}
+			setupLog.Error(err, "unable to start the Agent use enforcement period; retrying")
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}))
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
