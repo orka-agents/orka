@@ -14,12 +14,14 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -246,6 +248,19 @@ func WorkloadServiceAccountToken() (string, error) {
 	return "", errors.New("workload ServiceAccount token is unavailable for the Orka MCP proxy")
 }
 
+// validateSubstrateMCPEgressCredentialAuthority checks the Task may use the
+// Secrets the Substrate egress gateway injects into the actor's outbound
+// requests; a call on either route uses them.
+func (e *ToolExecutor) validateSubstrateMCPEgressCredentialAuthority(tool *corev1alpha1.Tool) error {
+	secretNames := aitools.SubstrateMCPEgressCredentialSecretNames(tool)
+	if slices.Contains(secretNames, "") {
+		return errors.New("MCP tool egress credential Secret reference is unresolved")
+	}
+	return outboundaccess.ValidateCredentialAuthority(
+		e.credentialAuthorityEnforced, e.credentialScopeAllowed, e.credentialSecret, secretNames, false,
+	)
+}
+
 // prepareSubstrateMCPRequest routes a Substrate MCP tools/call either through
 // the in-process router (Orka manager) or the authenticated Orka API proxy.
 func (e *ToolExecutor) prepareSubstrateMCPRequest(
@@ -277,6 +292,9 @@ func (e *ToolExecutor) prepareSubstrateMCPRequest(
 		if SubstrateMCPReservedHeader(name) || (strings.EqualFold(strings.TrimSpace(name), "Authorization") && httpConfig.AuthSecretRef != nil) {
 			return preparedToolRequest{}, fmt.Errorf("tool configured reserved header %q", name)
 		}
+	}
+	if err := e.validateSubstrateMCPEgressCredentialAuthority(tool); err != nil {
+		return preparedToolRequest{}, err
 	}
 	body, err := marshalMCPToolCallRequest(tool, params)
 	if err != nil {

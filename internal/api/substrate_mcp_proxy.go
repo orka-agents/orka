@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/aitools"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 	workerexecutor "github.com/orka-agents/orka/internal/worker"
 )
@@ -229,18 +230,31 @@ func (h *Handlers) substrateMCPProxyTool(ctx context.Context, namespace, name st
 	return tool, nil
 }
 
-// substrateMCPProxyCredential resolves the Tool's configured auth Secret
-// after checking the caller may use it: Kubernetes identities need
-// `get secrets/<name>`, transaction tokens need the credential-read scope.
+// substrateMCPProxyCredential checks the caller may use every credential the
+// Tool's invocation uses, then resolves the Tool's configured auth Secret.
+// That includes egress credentials the Substrate gateway injects into the
+// actor's outbound requests, which the proxy never reads. Kubernetes
+// identities need `get secrets/<name>`, transaction tokens need the
+// credential-read scope and a matching secret constraint.
 func (h *Handlers) substrateMCPProxyCredential(c fiber.Ctx, ui *UserInfo, tool *corev1alpha1.Tool) (string, error) {
-	if tool.Spec.HTTP == nil || tool.Spec.HTTP.AuthSecretRef == nil {
+	secretNames := aitools.SubstrateMCPEgressCredentialSecretNames(tool)
+	var ref *corev1alpha1.SecretKeySelector
+	if tool.Spec.HTTP != nil && tool.Spec.HTTP.AuthSecretRef != nil {
+		ref = tool.Spec.HTTP.AuthSecretRef
+		secretNames = append(secretNames, ref.Name)
+	}
+	if len(secretNames) == 0 {
 		return "", nil
 	}
-	ref := tool.Spec.HTTP.AuthSecretRef
 	switch ui.AuthType {
 	case AuthTypeTokenReview:
-		if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, ui, tool.Namespace, "get", "", "secrets", ref.Name); err != nil {
-			return "", fiber.NewError(fiber.StatusForbidden, "not authorized to use the tool credential")
+		for _, name := range secretNames {
+			if strings.TrimSpace(name) == "" {
+				return "", fiber.NewError(fiber.StatusForbidden, "not authorized to use the tool credential")
+			}
+			if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, ui, tool.Namespace, "get", "", "secrets", name); err != nil {
+				return "", fiber.NewError(fiber.StatusForbidden, "not authorized to use the tool credential")
+			}
 		}
 	case AuthTypeContextToken:
 		token := ui.ContextToken
@@ -249,8 +263,13 @@ func (h *Handlers) substrateMCPProxyCredential(c fiber.Ctx, ui *UserInfo, tool *
 			failures = append(failures, "tool credential requires a credential-read scope")
 		}
 		if token != nil {
-			if want, ok := contextString(token.TransactionContext, "secret"); ok && want != ref.Name {
-				failures = append(failures, "tool credential secret does not match token context")
+			if want, ok := contextString(token.TransactionContext, "secret"); ok {
+				for _, name := range secretNames {
+					if want != name {
+						failures = append(failures, "tool credential secret does not match token context")
+						break
+					}
+				}
 			}
 		}
 		if len(failures) > 0 {
@@ -261,6 +280,9 @@ func (h *Handlers) substrateMCPProxyCredential(c fiber.Ctx, ui *UserInfo, tool *
 		}
 	default:
 		return "", fiber.NewError(fiber.StatusForbidden, "not authorized to use the tool credential")
+	}
+	if ref == nil {
+		return "", nil
 	}
 	secret := &corev1.Secret{}
 	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: tool.Namespace, Name: ref.Name}, secret); err != nil {
