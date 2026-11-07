@@ -438,3 +438,103 @@ func TestExternalRouterTransportPinsOriginAndTarget(t *testing.T) {
 		t.Fatalf("unconfigured routed probe = %v", err)
 	}
 }
+
+// Retirement drain sends the pool's controller bearer. Provider startup
+// evidence that changed after binding must not redirect it to another Actor,
+// even when it keeps the bound instance identity.
+func TestExternalRetirementDrainRequiresBoundStartupEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*workspacev1alpha1.StartupEvidence)
+	}{
+		{name: "router target names another Actor", mutate: func(e *workspacev1alpha1.StartupEvidence) {
+			e.Process.Name, e.Process.RouterTarget = "actor-2", "orka-atespace/actor-2"
+		}},
+		{name: "endpoint differs from the bound endpoint", mutate: func(e *workspacev1alpha1.StartupEvidence) {
+			e.Endpoint = "https://atenet-router.ate-system.svc"
+		}},
+		{name: "worker differs from the bound worker", mutate: func(e *workspacev1alpha1.StartupEvidence) {
+			e.Process.Worker.UID = "other-worker-uid"
+		}},
+		{name: "routing removed", mutate: func(e *workspacev1alpha1.StartupEvidence) {
+			e.Process.RouterTarget = ""
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRoutedRuntimeFixture(t, true, nil)
+			w := f.currentWorkspace(t)
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			if err := f.r.bindExternalRuntimeInstanceEvidence(t.Context(), &pool, w); err != nil {
+				t.Fatal(err)
+			}
+			f.r.SupervisorClient = nil
+			changed := w.Status.Allocation.Startup.DeepCopy()
+			test.mutate(changed)
+			supervisor := f.r.externalStartupSupervisorClient(&pool, changed)
+			if _, err := supervisor.Probe(t.Context(), changed.Endpoint, "token", []byte(strings.Repeat("s", 32))); !errors.Is(err, workspaceprovider.ErrStaleIdentity) {
+				t.Fatalf("probe with changed evidence = %v, want stale identity", err)
+			}
+			if err := supervisor.RequestDrain(t.Context(), changed.Endpoint, "token", []byte(strings.Repeat("s", 32)), harnessv2.StatusResponse{}, "workspace_retirement"); !errors.Is(err, workspaceprovider.ErrStaleIdentity) {
+				t.Fatalf("drain with changed evidence = %v, want stale identity", err)
+			}
+			if len(f.router.requests) != 0 || f.direct.calls != 0 {
+				t.Fatalf("changed evidence carried controller credentials: routed=%d direct=%d", len(f.router.requests), f.direct.calls)
+			}
+			// The exact bound evidence still reaches its own Actor.
+			_, _ = f.r.externalStartupSupervisorClient(&pool, w.Status.Allocation.Startup).Probe(t.Context(), routedTestRouterURL, "token", []byte(strings.Repeat("s", 32)))
+			if len(f.router.requests) == 0 || f.router.requests[0].Header.Get(daemonprotocol.TargetActorHeader) != "orka-atespace/actor-1" {
+				t.Fatal("bound evidence did not reach its routed target")
+			}
+		})
+	}
+}
+
+// Gateway-backed pool policies are not admission intent. Their cleanup must
+// not depend on the live provider-proxy credential or settings, which may
+// have been removed or changed since they were written.
+func TestExternalGatewayBackedPolicyCleanupNeedsNoLiveProxyConfiguration(t *testing.T) {
+	f := newRoutedRuntimeFixture(t, true, nil)
+	w := f.currentWorkspace(t)
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if err := f.r.bindExternalRuntimeInstanceEvidence(t.Context(), &pool, w); err != nil {
+		t.Fatal(err)
+	}
+	attested, err := f.r.attestExternalWorkspaceStartup(t.Context(), w.Spec.Workload, w.Status.Allocation.Startup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.supervisor.probe = runtimePoolValidProbe(&pool, attested, "routed-boot", false)
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	cfg, err := f.r.runtimePoolConfigForDeletion(&pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.namespace = w.Spec.Workload.Runtime.Template.Namespace
+	listOwned := func() []networkingv1.NetworkPolicy {
+		policies := &networkingv1.NetworkPolicyList{}
+		if err := f.r.List(t.Context(), policies, client.InNamespace(cfg.namespace), client.MatchingLabels{runtimePoolUIDLabel: string(pool.UID)}); err != nil {
+			t.Fatal(err)
+		}
+		return policies.Items
+	}
+	if len(listOwned()) == 0 {
+		t.Fatal("fixture created no gateway-backed pool policies")
+	}
+	// The credential is gone and every proxy/controller input changed.
+	f.r.ProviderProxy.BearerToken, f.r.ProviderProxy.BearerTokenFile = nil, ""
+	f.r.ProviderProxy.Namespace, f.r.ProviderProxy.BaseURL = "moved-proxy", "http://provider-auth-proxy.moved-proxy.svc:9090"
+	f.r.ProviderProxy.PodLabels = map[string]string{"app": "moved"}
+	f.r.ControllerNamespace, f.r.ControllerAPIPort = "moved-core", 9443
+	if _, err := f.r.ProviderProxy.normalized(); err == nil {
+		t.Fatal("fixture still has a usable provider-proxy credential")
+	}
+	if _, err := f.r.deleteExternalCoreNetworkPolicies(t.Context(), &pool, cfg, f.currentWorkspace(t)); err != nil {
+		t.Fatalf("gateway-backed cleanup depended on live configuration: %v", err)
+	}
+	if remaining := listOwned(); len(remaining) != 0 {
+		t.Fatalf("gateway-backed cleanup left %d Core-owned policies", len(remaining))
+	}
+}

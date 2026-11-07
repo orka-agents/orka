@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -77,6 +78,11 @@ func DefaultSubstrateConfig() SubstrateConfig {
 	}
 }
 
+// ErrRemovedSubstrateSetting marks a configured Substrate v0.1.0 setting.
+// Startup rejects it unconditionally, independently of MCP Tool admission and
+// recovery state, so an obsolete operator setting is never silently ignored.
+var ErrRemovedSubstrateSetting = errors.New("removed Substrate setting")
+
 // removedSubstrateEnv names settings from the Substrate v0.1.0 integration.
 // Setting any of them fails startup instead of silently changing behavior.
 var removedSubstrateEnv = []string{
@@ -129,7 +135,7 @@ func SubstrateConfigFromEnv(getenv func(string) string) (SubstrateConfig, error)
 	}
 	for _, name := range removedSubstrateEnv {
 		if strings.TrimSpace(getenv(name)) != "" {
-			return cfg, fmt.Errorf("%s is no longer supported: Substrate v1 routes Actors by the ate-target-actor header and Orka issues per-Actor credentials itself", name)
+			return cfg, fmt.Errorf("%w: %s is no longer supported: Substrate v1 routes Actors by the ate-target-actor header and Orka issues per-Actor credentials itself", ErrRemovedSubstrateSetting, name)
 		}
 	}
 	if value := strings.TrimSpace(getenv(EnvSubstrateClaimTimeout)); value != "" {
@@ -176,8 +182,10 @@ func (c SubstrateConfig) WithDefaults() SubstrateConfig {
 	return c
 }
 
-// ValidateMCPTools validates the control API and routing used by MCP actors.
-func (c SubstrateConfig) ValidateMCPTools() error {
+// ValidateControl validates only the authenticated control API. It is enough
+// for control-only work such as SubstrateActorPool finalization, which may use
+// either a client certificate/key pair or a bearer token.
+func (c SubstrateConfig) ValidateControl() error {
 	cfg := c.WithDefaults()
 
 	if strings.TrimSpace(cfg.APIEndpoint) == "" {
@@ -193,6 +201,16 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 	}
 	if (cfg.APICertFile != "") == (cfg.APIBearerTokenFile != "") {
 		return fmt.Errorf("substrate control authentication requires either a client certificate/key pair or --substrate-api-bearer-token-file")
+	}
+	return nil
+}
+
+// ValidateMCPTools validates the control API and routing used by MCP actors.
+func (c SubstrateConfig) ValidateMCPTools() error {
+	cfg := c.WithDefaults()
+
+	if err := cfg.ValidateControl(); err != nil {
+		return err
 	}
 	// The router serves only mTLS from SPIFFE IDs on its ingress allowlist,
 	// so Actor traffic always needs the pod-certificate identity.
