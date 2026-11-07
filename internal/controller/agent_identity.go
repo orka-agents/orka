@@ -93,9 +93,10 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
 	claim := live.Status.IdentityClaim.DeepCopy()
 	issuer, id, declared := live.IdentityRef()
-	if declared && !r.Identity.AgentUseAuthorization {
-		// Claims exist only while Agent use authorization is enforced; without
-		// it a held claim is released like one the spec no longer names.
+	if _, configured := r.Identity.Instance(issuer); declared && (!r.Identity.AgentUseAuthorization || !configured) {
+		// Claims exist only while Agent use authorization is enforced and the
+		// issuer is configured; without either a held claim is released like
+		// one the spec no longer names.
 		issuer, id, declared = "", "", false
 	}
 	if claim != nil && identityClaimMatches(claim, issuer, id) {
@@ -250,6 +251,17 @@ const (
 	agentIdentityIssuerBackoff = time.Minute
 )
 
+// agentIdentityVerification is an issuer's answer, verified or refused, for
+// one generation of one Agent. It is kept for agentIdentityReverifyInterval;
+// an edit to the Agent asks the issuer again at once.
+type agentIdentityVerification struct {
+	uid        types.UID
+	generation int64
+	issuer, id string
+	state      agentIdentityState
+	until      time.Time
+}
+
 // agentIdentityState is the outcome of verifying an Agent's identity.
 type agentIdentityState struct {
 	declared bool
@@ -281,6 +293,16 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 			issuer, id, wait.Round(time.Second))
 		return state
 	}
+	key := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
+	r.verifications.Lock()
+	cached, found := r.verifications.byAgent[key]
+	r.verifications.Unlock()
+	if found && cached.uid == agent.UID && cached.generation == agent.Generation &&
+		cached.issuer == issuer && cached.id == id {
+		if time.Now().Before(cached.until) {
+			return cached.state
+		}
+	}
 	r.issuerBackoff.Lock()
 	wait := time.Until(r.issuerBackoff.until)
 	r.issuerBackoff.Unlock()
@@ -289,6 +311,18 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	}
 	verifyCtx, cancel := context.WithTimeout(ctx, agentIdentityVerifyTimeout)
 	defer cancel()
+	remember := func(answer agentIdentityState) agentIdentityState {
+		r.verifications.Lock()
+		if r.verifications.byAgent == nil {
+			r.verifications.byAgent = map[types.NamespacedName]agentIdentityVerification{}
+		}
+		r.verifications.byAgent[key] = agentIdentityVerification{
+			uid: agent.UID, generation: agent.Generation, issuer: issuer, id: id,
+			state: answer, until: time.Now().Add(agentIdentityReverifyInterval),
+		}
+		r.verifications.Unlock()
+		return answer
+	}
 	if err := r.IdentityVerifier.Verify(verifyCtx, agent); err != nil {
 		if errors.Is(err, agentidentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
 			r.issuerBackoff.Lock()
@@ -297,10 +331,17 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 			return unavailable(agentIdentityIssuerBackoff)
 		}
 		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
-		return state
+		return remember(state)
 	}
 	state.verified = true
-	return state
+	return remember(state)
+}
+
+// forgetAgentIdentityVerification drops a deleted Agent's last answer.
+func (r *AgentReconciler) forgetAgentIdentityVerification(key types.NamespacedName) {
+	r.verifications.Lock()
+	delete(r.verifications.byAgent, key)
+	r.verifications.Unlock()
 }
 
 // setAgentIdentityCondition reports whether a declared identity is verified
@@ -444,6 +485,13 @@ func requireTaskSourceCoveredByClaim(
 	}
 	owner := metav1.GetControllerOf(task)
 	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+		// A Task a scan or monitor created keeps its markers even when its
+		// owner reference is gone, as after an orphaning delete, so it cannot
+		// pass as a root Task.
+		if kind := taskAutomationMarker(task); kind != "" {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a %s's Task cannot use identity-bound Agent %q once its %s no longer controls it", kind, agent.Name, kind))
+		}
 		return nil
 	}
 	var source client.Object
@@ -470,6 +518,18 @@ func requireTaskSourceCoveredByClaim(
 			owner.Kind, owner.Name, agent.Name, ref.Issuer, ref.ID, owner.Kind))
 	}
 	return nil
+}
+
+// taskAutomationMarker names the kind of automation whose markers a Task
+// carries, or "".
+func taskAutomationMarker(task *corev1alpha1.Task) string {
+	switch {
+	case task.Labels[labels.LabelRepositoryMonitor] != "" || task.Annotations[labels.AnnotationRepositoryMonitorName] != "":
+		return "RepositoryMonitor"
+	case task.Labels[labels.LabelSecurityScanID] != "":
+		return "RepositoryScan"
+	}
+	return ""
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an
@@ -669,7 +729,7 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 	if task.Status.Execution != nil {
 		return ctrl.Result{}, nil, false
 	}
-	message, err := boundIdentityUnavailable(ctx, uncachedReader(r.APIReader, r.Client), task, binding)
+	message, err := boundIdentityUnavailable(ctx, uncachedReader(r.APIReader, r.Client), r.Identity, task, binding)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
@@ -688,6 +748,7 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 func boundIdentityUnavailable(
 	ctx context.Context,
 	reader client.Reader,
+	config agentidentity.Config,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (string, error) {
@@ -695,6 +756,16 @@ func boundIdentityUnavailable(
 		return "", nil
 	}
 	frozen := binding.Agent
+	// The controller must still honor the identity it froze: Agent use
+	// enforcement on, and the same issuer instance configured.
+	if !config.AgentUseAuthorization {
+		return fmt.Sprintf("identity %s/%s needs --agent-use-authorization-enabled, which this controller no longer sets",
+			frozen.Identity.Issuer, frozen.Identity.ID), nil
+	}
+	if instance, configured := config.Instance(frozen.Identity.Issuer); !configured || instance != frozen.Identity.Instance {
+		return fmt.Sprintf("identity issuer %s of %s/%s is no longer configured as it was when the Task was bound",
+			frozen.Identity.Issuer, frozen.Namespace, frozen.Name), nil
+	}
 	live := &corev1alpha1.Agent{}
 	err := reader.Get(ctx, types.NamespacedName{Namespace: frozen.Namespace, Name: frozen.Name}, live)
 	if err != nil && !apierrors.IsNotFound(err) {

@@ -71,6 +71,13 @@ type AgentReconciler struct {
 		sync.Mutex
 		until time.Time
 	}
+	// verifications holds each Agent's last answer from its issuer until it
+	// may be asked again, so the Agent's own status writes, which requeue
+	// it, never ask the issuer again early.
+	verifications struct {
+		sync.Mutex
+		byAgent map[types.NamespacedName]agentIdentityVerification
+	}
 }
 
 // AgentIdentityVerifier proves an Agent's identity with its issuer.
@@ -117,6 +124,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	agent := &corev1alpha1.Agent{}
 	if err := r.Get(ctx, req.NamespacedName, agent); err != nil {
 		if errors.IsNotFound(err) {
+			r.forgetAgentIdentityVerification(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err

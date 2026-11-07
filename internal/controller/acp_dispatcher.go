@@ -31,6 +31,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
@@ -94,6 +95,9 @@ const (
 // Task reconciliation only persists queued demand; this leader-elected runnable
 // reserves capacity and advances the durable attempt state machine.
 type ACPDispatcher struct {
+	// Identity is the controller's Agent identity configuration (ADR 0039),
+	// against which a Task bound to an identity is admitted.
+	Identity                 agentidentity.Config
 	Client                   client.Client
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
@@ -2035,6 +2039,15 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed}),
 				)
 			}
+			// The wait for capacity can outlast the Agent's identity claim, so
+			// the prompt is sent again only while the claim still covers it.
+			if unavailable := d.identityUnavailableBeforeResubmission(ctx, task); unavailable != "" {
+				_ = cleanupRuntimeSession("identity_unavailable_before_resubmission")
+				return recordACPPromptOutcomeIfSettled(
+					ctx, promptTrace, acpPromptOutcomeFailed,
+					d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+				)
+			}
 			continue
 		}
 		flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), acpInterruptedOutputFlushTimeout)
@@ -3807,7 +3820,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	default:
 		// A Task bound to an identity starts only while its Agent still holds
 		// the identity for it (ADR 0039).
-		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), task, task.Status.AgentExecutionBinding)
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
 			return true, nil
@@ -6931,6 +6944,44 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpPromptFailedReason, message)
 	}
+}
+
+// identityUnavailableBeforeResubmission says why a Task bound to an identity
+// must not send a prompt the runtime has not yet accepted, or "" when its
+// Agent still holds the identity for it (ADR 0039). A claim that cannot be
+// read counts as unavailable.
+func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) string {
+	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent again", "namespace", task.Namespace, "task", task.Name)
+		return "the Agent's identity claim could not be confirmed before the prompt was sent again"
+	}
+	return unavailable
+}
+
+// failPromptForUnavailableIdentity settles a prompt the runtime never
+// accepted, and its Task, as IdentityUnavailable.
+func (d *ACPDispatcher) failPromptForUnavailableIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	unavailable string,
+) error {
+	message := boundACPStatusMessage(unavailable)
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "identity-unavailable-before-resubmission", taskExecutionReasonIdentityUnavailable, message); err != nil {
+		return err
+	}
+	execution := corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
+		Reason: taskExecutionReasonIdentityUnavailable, Message: message,
+	}
+	if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution); err != nil {
+		return err
+	}
+	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, taskExecutionReasonIdentityUnavailable, message)
 }
 
 // acpPromptFailedReason classifies a prompt that the runtime settled as failed.
