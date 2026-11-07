@@ -558,9 +558,12 @@ the ceiling; the stage 4 operation list is then checked against it.
 - An issuer outage fails identity-backed Tool calls closed, with no fallback
   to another credential.
 - Requiring `use` for all Agents is a breaking change and stays opt-in.
-- Not yet proven: Entra agent on-behalf-of tokens against Azure Storage in a
-  live tenant, and identity provisioning latency. Stage 4 needs that
-  integration proof before Orka documents it as supported.
+- Proven in a live tenant on 2026-11-05: Self-mode tokens and Entra agent
+  on-behalf-of tokens against Microsoft Graph, including refusals for a wrong
+  audience, an expired delegation, and a disabled identity. Not yet proven:
+  on-behalf-of tokens against Azure Storage, and identity provisioning
+  latency. Stage 4 needs the Storage proof before Orka documents it as
+  supported there.
 - One issuer instance per installation means one Entra tenant per Orka
   installation. Serving several customer tenants needs several installations
   until per-namespace issuer references are added; the frozen issuer instance
