@@ -2660,21 +2660,36 @@ func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Confi
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	since, started, err := agentidentity.EstablishEnforcementPeriod(ctx, directClient, namespace, config.AgentUseAuthorization)
-	if err != nil {
-		return err
-	}
 	period := &agentidentity.EnforcementPeriod{}
 	config.Enforcement = period
-	if started {
-		period.Start(since)
-		return nil
+	if !config.AgentUseAuthorization {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err != nil {
+			return err
+		}
+		period.Start(time.Time{})
+		// An enforcing leader may have started a period since: end it again
+		// once this controller leads, or stop rather than serve beside it.
+		return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			var err error
+			for range 6 {
+				if err = agentidentity.EndEnforcementPeriod(ctx, directClient, namespace); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return err
+		}))
 	}
-	// The leader this controller replaces may not have checked Agent use and
-	// keeps serving until it loses leadership, so the period starts only
-	// once this controller leads. Identity bindings wait until then.
+	// The period is decided each time this controller wins leadership, never
+	// from what it read before: the leader it replaces, or one that ran while
+	// this controller waited, may not have checked Agent use. Identity
+	// decisions wait until then.
 	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		for {
 			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace)
