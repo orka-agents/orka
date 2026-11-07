@@ -207,10 +207,13 @@ var _ = Describe("Agent identity with a fake Entra", Ordered, Serial, Label("age
 			fakeEntraProxyPath("/fixture/identities/"+fakeEntraIdentity+"/disable"), "-f", "-"))
 		Expect(err).NotTo(HaveOccurred())
 		// Let the cached verification token lapse, then make the Agent
-		// re-verify; an annotation change reconciles it.
+		// re-verify. The controller keeps its last answer until the Agent's
+		// generation changes, so this edits the spec, not an annotation;
+		// both Tasks set their own turn limit, so the new default changes
+		// nothing they run with.
 		time.Sleep(fakeEntraTokenLifetime - time.Minute + 2*time.Second)
-		_, err = utils.Run(exec.Command("kubectl", "annotate", "agent", agentIdentityE2EAgent, "-n", namespace,
-			"--overwrite", "e2e.orka.ai/reverify="+fmt.Sprint(time.Now().UnixNano())))
+		_, err = utils.Run(exec.Command("kubectl", "patch", "agent", agentIdentityE2EAgent, "-n", namespace,
+			"--type", "merge", "-p", `{"spec":{"runtime":{"defaultMaxTurns":7}}}`))
 		Expect(err).NotTo(HaveOccurred())
 		Eventually(func(g Gomega) {
 			var agent corev1alpha1.Agent
