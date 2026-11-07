@@ -316,6 +316,32 @@ func TestRedactForwardedTextRemovesAPercentEncodedCredential(t *testing.T) {
 	}
 }
 
+// TestRedactForwardedTextRemovesACredentialInAnyURLPart covers an upstream
+// echoing the credential with non-standard escapes in an ordinary query value
+// or a path segment, as in a Location header or a JSON URL: no decoding
+// recovers it, and the bytes around it are kept.
+func TestRedactForwardedTextRemovesACredentialInAnyURLPart(t *testing.T) {
+	const secret = "opaque-example-value"
+	for text, want := range map[string]string{
+		`https://management.azure.com/x?echo=opaque%2Dexample%2Dvalue&api-version=1`:    `https://management.azure.com/x?echo=[REDACTED]&api-version=1`,
+		`https://management.azure.com/opaque%2dexample%2dvalue/providers?api-version=1`: `https://management.azure.com/[REDACTED]/providers?api-version=1`,
+		`https://management.azure.com/x?echo=%6Fpaque-example-valu%65s`:                 `https://management.azure.com/x?echo=[REDACTED]s`,
+	} {
+		if got := redactForwardedText(text, secret); got != want {
+			t.Fatalf("redactForwardedText(%s) = %s, want %s", text, got, want)
+		}
+	}
+	body := `{"id":"/subscriptions/opaque%2Dexample%2Dvalue/x","other":"100%25 kept"}`
+	got := redactForwardedBody(body, secret)
+	if want := `{"id":"/subscriptions/[REDACTED]/x","other":"100%25 kept"}`; got != want {
+		t.Fatalf("redactForwardedBody() = %s, want %s", got, want)
+	}
+	header := http.Header{"Location": {"https://management.azure.com/x?echo=opaque%2Dexample%2Dvalue"}}
+	if got := redactForwardedText(header.Get("Location"), secret); strings.Contains(got, "opaque") {
+		t.Fatalf("a Location header kept the encoded credential: %s", got)
+	}
+}
+
 // TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement covers a
 // credential the upstream echoes as a number, a string, a key, or nested:
 // the redacted body is always valid JSON, so a success status never carries

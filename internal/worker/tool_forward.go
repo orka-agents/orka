@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -169,7 +170,7 @@ func redactForwardedText(text string, secrets ...string) string {
 }
 
 // redactForwardedSecrets removes the credentials Orka injected from text,
-// as they are and in their standard URL encodings.
+// as they are and in any percent encoding a client would undo.
 func redactForwardedSecrets(text string, secrets []string) string {
 	for _, secret := range secrets {
 		if secret = strings.TrimSpace(secret); secret != "" {
@@ -178,7 +179,70 @@ func redactForwardedSecrets(text string, secrets []string) string {
 			}
 		}
 	}
-	return text
+	return redactPercentEncodedSecrets(text, secrets)
+}
+
+// redactPercentEncodedSecrets finds a credential the upstream percent-encoded
+// in a non-standard way, such as `%2D` for "-", anywhere in text. The text is
+// decoded with each decoded byte mapped back to its source bytes, and only
+// the source of each match is replaced, so the rest of a URL is unchanged.
+func redactPercentEncodedSecrets(text string, secrets []string) string {
+	if !strings.Contains(text, "%") {
+		return text
+	}
+	decoded := make([]byte, 0, len(text))
+	// source[i] is where decoded byte i starts in text; a final entry marks
+	// the end.
+	source := make([]int, 0, len(text)+1)
+	for i := 0; i < len(text); {
+		source = append(source, i)
+		if text[i] == '%' && i+2 < len(text) && isHexDigit(text[i+1]) && isHexDigit(text[i+2]) {
+			value, _ := strconv.ParseUint(text[i+1:i+3], 16, 8)
+			decoded = append(decoded, byte(value))
+			i += 3
+			continue
+		}
+		decoded = append(decoded, text[i])
+		i++
+	}
+	source = append(source, len(text))
+	var spans [][2]int
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret == "" {
+			continue
+		}
+		for offset := 0; ; {
+			index := strings.Index(string(decoded[offset:]), secret)
+			if index < 0 {
+				break
+			}
+			start := offset + index
+			spans = append(spans, [2]int{source[start], source[start+len(secret)]})
+			offset = start + len(secret)
+		}
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
+	var out strings.Builder
+	copied := 0
+	for _, span := range spans {
+		if span[1] <= copied {
+			continue
+		}
+		if span[0] > copied {
+			out.WriteString(text[copied:span[0]])
+		}
+		out.WriteString("[REDACTED]")
+		copied = span[1]
+	}
+	out.WriteString(text[copied:])
+	return out.String()
+}
+
+func isHexDigit(c byte) bool {
+	return ('0' <= c && c <= '9') || ('a' <= c && c <= 'f') || ('A' <= c && c <= 'F')
 }
 
 // forwardValueHoldsSecret reports whether a query value, once URL decoded

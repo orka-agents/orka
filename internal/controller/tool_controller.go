@@ -220,6 +220,11 @@ func (r *ToolReconciler) validateTool(ctx context.Context, tool *corev1alpha1.To
 	if tool.Spec.HTTP == nil {
 		return fmt.Errorf("http is required unless mcp.substrateActor is set")
 	}
+	// Admission cannot see the schemaless parameters field, so a forwarding
+	// Tool's schema is refused here, as prompt policy refuses it.
+	if tool.Spec.HTTP.Forward != nil && tool.Spec.Parameters != nil && len(tool.Spec.Parameters.Raw) > 0 {
+		return fmt.Errorf("a forwarding tool takes no parameter schema; its protocol defines the call")
+	}
 	// Only a Tool behind a connection-mode outbound access policy is
 	// called with a linked account, so only such a Tool may point at a
 	// private endpoint under the fixture allowance.
