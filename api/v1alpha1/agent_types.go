@@ -192,7 +192,10 @@ type AgentToolbox struct {
 // AgentRuntimeCeiling bounds the tool policy and iteration budget that Tasks
 // using an Agent may run with. Each omitted field leaves that dimension
 // unbounded. Orka-injected coordination messaging tools for delegated children
-// are platform plumbing and are not counted against AllowedTools.
+// are platform plumbing and are not counted against AllowedTools. Unknown keys
+// are kept until decoding rejects them, so a misspelled limit cannot be pruned
+// into no limit.
+// +kubebuilder:pruning:PreserveUnknownFields
 type AgentRuntimeCeiling struct {
 	// AllowedTools is the largest tool set a Task may run with. Tool names
 	// ignore case. An entry without a scope, such as "Read", also permits

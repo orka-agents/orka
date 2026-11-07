@@ -1358,6 +1358,7 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   contractVersion:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
