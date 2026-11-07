@@ -3853,7 +3853,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 		operation, reason, message = "cancelled-before-admission", acpCancelledReason, "task cancelled before runtime admission"
 		// The cancel request names who cancelled and why.
 		if requested := strings.TrimSpace(task.Annotations[labels.AnnotationCancelRequested]); requested != "" && task.DeletionTimestamp.IsZero() {
-			message = requested
+			message = boundACPStatusMessage(requested)
 		}
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
@@ -6983,7 +6983,7 @@ func (d *ACPDispatcher) requestedCancellationMessage(ctx context.Context, task *
 		!latest.DeletionTimestamp.IsZero() {
 		return ""
 	}
-	return strings.TrimSpace(latest.Annotations[labels.AnnotationCancelRequested])
+	return boundACPStatusMessage(strings.TrimSpace(latest.Annotations[labels.AnnotationCancelRequested]))
 }
 
 func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
