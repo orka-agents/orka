@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr/funcr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -278,5 +279,31 @@ func TestAgentIdentityRefusalWithoutAuditLogIsRecorded(t *testing.T) {
 		if !strings.Contains(lines[0], want) {
 			t.Fatalf("record lacks %s: %s", want, lines[0])
 		}
+	}
+}
+
+// TestAgentIdentityPolicyChangedWhileIssuingIsAPolicyRefusal covers an
+// outbound access policy deleted while the issuer answers: the refusal is
+// recorded as the policy's, not the Task's binding, and carries no
+// credential.
+func TestAgentIdentityPolicyChangedWhileIssuingIsAPolicyRefusal(t *testing.T) {
+	now := time.Now()
+	var lines []string
+	source := &fakeAgentIdentitySource{token: "obo-token"}
+	resolver := auditedResolver(t, now, source, &lines)
+	source.during = func() {
+		policy := &corev1alpha1.OutboundAccessPolicy{}
+		if err := resolver.Reader.Get(context.Background(), ctrlclient.ObjectKey{Namespace: "tenant", Name: "agent"}, policy); err != nil {
+			t.Fatal(err)
+		}
+		if err := resolver.Reader.(ctrlclient.Client).Delete(context.Background(), policy); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolver.Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute))); err == nil {
+		t.Fatal("Resolve() = nil error, want the call refused")
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], `"reason"="`+agentIdentityRefusalPolicy+`"`) || strings.Contains(lines[0], "obo-token") {
+		t.Fatalf("records = %v, want one policy refusal without the credential", lines)
 	}
 }
