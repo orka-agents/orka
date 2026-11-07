@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -172,14 +173,20 @@ func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 			}
 		}
 		marked := owned.DeepCopy()
-		marked.Labels = map[string]string{labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1"}
-		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor"}
+		marked.Labels = map[string]string{
+			labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1", gateway.TaskGatewayBindingLabel: "binding",
+		}
+		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor", gateway.TaskGatewayBindingAnnotation: "binding"}
 		marked.OwnerReferences = nil // already orphaned by the garbage collector
 		for name, change := range map[string]func(*corev1alpha1.Task){
-			"remove monitor label":      func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
-			"remove scan label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelSecurityScanID) },
-			"remove monitor annotation": func(task *corev1alpha1.Task) { delete(task.Annotations, labels.AnnotationRepositoryMonitorName) },
-			"change monitor label":      func(task *corev1alpha1.Task) { task.Labels[labels.LabelRepositoryMonitor] = "other" },
+			"remove monitor label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
+			"remove scan label":            func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelSecurityScanID) },
+			"remove monitor annotation":    func(task *corev1alpha1.Task) { delete(task.Annotations, labels.AnnotationRepositoryMonitorName) },
+			"change monitor label":         func(task *corev1alpha1.Task) { task.Labels[labels.LabelRepositoryMonitor] = "other" },
+			"remove gateway binding label": func(task *corev1alpha1.Task) { delete(task.Labels, gateway.TaskGatewayBindingLabel) },
+			"remove gateway binding annotation": func(task *corev1alpha1.Task) {
+				delete(task.Annotations, gateway.TaskGatewayBindingAnnotation)
+			},
 		} {
 			for _, user := range []string{untrustedUsername, trustedControllerUser} {
 				t.Run(kind+"/"+user+"/orphaned "+name, func(t *testing.T) {

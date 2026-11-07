@@ -257,6 +257,53 @@ func TestCancelSessionSkipsTurnsOfAnEarlierIncarnation(t *testing.T) {
 	}
 }
 
+// creationFailingSessionStore cannot read a Session's creation time.
+type creationFailingSessionStore struct {
+	store.SessionStore
+	typeReader transcriptSessionTypeReader
+	err        error
+}
+
+func (s creationFailingSessionStore) GetSessionType(ctx context.Context, namespace, name string) (string, error) {
+	return s.typeReader.GetSessionType(ctx, namespace, name)
+}
+
+func (s creationFailingSessionStore) GetSessionCreatedAt(context.Context, string, string) (time.Time, error) {
+	return time.Time{}, s.err
+}
+
+// TestCancelSessionRefusesWithoutTheChatIncarnation covers a creation-time
+// read that fails or finds the Session gone: without the incarnation the
+// cancel cannot tell the chat's Tasks from an earlier chat's, so it cancels
+// none.
+func TestCancelSessionRefusesWithoutTheChatIncarnation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+	}{
+		"unreadable": {err: errors.New("database is locked"), status: http.StatusServiceUnavailable},
+		"discarded":  {err: store.ErrNotFound, status: http.StatusNotFound},
+	} {
+		t.Run(name, func(t *testing.T) {
+			turn := cancelTestTask("chat-turn", corev1alpha1.TaskPhaseRunning, "")
+			turn.Labels = map[string]string{labels.LabelChatSession: "conversation"}
+			h, app := setupCancelTest(t, turn)
+			if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{
+				Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat, CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			h.sessionStore = creationFailingSessionStore{SessionStore: h.sessionStore, typeReader: h.sessionStore.(transcriptSessionTypeReader), err: tc.err}
+			if resp, body := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != tc.status {
+				t.Fatalf("status = %d, body = %v, want %d", resp.StatusCode, body, tc.status)
+			}
+			if _, ok := cancelAnnotation(t, h, "chat-turn"); ok {
+				t.Fatal("no Task may be cancelled without the chat's incarnation")
+			}
+		})
+	}
+}
+
 func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	h, app := setupCancelTest(t)
 	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
@@ -476,6 +523,44 @@ func TestStopActiveChatFencesAnIdleSession(t *testing.T) {
 	next, err := chat.reserveActiveChat("default", "conversation")
 	if err != nil {
 		t.Fatalf("next message after release: %v", err)
+	}
+	chat.finishActiveChatReservation(next, nil)
+}
+
+func TestOverlappingIdleCancelsReportNoRunningTurn(t *testing.T) {
+	chat := &ChatHandler{}
+	running, releaseFirst, err := chat.stopActiveChat(context.Background(), "default", "conversation")
+	if err != nil || running {
+		t.Fatalf("first stopActiveChat() = %v, %v; want an idle Session", running, err)
+	}
+	type result struct {
+		running bool
+		release func()
+		err     error
+	}
+	second := make(chan result, 1)
+	go func() {
+		running, release, err := chat.stopActiveChat(context.Background(), "default", "conversation")
+		second <- result{running, release, err}
+	}()
+	var overlap result
+	select {
+	case overlap = <-second:
+	case <-time.After(5 * time.Second):
+		releaseFirst()
+		t.Fatal("second idle cancel waited on the first cancel's gate")
+	}
+	if overlap.err != nil || overlap.running {
+		t.Fatalf("second stopActiveChat() = %v, %v; want no running turn", overlap.running, overlap.err)
+	}
+	releaseFirst()
+	if _, err := chat.reserveActiveChat("default", "conversation"); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("next message while the second cancel holds the gate = %v, want it refused", err)
+	}
+	overlap.release()
+	next, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatalf("next message after both releases: %v", err)
 	}
 	chat.finishActiveChatReservation(next, nil)
 }

@@ -99,8 +99,8 @@ type ConnectorCredential struct {
 }
 
 // ConnectorGrantReader reports the grant custody holds for a Connection
-// without opening its material: the sequence of the consent whose tokens it
-// holds. A missing row is ErrNotFound; a tombstoned one is
+// without returning its material: the sequence of the consent whose tokens it
+// holds, as the sealed record authenticates it. A missing row is ErrNotFound; a tombstoned one is
 // ErrConnectorCustodyTombstoned.
 type ConnectorGrantReader interface {
 	GetConnectorCredentialGrant(ctx context.Context, ref ConnectorCredentialRef) (int64, error)
