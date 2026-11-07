@@ -26,6 +26,7 @@ import (
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/workerenv"
 )
@@ -261,14 +262,15 @@ func (v *TaskProvenanceValidator) namesIdentityBoundAgent(ctx context.Context, n
 // must not move an existing worker into another Task's scope, nor detach a
 // Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
-	// The markers of the scan or monitor that created a Task are held too:
-	// they keep it from binding an identity as a root Task, also after the
-	// garbage collector orphans it.
+	// The markers of the scan, monitor, or GatewayBinding that created a
+	// Task are held too: they keep it from binding an identity as a root
+	// Task, also after the garbage collector orphans it. A GatewayBinding's
+	// Task has no owner reference, so its markers are all that say so.
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
 		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
-			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID})
+			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID, gateway.TaskGatewayBindingLabel})
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
-		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName})...)
+		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName, gateway.TaskGatewayBindingAnnotation})...)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
 	// metadata then has no matching owner UID, so coordination access fails
 	// closed. Cleanup controllers cannot attach the Task to a different owner.
