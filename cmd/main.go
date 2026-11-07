@@ -998,7 +998,15 @@ func main() {
 		setupLog.Error(err, "invalid trusted token endpoint Service references")
 		os.Exit(1)
 	}
-	outboundAccessTrust := outboundaccess.TrustConfig{Gateways: trustedGateways, TokenEndpoints: trustedTokenEndpoints}
+	outboundAccessTrust := outboundaccess.TrustConfig{
+		Gateways:       trustedGateways,
+		TokenEndpoints: trustedTokenEndpoints,
+		// Never let an OutboundAccessPolicy hand the AI worker a token for the
+		// controller or a worker, labeled or not.
+		PlatformServiceAccounts: outboundaccess.PlatformServiceAccountSet(
+			splitCommaList(executionModeControllerUsernames), watchNamespace,
+			aiWorkerServiceAccountName, vendorWorkerServiceAccountName, containerWorkerServiceAccountName),
+	}
 	if err := validateStaticTrustedServiceReferences(watchNamespace, outboundAccessTrust); err != nil {
 		setupLog.Error(err, "invalid static-controller outbound trust configuration")
 		os.Exit(1)

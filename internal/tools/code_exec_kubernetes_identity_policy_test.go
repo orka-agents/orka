@@ -71,10 +71,6 @@ func assertCodeExecJobMeetsAIWorkerIdentityPolicy(t *testing.T, resources *kuber
 	if pod.Subdomain != "" {
 		t.Errorf("Pod subdomain %q is not admitted", pod.Subdomain)
 	}
-	if pod.SecurityContext != nil && pod.SecurityContext.SeccompProfile != nil &&
-		pod.SecurityContext.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined {
-		t.Error("Pod seccomp must not be Unconfined")
-	}
 	for _, volume := range pod.Volumes {
 		if volume.EmptyDir == nil && volume.Secret == nil {
 			t.Errorf("volume %q is neither emptyDir nor Secret", volume.Name)
@@ -94,11 +90,19 @@ func assertCodeExecContainerMeetsAIWorkerIdentityPolicy(
 	if sc != nil && sc.RunAsNonRoot != nil {
 		nonRoot = *sc.RunAsNonRoot
 	}
+	var seccomp corev1.SeccompProfileType
+	if podSecurity != nil && podSecurity.SeccompProfile != nil {
+		seccomp = podSecurity.SeccompProfile.Type
+	}
+	if sc != nil && sc.SeccompProfile != nil {
+		seccomp = sc.SeccompProfile.Type
+	}
+	confined := seccomp == corev1.SeccompProfileTypeRuntimeDefault || seccomp == corev1.SeccompProfileTypeLocalhost
 	switch {
 	case sc == nil, sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation,
 		sc.Privileged != nil && *sc.Privileged,
 		sc.Capabilities == nil || len(sc.Capabilities.Add) > 0 || !slices.Contains(sc.Capabilities.Drop, "ALL"),
-		sc.SeccompProfile != nil && sc.SeccompProfile.Type == corev1.SeccompProfileTypeUnconfined, !nonRoot:
+		!confined, !nonRoot:
 		t.Errorf("container %q security context %+v does not meet the policy", container.Name, sc)
 	}
 	for _, port := range container.Ports {

@@ -99,13 +99,16 @@ upgrading:
   the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
   labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
   subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
-  ephemeral containers, no Unconfined seccomp, and non-root, unprivileged containers
-  with `allowPrivilegeEscalation: false`, all capabilities dropped and none added.
+  ephemeral containers, and non-root, unprivileged containers with
+  `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
+  `RuntimeDefault` or `Localhost` seccomp profile.
   Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
   ServiceAccounts as the AI worker ServiceAccount is now rejected.
 - Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
   and on worker accounts the controller creates. An OutboundAccessPolicy whose
-  `serviceAccountRef` names one (such as the controller or a worker) now
+  `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
+  controller is configured with (labeled or not, for example an externally managed
+  controller account), now
   reports `ReferenceDenied`, and the controller no longer grants the AI worker
   TokenRequest for it. Point such policies at a dedicated ServiceAccount.
 - Check the release namespace for ServiceAccount-token Secrets

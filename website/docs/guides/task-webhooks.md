@@ -243,13 +243,15 @@ Secrets, may only create or delete `code_exec`'s own ServiceAccounts (so it
 cannot replace a platform account and inherit its RoleBindings), and may only
 create `code_exec` Jobs: each runs as its own per-run
 ServiceAccount with no token mounted, carries only `code_exec` labels, uses
-only emptyDir and Secret volumes, and gets no host namespaces, privilege or
-capabilities. Keep that policy installed, and:
+only emptyDir and Secret volumes, gets no host namespaces, privilege or
+capabilities, and runs under a `RuntimeDefault` or `Localhost` seccomp
+profile. Keep that policy installed, and:
 
 - Do not grant the AI worker other ways to run Pods or request tokens. An
   OutboundAccessPolicy `serviceAccountRef` grants the AI worker TokenRequest
   for that account, so the controller refuses Orka's own ServiceAccounts
-  (labeled `orka.ai/platform-identity: "true"`) there.
+  there: any labeled `orka.ai/platform-identity: "true"`, plus the controller
+  and worker accounts it is configured with, labeled or not.
 - Do not keep ServiceAccount-token Secrets in the release namespace. The
   default AI worker profile can read every Secret there, so any such Secret
   hands the worker that account's token.

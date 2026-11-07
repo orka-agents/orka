@@ -29,7 +29,8 @@ var (
 
 func compileAIWorkerIdentityProtection(t *testing.T) admissionPolicyEvaluator {
 	t.Helper()
-	return compileAdmissionPolicy(t, "ai_worker_identity_protection.yaml", strings.NewReplacer("AI_WORKER_SA", "orka-ai-worker"))
+	return compileAdmissionPolicy(t, "ai_worker_identity_protection.yaml", strings.NewReplacer(
+		"ORKA_NAMESPACE", admissionTestNamespace, "AI_WORKER_SA", "orka-ai-worker"))
 }
 
 func aiWorkerSecret(secretType string) *unstructured.Unstructured {
@@ -151,6 +152,16 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		return policy.admits(t, jobKind, jobsResource, job.GetName(), apiserveradmission.Create, username, "", job, nil)
 	}
 	require.True(t, admits(aiWorkerIdentityTestWorker, codeExecJob()), "the code_exec Job")
+	inherited := codeExecJob()
+	containers, _, _ := unstructured.NestedSlice(inherited.Object, "spec", "template", "spec", "containers")
+	unstructured.RemoveNestedField(containers[0].(map[string]any), "securityContext", "seccompProfile")
+	require.True(t, admits(aiWorkerIdentityTestWorker, setJobField(t, inherited, containers, "containers")),
+		"a container inheriting the Pod's RuntimeDefault profile")
+	require.True(t, admits(aiWorkerIdentityTestWorker, setCodeContainerField(t, codeExecJob(), "Localhost",
+		"securityContext", "seccompProfile", "type")), "a Localhost profile")
+	// A container profile overrides the Pod's, so this container runs confined.
+	require.True(t, admits(aiWorkerIdentityTestWorker, setJobField(t, codeExecJob(), "Unconfined",
+		"securityContext", "seccompProfile", "type")), "a confined container in an Unconfined Pod")
 	unlabeled := codeExecJob()
 	unstructured.RemoveNestedField(unlabeled.Object, "spec", "template", "metadata")
 	require.True(t, admits(aiWorkerIdentityTestWorker, unlabeled), "a code_exec Job before the API server adds selector labels")
@@ -202,9 +213,22 @@ func TestAIWorkerIdentityProtectionJobs(t *testing.T) {
 		"another Job's name":         setPodLabel(t, codeExecJob(), "orka.ai/code-exec-job", "orka-code-exec-victim"),
 		"subdomain":                  setJobField(t, codeExecJob(), "orka", "subdomain"),
 		"capabilities kept":          setCodeContainerField(t, codeExecJob(), []any{"NET_RAW"}, "securityContext", "capabilities", "drop"),
-		"pod seccomp Unconfined":     setJobField(t, codeExecJob(), "Unconfined", "securityContext", "seccompProfile", "type"),
 		"container seccomp Unconfined": setCodeContainerField(t, codeExecJob(), "Unconfined",
 			"securityContext", "seccompProfile", "type"),
+		// Unset means Unconfined on nodes without kubelet seccompDefault.
+		"seccomp unset": func() *unstructured.Unstructured {
+			job := codeExecJob()
+			unstructured.RemoveNestedField(job.Object, "spec", "template", "spec", "securityContext", "seccompProfile")
+			containers, _, _ := unstructured.NestedSlice(job.Object, "spec", "template", "spec", "containers")
+			unstructured.RemoveNestedField(containers[0].(map[string]any), "securityContext", "seccompProfile")
+			return setJobField(t, job, containers, "containers")
+		}(),
+		"pod seccomp Unconfined, container unset": func() *unstructured.Unstructured {
+			job := setJobField(t, codeExecJob(), "Unconfined", "securityContext", "seccompProfile", "type")
+			containers, _, _ := unstructured.NestedSlice(job.Object, "spec", "template", "spec", "containers")
+			unstructured.RemoveNestedField(containers[0].(map[string]any), "securityContext", "seccompProfile")
+			return setJobField(t, job, containers, "containers")
+		}(),
 		"init container": setJobField(t, codeExecJob(), []any{map[string]any{
 			"name": "init", "image": "busybox", "securityContext": map[string]any{"privileged": true}}}, "initContainers"),
 	} {
@@ -237,6 +261,20 @@ func TestAIWorkerIdentityProtectionServiceAccounts(t *testing.T) {
 		}
 		return policy.admits(t, saKind, saResource, name, operation, username, "", object, old)
 	}
+	marked := func(name string) *unstructured.Unstructured {
+		account := serviceAccount(name)
+		account.SetLabels(map[string]string{"orka.ai/platform-identity": "true"})
+		return account
+	}
+	// A platform account that happens to match the code_exec prefix, for
+	// example serviceAccount.name=orka-code-exec-controller, stays protected.
+	platform := "orka-code-exec-controller"
+	require.False(t, policy.admits(t, saKind, saResource, platform, apiserveradmission.Delete,
+		aiWorkerIdentityTestWorker, "", nil, marked(platform)), "delete a marked account")
+	require.False(t, policy.admits(t, saKind, saResource, platform, apiserveradmission.Update,
+		aiWorkerIdentityTestWorker, "", serviceAccount(platform), marked(platform)), "strip the marker")
+	require.False(t, policy.admits(t, saKind, saResource, platform, apiserveradmission.Create,
+		aiWorkerIdentityTestWorker, "", marked(platform), nil), "create a marked account")
 	for _, operation := range []apiserveradmission.Operation{apiserveradmission.Create, apiserveradmission.Update, apiserveradmission.Delete} {
 		require.True(t, admits(operation, aiWorkerIdentityTestWorker, "orka-code-exec-run-1"), "code_exec's own account")
 		for _, name := range []string{"orka-controller-manager", "orka-ai-worker", "orka-workspace-publisher", "default"} {

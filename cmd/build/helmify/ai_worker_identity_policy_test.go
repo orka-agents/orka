@@ -40,8 +40,9 @@ func TestStaticChartAIWorkerIdentityProtectionMatchesCanonicalPolicy(t *testing.
 			require.Equal(t, tc.fullname+"-ai-worker-identity-protection", actual.Name)
 
 			var expected admissionregistrationv1.ValidatingAdmissionPolicy
-			require.NoError(t, yaml.UnmarshalStrict([]byte(strings.ReplaceAll(canonicalPolicy,
-				"AI_WORKER_SA", tc.fullname+"-ai-worker")), &expected))
+			require.NoError(t, yaml.UnmarshalStrict([]byte(strings.NewReplacer(
+				"ORKA_NAMESPACE", tc.namespace, "AI_WORKER_SA", tc.fullname+"-ai-worker",
+			).Replace(canonicalPolicy)), &expected))
 			require.Equal(t, expected.Spec, actual.Spec, "Helm must preserve the canonical AI worker identity rules")
 
 			var binding admissionregistrationv1.ValidatingAdmissionPolicyBinding

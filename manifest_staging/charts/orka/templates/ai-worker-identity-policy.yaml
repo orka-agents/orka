@@ -29,9 +29,9 @@ spec:
       operations: ["CREATE", "UPDATE"]
       resources: ["jobs"]
   matchConditions:
-  # The AI worker ServiceAccount writing in its own namespace.
+  # This installation's AI worker ServiceAccount.
   - name: ai-worker
-    expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':' + '{{ include "orka.aiWorkerServiceAccountName" . }}'"
+    expression: "request.userInfo.username == 'system:serviceaccount:' + '{{ .Release.Namespace }}' + ':' + '{{ include "orka.aiWorkerServiceAccountName" . }}'"
   variables:
   - name: pod
     expression: "object.spec.template.spec"
@@ -39,14 +39,22 @@ spec:
     expression: "variables.pod.?securityContext.orValue({})"
   - name: podLabels
     expression: "object.spec.template.?metadata.?labels.orValue({})"
+  - name: platformIdentity
+    expression: "'orka.ai/platform-identity'"
   validations:
   - expression: "request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'"
     message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret would hand it another identity
-  - expression: "request.resource.resource != 'serviceaccounts' || request.name.startsWith('orka-code-exec-')"
+  - expression: >-
+      request.resource.resource != 'serviceaccounts' || (
+        request.name.startsWith('orka-code-exec-') &&
+        (request.operation == 'CREATE' ||
+          oldObject.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true') &&
+        (request.operation == 'DELETE' ||
+          object.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true'))
     message: >-
       the AI worker may only create or delete code_exec ServiceAccounts
-      (orka-code-exec-*); replacing another ServiceAccount would inherit its
-      RoleBindings
+      (orka-code-exec-*) and never an Orka platform ServiceAccount; replacing
+      another ServiceAccount would inherit its RoleBindings
   - expression: >-
       request.resource.resource != 'jobs' || (
         object.metadata.name.startsWith('orka-code-exec-') &&
@@ -80,7 +88,6 @@ spec:
         !variables.pod.?hostPID.orValue(false) &&
         !variables.pod.?hostIPC.orValue(false) &&
         !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
-        variables.podSecurity.?seccompProfile.type.orValue('') != 'Unconfined' &&
         variables.pod.?initContainers.orValue([]).size() == 0 &&
         variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
         variables.pod.containers.all(c,
@@ -88,15 +95,16 @@ spec:
           c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
           c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
           'ALL' in c.?securityContext.capabilities.drop.orValue([]) &&
-          c.?securityContext.seccompProfile.type.orValue('') != 'Unconfined' &&
+          c.?securityContext.seccompProfile.type.orValue(
+            variables.podSecurity.?seccompProfile.type.orValue('')) in ['RuntimeDefault', 'Localhost'] &&
           !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
           c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
           c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
     message: >-
       AI worker Jobs get no host access or privilege: no host namespaces or
-      ports, no init or ephemeral containers, no Unconfined seccomp, and every
-      container non-root, unprivileged, with allowPrivilegeEscalation false,
-      all capabilities dropped and none added
+      ports, no init or ephemeral containers, and every container non-root,
+      unprivileged, with allowPrivilegeEscalation false, all capabilities
+      dropped and none added, and a RuntimeDefault or Localhost seccomp profile
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

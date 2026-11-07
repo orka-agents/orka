@@ -282,3 +282,42 @@ func TestResolveReferencesRejectsPlatformServiceAccountSources(t *testing.T) {
 		}
 	}
 }
+
+// An externally managed platform account (for example the chart's
+// serviceAccount.create=false) carries no label; it is refused by name.
+func TestResolveReferencesRejectsConfiguredPlatformServiceAccounts(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "external-controller", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "custom-ai-worker", Namespace: "tenant"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "workload", Namespace: "tenant"}},
+	).Build()
+	trust := TrustConfig{PlatformServiceAccounts: PlatformServiceAccountSet(
+		[]string{"system:serviceaccount:tenant:external-controller", "system:admin", "not-a-username"},
+		"tenant", "custom-ai-worker", "")}
+	for name, wantDenied := range map[string]bool{"external-controller": true, "custom-ai-worker": true, "workload": false} {
+		direct := validDirect()
+		direct.Subject = corev1alpha1.OutboundTokenSource{
+			Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+			TokenType:         tokenexchange.TokenTypeJWT,
+			ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: name},
+		}
+		policy := &corev1alpha1.OutboundAccessPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: "direct", Namespace: "tenant"},
+			Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: direct},
+		}
+		issue, err := ResolveReferences(context.Background(), reader, policy, trust)
+		if err != nil {
+			t.Fatalf("%s: ResolveReferences() error = %v", name, err)
+		}
+		if denied := issue != nil && issue.Reason == ReasonReferenceDenied; denied != wantDenied {
+			t.Fatalf("%s: ResolveReferences() issue = %#v, want denied=%v", name, issue, wantDenied)
+		}
+	}
+	if got := len(trust.PlatformServiceAccounts); got != 2 {
+		t.Fatalf("PlatformServiceAccountSet kept %d entries %v, want only the ServiceAccount username and the named worker", got, trust.PlatformServiceAccounts)
+	}
+}

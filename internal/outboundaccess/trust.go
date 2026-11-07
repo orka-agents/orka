@@ -24,6 +24,34 @@ type TrustedServiceReferences map[string]struct{}
 type TrustConfig struct {
 	Gateways       TrustedServiceReferences
 	TokenEndpoints TrustedServiceReferences
+	// PlatformServiceAccounts lists Orka's own ServiceAccounts as
+	// namespace/name. They are refused as token sources even without the
+	// platform label, for example an externally managed controller account.
+	PlatformServiceAccounts map[string]struct{}
+}
+
+// PlatformServiceAccountSet builds TrustConfig.PlatformServiceAccounts from
+// ServiceAccount usernames (system:serviceaccount:<namespace>:<name>) and from
+// names in namespace. Other usernames are ignored.
+func PlatformServiceAccountSet(usernames []string, namespace string, names ...string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, username := range usernames {
+		parts := strings.Split(strings.TrimSpace(username), ":")
+		if len(parts) == 4 && parts[0] == "system" && parts[1] == "serviceaccount" && parts[2] != "" && parts[3] != "" {
+			set[parts[2]+"/"+parts[3]] = struct{}{}
+		}
+	}
+	for _, name := range names {
+		if name = strings.TrimSpace(name); name != "" && namespace != "" {
+			set[namespace+"/"+name] = struct{}{}
+		}
+	}
+	return set
+}
+
+func (c TrustConfig) platformServiceAccount(namespace, name string) bool {
+	_, ok := c.PlatformServiceAccounts[namespace+"/"+name]
+	return ok
 }
 
 // ParseTrustedServiceReferences parses comma-separated namespace/name:port
