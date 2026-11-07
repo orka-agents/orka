@@ -73,8 +73,11 @@ never reach the runtime, the Task, the execution snapshot, events, or logs. Neit
 token requests nor the Tool call follow redirects. ACP runtimes reach these Tools through the
 MCP broker; native `type: ai` workers fail closed. The Tool URL must be HTTPS without
 template placeholders, and requests must go to the Tool's declared origin. Permissions are
-the agent identity's app roles in Entra. Removing the identity from the Agent, or
-disabling it in Entra, stops new calls. To set it up, follow
+the agent identity's app roles in Entra. Removing the identity from the Agent, or deleting
+the Agent, stops new calls at once, because Orka checks the live Agent on every call.
+Disabling the identity in Entra stops new tokens, but a token Orka already cached can still
+be used for up to five minutes, and whether the resource accepts it until it expires depends
+on that resource. To set it up, follow
 [Agent identities with Microsoft Entra](../guides/agent-identities.md); the design is
 [ADR 0039](https://github.com/orka-agents/orka/blob/main/docs/adr/0039-agent-identities.md).
 
