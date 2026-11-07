@@ -65,6 +65,35 @@ spec:
 Startup loading of reviewed memories into the prompt is separate and unchanged; tool
 opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
 
+## Task webhooks are signed and fail closed {#task-webhooks}
+
+`spec.webhookURL` notices are now signed, durable, and bounded. Review receivers before
+upgrading:
+
+- Every request carries an Ed25519-signed `X-Orka-Signature` and a stable
+  `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
+  against `/.well-known/orka/task-webhook-jwks.json`. See
+  [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
+- The controller creates the signing Secret in its namespace on first use. It needs the
+  Secret `create` and `update` access the controller role already grants. Under the
+  default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
+  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures, and do not let
+  untrusted users create Tasks or Agents there, since a `secretRef` can mount it. See
+  [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- With signing enabled but no usable key (the Secret cannot be read or holds a malformed
+  key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
+  key is available.
+- With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
+  their deliveries are marked `Failed`; enabling signing later does not retry them.
+- Destinations are checked at connect time. A DNS failure, any non-public resolved
+  address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
+  a private address stops receiving notices. Use a Service in the Task's namespace for
+  in-cluster receivers.
+- Failed deliveries are retried at most 8 times with exponential backoff, not every 30
+  seconds forever. Literal private IPs and other policy violations fail at once.
+- The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
+  fields are unchanged.
+
 ## Supported database layout
 
 Orka creates its SQLite database on first startup. Restarts reuse that database
@@ -83,7 +112,9 @@ Object counts alone do not establish compatibility.
 | 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
 | 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
 | 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
-| 159 objects (current), schema version 1 | Dataset identity layout | Validate schema, version and identity; no migration or automatic backup. |
+| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns; keep the dataset identity, records and key bootstrap state. |
+| 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
+| 162 objects (current), schema version 3 | Dataset binding layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -91,14 +122,17 @@ lineages. If either table holds records, or a Session lineage uses
 `harness v1 ... records`; that store belongs to an unsupported harness v1
 installation.
 
-The five historical source layouts have SQLite `user_version = 0`. A nonzero
-marker on an otherwise historical layout is refused rather than adopted.
+The five historical source layouts have SQLite `user_version = 0` and upgrade
+to the current layout in one transaction, ending with the schema version 3
+objects. A schema version 1 or 2 store keeps its identity row and upgrades in
+place through each later version, after the same automatic backup. A nonzero marker on any other layout is
+refused rather than adopted.
 
 ### Dataset identity and key bootstrap
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 1` records this metadata layout; the controller also checks
+`PRAGMA user_version = 3` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 

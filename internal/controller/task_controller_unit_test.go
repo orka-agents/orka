@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -48,13 +49,16 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -4118,6 +4122,10 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{
@@ -5948,14 +5956,24 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.WebhookNotifier = NewWebhookNotifier()
+	notifier := newWebhookNotifier(&taskwebhook.Dialer{
+		Policy: taskwebhook.PublicAddressPolicy,
+		Resolver: webhookTestResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}),
+	})
+	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
+	r.WebhookNotifier = notifier
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should requeue for webhook retry
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s requeue for webhook retry, got %v", result.RequeueAfter)
+	// Should requeue for webhook retry after the first backoff step.
+	if result.RequeueAfter != defaultWebhookInitialBackoff {
+		t.Errorf("expected %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
+	}
+	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
+		t.Errorf("unexpected webhook delivery state %#v", delivery)
 	}
 }
 
@@ -6444,9 +6462,7 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
-	r.WebhookNotifier = notifier
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -8800,11 +8816,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", sealedStore(t, persistence))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()

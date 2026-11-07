@@ -85,7 +85,7 @@ spec:
 | `timeout` | all | Maximum wall-clock duration. Coding-agent Tasks default to `30m`, measured from Task creation, including queueing and runtime admission. |
 | `priority` | all | Queue priority from 0 to 1000, default `500`. Higher runs first. |
 | `retryPolicy` | all | `maxRetries` (default `0`), `backoffMultiplier` (default `2`), and `initialDelay`. |
-| `webhookURL` | all | URL called when the Task completes. |
+| `webhookURL` | all | Public `http(s)` URL, or a Service in the Task's namespace, that receives a signed notice when the Task reaches a terminal phase. Delivery state is in `status.webhookDelivery`. See [Task webhooks](../guides/task-webhooks.md). |
 | `resources` | `ai`, `container` | CPU and memory requests and limits for the worker Pod. Coding-agent Tasks reject custom resources; their pool profile sets them. |
 | `execution` | `ai`, `container`; `workspace` only for `agent` | Runtime class and placement. See [Execution](#execution). |
 | `secretRef` | `ai`, `container` | A Secret for the Task. Container Tasks do not receive it by default; see [Container tasks](../guides/container-tasks.md#other-fields). |
