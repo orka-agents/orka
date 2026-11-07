@@ -76,7 +76,7 @@ spec:
                           or the canonical form a typed client sends ("24h0m0s"). Every component
                           is bounded so the value decodes without overflow: one that cannot
                           decode would keep the controller from reading any OutboundAccessPolicy.
-                        maxLength: 16
+                        maxLength: 32
                         pattern: ^([0-9]{1,4}(\.[0-9]{1,9})?(ns|us|µs|μs|ms|s|m|h)|([0-9]{1,4}h)?([0-9]{1,4}m)?[0-9]{1,4}(\.[0-9]{1,9})?s)$
                         type: string
                         x-kubernetes-validations:
