@@ -157,6 +157,10 @@ type activeChatRequest struct {
 	done            chan struct{}
 	deleteRequested bool
 	deleteWaiters   int
+	// keepCreatedSession records that a Session cancel stopped the request:
+	// a Session the request created is kept, empty, rather than deleted as
+	// for a disconnected client, so the cancel's caller can still read it.
+	keepCreatedSession bool
 }
 
 type activeChatHandle struct {
@@ -900,7 +904,10 @@ func (ch *ChatHandler) activateReservedChat(
 	stopTurnCancellation := context.AfterFunc(turnCancelCtx, reservation.cancel)
 	release := func() {
 		stopTurnCancellation()
-		ch.releaseChatTurn(namespace, sessionID, turnID, created)
+		ch.activeChatsMu.Lock()
+		keep := reservation.request.keepCreatedSession
+		ch.activeChatsMu.Unlock()
+		ch.releaseChatTurn(namespace, sessionID, turnID, created && !keep)
 		ch.finishActiveChatTurn(namespace, sessionID, turnID)
 	}
 	return &activeChatHandle{
@@ -1531,6 +1538,7 @@ func (ch *ChatHandler) stopActiveChat(ctx context.Context, namespace, sessionID 
 			// A gate holds the entry after the request finishes, as a
 			// deletion does, so reserveActiveChat refuses the next message.
 			request.deleteWaiters++
+			request.keepCreatedSession = true
 		}
 		ch.activeChatsMu.Unlock()
 		if request == nil {
