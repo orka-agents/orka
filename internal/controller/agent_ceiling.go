@@ -66,6 +66,9 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 		return nil
 	}
 	if tools == nil {
+		if runtimeRef {
+			return fmt.Errorf("agent %q ceiling restricts tools, but the task does not set allowedTools; set allowedTools within the ceiling", agent.Name)
+		}
 		return fmt.Errorf("agent %q ceiling restricts tools, but the task resolves to the unrestricted native tool set; set allowedTools or the Agent defaultAllowedTools within the ceiling", agent.Name)
 	}
 	limit := ceiling.AllowedTools
@@ -128,9 +131,15 @@ func resolvedCeilingToolRequest(
 	} else {
 		requested = effectiveACPAllowedTools(task, agent)
 	}
+	asked := requestedACPAllowedTools(task, agent)
 	tools, bash := resolvedCeilingRuntimeTools(task, agent, requested)
 	if tools != nil && injectsACPCoordinationTools(task, agent) {
-		tools = slices.DeleteFunc(tools, func(tool string) bool { return slices.Contains(acpInjectedCoordinationTools, tool) })
+		// Only the coordination tools Orka added are exempt; one the Task asked
+		// for itself still has to fit the ceiling.
+		tools = slices.DeleteFunc(tools, func(tool string) bool {
+			return slices.Contains(acpInjectedCoordinationTools, tool) &&
+				!slices.ContainsFunc(asked, func(name string) bool { return strings.EqualFold(strings.TrimSpace(name), tool) })
+		})
 	}
 	return tools, bash
 }
