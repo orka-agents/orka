@@ -134,6 +134,18 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
+// validateAgentIdentityProvenance refuses an identity issuer without Task
+// provenance admission. Identity binding judges a Task by who created it: the
+// RepositoryScan or RepositoryMonitor owner and markers it carries. Without
+// the webhook any Task editor could remove them and let an unchecked
+// automation Task bind as a root Task.
+func validateAgentIdentityProvenance(config agentidentity.Config, provenanceProtected bool) error {
+	if config.Entra != nil && !provenanceProtected {
+		return fmt.Errorf("an Agent identity issuer requires Task provenance admission (--task-provenance-admission-enabled or --task-provenance-admission-external) to protect how Tasks record who created them")
+	}
+	return nil
+}
+
 func validateWorkspaceProviderSecurityConfig(apiEnabled, classUseAdmissionEnabled, provenanceProtected bool) error {
 	if apiEnabled && !classUseAdmissionEnabled {
 		return fmt.Errorf("workspace provider API requires workspace class use admission")
@@ -839,6 +851,10 @@ func main() {
 		}
 	}
 	if err := agentIdentityConfig.Validate(); err != nil {
+		setupLog.Error(err, "invalid agent identity configuration")
+		os.Exit(1)
+	}
+	if err := validateAgentIdentityProvenance(agentIdentityConfig, taskProvenanceProtected); err != nil {
 		setupLog.Error(err, "invalid agent identity configuration")
 		os.Exit(1)
 	}

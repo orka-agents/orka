@@ -171,6 +171,25 @@ func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
 				})
 			}
 		}
+		marked := owned.DeepCopy()
+		marked.Labels = map[string]string{labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1"}
+		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor"}
+		marked.OwnerReferences = nil // already orphaned by the garbage collector
+		for name, change := range map[string]func(*corev1alpha1.Task){
+			"remove monitor label":      func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
+			"remove scan label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelSecurityScanID) },
+			"remove monitor annotation": func(task *corev1alpha1.Task) { delete(task.Annotations, labels.AnnotationRepositoryMonitorName) },
+			"change monitor label":      func(task *corev1alpha1.Task) { task.Labels[labels.LabelRepositoryMonitor] = "other" },
+		} {
+			for _, user := range []string{untrustedUsername, trustedControllerUser} {
+				t.Run(kind+"/"+user+"/orphaned "+name, func(t *testing.T) {
+					updated := marked.DeepCopy()
+					change(updated)
+					resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Update, user, updated, marked, ""))
+					require.False(t, resp.Allowed)
+				})
+			}
+		}
 		t.Run(kind+"/garbage collector orphans the Task", func(t *testing.T) {
 			orphaned := owned.DeepCopy()
 			orphaned.OwnerReferences = nil
