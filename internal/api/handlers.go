@@ -627,7 +627,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 }
 
 func (h *Handlers) authorizeTaskCreate(ctx context.Context, c fiber.Ctx, task *corev1alpha1.Task) error {
-	return authorizeKubernetesTaskCreate(ctx, h.clientset, GetUserInfo(c), task)
+	return authorizeKubernetesTaskCreate(ctx, h.uncachedReader(), h.clientset, GetUserInfo(c), task)
 }
 
 // ListTasks lists tasks
