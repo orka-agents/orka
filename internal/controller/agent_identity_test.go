@@ -32,6 +32,9 @@ import (
 
 const testAgentIdentityID = "33333333-3333-3333-3333-33333333aaaa"
 
+// testIdentityInstance is the issuer instance testIdentityConfig configures.
+const testIdentityInstance = "entra:11111111-1111-1111-1111-111111111111/22222222-2222-2222-2222-222222222222"
+
 func testIdentityConfig() agentidentity.Config {
 	return agentidentity.Config{
 		Entra: &agentidentity.EntraConfig{
@@ -103,7 +106,7 @@ func boundTask(name string, agent *corev1alpha1.Agent, phase corev1alpha1.TaskPh
 			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool,
 			Agent: &corev1alpha1.AgentExecutionAgentRef{
 				Namespace: agent.Namespace, Name: agent.Name, UID: agent.UID, Generation: 1,
-				Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+				Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
 			},
 		}},
 	}
@@ -519,7 +522,7 @@ func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
 		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
-		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
 	}
 	if external {
 		task.Status.AgentExecutionBinding.Backend = corev1alpha1.AgentExecutionBackendExternalEndpoint
@@ -562,7 +565,8 @@ func runACPDispatcherIdentityLossTest(t *testing.T, external bool) {
 		t.Fatal(err)
 	}
 	dispatcher := &ACPDispatcher{
-		Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
+		Identity: testIdentityConfig(),
+		Client:   kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs,
 		AdmissionGate: NewACPAdmissionGate(), sem: make(chan struct{}, 1), active: make(map[types.UID]struct{}),
 	}
 	if external {
@@ -712,7 +716,7 @@ func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
 	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
 	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
 		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
-		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: testIdentityInstance},
 	}
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
 	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "identity-resubmit.db"))
@@ -748,7 +752,7 @@ func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
 	}), fence); err != nil {
 		t.Fatal(err)
 	}
-	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs}
+	dispatcher := &ACPDispatcher{Identity: testIdentityConfig(), Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs}
 	states := []store.PromptExecutionState{
 		store.PromptExecutionQueued, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
 		store.PromptExecutionPlanned, store.PromptExecutionSubmitting,
@@ -780,5 +784,41 @@ func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
 	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || updated.Status.Execution == nil ||
 		updated.Status.Execution.Reason != taskExecutionReasonIdentityUnavailable {
 		t.Fatalf("Task status = %#v, want Failed/IdentityUnavailable", updated.Status)
+	}
+}
+
+// TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured covers a
+// restart without the Entra issuer while Agent use is still enforced: the
+// claim is released, as it is when enforcement is off.
+func TestHeldIdentityClaimIsReleasedOnceItsIssuerIsUnconfigured(t *testing.T) {
+	held := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r := identityAgentReconciler(held)
+	r.Identity.Entra = nil
+	if claim, err := r.reconcileIdentityClaim(context.Background(), held); err != nil || claim == nil || !claim.Releasing {
+		t.Fatalf("a held claim is released once its issuer is unconfigured: claim=%+v err=%v", claim, err)
+	}
+}
+
+// TestBoundIdentityRequiresTheIssuerConfiguredAsBound covers a controller
+// restarted after a Task bound to an identity: the Task may start only while
+// Agent use is enforced and the issuer instance it froze is still configured.
+func TestBoundIdentityRequiresTheIssuerConfiguredAsBound(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	task := boundTask("work", agent, corev1alpha1.TaskPhasePending)
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
+	otherTenant := testIdentityConfig()
+	otherTenant.Entra.TenantID = "44444444-4444-4444-4444-444444444444"
+	for name, tc := range map[string]struct {
+		config agentidentity.Config
+		want   string
+	}{
+		"use authorization off": {agentidentity.Config{Entra: testIdentityConfig().Entra}, "agent-use-authorization-enabled"},
+		"issuer removed":        {agentidentity.Config{AgentUseAuthorization: true}, "no longer configured"},
+		"issuer moved":          {otherTenant, "no longer configured"},
+	} {
+		unavailable, err := boundIdentityUnavailable(context.Background(), reader, tc.config, task, task.Status.AgentExecutionBinding)
+		if err != nil || !strings.Contains(unavailable, tc.want) {
+			t.Errorf("%s: unavailable = %q, %v; want it to mention %q", name, unavailable, err, tc.want)
+		}
 	}
 }

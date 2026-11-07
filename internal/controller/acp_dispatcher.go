@@ -31,6 +31,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
@@ -94,6 +95,9 @@ const (
 // Task reconciliation only persists queued demand; this leader-elected runnable
 // reserves capacity and advances the durable attempt state machine.
 type ACPDispatcher struct {
+	// Identity is the controller's Agent identity configuration (ADR 0039),
+	// against which a Task bound to an identity is admitted.
+	Identity                 agentidentity.Config
 	Client                   client.Client
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
@@ -3816,7 +3820,7 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	default:
 		// A Task bound to an identity starts only while its Agent still holds
 		// the identity for it (ADR 0039).
-		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), task, task.Status.AgentExecutionBinding)
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
 			return true, nil
@@ -6947,7 +6951,7 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 // Agent still holds the identity for it (ADR 0039). A claim that cannot be
 // read counts as unavailable.
 func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) string {
-	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), task, task.Status.AgentExecutionBinding)
+	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent again", "namespace", task.Namespace, "task", task.Name)
 		return "the Agent's identity claim could not be confirmed before the prompt was sent again"

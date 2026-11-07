@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 )
@@ -90,9 +91,10 @@ func (r *AgentReconciler) reconcileIdentityClaim(ctx context.Context, agent *cor
 	agent.Status.IdentityClaim = live.Status.IdentityClaim.DeepCopy()
 	claim := live.Status.IdentityClaim.DeepCopy()
 	issuer, id, declared := live.IdentityRef()
-	if declared && !r.Identity.AgentUseAuthorization {
-		// Claims exist only while Agent use authorization is enforced; without
-		// it a held claim is released like one the spec no longer names.
+	if _, configured := r.Identity.Instance(issuer); declared && (!r.Identity.AgentUseAuthorization || !configured) {
+		// Claims exist only while Agent use authorization is enforced and the
+		// issuer is configured; without either a held claim is released like
+		// one the spec no longer names.
 		issuer, id, declared = "", "", false
 	}
 	if claim != nil && identityClaimMatches(claim, issuer, id) {
@@ -475,7 +477,7 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 	if task.Status.Execution != nil {
 		return ctrl.Result{}, nil, false
 	}
-	message, err := boundIdentityUnavailable(ctx, uncachedReader(r.APIReader, r.Client), task, binding)
+	message, err := boundIdentityUnavailable(ctx, uncachedReader(r.APIReader, r.Client), r.Identity, task, binding)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "Agent identity claim check failed")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil, true
@@ -494,6 +496,7 @@ func (r *TaskReconciler) requireBoundIdentityClaim(
 func boundIdentityUnavailable(
 	ctx context.Context,
 	reader client.Reader,
+	config agentidentity.Config,
 	task *corev1alpha1.Task,
 	binding *corev1alpha1.AgentExecutionBinding,
 ) (string, error) {
@@ -501,6 +504,16 @@ func boundIdentityUnavailable(
 		return "", nil
 	}
 	frozen := binding.Agent
+	// The controller must still honor the identity it froze: Agent use
+	// enforcement on, and the same issuer instance configured.
+	if !config.AgentUseAuthorization {
+		return fmt.Sprintf("identity %s/%s needs --agent-use-authorization-enabled, which this controller no longer sets",
+			frozen.Identity.Issuer, frozen.Identity.ID), nil
+	}
+	if instance, configured := config.Instance(frozen.Identity.Issuer); !configured || instance != frozen.Identity.Instance {
+		return fmt.Sprintf("identity issuer %s of %s/%s is no longer configured as it was when the Task was bound",
+			frozen.Identity.Issuer, frozen.Namespace, frozen.Name), nil
+	}
 	live := &corev1alpha1.Agent{}
 	err := reader.Get(ctx, types.NamespacedName{Namespace: frozen.Namespace, Name: frozen.Name}, live)
 	if err != nil && !apierrors.IsNotFound(err) {
