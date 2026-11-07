@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -179,17 +180,9 @@ func refuseWorkerRootTaskForIdentityAgent(ctx context.Context, reader client.Rea
 }
 
 func isWorkerServiceAccount(userInfo *UserInfo) bool {
-	if userInfo == nil {
+	if userInfo == nil || parseServiceAccountNamespace(userInfo.Username) == "" {
 		return false
 	}
-	parts := strings.Split(userInfo.Username, ":")
-	if len(parts) != 4 || parts[0] != "system" || parts[1] != "serviceaccount" {
-		return false
-	}
-	for _, name := range workerServiceAccountNames {
-		if parts[3] == name {
-			return true
-		}
-	}
-	return false
+	name := userInfo.Username[strings.LastIndex(userInfo.Username, ":")+1:]
+	return slices.Contains(workerServiceAccountNames, name)
 }
