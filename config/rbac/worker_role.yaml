@@ -52,7 +52,8 @@ rules:
   verbs:
   - get
   - list
-# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent)
+# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent;
+# use lets delegated child Tasks name Agents under --agent-use-authorization-enabled)
 - apiGroups:
   - core.orka.ai
   resources:
@@ -62,6 +63,7 @@ rules:
   - create
   - update
   - delete
+  - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:
   - core.orka.ai
@@ -253,7 +255,8 @@ rules:
   verbs:
   - get
   - list
-# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent)
+# Orka Agent CRDs (for coordination: delegate_task type auto-detection, create_agent, delete_agent;
+# use lets delegated child Tasks name Agents under --agent-use-authorization-enabled)
 - apiGroups:
   - core.orka.ai
   resources:
@@ -263,6 +266,7 @@ rules:
   - create
   - update
   - delete
+  - use
 # Registered external runtime policy lookup for delegate_task materialization
 - apiGroups:
   - core.orka.ai

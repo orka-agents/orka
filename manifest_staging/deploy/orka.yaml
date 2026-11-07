@@ -399,6 +399,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:
@@ -1079,7 +1080,6 @@ rules:
   resources:
   - agenthosts
   - agentruntimes
-  - agents
   - branchclaims
   - connections
   - controllerepochs
@@ -1163,6 +1163,19 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - agents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - use
   - watch
 - apiGroups:
   - core.orka.ai
@@ -1769,6 +1782,7 @@ rules:
   - create
   - update
   - delete
+  - use
 - apiGroups:
   - core.orka.ai
   resources:

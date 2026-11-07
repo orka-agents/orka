@@ -12,6 +12,11 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["tasks", "tools", "agents", "agentruntimes", "runtimepools", "promptattempts", "runtimesessioncontrols", "publications", "controllerepochs", "externaleffects", "providers", "skills", "repositorymonitors", "repositoryscans", "substrateactorpools", "outboundaccesspolicies", "connections"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Orka creates Tasks for callers it has already authorized, so it may use
+  # every Agent; see --agent-use-authorization-enabled.
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents"]
+    verbs: ["use"]
   # Providers are operator-authored: the controller reads them and manages
   # their finalizer, never creates or deletes one.
   - apiGroups: ["core.orka.ai"]
@@ -564,7 +569,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]
@@ -653,7 +658,7 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agents"]
-    verbs: ["get", "create", "update", "delete"]
+    verbs: ["get", "create", "update", "delete", "use"]
   - apiGroups: ["core.orka.ai"]
     resources: ["agentruntimes"]
     verbs: ["get"]

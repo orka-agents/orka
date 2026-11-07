@@ -225,6 +225,29 @@ bindings, transaction-token scope modes, workspace-class `use` checks, and Gatew
 identity checks retain their existing policies. See [API authorization](../reference/api-authorization.md)
 for every route's permissions, namespace precedence, and grant examples.
 
+### Agent use
+
+Creating a Task authorizes the Task, not the Agent it runs as. With
+`--agent-use-authorization-enabled` (Helm: `controller.agentUseAuthorization.enabled`),
+running work as an Agent also needs the `use` verb on that Agent, the way
+workspace classes already need it. The API checks its caller, and
+ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
+RepositoryMonitors, and GatewayBindings that newly name an Agent. The Helm value
+installs those policies; without Helm, also apply `config/agent-use-policy`, or
+direct Kubernetes writes go unchecked. Orka's own components (the controller,
+API, gateways, monitors, and workers) hold `use` broadly. Callers are checked
+only when a request newly names an Agent: a RepositoryMonitor run starts with
+no Agent `use` check, and Agent references an object already names, including
+ones set before the check was enabled, are not checked again on edit. Review
+existing configurations and who may `patch` RepositoryMonitors before you
+enable the check.
+Delegation is the exception: a worker creates a child Task for any Agent the
+parent Agent's owner listed in `spec.coordination.allowedAgents`, without
+checking the root caller's `use` on the child Agent. Whoever may use a parent
+Agent can therefore run the Agents its owner listed, so list only Agents its
+callers may run. The check is off by default, because turning it on denies
+every caller without a `use` grant.
+
 ## Secret management
 
 - Provider-proxy, source-read, publication-read, publication-write, forge,

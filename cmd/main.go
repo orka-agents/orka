@@ -242,6 +242,7 @@ func main() {
 	var taskProvenanceAdmissionEnabled bool
 	var taskProvenanceAdmissionExternal bool
 	var workspaceClassUseAdmissionEnabled bool
+	var agentUseAuthorizationEnabled bool
 	var taskProvenanceAdmissionTrustedUsers string
 	var taskProvenanceAdmissionTrustedServiceAccounts string
 	var enableLeaderElection bool
@@ -445,6 +446,9 @@ func main() {
 	flag.BoolVar(&workspaceClassUseAdmissionEnabled, "workspace-class-use-admission-enabled",
 		envBool("ORKA_WORKSPACE_CLASS_USE_ADMISSION_ENABLED"),
 		"Enable fail-closed Task and Tool admission checks for ExecutionWorkspaceClass use.")
+	flag.BoolVar(&agentUseAuthorizationEnabled, "agent-use-authorization-enabled",
+		envBool("ORKA_AGENT_USE_AUTHORIZATION_ENABLED"),
+		"Require the `use` verb on an Agent before API callers create or edit Tasks, RepositoryScans, or RepositoryMonitors naming it. Pair with the agent-use ValidatingAdmissionPolicy for direct Kubernetes writes.")
 	flag.StringVar(&aiWorkerImage, "ai-worker-image",
 		controller.DefaultAIWorkerImage, "Container image for AI worker.")
 	flag.StringVar(&generalWorkerImage, "general-worker-image",
@@ -2183,8 +2187,9 @@ func main() {
 			ExternalEffects:                  connectorToolEffects,
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
-		DashboardEnabled: dashboardEnabled,
-		TaskWebhookKeys:  taskWebhookKeys,
+		DashboardEnabled:      dashboardEnabled,
+		AgentUseAuthorization: agentUseAuthorizationEnabled,
+		TaskWebhookKeys:       taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
