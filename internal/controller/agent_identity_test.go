@@ -696,3 +696,89 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 		t.Fatalf("Task bound before a re-grant: handled=%v err=%v, want it failed", handled, err)
 	}
 }
+
+// TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt covers a prompt
+// a RuntimePool turned away for capacity: while the Task waits, its Agent can
+// lose the identity, so the dispatcher checks the claim again before it sends
+// the prompt once more and settles the Task as IdentityUnavailable instead.
+func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	task := runtimePoolReservationTestTask("identity-resubmit", "identity-resubmit-uid", "pool-uid")
+	task.CreationTimestamp = metav1.Now()
+	task.Status.Execution.State = corev1alpha1.TaskExecutionStateSubmitting
+	task.Status.AgentExecutionBinding = testACPExecuteBindingForDispatcher()
+	task.Status.AgentExecutionBinding.Agent = &corev1alpha1.AgentExecutionAgentRef{
+		Namespace: task.Namespace, Name: "reviewer", UID: "reviewer-uid", Generation: 1,
+		Identity: &corev1alpha1.AgentExecutionIdentityRef{Issuer: "entra", ID: testAgentIdentityID, Instance: "entra:x/y"},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(task.DeepCopy()).Build()
+	db, err := sqlite.NewDB(filepath.Join(t.TempDir(), "identity-resubmit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	controlStore := sqlite.NewStore(db, "identity-resubmit-test")
+	epochs := NewControllerEpochManager(controlStore, "identity-resubmit-controller")
+	epochCtx, cancelEpoch := context.WithCancel(context.Background())
+	epochDone := make(chan error, 1)
+	go func() { epochDone <- epochs.Start(epochCtx) }()
+	t.Cleanup(func() {
+		cancelEpoch()
+		if err := <-epochDone; err != nil {
+			t.Errorf("controller epoch manager shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fence, err := epochs.CurrentFence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := store.PromptAttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1, PromptID: task.Status.Execution.PromptID}
+	attemptID, err := key.CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlStore.CreatePromptAttempt(ctx, boundPromptAttemptForTest(&store.PromptAttempt{
+		ID: attemptID, Key: key, RequestDigest: task.Status.Execution.RequestDigest,
+		ExecutionState: store.PromptExecutionQueued, DeliveryState: store.PromptDeliveryNotRequested,
+	}), fence); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &ACPDispatcher{Client: kubeClient, APIReader: kubeClient, Store: controlStore, ResultStore: controlStore, Epochs: epochs}
+	states := []store.PromptExecutionState{
+		store.PromptExecutionQueued, store.PromptExecutionReserved, store.PromptExecutionSessionStarting,
+		store.PromptExecutionPlanned, store.PromptExecutionSubmitting,
+	}
+	for i := 1; i < len(states); i++ {
+		if err := dispatcher.transitionAttempt(ctx, attemptID, fence, states[i-1], states[i], "test-"+string(states[i]), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	unavailable := dispatcher.identityUnavailableBeforeResubmission(ctx, task)
+	if !strings.Contains(unavailable, "no longer holds identity") {
+		t.Fatalf("unavailable = %q, want the lost identity named", unavailable)
+	}
+	if err := dispatcher.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, nil, unavailable); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := controlStore.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.ExecutionState != store.PromptExecutionFailed || attempt.TerminalReason != string(taskExecutionReasonIdentityUnavailable) {
+		t.Fatalf("attempt = %s/%s, want Failed/IdentityUnavailable", attempt.ExecutionState, attempt.TerminalReason)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := kubeClient.Get(ctx, client.ObjectKeyFromObject(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed || updated.Status.Execution == nil ||
+		updated.Status.Execution.Reason != taskExecutionReasonIdentityUnavailable {
+		t.Fatalf("Task status = %#v, want Failed/IdentityUnavailable", updated.Status)
+	}
+}
