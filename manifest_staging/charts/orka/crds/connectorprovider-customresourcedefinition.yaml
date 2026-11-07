@@ -210,6 +210,23 @@ spec:
                         HTTP is the request definition for HTTP tools. The controller adds the
                         person's bearer credential at call time; no other auth is configurable.
                       properties:
+                        forward:
+                          description: |-
+                            Forward makes this curated tool a route for a command-line client in an
+                            ACP runtime, as for a Tool's spec.http.forward. The person consents to
+                            the provider's scopes, and every request goes to this origin only. A
+                            forwarding tool must be class read, its url an HTTPS origin with no
+                            path, and it declares no parameters; provider validation checks these.
+                          properties:
+                            protocol:
+                              description: Protocol is the client protocol the runtime
+                                serves.
+                              enum:
+                              - AzureResourceManager
+                              type: string
+                          required:
+                          - protocol
+                          type: object
                         headers:
                           additionalProperties:
                             type: string
@@ -253,6 +270,9 @@ spec:
                       x-kubernetes-validations:
                       - message: connector tool url must use https
                         rule: self.url.startsWith('https://')
+                      - message: a forwarding connector tool sets no headers
+                        rule: '!has(self.forward) || !has(self.headers) || size(self.headers)
+                          == 0'
                     name:
                       description: |-
                         Name is the tool name exposed to agents. For Builtin tools it must match

@@ -113,6 +113,8 @@ func toolCallIDFromContext(ctx context.Context) string {
 
 // ToolExecutor handles execution of custom Tool CRDs via HTTP or MCP-over-HTTP.
 type ToolExecutor struct {
+	// forwarding admits forwarding Tools; see AllowForwarding.
+	forwarding                 bool
 	client                     *http.Client
 	secretPath                 string
 	namespace                  string
@@ -544,6 +546,9 @@ func (e *ToolExecutor) executePreparedToolRequest(ctx context.Context, prepared 
 		return result, err
 	}
 
+	if prepared.forward {
+		return executeForwardRequest(httpClient, prepared)
+	}
 	respBody, err := executeToolHTTPRequest(httpClient, prepared.request, prepared.gateway, prepared.redactionSecrets...)
 	if err != nil {
 		return "", ToolRequestAttemptedError{Err: err}
@@ -925,6 +930,9 @@ type preparedToolRequest struct {
 	agentIdentity     bool
 	mcp               bool
 	trustedActorRoute bool
+	// forward marks a forwarding Tool's request, whose upstream answer is
+	// returned whatever its status.
+	forward bool
 }
 
 func (p preparedToolRequest) secrets(extra ...string) []string {
@@ -954,6 +962,9 @@ func decodeToolArguments(args json.RawMessage) (map[string]any, error) {
 func (e *ToolExecutor) prepareRequest(ctx context.Context, tool *corev1alpha1.Tool, args json.RawMessage) (preparedToolRequest, error) {
 	if tool != nil && tool.Spec.MCP != nil && tool.Spec.MCP.Remote != nil {
 		return e.prepareRemoteMCPRequest(ctx, tool, args, false)
+	}
+	if isForwardingTool(tool) {
+		return e.prepareForwardRequest(ctx, tool, args)
 	}
 	params, err := decodeToolArguments(args)
 	if err != nil {
@@ -1128,6 +1139,7 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		CheckedPolicy:               e.checkedPolicy(ref.Name),
 		Tool: outboundaccess.ToolBinding{
 			Name: tool.Name, URL: strings.TrimSpace(tool.Spec.HTTP.URL), Method: prepared.request.Method, Class: tool.Spec.BrokeredToolClass,
+			Forward: toolForwardProtocol(tool),
 			Headers: tool.Spec.HTTP.Headers, Parameters: tool.Spec.Parameters,
 			Timeout: toolHTTPTimeout(tool), TimeoutSet: tool.Spec.HTTP.Timeout != nil,
 		},
@@ -1187,6 +1199,9 @@ func (e *ToolExecutor) applyOutboundAccessPolicy(ctx context.Context, tool *core
 		prepared.request.Header.Del(transactiontoken.HeaderName)
 		prepared.request.Header.Set(header, resolution.CredentialValue)
 	case outboundaccess.AdapterGateway:
+		if prepared.forward {
+			return errors.New("a forwarding tool needs a credential-injecting outbound access policy, not a gateway")
+		}
 		return e.applyGatewayOutboundAccess(ctx, prepared, resolution, parentScopes, transactionTokenSource)
 	default:
 		return fmt.Errorf("unsupported outbound access adapter %q", resolution.Adapter)

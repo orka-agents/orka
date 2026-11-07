@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
@@ -499,6 +500,9 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		}
 		executor := workerexecutor.NewToolExecutorForNamespace(request.Namespace, e.KubeClient, e.HTTPClient, e.OutboundAccess)
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
+		if descriptor.Forward != nil {
+			executor.AllowForwarding()
+		}
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr
 		}
@@ -574,6 +578,18 @@ func acpMCPToolExecutionResult(ctx context.Context, descriptor harnessv2.MCPTool
 				Code    string `json:"code"`
 				Error   string `json:"error"`
 			}{true, "invalid_arguments", argErr.Error()})
+		}
+		if required, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); ok {
+			// The requester's link is missing or unusable, so nothing was
+			// sent. The reason is Orka's own text naming the provider and the
+			// fix, safe for the agent to relay and for the log.
+			log.FromContext(ctx).Info("ACP MCP tool call refused: the requester's linked account is unavailable",
+				"tool", descriptor.Name, "provider", required.Provider, "kind", required.Kind, "reason", required.Error())
+			return json.Marshal(struct {
+				IsError bool   `json:"isError"`
+				Code    string `json:"code"`
+				Error   string `json:"error"`
+			}{true, harnessv2.MCPToolErrorCodeConnectionRequired, required.Error()})
 		}
 		_, executionFailed := errors.AsType[workerexecutor.ToolExecutionError](err)
 		// A read-only Tool may reach its own request deadline while the

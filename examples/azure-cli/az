@@ -1,0 +1,51 @@
+#!/bin/sh
+# Orka Azure CLI toolbox wrapper.
+#
+# In an Orka runtime that forwards Azure Resource Manager, the supervisor sets
+# IDENTITY_ENDPOINT and preselects its loopback cloud in AZURE_CONFIG_DIR. The
+# first az command of a session signs in through that endpoint, so the agent
+# never runs `az login` and never holds an Azure credential.
+set -u
+python=/opt/azure-cli/venv/bin/python
+# The Azure SDK has string escapes newer Pythons warn about; -I ignores
+# PYTHONWARNINGS, so the filter is passed on the command line.
+pyflags="-I -W ignore::SyntaxWarning"
+config_dir=${AZURE_CONFIG_DIR:-${HOME:-/tmp}/.azure}
+profile=$config_dir/azureProfile.json
+# Signing out in an Orka runtime only forgets the placeholder sign-in: there
+# is no Azure credential here, and az's own sign-out would try to reach
+# login.microsoftonline.com, which the runtime cannot. The next command
+# signs in again.
+if [ -n "${IDENTITY_ENDPOINT:-}" ] && { [ "${1:-}" = logout ] || { [ "${1:-}" = account ] && [ "${2:-}" = clear ]; }; }; then
+  rm -f "$profile" "$config_dir"/msal_token_cache.* "$config_dir"/service_principal_entries.*
+  exit 0
+fi
+case "${1:-}" in
+  cloud)
+    # The supervisor's cloud is the only route to Azure in this runtime;
+    # switching to another cloud would only send az past Orka and fail.
+    if [ -n "${IDENTITY_ENDPOINT:-}" ]; then
+      case "${2:-}" in
+        set|register|update|unregister)
+          echo "ERROR: Orka reaches Azure only through the preselected cloud; 'az cloud ${2}' is not available in this runtime." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
+  login|logout|version|--version|-h|--help|help|"") ;;
+  *)
+    # Sign in whenever az's own profile holds no account.
+    if [ -n "${IDENTITY_ENDPOINT:-}" ] && ! grep -qs '"user"' "$profile"; then
+      # A failed sign-in stops here and says why (for example
+      # OrkaConnectionRequired), so the agent does not also see az's
+      # "Please run 'az login'" hint, which cannot help in this runtime.
+      if ! signin_error=$("$python" $pyflags -m azure.cli login --identity --allow-no-subscriptions --output none 2>&1); then
+        reason=$(printf '%s\n' "$signin_error" | sed -n 's/^ERROR: //p' | head -n 1)
+        printf 'ERROR: Orka could not sign az in: %s\n' "${reason:-$signin_error}" >&2
+        exit 1
+      fi
+    fi
+    ;;
+esac
+exec "$python" $pyflags -m azure.cli "$@"
