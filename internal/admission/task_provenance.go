@@ -217,9 +217,14 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 // must not move an existing worker into another Task's scope, nor detach a
 // Task from the chat whose deletion stops its delegated calls.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
+	// The markers of the scan or monitor that created a Task are held too:
+	// they keep it from binding an identity as a root Task, also after the
+	// garbage collector orphans it.
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels,
-		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace})
-	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
+		[]string{labels.LabelParentTask, labels.LabelChatSession, labels.LabelChatSessionEpoch, labels.LabelChatSessionNamespace,
+			labels.LabelRepositoryMonitor, labels.LabelSecurityScanID})
+	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations,
+		[]string{labels.AnnotationParentTaskName, labels.AnnotationRepositoryMonitorName})...)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
 	// metadata then has no matching owner UID, so coordination access fails
 	// closed. Cleanup controllers cannot attach the Task to a different owner.

@@ -518,9 +518,11 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		if identity != nil {
 			executor.SetCheckedPolicy(policyName, *identity)
 		}
+		authenticated, _ := ACPMCPAuthenticatedTaskFromContext(ctx)
 		execute = func(callCtx context.Context) (string, error) {
 			execCtx := workerexecutor.WithToolCallID(callCtx, request.Call.CallID)
 			execCtx = workerexecutor.WithToolIdempotencyKey(execCtx, string(request.Metadata.OperationID))
+			execCtx = workerexecutor.WithAgentUID(execCtx, authenticated.AgentUID)
 			result, err := executor.Execute(execCtx, tool, request.Call.Arguments)
 			return result, customToolNoEffectError(err)
 		}
