@@ -918,11 +918,19 @@ func (r *KubernetesResolver) requireLiveRequesterConnection(ctx context.Context,
 	if !ok || !bound || req.Requester == nil {
 		return errors.New("the Task has no requester Connection frozen for the policy")
 	}
-	return checker.RequireLiveConnection(ctx, ConnectionCredentialRequest{
+	err := checker.RequireLiveConnection(ctx, ConnectionCredentialRequest{
 		Namespace: policy.Namespace, Provider: provider,
 		Issuer: req.Requester.Issuer, Subject: req.Requester.Subject,
 		Frozen: frozen, Tool: req.Tool,
 	})
+	if refusal, ok := errors.AsType[*ConnectionRequiredError](err); ok {
+		// Describe a copy, as the credential path does, so the agent is told
+		// how the person relinks.
+		described := *refusal
+		r.describeConnectionRefusal(ctx, &described, policy.Namespace, provider, nil)
+		return &described
+	}
+	return err
 }
 
 var errDelegationExpired = errors.New("the delegation has expired; the requester must act again for the Agent to act for them")

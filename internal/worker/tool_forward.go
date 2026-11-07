@@ -137,8 +137,10 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 
 // forwardContinuationRe matches an Azure Resource Manager continuation
 // parameter, `$skiptoken` (or its escaped `%24skiptoken`), in a nextLink or a
-// URL-valued header.
-var forwardContinuationRe = regexp.MustCompile(`(?i)([?&])((?:\$|%24)skiptoken=[^&#\s"'<>\\]+)`)
+// URL-valued header. A JSON body may escape the separator as `\u0026` and the
+// dollar as `\u0024`; the value stops at a backslash, so a following escaped
+// separator ends it.
+var forwardContinuationRe = regexp.MustCompile(`(?i)([?&]|\\u0026)((?:\$|%24|\\u0024)skiptoken=[^&#\s"'<>\\]+)`)
 
 // redactForwardedText redacts a forwarded response as other tool results are,
 // but keeps continuation parameters: the generic `token=` rule would replace a

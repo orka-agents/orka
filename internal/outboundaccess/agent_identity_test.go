@@ -358,6 +358,21 @@ func TestKubernetesResolverDelegatedRechecksTheRequesterLink(t *testing.T) {
 		}
 	})
 
+	t.Run("names the provider when the requester disconnected during the exchange", func(t *testing.T) {
+		source := connection()
+		shared := &ConnectionRequiredError{Kind: ConnectionNotLinked}
+		identity := &fakeAgentIdentitySource{token: "obo-token", during: func() { source.liveErr = shared }}
+		_, err := resolver(delegatedPolicySpec(nil), source, identity).Resolve(context.Background(), delegatedRequest(now.Add(-time.Minute)))
+		refusal, ok := errors.AsType[*ConnectionRequiredError](err)
+		if !errors.Is(err, ErrRequesterLinkChanged) || !ok || refusal.Provider == "" || refusal.Namespace == "" ||
+			!strings.Contains(refusal.Error(), "orka connect "+refusal.Provider+" -n "+refusal.Namespace) {
+			t.Fatalf("Resolve() = %v, want a described link refusal", err)
+		}
+		if shared.Provider != "" || shared.Namespace != "" {
+			t.Fatalf("the source's error was annotated in place: %+v", shared)
+		}
+	})
+
 	t.Run("refuses when the source cannot re-check the Connection", func(t *testing.T) {
 		r := resolver(delegatedPolicySpec(nil), nil, &fakeAgentIdentitySource{token: "obo-token"})
 		r.Connections = resolveOnlyConnectionSource{connection()}

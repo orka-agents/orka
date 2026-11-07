@@ -217,3 +217,18 @@ func TestRedactForwardedTextRemovesAnInjectedCredentialFromAContinuationToken(t 
 		t.Fatalf("injected credential survived in a continuation token: %q", got)
 	}
 }
+
+func TestRedactForwardedTextKeepsJSONEscapedContinuationTokens(t *testing.T) {
+	for _, body := range []string{
+		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1&$skiptoken=page2"}`,
+		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1&$skiptoken=page2&x=1"}`,
+	} {
+		got := redactForwardedText(body)
+		if !strings.Contains(got, "skiptoken=page2") || strings.Contains(got, "[REDACTED]") {
+			t.Fatalf("escaped continuation token lost: %s -> %s", body, got)
+		}
+		if got != body {
+			t.Fatalf("the body changed: %s -> %s", body, got)
+		}
+	}
+}
