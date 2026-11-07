@@ -330,6 +330,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
+		// Delegated work still stops while usage storage is down: the
+		// cascade needs none of it.
+		_ = r.cascadeTaskCancellation(ctx, task)
 		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 	}
 	if tx := task.Spec.Transaction; tx != nil {
@@ -2843,14 +2846,18 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 			child := &children[i]
 			// A scheduled child is a template; cancelling it would end its
 			// future runs, so it is left for its own owner.
-			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) || !child.DeletionTimestamp.IsZero() ||
+			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) ||
 				strings.TrimSpace(child.Spec.Schedule) != "" {
 				continue
 			}
 			visited[client.ObjectKeyFromObject(child)] = true
-			// Every real child is walked: its own cascade may never run, as
-			// when its status write keeps failing.
+			// Every real child is walked, a deleting one included: its own
+			// cascade may never run, as when its status write or finalizer
+			// keeps failing.
 			parents = append(parents, child)
+			if !child.DeletionTimestamp.IsZero() {
+				continue
+			}
 			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
 				continue
 			}
