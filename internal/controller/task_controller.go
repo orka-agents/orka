@@ -2611,6 +2611,14 @@ func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task
 
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		// Work the Task delegated stops with it, at every depth: each child
+		// cascades to its own children once it is Cancelled.
+		if err := r.cancelChildTasks(ctx, task); err != nil {
+			log.Error(err, "failed to cancel the Task's child Tasks")
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+	}
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
@@ -2777,6 +2785,44 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 // cancel request that this reconciler may complete through the native
 // terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
 // are cancelled by cancelRequestedAgentTask under the controller epoch guard.
+// cancelChildTasks records a cancel request on every Pending or Running
+// Task the cancelled task controls, the same request a person makes, so the
+// children stop the way a cancelled Task does. Children already finished or
+// already asked to cancel are left alone, so it can run on every reconcile.
+func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
+	var children corev1alpha1.TaskList
+	if err := r.List(ctx, &children, client.InNamespace(task.Namespace),
+		client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(task.Name)}); err != nil {
+		return err
+	}
+	message := "cancelled with its parent task " + task.Name
+	var errs []error
+	for i := range children.Items {
+		child := &children.Items[i]
+		// A scheduled child is a template; cancelling it would end its future
+		// runs, so it is left for its own owner.
+		if !metav1.IsControlledBy(child, task) || !child.DeletionTimestamp.IsZero() || strings.TrimSpace(child.Spec.Schedule) != "" {
+			continue
+		}
+		if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
+			continue
+		}
+		if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+			continue
+		}
+		base := child.DeepCopy()
+		if child.Annotations == nil {
+			child.Annotations = map[string]string{}
+		}
+		child.Annotations[labels.AnnotationCancelRequested] = message
+		if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
+			!apierrors.IsNotFound(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||

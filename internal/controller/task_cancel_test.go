@@ -658,3 +658,54 @@ func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
 		t.Fatal("the run's context was not cancelled")
 	}
 }
+
+// TestCancelledTaskCancelsTheChildrenItControls covers delegated work: a
+// cancelled parent asks its Pending and Running children to cancel, and
+// leaves finished children, children it does not control, and scheduled
+// templates alone.
+func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	controller := true
+	child := func(name string, phase corev1alpha1.TaskPhase, controlled bool, schedule string) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: map[string]string{labels.LabelParentTask: "parent"}},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Schedule: schedule},
+			Status:     corev1alpha1.TaskStatus{Phase: phase},
+		}
+		if controlled {
+			task.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "parent", UID: "parent-uid", Controller: &controller,
+			}}
+		}
+		return task
+	}
+	objects := []client.Object{
+		parent,
+		child("running", corev1alpha1.TaskPhaseRunning, true, ""),
+		child("pending", corev1alpha1.TaskPhasePending, true, ""),
+		child("done", corev1alpha1.TaskPhaseSucceeded, true, ""),
+		child("unowned", corev1alpha1.TaskPhaseRunning, false, ""),
+		child("template", corev1alpha1.TaskPhasePending, true, "*/5 * * * *"),
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
+	r := &TaskReconciler{Client: c}
+	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"running": true, "pending": true, "done": false, "unowned": false, "template": false} {
+		got := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, got); err != nil {
+			t.Fatal(err)
+		}
+		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; requested != want {
+			t.Errorf("%s: cancel requested = %t, want %t", name, requested, want)
+		}
+	}
+	// A second pass changes nothing.
+	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+}
