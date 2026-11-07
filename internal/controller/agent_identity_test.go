@@ -458,6 +458,20 @@ func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
 			if verifier.calls != 1 {
 				t.Fatalf("Verify() called %d times across repeated passes, want the answer reused", verifier.calls)
 			}
+			// A reused answer requeues the Agent for when it expires, so a
+			// late pass cannot push verification past the interval.
+			r.verifications.Lock()
+			entry := r.verifications.byAgent[request.NamespacedName]
+			entry.until = time.Now().Add(10 * time.Minute)
+			r.verifications.byAgent[request.NamespacedName] = entry
+			r.verifications.Unlock()
+			reused, err := r.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reused.RequeueAfter <= 0 || reused.RequeueAfter > 10*time.Minute {
+				t.Fatalf("RequeueAfter = %v, want at most the 10m the answer has left", reused.RequeueAfter)
+			}
 			// An edit asks the issuer again at once.
 			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
 				t.Fatal(err)
