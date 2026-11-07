@@ -50,6 +50,21 @@ func identityClaimCoversCreation(claim *corev1alpha1.AgentIdentityClaim, created
 // identityClaimBindable reports whether new Task bindings may use the claim:
 // it must name the identity, not be on its way out, and carry the grant time
 // the API server recorded.
+// enforcedIdentityClaim returns the claim as the current period of Agent use
+// enforcement sees it: a grant from before that period began counts from its
+// start, so a Task or source created while the check was off is never covered,
+// even when the Agent did not reconcile while it was off.
+func enforcedIdentityClaim(claim *corev1alpha1.AgentIdentityClaim, config agentidentity.Config) *corev1alpha1.AgentIdentityClaim {
+	since := config.EnforcedSince
+	if claim == nil || claim.GrantedAt == nil || since.IsZero() || !claim.GrantedAt.Time.Before(since) {
+		return claim
+	}
+	enforced := claim.DeepCopy()
+	start := metav1.NewTime(since)
+	enforced.GrantedAt = &start
+	return enforced
+}
+
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
 	return identityClaimMatches(claim, issuer, id) && !claim.Releasing && claim.GrantedAt != nil
 }
@@ -313,7 +328,8 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
-	if !identityClaimCoversTask(live.Status.IdentityClaim, task) {
+	claim := enforcedIdentityClaim(live.Status.IdentityClaim, r.Identity)
+	if !identityClaimCoversTask(claim, task) {
 		return nil, permanentACPAgentConfiguration(fmt.Errorf(
 			"the Task was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; create the Task again",
 			agent.Name, issuer, id))
@@ -322,11 +338,11 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if err != nil {
 		return nil, permanentACPAgentConfiguration(err)
 	}
-	if err := requireTaskSourceCoveredByClaim(ctx, reader, task, agent, ref, live.Status.IdentityClaim); err != nil {
+	if err := requireTaskSourceCoveredByClaim(ctx, reader, task, agent, ref, claim); err != nil {
 		return nil, err
 	}
 	if parentName := labels.ParentTaskName(task.Labels, task.Annotations); parentName != "" {
-		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref, live.Status.IdentityClaim); err != nil {
+		if err := requireParentOwnsIdentityAgent(ctx, reader, task, parentName, agent, ref, claim); err != nil {
 			return nil, err
 		}
 	}
@@ -520,7 +536,7 @@ func boundIdentityUnavailable(
 		return "", fmt.Errorf("read the Agent's identity claim: %w", err)
 	}
 	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
-		if identityClaimCoversTask(live.Status.IdentityClaim, task) {
+		if identityClaimCoversTask(enforcedIdentityClaim(live.Status.IdentityClaim, config), task) {
 			return "", nil
 		}
 		// The claim was released and granted again after the Task was created.
