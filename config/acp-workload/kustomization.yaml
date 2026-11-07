@@ -186,6 +186,16 @@ replacements:
     options:
       delimiter: "'"
       index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: ai-worker-identity-protection
+    fieldPaths:
+    - spec.matchConditions.[name=ai-worker].expression
+    options:
+      delimiter: "'"
+      index: 5
 - source:
     group: ""
     version: v1

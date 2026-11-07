@@ -1,0 +1,75 @@
+# The default AI worker role can create Secrets and Jobs in its namespace, for
+# code_exec and child-Task credentials. Kubernetes fills a ServiceAccount-token
+# Secret with a token for whichever ServiceAccount it names, and a Job's Pods run
+# as whichever ServiceAccount it names, with that account's token. Either lets
+# the worker act as the controller or any other ServiceAccount in the namespace.
+# This policy holds the AI worker to what it actually creates: Opaque Secrets,
+# and code_exec Jobs that run as their own per-run ServiceAccount with no token
+# and cannot reach the node. Patch AI_WORKER_SA to the AI worker ServiceAccount,
+# exactly as for gateway_task_protection.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ai-worker-identity-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["secrets"]
+    - apiGroups: ["batch"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["jobs"]
+  matchConditions:
+  # The AI worker ServiceAccount writing in its own namespace. Kustomize
+  # replaces the sixth quote-delimited segment with the ServiceAccount name.
+  - name: ai-worker
+    expression: "request.userInfo.username == 'system:serviceaccount:' + request.namespace + ':' + 'AI_WORKER_SA'"
+  variables:
+  - name: pod
+    expression: "object.spec.template.spec"
+  - name: podSecurity
+    expression: "variables.pod.?securityContext.orValue({})"
+  validations:
+  - expression: "request.resource.resource != 'secrets' || object.type == 'Opaque'"
+    message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret would hand it another identity
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        object.metadata.name.startsWith('orka-code-exec-') &&
+        variables.pod.?serviceAccountName.orValue('') == object.metadata.name &&
+        variables.pod.?automountServiceAccountToken.orValue(true) == false &&
+        variables.pod.?volumes.orValue([]).all(v, has(v.emptyDir) || has(v.secret)))
+    message: >-
+      AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as the
+      ServiceAccount of the same name with automountServiceAccountToken false,
+      and use only emptyDir and Secret volumes
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        !variables.pod.?hostNetwork.orValue(false) &&
+        !variables.pod.?hostPID.orValue(false) &&
+        !variables.pod.?hostIPC.orValue(false) &&
+        !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.pod.?initContainers.orValue([]).size() == 0 &&
+        variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
+        variables.pod.containers.all(c,
+          !c.?securityContext.privileged.orValue(false) &&
+          c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
+          c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
+          c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
+          c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
+    message: >-
+      AI worker Jobs must not reach the node: no host namespaces or ports, no
+      init or ephemeral containers, and every container non-root, unprivileged,
+      with allowPrivilegeEscalation false and no added capabilities
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ai-worker-identity-protection
+spec:
+  policyName: ai-worker-identity-protection
+  validationActions: [Deny]

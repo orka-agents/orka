@@ -3313,6 +3313,75 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:' + request.namespace
+      + ':' + 'orka-ai-worker'
+    name: ai-worker
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - secrets
+    - apiGroups:
+      - batch
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - jobs
+  validations:
+  - expression: request.resource.resource != 'secrets' || object.type == 'Opaque'
+    message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret
+      would hand it another identity
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        object.metadata.name.startsWith('orka-code-exec-') &&
+        variables.pod.?serviceAccountName.orValue('') == object.metadata.name &&
+        variables.pod.?automountServiceAccountToken.orValue(true) == false &&
+        variables.pod.?volumes.orValue([]).all(v, has(v.emptyDir) || has(v.secret)))
+    message: 'AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as
+      the ServiceAccount of the same name with automountServiceAccountToken false,
+      and use only emptyDir and Secret volumes'
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        !variables.pod.?hostNetwork.orValue(false) &&
+        !variables.pod.?hostPID.orValue(false) &&
+        !variables.pod.?hostIPC.orValue(false) &&
+        !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.pod.?initContainers.orValue([]).size() == 0 &&
+        variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
+        variables.pod.containers.all(c,
+          !c.?securityContext.privileged.orValue(false) &&
+          c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
+          c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
+          c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
+          c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
+    message: 'AI worker Jobs must not reach the node: no host namespaces or ports,
+      no init or ephemeral containers, and every container non-root, unprivileged,
+      with allowPrivilegeEscalation false and no added capabilities'
+  variables:
+  - expression: object.spec.template.spec
+    name: pod
+  - expression: variables.pod.?securityContext.orValue({})
+    name: podSecurity
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3677,6 +3746,15 @@ metadata:
   name: orka-agenthost-template-use.orka.ai
 spec:
   policyName: orka-agenthost-template-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  policyName: orka-ai-worker-identity-protection
   validationActions:
   - Deny
 ---
