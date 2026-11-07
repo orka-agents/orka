@@ -99,6 +99,10 @@ type TaskProvenanceConfig struct {
 	// metadata stays reserved to ControllerUsernames.
 	TrustedUsernames           []string
 	TrustedServiceAccountNames []string
+	// WorkerServiceAccountNames are the ServiceAccounts worker Pods run as,
+	// trusted or not. They hold Agent use broadly, so the identity-bound
+	// Agent rule applies to them however TrustedServiceAccountNames is set.
+	WorkerServiceAccountNames []string
 }
 
 // NewTaskProvenanceConfig builds Task provenance admission config.
@@ -131,6 +135,7 @@ func NewTaskProvenanceConfig(
 	if len(cfg.TrustedServiceAccountNames) == 0 {
 		cfg.TrustedServiceAccountNames = append([]string{}, defaultTrustedWorkerServiceAccounts...)
 	}
+	cfg.WorkerServiceAccountNames = WorkerServiceAccountNames(cfg.TrustedServiceAccountNames)
 	return cfg
 }
 
@@ -197,7 +202,7 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 		if workerTrusted && task.Spec.SessionRef != nil && taskCoordinationOwner(task) == nil {
 			return ctrladmission.Denied("worker session references require an authorized coordination parent")
 		}
-		if workerTrusted && taskCoordinationOwner(task) == nil {
+		if (workerTrusted || isWorkerServiceAccountUser(v.config, req.UserInfo, req.Namespace)) && taskCoordinationOwner(task) == nil {
 			// Workers hold Agent use broadly, so a parentless Task from a
 			// worker would bind an identity-bound Agent as a root Task that
 			// no use check covered. A worker reaches such an Agent only as a
@@ -413,6 +418,32 @@ func isTrustedControllerProvenanceUser(cfg TaskProvenanceConfig, user authentica
 // trusted worker ServiceAccount or a flag-listed trusted user: it keeps the
 // provenance-field allowance but never the workspace settlement metadata
 // reservation.
+// WorkerServiceAccountNames returns the default worker ServiceAccount names
+// joined with extra, without duplicates or blanks.
+func WorkerServiceAccountNames(extra ...[]string) []string {
+	names := append([]string{}, defaultTrustedWorkerServiceAccounts...)
+	for _, list := range extra {
+		for _, name := range list {
+			if name = strings.TrimSpace(name); name != "" && !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
+}
+
+// isWorkerServiceAccountUser reports a worker Pod's ServiceAccount in the
+// request namespace, whether or not provenance admission trusts it.
+func isWorkerServiceAccountUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
+	username := strings.TrimSpace(user.Username)
+	for _, name := range cfg.WorkerServiceAccountNames {
+		if username != "" && username == serviceAccountUsername(namespace, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func isTrustedWorkerProvenanceUser(cfg TaskProvenanceConfig, user authenticationv1.UserInfo, namespace string) bool {
 	username := strings.TrimSpace(user.Username)
 	if username == "" {
