@@ -626,3 +626,35 @@ func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 		t.Fatalf("workspace reads = %d, want the cancellation applied before the workspace projection", workspaceReads)
 	}
 }
+
+// TestRuntimeWatcherStopsARunOnACancelRequest covers a cancel request whose
+// Cancelled status write keeps failing: the Task stays Running, but the
+// runtime watcher sees the request itself and stops the run.
+func TestRuntimeWatcherStopsARunOnACancelRequest(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "running", Namespace: "default", UID: "running-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(task).Build()
+	dispatcher := &ACPDispatcher{APIReader: reader}
+	ctx, cancelTest := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelTest()
+	runCtx, stopRun := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		dispatcher.watchTaskCancellation(runCtx, stopRun, client.ObjectKeyFromObject(task))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("the watcher kept a Running Task with a cancel request running")
+	}
+	if runCtx.Err() == nil {
+		t.Fatal("the run's context was not cancelled")
+	}
+}
