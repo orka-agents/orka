@@ -8,12 +8,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,7 +25,34 @@ import (
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
+type egressPolicyApplication struct {
+	actorID string
+	rules   []workspace.SubstrateEgressRule
+}
+
 func reconcileEgressCredentialTool(t *testing.T, provider string, secret *corev1.Secret) (*recordingToolWorkspaceExecutor, corev1alpha1.Tool, []workspace.SubstrateEgressRule) {
+	t.Helper()
+	r, executor, applications := newEgressCredentialToolReconciler(t, provider, secret)
+	for range 3 {
+		_, _ = r.Reconcile(context.Background(), mcpToolRequest())
+	}
+	var applied []workspace.SubstrateEgressRule
+	if len(*applications) > 0 {
+		applied = (*applications)[len(*applications)-1].rules
+	}
+	return executor, getEgressCredentialTool(t, r), applied
+}
+
+func getEgressCredentialTool(t *testing.T, r *ToolReconciler) corev1alpha1.Tool {
+	t.Helper()
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func newEgressCredentialToolReconciler(t *testing.T, provider string, secret *corev1.Secret) (*ToolReconciler, *recordingToolWorkspaceExecutor, *[]egressPolicyApplication) {
 	t.Helper()
 	tool := newEgressTestMCPTool(corev1alpha1.SubstrateActorEgressRule{
 		Scheme: "https", Host: "api.github.com",
@@ -37,29 +66,22 @@ func reconcileEgressCredentialTool(t *testing.T, provider string, secret *corev1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	t.Cleanup(srv.Close)
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
-	var applied []workspace.SubstrateEgressRule
+	applications := &[]egressPolicyApplication{}
 	r := &ToolReconciler{
 		Client:                    fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(objects...).Build(),
 		Scheme:                    scheme,
 		SubstrateRouterHTTPClient: srv.Client(),
 		SubstrateMCPToolsEnabled:  true,
 		SubstrateConfig:           SubstrateConfig{RouterURL: srv.URL, ClaimTimeout: 1, EgressCredentialProvider: provider},
-		SubstrateEgressPolicyApplier: func(_ context.Context, _ SubstrateConfig, _ string, rules []workspace.SubstrateEgressRule) error {
-			applied = rules
+		SubstrateEgressPolicyApplier: func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+			*applications = append(*applications, egressPolicyApplication{actorID: actorID, rules: rules})
 			_, err := workspace.CompileSubstrateActorEgressPolicy("ate-demo", rules)
 			return err
 		},
 		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return executor, nil },
 	}
 	r.SubstrateTemplateValidator = substrateFixtureTemplateValidator(r.Client)
-	for range 3 {
-		_, _ = r.Reconcile(context.Background(), mcpToolRequest())
-	}
-	var got corev1alpha1.Tool
-	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
-		t.Fatal(err)
-	}
-	return executor, got, applied
+	return r, executor, applications
 }
 
 func githubTokenSecret(value string) *corev1.Secret {
@@ -102,6 +124,68 @@ func TestToolReconcilerEgressCredentialsFailClosed(t *testing.T) {
 				t.Fatal("Tool status leaked the credential value")
 			}
 		})
+	}
+}
+
+// A running credential-bearing actor whose Tool stops validating must lose
+// all egress, not keep the last installed policy and its injected credential.
+func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *testing.T) {
+	for name, invalidate := range map[string]func(t *testing.T, r *ToolReconciler){
+		"credential provider cleared": func(_ *testing.T, r *ToolReconciler) { r.SubstrateConfig.EgressCredentialProvider = "" },
+		"credential Secret deleted": func(t *testing.T, r *ToolReconciler) {
+			if err := r.Delete(context.Background(), githubTokenSecret("")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _, applications := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
+			for range 3 {
+				_, _ = r.Reconcile(context.Background(), mcpToolRequest())
+			}
+			running := getEgressCredentialTool(t, r)
+			if !running.Status.Available || running.Status.Actor == nil || len(*applications) == 0 {
+				t.Fatalf("status = %+v, want an available actor with an installed policy", running.Status)
+			}
+			actorID := running.Status.Actor.ActorID
+
+			invalidate(t, r)
+			*applications = nil
+			if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+				t.Fatal(err)
+			}
+			if len(*applications) != 1 || (*applications)[0].actorID != actorID || len((*applications)[0].rules) != 0 {
+				t.Fatalf("applications = %+v, want one deny-all policy for actor %q", *applications, actorID)
+			}
+			got := getEgressCredentialTool(t, r)
+			condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+			if got.Status.Available || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" {
+				t.Fatalf("status = %+v, want an unavailable Tool with revoked egress", got.Status)
+			}
+		})
+	}
+}
+
+func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
+	r, _, _ := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
+	for range 3 {
+		_, _ = r.Reconcile(context.Background(), mcpToolRequest())
+	}
+	if !getEgressCredentialTool(t, r).Status.Available {
+		t.Fatal("actor did not become available")
+	}
+	r.SubstrateConfig.EgressCredentialProvider = ""
+	r.SubstrateEgressPolicyApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
+		return errors.New("substrate unavailable")
+	}
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+		t.Fatal("failed egress revocation was not retried")
+	}
+	got := getEgressCredentialTool(t, r)
+	condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+	if got.Status.Available || condition == nil || condition.Reason != "EgressRevocationFailed" ||
+		!strings.Contains(got.Status.Error, "actor egress was not revoked") {
+		t.Fatalf("status = %+v, want a reported revocation failure", got.Status)
 	}
 }
 

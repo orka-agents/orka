@@ -149,6 +149,9 @@ func (r *ToolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		if aitools.IsRemoteMCP(tool) {
 			return r.updateRemoteMCPStatus(ctx, tool, err)
 		}
+		if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
+			return r.failSubstrateMCPToolValidation(ctx, tool, err)
+		}
 		return r.updateStatus(ctx, tool, false, err.Error())
 	}
 	if tool.Spec.MCP != nil && tool.Spec.MCP.SubstrateActor != nil {
@@ -1809,6 +1812,79 @@ func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool 
 		apply = applyNativeSubstrateActorEgressPolicy
 	}
 	return apply(ctx, r.SubstrateConfig.WithDefaults(), actorID, rules)
+}
+
+// failSubstrateMCPToolValidation reports an invalid Substrate MCP Tool and
+// first denies all egress to every actor it still holds. Otherwise an actor
+// that was running before the Tool became invalid (for example a cleared
+// egress credential provider or a credential Secret that no longer resolves)
+// would keep egressing, and keep using a gateway-injected credential, under
+// its last installed policy. A failed revocation is reported and retried.
+// Reconcile reinstalls the Tool's policy before the actor serves again.
+func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
+	message := validationErr.Error()
+	revoked, revokeErr := r.revokeSubstrateMCPToolActorEgress(ctx, tool)
+	switch {
+	case revokeErr != nil:
+		message += "; actor egress was not revoked: " + revokeErr.Error()
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressRevocationFailed",
+			Message: "actor egress was not revoked: " + revokeErr.Error(), ObservedGeneration: tool.Generation,
+		})
+	case revoked:
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressRevoked",
+			Message: "Tool is invalid; actor egress is denied", ObservedGeneration: tool.Generation,
+		})
+	}
+	result, updateErr := r.updateStatus(ctx, tool, false, message)
+	if revokeErr != nil {
+		return ctrl.Result{}, revokeErr
+	}
+	return result, updateErr
+}
+
+// revokeSubstrateMCPToolActorEgress installs a deny-all egress policy on every
+// actor whose Tool or pool lease this Tool still holds; actors leased by
+// another owner are never touched. An actor Substrate no longer has cannot
+// egress, so it counts as revoked. It reports whether any actor was held.
+func (r *ToolReconciler) revokeSubstrateMCPToolActorEgress(ctx context.Context, tool *corev1alpha1.Tool) (bool, error) {
+	if tool == nil || !r.SubstrateMCPToolsEnabled || !controllerutil.ContainsFinalizer(tool, substrateMCPToolActorFinalizer) {
+		return false, nil
+	}
+	leased, err := r.substrateMCPToolActorLeaseDeleteRefs(ctx, tool, "")
+	if err != nil {
+		return false, err
+	}
+	pooled, err := r.heldSubstrateMCPPoolActorLeaseRefs(ctx, tool, substrateMCPPoolActorLeaseRefs(tool))
+	if err != nil {
+		return false, err
+	}
+	actorIDs := make([]string, 0, len(leased)+len(pooled))
+	for _, ref := range leased {
+		actorIDs = append(actorIDs, strings.TrimSpace(ref.actorID))
+	}
+	for _, ref := range pooled {
+		actorIDs = append(actorIDs, strings.TrimSpace(ref.actorID))
+	}
+	slices.Sort(actorIDs)
+	actorIDs = slices.Compact(actorIDs)
+	apply := r.SubstrateEgressPolicyApplier
+	if apply == nil {
+		apply = applyNativeSubstrateActorEgressPolicy
+	}
+	cfg := r.SubstrateConfig.WithDefaults()
+	revoked := false
+	for _, actorID := range actorIDs {
+		if actorID == "" {
+			continue
+		}
+		if err := apply(ctx, cfg, actorID, nil); err != nil && !workspace.IsKind(err, workspace.ErrorKindNotFound) {
+			return revoked, fmt.Errorf("deny egress for actor %q: %w", actorID, err)
+		}
+		revoked = true
+	}
+	return revoked, nil
 }
 
 func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
