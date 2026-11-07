@@ -144,6 +144,10 @@ func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAcces
 	if strings.ContainsAny(resource, "?#") {
 		return invalid("agentIdentity entra.resource must not contain a query or fragment")
 	}
+	// Entra refuses a scope without an authority, such as https://:123.
+	if parsed, err := url.Parse(resource); err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return invalid("agentIdentity entra.resource must name a host or application ID")
+	}
 	return validateCredentialOutput(identity.Output)
 }
 
