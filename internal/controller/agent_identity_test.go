@@ -968,11 +968,12 @@ func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
 	}
 }
 
-// TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt covers a prompt
-// a RuntimePool turned away for capacity: while the Task waits, its Agent can
-// lose the identity, so the dispatcher checks the claim again before it sends
-// the prompt once more and settles the Task as IdentityUnavailable instead.
-func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
+// TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt covers the time
+// between admission and a prompt's submission, the RuntimeSession start or a
+// wait for capacity: the Agent can lose the identity meanwhile, so the
+// dispatcher checks the claim again before every submission and settles the
+// Task as IdentityUnavailable instead.
+func TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -1030,7 +1031,7 @@ func TestACPDispatcherRechecksIdentityBeforeResubmittingAPrompt(t *testing.T) {
 		}
 	}
 
-	unavailable := dispatcher.identityUnavailableBeforeResubmission(ctx, task)
+	unavailable := dispatcher.identityUnavailableBeforeSubmission(ctx, task)
 	if !strings.Contains(unavailable, "no longer holds identity") {
 		t.Fatalf("unavailable = %q, want the lost identity named", unavailable)
 	}
