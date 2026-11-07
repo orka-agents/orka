@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -152,6 +153,11 @@ func redactForwardedText(text string, secrets ...string) string {
 	var kept []string
 	masked := forwardContinuationRe.ReplaceAllStringFunc(text, func(match string) string {
 		parts := forwardContinuationRe.FindStringSubmatch(match)
+		// A continuation token is kept as is only when it carries no
+		// injected credential in any encoding the client would undo.
+		if name, value, ok := strings.Cut(parts[2], "="); ok && forwardValueHoldsSecret(value, secrets) {
+			return parts[1] + name + "=[REDACTED]"
+		}
 		kept = append(kept, parts[2])
 		return parts[1] + "\x00orka-forward-continuation-" + strconv.Itoa(len(kept)-1) + "\x00"
 	})
@@ -162,14 +168,33 @@ func redactForwardedText(text string, secrets ...string) string {
 	return redacted
 }
 
-// redactForwardedSecrets removes the credentials Orka injected from text.
+// redactForwardedSecrets removes the credentials Orka injected from text,
+// as they are and in their standard URL encodings.
 func redactForwardedSecrets(text string, secrets []string) string {
 	for _, secret := range secrets {
 		if secret = strings.TrimSpace(secret); secret != "" {
-			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+			for _, form := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
+				text = strings.ReplaceAll(text, form, "[REDACTED]")
+			}
 		}
 	}
 	return text
+}
+
+// forwardValueHoldsSecret reports whether a query value, once URL decoded
+// (any percent escape, not only the standard ones), contains an injected
+// credential.
+func forwardValueHoldsSecret(value string, secrets []string) bool {
+	decoded, err := url.QueryUnescape(value)
+	if err != nil {
+		decoded = value
+	}
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" && strings.Contains(decoded, secret) {
+			return true
+		}
+	}
+	return false
 }
 
 // forwardSensitiveKeyRe matches a JSON key whose string value is a

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -287,5 +288,30 @@ func TestRedactForwardedBodyRemovesAnEscapedInjectedCredential(t *testing.T) {
 		if strings.Contains(string(text), secret) {
 			t.Fatalf("decoded %s still holds the credential: %s", body, text)
 		}
+	}
+}
+
+func TestRedactForwardedTextRemovesAPercentEncodedCredential(t *testing.T) {
+	const secret = "opaque-example-value"
+	for _, text := range []string{
+		`https://management.azure.com/x?api-version=1&$skiptoken=opaque%2Dexample%2Dvalue`,
+		`https://management.azure.com/x?api-version=1&%24skiptoken=opaque%2dexample-value&a=1`,
+	} {
+		got := redactForwardedText(text, secret)
+		decoded, err := neturl.QueryUnescape(got)
+		if err != nil {
+			decoded = got
+		}
+		if strings.Contains(decoded, secret) {
+			t.Fatalf("decoded %s still holds the credential: %s", text, decoded)
+		}
+	}
+	page := `https://management.azure.com/x?api-version=1&$skiptoken=page%2Dtwo`
+	if got := redactForwardedText(page, secret); got != page {
+		t.Fatalf("an ordinary paging token changed: %s -> %s", page, got)
+	}
+	body := `{"nextLink":"https://management.azure.com/x?a=1&$skiptoken=opaque%2Dexample%2Dvalue"}`
+	if got := redactForwardedBody(body, secret); strings.Contains(got, "opaque%2Dexample%2Dvalue") {
+		t.Fatalf("a JSON nextLink kept the encoded credential: %s", got)
 	}
 }
