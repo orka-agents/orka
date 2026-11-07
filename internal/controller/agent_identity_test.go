@@ -1160,3 +1160,41 @@ func TestIdentityDecisionsWaitForTheEnforcementPeriod(t *testing.T) {
 		t.Fatalf("binding once the period started: ref = %+v, err = %v", ref, err)
 	}
 }
+
+// TestIssuerRefusalStandsUntilTheIdentityIsVerified covers an Agent the
+// issuer refused that is then edited into an invalid configuration, or
+// re-checked while the issuer cannot answer: neither turns the refusal back
+// into a merely declared identity. Only a later verification clears it.
+func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	agent.UID, agent.Generation = "reviewer-uid", 1
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	verifier := &countingIdentityVerifier{err: errors.New("AADSTS700016")}
+	r.IdentityVerifier = verifier
+	ctx := context.Background()
+	if state := r.verifyAgentIdentity(ctx, agent, nil); state.err == nil || state.unavailable {
+		t.Fatalf("first answer = %+v, want a refusal", state)
+	}
+
+	agent.Generation = 2
+	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err == nil || state.unavailable || state.verified {
+		t.Fatalf("an invalid edit after a refusal = %+v, want the refusal kept", state)
+	}
+	verifier.err = fmt.Errorf("token endpoint down: %w", agentidentity.ErrIssuerUnavailable)
+	if state := r.verifyAgentIdentity(ctx, agent, nil); state.err == nil || state.unavailable || state.verified || state.retryAfter <= 0 {
+		t.Fatalf("an unavailable issuer after a refusal = %+v, want the refusal kept and retried", state)
+	}
+
+	r.issuerBackoff.Lock()
+	r.issuerBackoff.until = time.Time{}
+	r.issuerBackoff.Unlock()
+	verifier.err = nil
+	agent.Generation = 3
+	if state := r.verifyAgentIdentity(ctx, agent, nil); !state.verified || state.err != nil {
+		t.Fatalf("a later verification = %+v, want it to clear the refusal", state)
+	}
+	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err != nil {
+		t.Fatalf("an invalid edit after verification = %+v, want no refusal", state)
+	}
+}

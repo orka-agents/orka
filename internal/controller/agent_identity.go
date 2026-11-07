@@ -306,16 +306,28 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 		return agentIdentityState{}
 	}
 	state := agentIdentityState{declared: true}
+	key := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
+	// A refusal from the issuer stands until the issuer verifies the identity
+	// again: an edit that fails validation, or an issuer that cannot answer,
+	// must not turn it back into a merely declared identity whose cached
+	// tokens Tools could still receive.
+	refusal, refused := r.lastIdentityRefusal(key, agent.UID, issuer, id)
 	if validationErr != nil || r.IdentityVerifier == nil {
+		if refused {
+			return refusal
+		}
 		return state
 	}
 	unavailable := func(wait time.Duration) agentIdentityState {
+		if refused {
+			refusal.retryAfter = wait
+			return refusal
+		}
 		state.unavailable, state.retryAfter = true, wait
 		state.err = fmt.Errorf("identity %s/%s could not be verified: the issuer is unavailable; retrying in %s",
 			issuer, id, wait.Round(time.Second))
 		return state
 	}
-	key := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
 	r.verifications.Lock()
 	cached, found := r.verifications.byAgent[key]
 	r.verifications.Unlock()
@@ -361,6 +373,21 @@ func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1
 	}
 	state.verified = true
 	return remember(state)
+}
+
+// lastIdentityRefusal returns the issuer's last refusal of this Agent's
+// identity, whatever generation it was given for and however old it is.
+func (r *AgentReconciler) lastIdentityRefusal(key types.NamespacedName, uid types.UID, issuer, id string) (agentIdentityState, bool) {
+	r.verifications.Lock()
+	cached, found := r.verifications.byAgent[key]
+	r.verifications.Unlock()
+	if !found || cached.uid != uid || cached.issuer != issuer || cached.id != id ||
+		cached.state.err == nil || cached.state.unavailable || cached.state.verified {
+		return agentIdentityState{}, false
+	}
+	refusal := cached.state
+	refusal.retryAfter = 0
+	return refusal, true
 }
 
 // forgetAgentIdentityVerification drops a deleted Agent's last answer.
