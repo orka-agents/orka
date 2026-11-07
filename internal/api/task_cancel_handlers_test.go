@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -286,6 +287,72 @@ func TestCancelSessionKeepsASessionItsFirstTurnCreated(t *testing.T) {
 	}
 	if _, err := h.sessionStore.GetSession(context.Background(), "default", "fresh"); err != nil {
 		t.Fatalf("the cancelled Session must be kept: %v", err)
+	}
+}
+
+// blockingTurnCommitter holds ReleaseChatTurn until released, so a test can
+// order a turn that is already ending against a cancel.
+type blockingTurnCommitter struct {
+	store.SessionTurnCommitter
+	entered chan bool
+	proceed chan struct{}
+}
+
+func (c blockingTurnCommitter) ReleaseChatTurn(ctx context.Context, namespace, name, turnID string, deleteEmptyCreatedSession bool) error {
+	c.entered <- deleteEmptyCreatedSession
+	<-c.proceed
+	return c.SessionTurnCommitter.ReleaseChatTurn(ctx, namespace, name, turnID, deleteEmptyCreatedSession)
+}
+
+// TestCancelSessionReportsASessionItsEndingTurnDiscarded covers the race in
+// which a first turn that is already ending decides to discard its empty
+// Session before a cancel could keep it: the cancel then answers 404, never
+// a success for a Session that is gone.
+func TestCancelSessionReportsASessionItsEndingTurnDiscarded(t *testing.T) {
+	h, app := setupCancelTest(t)
+	committer, ok := h.sessionStore.(store.SessionTurnCommitter)
+	if !ok {
+		t.Fatal("the test session store commits no chat turns")
+	}
+	blocking := blockingTurnCommitter{SessionTurnCommitter: committer, entered: make(chan bool, 1), proceed: make(chan struct{})}
+	chat := &ChatHandler{sessionTurnCommitter: blocking}
+	h.chatTurns = chat
+	reservation, err := chat.reserveActiveChat("default", "ending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := chat.activateReservedChat(context.Background(), reservation, "default", "ending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go handle.finish() // the turn ends on its own, as after a disconnect
+	if discard := <-blocking.entered; !discard {
+		t.Fatal("an ending first turn should discard its empty Session")
+	}
+	type outcome struct {
+		status int
+		body   map[string]any
+	}
+	cancelled := make(chan outcome, 1)
+	go func() {
+		resp, body := postCancel(t, app, "/sessions/ending/cancel", "")
+		cancelled <- outcome{resp.StatusCode, body}
+	}()
+	// Let the cancel reach the turn, then let the discard finish.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		chat.activeChatsMu.Lock()
+		waiting := reservation.request.deleteWaiters > 0
+		chat.activeChatsMu.Unlock()
+		if waiting || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(blocking.proceed)
+	got := <-cancelled
+	if got.status != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %v; want 404 for the discarded Session", got.status, got.body)
 	}
 }
 
