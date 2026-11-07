@@ -2824,6 +2824,12 @@ func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *core
 // keeps its outcome, because work it delegated can outlive it, and one
 // already cancel-requested may never cascade itself.
 func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
+	// One snapshot of every delegated Task in reach serves the whole walk,
+	// so a large tree costs at most two list requests, not one per Task.
+	index, err := r.delegatedTaskIndex(ctx, task)
+	if err != nil {
+		return err
+	}
 	visited := map[types.NamespacedName]bool{client.ObjectKeyFromObject(task): true}
 	parents := []*corev1alpha1.Task{task}
 	var errs []error
@@ -2834,13 +2840,9 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 		if parent != task {
 			message = "cancelled with its ancestor task " + task.Name
 		}
-		children, err := r.delegatedChildCandidates(ctx, parent)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		for i := range children {
-			child := &children[i]
+		children := index[labels.SelectorValue(parent.Name)]
+		for _, candidate := range children {
+			child := candidate.DeepCopy()
 			// A scheduled child is a template; cancelling it would end its
 			// future runs, so it is left for its own owner.
 			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) ||
@@ -2875,39 +2877,43 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 	return errors.Join(errs...)
 }
 
-// delegatedChildCandidates lists the Tasks that name parent as their parent.
-// They are read from the API server, not the cache: a child in another
-// namespace enqueues no reconcile of its parent when it reaches the cache.
-// The parent's own namespace is always listed. Children elsewhere carry no
-// owner reference and exist only when namespace isolation is off, so other
-// namespaces are listed then, and only where the controller may list Tasks
-// cluster-wide; delegatedBy keeps only real children.
-func (r *TaskReconciler) delegatedChildCandidates(ctx context.Context, parent *corev1alpha1.Task) ([]corev1alpha1.Task, error) {
-	selector := client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+// delegatedTaskIndex lists every Task that names a parent, grouped by the
+// parent label value, for one cascade's walk. It reads the API server, not
+// the cache: a child in another namespace enqueues no reconcile of its parent
+// when it reaches the cache. The root's namespace is always listed. Children
+// elsewhere carry no owner reference and exist only when namespace isolation
+// is off, so other namespaces are listed then, and only where the controller
+// may list Tasks cluster-wide; delegatedBy keeps only real children.
+func (r *TaskReconciler) delegatedTaskIndex(ctx context.Context, root *corev1alpha1.Task) (map[string][]corev1alpha1.Task, error) {
+	selector := client.HasLabels{labels.LabelParentTask}
 	var local corev1alpha1.TaskList
-	if err := r.taskMetadataReader().List(ctx, &local, client.InNamespace(parent.Namespace), selector); err != nil {
+	if err := r.taskMetadataReader().List(ctx, &local, client.InNamespace(root.Namespace), selector); err != nil {
 		return nil, err
 	}
-	if r.EnforceNamespaceIsolation {
-		return local.Items, nil
-	}
-	var all corev1alpha1.TaskList
-	if err := r.taskMetadataReader().List(ctx, &all, selector); err != nil {
-		if apierrors.IsForbidden(err) {
+	tasks := local.Items
+	if !r.EnforceNamespaceIsolation {
+		var all corev1alpha1.TaskList
+		switch err := r.taskMetadataReader().List(ctx, &all, selector); {
+		case err == nil:
+			for _, task := range all.Items {
+				if task.Namespace != root.Namespace {
+					tasks = append(tasks, task)
+				}
+			}
+		case apierrors.IsForbidden(err):
 			// Task access granted per namespace, as the standard install
-			// does, cannot list other namespaces; children there stay out of
-			// reach and must be cancelled directly.
-			return local.Items, nil
-		}
-		return nil, err
-	}
-	children := local.Items
-	for _, task := range all.Items {
-		if task.Namespace != parent.Namespace {
-			children = append(children, task)
+			// does, cannot list other namespaces; children there stay out
+			// of reach and must be cancelled directly.
+		default:
+			return nil, err
 		}
 	}
-	return children, nil
+	index := make(map[string][]corev1alpha1.Task, len(tasks))
+	for _, task := range tasks {
+		parent := task.Labels[labels.LabelParentTask]
+		index[parent] = append(index[parent], task)
+	}
+	return index, nil
 }
 
 // delegatedBy reports whether parent delegated child. In the parent's
