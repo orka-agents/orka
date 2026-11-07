@@ -431,6 +431,12 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.cancelRequestedAgentTask(ctx, task)
 	}
 
+	// Work a cancelled Task delegated stops with it, at every depth. The
+	// cascade runs before the workspace projection, which can keep failing,
+	// and a refused child only requeues the Task once its own completion
+	// work is done.
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
+
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -446,7 +452,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseFinalizing:
 		return r.handleFinalizing(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return r.handleCompleted(ctx, task)
+		return r.handleCompletedAfterCascade(ctx, task, cascadeErr)
 	}
 
 	return ctrl.Result{}, nil
@@ -2611,24 +2617,13 @@ func (r *TaskReconciler) quarantineFinalizingWorkspace(ctx context.Context, task
 
 func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
-	// Work the Task delegated stops with it, at every depth. A cancel request
-	// counts even when the Task did not end Cancelled: recovery records an
-	// interrupted cancel as Failed with an unknown outcome.
-	_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
-	var cascadeErr error
-	if task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
-		if cascadeErr = r.cancelChildTasks(ctx, task); cascadeErr != nil {
-			log.Error(cascadeErr, "failed to cancel the Task's child Tasks")
-		}
-	}
 	terminalEventRecorded := r.recordTerminalTaskLifecycleEventIfMissing(ctx, task)
-	// The Task's own Job stops even while a child refuses its cancel.
 	waitingForJob, err := r.cleanupTerminalTaskJob(ctx, task)
 	if err != nil {
 		log.Error(err, "failed to clean up terminal task Job")
 		return ctrl.Result{}, err
 	}
-	if waitingForJob || cascadeErr != nil {
+	if waitingForJob {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 	if err := r.cleanupDeferredTaskFinalization(ctx, task); err != nil {
@@ -2792,6 +2787,34 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 // Task the cancelled task controls, the same request a person makes, so the
 // children stop the way a cancelled Task does. Children already finished or
 // already asked to cancel are left alone, so it can run on every reconcile.
+// handleCompletedAfterCascade runs a finished Task's own completion work,
+// then requeues it soon while a child refused its cancel.
+func (r *TaskReconciler) handleCompletedAfterCascade(ctx context.Context, task *corev1alpha1.Task, cascadeErr error) (ctrl.Result, error) {
+	result, err := r.handleCompleted(ctx, task)
+	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
+		result.RequeueAfter = 2 * time.Second
+	}
+	return result, err
+}
+
+// cascadeTaskCancellation cancels what a finished Task delegated when the
+// Task was cancelled. A cancel request counts even when the Task did not end
+// Cancelled: recovery records an interrupted cancel as Failed with an
+// unknown outcome.
+func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *corev1alpha1.Task) error {
+	if !isTerminalTaskPhase(task.Status.Phase) {
+		return nil
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested && task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		return nil
+	}
+	err := r.cancelChildTasks(ctx, task)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the Task's child Tasks")
+	}
+	return err
+}
+
 // cancelChildTasks requests cancellation of the Tasks a cancelled Task
 // delegated. A child already cancel-requested cascades on its own once it
 // ends. A child that finished is passed through without changing its outcome,
@@ -2808,9 +2831,11 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 			message = "cancelled with its ancestor task " + task.Name
 		}
 		// Children in another namespace carry no owner reference, so the
-		// list spans namespaces and delegatedBy keeps only real children.
+		// list spans namespaces and delegatedBy keeps only real children. A
+		// child elsewhere enqueues no reconcile of its parent when it reaches
+		// the cache, so the list reads the API server, not the cache.
 		var children corev1alpha1.TaskList
-		if err := r.List(ctx, &children, client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}); err != nil {
+		if err := r.taskMetadataReader().List(ctx, &children, client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}); err != nil {
 			errs = append(errs, err)
 			continue
 		}

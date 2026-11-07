@@ -578,7 +578,8 @@ func TestCancelRequestedAgentTaskSettlesAnUnprojectedAttempt(t *testing.T) {
 
 // A workspace status projection that keeps failing must not keep a
 // cancelled class-backed Agent Task running: the Cancelled phase, which
-// stops the dispatcher's run, is written first.
+// stops the dispatcher's run, is written first, and a later reconcile still
+// cancels the Tasks it delegated.
 func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 	const request = "cancelled by alice: wrong repository"
 	task := &corev1alpha1.Task{
@@ -598,7 +599,19 @@ func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 		},
 	}
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS, UID: "test-ns-uid"}}
-	r := newUnitReconciler(newTestScheme(), task, namespace)
+	controller := true
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated", Namespace: testNS, UID: "delegated-uid",
+			Labels: map[string]string{labels.LabelParentTask: "class-backed"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "class-backed", UID: "class-backed-uid", Controller: &controller,
+			}},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	r := newUnitReconciler(newTestScheme(), task, namespace, child)
 	watched, ok := r.Client.(client.WithWatch)
 	if !ok {
 		t.Fatal("unit reconciler client does not implement client.WithWatch")
@@ -625,6 +638,16 @@ func TestReconcileCancelsBeforeAFailingWorkspaceProjection(t *testing.T) {
 	}
 	if workspaceReads != 0 {
 		t.Fatalf("workspace reads = %d, want the cancellation applied before the workspace projection", workspaceReads)
+	}
+	// The next reconcile reaches the failing projection, but cancels the
+	// delegated child first.
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
+	delegated := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), delegated); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := delegated.Annotations[labels.AnnotationCancelRequested]; !requested {
+		t.Fatal("a failing workspace projection must not keep the delegated child running")
 	}
 }
 
@@ -709,7 +732,26 @@ func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 		elsewhere("namesake-elsewhere", "another-parent-uid"),
 	}
 	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
-	r := &TaskReconciler{Client: c}
+	// The cache has not seen the child in the other namespace yet; the API
+	// server has.
+	stale := interceptor.NewClient(c, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if tasks, ok := list.(*corev1alpha1.TaskList); ok {
+				kept := tasks.Items[:0]
+				for _, task := range tasks.Items {
+					if task.Namespace != "other" {
+						kept = append(kept, task)
+					}
+				}
+				tasks.Items = kept
+			}
+			return nil
+		},
+	})
+	r := &TaskReconciler{Client: stale, APIReader: c}
 	if err := r.cancelChildTasks(context.Background(), parent); err != nil {
 		t.Fatal(err)
 	}
@@ -739,8 +781,8 @@ func TestCancelledTaskCancelsTheChildrenItControls(t *testing.T) {
 
 // TestInterruptedCancelStopsTheJobWhileAChildRefuses covers a parent that
 // recovery recorded as Failed after a cancel request, with a child whose
-// cancel keeps failing: the cascade still runs and is retried, and the
-// parent's own Job is stopped in the same reconcile.
+// cancel keeps failing: the cascade still runs and reports the refusal for a
+// retry, and the parent's own completion, its Job included, still proceeds.
 func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
 	controller := true
 	parent := &corev1alpha1.Task{
@@ -781,15 +823,14 @@ func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
 			return c.Patch(ctx, obj, patch, opts...)
 		},
 	})
-	result, err := r.handleCompleted(context.Background(), parent)
-	if err != nil {
-		t.Fatalf("handleCompleted() = %v, want the refused cascade retried", err)
+	if err := r.cascadeTaskCancellation(context.Background(), parent); err == nil {
+		t.Fatal("a refused child cancel must be reported for a retry")
 	}
 	if childPatches == 0 {
 		t.Fatal("a cancel-requested parent that ended Failed must still cancel its children")
 	}
-	if result.RequeueAfter == 0 {
-		t.Fatal("the refused cascade must be retried")
+	if _, err := r.handleCompleted(context.Background(), parent); err != nil {
+		t.Fatalf("handleCompleted() = %v, want the parent's own completion to proceed", err)
 	}
 	if err := watched.Get(context.Background(), client.ObjectKeyFromObject(job), &batchv1.Job{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("parent Job read = %v, want it deleted while the child refuses", err)
