@@ -730,39 +730,7 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	if binding == nil || strings.TrimSpace(binding.Identity.ID) == "" {
 		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
 	}
-	// The bound Agent must still exist, hold the identity, and name it:
-	// deleting the Agent, a claim that moved to another Agent, or the owner
-	// removing or changing the identity stops its Tasks' calls at once. The
-	// spec is checked as well as the claim because the claim is marked
-	// releasing only when the Agent next reconciles. A claim being released
-	// is still held, so no other Agent can take the identity while bound
-	// Tasks run, but it is no longer used.
-	live := &corev1alpha1.Agent{}
-	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
-		return Resolution{}, fmt.Errorf("resolve the Task's bound Agent: %w", err)
-	}
-	// Deleting the Agent stops its Tasks' calls at once, even while a
-	// finalizer keeps the object readable.
-	if !live.DeletionTimestamp.IsZero() {
-		return Resolution{}, errors.New("the Task's bound Agent is being deleted")
-	}
-	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
-		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
-		return Resolution{}, errors.New("the Task's bound Agent no longer holds its identity")
-	}
-	issuer, id, named := live.IdentityRef()
-	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
-		return Resolution{}, errors.New("the Task's bound Agent no longer names its identity")
-	}
-	// A claim granted again, for example after it was released or Agent use
-	// authorization was re-enabled, covers only Tasks created since; an
-	// older Task's creation was never checked for this grant. Both times
-	// have one-second precision, so a Task from the grant's own second may
-	// predate it and is refused too.
-	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
-		return Resolution{}, errors.New("the Task was created before the Agent's current identity grant")
-	}
-	if err := issuerRefusedIdentity(live); err != nil {
+	if err := r.requireLiveIdentityAgent(ctx, *binding); err != nil {
 		return Resolution{}, err
 	}
 	identity := policy.Spec.AgentIdentity
@@ -812,6 +780,48 @@ func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *c
 	}, nil
 }
 
+// requireLiveIdentityAgent checks that the Task's bound Agent may still use
+// its identity. It runs before a credential is requested and again before
+// one is released, since issuing it can take seconds.
+func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, binding AgentIdentityBinding) error {
+	// The bound Agent must still exist, hold the identity, and name it:
+	// deleting the Agent, a claim that moved to another Agent, or the owner
+	// removing or changing the identity stops its Tasks' calls at once. The
+	// spec is checked as well as the claim because the claim is marked
+	// releasing only when the Agent next reconciles. A claim being released
+	// is still held, so no other Agent can take the identity while bound
+	// Tasks run, but it is no longer used.
+	live := &corev1alpha1.Agent{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
+		return fmt.Errorf("resolve the Task's bound Agent: %w", err)
+	}
+	// Deleting the Agent stops its Tasks' calls at once, even while a
+	// finalizer keeps the object readable.
+	if !live.DeletionTimestamp.IsZero() {
+		return errors.New("the Task's bound Agent is being deleted")
+	}
+	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
+		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
+		return errors.New("the Task's bound Agent no longer holds its identity")
+	}
+	issuer, id, named := live.IdentityRef()
+	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
+		return errors.New("the Task's bound Agent no longer names its identity")
+	}
+	// A claim granted again, for example after it was released or Agent use
+	// authorization was re-enabled, covers only Tasks created since; an
+	// older Task's creation was never checked for this grant. Both times
+	// have one-second precision, so a Task from the grant's own second may
+	// predate it and is refused too.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
+		return errors.New("the Task was created before the Agent's current identity grant")
+	}
+	if err := issuerRefusedIdentity(live); err != nil {
+		return err
+	}
+	return nil
+}
+
 // issueAgentIdentityToken asks the issuer for the credential. In Delegated
 // mode it checks the delegation is still live again once the credential is
 // issued: refreshing the requester's token and the on-behalf-of exchange can
@@ -829,10 +839,15 @@ func (r *KubernetesResolver) issueAgentIdentityToken(
 	if strings.TrimSpace(token) == "" {
 		return "", errors.New("agent identity issuer returned an empty credential")
 	}
+	binding := *req.AgentIdentity
+	// The Agent can lose its identity, or be deleted, while the issuer
+	// answers; the credential is released only while it still may be used.
+	if err := r.requireLiveIdentityAgent(ctx, binding); err != nil {
+		return "", fmt.Errorf("the Agent's identity changed while its credential was issued: %w", err)
+	}
 	if tokenRequest.Mode != corev1alpha1.OutboundAgentIdentityModeDelegated {
 		return token, nil
 	}
-	binding := *req.AgentIdentity
 	if r.DelegationLive == nil {
 		return "", errors.New("delegated agent identity access requires the controller's Task and Session check")
 	}
