@@ -76,16 +76,19 @@ import (
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
+	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/usage"
 	"github.com/orka-agents/orka/internal/worker"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -93,6 +96,9 @@ const (
 	taskResourceKind            = "Task"
 	serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	controllerLeaderElectionID  = "03b49a10.orka.ai"
+	// storageConfigResolveTimeout bounds the startup Secret reads for storage
+	// adapters.
+	storageConfigResolveTimeout = 30 * time.Second
 )
 
 var (
@@ -281,11 +287,11 @@ func main() {
 	var gatewayPollInterval time.Duration
 	var gatewayBatchSize int
 	var aiWorkerImage string
-	var storeBackend string
-	var storePath string
+	var storageFlags storageconfig.Flags
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
+	var taskWebhookSigningSecret string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
@@ -510,8 +516,7 @@ func main() {
 		"Gateway dispatcher and delivery poll interval.")
 	flag.IntVar(&gatewayBatchSize, "gateway-batch-size", 25,
 		"Maximum gateway events, deliveries, Session cleanup candidates, or Task cleanup receipts processed per iteration (capped at 100).")
-	flag.StringVar(&storeBackend, "store-backend", "sqlite", "Storage backend (sqlite)")
-	flag.StringVar(&storePath, "store-path", "/data/orka.db", "Path to SQLite database file")
+	storageFlags.AddFlags(flag.CommandLine)
 	flag.StringVar(&agentExecutionSnapshotKeyFile, "agent-execution-snapshot-key-file", "",
 		"Path to the 32-byte (raw or base64) AES-256 key encrypting immutable agent execution snapshots. "+
 			"When set, executable agent Tasks freeze a write-once binding and encrypted snapshot before dispatch.")
@@ -521,6 +526,10 @@ func main() {
 			"then the kubelet's projection of that Secret. Empty means the operator supplies the mounted key file.")
 	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
 		"Item inside --agent-execution-snapshot-secret that holds the key.")
+	flag.StringVar(&taskWebhookSigningSecret, "task-webhook-signing-secret", "orka-task-webhook-signing",
+		"Name of the Secret in the controller Pod namespace that holds the Ed25519 keys signing Task webhook "+
+			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
+			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -889,6 +898,13 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)
+	// Read the storage configuration before anything opens storage. It reads
+	// only local flags and the configuration file.
+	storageConfig, err := storageFlags.Load()
+	if err != nil {
+		setupLog.Error(err, "invalid storage configuration")
+		os.Exit(1)
+	}
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
 	substrateConfig = substrateConfig.WithDefaults()
@@ -1311,15 +1327,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create SQLite store
-	if storeBackend != "sqlite" {
-		setupLog.Error(fmt.Errorf("unsupported store backend: %s", storeBackend), "unknown store backend")
+	// Resolve the Secrets that storage adapters reference with the direct
+	// reader, before any application storage opens and without waiting for
+	// the manager cache. A configuration bound only to SQLite reads nothing.
+	storageLog := setupLog.WithValues("source", storageConfig.Source, "digest", storageConfig.Digest,
+		"state", storageConfig.Bindings[storagev1.StateContract].Backend,
+		"artifacts", storageConfig.Bindings[storagev1.ArtifactsContract].Backend)
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), storageConfigResolveTimeout)
+	_, err = storageConfig.Resolve(resolveCtx, mgr.GetAPIReader(), currentPodNamespace())
+	cancelResolve()
+	if err != nil {
+		storageLog.Error(err, "unable to resolve the storage configuration")
 		os.Exit(1)
 	}
+	// Only embedded SQLite can serve a contract until the storage adapter
+	// transport exists; an adapter binding is refused, never replaced.
+	storePath, err := storageConfig.RequireEmbeddedSQLite()
+	if err != nil {
+		storageLog.Error(err, "unsupported storage configuration")
+		os.Exit(1)
+	}
+	storageLog.Info("storage configuration loaded")
 
 	// Acquire SQLite exclusivity and validate durable dataset history before
-	// deciding whether an absent snapshot key may be created.
-	sqliteStore, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
+	// deciding whether an absent snapshot key may be created. Application
+	// consumers reach storage only through the storage client, which holds
+	// the snapshot key; the SQLite store is its in-process provider and a
+	// manager runnable.
+	sqliteStore, appStorage, snapshotKey, err := openControllerSQLiteStore(storePath, func(info sqlite.DatasetInfo) ([]byte, error) {
 		if agentExecutionSnapshotSecretOpts.enabled() {
 			return ensureAgentExecutionSnapshotKey(context.Background(), mgr.GetAPIReader(), mgr.GetClient(),
 				currentPodNamespace(), agentExecutionSnapshotSecretOpts, info.CanBootstrapSnapshotKey)
@@ -1330,7 +1365,7 @@ func main() {
 		setupLog.Error(err, "unable to initialize the exclusive SQLite dataset and snapshot key", "path", storePath)
 		os.Exit(1)
 	}
-	if err := sqliteStore.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
+	if err := appStorage.SetNativeSessionMaxBytes(nativeSessionMaxBytes); err != nil {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
@@ -1342,11 +1377,11 @@ func main() {
 		setupLog.Error(fmt.Errorf("usage retention must not be negative"), "invalid usage retention")
 		os.Exit(1)
 	}
-	if err := mgr.Add(&usage.Retention{Store: sqliteStore, Period: usageRetention}); err != nil {
+	if err := mgr.Add(&usage.Retention{Store: appStorage, Period: usageRetention}); err != nil {
 		setupLog.Error(err, "unable to add usage retention")
 		os.Exit(1)
 	}
-	agentExecutionSnapshotStore := sqliteStore
+	agentExecutionSnapshotStore := appStorage
 	connectorConfig := api.ConnectorConfig{Enabled: connectorsEnabled}
 	// The OAuth client exists whether or not new consent is enabled: the
 	// Connection finalizer must still be able to revoke committed tokens for
@@ -1390,8 +1425,8 @@ func main() {
 			Enabled:         true,
 			CallbackBaseURL: strings.TrimSpace(connectorCallbackBaseURL),
 			StateKey:        stateKey,
-			Credentials:     sqliteStore,
-			Consents:        sqliteStore,
+			Credentials:     appStorage,
+			Consents:        appStorage,
 			OAuth:           connectorOAuthClient,
 		}
 		if err := api.ValidateConnectorConfig(connectorConfig); err != nil {
@@ -1411,7 +1446,7 @@ func main() {
 		connectionCredentials := &credential.Source{
 			Client:      mgr.GetClient(),
 			APIReader:   mgr.GetAPIReader(),
-			Credentials: sqliteStore,
+			Credentials: appStorage,
 			OAuth:       connectorOAuthClient,
 		}
 		outboundAccessResolver.Connections = connectionCredentials
@@ -1425,7 +1460,7 @@ func main() {
 	setupLog.Info("agent execution binding stage enabled: executable agent Tasks freeze an immutable encrypted snapshot and write-once binding before dispatch")
 	snapshotRetentionManager := &controller.AgentExecutionSnapshotRetentionManager{
 		APIReader: mgr.GetAPIReader(),
-		Store:     sqliteStore,
+		Store:     appStorage,
 		Namespace: watchNamespace,
 		Retention: agentExecutionSnapshotRetention,
 		Interval:  agentExecutionSnapshotRetentionInterval,
@@ -1442,12 +1477,12 @@ func main() {
 
 	// Create the durable control store, epoch manager, and Session cleanup recovery.
 	acpAdmissionGate := controller.NewACPAdmissionGate()
-	sessionManager := controller.NewSessionManager(sqliteStore)
+	sessionManager := controller.NewSessionManager(appStorage)
 	acpPromptLeases := &controller.ACPMCPPromptLeaseRegistry{}
 
 	// Session deletion retains authenticated cleanup while new admission is closed.
 	sessionCleanupDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: sqliteStore,
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), ResultStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 	}
 	controlStoreOptions := []storekube.Option{
@@ -1457,14 +1492,23 @@ func main() {
 	}
 
 	kubeControlStore, err := storekube.NewComposite(
-		mgr.GetClient(), controlNamespace, sqliteStore, controlStoreOptions...,
+		mgr.GetClient(), controlNamespace, appStorage, controlStoreOptions...,
 	)
 	if err != nil {
 		setupLog.Error(err, "unable to configure Kubernetes ACP control store")
 		os.Exit(1)
 	}
-	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID).
-		WithMirror(sqliteStore)
+	controllerEpochManager := controller.NewControllerEpochManager(kubeControlStore, controllerHolderID)
+	// The epoch manager advances each storage dataset to the acquired epoch
+	// and opens its write fence; every storage client write waits for the
+	// fence of the dataset it targets.
+	for contract, dataset := range appStorage.Datasets() {
+		controllerEpochManager.WithStorage(contract, dataset)
+	}
+	if err := appStorage.BindFences(controllerEpochManager); err != nil {
+		setupLog.Error(err, "unable to bind the storage client to the controller epoch manager")
+		os.Exit(1)
+	}
 	sessionCleanupDispatcher.Store = kubeControlStore
 	sessionCleanupDispatcher.Epochs = controllerEpochManager
 	sessionManager.SetACPSessionCleanup(kubeControlStore, controllerEpochManager)
@@ -1479,8 +1523,8 @@ func main() {
 	}
 
 	acpSessionContinuity, err := controller.NewACPSessionContinuity(controller.ACPSessionContinuityConfig{
-		SessionControls: kubeControlStore, Transcripts: sqliteStore, Publications: kubeControlStore, BranchClaims: kubeControlStore,
-		GatewayEvents: sqliteStore, Lineages: sqliteStore,
+		SessionControls: kubeControlStore, Transcripts: appStorage, Publications: kubeControlStore, BranchClaims: kubeControlStore,
+		GatewayEvents: appStorage, Lineages: appStorage,
 	})
 
 	if err != nil {
@@ -1507,7 +1551,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	sessionManager.SetGatewayEventStore(sqliteStore)
+	sessionManager.SetGatewayEventStore(appStorage)
 	maxTasksPerNamespaceValue := int32(maxTasksPerNamespace) //nolint:gosec // flag default is non-negative
 	gatewayConfig := gatewayruntime.Config{
 		Enabled: gatewayEnabled, Namespace: watchNamespace, PendingPerSession: gatewayPendingPerSession,
@@ -1520,11 +1564,11 @@ func main() {
 		InterimMessagesPerTask: gatewayInterimMessagesPerTask,
 		PollInterval:           gatewayPollInterval, BatchSize: gatewayBatchSize,
 	}
-	gatewayService := gatewayruntime.NewService(mgr.GetClient(), sqliteStore, sqliteStore, sqliteStore, gatewayConfig)
+	gatewayService := gatewayruntime.NewService(mgr.GetClient(), appStorage, appStorage, appStorage, gatewayConfig)
 	gatewayService.APIReader = mgr.GetAPIReader()
 	if kubeControlStore != nil {
 		gatewayService.SessionCleanup = kubeControlStore
-		gatewayService.SessionCleanupCandidates = sqliteStore
+		gatewayService.SessionCleanupCandidates = appStorage
 		gatewayService.SessionCleanupEpochs = controllerEpochManager
 	}
 	if gatewayEnabled {
@@ -1536,6 +1580,18 @@ func main() {
 	}
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
+	var taskWebhookKeys taskwebhook.KeySource
+	if name := strings.TrimSpace(taskWebhookSigningSecret); name != "" {
+		taskWebhookKeys = &taskwebhook.SecretKeySource{
+			Reader:    mgr.GetAPIReader(),
+			Writer:    mgr.GetClient(),
+			Namespace: currentPodNamespace(),
+			Name:      name,
+		}
+		webhookNotifier.SetKeySource(taskWebhookKeys)
+	} else {
+		setupLog.Info("Task webhook signing is disabled; Task webhooks will not be delivered")
+	}
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
@@ -1661,14 +1717,14 @@ func main() {
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
 		KubeClient:                   kubeClient,
-		ResultStore:                  sqliteStore,
-		PlanStore:                    sqliteStore,
-		MessageStore:                 sqliteStore,
-		ArtifactStore:                sqliteStore,
-		ExecutionEventStore:          sqliteStore,
+		ResultStore:                  appStorage,
+		PlanStore:                    appStorage,
+		MessageStore:                 appStorage,
+		ArtifactStore:                appStorage,
+		ExecutionEventStore:          appStorage,
 		DurableControlStore:          kubeControlStore,
 		AgentExecutionSnapshots:      agentExecutionSnapshotStore,
-		RepositoryValidationBindings: sqliteStore,
+		RepositoryValidationBindings: appStorage,
 		MCPRegistry:                  acpMCPRegistry,
 		Mode:                         mode,
 		ACPArtifactRetirer:           artifactRetentionWiring.taskCleanup,
@@ -1719,8 +1775,8 @@ func main() {
 		os.Exit(1)
 	}
 	acpDispatcher := &controller.ACPDispatcher{
-		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: sqliteStore,
-		EventStore: sqliteStore, PlanStore: sqliteStore,
+		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Store: kubeControlStore, ResultStore: appStorage,
+		EventStore: appStorage, PlanStore: appStorage,
 		Snapshots: agentExecutionSnapshotStore,
 		Epochs:    controllerEpochManager, Sessions: acpSessionContinuity,
 		Publisher: publisherClient, ArtifactCapabilitySecret: artifactCapabilitySecret,
@@ -1748,7 +1804,7 @@ func main() {
 	}
 	upgradeDrain := controller.NewACPUpgradeDrainCoordinator(
 		mgr.GetClient(), mgr.GetAPIReader(), controllerEpochManager, kubeControlStore,
-		&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: sqliteStore},
+		&controller.KubernetesACPUpgradeDrainBarrierObserver{Reader: mgr.GetAPIReader(), Outbox: appStorage},
 		acpAdmissionGate, acpUpgradeDrainOptions,
 	)
 
@@ -1801,8 +1857,8 @@ func main() {
 		Client:      mgr.GetClient(),
 		APIReader:   mgr.GetAPIReader(),
 		Scheme:      mgr.GetScheme(),
-		Credentials: sqliteStore,
-		Consents:    sqliteStore,
+		Credentials: appStorage,
+		Consents:    appStorage,
 	}
 	connectionReconciler.Revoker = connectorOAuthClient
 	if err := connectionReconciler.SetupWithManager(mgr); err != nil {
@@ -2021,9 +2077,9 @@ func main() {
 		Client:                        mgr.GetClient(),
 		APIReader:                     mgr.GetAPIReader(),
 		Scheme:                        mgr.GetScheme(),
-		SecurityStore:                 sqliteStore,
-		ArtifactStore:                 sqliteStore,
-		ResultStore:                   sqliteStore,
+		SecurityStore:                 appStorage,
+		ArtifactStore:                 appStorage,
+		ResultStore:                   appStorage,
 		ACPDispatchMaxConcurrentTasks: acpDispatchMaxConcurrentTasks,
 		// Governed publications are recorded by the ACP dispatcher in the
 		// durable control store; verifying patch proposals must read the same
@@ -2037,9 +2093,9 @@ func main() {
 	if err := (&controller.RepositoryMonitorReconciler{
 		Client:                    mgr.GetClient(),
 		Scheme:                    mgr.GetScheme(),
-		Store:                     sqliteStore,
-		ResultStore:               sqliteStore,
-		ArtifactStore:             sqliteStore,
+		Store:                     appStorage,
+		ResultStore:               appStorage,
+		ArtifactStore:             appStorage,
 		DurableControlStore:       kubeControlStore,
 		ControllerEpochManager:    controllerEpochManager,
 		EnforceNamespaceIsolation: enforceNamespaceIsolation,
@@ -2094,23 +2150,23 @@ func main() {
 		},
 		ContextTokens:             contextTokenConfig,
 		ContextTokenAuthorization: contextTokenAuthzConfig,
-		ResultStore:               sqliteStore,
-		SessionStore:              sqliteStore,
-		PlanStore:                 sqliteStore,
-		MessageStore:              sqliteStore,
-		ArtifactStore:             sqliteStore,
+		ResultStore:               appStorage,
+		SessionStore:              appStorage,
+		PlanStore:                 appStorage,
+		MessageStore:              appStorage,
+		ArtifactStore:             appStorage,
 		ArtifactReservations:      artifactRetentionWiring.runtimeReservations,
 		AgentExecutionSnapshots:   agentExecutionSnapshotStore,
 		ExternalEffects:           kubeControlStore,
-		MemoryStore:               sqliteStore,
-		MemoryProposalStore:       sqliteStore,
-		SecurityStore:             sqliteStore,
-		RepositoryMonitorStore:    sqliteStore,
-		ExecutionEventStore:       sqliteStore,
-		GatewayEventStore:         sqliteStore,
-		GatewayDeliveryStore:      sqliteStore,
+		MemoryStore:               appStorage,
+		MemoryProposalStore:       appStorage,
+		SecurityStore:             appStorage,
+		RepositoryMonitorStore:    appStorage,
+		ExecutionEventStore:       appStorage,
+		GatewayEventStore:         appStorage,
+		GatewayDeliveryStore:      appStorage,
 		GatewayService:            gatewayService,
-		HealthChecker:             sqliteStore,
+		HealthChecker:             appStorage,
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),
 		ControllerEpochs:          publisherControllerEpochs,
@@ -2128,6 +2184,7 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		DashboardEnabled: dashboardEnabled,
+		TaskWebhookKeys:  taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
@@ -2147,7 +2204,7 @@ func main() {
 	mcpBroker, err := controller.NewProductionACPMCPBroker(controller.ACPMCPBrokerDependencies{
 		Reader: mgr.GetAPIReader(), Epochs: controllerEpochManager, ControlStore: kubeControlStore,
 		AgentExecutionSnapshots: agentExecutionSnapshotStore,
-		ExecutionEvents:         sqliteStore,
+		ExecutionEvents:         appStorage,
 		PromptLeases:            acpPromptLeases,
 		KubeClient:              kubeClient, Registry: acpMCPRegistry,
 		OutboundAccess: outboundAccessResolver, TransactionExchange: brokeredTransactionExchange,
@@ -2181,14 +2238,14 @@ func main() {
 				Tenant: request.Namespace, WatchNamespace: watchNamespace,
 				EnforceNamespaceIsolation: enforceNamespaceIsolation, Brokered: true,
 				TaskProvenanceProtected:      taskProvenanceProtected,
-				RepositoryValidationBindings: sqliteStore,
-				ResultStore:                  sqliteStore, SessionDeleter: sessionManager,
-				MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), sqliteStore,
+				RepositoryValidationBindings: appStorage,
+				ResultStore:                  appStorage, SessionDeleter: sessionManager,
+				MessageStore: api.NewTaskMessageStore(mgr.GetAPIReader(), appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 				GatewayReplySender: gatewayReplySender,
 				DashboardEnabled:   dashboardEnabled,
-				MemoryReader:       sqliteStore, MemoryProposalWriter: sqliteStore,
-				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), sqliteStore, sqliteStore,
+				MemoryReader:       appStorage, MemoryProposalWriter: appStorage,
+				TranscriptSearcher: api.NewTaskTranscriptSearcher(mgr.GetAPIReader(), appStorage, appStorage,
 					crclient.ObjectKey{Namespace: task.Namespace, Name: task.Name}, task.UID, taskProvenanceProtected, dataGuard),
 			}, nil
 		},
@@ -2632,7 +2689,7 @@ func currentPodNamespace() string {
 	return strings.TrimSpace(string(data))
 }
 
-// loadAgentExecutionSnapshotCipher reads the AES-256 snapshot key from a file
+// loadAgentExecutionSnapshotKey reads the AES-256 snapshot key from a file
 // holding either exactly 32 raw bytes or whitespace-padded base64 text.
 func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied key path.
@@ -2640,14 +2697,6 @@ func loadAgentExecutionSnapshotKey(path string) ([]byte, error) {
 		return nil, err
 	}
 	return decodeAgentExecutionSnapshotKey(raw)
-}
-
-func loadAgentExecutionSnapshotCipher(path string) (*sqlite.AgentExecutionSnapshotCipher, error) {
-	key, err := loadAgentExecutionSnapshotKey(path)
-	if err != nil {
-		return nil, err
-	}
-	return sqlite.NewAgentExecutionSnapshotCipher(key)
 }
 
 // connectorStateKeyInfo is the HKDF label separating the connector state
