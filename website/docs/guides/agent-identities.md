@@ -455,10 +455,20 @@ ORKA_TOKEN=$(curl -s https://login.microsoftonline.com/$TENANT/oauth2/v2.0/token
   -d grant_type=urn:ietf:params:oauth:grant-type:device_code -d client_id=$FRONTEND \
   -d device_code="$(echo "$DC" | python3 -c "import json,sys;print(json.load(sys.stdin)['device_code'])")" |
   python3 -c "import json,sys;print(json.load(sys.stdin)['access_token'])")
-orka -t "$ORKA_TOKEN" connect entra-signin -n team-a
+orka -t "$ORKA_TOKEN" connect entra-signin -n team-a --no-wait
 ```
 
-They pass the same token with `-t` to create Tasks.
+The consent page ends on an address that carries `#completion=<value>`. With
+no dashboard signed in as that person to finish the link, they copy the value
+and complete it with the same token, using the Connection name `orka connect`
+printed:
+
+```bash
+orka -t "$ORKA_TOKEN" connection complete entra-signin-<digest> -n team-a --completion '<value>'
+```
+
+The completion value expires a few minutes after consent, so they complete it
+right away. They pass the same token with `-t` to create Tasks.
 
 They should sign in with the same Entra account they use for Orka. Orka
 binds the link to their Orka sign-in, but does not check that the Entra
