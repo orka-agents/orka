@@ -257,6 +257,38 @@ func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	chat.finishActiveChatReservation(next, nil)
 }
 
+// TestCancelSessionKeepsASessionItsFirstTurnCreated covers a cancel that stops
+// the first turn of a new chat Session: a disconnected client's empty Session
+// is deleted, but a cancelled one is kept, so the caller can still read it.
+func TestCancelSessionKeepsASessionItsFirstTurnCreated(t *testing.T) {
+	h, app := setupCancelTest(t)
+	committer, ok := h.sessionStore.(store.SessionTurnCommitter)
+	if !ok {
+		t.Fatal("the test session store commits no chat turns")
+	}
+	chat := &ChatHandler{sessionTurnCommitter: committer}
+	h.chatTurns = chat
+	reservation, err := chat.reserveActiveChat("default", "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := chat.activateReservedChat(context.Background(), reservation, "default", "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-reservation.cancelContext.Done()
+		handle.finish()
+	}()
+	resp, body := postCancel(t, app, "/sessions/fresh/cancel", "")
+	if resp.StatusCode != http.StatusOK || body["chatTurnStopped"] != true {
+		t.Fatalf("status = %d, body = %v, want the first turn stopped", resp.StatusCode, body)
+	}
+	if _, err := h.sessionStore.GetSession(context.Background(), "default", "fresh"); err != nil {
+		t.Fatalf("the cancelled Session must be kept: %v", err)
+	}
+}
+
 // staleCacheClient lists from a cache that has not seen the newest Tasks, and
 // runs onPatch before each patch.
 type staleCacheClient struct {
