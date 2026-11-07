@@ -209,25 +209,45 @@ func validateDisabledSubstrateRecoveryConfig(
 		return fmt.Errorf("kubernetes reader is required to discover existing substrate resources")
 	}
 
-	recoveryState := ""
 	// Only registered cleanup controllers can service these obligations.
-
-	if recoveryState == "" {
-		var err error
-		recoveryState, err = controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
-		if err != nil {
-			return err
-		}
+	recoveryState, routerRequired, err := controller.FindSubstrateMCPRecoveryState(ctx, reader, watchNamespace)
+	if err != nil {
+		return err
 	}
-
 	if recoveryState == "" {
 		return nil
 	}
 	if configErr != nil {
 		return fmt.Errorf("parse substrate recovery configuration for existing %s: %w", recoveryState, configErr)
 	}
-	if err := cfg.ValidateMCPTools(); err != nil {
+	// SubstrateActorPool finalization uses only the control API; MCP Tool
+	// finalization also builds the router client.
+	validate := cfg.ValidateControl
+	if routerRequired {
+		validate = cfg.ValidateMCPTools
+	}
+	if err := validate(); err != nil {
 		return fmt.Errorf("existing substrate %s requires valid recovery configuration: %w", recoveryState, err)
+	}
+	return nil
+}
+
+// validateSubstrateStartupConfig rejects removed Substrate v0.1.0 settings
+// unconditionally, then validates MCP Tool admission when it is enabled.
+// Disabled-admission recovery is validated separately once existing cleanup
+// obligations can be discovered.
+func validateSubstrateStartupConfig(mcpToolsEnabled bool, cfg controller.SubstrateConfig, configErr error) error {
+	if errors.Is(configErr, controller.ErrRemovedSubstrateSetting) {
+		return configErr
+	}
+	if !mcpToolsEnabled {
+		return nil
+	}
+	if configErr != nil {
+		return fmt.Errorf("invalid substrate configuration from environment: %w", configErr)
+	}
+	if err := cfg.ValidateMCPTools(); err != nil {
+		return fmt.Errorf("invalid substrate configuration: %w", err)
 	}
 	return nil
 }
@@ -883,15 +903,9 @@ func main() {
 
 	substrateConfig.CleanupPolicy = corev1alpha1.WorkspaceCleanupPolicy(substrateCleanupPolicy)
 	substrateConfig = substrateConfig.WithDefaults()
-	if substrateMCPToolsEnabled {
-		if substrateConfigErr != nil {
-			setupLog.Error(substrateConfigErr, "invalid substrate configuration from environment")
-			os.Exit(1)
-		}
-		if err := substrateConfig.ValidateMCPTools(); err != nil {
-			setupLog.Error(err, "invalid substrate configuration")
-			os.Exit(1)
-		}
+	if err := validateSubstrateStartupConfig(substrateMCPToolsEnabled, substrateConfig, substrateConfigErr); err != nil {
+		setupLog.Error(err, "invalid substrate configuration")
+		os.Exit(1)
 	}
 	// The manager is the only Orka identity on the Substrate router's SPIFFE
 	// allowlist. Substrate MCP Tool calls from workers reach Actors through the
