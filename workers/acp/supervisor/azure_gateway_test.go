@@ -399,3 +399,31 @@ func TestAzureGatewayRewritesLinksOnTheSameOriginWithOrWithoutTheDefaultPort(t *
 		}
 	}
 }
+
+// TestAzureGatewaySharesTheRuntimeWideCallLimit covers forwarding under load:
+// a forwarded call takes the same runtime-wide slot an MCP tool call does,
+// so a full runtime answers az with a retryable 429 and calls no broker.
+func TestAzureGatewaySharesTheRuntimeWideCallLimit(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	token := fixture.token(t)
+	slots := fixture.session.proxy.slots
+	for range cap(slots) {
+		slots <- struct{}{}
+	}
+	response, body := fixture.do(t, http.MethodGet, "/subscriptions?api-version=2022-12-01", http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") == "" || !strings.Contains(body, "OrkaGatewayBusy") {
+		t.Fatalf("full runtime: status %d, Retry-After %q, body %s", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 0 {
+		t.Fatalf("broker calls = %d, want none while the runtime is full", len(calls))
+	}
+	for range cap(slots) {
+		<-slots
+	}
+	if response, body := fixture.do(t, http.MethodGet, "/subscriptions?api-version=2022-12-01", http.Header{"Authorization": {"Bearer " + token}}); response.StatusCode != http.StatusOK {
+		t.Fatalf("after the slots free: status %d, body %s", response.StatusCode, body)
+	}
+	if len(slots) != 0 {
+		t.Fatalf("slots held after the call = %d, want the slot released", len(slots))
+	}
+}

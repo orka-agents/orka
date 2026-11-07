@@ -384,6 +384,16 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be identified.")
 		return
 	}
+	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
+	// a larger pool keeps the same backpressure on the broker.
+	if g.session.proxy != nil {
+		if !tryAcquireMCPSlot(g.session.proxy.slots) {
+			w.Header().Set("Retry-After", "1")
+			writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This runtime already has its most requests in flight; retry shortly.")
+			return
+		}
+		defer releaseMCPSlot(g.session.proxy.slots)
+	}
 	response, err := g.session.callBrokeredTool(r.Context(), callID, g.toolName, arguments, true)
 	if err != nil {
 		switch {
