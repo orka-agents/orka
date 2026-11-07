@@ -651,6 +651,21 @@ func TestAgentIdentityBindingCarriesDelegationStartAndEgress(t *testing.T) {
 	child.CreationTimestamp = metav1.Now()
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build()
 
+	// A Self-mode binding never needs the delegation start, so it reads no
+	// ancestor.
+	reads := 0
+	counting := interceptor.NewClient(fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(root, child).Build(), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			reads++
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	selfOnly, err := agentIdentityBindingFromTask(context.Background(), counting, child)
+	if err != nil || selfOnly == nil || !selfOnly.DelegationStart.IsZero() || reads != 0 {
+		t.Fatalf("Self-mode binding = %+v, err = %v, reads = %d; want no delegation start and no reads", selfOnly, err, reads)
+	}
+	child.Status.AgentExecutionBinding.Agent.Identity.ActsForRequester = true
+
 	binding, err := agentIdentityBindingFromTask(context.Background(), reader, child)
 	if err != nil || binding == nil {
 		t.Fatalf("binding = %+v, err = %v", binding, err)

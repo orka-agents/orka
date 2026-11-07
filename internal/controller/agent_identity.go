@@ -625,9 +625,15 @@ func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, tas
 	}
 	binding := task.Status.AgentExecutionBinding
 	agent := binding.Agent
-	start, err := delegationStart(ctx, reader, task)
-	if err != nil {
-		return nil, err
+	// Only a binding that acts for its requester needs the delegation start,
+	// so a Self-mode Task never walks its parent chain. A Delegated call on a
+	// binding without it finds no start and is refused as expired.
+	var start time.Time
+	if agent.Identity.ActsForRequester {
+		var err error
+		if start, err = delegationStart(ctx, reader, task); err != nil {
+			return nil, err
+		}
 	}
 	workspaceBacked := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 	return &outboundaccess.AgentIdentityBinding{
