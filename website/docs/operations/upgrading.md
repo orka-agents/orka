@@ -81,15 +81,23 @@ upgrading:
   Secret and mints the key on first use. Installs that grant RBAC some other way must
   grant the controller `get` and `update` on that Secret and `create` on Secrets there.
   The controller refuses to start if the signing namespace is its own, the watch, ACP
-  runtime or agent-host namespace. Under the default AI worker RBAC profile the AI worker
-  can still act as the controller (it can create Secrets and Jobs in the release
-  namespace), so use `workers.ai.rbacProfile: restricted` if receivers rely on
-  signatures. See
+  runtime or agent-host namespace. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
 - Builds of `main` from before this change kept the key in the controller namespace,
   where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
   new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
   or `orka-task-webhook-signing` in the controller namespace) after upgrading.
+- A new ValidatingAdmissionPolicy, `<fullname>-ai-worker-identity-protection`
+  (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
+  ServiceAccount may create. Before, the default AI worker role could create a
+  ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
+  act as the controller. Now it may write only Opaque Secrets and create only
+  `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
+  the same name with `automountServiceAccountToken: false`, with only emptyDir and
+  Secret volumes, no host namespaces or ports, no init or ephemeral containers, and
+  non-root, unprivileged containers with `allowPrivilegeEscalation: false` and no added
+  capabilities. Orka's own worker already works this way. Anything else that creates
+  Secrets or Jobs as the AI worker ServiceAccount is now rejected.
 - With signing enabled but no usable key (the Secret cannot be read or holds a malformed
   key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
   key is available.

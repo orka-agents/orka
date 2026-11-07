@@ -230,13 +230,17 @@ closes two paths:
 - Worker roles are bound in the release namespace only, so no worker can read
   or replace the key with its own permissions.
 
-That protection is only as strong as the controller's identity. Under the
-default AI worker RBAC profile (`workers.ai.rbacProfile: default`), the AI
-worker can create Secrets and Jobs in the release namespace. A
-ServiceAccount-token Secret or a Job can name the controller's ServiceAccount,
-which gives the worker the controller's permissions, including this key. If
-receivers rely on signatures, install with `workers.ai.rbacProfile: restricted`,
-which grants the AI worker no Secret or Job writes.
+The protection also depends on no worker being able to act as the controller.
+The default AI worker RBAC profile lets the AI worker create Secrets and Jobs in
+the release namespace (for `code_exec` and child Task credentials), and a
+ServiceAccount-token Secret or a Job could name the controller's
+ServiceAccount. The `<fullname>-ai-worker-identity-protection`
+ValidatingAdmissionPolicy, which both installs ship, blocks that. The AI
+worker may only write Opaque Secrets, and may only create `code_exec` Jobs:
+each runs as its own per-run ServiceAccount with no token mounted, uses only
+emptyDir and Secret volumes, and cannot reach the node. Keep that policy
+installed, and do not grant the AI worker other ways to run Pods or request
+tokens.
 
 The chart and the controller both refuse a signing namespace that is the
 release (watch), controller, client, ACP runtime or agent-host namespace. Keep
