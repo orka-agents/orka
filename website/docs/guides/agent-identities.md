@@ -237,8 +237,13 @@ kubectl -n team-a get agent inventory-agent \
 ```
 
 `IdentityVerified=True` means the controller obtained a token for the
-identity from Entra. It re-checks on every reconcile and at least hourly, so
-an identity disabled in Entra turns it `False` and the Agent `Ready=False`.
+identity from Entra. The controller keeps that answer for an hour, or until
+the Agent is edited, so an identity disabled in Entra turns it `False` and the
+Agent `Ready=False` within the hour, not at once. Token requests are not
+held to that hour: new tokens are refused as soon as Entra refuses them (see
+[What stops identity-backed calls](#what-stops-identity-backed-calls)). A
+change to the Agent's spec checks again at once; metadata such as an
+annotation does not.
 
 ## 6. Call a resource as the Agent (Self)
 
