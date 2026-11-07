@@ -2943,7 +2943,7 @@ func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	if strings.TrimSpace(message) == "" {
 		message = "cancelled by parent task"
 	}
-	return message, true
+	return boundACPStatusMessage(message), true
 }
 
 // completeTask marks a task as completed without asserting that workload execution started.
