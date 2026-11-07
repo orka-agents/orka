@@ -147,7 +147,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks {
 		task := &tasks[i]
-		if !cancellableTaskPhase(task.Status.Phase) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat) {
+		if !cancellableTask(task) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat) {
 			continue
 		}
 		if task.Namespace != namespace {
@@ -253,7 +253,10 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 			result.Message = current.Status.Message
 			return nil
 		}
-		if !cancellableTaskPhase(current.Status.Phase) {
+		if strings.TrimSpace(current.Spec.Schedule) != "" {
+			return fmt.Errorf("%w: the task is a schedule; suspend it to stop future runs", errTaskNotCancellable)
+		}
+		if !cancellableTask(current) {
 			return fmt.Errorf("%w: the task is %s", errTaskNotCancellable, current.Status.Phase)
 		}
 		base := current.DeepCopy()
@@ -279,9 +282,15 @@ func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task,
 	}
 }
 
-// cancellableTaskPhase reports whether a Task is still Pending or Running. A
-// Scheduled Task is a cron template; suspend it instead.
-func cancellableTaskPhase(phase corev1alpha1.TaskPhase) bool {
+// cancellableTask reports whether a Task is still Pending or Running and is
+// not a schedule. A Task with spec.schedule is a cron template, in every
+// phase including the empty or Pending one it starts in; cancelling it would
+// end all future runs, so it is suspended instead.
+func cancellableTask(task *corev1alpha1.Task) bool {
+	if strings.TrimSpace(task.Spec.Schedule) != "" {
+		return false
+	}
+	phase := task.Status.Phase
 	return phase == "" || phase == corev1alpha1.TaskPhasePending || phase == corev1alpha1.TaskPhaseRunning
 }
 

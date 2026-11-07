@@ -28,10 +28,15 @@ export function isTaskDeleting(task: Task): boolean {
   return Boolean(task.metadata.deletionTimestamp)
 }
 
-/** A Pending or Running task that a person can still cancel. */
+/**
+ * A Pending or Running task that a person can still cancel. A scheduled (cron)
+ * Task is a template in every phase; it is suspended, never cancelled.
+ */
 export function isTaskCancellable(task: Task): boolean {
   const phase = task.status?.phase ?? ''
-  return !isTaskDeleting(task) && (phase === '' || phase === 'Pending' || phase === 'Running')
+  return (
+    !isTaskDeleting(task) && !task.spec.schedule?.trim() && (phase === '' || phase === 'Pending' || phase === 'Running')
+  )
 }
 
 /** A task whose cancellation was requested but that has not ended yet. */

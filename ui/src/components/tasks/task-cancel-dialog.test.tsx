@@ -60,6 +60,13 @@ describe('task cancel state', () => {
     expect(isTaskCancellable(task('Running', undefined, '2026-11-05T00:00:00Z'))).toBe(false)
   })
 
+  it('never offers cancel for a scheduled template, even before it is Scheduled', () => {
+    const template = (phase: string) =>
+      ({ metadata: { name: 'nightly' }, spec: { schedule: '0 2 * * *' }, status: { phase } }) as unknown as Task
+    expect(isTaskCancellable(template(''))).toBe(false)
+    expect(isTaskCancellable(template('Pending'))).toBe(false)
+  })
+
   it('reports a requested cancellation until the task ends', () => {
     expect(isTaskCancelling(task('Running', { 'orka.ai/cancel-requested': 'cancelled by alice' }))).toBe(true)
     expect(isTaskCancelling(task('Cancelled', { 'orka.ai/cancel-requested': 'cancelled by alice' }))).toBe(false)
