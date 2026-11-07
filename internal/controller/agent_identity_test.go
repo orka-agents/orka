@@ -1196,6 +1196,8 @@ func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
 	}
 	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err != nil {
 		t.Fatalf("an invalid edit after verification = %+v, want no refusal", state)
+	}
+}
 
 // TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm covers a claim
 // the dispatcher cannot read, and an enforcement period not yet recorded:
