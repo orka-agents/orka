@@ -559,3 +559,55 @@ func TestKubernetesResolverRechecksTheAgentBeforeReleasingAnIdentityCredential(t
 		})
 	}
 }
+
+// TestKubernetesResolverRechecksThePolicyBeforeReleasingAnIdentityCredential
+// covers an outbound access policy revoked or edited while the issuer
+// answers: the credential is released only under the policy as it now is.
+func TestKubernetesResolverRechecksThePolicyBeforeReleasingAnIdentityCredential(t *testing.T) {
+	scheme := resolverScheme(t)
+	for name, change := range map[string]func(context.Context, ctrlclient.Client, *corev1alpha1.OutboundAccessPolicy) error{
+		"policy deleted": func(ctx context.Context, c ctrlclient.Client, policy *corev1alpha1.OutboundAccessPolicy) error {
+			return c.Delete(ctx, policy)
+		},
+		"policy edited": func(ctx context.Context, c ctrlclient.Client, policy *corev1alpha1.OutboundAccessPolicy) error {
+			policy.Generation++
+			return c.Update(ctx, policy)
+		},
+		"policy no longer accepted": func(ctx context.Context, c ctrlclient.Client, policy *corev1alpha1.OutboundAccessPolicy) error {
+			for i := range policy.Status.Conditions {
+				if policy.Status.Conditions[i].Type == corev1alpha1.OutboundAccessPolicyConditionAccepted {
+					policy.Status.Conditions[i].Status = metav1.ConditionFalse
+				}
+			}
+			return c.Status().Update(ctx, policy)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			policy := readyPolicy("agent", agentIdentityPolicySpec())
+			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(policy, identityHolder("agent-uid", true)).
+				WithStatusSubresource(&corev1alpha1.Agent{}, &corev1alpha1.OutboundAccessPolicy{}).Build()
+			identity := &fakeAgentIdentitySource{token: "agent-token", during: func() {
+				live := &corev1alpha1.OutboundAccessPolicy{}
+				if err := reader.Get(context.Background(), ctrlclient.ObjectKeyFromObject(policy), live); err != nil {
+					t.Fatal(err)
+				}
+				if err := change(context.Background(), reader, live); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			resolution, err := (&KubernetesResolver{Reader: reader, AgentIdentities: identity}).Resolve(context.Background(), agentIdentityRequest())
+			if err == nil || resolution.CredentialValue != "" || len(resolution.SensitiveValues) != 0 {
+				t.Fatalf("Resolve() = %#v, %v; want no credential once the policy changed", resolution, err)
+			}
+		})
+	}
+	// An unchanged policy still releases it.
+	reader := ctrlfake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(readyPolicy("agent", agentIdentityPolicySpec()), identityHolder("agent-uid", true)).
+		WithStatusSubresource(&corev1alpha1.Agent{}, &corev1alpha1.OutboundAccessPolicy{}).Build()
+	resolution, err := (&KubernetesResolver{Reader: reader, AgentIdentities: &fakeAgentIdentitySource{token: "agent-token"}}).Resolve(context.Background(), agentIdentityRequest())
+	if err != nil || resolution.CredentialValue == "" {
+		t.Fatalf("an unchanged policy: Resolve() = %#v, %v", resolution, err)
+	}
+}
