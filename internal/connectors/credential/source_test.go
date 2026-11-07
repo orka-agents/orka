@@ -1286,4 +1286,3 @@ func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
 		t.Fatalf("a granted scope: %v", err)
 	}
 }
-
