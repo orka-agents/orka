@@ -1430,7 +1430,7 @@ func main() {
 	}
 	if agentIdentitySource != nil {
 		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
-			Reader: mgr.GetAPIReader(), Sessions: sqliteStore,
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
 		}.Check
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
