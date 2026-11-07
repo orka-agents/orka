@@ -451,35 +451,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if response.IsError {
-		if brokerErrorCode(response.Result) == harnessv2.MCPToolErrorCodeConnectionRequired {
-			// The broker's message already says who must do what; the agent
-			// should not retry or try to sign az in itself.
-			writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired",
-				brokerErrorMessage(response.Result)+". Retrying or running az login will not help.")
-			return
-		}
-		switch brokerErrorCode(response.Result) {
-		case "approval_declined", "approval_expired", "approval_cancelled", "approval_stale":
-			// A 403 is final to az; a 5xx would make it retry a decided write.
-			writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted",
-				"Orka did not send the request: "+brokerErrorMessage(response.Result))
-			return
-		case "tool_failed_without_effect":
-			// Nothing was sent, and a retry would replay the same refusal.
-			writeAzureError(w, http.StatusForbidden, "OrkaToolRefused",
-				"Orka refused the request without sending it: "+brokerErrorMessage(response.Result))
-			return
-		case "tool_outcome_unknown", "tool_execution_failed":
-			// A failed execution was delivered: for a write, the request may
-			// have reached Azure. A failed read stays a 502 below.
-			if !write && brokerErrorCode(response.Result) == "tool_execution_failed" {
-				break
-			}
-			writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
-				"The request may have reached Azure. Check the resource before repeating it.")
-			return
-		}
-		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
+		writeAzureToolError(w, write, response.Result)
 		return
 	}
 	forwarded, err := harnessv2.DecodeMCPForwardResponse(response.Result)
@@ -509,6 +481,29 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Length", strconv.Itoa(len(answer)))
 	w.WriteHeader(forwarded.Status)
 	_, _ = io.WriteString(w, answer)
+}
+
+// writeAzureToolError answers a request the broker answered with a tool
+// error. A decided or possibly delivered write gets a status az does not
+// retry, since a retry could only replay the recorded outcome.
+func writeAzureToolError(w http.ResponseWriter, write bool, result json.RawMessage) {
+	code, message := brokerErrorCode(result), brokerErrorMessage(result)
+	switch {
+	case code == harnessv2.MCPToolErrorCodeConnectionRequired:
+		// The broker's message already says who must do what; the agent
+		// should not retry or try to sign az in itself.
+		writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired", message+". Retrying or running az login will not help.")
+	case code == "approval_declined" || code == "approval_expired" || code == "approval_cancelled" || code == "approval_stale":
+		writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted", "Orka did not send the request: "+message)
+	case code == "tool_failed_without_effect":
+		writeAzureError(w, http.StatusForbidden, "OrkaToolRefused", "Orka refused the request without sending it: "+message)
+	case code == "tool_outcome_unknown" || (write && code == "tool_execution_failed"):
+		// A failed execution was delivered, so a write may have reached Azure.
+		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+			"The request may have reached Azure. Check the resource before repeating it.")
+	default:
+		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+message+".")
+	}
 }
 
 // azureNextLinkFields are the paging fields Resource Manager responses use.
