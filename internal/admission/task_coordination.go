@@ -60,6 +60,10 @@ func (v *TaskProvenanceValidator) authorizedTaskCoordinationParent(
 		!parent.DeletionTimestamp.IsZero() || parent.Status.ExecutionOutcome != nil {
 		return false, nil
 	}
+	// A Task asked to stop delegates no more work.
+	if _, cancelRequested := parent.Annotations[labels.AnnotationCancelRequested]; cancelRequested {
+		return false, nil
+	}
 	switch parent.Status.Phase {
 	case "", corev1alpha1.TaskPhasePending, corev1alpha1.TaskPhaseRunning, corev1alpha1.TaskPhaseFinalizing:
 		return taskCoordinationSessionAllowed(child, parent), nil
