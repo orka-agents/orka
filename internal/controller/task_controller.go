@@ -410,6 +410,13 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
+	// Work a cancelled Task delegated stops with it, at every depth, as soon
+	// as the cancel is requested. The cascade runs before anything that can
+	// keep failing, such as result storage or the workspace projection, and a
+	// refused child only requeues a finished Task once its own completion
+	// work is done.
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
+
 	// A deferred finalization records a stop already decided, so it settles
 	// before a later cancel request. A requested cancellation is applied
 	// before the workspace status projection, so a failing projection cannot
@@ -430,12 +437,6 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return r.cancelRequestedAgentTask(ctx, task)
 	}
-
-	// Work a cancelled Task delegated stops with it, at every depth. The
-	// cascade runs before the workspace projection, which can keep failing,
-	// and a refused child only requeues the Task once its own completion
-	// work is done.
-	cascadeErr := r.cascadeTaskCancellation(ctx, task)
 
 	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
 		return ctrl.Result{}, err
@@ -2797,14 +2798,11 @@ func (r *TaskReconciler) handleCompletedAfterCascade(ctx context.Context, task *
 	return result, err
 }
 
-// cascadeTaskCancellation cancels what a finished Task delegated when the
-// Task was cancelled. A cancel request counts even when the Task did not end
-// Cancelled: recovery records an interrupted cancel as Failed with an
-// unknown outcome.
+// cascadeTaskCancellation cancels what a Task delegated once the Task's
+// cancellation was requested, before the Task itself has stopped. A cancel
+// request counts even when the Task did not end Cancelled: recovery records
+// an interrupted cancel as Failed with an unknown outcome.
 func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *corev1alpha1.Task) error {
-	if !isTerminalTaskPhase(task.Status.Phase) {
-		return nil
-	}
 	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested && task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
 		return nil
 	}
@@ -2830,17 +2828,13 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 		if parent != task {
 			message = "cancelled with its ancestor task " + task.Name
 		}
-		// Children in another namespace carry no owner reference, so the
-		// list spans namespaces and delegatedBy keeps only real children. A
-		// child elsewhere enqueues no reconcile of its parent when it reaches
-		// the cache, so the list reads the API server, not the cache.
-		var children corev1alpha1.TaskList
-		if err := r.taskMetadataReader().List(ctx, &children, client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}); err != nil {
+		children, err := r.delegatedChildCandidates(ctx, parent)
+		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		for i := range children.Items {
-			child := &children.Items[i]
+		for i := range children {
+			child := &children[i]
 			// A scheduled child is a template; cancelling it would end its
 			// future runs, so it is left for its own owner.
 			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) || !child.DeletionTimestamp.IsZero() ||
@@ -2867,6 +2861,41 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// delegatedChildCandidates lists the Tasks that name parent as their parent.
+// They are read from the API server, not the cache: a child in another
+// namespace enqueues no reconcile of its parent when it reaches the cache.
+// The parent's own namespace is always listed. Children elsewhere carry no
+// owner reference and exist only when namespace isolation is off, so other
+// namespaces are listed then, and only where the controller may list Tasks
+// cluster-wide; delegatedBy keeps only real children.
+func (r *TaskReconciler) delegatedChildCandidates(ctx context.Context, parent *corev1alpha1.Task) ([]corev1alpha1.Task, error) {
+	selector := client.MatchingLabels{labels.LabelParentTask: labels.SelectorValue(parent.Name)}
+	var local corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &local, client.InNamespace(parent.Namespace), selector); err != nil {
+		return nil, err
+	}
+	if r.EnforceNamespaceIsolation {
+		return local.Items, nil
+	}
+	var all corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &all, selector); err != nil {
+		if apierrors.IsForbidden(err) {
+			// Task access granted per namespace, as the standard install
+			// does, cannot list other namespaces; children there stay out of
+			// reach and must be cancelled directly.
+			return local.Items, nil
+		}
+		return nil, err
+	}
+	children := local.Items
+	for _, task := range all.Items {
+		if task.Namespace != parent.Namespace {
+			children = append(children, task)
+		}
+	}
+	return children, nil
 }
 
 // delegatedBy reports whether parent delegated child. In the parent's

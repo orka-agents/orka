@@ -836,3 +836,55 @@ func TestInterruptedCancelStopsTheJobWhileAChildRefuses(t *testing.T) {
 		t.Fatalf("parent Job read = %v, want it deleted while the child refuses", err)
 	}
 }
+
+// TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess covers the
+// standard install, whose controller may list Tasks only in the namespaces
+// it is bound in: a cluster-wide list is forbidden, yet the parent's own
+// children are still cancelled, and with namespace isolation on no
+// cluster-wide list is tried at all.
+func TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess(t *testing.T) {
+	controller := true
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: "default", Labels: map[string]string{labels.LabelParentTask: "parent"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "parent", UID: "parent-uid", Controller: &controller,
+			}},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	for _, isolated := range []bool{false, true} {
+		c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(parent.DeepCopy(), child.DeepCopy()).Build()
+		clusterLists := 0
+		scoped := interceptor.NewClient(c, interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				options := &client.ListOptions{}
+				options.ApplyOptions(opts)
+				if options.Namespace == "" {
+					clusterLists++
+					return apierrors.NewForbidden(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), "", errors.New("namespace-scoped"))
+				}
+				return c.List(ctx, list, opts...)
+			},
+		})
+		r := &TaskReconciler{Client: scoped, EnforceNamespaceIsolation: isolated}
+		if err := r.cancelChildTasks(context.Background(), parent); err != nil {
+			t.Fatalf("isolation %t: cancelChildTasks() = %v, want a forbidden cluster-wide list tolerated", isolated, err)
+		}
+		got := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(child), got); err != nil {
+			t.Fatal(err)
+		}
+		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+			t.Fatalf("isolation %t: the parent's own child was not cancelled", isolated)
+		}
+		if isolated && clusterLists != 0 {
+			t.Fatalf("namespace isolation: %d cluster-wide lists, want none", clusterLists)
+		}
+	}
+}
