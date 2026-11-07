@@ -29,13 +29,21 @@ type EntraConfig struct {
 }
 
 // authority returns the canonical authority: no surrounding space or
-// trailing slash, lower case, and DefaultEntraAuthority when unset.
+// trailing slash, scheme and host in lower case, the path as given, and
+// DefaultEntraAuthority when unset. Paths are case-sensitive, so they are
+// never folded.
 func (c EntraConfig) authority() string {
-	authority := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(c.Authority), "/"))
+	authority := strings.TrimSuffix(strings.TrimSpace(c.Authority), "/")
 	if authority == "" {
 		return DefaultEntraAuthority
 	}
-	return authority
+	parsed, err := url.Parse(authority)
+	if err != nil || parsed.Host == "" {
+		// Validate refuses it; keep the value as given.
+		return authority
+	}
+	parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
+	return parsed.String()
 }
 
 // Config is the controller-wide identity configuration.
@@ -70,8 +78,11 @@ func (c Config) Validate() error {
 		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
 	}
 	authority, err := url.Parse(c.Entra.authority())
+	// A bare "?" or "#" parses to an empty query or fragment but still changes
+	// the token endpoint built from the authority, so the delimiters are
+	// refused too.
 	if err != nil || authority.Scheme != "https" || authority.Host == "" || authority.User != nil ||
-		authority.RawQuery != "" || authority.Fragment != "" {
+		authority.RawQuery != "" || authority.ForceQuery || authority.Fragment != "" || strings.ContainsAny(c.Entra.Authority, "?#") {
 		return fmt.Errorf("the Entra authority must be an https URL without credentials, query, or fragment")
 	}
 	return nil
