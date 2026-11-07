@@ -149,8 +149,19 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		result.ChatTurnStopped = stopped
 	}
 	epoch := ""
-	if sessionType == store.SessionTypeChat {
-		epoch = chatSessionEpoch(ctx, h.sessionStore, namespace, name)
+	if reader, ok := h.sessionStore.(store.SessionCreationReader); ok && sessionType == store.SessionTypeChat {
+		// Tasks of an earlier chat under this name are told apart by the
+		// current one's creation time, so a cancel that cannot read it stops
+		// here rather than cancel them too. Stores without creation times
+		// pin no incarnation and keep the name-only match.
+		createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, name)
+		if errors.Is(err, store.ErrNotFound) {
+			return fiber.NewError(fiber.StatusNotFound, "session not found")
+		}
+		if err != nil {
+			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat Session's incarnation is unavailable; retry")
+		}
+		epoch = labels.SessionEpoch(createdAt)
 	}
 	tasks, err := h.sessionTaskCandidates(ctx, namespace, name, sessionType == store.SessionTypeChat)
 	if err != nil {

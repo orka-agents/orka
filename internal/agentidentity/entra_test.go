@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -513,5 +515,28 @@ func TestEntraCallerDeadlineWhileWaitingIsIssuerUnavailable(t *testing.T) {
 	defer cancel()
 	if _, err := issuer.AppToken(ctx, testIdentity, entraVerificationResource); !errors.Is(err, ErrIssuerUnavailable) {
 		t.Fatalf("error = %v, want ErrIssuerUnavailable so verification backs off", err)
+	}
+}
+
+// TestFileCredentialFailuresAreUnavailable covers a missing or empty projected
+// token: Entra was never asked, so verification must back off and retry
+// rather than keep a refusal of the identity.
+func TestFileCredentialFailuresAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"missing": filepath.Join(dir, "missing"), "empty": empty} {
+		if _, err := FileCredential(path)(); !errors.Is(err, ErrIssuerUnavailable) {
+			t.Fatalf("%s token file: error = %v, want ErrIssuerUnavailable", name, err)
+		}
+	}
+	present := filepath.Join(dir, "token")
+	if err := os.WriteFile(present, []byte(testControllerToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := FileCredential(present)(); err != nil || token != testControllerToken {
+		t.Fatalf("FileCredential() = %q, %v; want the trimmed token", token, err)
 	}
 }
