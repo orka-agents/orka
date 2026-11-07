@@ -93,9 +93,9 @@ func (c Config) Validate() error {
 	// A bare "?" or "#" parses to an empty query or fragment but still changes
 	// the token endpoint built from the authority, so the delimiters are
 	// refused too.
-	if err != nil || authority.Scheme != "https" || authority.Host == "" || authority.User != nil ||
+	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" || authority.User != nil ||
 		authority.RawQuery != "" || authority.ForceQuery || authority.Fragment != "" || strings.ContainsAny(c.Entra.Authority, "?#") {
-		return fmt.Errorf("the Entra authority must be an https URL without credentials, query, or fragment")
+		return fmt.Errorf("the Entra authority must be an https URL with a host and without credentials, query, or fragment")
 	}
 	return nil
 }
