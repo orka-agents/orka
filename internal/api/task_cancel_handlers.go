@@ -138,6 +138,17 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat turn did not stop in time; retry")
 		}
 		defer release()
+		// A first turn that was already ending, after an error or a client
+		// disconnect, may have discarded its empty Session before this
+		// cancel could keep it. Its release finishes before the turn reports
+		// done, so the Session is read again only now, and a discarded one
+		// is reported as missing rather than as a successful cancel.
+		if _, err := transcriptSessionType(ctx, h.sessionStore, namespace, name); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fiber.NewError(fiber.StatusNotFound, "session not found")
+			}
+			return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+		}
 		result.ChatTurnStopped = stopped
 	}
 	tasks, err := h.sessionTaskCandidates(ctx, namespace, name, sessionType == store.SessionTypeChat)
