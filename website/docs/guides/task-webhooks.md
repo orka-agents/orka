@@ -175,9 +175,13 @@ status:
 ## Signing keys and rotation
 
 The controller signs with the Ed25519 key in the `current` item of a Secret in
-its own namespace: `<fullname>-task-webhook-signing` for the Helm chart, where
-`<fullname>` is the chart's full name (`orka` for a release named `orka`;
-override the Secret name with `controller.taskWebhooks.signingSecretName`), or
+a namespace of its own: `<release namespace>-task-webhook-signing` for the Helm
+chart (override with `controller.taskWebhooks.signingNamespace`), or
+`orka-task-webhook-signing` for the kustomize install (flag
+`--task-webhook-signing-namespace`). The Secret is
+`<fullname>-task-webhook-signing` for the Helm chart, where `<fullname>` is the
+chart's full name (`orka` for a release named `orka`; override the Secret name
+with `controller.taskWebhooks.signingSecretName`), or
 `orka-task-webhook-signing` for the kustomize install. On first use, the
 controller creates that Secret and mints `current` if either is missing. Keys
 are PEM-encoded PKCS#8, which is what
@@ -188,8 +192,8 @@ Every replica rereads the Secret at least every 15 seconds, so rotation needs no
 restart. To rotate:
 
 ```bash
-NS=orka-system
-SECRET=orka-task-webhook-signing
+NS=orka-task-webhook-signing      # <release namespace>-task-webhook-signing for Helm
+SECRET=orka-task-webhook-signing  # <fullname>-task-webhook-signing for Helm
 openssl genpkey -algorithm ed25519 -out new.pem
 OLD=$(kubectl -n "$NS" get secret "$SECRET" -o jsonpath='{.data.current}')
 kubectl -n "$NS" patch secret "$SECRET" --type merge \
@@ -217,16 +221,44 @@ signing is enabled again.
 
 ### Who can read the signing key
 
-Anyone who can read the signing Secret can forge notices. The controller needs
-that access, but under the default AI worker RBAC profile
-(`workers.ai.rbacProfile: default`) the AI worker service account can also
-`get` Secrets in the release namespace, including this one, so an AI Task there
-could read the private key. If receivers rely on signatures, install with
-`workers.ai.rbacProfile: restricted`, which grants the AI worker no Secret
-access, and restrict any other Secret readers in that namespace.
+Anyone who can read or change the signing Secret can forge notices, so it
+lives alone in its own namespace and only the controller is bound there:
+`get` and `update` on that one Secret, and `create` on Secrets there. This
+closes two paths:
 
-The worker's RBAC is not the only path. A trusted Task's or Agent's `secretRef`
-mounts the named Secret from its own namespace into the worker, so anyone who
-can create Tasks or Agents in the release namespace can mount the signing key
-(and the controller's other Secrets there). Do not let untrusted users create
-Tasks or Agents in the release namespace.
+- A Task's or Agent's `secretRef` mounts a Secret from the Task's namespace.
+  Tasks live in the release namespace, so a `secretRef` cannot name the key.
+- Worker roles are bound in the release namespace only, so no worker can read
+  or replace the key with its own permissions.
+
+The protection also depends on no worker being able to act as the controller.
+The default AI worker RBAC profile lets the AI worker create Secrets and Jobs in
+the release namespace (for `code_exec` and child Task credentials). A
+ServiceAccount-token Secret or a Job could name the controller's
+ServiceAccount, and a Job's Pod could carry the controller's labels, which
+would put it behind the API Service that publishes the JWKS. The
+`<fullname>-ai-worker-identity-protection` ValidatingAdmissionPolicy, which
+both installs ship, blocks all three. The AI worker may only write Opaque
+Secrets, may only create or delete `code_exec`'s own ServiceAccounts (so it
+cannot replace a platform account and inherit its RoleBindings), and may only
+create `code_exec` Jobs: each runs as its own per-run
+ServiceAccount with no token mounted, carries only `code_exec` labels, uses
+only emptyDir and Secret volumes, gets no host namespaces, privilege or
+capabilities, and runs under a `RuntimeDefault` or `Localhost` seccomp
+profile. Keep that policy installed, and:
+
+- Do not grant the AI worker other ways to run Pods or request tokens. An
+  OutboundAccessPolicy `serviceAccountRef` grants the AI worker TokenRequest
+  for that account, so the controller refuses Orka's own ServiceAccounts
+  there: any labeled `orka.ai/platform-identity: "true"`, plus the controller
+  and worker accounts it is configured with, labeled or not.
+- Do not keep ServiceAccount-token Secrets in the release namespace. The
+  default AI worker profile can read every Secret there, so any such Secret
+  hands the worker that account's token.
+
+The controller refuses to start with a signing namespace that is the watch,
+controller Pod, ACP runtime or agent-host namespace. The chart also refuses the
+client namespace when rendering; the controller cannot see that one, so
+kustomize and other installs must keep it apart themselves. Keep the signing
+namespace free of other workloads and of role bindings beyond the
+controller's and your cluster administrators'.
