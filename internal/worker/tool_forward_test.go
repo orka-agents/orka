@@ -173,3 +173,47 @@ func TestForwardingToolCarriesTheLengthOfAHeadResponse(t *testing.T) {
 		}
 	}
 }
+
+// TestForwardingToolKeepsContinuationTokens covers ARM paging: a nextLink's
+// $skiptoken, in the body or a URL-valued header, survives redaction so the
+// next page can be requested, while the injected credential and other
+// secret-shaped values are still removed.
+func TestForwardingToolKeepsContinuationTokens(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Location", "https://management.azure.com/subscriptions?api-version=2022-12-01&%24skiptoken=hdr-page2")
+		_, _ = w.Write([]byte(`{"value":[{"id":"/subscriptions/s1","tags":{"note":"password=hunter2 arm-token-secret"}}],` +
+			`"nextLink":"https://management.azure.com/subscriptions?api-version=2022-12-01&$skiptoken=page2"}`))
+	}))
+	defer server.Close()
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: agentIdentityResolver(), skipDirectPublicValidation: true}
+	executor.AllowForwarding()
+	result, err := executor.Execute(context.Background(), forwardingTestTool(server.URL),
+		json.RawMessage(`{"method":"GET","path":"/subscriptions","query":"api-version=2022-12-01"}`))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	response, err := harnessv2.DecodeMCPForwardResponse(json.RawMessage(result))
+	if err != nil {
+		t.Fatalf("result %q: %v", result, err)
+	}
+	if !strings.Contains(response.Body, `&$skiptoken=page2"`) {
+		t.Fatalf("body lost the continuation token: %q", response.Body)
+	}
+	if location := response.Headers["Location"]; !strings.HasSuffix(location, "&%24skiptoken=hdr-page2") {
+		t.Fatalf("Location lost the continuation token: %q", location)
+	}
+	if strings.Contains(response.Body, "hunter2") || strings.Contains(response.Body, "arm-token-secret") {
+		t.Fatalf("body kept a secret: %q", response.Body)
+	}
+	if strings.Contains(response.Body, "\x00") || strings.Contains(response.Body, "orka-forward-continuation") {
+		t.Fatalf("body kept a placeholder: %q", response.Body)
+	}
+}
+
+func TestRedactForwardedTextRemovesAnInjectedCredentialFromAContinuationToken(t *testing.T) {
+	got := redactForwardedText(`{"nextLink":"https://x/?$skiptoken=arm-token-secret"}`, "arm-token-secret")
+	if strings.Contains(got, "arm-token-secret") {
+		t.Fatalf("injected credential survived in a continuation token: %q", got)
+	}
+}

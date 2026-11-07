@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -100,7 +101,7 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 	}
 	response := harnessv2.MCPForwardResponse{
 		Status: resp.StatusCode,
-		Body:   redactToolSensitiveText(string(body), prepared.redactionSecrets...),
+		Body:   redactForwardedText(string(body), prepared.redactionSecrets...),
 	}
 	for _, name := range harnessv2.ForwardResponseHeaders {
 		value := strings.TrimSpace(resp.Header.Get(name))
@@ -116,7 +117,7 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 		if response.Headers == nil {
 			response.Headers = map[string]string{}
 		}
-		response.Headers[name] = redactToolSensitiveText(value, prepared.redactionSecrets...)
+		response.Headers[name] = redactForwardedText(value, prepared.redactionSecrets...)
 	}
 	if err := response.Validate(); err != nil {
 		return "", ToolExecutionError{Err: err}
@@ -132,4 +133,33 @@ func executeForwardRequest(httpClient *http.Client, prepared preparedToolRequest
 		return "", ToolExecutionError{Err: fmt.Errorf("forwarded response exceeds %d bytes once encoded", harnessv2.MaxMCPResultBytes)}
 	}
 	return string(encoded), nil
+}
+
+// forwardContinuationRe matches an Azure Resource Manager continuation
+// parameter, `$skiptoken` (or its escaped `%24skiptoken`), in a nextLink or a
+// URL-valued header.
+var forwardContinuationRe = regexp.MustCompile(`(?i)([?&])((?:\$|%24)skiptoken=[^&#\s"'<>\\]+)`)
+
+// redactForwardedText redacts a forwarded response as other tool results are,
+// but keeps continuation parameters: the generic `token=` rule would replace a
+// `$skiptoken` value, and the gateway would then refuse the next page's
+// request. The credentials Orka injected are still removed everywhere first,
+// continuation parameters included.
+func redactForwardedText(text string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" {
+			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+		}
+	}
+	var kept []string
+	masked := forwardContinuationRe.ReplaceAllStringFunc(text, func(match string) string {
+		parts := forwardContinuationRe.FindStringSubmatch(match)
+		kept = append(kept, parts[2])
+		return parts[1] + "\x00orka-forward-continuation-" + strconv.Itoa(len(kept)-1) + "\x00"
+	})
+	redacted := redactToolSensitiveText(masked)
+	for index, value := range kept {
+		redacted = strings.Replace(redacted, "\x00orka-forward-continuation-"+strconv.Itoa(index)+"\x00", value, 1)
+	}
+	return redacted
 }
