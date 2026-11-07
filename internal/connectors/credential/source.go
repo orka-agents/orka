@@ -210,7 +210,7 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	}
 	grant, err := grants.GetConnectorCredentialGrant(ctx, ref)
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConnectorCustodyTombstoned) {
-		return errors.New("connection holds no credential; the person must reconnect")
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionNoCredential}
 	}
 	if err != nil {
 		return err
@@ -218,7 +218,7 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	// The exchanged credential carried the frozen grant: resolution refuses
 	// any other before it releases material (frozenGrantHolds).
 	if grant != req.Frozen.GrantSequence {
-		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
+		return &outboundaccess.ConnectionRequiredError{Kind: outboundaccess.ConnectionRelinked}
 	}
 	return nil
 }

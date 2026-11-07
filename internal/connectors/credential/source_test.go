@@ -1189,8 +1189,10 @@ func TestRequireLiveConnectionTrustsCustodyOverLaggingStatus(t *testing.T) {
 	if h.reload().Status.GrantSequence != request.Frozen.GrantSequence {
 		t.Fatal("the status must still show the frozen grant")
 	}
-	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "re-linked") {
-		t.Fatalf("err = %v, want the stale grant refused", err)
+	err = h.source.RequireLiveConnection(context.Background(), request)
+	if refusal, ok := errors.AsType[*outboundaccess.ConnectionRequiredError](err); !ok ||
+		refusal.Kind != outboundaccess.ConnectionRelinked || !strings.Contains(err.Error(), "re-linked") {
+		t.Fatalf("err = %v, want the stale grant refused as a re-linked Connection", err)
 	}
 
 	// Custody that cannot report its grant fails closed.
