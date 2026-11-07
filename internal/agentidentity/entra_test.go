@@ -154,6 +154,29 @@ func TestEntraRefusalCarriesOnlyTheErrorCode(t *testing.T) {
 	}
 }
 
+// TestEntraRefusalNamesOnlyKnownErrorCodes covers an issuer or proxy that
+// puts arbitrary text in the OAuth error field: only a known code reaches the
+// returned error, which feeds Agent status and a metric label.
+func TestEntraRefusalNamesOnlyKnownErrorCodes(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "assertion=eyJsecret identity=" + testIdentity})
+	}))
+	t.Cleanup(server.Close)
+	issuer := &EntraIssuer{
+		Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
+		Credential: func() (string, error) { return testControllerToken, nil },
+		HTTPClient: server.Client(),
+	}
+	_, err := issuer.ExchangeToken(context.Background(), testIdentity)
+	if err == nil || !strings.Contains(err.Error(), "unknown_error") || strings.Contains(err.Error(), "eyJsecret") {
+		t.Fatalf("error = %v, want unknown_error and none of the response text", err)
+	}
+	if got := entraOAuthErrorCode(" invalid_grant "); got != "invalid_grant" {
+		t.Fatalf("known code = %q", got)
+	}
+}
+
 func TestSourceRefusesAChangedIssuerInstanceAndOtherModes(t *testing.T) {
 	fake := &fakeEntra{}
 	now := time.Now()
@@ -176,6 +199,15 @@ func TestSourceRefusesAChangedIssuerInstanceAndOtherModes(t *testing.T) {
 	delegated.Mode = "Delegated"
 	if _, err := source.AgentIdentityToken(context.Background(), delegated); err == nil {
 		t.Fatal("an unsupported mode must be refused")
+	}
+	// After a restart without Agent use enforcement, a Task bound earlier
+	// gets no token, and the issuer is not asked.
+	before := fake.count()
+	unenforced := &Source{Config: configuredConfig(), Entra: source.Entra}
+	unenforced.Config.AgentUseAuthorization = false
+	if _, err := unenforced.AgentIdentityToken(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), "agent-use-authorization-enabled") || fake.count() != before {
+		t.Fatalf("unenforced: error = %v, issuer requests %d -> %d", err, before, fake.count())
 	}
 }
 
@@ -330,6 +362,7 @@ func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
 		"server error":            {status: http.StatusServiceUnavailable, body: map[string]any{"error": "server_error"}, unavailable: true},
 		"throttled":               {status: http.StatusTooManyRequests, body: map[string]any{}, unavailable: true},
 		"temporarily unavailable": {status: http.StatusBadRequest, body: map[string]any{"error": "temporarily_unavailable"}, unavailable: true},
+		"server error as 400":     {status: http.StatusBadRequest, body: map[string]any{"error": "server_error"}, unavailable: true},
 		"refused":                 {status: http.StatusBadRequest, body: map[string]any{"error": "unauthorized_client", "error_codes": []int{7000112}}},
 	} {
 		t.Run(name, func(t *testing.T) {
