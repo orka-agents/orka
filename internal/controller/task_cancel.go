@@ -13,7 +13,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -74,7 +73,7 @@ func requestedAgentTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 // cancelRequestedAgentTask ends an Agent Task whose cancellation was
 // requested, re-reading it so a Task that finished or was replaced meanwhile
 // is left alone.
-func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *corev1alpha1.Task) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	var cancelled *corev1alpha1.Task
 	message := ""
@@ -111,11 +110,11 @@ func (r *TaskReconciler) cancelRequestedAgentTask(ctx context.Context, task *cor
 		return nil
 	})
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if cancelled != nil {
 		_ = r.recordTaskLifecycleEvent(ctx, cancelled, execevents.ExecutionEventTypeTaskCancelled,
 			execevents.ExecutionEventSeverityWarning, message)
 	}
-	return ctrl.Result{}, nil
+	return nil
 }
