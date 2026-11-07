@@ -965,6 +965,8 @@ func main() {
 			vendorWorkerServiceAccountName,
 		}, ",")
 	}
+	// The API applies admission's worker rules to the same identities.
+	api.SetWorkerServiceAccountNames(workerenv.SplitCSV(taskProvenanceAdmissionTrustedServiceAccounts))
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog.Info("configured isolated controller mode", "mode", mode, "namespace", watchNamespace)

@@ -162,7 +162,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   ceiling (which Agents a parent may hand work to), which is outside this ADR.
   Workers hold Agent `use` broadly, so Task provenance admission also refuses
   a worker's Task that has no parent Task and names an identity-bound Agent;
-  otherwise it would bind as a root Task that no `use` check covered.
+  otherwise it would bind as a root Task that no `use` check covered. The API
+  refuses the same request from a worker's ServiceAccount, because it writes
+  Tasks as the controller, which admission trusts.
 
 ### Stage 2: bind an identity and attribute actions to it
 

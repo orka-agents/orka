@@ -363,7 +363,7 @@ func authorizeAndStampToolTaskCreate(ctx context.Context, reader client.Reader, 
 	if err := authorizeContextTokenTaskCreateObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
-	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
+	if err := authorizeKubernetesTaskCreate(ctx, reader, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
@@ -375,7 +375,7 @@ func authorizeAndStampTaskContext(ctx context.Context, reader client.Reader, kub
 	if err := authorizeContextTokenTaskContextObject(ctx, reader, token, cfg, action, task); err != nil {
 		return err
 	}
-	if err := authorizeKubernetesTaskCreate(ctx, kubeClient, ui, task); err != nil {
+	if err := authorizeKubernetesTaskCreate(ctx, reader, kubeClient, ui, task); err != nil {
 		return err
 	}
 	stampTaskRequesterFromUserInfo(task, ui)
