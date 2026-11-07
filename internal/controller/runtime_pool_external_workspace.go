@@ -803,7 +803,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "exact runtime materialization is unavailable for drain")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, nil, externalRetirementAction(w, deleting)); err != nil {
 					return ctrl.Result{}, err
 				}
 				validationPool, cfg, err := runtimePoolPodTemplateValidationTarget(pool, w.Spec.Workload.Runtime.Template)
@@ -822,7 +822,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 				if err != nil || !runtimePoolRolloutActiveInstanceMatches(pool.Status.ActiveInstance, active) {
 					return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleDraining, "runtime drain fence changed")
 				}
-				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status); err != nil {
+				if err := r.observeExternalRetiringWorkerEviction(ctx, pool, w, &probe.Status, externalRetirementAction(w, deleting)); err != nil {
 					return ctrl.Result{}, err
 				}
 				if !probe.Status.Drain.Requested {

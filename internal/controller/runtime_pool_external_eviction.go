@@ -282,15 +282,21 @@ func (r *RuntimePoolReconciler) recordExternalRuntimeEviction(
 // observeExternalRetiringWorkerEviction keeps collecting eviction signals
 // while a retirement drain runs: termination can begin during a drain that
 // started for another reason, and the Pod can reveal a shorter window than a
-// supervisor signal recorded earlier.
-func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, status *harnessv2.StatusResponse) error {
+// supervisor signal recorded earlier. The action is the retirement the drain
+// will authorize; it decides whether the eviction is reported as draining for
+// suspension.
+func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace, status *harnessv2.StatusResponse, action workspacev1alpha1.WorkloadRetirementAction) error {
 	a := w.Status.Allocation
 	if a == nil || a.Startup == nil {
 		return nil
 	}
 	if _, err := r.attestExternalWorkspaceStartup(ctx, w.Spec.Workload, a.Startup); err != nil {
 		if eviction := (*externalWorkerEvictionError)(nil); errors.As(err, &eviction) {
-			if _, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline, false); err != nil {
+			record, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceWorker, eviction.signaledAt, eviction.deadline, false)
+			if err != nil {
+				return err
+			}
+			if err := r.markExternalRetiringEviction(ctx, pool, record, action); err != nil {
 				return err
 			}
 		}
@@ -300,11 +306,40 @@ func (r *RuntimePoolReconciler) observeExternalRetiringWorkerEviction(ctx contex
 		if now := r.now().UTC(); signaledAt.IsZero() || signaledAt.After(now) {
 			signaledAt = now
 		}
-		if _, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceSupervisor, signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), false); err != nil {
+		record, err := r.recordExternalRuntimeEviction(ctx, pool, w, externalEvictionSourceSupervisor, signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), false)
+		if err != nil {
+			return err
+		}
+		if err := r.markExternalRetiringEviction(ctx, pool, record, action); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// markExternalRetiringEviction publishes an eviction observed during a
+// retirement drain. A Suspend retirement drains for suspension, so its
+// settlement can later report EvictionSuspended; any other retirement cannot
+// preserve the instance's data. A condition already reporting this eviction,
+// including an expired window, is preserved; one left by an earlier instance
+// is replaced.
+func (r *RuntimePoolReconciler) markExternalRetiringEviction(ctx context.Context, pool *corev1alpha1.RuntimePool, record *externalRuntimeEviction, action workspacev1alpha1.WorkloadRetirementAction) error {
+	if record == nil {
+		return nil
+	}
+	reason := corev1alpha1.RuntimePoolReasonEvictionNotSuspendable
+	message := "runtime worker is terminating during a retirement that does not preserve data; uncertain work is never replayed"
+	if action == workspacev1alpha1.WorkloadRetirementSuspend {
+		reason = corev1alpha1.RuntimePoolReasonEvictionDraining
+		message = fmt.Sprintf("runtime worker is terminating; draining for data-only suspension before %s", record.Deadline.Format(time.RFC3339))
+	}
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction); condition != nil && condition.Status == metav1.ConditionTrue &&
+		(condition.Reason == reason || (condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded && !r.now().Before(record.Deadline))) {
+		return nil
+	}
+	base := pool.DeepCopy()
+	r.setRuntimePoolCondition(pool, &pool.Status, corev1alpha1.RuntimePoolConditionWorkerEviction, metav1.ConditionTrue, reason, message)
+	return r.Status().Patch(ctx, pool, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // externalEvictionProgress closes admission and reports the eviction

@@ -416,3 +416,47 @@ func TestExternalEvictionDeadlineIsRecheckedAfterTheDrainProbe(t *testing.T) {
 		t.Fatalf("deadline condition = %#v", condition)
 	}
 }
+
+// Termination first observed during a retirement drain that will suspend is
+// reported as draining, replacing an earlier instance's settled result, so the
+// suspension it ends in is reported as EvictionSuspended.
+func TestExternalEvictionDuringSuspendRetirementReportsDrainingAndSettles(t *testing.T) {
+	f, _, pod, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	f.r.setRuntimePoolCondition(&pool, &pool.Status, corev1alpha1.RuntimePoolConditionWorkerEviction, metav1.ConditionFalse,
+		corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded, "an earlier instance was lost")
+	if err := f.r.Status().Update(t.Context(), &pool); err != nil {
+		t.Fatal(err)
+	}
+	startRetirementDrain(t, f)
+	probe := quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkerEviction)
+	probe.Status.Drain.RequestedAt = runtimePoolTestNow
+	f.supervisor.probe = probe
+	runtimePoolReconcile(t, f.r, f.pool)
+	if record := evictionRecord(t, f); record == nil || record.Source != externalEvictionSourceSupervisor {
+		t.Fatalf("eviction during retirement drain = %#v", record)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDraining {
+		t.Fatalf("eviction observed during a Suspend retirement condition = %#v, want EvictionDraining", condition)
+	}
+	for range 2 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDraining {
+		t.Fatalf("later drain status writes replaced the eviction condition: %#v", condition)
+	}
+	w := f.currentWorkspace(t)
+	if retirement := w.Spec.Retirement; retirement == nil || retirement.Action != workspacev1alpha1.WorkloadRetirementSuspend {
+		t.Fatalf("quiescent retirement drain did not earn Suspend: %#v", retirement)
+	}
+	w.Status.Allocation.State = workspacev1alpha1.AllocationStopped
+	w.Status.Allocation.Startup = nil
+	w.Status.Allocation.RetainedData = &workspacev1alpha1.RetainedDataReference{ID: "retained", SourceInstance: w.Status.Allocation.Identity, ProofSHA256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
+		t.Fatal(err)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionSuspended {
+		t.Fatalf("settled eviction condition = %#v, want EvictionSuspended", condition)
+	}
+}
