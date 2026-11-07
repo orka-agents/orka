@@ -58,23 +58,62 @@ func ValidateSpec(policy *corev1alpha1.OutboundAccessPolicy) *Issue {
 	if policy == nil {
 		return invalid("policy is required")
 	}
-	direct, gateway, connection := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection
+	direct, gateway, connection, identity := policy.Spec.Direct, policy.Spec.Gateway, policy.Spec.Connection, policy.Spec.AgentIdentity
 	modes := 0
-	for _, set := range []bool{direct != nil, gateway != nil, connection != nil} {
+	for _, set := range []bool{direct != nil, gateway != nil, connection != nil, identity != nil} {
 		if set {
 			modes++
 		}
 	}
 	if modes != 1 {
-		return invalid("exactly one of direct, gateway, or connection is required")
+		return invalid("exactly one of direct, gateway, connection, or agentIdentity is required")
 	}
 	switch {
 	case direct != nil:
 		return validateDirectSpec(direct)
 	case connection != nil:
 		return validateConnectionSpec(connection)
+	case identity != nil:
+		return validateAgentIdentitySpec(identity)
 	}
 	return validateGatewaySpec(gateway)
+}
+
+// AgentIdentityMode returns the policy's mode with its default applied.
+func AgentIdentityMode(identity *corev1alpha1.AgentIdentityOutboundAccess) string {
+	if identity == nil || strings.TrimSpace(identity.Mode) == "" {
+		return corev1alpha1.OutboundAgentIdentityModeSelf
+	}
+	return strings.TrimSpace(identity.Mode)
+}
+
+func validateAgentIdentitySpec(identity *corev1alpha1.AgentIdentityOutboundAccess) *Issue {
+	if AgentIdentityMode(identity) != corev1alpha1.OutboundAgentIdentityModeSelf {
+		return invalid("agentIdentity mode must be Self")
+	}
+	if identity.Entra == nil {
+		return invalid("agentIdentity requires an entra target")
+	}
+	resource := identity.Entra.Resource
+	if strings.TrimSpace(resource) != resource || resource == "" || strings.ContainsAny(resource, " \t\r\n") {
+		return invalid("agentIdentity entra.resource is required and must not contain whitespace")
+	}
+	if !strings.HasPrefix(resource, "https://") && !strings.HasPrefix(resource, "api://") {
+		return invalid("agentIdentity entra.resource must start with https:// or api://")
+	}
+	if strings.HasSuffix(resource, "/.default") {
+		return invalid("agentIdentity entra.resource names the resource; Orka appends /.default")
+	}
+	// Orka appends /.default, so a query or fragment would leave a scope
+	// Entra refuses on every call.
+	if strings.ContainsAny(resource, "?#") {
+		return invalid("agentIdentity entra.resource must not contain a query or fragment")
+	}
+	// Entra refuses a scope without an authority, such as https://:123.
+	if parsed, err := url.Parse(resource); err != nil || parsed.Hostname() == "" || parsed.User != nil {
+		return invalid("agentIdentity entra.resource must name a host or application ID")
+	}
+	return validateCredentialOutput(identity.Output)
 }
 
 func validateConnectionSpec(connection *corev1alpha1.ConnectionOutboundAccess) *Issue {
@@ -340,6 +379,11 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 	}
 	if connection := policy.Spec.Connection; connection != nil {
 		return resolveConnectorProvider(ctx, reader, policy.Namespace, connection.ProviderRef.Name)
+	}
+	if policy.Spec.AgentIdentity != nil {
+		// The identity comes from the Task binding at call time; the policy
+		// references nothing in the cluster.
+		return nil, nil
 	}
 	if policy.Spec.Direct != nil {
 		direct := policy.Spec.Direct

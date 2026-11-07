@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/orka-agents/orka/internal/agentcontext"
@@ -36,6 +37,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/executionmode"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
 const (
@@ -58,12 +60,35 @@ type AgentReconciler struct {
 	// APIReader reads live state for identity claims, so two Agents never
 	// claim one identity from a stale cache.
 	APIReader client.Reader
+	// IdentityVerifier proves identities with their issuer. Nil leaves them
+	// declared but unverified.
+	IdentityVerifier AgentIdentityVerifier
+
+	// issuerBackoff holds back verification for every Agent after the
+	// issuer could not answer, so an outage costs one timeout, not one per
+	// Agent on the single reconcile worker.
+	issuerBackoff struct {
+		sync.Mutex
+		until time.Time
+	}
+	// verifications holds each Agent's last answer from its issuer until it
+	// may be asked again, so the Agent's own status writes, which requeue
+	// it, never ask the issuer again early.
+	verifications struct {
+		sync.Mutex
+		byAgent map[types.NamespacedName]agentIdentityVerification
+	}
+}
+
+// AgentIdentityVerifier proves an Agent's identity with its issuer.
+type AgentIdentityVerifier interface {
+	Verify(context.Context, *corev1alpha1.Agent) error
 }
 
 const (
 	// conditionTypeIdentityVerified reports whether an Agent's identity has
 	// been verified with its issuer.
-	conditionTypeIdentityVerified = "IdentityVerified"
+	conditionTypeIdentityVerified = outboundaccess.AgentConditionIdentityVerified
 	reasonIdentityDeclared        = "Declared"
 )
 
@@ -99,6 +124,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	agent := &corev1alpha1.Agent{}
 	if err := r.Get(ctx, req.NamespacedName, agent); err != nil {
 		if errors.IsNotFound(err) {
+			r.forgetAgentIdentityVerification(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -124,6 +150,10 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if validationErr == nil && claimErr != nil {
 		validationErr = claimErr
 	}
+	identity := r.verifyAgentIdentity(ctx, agent, validationErr)
+	if validationErr == nil && identity.err != nil {
+		validationErr = identity.err
+	}
 
 	// Count active tasks referencing this agent
 	activeTasks, err := r.countActiveTasks(ctx, agent)
@@ -138,7 +168,14 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 
 	// Update status
-	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim)
+	result, err := r.updateStatus(ctx, agent, activeTasks, validationErr, claim, identity)
+	if err == nil && identity.retryAfter > 0 && (result.RequeueAfter == 0 || result.RequeueAfter > identity.retryAfter) {
+		result.RequeueAfter = identity.retryAfter
+	}
+	if err == nil && identity.declared && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReverifyInterval) {
+		// Identities can be disabled or deleted at the issuer at any time.
+		result.RequeueAfter = agentIdentityReverifyInterval
+	}
 	if err == nil && claim != nil && claim.Releasing && (result.RequeueAfter == 0 || result.RequeueAfter > agentIdentityReleaseRecheck) {
 		// The release finishes on a later pass, once bound Tasks are done.
 		result.RequeueAfter = agentIdentityReleaseRecheck
@@ -514,7 +551,7 @@ func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
 }
 
 // updateStatus updates the Agent's status with validation results and active task count.
-func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim) (ctrl.Result, error) {
+func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.Agent, activeTasks int32, validationErr error, claim *corev1alpha1.AgentIdentityClaim, identity agentIdentityState) (ctrl.Result, error) {
 	now := metav1.Now()
 
 	agent.Status.ActiveTasks = activeTasks
@@ -540,21 +577,29 @@ func (r *AgentReconciler) updateStatus(ctx context.Context, agent *corev1alpha1.
 	}
 
 	meta.SetStatusCondition(&agent.Status.Conditions, condition)
-	setAgentIdentityCondition(agent, now)
+	setAgentIdentityCondition(agent, now, identity)
 	observedClaim := agent.Status.IdentityClaim.DeepCopy()
 	agent.Status.IdentityClaim = claim.DeepCopy()
 
 	activeCount := activeTasks // capture for closure
 	lastUsed := agent.Status.LastUsed
+	decidedUID, decidedGeneration := agent.UID, agent.Generation
 	if err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		if err := r.Get(ctx, types.NamespacedName{Name: agent.Name, Namespace: agent.Namespace}, agent); err != nil {
 			return err
+		}
+		// Validation, the claim, and identity verification judged one
+		// generation of one Agent. Never record them on a recreated or
+		// edited Agent, which could name another identity; the edit
+		// requeues the Agent, and the error retries this pass.
+		if agent.UID != decidedUID || agent.Generation != decidedGeneration {
+			return fmt.Errorf("agent changed while its status was being decided")
 		}
 		agent.Status.ActiveTasks = activeCount
 		agent.Status.Ready = validationErr == nil
 		agent.Status.LastUsed = lastUsed
 		meta.SetStatusCondition(&agent.Status.Conditions, condition)
-		setAgentIdentityCondition(agent, now)
+		setAgentIdentityCondition(agent, now, identity)
 		// The claim was decided from observedClaim; never write it over a
 		// claim that changed since.
 		if !apiequality.Semantic.DeepEqual(agent.Status.IdentityClaim, observedClaim) &&

@@ -269,8 +269,19 @@ controller trusts the flag and does not detect a missing policy) and a
 `runtime.ceiling.allowedTools`, and a delegated child Task can use it only when
 it is the parent's own Agent. Task bindings freeze the identity and the issuer
 instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
-`IdentityVerified` condition stays `False` with reason `Declared`: the identity
-is an authorized declaration, not yet proven with the issuer.
+`IdentityVerified` condition turns `True` once the controller has obtained a token
+for the identity from its issuer, and the controller asks again at least hourly; a
+refusal sets it `False`, makes the Agent not Ready, and stops its identity-backed calls; an issuer that cannot answer sets it `Unknown` instead. Tokens for the identity are
+issued only by the controller, through `agentIdentity`-mode outbound access
+policies, and never reach the runtime.
+
+The controller's blueprint credential is a projected token on the node that
+runs it. AI workers can create Jobs in the release namespace, and a privileged
+Pod, or one with a `hostPath` volume, can read any token on its node, this one
+included, whichever ServiceAccount it runs as. Before you turn on agent
+identities, enforce at least the `baseline` Pod Security profile on the release
+namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
+admission control; the chart does not label a namespace it does not create.
 
 ## Secret management
 

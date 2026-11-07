@@ -6,6 +6,7 @@ package agentidentity
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -22,6 +23,27 @@ type EntraConfig struct {
 	// BlueprintClientID is the agent identity blueprint every bound identity
 	// must be a child of.
 	BlueprintClientID string
+	// Authority is the Entra authority URL tokens are requested from;
+	// DefaultEntraAuthority when empty.
+	Authority string
+}
+
+// authority returns the canonical authority: no surrounding space or
+// trailing slash, scheme and host in lower case, the path as given, and
+// DefaultEntraAuthority when unset. Paths are case-sensitive, so they are
+// never folded.
+func (c EntraConfig) authority() string {
+	authority := strings.TrimSuffix(strings.TrimSpace(c.Authority), "/")
+	if authority == "" {
+		return DefaultEntraAuthority
+	}
+	parsed, err := url.Parse(authority)
+	if err != nil || parsed.Host == "" {
+		// Validate refuses it; keep the value as given.
+		return authority
+	}
+	parsed.Scheme, parsed.Host = strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Host)
+	return parsed.String()
 }
 
 // Config is the controller-wide identity configuration.
@@ -58,12 +80,22 @@ func (c Config) Validate() error {
 	if c.Entra == nil {
 		return nil
 	}
-	tenant, blueprint := strings.TrimSpace(c.Entra.TenantID), strings.TrimSpace(c.Entra.BlueprintClientID)
-	if tenant == "" || blueprint == "" {
+	tenant, blueprint := c.Entra.TenantID, c.Entra.BlueprintClientID
+	if strings.TrimSpace(tenant) == "" || strings.TrimSpace(blueprint) == "" {
 		return fmt.Errorf("the Entra agent identity issuer needs both a tenant ID and a blueprint client ID")
 	}
+	// The issuer sends these values as they are, so surrounding space would
+	// reach Entra; they must be bare GUIDs.
 	if !guidPattern.MatchString(tenant) || !guidPattern.MatchString(blueprint) {
-		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs")
+		return fmt.Errorf("the Entra tenant ID and blueprint client ID must be GUIDs without surrounding space")
+	}
+	authority, err := url.Parse(c.Entra.authority())
+	// A bare "?" or "#" parses to an empty query or fragment but still changes
+	// the token endpoint built from the authority, so the delimiters are
+	// refused too.
+	if err != nil || authority.Scheme != "https" || authority.Hostname() == "" || authority.User != nil ||
+		authority.RawQuery != "" || authority.ForceQuery || authority.Fragment != "" || strings.ContainsAny(c.Entra.Authority, "?#") {
+		return fmt.Errorf("the Entra authority must be an https URL with a host and without credentials, query, or fragment")
 	}
 	return nil
 }
@@ -76,8 +108,14 @@ func (c Config) Instance(issuer string) (string, bool) {
 		if c.Entra == nil {
 			return "", false
 		}
-		return "entra:" + strings.ToLower(strings.TrimSpace(c.Entra.TenantID)) + "/" +
-			strings.ToLower(strings.TrimSpace(c.Entra.BlueprintClientID)), true
+		instance := "entra:" + strings.ToLower(strings.TrimSpace(c.Entra.TenantID)) + "/" +
+			strings.ToLower(strings.TrimSpace(c.Entra.BlueprintClientID))
+		// Tokens come from the authority too, so restarting against another
+		// one must fail bound Tasks closed. The public cloud stays implicit.
+		if authority := c.Entra.authority(); authority != DefaultEntraAuthority {
+			instance += "@" + authority
+		}
+		return instance, true
 	default:
 		return "", false
 	}

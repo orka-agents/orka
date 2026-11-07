@@ -25,6 +25,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,8 +44,14 @@ const (
 	// AdapterConnection injects a person's linked-account credential; the
 	// executor applies it exactly like a direct credential.
 	AdapterConnection = "connection"
-	schemeHTTP        = "http"
-	schemeHTTPS       = "https"
+	// AdapterAgentIdentity injects a credential issued for the Task's frozen
+	// Agent identity; the executor applies it exactly like a direct credential.
+	AdapterAgentIdentity = "agentIdentity"
+	schemeHTTP           = "http"
+	schemeHTTPS          = "https"
+
+	// defaultCredentialPrefix precedes an injected bearer credential.
+	defaultCredentialPrefix = "Bearer "
 
 	// DefaultCredentialReadScope authorizes use of cluster-managed credential material.
 	DefaultCredentialReadScope = "orka:secrets:credentials:read"
@@ -89,6 +96,64 @@ type ResolveRequest struct {
 	// rather than its declared URL; connection mode refuses it before any
 	// credential work.
 	MCPBacked bool
+	// AgentIdentity is the identity frozen into the executing Task's binding.
+	// agentIdentity-mode policies act as this identity and no other; nil
+	// fails them closed.
+	AgentIdentity *AgentIdentityBinding
+}
+
+// AgentIdentityBinding is the executing Task's frozen Agent identity.
+type AgentIdentityBinding struct {
+	Identity        corev1alpha1.AgentExecutionIdentityRef
+	AgentNamespace  string
+	AgentName       string
+	AgentUID        string
+	AgentGeneration int64
+	TaskUID         string
+	// TaskCreated is the Task's creation time. Only a Task created after the
+	// claim was granted was checked for Agent use while the Agent named the
+	// identity.
+	TaskCreated time.Time
+}
+
+// AgentIdentityTokenRequest asks the issuer for a credential for one frozen
+// identity, mode, and target.
+type AgentIdentityTokenRequest struct {
+	Identity corev1alpha1.AgentExecutionIdentityRef
+	Mode     string
+	// Resource is the issuer-typed target, for Entra the resource whose
+	// /.default scope is requested.
+	Resource string
+	Policy   PolicyIdentity
+}
+
+// AgentConditionIdentityVerified is the Agent condition reporting whether its
+// issuer proved the identity, and AgentReasonIdentityVerificationFailed the
+// reason for a definitive refusal, as opposed to an issuer that could not
+// answer or an identity not verified yet.
+const (
+	AgentConditionIdentityVerified        = "IdentityVerified"
+	AgentReasonIdentityVerificationFailed = "VerificationFailed"
+)
+
+// issuerRefusedIdentity fails closed once the issuer has definitively refused
+// the Agent's identity, for example because it was disabled or deleted, so a
+// policy token still cached from before is not served for new calls. An
+// issuer that could not answer, or an identity not verified yet, does not
+// refuse here; the issuer's own answer decides those calls.
+func issuerRefusedIdentity(agent *corev1alpha1.Agent) error {
+	condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionIdentityVerified)
+	if condition != nil && condition.Status == metav1.ConditionFalse && condition.Reason == AgentReasonIdentityVerificationFailed {
+		return errors.New("the issuer refused the Task's bound Agent identity when it was last verified")
+	}
+	return nil
+}
+
+// AgentIdentityTokenSource issues Agent identity credentials. It exists only
+// in the controller; worker Pods have no implementation and therefore fail
+// closed on agentIdentity-mode policies.
+type AgentIdentityTokenSource interface {
+	AgentIdentityToken(context.Context, AgentIdentityTokenRequest) (string, error)
 }
 
 // ToolBinding is the executing Tool's identity for connector checks.
@@ -239,6 +304,14 @@ type KubernetesResolver struct {
 	// policies. Nil means this process may not execute connector-backed
 	// tools.
 	Connections ConnectionCredentialSource
+	// AgentIdentities issues credentials for agentIdentity-mode policies. Nil
+	// means this process may not act as an Agent identity.
+	AgentIdentities AgentIdentityTokenSource
+	// ReservedServiceAccount is the controller's own ServiceAccount. No
+	// policy may request a token for it: the token would carry the
+	// controller's authority, and the Entra agent identity blueprint trusts
+	// it, to whatever endpoint the policy names.
+	ReservedServiceAccount ReservedServiceAccount
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -290,7 +363,7 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		}
 		req.TransactionToken = token
 	}
-	if policy.Spec.Direct != nil || policy.Spec.Connection != nil {
+	if injectsCredential(policy) {
 		if !strings.EqualFold(strings.TrimSpace(req.TargetScheme), schemeHTTPS) {
 			return Resolution{}, errors.New("credential-injecting outbound access requires an HTTPS Tool URL")
 		}
@@ -309,6 +382,8 @@ func (r *KubernetesResolver) Resolve(ctx context.Context, req ResolveRequest) (R
 		return r.resolveDirect(ctx, policy, req)
 	case policy.Spec.Connection != nil:
 		return r.resolveConnection(ctx, policy, req)
+	case policy.Spec.AgentIdentity != nil:
+		return r.resolveAgentIdentity(ctx, policy, req)
 	}
 	return r.resolveGateway(ctx, policy)
 }
@@ -516,7 +591,7 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		return Resolution{}, errors.New("connection is readOnly; write tools are not available")
 	}
 	header := defaultCredentialHeader
-	prefix := "Bearer "
+	prefix := defaultCredentialPrefix
 	if output := policy.Spec.Connection.Output; output != nil {
 		if strings.TrimSpace(output.Header) != "" {
 			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
@@ -533,6 +608,116 @@ func (r *KubernetesResolver) resolveConnection(ctx context.Context, policy *core
 		ConnectionUID:    credential.ConnectionUID,
 		Parameters:       declared.Parameters,
 	}, nil
+}
+
+// injectsCredential reports whether the policy's adapter attaches a
+// credential to the Tool's own request, rather than routing it.
+func injectsCredential(policy *corev1alpha1.OutboundAccessPolicy) bool {
+	return policy.Spec.Direct != nil || policy.Spec.Connection != nil || policy.Spec.AgentIdentity != nil
+}
+
+func (r *KubernetesResolver) resolveAgentIdentity(ctx context.Context, policy *corev1alpha1.OutboundAccessPolicy, req ResolveRequest) (Resolution, error) {
+	if r.AgentIdentities == nil {
+		return Resolution{}, errors.New("agent identity credentials are issued only by the controller")
+	}
+	binding := req.AgentIdentity
+	if binding == nil || strings.TrimSpace(binding.Identity.ID) == "" {
+		return Resolution{}, errors.New("agent identity outbound access requires a Task bound to an Agent with an identity")
+	}
+	if err := r.requireLiveIdentityAgent(ctx, *binding); err != nil {
+		return Resolution{}, err
+	}
+	identity := policy.Spec.AgentIdentity
+	if identity.Entra == nil || binding.Identity.Issuer != corev1alpha1.AgentIdentityIssuerEntra {
+		return Resolution{}, fmt.Errorf("agent identity outbound access policy %q targets an issuer the Task's identity is not from", policy.Name)
+	}
+	// The credential is for one fixed destination. A Tool whose requests go
+	// elsewhere, or whose URL the call's arguments rewrite, could send it to
+	// a host the policy author never chose.
+	if req.MCPBacked {
+		return Resolution{}, errors.New("agent identity outbound access policies are not supported on MCP-backed tools")
+	}
+	if strings.Contains(req.Tool.URL, "{{") {
+		return Resolution{}, errors.New("agent identity outbound access requires a Tool URL without template placeholders")
+	}
+	if req.Tool.Builtin {
+		return Resolution{}, errors.New("a built-in tool has no outbound access policy")
+	}
+	token, err := r.AgentIdentities.AgentIdentityToken(ctx, AgentIdentityTokenRequest{
+		Identity: binding.Identity,
+		Mode:     AgentIdentityMode(identity),
+		Resource: identity.Entra.Resource,
+		Policy:   PolicyIdentity{UID: string(policy.UID), Generation: policy.Generation},
+	})
+	if err != nil {
+		return Resolution{}, fmt.Errorf("issue agent identity credential: %w", err)
+	}
+	if strings.TrimSpace(token) == "" {
+		return Resolution{}, errors.New("agent identity issuer returned an empty credential")
+	}
+	// The Agent can lose its identity, or be deleted, while the issuer
+	// answers; the credential is released only while it still may be used.
+	if err := r.requireLiveIdentityAgent(ctx, *binding); err != nil {
+		return Resolution{}, fmt.Errorf("the Agent's identity changed while its credential was issued: %w", err)
+	}
+	header := defaultCredentialHeader
+	prefix := defaultCredentialPrefix
+	if output := identity.Output; output != nil {
+		if strings.TrimSpace(output.Header) != "" {
+			header = http.CanonicalHeaderKey(strings.TrimSpace(output.Header))
+		}
+		if output.Prefix != nil {
+			prefix = *output.Prefix
+		}
+	}
+	return Resolution{
+		Adapter:          AdapterAgentIdentity,
+		CredentialHeader: header,
+		CredentialValue:  prefix + token,
+		SensitiveValues:  compactSensitiveValues([]string{token}),
+	}, nil
+}
+
+// requireLiveIdentityAgent checks that the Task's bound Agent may still use
+// its identity. It runs before a credential is requested and again before
+// one is released, since issuing it can take seconds.
+func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, binding AgentIdentityBinding) error {
+	// The bound Agent must still exist, hold the identity, and name it:
+	// deleting the Agent, a claim that moved to another Agent, or the owner
+	// removing or changing the identity stops its Tasks' calls at once. The
+	// spec is checked as well as the claim because the claim is marked
+	// releasing only when the Agent next reconciles. A claim being released
+	// is still held, so no other Agent can take the identity while bound
+	// Tasks run, but it is no longer used.
+	live := &corev1alpha1.Agent{}
+	if err := r.Reader.Get(ctx, client.ObjectKey{Namespace: binding.AgentNamespace, Name: binding.AgentName}, live); err != nil {
+		return fmt.Errorf("resolve the Task's bound Agent: %w", err)
+	}
+	// Deleting the Agent stops its Tasks' calls at once, even while a
+	// finalizer keeps the object readable.
+	if !live.DeletionTimestamp.IsZero() {
+		return errors.New("the Task's bound Agent is being deleted")
+	}
+	if string(live.UID) != binding.AgentUID || live.Status.IdentityClaim == nil ||
+		live.Status.IdentityClaim.Issuer != binding.Identity.Issuer || live.Status.IdentityClaim.ID != binding.Identity.ID {
+		return errors.New("the Task's bound Agent no longer holds its identity")
+	}
+	issuer, id, named := live.IdentityRef()
+	if live.Status.IdentityClaim.Releasing || !named || issuer != binding.Identity.Issuer || id != binding.Identity.ID {
+		return errors.New("the Task's bound Agent no longer names its identity")
+	}
+	// A claim granted again, for example after it was released or Agent use
+	// authorization was re-enabled, covers only Tasks created since; an
+	// older Task's creation was never checked for this grant. Both times
+	// have one-second precision, so a Task from the grant's own second may
+	// predate it and is refused too.
+	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
+		return errors.New("the Task was created before the Agent's current identity grant")
+	}
+	if err := issuerRefusedIdentity(live); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *KubernetesResolver) exchanger() tokenexchange.Exchanger {
@@ -604,7 +789,7 @@ func (r *KubernetesResolver) resolveDirect(ctx context.Context, policy *corev1al
 		return Resolution{}, fmt.Errorf("outbound resource token exchange failed: %w", err)
 	}
 	header := "Authorization"
-	prefix := "Bearer "
+	prefix := defaultCredentialPrefix
 	if direct.Output != nil {
 		if strings.TrimSpace(direct.Output.Header) != "" {
 			header = http.CanonicalHeaderKey(strings.TrimSpace(direct.Output.Header))
@@ -679,6 +864,9 @@ func (r *KubernetesResolver) resolveTokenSource(ctx context.Context, namespace s
 	case corev1alpha1.OutboundTokenSourceServiceAccount:
 		if r.KubeClient == nil {
 			return resolvedToken{}, errors.New("ServiceAccount token source requires a Kubernetes client")
+		}
+		if r.ReservedServiceAccount.Reserves(namespace, source.ServiceAccountRef.Name) {
+			return resolvedToken{}, errReservedServiceAccount
 		}
 		expiration := int64(600)
 		if source.ServiceAccountRef.ExpirationSeconds != nil {

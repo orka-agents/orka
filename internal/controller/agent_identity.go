@@ -22,6 +22,7 @@ import (
 	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/outboundaccess"
 )
 
 // errIdentityClaimPending marks a Task waiting for its Agent to hold the
@@ -253,21 +254,178 @@ func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *core
 	return binding.Agent
 }
 
-// setAgentIdentityCondition reports that a declared identity is not yet
-// verified with its issuer, and clears the condition when there is none.
-func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time) {
-	if _, _, ok := agent.IdentityRef(); !ok {
+// agentIdentityReverifyInterval bounds how long a verified identity stays
+// trusted without asking its issuer again.
+const agentIdentityReverifyInterval = time.Hour
+
+const (
+	reasonIdentityVerified           = "Verified"
+	reasonIdentityVerificationFailed = outboundaccess.AgentReasonIdentityVerificationFailed
+	reasonIdentityIssuerUnavailable  = "IssuerUnavailable"
+)
+
+const (
+	// agentIdentityVerifyTimeout bounds one verification, shorter than a
+	// Tool call's token requests, because Agents verify one at a time.
+	agentIdentityVerifyTimeout = 5 * time.Second
+	// agentIdentityIssuerBackoff is how long every Agent skips verification
+	// after the issuer could not answer.
+	agentIdentityIssuerBackoff = time.Minute
+)
+
+// agentIdentityVerification is an issuer's answer, verified or refused, for
+// one generation of one Agent. It is kept for agentIdentityReverifyInterval;
+// an edit to the Agent asks the issuer again at once.
+type agentIdentityVerification struct {
+	uid        types.UID
+	generation int64
+	issuer, id string
+	state      agentIdentityState
+	until      time.Time
+}
+
+// agentIdentityState is the outcome of verifying an Agent's identity.
+type agentIdentityState struct {
+	declared bool
+	verified bool
+	// unavailable reports that the issuer could not answer; err is set too,
+	// so the Agent is not Ready until it is verified.
+	unavailable bool
+	// retryAfter is when verification may be tried again.
+	retryAfter time.Duration
+	err        error
+}
+
+// verifyAgentIdentity asks the issuer to prove a declared identity. A
+// configuration that already failed validation is not sent to the issuer.
+// After the issuer could not answer, no Agent asks it again until the
+// back-off ends; a refusal from the issuer is not retried early.
+func (r *AgentReconciler) verifyAgentIdentity(ctx context.Context, agent *corev1alpha1.Agent, validationErr error) agentIdentityState {
+	issuer, id, ok := agent.IdentityRef()
+	if !ok {
+		return agentIdentityState{}
+	}
+	state := agentIdentityState{declared: true}
+	key := types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}
+	// A refusal from the issuer stands until the issuer verifies the identity
+	// again: an edit that fails validation, or an issuer that cannot answer,
+	// must not turn it back into a merely declared identity whose cached
+	// tokens Tools could still receive.
+	refusal, refused := r.lastIdentityRefusal(key, agent.UID, issuer, id)
+	if validationErr != nil || r.IdentityVerifier == nil {
+		if refused {
+			return refusal
+		}
+		return state
+	}
+	unavailable := func(wait time.Duration) agentIdentityState {
+		if refused {
+			refusal.retryAfter = wait
+			return refusal
+		}
+		state.unavailable, state.retryAfter = true, wait
+		state.err = fmt.Errorf("identity %s/%s could not be verified: the issuer is unavailable; retrying in %s",
+			issuer, id, wait.Round(time.Second))
+		return state
+	}
+	r.verifications.Lock()
+	cached, found := r.verifications.byAgent[key]
+	r.verifications.Unlock()
+	if found && cached.uid == agent.UID && cached.generation == agent.Generation &&
+		cached.issuer == issuer && cached.id == id {
+		if remaining := time.Until(cached.until); remaining > 0 {
+			// The Agent is reconciled again when the answer expires, not a
+			// full interval after this pass, so it is never kept past it.
+			answer := cached.state
+			answer.retryAfter = remaining
+			return answer
+		}
+	}
+	r.issuerBackoff.Lock()
+	wait := time.Until(r.issuerBackoff.until)
+	r.issuerBackoff.Unlock()
+	if wait > 0 {
+		return unavailable(wait)
+	}
+	verifyCtx, cancel := context.WithTimeout(ctx, agentIdentityVerifyTimeout)
+	defer cancel()
+	remember := func(answer agentIdentityState) agentIdentityState {
+		r.verifications.Lock()
+		if r.verifications.byAgent == nil {
+			r.verifications.byAgent = map[types.NamespacedName]agentIdentityVerification{}
+		}
+		r.verifications.byAgent[key] = agentIdentityVerification{
+			uid: agent.UID, generation: agent.Generation, issuer: issuer, id: id,
+			state: answer, until: time.Now().Add(agentIdentityReverifyInterval),
+		}
+		r.verifications.Unlock()
+		return answer
+	}
+	if err := r.IdentityVerifier.Verify(verifyCtx, agent); err != nil {
+		if errors.Is(err, agentidentity.ErrIssuerUnavailable) || errors.Is(err, context.DeadlineExceeded) {
+			r.issuerBackoff.Lock()
+			r.issuerBackoff.until = time.Now().Add(agentIdentityIssuerBackoff)
+			r.issuerBackoff.Unlock()
+			return unavailable(agentIdentityIssuerBackoff)
+		}
+		state.err = fmt.Errorf("identity %s/%s failed verification: %w", issuer, id, err)
+		return remember(state)
+	}
+	state.verified = true
+	return remember(state)
+}
+
+// lastIdentityRefusal returns the issuer's last refusal of this Agent's
+// identity, whatever generation it was given for and however old it is.
+func (r *AgentReconciler) lastIdentityRefusal(key types.NamespacedName, uid types.UID, issuer, id string) (agentIdentityState, bool) {
+	r.verifications.Lock()
+	cached, found := r.verifications.byAgent[key]
+	r.verifications.Unlock()
+	if !found || cached.uid != uid || cached.issuer != issuer || cached.id != id ||
+		cached.state.err == nil || cached.state.unavailable || cached.state.verified {
+		return agentIdentityState{}, false
+	}
+	refusal := cached.state
+	refusal.retryAfter = 0
+	return refusal, true
+}
+
+// forgetAgentIdentityVerification drops a deleted Agent's last answer.
+func (r *AgentReconciler) forgetAgentIdentityVerification(key types.NamespacedName) {
+	r.verifications.Lock()
+	delete(r.verifications.byAgent, key)
+	r.verifications.Unlock()
+}
+
+// setAgentIdentityCondition reports whether a declared identity is verified
+// with its issuer, and clears the condition when there is none.
+func setAgentIdentityCondition(agent *corev1alpha1.Agent, now metav1.Time, identity agentIdentityState) {
+	if !identity.declared {
 		meta.RemoveStatusCondition(&agent.Status.Conditions, conditionTypeIdentityVerified)
 		return
 	}
-	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+	condition := metav1.Condition{
 		Type:               conditionTypeIdentityVerified,
 		Status:             metav1.ConditionFalse,
 		Reason:             reasonIdentityDeclared,
 		Message:            "declared by an authorized Agent editor; not verified with the issuer",
 		LastTransitionTime: now,
 		ObservedGeneration: agent.Generation,
-	})
+	}
+	switch {
+	case identity.unavailable:
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = reasonIdentityIssuerUnavailable
+		condition.Message = identity.err.Error()
+	case identity.err != nil:
+		condition.Reason = reasonIdentityVerificationFailed
+		condition.Message = identity.err.Error()
+	case identity.verified:
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = reasonIdentityVerified
+		condition.Message = "the issuer issued a token for this identity"
+	}
+	meta.SetStatusCondition(&agent.Status.Conditions, condition)
 }
 
 // agentsSharingIdentity re-validates every other Agent that declares or holds
@@ -495,6 +653,21 @@ func requireParentOwnsIdentityAgent(
 			"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
 	}
 	return nil
+}
+
+// agentIdentityBindingFromTask returns the identity frozen into an ACP Task's
+// binding, for agentIdentity-mode outbound access.
+func agentIdentityBindingFromTask(task *corev1alpha1.Task) *outboundaccess.AgentIdentityBinding {
+	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil ||
+		task.Status.AgentExecutionBinding.Agent.Identity == nil {
+		return nil
+	}
+	agent := task.Status.AgentExecutionBinding.Agent
+	return &outboundaccess.AgentIdentityBinding{
+		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
+		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
+		TaskCreated: task.CreationTimestamp.Time,
+	}
 }
 
 // taskExecutionReasonIdentityUnavailable fails a Task whose bound identity

@@ -74,11 +74,11 @@ func TestValidateSpecConnectionMode(t *testing.T) {
 		"with direct": {spec: corev1alpha1.OutboundAccessPolicySpec{
 			Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
 			Direct:     &corev1alpha1.DirectOutboundAccess{},
-		}, wantErr: "exactly one of direct, gateway, or connection"},
+		}, wantErr: "exactly one of direct, gateway, connection, or agentIdentity"},
 		"with gateway": {spec: corev1alpha1.OutboundAccessPolicySpec{
 			Connection: &corev1alpha1.ConnectionOutboundAccess{ProviderRef: corev1alpha1.LocalObjectReference{Name: "github"}},
 			Gateway:    &corev1alpha1.GatewayOutboundAccess{},
-		}, wantErr: "exactly one of direct, gateway, or connection"},
+		}, wantErr: "exactly one of direct, gateway, connection, or agentIdentity"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			issue := ValidateSpec(&corev1alpha1.OutboundAccessPolicy{Spec: tt.spec})

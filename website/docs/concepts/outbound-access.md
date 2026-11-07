@@ -14,6 +14,7 @@ A policy uses exactly one mode:
 | Mode | What Orka does | Use it when |
 | --- | --- | --- |
 | [`connection`](#linked-account-credentials-connection-mode) | Injects the requesting person's own linked-account token | Agents should act as the person who asked |
+| [`agentIdentity`](#agent-identity-credentials-agentidentity-mode) | Injects a token issued for the Agent's own external identity | The API should see which Agent called, independent of who asked |
 | [`direct`](#direct-credential-exchange) | Exchanges a token at an OAuth endpoint (RFC 8693 or RFC 7523) and injects the resulting Bearer token | The API accepts OAuth access tokens and you run a token service |
 | [`gateway`](#trusted-gateway-routing) | Sends the call through a trusted gateway Service that holds the upstream credentials | You run an API gateway such as [agentgateway](https://github.com/orka-agents/orka-integration-agentgateway) |
 
@@ -44,6 +45,36 @@ The credential belongs to the Task's verified requester, never to the namespace 
 
 Orka's built-in GitHub tools use the same links without a policy: a `ConnectorProvider` declares them with `source: Builtin`, and the controller's MCP broker runs them under the requester's frozen Connection for ACP runtimes (write tools only where brokered approval exists). Native worker Pods keep the Task's own credential Secrets for those tools. The [Connectors guide](../guides/connectors.md) covers the setup.
 
+## Agent identity credentials (agentIdentity mode)
+
+When an Agent is bound to an external identity (`Agent.spec.identity`), a policy in
+`agentIdentity` mode lets a Tool act as that Agent. The first issuer is a Microsoft
+Entra agent identity:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: OutboundAccessPolicy
+metadata:
+  name: graph-as-agent
+spec:
+  agentIdentity:
+    mode: Self
+    entra:
+      resource: https://graph.microsoft.com
+```
+
+The policy never names an identity: the identity always comes from the executing Task's
+binding, which froze it, with the issuer instance, when the Task was bound. Only the
+controller issues these tokens. It authenticates to Entra as the installation's agent
+identity blueprint with its own projected ServiceAccount token, requests an exchange token
+for the agent identity, and then an app-only token for `<resource>/.default`. Tokens are
+injected per Tool call, cached for at most five minutes per policy UID and generation, and
+never reach the runtime, the Task, the execution snapshot, events, or logs. Neither the
+token requests nor the Tool call follow redirects. ACP runtimes reach these Tools through the
+MCP broker; native `type: ai` workers fail closed. The Tool URL must be HTTPS without
+template placeholders, and requests must go to the Tool's declared origin. Permissions are
+the agent identity's app roles in Entra. See [ADR 0039](https://github.com/orka-agents/orka/blob/main/docs/adr/0039-agent-identities.md).
+
 ## Direct credential exchange
 
 ```yaml
@@ -72,7 +103,7 @@ Direct mode supports RFC 8693 and RFC 7523, optional actor tokens, arbitrary tok
 
 Resource responses must be non-empty Bearer tokens with the expected `issued_token_type` for RFC 8693 (RFC 7523 may omit it). `Txn-Token` cannot be the output header, direct mode cannot coexist with `authSecretRef`, and Secret references cannot cross namespaces. Transaction-token scopes cannot expand the parent scope. Context-token Task creation fails closed when a referenced policy is unresolved and requires `orka:secrets:credentials:read` when direct mode reads Secret credentials or mints a ServiceAccount token.
 
-For `ServiceAccount` sources, the controller creates a policy-owned namespaced `Role` whose `serviceaccounts/token` permission is restricted with `resourceNames` to the exact resolved ServiceAccount references. The AI worker is bound only to that Role. Invalid or unresolved policies revoke the binding before execution can mint a token.
+A `ServiceAccount` source may not name the controller's own ServiceAccount: such a policy is not accepted, and the resolver refuses it before requesting a token. For other `ServiceAccount` sources, the controller creates a policy-owned namespaced `Role` whose `serviceaccounts/token` permission is restricted with `resourceNames` to the exact resolved ServiceAccount references. The AI worker is bound only to that Role. Invalid or unresolved policies revoke the binding before execution can mint a token.
 
 The in-process AI worker is a trusted Orka worker; arbitrary task code runs in separate Jobs. These policy grants are shared by trusted AI tasks in the policy namespace. If your threat model includes compromise of the AI worker process itself, use a controller-side credential broker or per-task worker identities rather than enabling ServiceAccount token sources.
 

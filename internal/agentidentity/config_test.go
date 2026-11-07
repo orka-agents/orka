@@ -23,7 +23,8 @@ func configuredConfig() Config {
 	return Config{Entra: &EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint}, AgentUseAuthorization: true}
 }
 
-func identityAgent(name string, created time.Time) corev1alpha1.Agent {
+func identityAgent(created time.Time) corev1alpha1.Agent {
+	const name = "a"
 	return corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a", UID: types.UID("uid-" + name), CreationTimestamp: metav1.NewTime(created)},
 		Spec: corev1alpha1.AgentSpec{
@@ -40,7 +41,9 @@ func TestConfigValidate(t *testing.T) {
 	if err := configuredConfig().Validate(); err != nil {
 		t.Fatalf("configured issuer: %v", err)
 	}
-	for _, entra := range []EntraConfig{{TenantID: testTenant}, {BlueprintClientID: testBlueprint}, {TenantID: "tenant", BlueprintClientID: testBlueprint}} {
+	for _, entra := range []EntraConfig{{TenantID: testTenant}, {BlueprintClientID: testBlueprint}, {TenantID: "tenant", BlueprintClientID: testBlueprint},
+		// The issuer sends the IDs as they are, so padding must not pass.
+		{TenantID: " " + testTenant, BlueprintClientID: testBlueprint}, {TenantID: testTenant, BlueprintClientID: testBlueprint + "\n"}} {
 		if err := (Config{Entra: &entra}).Validate(); err == nil {
 			t.Fatalf("Validate(%+v) = nil, want error", entra)
 		}
@@ -48,7 +51,7 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestValidateAgentRequirements(t *testing.T) {
-	agent := identityAgent("a", time.Now())
+	agent := identityAgent(time.Now())
 	if err := configuredConfig().ValidateAgent(&agent); err != nil {
 		t.Fatalf("valid identity Agent: %v", err)
 	}
@@ -65,7 +68,7 @@ func TestValidateAgentRequirements(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			candidate := identityAgent("a", time.Now())
+			candidate := identityAgent(time.Now())
 			if tc.mutate != nil {
 				tc.mutate(&candidate)
 			}
@@ -81,7 +84,7 @@ func TestValidateAgentRequirements(t *testing.T) {
 }
 
 func TestBindingRefFreezesIssuerInstance(t *testing.T) {
-	agent := identityAgent("a", time.Now())
+	agent := identityAgent(time.Now())
 	ref, err := configuredConfig().BindingRef(&agent)
 	if err != nil {
 		t.Fatal(err)
@@ -91,5 +94,41 @@ func TestBindingRefFreezesIssuerInstance(t *testing.T) {
 	}
 	if *ref != want {
 		t.Fatalf("BindingRef() = %+v, want %+v", *ref, want)
+	}
+}
+
+func TestEntraAuthorityIsPartOfTheIssuerInstance(t *testing.T) {
+	public, _ := configuredConfig().Instance("entra")
+	explicit := configuredConfig()
+	explicit.Entra.Authority = "https://login.microsoftonline.com/"
+	if got, _ := explicit.Instance("entra"); got != public {
+		t.Fatalf("explicit public authority instance = %q, want %q", got, public)
+	}
+	sovereign := configuredConfig()
+	sovereign.Entra.Authority = "https://login.microsoftonline.us"
+	if err := sovereign.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := sovereign.Instance("entra")
+	if got == public || !strings.HasSuffix(got, "@https://login.microsoftonline.us") {
+		t.Fatalf("sovereign instance = %q, want it to name the authority", got)
+	}
+	proxied := configuredConfig()
+	proxied.Entra.Authority = "HTTPS://Proxy.Example/Entra/"
+	if err := proxied.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := proxied.Instance("entra"); !strings.HasSuffix(got, "@https://proxy.example/Entra") {
+		t.Fatalf("proxied instance = %q, want the host folded and the path kept", got)
+	}
+	for _, authority := range []string{
+		"http://login.microsoftonline.us", "https://user@login.example", "https://login.example?x=1", "login.example",
+		"https://login.microsoftonline.com?", "https://login.microsoftonline.com#", "https://:443",
+	} {
+		bad := configuredConfig()
+		bad.Entra.Authority = authority
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("authority %q: Validate() = nil, want an error", authority)
+		}
 	}
 }

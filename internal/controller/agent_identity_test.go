@@ -5,8 +5,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -385,6 +387,167 @@ func TestAgentExecutionIdentityRequiresCheckedTaskSources(t *testing.T) {
 	}
 }
 
+func TestAgentReconcileVerifiesIdentityWithTheIssuer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		wantStatus metav1.ConditionStatus
+		wantReason string
+		wantReady  bool
+	}{
+		"verified": {wantStatus: metav1.ConditionTrue, wantReason: reasonIdentityVerified, wantReady: true},
+		"refused":  {err: errors.New("AADSTS700016"), wantStatus: metav1.ConditionFalse, wantReason: reasonIdentityVerificationFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent := identityBoundTestAgent("reviewer", time.Now())
+			r := setupAgentReconciler()
+			r.Identity = testIdentityConfig()
+			verifier := &countingIdentityVerifier{err: tc.err}
+			r.IdentityVerifier = verifier
+			r.Client = apiServerClockClient(fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build())
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}
+			// The first pass records the claim; its grant time comes from the
+			// API server's record of that write on the next pass. The issuer
+			// is asked only once the claim is granted.
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			if verifier.calls != 0 {
+				t.Fatalf("Verify() called %d times while the claim was pending", verifier.calls)
+			}
+			result, err := r.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if verifier.calls != 1 {
+				t.Fatalf("Verify() called %d times, want once the claim is granted", verifier.calls)
+			}
+			if result.RequeueAfter <= 0 || result.RequeueAfter > agentIdentityReverifyInterval {
+				t.Fatalf("RequeueAfter = %v, want re-verification within an hour", result.RequeueAfter)
+			}
+			stored := &corev1alpha1.Agent{}
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+				t.Fatal(err)
+			}
+			condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified)
+			if condition == nil || condition.Status != tc.wantStatus || condition.Reason != tc.wantReason {
+				t.Fatalf("IdentityVerified = %+v", condition)
+			}
+			// The runtime config here is minimal, so readiness is judged only
+			// by whether verification turned it false.
+			if !tc.wantReady && stored.Status.Ready {
+				t.Fatal("a refused identity must make the Agent not Ready")
+			}
+			// The Agent's own status writes requeue it; those passes reuse
+			// the issuer's answer instead of asking again.
+			for range 3 {
+				if _, err := r.Reconcile(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if verifier.calls != 1 {
+				t.Fatalf("Verify() called %d times across repeated passes, want the answer reused", verifier.calls)
+			}
+			// A reused answer requeues the Agent for when it expires, so a
+			// late pass cannot push verification past the interval.
+			r.verifications.Lock()
+			entry := r.verifications.byAgent[request.NamespacedName]
+			entry.until = time.Now().Add(10 * time.Minute)
+			r.verifications.byAgent[request.NamespacedName] = entry
+			r.verifications.Unlock()
+			reused, err := r.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reused.RequeueAfter <= 0 || reused.RequeueAfter > 10*time.Minute {
+				t.Fatalf("RequeueAfter = %v, want at most the 10m the answer has left", reused.RequeueAfter)
+			}
+			// An edit asks the issuer again at once.
+			if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+				t.Fatal(err)
+			}
+			stored.Generation++
+			if err := r.Update(context.Background(), stored); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Reconcile(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			if verifier.calls != 2 {
+				t.Fatalf("Verify() called %d times after an edit, want the issuer asked again", verifier.calls)
+			}
+		})
+	}
+}
+
+type countingIdentityVerifier struct {
+	err   error
+	calls int
+}
+
+func (v *countingIdentityVerifier) Verify(context.Context, *corev1alpha1.Agent) error {
+	v.calls++
+	return v.err
+}
+
+// apiServerClockClient stamps every Agent it reads with a managedFields write
+// time, as the API server records one for each write.
+func apiServerClockClient(base client.WithWatch) client.WithWatch {
+	written := metav1.NewTime(time.Now().Truncate(time.Second))
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*corev1alpha1.Agent); ok {
+				obj.SetManagedFields([]metav1.ManagedFieldsEntry{{
+					Manager: "manager", Operation: metav1.ManagedFieldsOperationUpdate, Time: &written,
+				}})
+			}
+			return nil
+		},
+	})
+}
+
+type identityVerifierFunc func(context.Context, *corev1alpha1.Agent) error
+
+func (f identityVerifierFunc) Verify(ctx context.Context, agent *corev1alpha1.Agent) error {
+	return f(ctx, agent)
+}
+
+func TestAgentReconcileNeverRecordsAVerificationOnAnEditedAgent(t *testing.T) {
+	// The claim is already granted, so this pass asks the issuer.
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agent).WithStatusSubresource(agent).Build()
+	// While the issuer proves the original identity, an editor names another.
+	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
+		edited := &corev1alpha1.Agent{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(agent), edited); err != nil {
+			return err
+		}
+		edited.Spec.Identity.Entra.AgentIdentityID = "44444444-4444-4444-4444-444444444444"
+		edited.Generation = 2
+		return r.Update(ctx, edited)
+	})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err == nil {
+		t.Fatal("Reconcile() = nil error, want the pass retried for the edited Agent")
+	}
+	stored := &corev1alpha1.Agent{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Generation != 2 {
+		t.Fatalf("Generation = %d, want the edit stored", stored.Generation)
+	}
+	if condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified); condition != nil {
+		t.Fatalf("IdentityVerified = %+v, want nothing recorded for the unverified identity", condition)
+	}
+	if !reflect.DeepEqual(stored.Status.IdentityClaim, agent.Status.IdentityClaim) {
+		t.Fatalf("IdentityClaim = %+v, want the claim left as it was (%+v)", stored.Status.IdentityClaim, agent.Status.IdentityClaim)
+	}
+}
+
 func TestIdentityClaimWaitsForADeletedHoldersTasks(t *testing.T) {
 	now := time.Now()
 	deleted := claimedAgent(identityBoundTestAgent("deleted", now)) // only its Tasks remain
@@ -720,6 +883,124 @@ func TestOnlyTasksCreatedAfterTheGrantBindTheIdentity(t *testing.T) {
 	}
 }
 
+func TestAgentIdentityBindingFromTaskCarriesTheTaskCreationTime(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	task := boundTask("bound", agent, corev1alpha1.TaskPhaseRunning)
+	task.UID = "bound-uid"
+	binding := agentIdentityBindingFromTask(task)
+	if binding == nil || binding.TaskUID != "bound-uid" || !binding.TaskCreated.Equal(task.CreationTimestamp.Time) {
+		t.Fatalf("binding = %+v, want the Task's UID and creation time for the grant check", binding)
+	}
+	if agentIdentityBindingFromTask(&corev1alpha1.Task{}) != nil {
+		t.Fatal("a Task without an identity binding must yield none")
+	}
+}
+
+// The issuer instance names a non-default authority, so a parent bound before
+// the controller moved to another authority cannot hand its identity to a
+// child bound after.
+func TestAgentExecutionIdentityRefusesAChildAfterAnAuthorityChange(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	instance, _ := testIdentityConfig().Instance("entra")
+	parent := boundTask("parent", agent, corev1alpha1.TaskPhaseRunning)
+	parent.UID = "parent-uid"
+	parent.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
+	sovereign := testIdentityConfig()
+	sovereign.Entra.Authority = "https://login.microsoftonline.us"
+	r := &TaskReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, parent).Build(),
+		Identity: sovereign,
+	}
+	controller := true
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: testNS, CreationTimestamp: metav1.Now(),
+			Labels: map[string]string{labels.LabelParentTask: "parent"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: taskResourceKind, Name: "parent",
+				UID: "parent-uid", Controller: &controller,
+			}},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
+	}
+	root := child.DeepCopy()
+	root.Labels, root.OwnerReferences = nil, nil
+	ref, err := r.agentExecutionIdentity(context.Background(), root, agent)
+	if err != nil || ref == nil || ref.Instance != instance+"@https://login.microsoftonline.us" {
+		t.Fatalf("root Task identity under another authority = %+v, %v", ref, err)
+	}
+	_, err = r.agentExecutionIdentity(context.Background(), child, agent)
+	if err == nil || !isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "parent's own bound Agent") {
+		t.Fatalf("child after an authority change: error = %v, want a permanent refusal", err)
+	}
+}
+
+// With the issuer down, the first Agent's verification starts a shared
+// back-off: the rest of the queue is not each held for a timeout, and every
+// Agent reports the issuer unavailable rather than its identity refused.
+func TestAgentReconcileBacksOffAnUnavailableIssuer(t *testing.T) {
+	agents := make([]client.Object, 0, 5)
+	for i := range 5 {
+		agent := claimedAgent(identityBoundTestAgent(fmt.Sprintf("agent-%d", i), time.Now()))
+		agent.Spec.Identity.Entra.AgentIdentityID = fmt.Sprintf("33333333-3333-3333-3333-%012d", i)
+		agent.Status.IdentityClaim.ID = agent.Spec.Identity.Entra.AgentIdentityID
+		agents = append(agents, agent)
+	}
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(agents...).WithStatusSubresource(agents...).Build()
+	calls := 0
+	r.IdentityVerifier = identityVerifierFunc(func(ctx context.Context, _ *corev1alpha1.Agent) error {
+		calls++
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > agentIdentityVerifyTimeout {
+			t.Errorf("verification deadline = %v, %v; want at most %s", deadline, ok, agentIdentityVerifyTimeout)
+		}
+		return fmt.Errorf("the Entra token endpoint is unreachable: %w", agentidentity.ErrIssuerUnavailable)
+	})
+	for _, agent := range agents {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.RequeueAfter <= 0 || result.RequeueAfter > agentIdentityIssuerBackoff {
+			t.Fatalf("%s: RequeueAfter = %v, want a retry within the back-off", agent.GetName(), result.RequeueAfter)
+		}
+		stored := &corev1alpha1.Agent{}
+		if err := r.Get(context.Background(), client.ObjectKeyFromObject(agent), stored); err != nil {
+			t.Fatal(err)
+		}
+		condition := meta.FindStatusCondition(stored.Status.Conditions, conditionTypeIdentityVerified)
+		if condition == nil || condition.Status != metav1.ConditionUnknown || condition.Reason != reasonIdentityIssuerUnavailable {
+			t.Fatalf("%s: IdentityVerified = %+v, want Unknown/%s", agent.GetName(), condition, reasonIdentityIssuerUnavailable)
+		}
+		if stored.Status.Ready {
+			t.Fatalf("%s: an unverified identity must not make the Agent Ready", agent.GetName())
+		}
+		if !reflect.DeepEqual(stored.Status.IdentityClaim, agent.(*corev1alpha1.Agent).Status.IdentityClaim) {
+			t.Fatalf("%s: IdentityClaim = %+v, want the claim kept while the issuer is down", agent.GetName(), stored.Status.IdentityClaim)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("issuer asked %d times, want once for the whole queue", calls)
+	}
+
+	// A definitive refusal is the identity's own answer and starts no back-off.
+	r.issuerBackoff.until = time.Time{}
+	calls = 0
+	r.IdentityVerifier = identityVerifierFunc(func(context.Context, *corev1alpha1.Agent) error {
+		calls++
+		return errors.New("Entra refused the token request: unauthorized_client (AADSTS7000112, HTTP 400)")
+	})
+	for _, agent := range agents[:2] {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(agent)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("issuer asked %d times after refusals, want each Agent verified", calls)
+	}
+}
+
 // TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt covers the time
 // between admission and a prompt's submission, the RuntimeSession start or a
 // wait for capacity: the Agent can lose the identity meanwhile, so the
@@ -896,6 +1177,44 @@ func TestIdentityDecisionsWaitForTheEnforcementPeriod(t *testing.T) {
 	config.Enforcement.Start(testClaimGrantedAt.Add(-time.Hour))
 	if ref, err := r.agentExecutionIdentity(context.Background(), task, agent); err != nil || ref == nil {
 		t.Fatalf("binding once the period started: ref = %+v, err = %v", ref, err)
+	}
+}
+
+// TestIssuerRefusalStandsUntilTheIdentityIsVerified covers an Agent the
+// issuer refused that is then edited into an invalid configuration, or
+// re-checked while the issuer cannot answer: neither turns the refusal back
+// into a merely declared identity. Only a later verification clears it.
+func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
+	agent := identityBoundTestAgent("reviewer", time.Now())
+	agent.UID, agent.Generation = "reviewer-uid", 1
+	r := setupAgentReconciler()
+	r.Identity = testIdentityConfig()
+	verifier := &countingIdentityVerifier{err: errors.New("AADSTS700016")}
+	r.IdentityVerifier = verifier
+	ctx := context.Background()
+	if state := r.verifyAgentIdentity(ctx, agent, nil); state.err == nil || state.unavailable {
+		t.Fatalf("first answer = %+v, want a refusal", state)
+	}
+
+	agent.Generation = 2
+	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err == nil || state.unavailable || state.verified {
+		t.Fatalf("an invalid edit after a refusal = %+v, want the refusal kept", state)
+	}
+	verifier.err = fmt.Errorf("token endpoint down: %w", agentidentity.ErrIssuerUnavailable)
+	if state := r.verifyAgentIdentity(ctx, agent, nil); state.err == nil || state.unavailable || state.verified || state.retryAfter <= 0 {
+		t.Fatalf("an unavailable issuer after a refusal = %+v, want the refusal kept and retried", state)
+	}
+
+	r.issuerBackoff.Lock()
+	r.issuerBackoff.until = time.Time{}
+	r.issuerBackoff.Unlock()
+	verifier.err = nil
+	agent.Generation = 3
+	if state := r.verifyAgentIdentity(ctx, agent, nil); !state.verified || state.err != nil {
+		t.Fatalf("a later verification = %+v, want it to clear the refusal", state)
+	}
+	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err != nil {
+		t.Fatalf("an invalid edit after verification = %+v, want no refusal", state)
 	}
 }
 
