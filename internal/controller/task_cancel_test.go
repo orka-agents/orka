@@ -931,3 +931,28 @@ func TestCancelReachesGrandchildrenThroughACancelRequestedChild(t *testing.T) {
 		t.Fatal("a running grandchild under a cancel-requested child must be cancelled")
 	}
 }
+
+// TestJobCreationSeesACancelTheCacheMissed covers a cancel request written
+// after the cached copy was read: Job creation re-reads the Task and starts
+// no workload.
+func TestJobCreationSeesACancelTheCacheMissed(t *testing.T) {
+	stale := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "native", Namespace: testNS, UID: "native-uid"},
+		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	live := stale.DeepCopy()
+	live.Annotations = map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"}
+	r := newUnitReconciler(newTestScheme(), live)
+	result, err := r.createTaskJob(context.Background(), stale, nil, nil)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("createTaskJob() = %+v, %v; want creation skipped and the cancel applied on the next pass", result, err)
+	}
+	var jobs batchv1.JobList
+	if err := r.List(context.Background(), &jobs, client.InNamespace(testNS)); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs.Items) != 0 {
+		t.Fatalf("Jobs = %d, want none for a cancel-requested Task", len(jobs.Items))
+	}
+}
