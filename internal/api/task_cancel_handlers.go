@@ -85,10 +85,7 @@ func (h *Handlers) CancelTask(c fiber.Ctx) error {
 		}
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
 	}
-	if request.UID != "" && string(task.UID) != request.UID {
-		return fiber.NewError(fiber.StatusConflict, "the task was replaced since it was confirmed; reload it")
-	}
-	result, err := h.requestTaskCancellation(c, task, cancelMessage(GetUserInfo(c), request.Reason))
+	result, err := h.requestTaskCancellation(c, task, request.UID, cancelMessage(GetUserInfo(c), request.Reason))
 	if err != nil {
 		return err
 	}
@@ -168,7 +165,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 				return err
 			}
 		}
-		cancelled, err := h.requestTaskCancellation(c, task, message)
+		cancelled, err := h.requestTaskCancellation(c, task, "", message)
 		if err != nil {
 			var fiberErr *fiber.Error
 			if errors.Is(err, errCancelTaskGone) || (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict) {
@@ -234,12 +231,17 @@ func taskInSession(task *corev1alpha1.Task, namespace, name string, chat bool) b
 
 // requestTaskCancellation records a cancel request on task. A second request
 // changes nothing; a finished Task other than a Cancelled one is a conflict.
-func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task, message string) (taskCancellation, error) {
+func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task, expectedUID, message string) (taskCancellation, error) {
 	if err := h.authorizeContextTokenLoadedTask(c, "cancelTask", task); err != nil {
 		return taskCancellation{}, err
 	}
 	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "cancelTask", task); err != nil {
 		return taskCancellation{}, err
+	}
+	// The confirmed UID is compared only once the caller may act on this
+	// Task, so a refusal says nothing about the Task's identity.
+	if expectedUID != "" && string(task.UID) != expectedUID {
+		return taskCancellation{}, fiber.NewError(fiber.StatusConflict, "the task was replaced since it was confirmed; reload it")
 	}
 	ctx := c.Context()
 	key := client.ObjectKeyFromObject(task)
