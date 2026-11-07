@@ -2,27 +2,54 @@ package sqlite
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 )
 
-func nativeTestStore(t *testing.T, path string) *Store {
+// nativeStore is a SQLite store with the storage client that seals its
+// native session state. Native session reads and writes go through the
+// client, as in production; every other method is the store's own.
+type nativeStore struct {
+	*Store
+	client *storageclient.Client
+}
+
+func (s nativeStore) GetNativeSession(ctx context.Context, namespace, name, uid string) (*store.NativeSessionRecord, error) {
+	return s.client.GetNativeSession(ctx, namespace, name, uid)
+}
+
+func (s nativeStore) SaveNativeSession(ctx context.Context, record store.NativeSessionRecord) error {
+	return s.client.SaveNativeSession(ctx, record)
+}
+
+func (s nativeStore) StageNativeSessionImport(ctx context.Context, request store.NativeSessionImport) (*store.NativeSessionImportReceipt, error) {
+	return s.client.StageNativeSessionImport(ctx, request)
+}
+
+func (s nativeStore) SetNativeSessionMaxBytes(limit int) error {
+	return s.client.SetNativeSessionMaxBytes(limit)
+}
+
+func (s nativeStore) CommitSessionTurnFinalization(ctx context.Context, request store.CommitSessionTurnFinalizationRequest) (*store.SessionTurn, error) {
+	return s.client.CommitSessionTurnFinalization(ctx, request)
+}
+
+func nativeTestStore(t *testing.T, path string) nativeStore {
 	t.Helper()
 	db, err := NewDB(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	s := NewStore(db, path)
-	cipher, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-	require.NoError(t, err)
-	require.NoError(t, s.SetAgentExecutionSnapshotCipher(cipher))
-	return s
+	return nativeStore{Store: s, client: activateTestKey(t, s)}
 }
 
 // appendCanonicalNativeTestMessages sets up a canonical transcript boundary
@@ -54,9 +81,9 @@ func TestNativeSessionImportOwnershipAndRetry(t *testing.T) {
 	request := nativeImportFixture(t, "fresh", "private original history")
 	receipt, err := s.StageNativeSessionImport(ctx, request)
 	require.NoError(t, err)
-	withoutKey := NewStore(s.db, ":memory:")
+	withoutKey := orkaClient(t, NewStore(s.db, ":memory:"))
 	_, err = withoutKey.GetNativeSession(ctx, "tenant", "fresh", "")
-	require.ErrorIs(t, err, errSnapshotCipherRequired)
+	require.ErrorIs(t, err, storageclient.ErrSnapshotKeyNotActive)
 	retry, err := s.StageNativeSessionImport(ctx, request)
 	require.NoError(t, err)
 	require.Equal(t, receipt, retry)
@@ -98,7 +125,7 @@ func TestNativeSessionImportAndCaptureOperationIDsAreIndependent(t *testing.T) {
 	receipt, err := s.StageNativeSessionImport(ctx, request)
 	require.NoError(t, err)
 	require.NoError(t, s.BindSessionCleanupIdentity(ctx, request.Namespace, request.SessionName, "canonical-uid"))
-	appendCanonicalNativeTestMessages(t, s, request.Namespace, request.SessionName, []store.SessionMessage{
+	appendCanonicalNativeTestMessages(t, s.Store, request.Namespace, request.SessionName, []store.SessionMessage{
 		{ID: "new-result", Role: "assistant", Content: "continued result"},
 	})
 	capture := store.NativeSessionRecord{
@@ -179,7 +206,7 @@ func TestNativeSessionCaptureMonotonicBoundary(t *testing.T) {
 	wrongUID := first
 	wrongUID.SessionUID = "wrong-owner"
 	require.ErrorIs(t, s.SaveNativeSession(ctx, wrongUID), store.ErrConflict)
-	appendCanonicalNativeTestMessages(t, s, "tenant", "captured", []store.SessionMessage{{ID: "message-two", Role: "assistant", Content: "next"}})
+	appendCanonicalNativeTestMessages(t, s.Store, "tenant", "captured", []store.SessionMessage{{ID: "message-two", Role: "assistant", Content: "next"}})
 	_, err := s.GetNativeSession(ctx, "tenant", "captured", "canonical-uid")
 	require.ErrorIs(t, err, store.ErrConflict)
 	second := first
@@ -218,9 +245,8 @@ func TestNativeSessionRestartEncryptionAndMetadataAuthentication(t *testing.T) {
 	got, err := restarted.GetNativeSession(ctx, "tenant", "restart", "")
 	require.NoError(t, err)
 	require.Equal(t, request.Snapshot.Data, got.Snapshot.Data)
-	different, err := NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{8}, 32))
-	require.NoError(t, err)
-	require.Error(t, restarted.SetAgentExecutionSnapshotCipher(different))
+	different := bytes.Repeat([]byte{8}, storageclient.SnapshotKeyBytes)
+	require.ErrorContains(t, orkaClient(t, restarted.Store).ActivateSnapshotKey(ctx, different), "cannot authenticate retained native session")
 	got, err = restarted.GetNativeSession(ctx, "tenant", "restart", "")
 	require.NoError(t, err)
 	require.Equal(t, request.Snapshot.Data, got.Snapshot.Data)
@@ -269,12 +295,12 @@ func TestNativeSessionStorageFailsClosedWithoutCipher(t *testing.T) {
 	db, err := NewDB(":memory:")
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
-	s := NewStore(db, ":memory:")
+	s := orkaClient(t, NewStore(db, ":memory:"))
 	_, err = s.GetNativeSession(t.Context(), "tenant", "ordinary", "not-yet-bound")
 	require.ErrorIs(t, err, store.ErrNotFound)
 	request := nativeImportFixture(t, "no-key", "private")
 	_, err = s.StageNativeSessionImport(t.Context(), request)
-	require.ErrorIs(t, err, errSnapshotCipherRequired)
+	require.ErrorIs(t, err, storageclient.ErrSnapshotKeyNotActive)
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&count))
 	require.Zero(t, count)
@@ -300,7 +326,7 @@ func TestNativeSessionAtomicCanonicalFinalization(t *testing.T) {
 		t.Run(map[bool]string{true: "hybrid-persistence", false: "sqlite-control"}[persistenceOnly], func(t *testing.T) {
 			s := nativeTestStore(t, ":memory:")
 			ctx := t.Context()
-			request := sessionTurnFinalizationOwnershipFixture(t, s, persistenceOnly, "native-task-uid")
+			request := sessionTurnFinalizationOwnershipFixture(t, s.Store, persistenceOnly, "native-task-uid")
 			require.NoError(t, s.BindSessionCleanupIdentity(ctx, "ns", "session", request.Key.SessionUID))
 			native := &store.NativeSessionRecord{Namespace: "ns", SessionName: "session", SessionUID: request.Key.SessionUID, Snapshot: storetest.NativeSessionSnapshot(t, "completed native task"), RuntimeSessionGeneration: 1, SourceOperationID: "native-capture-operation", MessageCount: 999, ThroughMessageID: "untrusted-guessed-boundary"}
 			request.NativeSession = native
@@ -360,10 +386,38 @@ func TestNativeSessionAtomicCanonicalFinalization(t *testing.T) {
 	}
 }
 
+// TestNativeSessionFinalizationAfterMessageWithoutID covers a transcript whose
+// last message was stored before messages carried IDs: the client seals
+// against a boundary with a count but no last ID, and the commit accepts it.
+func TestNativeSessionFinalizationAfterMessageWithoutID(t *testing.T) {
+	s := nativeTestStore(t, ":memory:")
+	ctx := t.Context()
+	request := sessionTurnFinalizationOwnershipFixture(t, s.Store, true, "legacy-message-task")
+	require.NoError(t, s.BindSessionCleanupIdentity(ctx, "ns", "session", request.Key.SessionUID))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_messages(namespace, session_name, message_id, sort_order, role, content) VALUES ('ns','session','',1,'user','an older message')`)
+	require.NoError(t, err)
+	_, err = s.db.ExecContext(ctx, `UPDATE sessions SET message_count = 1 WHERE namespace = 'ns' AND name = 'session'`)
+	require.NoError(t, err)
+	native := &store.NativeSessionRecord{
+		Namespace: "ns", SessionName: "session", SessionUID: request.Key.SessionUID, RuntimeSessionGeneration: 1,
+		SourceOperationID: "capture-after-legacy-message", Snapshot: storetest.NativeSessionSnapshot(t, "native history after an older message"),
+	}
+	_, err = s.CommitSessionTurnFinalization(ctx, store.CommitSessionTurnFinalizationRequest{
+		Key: request.Key, Namespace: "ns", SessionName: "session", Fence: request.Fence, ExpectedTurnVersion: request.ExpectedTurnVersion,
+		FinalizationDigest: request.FinalizationDigest, TerminalKind: request.TerminalKind, TerminalContent: request.TerminalContent,
+		Projection: request.Projection, FinalizedAt: request.FinalizedAt, NativeSession: native,
+	})
+	require.NoError(t, err)
+	stored, err := s.GetNativeSession(ctx, "ns", "session", request.Key.SessionUID)
+	require.NoError(t, err)
+	require.Equal(t, 3, stored.MessageCount)
+	require.Equal(t, native.Snapshot.Data, stored.Snapshot.Data)
+}
+
 func TestNativeSessionCarriedAcrossOutcomeMarker(t *testing.T) {
 	s := nativeTestStore(t, ":memory:")
 	ctx := t.Context()
-	request := sessionTurnFinalizationOwnershipFixture(t, s, false, "carried-task-uid")
+	request := sessionTurnFinalizationOwnershipFixture(t, s.Store, false, "carried-task-uid")
 	uid := request.Key.SessionUID
 	require.NoError(t, s.BindSessionCleanupIdentity(ctx, "ns", "session", uid))
 	prior := store.NativeSessionRecord{Namespace: "ns", SessionName: "session", SessionUID: uid, Snapshot: storetest.NativeSessionSnapshot(t, "checkpoint before a failed prompt"), RuntimeSessionGeneration: 1, SourceOperationID: "prior-capture"}
