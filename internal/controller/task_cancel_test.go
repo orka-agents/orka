@@ -956,3 +956,90 @@ func TestJobCreationSeesACancelTheCacheMissed(t *testing.T) {
 		t.Fatalf("Jobs = %d, want none for a cancel-requested Task", len(jobs.Items))
 	}
 }
+
+// TestCancelReachesGrandchildrenThroughADeletingChild covers a child being
+// deleted whose finalizer keeps it readable: it is not patched, but its
+// running grandchild is still cancelled.
+func TestCancelReachesGrandchildrenThroughADeletingChild(t *testing.T) {
+	controller := true
+	owner := func(name string, uid types.UID) []metav1.OwnerReference {
+		return []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: name, UID: uid, Controller: &controller}}
+	}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	deleting := metav1.Now()
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: "default", UID: "child-uid", OwnerReferences: owner("parent", "parent-uid"),
+			Labels: map[string]string{labels.LabelParentTask: "parent"}, DeletionTimestamp: &deleting, Finalizers: []string{labels.TaskFinalizer},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	grandchild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "grandchild", Namespace: "default", UID: "grandchild-uid", OwnerReferences: owner("child", "child-uid"),
+			Labels: map[string]string{labels.LabelParentTask: "child"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(parent, child, grandchild).Build()
+	if err := (&TaskReconciler{Client: c}).cancelChildTasks(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"child": false, "grandchild": true} {
+		got := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, got); err != nil {
+			t.Fatal(err)
+		}
+		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; requested != want {
+			t.Errorf("%s: cancel requested = %t, want %t", name, requested, want)
+		}
+	}
+}
+
+// failingUsageStore refuses to register usage, as during a storage outage.
+type failingUsageStore struct{ *sqlite.Store }
+
+func (failingUsageStore) RegisterUsageTask(context.Context, store.UsageTask) error {
+	return store.ErrUnavailable
+}
+
+// TestUsageOutageStillCancelsDelegatedWork covers a cancelled Task whose
+// usage registration keeps failing: the reconcile fails early, but its
+// running child is still asked to cancel.
+func TestUsageOutageStillCancelsDelegatedWork(t *testing.T) {
+	controller := true
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "parent", Namespace: testNS, UID: "parent-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: testNS, UID: "child-uid", Labels: map[string]string{labels.LabelParentTask: "parent"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: "parent", UID: "parent-uid", Controller: &controller,
+			}},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS, UID: "test-ns-uid"}}
+	r := newUnitReconciler(newTestScheme(), parent, child, namespace)
+	r.ExecutionEventStore = failingUsageStore{r.ExecutionEventStore.(*sqlite.Store)}
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+	got := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(child), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+		t.Fatal("a usage storage outage must not keep the delegated child running")
+	}
+}
