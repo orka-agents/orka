@@ -90,8 +90,11 @@ spec:
         name: entra-blueprint-signin
       maxDelegationAge: 1h
     entra:
-      resource: https://storage.azure.com
+      resource: https://graph.microsoft.com
 ```
+
+Delegated mode is validated against Microsoft Graph. On-behalf-of tokens for other
+resources, such as Azure Storage, are not yet validated against a live tenant.
 
 - **The requester's grant** is their own Connection to the named `ConnectorProvider`, an
   Entra front-end client that requests the blueprint's scope. The controller refuses a
