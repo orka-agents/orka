@@ -64,6 +64,8 @@ func NewTelemetryFromEnv() (trace.Tracer, func(context.Context) error, error) {
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(supervisorTraceResource),
 		sdktrace.WithBatcher(safeTelemetryExporter{exporter}, sdktrace.WithExportTimeout(supervisorTelemetryTimeout)),
+		// A span ended while panicking would otherwise record the panic value.
+		sdktrace.WithoutPanicRecording(),
 	)
 	shutdown := func(ctx context.Context) error {
 		ctx, cancel := context.WithTimeout(ctx, supervisorTelemetryTimeout)

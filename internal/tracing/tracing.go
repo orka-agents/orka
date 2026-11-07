@@ -77,7 +77,7 @@ func Init(serviceName string, enabled bool) (shutdown func(ctx context.Context) 
 
 	var shutdowns []func(context.Context) error
 	if traceExporter != nil {
-		tp := sdktrace.NewTracerProvider(
+		tp := newTracerProvider(
 			sdktrace.WithBatcher(traceExporter),
 			sdktrace.WithResource(res),
 		)
@@ -131,6 +131,12 @@ func Meter(name string, opts ...metric.MeterOption) metric.Meter {
 // GenAIMeter returns a meter with the GenAI development schema URL.
 func GenAIMeter(name string) metric.Meter {
 	return Meter(name, metric.WithSchemaURL(genai.SchemaURL))
+}
+
+// newTracerProvider disables the SDK's panic recording, which would add the
+// panic value as exception.message to a span ended while panicking.
+func newTracerProvider(opts ...sdktrace.TracerProviderOption) *sdktrace.TracerProvider {
+	return sdktrace.NewTracerProvider(append(opts, sdktrace.WithoutPanicRecording())...)
 }
 
 func newTraceExporter(ctx context.Context) (sdktrace.SpanExporter, error) {

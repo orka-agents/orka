@@ -244,8 +244,8 @@ wins.
 
 Use `orka.task.id` to find a Task trace, `orka.tool.name` to find specific tool
 executions, and `orka.parent_task.id` / `orka.child_task.id` to follow delegated
-children. Tool spans do not include raw arguments or complete result bodies, but a structured tool
-error message can appear in the span status description.
+children. Tool spans do not include raw arguments, result bodies or error
+messages.
 
 ### OpenTelemetry traces vs Task trace read model
 
@@ -361,7 +361,17 @@ Telemetry must not include:
 - raw prompts or completion content,
 - raw tool arguments or tool result bodies,
 - API keys, auth headers, TxTokens, context tokens, JWTs, cookies, or credentials,
-- raw transcripts or broad local filesystem paths.
+- raw transcripts or broad local filesystem paths,
+- error message text.
+
+A failed span records only an error class, such as a provider status code, a Go
+error type or a fixed Orka outcome name, in its status description and
+`error.type` attribute. Where a failed span also has an `exception` event, the
+event carries the same class and no message or stack trace. Orka's tracer
+providers do not record panics on spans, because the SDK would store the panic
+value as the exception message. A stop reason that is neither known to Orka
+nor a documented provider value is reported as `unknown_stop_reason`, and a tool
+error type outside Orka's tool error types is reported as `tool_error`.
 
 Future opt-in content capture must pass through Orka redaction and size caps
 before any span attribute or event is emitted.
