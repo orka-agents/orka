@@ -114,7 +114,18 @@ func TestRequestedCancellationStopsJobDuringStorageOutage(t *testing.T) {
 				Status:     batchv1.JobStatus{Active: 1},
 			}
 			namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: task.Namespace, UID: "namespace-uid"}}
-			r := newUnitReconciler(newTestScheme(), task, job, namespace)
+			controller := true
+			child := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "delegated", Namespace: task.Namespace, Labels: map[string]string{labels.LabelParentTask: task.Name},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID, Controller: &controller,
+					}},
+				},
+				Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+				Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+			}
+			r := newUnitReconciler(newTestScheme(), task, job, namespace, child)
 			originalStore := r.ResultStore
 			r.ResultStore = transientGetResultErrorStore{ResultStore: originalStore, err: storageErr}
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)}
@@ -122,6 +133,10 @@ func TestRequestedCancellationStopsJobDuringStorageOutage(t *testing.T) {
 			require.ErrorIs(t, err, storageErr)
 			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(job), &batchv1.Job{})),
 				"cancellation must stop the workload while result finalization waits")
+			delegated := &corev1alpha1.Task{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), delegated))
+			require.Contains(t, delegated.Annotations, labels.AnnotationCancelRequested,
+				"the delegated child must be cancelled while the parent's result finalization waits")
 			current := &corev1alpha1.Task{}
 			require.NoError(t, r.Get(t.Context(), request.NamespacedName, current))
 			require.Equal(t, corev1alpha1.TaskPhaseRunning, current.Status.Phase)
