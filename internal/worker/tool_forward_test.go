@@ -220,8 +220,8 @@ func TestRedactForwardedTextRemovesAnInjectedCredentialFromAContinuationToken(t 
 
 func TestRedactForwardedTextKeepsJSONEscapedContinuationTokens(t *testing.T) {
 	for _, body := range []string{
-		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1&$skiptoken=page2"}`,
-		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1&$skiptoken=page2&x=1"}`,
+		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1\u0026$skiptoken=page2"}`,
+		`{"nextLink":"https://management.azure.com/subscriptions?api-version=1\u0026\u0024skiptoken=page2\u0026x=1"}`,
 	} {
 		got := redactForwardedText(body)
 		if !strings.Contains(got, "skiptoken=page2") || strings.Contains(got, "[REDACTED]") {
@@ -236,7 +236,7 @@ func TestRedactForwardedTextKeepsJSONEscapedContinuationTokens(t *testing.T) {
 func TestRedactForwardedBodyKeepsJSONValid(t *testing.T) {
 	body := `{"secrets":[{"name":"example"}],"secret":null,"count":3,` +
 		`"properties":{"password":"hunter2","note":"token=abc rest","accessToken":"tok-1","items":[1,true,null]},` +
-		`"nextLink":"https://management.azure.com/x?api-version=1&$skiptoken=page2","$skipToken":"page3",` +
+		`"nextLink":"https://management.azure.com/x?api-version=1\u0026$skiptoken=page2","$skipToken":"page3",` +
 		`"echo":"arm-token-secret"}`
 	got := redactForwardedBody(body, "arm-token-secret")
 	if !json.Valid([]byte(got)) {
@@ -271,9 +271,9 @@ func TestRedactForwardedBodyKeepsJSONValid(t *testing.T) {
 func TestRedactForwardedBodyRemovesAnEscapedInjectedCredential(t *testing.T) {
 	const secret = "opaque-example-value"
 	for _, body := range []string{
-		`{"echo":"opaque-example-value"}`,
-		`{"opaque-example-value":"key"}`,
-		`{"nextLink":"https://x/?a=1&$skiptoken=opaque-example-value"}`,
+		`{"echo":"opaque\u002dexample-value"}`,
+		`{"opaque\u002dexample-value":"key"}`,
+		`{"nextLink":"https://x/?a=1\u0026$skiptoken=opaque\u002dexample-value"}`,
 	} {
 		got := redactForwardedBody(body, secret)
 		var decoded any
