@@ -86,6 +86,32 @@ func TestDialerFailsClosedOnResolutionError(t *testing.T) {
 	}
 }
 
+func TestDialerTimeoutBoundsResolution(t *testing.T) {
+	t.Parallel()
+	dialer := &Dialer{
+		Timeout: 50 * time.Millisecond,
+		Resolver: resolverFunc(func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+	}
+	// net/http detaches dials from request cancellation, so the dial must
+	// bound a stalled lookup itself rather than rely on the caller's context.
+	done := make(chan error, 1)
+	go func() {
+		_, err := dialer.DialContext(context.Background(), "tcp", "hook.example.com:443")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DialContext() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DialContext() did not bound a stalled resolution")
+	}
+}
+
 func TestDialerRejectsEveryNonPublicResolvedAddress(t *testing.T) {
 	t.Parallel()
 	for _, raw := range []string{

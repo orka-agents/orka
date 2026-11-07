@@ -91,8 +91,9 @@ type Dialer struct {
 	Resolver Resolver
 	// Policy permits destination addresses. Defaults to PublicAddressPolicy.
 	Policy AddressPolicy
-	// Timeout bounds the whole connect across every candidate address,
-	// shared equally among the candidates still untried. Defaults to 10s.
+	// Timeout bounds the whole connect, including name resolution and every
+	// candidate address, shared equally among the candidates still untried.
+	// Defaults to 10s.
 	Timeout time.Duration
 }
 
@@ -112,19 +113,21 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid address", ErrAddressNotAllowed)
 	}
-	candidates, allowed, err := d.candidates(ctx, host)
-	if err != nil {
-		return nil, err
-	}
 	timeout := d.Timeout
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
-	// One deadline bounds the whole connect, so unreachable candidates
-	// listed first cannot spend the request deadline before a reachable one
-	// is tried. Each candidate gets an equal share of the remaining time.
+	// One deadline bounds the whole connect, including resolution: net/http
+	// detaches dials from request cancellation, so without it a stalled
+	// lookup would outlive the request. Unreachable candidates listed first
+	// cannot spend the deadline before a reachable one is tried; each
+	// candidate gets an equal share of the remaining time.
 	dialCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	candidates, allowed, err := d.candidates(dialCtx, host)
+	if err != nil {
+		return nil, err
+	}
 	dialer := &net.Dialer{
 		ControlContext: func(_ context.Context, _ string, address string, _ syscall.RawConn) error {
 			remote, parseErr := netip.ParseAddrPort(address)
