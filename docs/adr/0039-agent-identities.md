@@ -160,6 +160,9 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   against. This blocks the common pattern where a coordinator hands work to a
   different, identity-bound worker Agent. Lifting it needs a delegation
   ceiling (which Agents a parent may hand work to), which is outside this ADR.
+  Workers hold Agent `use` broadly, so Task provenance admission also refuses
+  a worker's Task that has no parent Task and names an identity-bound Agent;
+  otherwise it would bind as a root Task that no `use` check covered.
 
 ### Stage 2: bind an identity and attribute actions to it
 
