@@ -365,7 +365,14 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 		return "", 0, fmt.Errorf("read the Entra token response: %w", ErrIssuerUnavailable)
 	}
 	var parsed entraTokenResponse
-	_ = json.Unmarshal(body, &parsed)
+	if err := json.Unmarshal(body, &parsed); err != nil ||
+		(response.StatusCode == http.StatusOK && parsed.AccessToken == "" && strings.TrimSpace(parsed.Error) == "") {
+		// An answer that is not a token response, such as a proxy's HTML
+		// page or a truncated body, says nothing about the identity, so it is
+		// an outage rather than a refusal that would be kept for an hour.
+		reason = "malformed_response"
+		return "", 0, fmt.Errorf("the Entra token endpoint returned an unreadable response (HTTP %d): %w", response.StatusCode, ErrIssuerUnavailable)
+	}
 	if response.StatusCode != http.StatusOK || parsed.AccessToken == "" {
 		code := entraOAuthErrorCode(parsed.Error)
 		reason = code
