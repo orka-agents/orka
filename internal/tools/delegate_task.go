@@ -19,7 +19,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
@@ -971,12 +973,6 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 		return "", fmt.Errorf("failed to create child task: %w", err)
 	}
-	// The parent can be cancelled while the child is created, after its
-	// cascade listed its children. Reading it again closes the gap: either
-	// the cascade's list saw this child, or this read sees the cancel.
-	if err := cancelChildOfCancelledParent(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
-		return "", err
-	}
 	span.SetAttributes(orkatracing.DelegateAttributes("", childTask.Name)...)
 	sealTaskCreate(ctx, GetToolContext(ctx), childTask)
 
@@ -989,6 +985,15 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
 			return "", err
 		}
+	}
+
+	// The parent can be cancelled while the child is created, after its
+	// cascade listed its children. Reading it again closes the gap: either
+	// the cascade's list saw this child, or this read sees the cancel. It
+	// runs once the child's credentials are adopted, so a failure here
+	// leaves a complete child for the parent's next cascade.
+	if err := cancelChildOfCancelledParent(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the child of a cancelled parent task", "child", childTask.Name)
 	}
 
 	result := DelegateTaskResult{
@@ -1083,20 +1088,36 @@ func delegationParentCancelled(ctx context.Context, reader client.Reader, parent
 }
 
 // cancelChildOfCancelledParent asks a just-created child to cancel when its
-// parent was cancelled meanwhile. The delegation otherwise completes, so the
-// child's credentials are still adopted and cleaned up with it.
+// parent was cancelled meanwhile. It re-reads the child, so a replacement
+// under its name, a finished child, or a cancel already requested by someone
+// else is left as it is, and it patches under an optimistic lock.
 func cancelChildOfCancelledParent(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
 	cancelled, err := delegationParentCancelled(ctx, reader, parent)
 	if err != nil || !cancelled {
 		return err
 	}
-	base := child.DeepCopy()
-	if child.Annotations == nil {
-		child.Annotations = map[string]string{}
-	}
-	child.Annotations[labels.AnnotationCancelRequested] = "cancelled with its parent task " + parent.Name
-	if err := writer.Patch(ctx, child, client.MergeFrom(base)); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("cancel the child of a cancelled parent task: %w", err)
-	}
-	return nil
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(child), live); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if live.UID != child.UID || !live.DeletionTimestamp.IsZero() {
+			return nil
+		}
+		if _, requested := live.Annotations[labels.AnnotationCancelRequested]; requested {
+			return nil
+		}
+		if phase := live.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+			return nil
+		}
+		base := live.DeepCopy()
+		if live.Annotations == nil {
+			live.Annotations = map[string]string{}
+		}
+		live.Annotations[labels.AnnotationCancelRequested] = "cancelled with its parent task " + parent.Name
+		if err := writer.Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
 }
