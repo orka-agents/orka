@@ -288,6 +288,55 @@ func TestExternalWorkerEvictionSignal(t *testing.T) {
 	if _, _, evicting := externalWorkerEvictionSignal(&corev1.Pod{}, now); evicting {
 		t.Fatal("a running worker was reported as evicting")
 	}
+	// A node or API server clock ahead of Core never extends the window.
+	future := metav1.NewTime(now.Add(10 * time.Minute))
+	pod = &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: podConditionDisruptionTarget, Status: corev1.ConditionTrue, LastTransitionTime: future}}}}
+	if signaledAt, deadline, evicting := externalWorkerEvictionSignal(pod, now); !evicting || !signaledAt.Equal(now) || deadline.After(now.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("future disruption target signal = %s, %s, %t; want it clamped to now", signaledAt, deadline, evicting)
+	}
+	skewed := metav1.NewTime(now.Add(time.Hour + 10*time.Minute))
+	pod = &corev1.Pod{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &skewed, DeletionGracePeriodSeconds: ptr.To[int64](3600)}}
+	if signaledAt, deadline, evicting := externalWorkerEvictionSignal(pod, now); !evicting || !signaledAt.Equal(now) || deadline.After(now.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("future deletion signal = %s, %s, %t; want it clamped to now", signaledAt, deadline, evicting)
+	}
+}
+
+// A DisruptionTarget dated in Core's future starts the window at Core's now,
+// so a drain probe that straddles the real shutdown cutoff never earns Suspend.
+func TestExternalEvictionFromFutureDisruptionTargetNeverExtendsTheWindow(t *testing.T) {
+	f, _, pod, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	now := f.r.now()
+	current := &corev1.Pod{}
+	if err := f.r.APIReader.Get(t.Context(), client.ObjectKeyFromObject(&worker), current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status.Conditions = append(current.Status.Conditions, corev1.PodCondition{
+		Type: podConditionDisruptionTarget, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(10 * time.Minute)),
+	})
+	if err := f.r.Status().Update(t.Context(), current); err != nil {
+		t.Fatal(err)
+	}
+	runtimePoolReconcile(t, f.r, f.pool)
+	record := evictionRecord(t, f)
+	if record == nil || record.Source != externalEvictionSourceWorker {
+		t.Fatalf("disruption target was not recorded as an eviction: %#v", record)
+	}
+	cutoff := now.Add(harnessv2.WorkerEvictionSuspendWindow)
+	if record.SignaledAt.After(now) || record.Deadline.After(cutoff) {
+		t.Fatalf("future disruption target extended the eviction window: signaled %s, deadline %s, want no later than %s", record.SignaledAt, record.Deadline, cutoff)
+	}
+	for range 3 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	f.supervisor.probe = quiescentEvictionProbe(f, &pod, harnessv2.DrainReasonWorkspaceSuspend)
+	f.supervisor.afterProbe = func() { f.r.Now = func() time.Time { return cutoff } }
+	runtimePoolReconcile(t, f.r, f.pool)
+	if retirement := f.currentWorkspace(t).Spec.Retirement; retirement != nil {
+		t.Fatalf("Suspend authorized after the worker's real shutdown cutoff: %#v", retirement)
+	}
+	if condition := evictionCondition(t, f); condition == nil || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+		t.Fatalf("deadline condition = %#v", condition)
+	}
 }
 
 // Admission never reaches a terminating worker; settlement of accepted work

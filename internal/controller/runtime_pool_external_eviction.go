@@ -110,18 +110,29 @@ func (e *externalWorkerEvictionError) Unwrap() error { return workspaceprovider.
 // externalWorkerEvictionSignal derives the eviction window from the worker
 // Pod. The worker forwards SIGTERM to its Actors when the kubelet signals it,
 // which is the Pod's deletion time less its grace period. The window ends at
-// the worker's shutdown budget or the Pod's own deadline, whichever is first.
+// the worker's shutdown budget or the Pod's own grace, whichever is first.
+// Every signal time is clamped to Core's clock, as the supervisor signal is:
+// a node or API server clock ahead of Core never extends the window.
 func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time, time.Time, bool) {
 	if worker == nil {
 		return time.Time{}, time.Time{}, false
 	}
+	now = now.UTC()
+	clamp := func(at time.Time) time.Time {
+		if at.IsZero() || at.After(now) {
+			return now
+		}
+		return at.UTC()
+	}
 	if worker.DeletionTimestamp != nil {
 		podDeadline := worker.DeletionTimestamp.UTC()
-		signaledAt := now.UTC()
+		signaledAt, window := now, harnessv2.WorkerEvictionSuspendWindow
 		if grace := worker.DeletionGracePeriodSeconds; grace != nil && *grace >= 0 {
-			signaledAt = podDeadline.Add(-time.Duration(*grace) * time.Second)
+			graceWindow := time.Duration(*grace) * time.Second
+			signaledAt = clamp(podDeadline.Add(-graceWindow))
+			window = min(window, graceWindow)
 		}
-		deadline := signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow)
+		deadline := signaledAt.Add(window)
 		if podDeadline.Before(deadline) {
 			deadline = podDeadline
 		}
@@ -129,10 +140,7 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 	}
 	for _, condition := range worker.Status.Conditions {
 		if condition.Type == podConditionDisruptionTarget && condition.Status == corev1.ConditionTrue {
-			signaledAt := condition.LastTransitionTime.UTC()
-			if signaledAt.IsZero() {
-				signaledAt = now.UTC()
-			}
+			signaledAt := clamp(condition.LastTransitionTime.Time)
 			return signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), true
 		}
 	}
