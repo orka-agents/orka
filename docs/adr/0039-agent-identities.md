@@ -120,9 +120,12 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   was created after the claim was granted. A claim can outlive a run without
   the check when its Agent never reconciled during that run, so the
   controller also records each unbroken period of enforcement in a Lease,
-  `orka-agent-use-enforcement`, that an enforcing run keeps or creates and a
-  run without the check deletes before serving requests; a Task or source
-  also binds only if it was created after the current period began. The grant time comes from the API server's clock, like
+  `orka-agent-use-enforcement`. A run without the check deletes it before
+  serving requests. An enforcing run keeps one an enforcing leader created,
+  and otherwise creates it only once it leads, because the leader it replaces
+  may still serve requests without the check until then; identity decisions
+  wait until the period is recorded. A Task or source also binds only if it
+  was created after the current period began. The grant time comes from the API server's clock, like
   creation times, never the controller's: a granted claim first carries no
   grant time and binds nothing, and the controller then records the latest
   write time the API server stamped on the Agent's `managedFields`, which is
