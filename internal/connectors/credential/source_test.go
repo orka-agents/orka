@@ -1227,3 +1227,33 @@ func TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody(t *testing.T) {
 		t.Fatalf("custody reads = %d refreshes = %d, want none", counting.reads, h.refresher.calls.Load())
 	}
 }
+
+// TestRequireLiveConnectionRechecksTheProvider covers a provider that changes
+// during a Delegated exchange, before the Connection's status catches up: a
+// provider that no longer declares the Tool, or is deleted, refuses the
+// credential the exchange produced.
+func TestRequireLiveConnectionRechecksTheProvider(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("unchanged provider: %v", err)
+	}
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.Tools = nil
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
+		t.Fatal("a provider that no longer declares the Tool must refuse the exchanged credential")
+	}
+	if err := h.client.Delete(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("deleted provider: err = %v", err)
+	}
+}
