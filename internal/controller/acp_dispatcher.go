@@ -1858,13 +1858,19 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	accepted := false
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
+	// lastRejection is the rate-limited admission a resubmission follows; it
+	// proves the prompt was not accepted.
+	var lastRejection error
 	for {
 		// A resubmission after a rejected admission is made only while the
-		// claim still covers the Task. The attempt is Submitting by then, so
-		// a claim that stays unreadable fails the prompt, which was provably
-		// not accepted, rather than leave it stranded.
+		// claim still covers the Task. A claim that stays unreadable requeues
+		// the attempt on the rejection's proof that it was never accepted.
 		if admissionRetry > 0 {
-			unavailable = d.identityUnavailableBeforeResubmission(ctx, task)
+			var confirmErr error
+			unavailable, confirmErr = d.identityUnavailableBeforeResubmission(ctx, task)
+			if confirmErr != nil {
+				return d.requeueRejectedPromptForIdentity(ctx, task, attemptID, fence, lastRejection, reservationLease, sessionExecution, confirmErr)
+			}
 		}
 		if unavailable != "" {
 			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
@@ -2053,6 +2059,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}); err != nil {
 				return err
 			}
+			lastRejection = streamErr
 			admissionRetry++
 			reservationLease, err = d.waitForPromptCapacityReservation(runtimeCtx, task, target, fence, runtimeFence.RuntimeInstanceID)
 			if err != nil {
@@ -7021,24 +7028,56 @@ func (d *ACPDispatcher) confirmIdentityWhilePlanned(
 }
 
 // identityUnavailableBeforeResubmission is identityUnavailableBeforeSubmission
-// for an attempt already Submitting, which cannot be requeued: a claim that
-// cannot be confirmed within identityConfirmationWait counts as unavailable.
-func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) string {
+// for an attempt already Submitting: it retries a claim it cannot confirm for
+// up to identityConfirmationWait, then returns the error.
+func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
 	deadline := time.Now().Add(identityConfirmationWait)
 	for {
 		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
-		if err == nil {
-			return unavailable
-		}
-		if !time.Now().Before(deadline) {
-			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+		if err == nil || !time.Now().Before(deadline) {
+			return unavailable, err
 		}
 		select {
 		case <-ctx.Done():
-			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+			return "", ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// requeueRejectedPromptForIdentity requeues an attempt whose resubmission
+// cannot confirm the identity claim. The rate-limited rejection it follows
+// proves no prompt was accepted, so the attempt returns to dispatch.
+func (d *ACPDispatcher) requeueRejectedPromptForIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	rejection error,
+	reservationLease *acpRuntimePoolReservationLease,
+	sessionExecution *acpTaskSession,
+	confirmErr error,
+) error {
+	identityErr := fmt.Errorf("confirm the Agent identity claim before resubmitting the prompt: %w", confirmErr)
+	if reservationLease != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		releaseErr := reservationLease.release(releaseCtx)
+		cancel()
+		if releaseErr != nil {
+			return errors.Join(identityErr, releaseErr)
+		}
+	}
+	var runtimeBinding *ACPRuntimeSessionBinding
+	if sessionExecution != nil {
+		runtimeBinding = &sessionExecution.Binding
+	}
+	if err := d.requeueProvenNotAcceptedPromptAdmission(ctx, task, attemptID, fence, rejection, runtimeBinding, false); err != nil {
+		return errors.Join(identityErr, err)
+	}
+	if sessionExecution != nil {
+		sessionExecution.requeued = true
+	}
+	return nil
 }
 
 // identityConfirmationWait bounds how long a resubmission retries an
