@@ -157,6 +157,36 @@ func TestEntraRefusalCarriesOnlyTheErrorCode(t *testing.T) {
 // TestEntraRefusalNamesOnlyKnownErrorCodes covers an issuer or proxy that
 // puts arbitrary text in the OAuth error field: only a known code reaches the
 // returned error, which feeds Agent status and a metric label.
+// TestEntraUnreadableResponseIsAnOutage covers an authority proxy that
+// answers with HTML, or a truncated body: neither proves anything about the
+// identity, so the issuer counts as unavailable, not as refusing it.
+func TestEntraUnreadableResponseIsAnOutage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+	}{
+		"html with 200":  {http.StatusOK, "<html><body>sign in</body></html>"},
+		"truncated json": {http.StatusOK, `{"access_token":"abc`},
+		"html with 400":  {http.StatusBadRequest, "<html>bad gateway page</html>"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+			issuer := &EntraIssuer{
+				Config:     EntraConfig{TenantID: testTenant, BlueprintClientID: testBlueprint, Authority: server.URL},
+				Credential: func() (string, error) { return testControllerToken, nil },
+				HTTPClient: server.Client(),
+			}
+			if _, err := issuer.ExchangeToken(context.Background(), testIdentity); !errors.Is(err, ErrIssuerUnavailable) {
+				t.Fatalf("error = %v, want ErrIssuerUnavailable", err)
+			}
+		})
+	}
+}
+
 func TestEntraRefusalNamesOnlyKnownErrorCodes(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -363,6 +393,7 @@ func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
 		"throttled":               {status: http.StatusTooManyRequests, body: map[string]any{}, unavailable: true},
 		"temporarily unavailable": {status: http.StatusBadRequest, body: map[string]any{"error": "temporarily_unavailable"}, unavailable: true},
 		"server error as 400":     {status: http.StatusBadRequest, body: map[string]any{"error": "server_error"}, unavailable: true},
+		"token without a value":   {status: http.StatusOK, body: map[string]any{"token_type": "Bearer"}, unavailable: true},
 		"refused":                 {status: http.StatusBadRequest, body: map[string]any{"error": "unauthorized_client", "error_codes": []int{7000112}}},
 	} {
 		t.Run(name, func(t *testing.T) {
