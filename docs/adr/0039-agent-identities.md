@@ -125,7 +125,13 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   period each time it wins leadership, never from what it read earlier: it
   keeps a marker an enforcing leader created and otherwise creates one, since
   the leader it replaces may not have checked Agent use; identity decisions
-  wait until the period is recorded. A Task or source also binds only if it
+  wait until the period is recorded. A controller that turns the check off
+  still serves requests while its leader-time deletion runs, so a change
+  between enforcing and non-enforcing controllers must not overlap them: the
+  chart's `Recreate` strategy stops the old controller before the new one
+  starts. With `controller.replicas` above one, turn the check off or on with
+  every replica stopped first; overlapping runs across that change can let
+  unchecked work bind an identity whose claim was not yet released. A Task or source also binds only if it
   was created after the current period began. The grant time comes from the API server's clock, like
   creation times, never the controller's: a granted claim first carries no
   grant time and binds nothing, and the controller then records the latest
