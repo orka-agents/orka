@@ -123,7 +123,7 @@ func TestEntraAuthorityIsPartOfTheIssuerInstance(t *testing.T) {
 	}
 	for _, authority := range []string{
 		"http://login.microsoftonline.us", "https://user@login.example", "https://login.example?x=1", "login.example",
-		"https://login.microsoftonline.com?", "https://login.microsoftonline.com#",
+		"https://login.microsoftonline.com?", "https://login.microsoftonline.com#", "https://:443",
 	} {
 		bad := configuredConfig()
 		bad.Entra.Authority = authority
