@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,15 +28,11 @@ func TestACPSessionCreationReusesBoundNativeIdentity(t *testing.T) {
 		t.Run(fmt.Sprintf("restart-%t", restart), func(t *testing.T) {
 			ctx := t.Context()
 			path := filepath.Join(t.TempDir(), "session.db")
-			openPersistence := func() (*sqlite.Store, func() error) {
+			openPersistence := func() (*sealedTestStore, func() error) {
 				db, err := sqlite.NewDB(path)
 				require.NoError(t, err)
 				t.Cleanup(func() { _ = db.Close() })
-				persistence := sqlite.NewStore(db, path)
-				cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{7}, 32))
-				require.NoError(t, err)
-				require.NoError(t, persistence.SetAgentExecutionSnapshotCipher(cipher))
-				return persistence, db.Close
+				return sealedStore(t, sqlite.NewStore(db, path)), db.Close
 			}
 			persistence, closeDB := openPersistence()
 			snapshot := storetest.NativeSessionSnapshot(t, "staged import survives partial creation")

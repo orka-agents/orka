@@ -220,10 +220,15 @@ function TourRail() {
           <X className="h-4 w-4" />
         </Button>
       </div>
-      <div className="flex-1 space-y-4 overflow-y-auto p-5">
+      {/* Keyed by step so each step starts scrolled to the top. */}
+      <div key={current.title} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
         <Progress step={current} />
         <h2 className="text-base font-semibold">{current.title}</h2>
-        <StepBody key={current.title} step={current} />
+        <StepBody step={current} />
+      </div>
+      {/* Pinned footer: Back and Next stay in the same place on every step,
+          however long the step's text is. */}
+      <div className="shrink-0 border-t border-border px-5 py-3">
         <StepNav />
       </div>
     </aside>
@@ -253,11 +258,17 @@ function TourSheet() {
           </Button>
         </div>
         {!collapsed && (
-          <div className="mt-2 max-h-[45vh] space-y-3 overflow-y-auto">
-            <Progress step={current} />
-            <StepBody key={current.title} step={current} />
-            <StepNav />
-          </div>
+          <>
+            <div key={current.title} className="mt-2 max-h-[45vh] space-y-3 overflow-y-auto">
+              <Progress step={current} />
+              <StepBody step={current} />
+            </div>
+            {/* Outside the scroll area, at the bottom of a bottom-anchored
+                sheet, so the controls hold their position between steps. */}
+            <div className="mt-3">
+              <StepNav />
+            </div>
+          </>
         )}
       </div>
     </aside>
