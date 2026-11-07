@@ -262,8 +262,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   it. With Entra, the controller requests the blueprint's exchange token for
   the identity, which proves the identity is a child of the configured
   blueprint, which stage 2 cannot, and then the identity's own token, because
-  Entra still issues the exchange token for a disabled identity. The controller re-verifies when the Agent reconciles and at least
-  hourly while Tasks are bound to it. A failure, for example an identity
+  Entra still issues the exchange token for a disabled identity. The controller keeps the issuer's
+  answer, verified or refused, for one Agent generation and asks again when
+  the Agent is edited and at least hourly, so the Agent's own status writes
+  never call the issuer again early. A failure, for example an identity
   disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
   new calls; deleting the Agent fails identity-backed calls from Tasks still
   bound to it.
