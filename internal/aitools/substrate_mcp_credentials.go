@@ -14,11 +14,20 @@ func SubstrateMCPEgressCredentialSecretNames(tool *corev1alpha1.Tool) []string {
 	if tool == nil || tool.Spec.MCP == nil || tool.Spec.MCP.SubstrateActor == nil {
 		return nil
 	}
+	// Rules may share a Secret; each name is authorized once, in rule order,
+	// so callers make one access check per Secret rather than per rule.
 	var names []string
+	seen := map[string]bool{}
 	for _, rule := range tool.Spec.MCP.SubstrateActor.Egress {
-		if rule.Credential != nil {
-			names = append(names, strings.TrimSpace(rule.Credential.SecretRef.Name))
+		if rule.Credential == nil {
+			continue
 		}
+		name := strings.TrimSpace(rule.Credential.SecretRef.Name)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
 	}
 	return names
 }
