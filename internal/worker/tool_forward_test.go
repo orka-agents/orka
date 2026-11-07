@@ -315,3 +315,28 @@ func TestRedactForwardedTextRemovesAPercentEncodedCredential(t *testing.T) {
 		t.Fatalf("a JSON nextLink kept the encoded credential: %s", got)
 	}
 }
+
+// TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement covers a
+// credential the upstream echoes as a number, a string, a key, or nested:
+// the redacted body is always valid JSON, so a success status never carries
+// a body the runtime cannot decode.
+func TestRedactForwardedBodyKeepsJSONValidForAnyCredentialPlacement(t *testing.T) {
+	const secret = "123456789"
+	for _, body := range []string{
+		`{"pin":123456789,"ok":true}`,
+		`{"pin": 123456789 ,"n":[1, 123456789]}`,
+		`{"echo":"x123456789y","123456789":null}`,
+		`[123456789, {"a": "123456789"}]`,
+	} {
+		got := redactForwardedBody(body, secret)
+		if !json.Valid([]byte(got)) {
+			t.Fatalf("redacted body is not JSON: %s -> %s", body, got)
+		}
+		if strings.Contains(got, secret) {
+			t.Fatalf("redacted body still holds the credential: %s -> %s", body, got)
+		}
+	}
+	if got := redactForwardedBody(`{"n":42}`, secret); got != `{"n":42}` {
+		t.Fatalf("an unrelated number changed: %s", got)
+	}
+}

@@ -212,13 +212,14 @@ var forwardContinuationKeyRe = regexp.MustCompile(`(?i)^(?:\$?skiptoken|continua
 // arrays, objects, numbers, and nulls are never rewritten, so a valid
 // response stays valid JSON. Other bodies are redacted as text.
 func redactForwardedBody(body string, secrets ...string) string {
-	body = redactForwardedSecrets(body, secrets)
+	// A JSON body is judged token by token, so redaction can never leave it
+	// malformed; a raw replacement could split a number or a literal.
 	if json.Valid([]byte(body)) {
 		if redacted, ok := redactForwardedJSON(body, secrets); ok {
 			return redacted
 		}
 	}
-	return redactForwardedText(body)
+	return redactForwardedText(body, secrets...)
 }
 
 // redactForwardedJSON rewrites only the string literals whose redacted
@@ -243,10 +244,12 @@ func redactForwardedJSON(body string, secrets []string) (string, bool) {
 	}
 	var previous, end int
 	// rewrite replaces the string literal the decoder just read.
+	// rewrite replaces the token the decoder just read with a JSON string.
 	rewrite := func(replacement string) bool {
-		start := strings.IndexByte(body[previous:end], '"')
+		between := body[previous:end]
+		start := len(between) - len(strings.TrimLeft(between, " \t\r\n:,"))
 		encoded, err := json.Marshal(replacement)
-		if err != nil || start < 0 {
+		if err != nil || start >= len(between) {
 			return false
 		}
 		out.WriteString(body[copied : previous+start])
@@ -297,6 +300,13 @@ func redactForwardedJSON(body string, secrets []string) (string, bool) {
 			}
 			valueDone()
 		default:
+			// A number holding an injected credential becomes a string; the
+			// literals true, false, and null cannot hold one.
+			if number, ok := value.(json.Number); ok && redactForwardedSecrets(number.String(), secrets) != number.String() {
+				if !rewrite("[REDACTED]") {
+					return "", false
+				}
+			}
 			valueDone()
 		}
 		previous = end
