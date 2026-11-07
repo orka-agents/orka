@@ -67,7 +67,7 @@ func requestedAgentTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	if strings.TrimSpace(message) == "" {
 		message = "cancellation requested"
 	}
-	return message, true
+	return boundACPStatusMessage(message), true
 }
 
 // cancelRequestedAgentTask ends an Agent Task whose cancellation was
