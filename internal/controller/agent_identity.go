@@ -355,6 +355,13 @@ func requireTaskSourceCoveredByClaim(
 	}
 	owner := metav1.GetControllerOf(task)
 	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() {
+		// A Task a scan or monitor created keeps its markers even when its
+		// owner reference is gone, as after an orphaning delete, so it cannot
+		// pass as a root Task.
+		if kind := taskAutomationMarker(task); kind != "" {
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a %s's Task cannot use identity-bound Agent %q once its %s no longer controls it", kind, agent.Name, kind))
+		}
 		return nil
 	}
 	var source client.Object
@@ -381,6 +388,18 @@ func requireTaskSourceCoveredByClaim(
 			owner.Kind, owner.Name, agent.Name, ref.Issuer, ref.ID, owner.Kind))
 	}
 	return nil
+}
+
+// taskAutomationMarker names the kind of automation whose markers a Task
+// carries, or "".
+func taskAutomationMarker(task *corev1alpha1.Task) string {
+	switch {
+	case task.Labels[labels.LabelRepositoryMonitor] != "" || task.Annotations[labels.AnnotationRepositoryMonitorName] != "":
+		return "RepositoryMonitor"
+	case task.Labels[labels.LabelSecurityScanID] != "":
+		return "RepositoryScan"
+	}
+	return ""
 }
 
 // requireParentOwnsIdentityAgent lets a delegated child Task use an

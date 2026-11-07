@@ -217,14 +217,32 @@ func (v *TaskProvenanceValidator) Handle(ctx context.Context, req ctrladmission.
 func changedTaskCoordinationFields(oldTask, newTask *corev1alpha1.Task, cleanupController bool) []string {
 	fields := changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, []string{labels.LabelParentTask})
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, []string{labels.AnnotationParentTaskName})...)
-	oldOwner, newOwner := taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)
 	// Kubernetes can orphan dependents during deletion. The unchanged parent
 	// metadata then has no matching owner UID, so coordination access fails
 	// closed. Cleanup controllers cannot attach the Task to a different owner.
-	if !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil) {
+	// The RepositoryScan or RepositoryMonitor that created a Task is held the
+	// same way: removing it would let the Task pass as a root Task when it
+	// binds to an identity-bound Agent.
+	changed := func(oldOwner, newOwner *metav1.OwnerReference) bool {
+		return !reflect.DeepEqual(oldOwner, newOwner) && (!cleanupController || newOwner != nil)
+	}
+	if changed(taskCoordinationOwner(oldTask), taskCoordinationOwner(newTask)) ||
+		changed(taskAutomationOwner(oldTask), taskAutomationOwner(newTask)) {
 		fields = append(fields, "metadata.ownerReferences")
 	}
 	return fields
+}
+
+// taskAutomationOwner returns the RepositoryScan or RepositoryMonitor that
+// controls a Task, or nil.
+func taskAutomationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
+		(owner.Kind != "RepositoryScan" && owner.Kind != "RepositoryMonitor") {
+		return nil
+	}
+	owner.BlockOwnerDeletion = nil
+	return owner
 }
 
 func taskCoordinationOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
