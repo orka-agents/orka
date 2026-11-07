@@ -1263,3 +1263,33 @@ func TestRequireLiveConnectionRechecksTheProvider(t *testing.T) {
 		t.Fatalf("deleted provider: err = %v", err)
 	}
 }
+
+// TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant covers a
+// provider that starts requiring a scope during the exchange, which the
+// consent fence does not cover: the credential is refused until the person
+// consents again.
+func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = append(provider.Spec.OAuth.Scopes.Read, "read:org")
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
+		t.Fatalf("a newly required scope: err = %v, want a refusal", err)
+	}
+	live := h.reload()
+	live.Status.GrantedScopes = append(live.Status.GrantedScopes, "read:org")
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("a granted scope: %v", err)
+	}
+}
+

@@ -233,6 +233,16 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if !connectors.ConsentMatchesProvider(connection, provider) {
 		return errors.New("connector provider changed since consent; the person must consent again")
 	}
+	// The consent fence leaves scopes out, so a provider that now requires
+	// more than the person granted is caught here, from the grant recorded at
+	// consent.
+	mode := connection.Spec.Mode
+	if mode == "" {
+		mode = corev1alpha1.ConnectionModeReadOnly
+	}
+	if !connectors.ScopesCover(connection.Status.GrantedScopes, connectors.ScopesForMode(provider, mode)) {
+		return errors.New("the provider now requires scopes the person did not grant; the person must consent again")
+	}
 	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
 		return err
 	}
