@@ -1991,7 +1991,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			break
 		}
 		if !accepted && !summary.Accepted && isACPRateLimitedClientError(streamErr) {
-			if promptAdmissionRejectionRequeues(target) {
+			requeueRejectedAdmission := func() error {
 				var runtimeBinding *ACPRuntimeSessionBinding
 				if sessionExecution != nil {
 					runtimeBinding = &sessionExecution.Binding
@@ -2005,6 +2005,9 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 					sessionExecution.requeued = true
 				}
 				return nil
+			}
+			if d.promptAdmissionRejectionRequeues(runtimeCtx, target) {
+				return requeueRejectedAdmission()
 			}
 			if reservationLease != nil {
 				releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -2023,6 +2026,11 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}
 			admissionRetry++
 			reservationLease, err = d.waitForPromptCapacityReservation(runtimeCtx, task, target, fence, runtimeFence.RuntimeInstanceID)
+			if errors.Is(err, errACPPromptAdmissionInstanceRetiring) {
+				// The rejected prompt was never accepted, and the instance it
+				// waited on is being retired: requeue it for the replacement.
+				return requeueRejectedAdmission()
+			}
 			if err != nil {
 				_ = cleanupRuntimeSession("prompt_admission_reconciliation_stopped")
 				if runtimeContextError(runtimeCtx) != nil {
@@ -6013,14 +6021,54 @@ func frozenMCPPermissionDecision(
 	return cancelled
 }
 
+// errACPPromptAdmissionInstanceRetiring reports that the execution-workspace
+// instance a rate-limited prompt waited on is being retired or replaced.
+var errACPPromptAdmissionInstanceRetiring = errors.New("execution workspace runtime instance is retiring before prompt acceptance")
+
 // promptAdmissionRejectionRequeues reports whether a proven-unaccepted,
 // retryable rate-limit rejection releases the Task for requeue instead of
-// waiting for capacity on the same exact instance. External runtimes and
-// dedicated execution-workspace pools replace their instance once a drain
-// closes admission, as on a worker eviction, so waiting on the retiring
-// instance would fail a prompt that was never accepted.
-func promptAdmissionRejectionRequeues(target acpDispatchTarget) bool {
-	return target.external != nil || runtimePoolHasExternalWorkspace(target.pool)
+// waiting for capacity on the same exact instance. External runtimes always
+// requeue. A dedicated execution-workspace pool requeues only while its
+// current state shows the instance draining, stopping, or evicted, as on a
+// worker eviction; a Serving and Accepting pool, whose 429 means its prompt
+// slot is busy, keeps waiting for capacity like a shared pool.
+func (d *ACPDispatcher) promptAdmissionRejectionRequeues(ctx context.Context, target acpDispatchTarget) bool {
+	if target.external != nil {
+		return true
+	}
+	if !runtimePoolHasExternalWorkspace(target.pool) {
+		return false
+	}
+	retiring, err := d.externalWorkspacePoolRetiring(ctx, target.pool)
+	return err == nil && retiring
+}
+
+// externalWorkspacePoolRetiring reads the pool's current state. A read
+// failure keeps the caller waiting for capacity, which re-evaluates it.
+func (d *ACPDispatcher) externalWorkspacePoolRetiring(ctx context.Context, pool *corev1alpha1.RuntimePool) (bool, error) {
+	current := &corev1alpha1.RuntimePool{}
+	if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(pool), current); err != nil {
+		return false, err
+	}
+	if current.UID != pool.UID {
+		return false, fmt.Errorf("RuntimePool identity changed before prompt acceptance")
+	}
+	return runtimePoolWorkspaceInstanceRetiring(current), nil
+}
+
+func runtimePoolWorkspaceInstanceRetiring(pool *corev1alpha1.RuntimePool) bool {
+	if !runtimePoolHasExternalWorkspace(pool) ||
+		pool.Status.Lifecycle == corev1alpha1.RuntimePoolLifecycleServing && pool.Status.AdmissionState == corev1alpha1.RuntimePoolAdmissionAccepting {
+		return false
+	}
+	switch pool.Status.Lifecycle {
+	case corev1alpha1.RuntimePoolLifecycleDraining, corev1alpha1.RuntimePoolLifecycleStopping, corev1alpha1.RuntimePoolLifecycleStopped:
+		return true
+	}
+	if condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction); condition != nil && condition.Status == metav1.ConditionTrue {
+		return true
+	}
+	return pool.Annotations[externalRuntimeRetirementRequestedAnnotation] == booleanTrueValue || pool.Annotations[externalRuntimeEvictionAnnotation] != ""
 }
 
 func isACPRateLimitedClientError(err error) bool {
@@ -6200,6 +6248,11 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 		}
 		pool, identity, err := d.claimRuntimePoolReservation(ctx, task, target.pool.Name, fence, 0)
 		if err != nil {
+			if errors.Is(err, errACPRuntimePoolNotAdmitting) && runtimePoolHasExternalWorkspace(target.pool) {
+				if retiring, retiringErr := d.externalWorkspacePoolRetiring(ctx, target.pool); retiringErr == nil && retiring {
+					return nil, errACPPromptAdmissionInstanceRetiring
+				}
+			}
 			if errors.Is(err, errACPRuntimePoolAtCapacity) || errors.Is(err, errACPRuntimePoolNotAdmitting) {
 				continue
 			}
@@ -6211,6 +6264,9 @@ func (d *ACPDispatcher) waitForPromptCapacityReservation(
 			cancel()
 			if releaseErr != nil {
 				return nil, releaseErr
+			}
+			if runtimePoolHasExternalWorkspace(target.pool) {
+				return nil, errACPPromptAdmissionInstanceRetiring
 			}
 			return nil, fmt.Errorf("RuntimePool exact instance changed before prompt acceptance")
 		}
