@@ -825,7 +825,11 @@ func (d *ACPDispatcher) watchTaskCancellation(ctx context.Context, cancel contex
 				}
 				continue
 			}
-			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			// A recorded cancel request stops the run at once, as deletion
+			// does, whether or not the Task's Cancelled status was written:
+			// that write can keep failing while the agent's work would go on.
+			_, cancelRequested := task.Annotations[labels.AnnotationCancelRequested]
+			if !task.DeletionTimestamp.IsZero() || task.Status.Phase == corev1alpha1.TaskPhaseCancelled || cancelRequested {
 				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 				_, _ = d.cancelPreparedPublication(cancelCtx, task)
 				stop()
