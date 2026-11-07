@@ -217,8 +217,13 @@ spec:
 
 - An Agent with an identity must set `runtime.ceiling.allowedTools`, so every
   Tool that can carry identity-backed data is one the Agent owner listed.
-- List the runtime's built-in tools as well as your own. The codex runtime
-  needs all eight shown above, in both lists. OpenCode's are `Read`, `Write`,
+- List the runtime's built-in tools as well as your own, in both lists. The
+  codex runtime enforces two built-in tool sets: all eight shown above, or
+  exactly `Read`, `Glob`, and `Grep` for Tasks whose workspace intent is
+  `read` (the default for a Task that names no workspace). An Agent that only
+  reads should use the smaller set, which leaves out shell, file writes, and
+  web access; brokered tools and Tools such as `graph-users` are listed on top
+  of either. OpenCode's are `Read`, `Write`,
   `Edit`, `apply_patch`, `Bash`, `Glob`, `Grep`, and it also needs
   `model.contextWindow` and `model.maxTokens`.
 - One identity belongs to one Agent. The first Agent to claim it holds it in
@@ -520,7 +525,7 @@ For each call, the controller:
 | `IdentityVerified=False` with `AADSTS7000112` | The agent identity is disabled in Entra |
 | `IdentityVerified=False` with `AADSTS700016` or `AADSTS70021` | The blueprint ID is wrong, or its federated credential does not match the cluster issuer and controller ServiceAccount |
 | Task creation fails: `not authorized to use agent …` or `caller is not authorized to use the Task's Agent` | The caller lacks `use` on the Agent |
-| Task fails: `codex ACP runtime cannot exactly enforce provider-native tool restrictions` | A codex Agent must list all eight built-in tools in both `defaultAllowedTools` and the ceiling |
+| Task fails: `codex ACP runtime cannot exactly enforce provider-native tool restrictions` | A codex Agent must list either all eight built-in tools or, for a Task with workspace intent `read`, exactly `Read`, `Glob`, and `Grep`, in both `defaultAllowedTools` and the ceiling |
 | Linking fails with `scopes_denied` | Remove `offline_access` from the provider's scopes |
 | Linking fails with `consent_expired` | The consent link expires within minutes; run `orka connect` again and finish promptly |
 | Audit reason `policy` | The policy changed since the Tool checked it, its target is not HTTPS, or it sets `authSecretRef` |

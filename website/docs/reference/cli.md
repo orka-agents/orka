@@ -262,7 +262,7 @@ Common task commands:
 | `orka task plan NAME` | Read autonomous plan state. |
 | `orka task artifacts NAME` | List task artifacts. |
 | `orka task download NAME [FILENAME] --output PATH` | Download task artifact content. |
-| `orka task cancel NAME [--reason TEXT]` | Stop a Pending or Running task and keep its result, artifacts and events. Requires `update` on `tasks/cancel`. |
+| `orka task cancel NAME [--reason TEXT]` | Stop a Pending or Running task and keep its result, artifacts and events. A scheduled task is refused; suspend it instead. Requires `update` on `tasks/cancel`. |
 | `orka task delete NAME` | Delete a task and everything it produced; a running task is stopped first. |
 
 ### Following tasks

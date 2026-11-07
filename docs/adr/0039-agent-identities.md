@@ -115,9 +115,14 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   the check was off, or before its Agent declared an identity, was never
   checked for that identity. So a claim (stage 2) records when it was
   granted (`status.identityClaim.grantedAt`); claims are granted only while
-  the check is enforced and are released when the controller runs without
-  it; and a Task binds an identity only if it was created after the claim
-  was granted. The grant time comes from the API server's clock, like
+  the check is enforced and the issuer is configured, and are released when
+  the controller runs without either; and a Task binds an identity only if it
+  was created after the claim was granted. A claim can outlive a run without
+  the check when its Agent never reconciled during that run, so the
+  controller also records each unbroken period of enforcement in a Lease,
+  `orka-agent-use-enforcement`, that an enforcing run keeps or creates and a
+  run without the check deletes before serving requests; a Task or source
+  also binds only if it was created after the current period began. The grant time comes from the API server's clock, like
   creation times, never the controller's: a granted claim first carries no
   grant time and binds nothing, and the controller then records the latest
   write time the API server stamped on the Agent's `managedFields`, which is
@@ -134,12 +139,17 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   holds for every durable object Orka creates Tasks from with its own broad
   `use` grant: a Task controlled by a RepositoryScan or RepositoryMonitor
   binds only if that object, matched by owner UID, was also created after
-  the grant, and fails closed with "re-create" otherwise. GatewayBinding
+  the grant, and fails closed with "re-create" otherwise. Task provenance
+  admission keeps that owner from being removed or replaced, and a Task that
+  still carries a scan's or monitor's labels without its owner (as after an
+  orphaning delete) is refused rather than judged as a root Task. GatewayBinding
   Tasks record their binding only by name, so they cannot prove this and are
   refused for identity-bound Agents. Before every runtime admission the
-  dispatcher checks again that the Agent still holds a non-releasing claim
-  the Task satisfies, and otherwise fails the Task with
-  `IdentityUnavailable`.
+  dispatcher checks again that the controller still enforces the check, that
+  the issuer instance the Task froze is still configured, and that the Agent
+  still holds a non-releasing claim the Task satisfies, and otherwise fails
+  the Task with `IdentityUnavailable`. That includes resending a prompt a
+  RuntimePool turned away for capacity, since the wait can outlast the claim.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked
@@ -262,8 +272,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   it. With Entra, the controller requests the blueprint's exchange token for
   the identity, which proves the identity is a child of the configured
   blueprint, which stage 2 cannot, and then the identity's own token, because
-  Entra still issues the exchange token for a disabled identity. The controller re-verifies when the Agent reconciles and at least
-  hourly while Tasks are bound to it. A failure, for example an identity
+  Entra still issues the exchange token for a disabled identity. The controller keeps the issuer's
+  answer, verified or refused, for one Agent generation and asks again when
+  the Agent is edited and at least hourly, so the Agent's own status writes
+  never call the issuer again early. A failure, for example an identity
   disabled or deleted at the issuer, sets the Agent `Ready=False` and fails
   new calls; deleting the Agent fails identity-backed calls from Tasks still
   bound to it.
@@ -607,9 +619,12 @@ the ceiling; the provider's curated tools are then checked against it.
 - An issuer outage fails identity-backed Tool calls closed, with no fallback
   to another credential.
 - Requiring `use` for all Agents is a breaking change and stays opt-in.
-- Not yet proven: Entra agent on-behalf-of tokens against Azure Storage in a
-  live tenant, and identity provisioning latency. Stage 4 needs that
-  integration proof before Orka documents it as supported.
+- Proven in a live tenant on 2026-11-05: Self-mode tokens and Entra agent
+  on-behalf-of tokens against Microsoft Graph, including refusals for a wrong
+  audience, an expired delegation, and a disabled identity. Not yet proven:
+  on-behalf-of tokens against Azure Storage, and identity provisioning
+  latency. Stage 4 needs the Storage proof before Orka documents it as
+  supported there.
 - One issuer instance per installation means one Entra tenant per Orka
   installation. Serving several customer tenants needs several installations
   until per-namespace issuer references are added; the frozen issuer instance

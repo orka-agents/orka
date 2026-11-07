@@ -1472,3 +1472,33 @@ func TestBoundIdentityRequiresTheIssuerConfiguredAsBound(t *testing.T) {
 		}
 	}
 }
+
+// TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod covers a
+// controller run with Agent use authorization off that never reconciled an
+// identity-bound Agent: its claim kept the old grant time, but a Task created
+// during that run predates the current enforcement period and cannot bind.
+func TestIdentityClaimDoesNotCoverWorkFromBeforeTheEnforcementPeriod(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	reenabled := testClaimGrantedAt.Add(time.Hour)
+	config := testIdentityConfig()
+	config.EnforcedSince = reenabled
+	r := &TaskReconciler{Client: fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build(), Identity: config}
+	task := func(name string, created time.Time) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS, CreationTimestamp: metav1.NewTime(created)},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}},
+		}
+	}
+	_, err := r.agentExecutionIdentity(context.Background(), task("unchecked", reenabled.Add(-time.Minute)), agent)
+	requirePermanentIdentityRefusal(t, "a Task created while the check was off", err, "create the Task again")
+	if ref, err := r.agentExecutionIdentity(context.Background(), task("checked", reenabled.Add(time.Minute)), agent); err != nil || ref == nil {
+		t.Fatalf("a Task created in the current period: ref = %+v, err = %v", ref, err)
+	}
+	bound := boundTask("bound-unchecked", agent, corev1alpha1.TaskPhasePending)
+	bound.CreationTimestamp = metav1.NewTime(reenabled.Add(-time.Minute))
+	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	unavailable, err := boundIdentityUnavailable(context.Background(), reader, config, bound, bound.Status.AgentExecutionBinding)
+	if err != nil || unavailable == "" {
+		t.Fatalf("a Task from before the period must not start: unavailable = %q, %v", unavailable, err)
+	}
+}
