@@ -218,13 +218,14 @@ func redactPercentEncodedSecrets(text string, secrets []string) string {
 		i++
 	}
 	source = append(source, len(text))
+	plain := string(decoded)
 	var spans [][2]int
 	for _, secret := range secrets {
 		if secret = strings.TrimSpace(secret); secret == "" {
 			continue
 		}
 		for offset := 0; ; {
-			index := strings.Index(string(decoded[offset:]), secret)
+			index := strings.Index(plain[offset:], secret)
 			if index < 0 {
 				break
 			}
