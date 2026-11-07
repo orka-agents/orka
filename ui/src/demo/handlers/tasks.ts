@@ -1112,6 +1112,28 @@ export const taskHandlers: RequestHandler[] = [
     return noContent()
   }),
 
+  http.post(api('/tasks/:id/cancel'), async ({ request, params }) => {
+    if (!inDemoNamespace(request)) return forbiddenNamespace()
+    const name = nameParam(params)
+    const rec = tasks.get(name)
+    if (!rec) return notFound(`tasks.orka.ai "${name}"`)
+    const now = Date.now()
+    advance(rec, now)
+    const phase = phaseOf(rec, now)
+    if (phase === 'Cancelled') {
+      return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase, requested: false, message: 'cancelled' })
+    }
+    if (TERMINAL.has(phase) || rec.schedule) {
+      return apiError(409, `task cannot be cancelled: the task is ${phase}`)
+    }
+    const body = (await request.json().catch(() => ({}))) as { reason?: string; uid?: string }
+    if (body.uid && body.uid !== rec.uid) return apiError(409, 'the task was replaced since it was confirmed; reload it')
+    const reason = body.reason?.trim()
+    const message = reason ? `cancelled by demo-user: ${reason}` : 'cancelled by demo-user'
+    cancelDemoTask(name, message)
+    return HttpResponse.json({ namespace: DEMO_NAMESPACE, name, phase: 'Cancelled', requested: true, message })
+  }),
+
   http.get(api('/tasks/:id/result'), ({ request, params }) => {
     const rec = lookup(request, nameParam(params))
     if (!rec) return notFound(`tasks.orka.ai "${nameParam(params)}"`)

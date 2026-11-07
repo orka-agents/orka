@@ -16,9 +16,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/contexttoken"
@@ -954,6 +958,16 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 		}
 	}
 
+	parentReader := toolPolicyReader(ctx, t.k8sClient)
+	if cancelled, err := delegationParentCancelled(ctx, parentReader, dc.parentTask); err != nil || cancelled {
+		if childTokenExchangeEnabled {
+			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
+		}
+		if err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("parent task %s is being cancelled; it can delegate no more work", dc.parentName)
+	}
 	if err := t.k8sClient.Create(ctx, childTask); err != nil {
 		if childTokenExchangeEnabled {
 			cleanupChildTransactionTokenSecret(ctx, t.k8sClient, childTask)
@@ -972,6 +986,15 @@ func (t *DelegateTaskTool) Execute(ctx context.Context, args json.RawMessage) (s
 			cleanupChildTaskAfterTokenAdoptionFailure(ctx, t.k8sClient, childTask)
 			return "", err
 		}
+	}
+
+	// The parent can be cancelled while the child is created, after its
+	// cascade listed its children. Reading it again closes the gap: either
+	// the cascade's list saw this child, or this read sees the cancel. It
+	// runs once the child's credentials are adopted, so a failure here
+	// leaves a complete child for the parent's next cascade.
+	if err := ensureLateChildCancelled(ctx, parentReader, t.k8sClient, dc.parentTask, childTask); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the child of a cancelled parent task", "child", childTask.Name)
 	}
 
 	result := DelegateTaskResult{
@@ -1044,3 +1067,75 @@ func patchPreparedChildTransactionToken(ctx context.Context, k8sClient client.Cl
 
 // Ensure DelegateTaskTool implements Tool
 var _ Tool = (*DelegateTaskTool)(nil)
+
+// lateChildCheckTimeout bounds the post-create parent check, which outlives
+// the caller: the broker cancels the call's context when the caller's
+// authority ends, which is when this check matters most.
+const lateChildCheckTimeout = 30 * time.Second
+
+// ensureLateChildCancelled runs cancelChildOfCancelledParent on a context the
+// caller's cancellation cannot end, retrying transient failures, since no
+// later cascade is guaranteed to reach a child in another namespace.
+func ensureLateChildCancelled(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lateChildCheckTimeout)
+	defer cancel()
+	backoff := wait.Backoff{Steps: 6, Duration: 250 * time.Millisecond, Factor: 2, Cap: 5 * time.Second}
+	return retry.OnError(backoff, func(err error) bool { return checkCtx.Err() == nil }, func() error {
+		return cancelChildOfCancelledParent(checkCtx, reader, writer, parent, child)
+	})
+}
+
+// delegationParentCancelled reports whether a delegating Task was asked to
+// stop, or is gone or replaced, as the API server sees it now.
+func delegationParentCancelled(ctx context.Context, reader client.Reader, parent *corev1alpha1.Task) (bool, error) {
+	if parent == nil || parent.Name == "" || parent.UID == "" {
+		return false, nil
+	}
+	live := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: parent.Namespace, Name: parent.Name}, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("re-read the parent task: %w", err)
+	}
+	if live.UID != parent.UID || !live.DeletionTimestamp.IsZero() || live.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		return true, nil
+	}
+	_, requested := live.Annotations[labels.AnnotationCancelRequested]
+	return requested, nil
+}
+
+// cancelChildOfCancelledParent asks a just-created child to cancel when its
+// parent was cancelled meanwhile. It re-reads the child, so a replacement
+// under its name, a finished child, or a cancel already requested by someone
+// else is left as it is, and it patches under an optimistic lock.
+func cancelChildOfCancelledParent(ctx context.Context, reader client.Reader, writer client.Client, parent, child *corev1alpha1.Task) error {
+	cancelled, err := delegationParentCancelled(ctx, reader, parent)
+	if err != nil || !cancelled {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		live := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(child), live); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if live.UID != child.UID || !live.DeletionTimestamp.IsZero() {
+			return nil
+		}
+		if _, requested := live.Annotations[labels.AnnotationCancelRequested]; requested {
+			return nil
+		}
+		if phase := live.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+			return nil
+		}
+		base := live.DeepCopy()
+		if live.Annotations == nil {
+			live.Annotations = map[string]string{}
+		}
+		live.Annotations[labels.AnnotationCancelRequested] = "cancelled with its parent task " + parent.Name
+		if err := writer.Patch(ctx, live, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		return nil
+	})
+}

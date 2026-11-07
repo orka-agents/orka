@@ -330,7 +330,11 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
-		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
+		// Delegated work still stops while usage storage is down: the
+		// cascade needs none of it, and runs once the Task's own stop has.
+		stopErr := r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return ctrl.Result{}, stopErr
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -410,21 +414,42 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
-		return ctrl.Result{}, err
+	// Work a cancelled Task delegated stops with it, at every depth, as soon
+	// as the cancel is requested. The cascade runs right after the Task's own
+	// stop, which it never delays, and before anything that can keep
+	// failing, such as result storage or the workspace projection. A refused
+	// child only requeues a finished Task once its own completion work is
+	// done.
+	stopThenCascade := func(result ctrl.Result, err error) (ctrl.Result, error) {
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return result, err
 	}
 
+	// A deferred finalization records a stop already decided, so it settles
+	// before a later cancel request. A requested cancellation is applied
+	// before the workspace status projection, so a failing projection cannot
+	// keep a cancelled Task running; the projection resumes on the next
+	// reconcile.
 	if !isTerminalTaskPhase(task.Status.Phase) {
 		intent, err := r.loadDeferredTaskFinalization(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if intent != nil {
-			return r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+			return stopThenCascade(r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome))
 		}
 	}
 	if message, ok := requestedTaskCancellation(task); ok {
-		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+		return stopThenCascade(r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message))
+	}
+	if _, ok := requestedAgentTaskCancellation(task); ok {
+		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
+	}
+	if err := r.projectACPExecutionWorkspaceStatus(ctx, task); err != nil {
+		// A projection that keeps failing must not keep delegated work
+		// running.
+		_ = r.cascadeTaskCancellation(ctx, task)
+		return ctrl.Result{}, err
 	}
 
 	// Handle based on current phase
@@ -438,7 +463,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case corev1alpha1.TaskPhaseFinalizing:
 		return r.handleFinalizing(ctx, task)
 	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return r.handleCompleted(ctx, task)
+		return r.handleCompletedThenCascade(ctx, task)
 	}
 
 	return ctrl.Result{}, nil
@@ -1522,6 +1547,12 @@ func (r *TaskReconciler) createTaskJob(ctx context.Context, task *corev1alpha1.T
 		task.Status = latest.Status
 		log.Info("skipping job creation because task is no longer runnable", "phase", latest.Status.Phase)
 		return ctrl.Result{}, nil
+	}
+	// A cancel the cached copy has not seen yet must not start the workload:
+	// the next pass applies it.
+	if _, requested := latest.Annotations[labels.AnnotationCancelRequested]; requested {
+		log.Info("skipping job creation because the task's cancellation was requested")
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	if taskJobIdentityRejected(latest) {
 		if err := r.retireRejectedTaskJob(ctx, latest); err != nil {
@@ -2764,11 +2795,145 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	return nil
 }
 
-// completeTask marks a task as completed without asserting that workload execution started.
+// handleCompletedThenCascade runs a finished Task's own completion work, its
+// Job cleanup included, then cancels what it delegated, and requeues it soon
+// while a child refused its cancel.
+func (r *TaskReconciler) handleCompletedThenCascade(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, error) {
+	result, err := r.handleCompleted(ctx, task)
+	cascadeErr := r.cascadeTaskCancellation(ctx, task)
+	if err == nil && cascadeErr != nil && (result.RequeueAfter == 0 || result.RequeueAfter > 2*time.Second) {
+		result.RequeueAfter = 2 * time.Second
+	}
+	return result, err
+}
+
+// cascadeTaskCancellation cancels what a Task delegated once the Task's
+// cancellation was requested, before the Task itself has stopped. A cancel
+// request counts even when the Task did not end Cancelled: recovery records
+// an interrupted cancel as Failed with an unknown outcome.
+func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *corev1alpha1.Task) error {
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; !requested && task.Status.Phase != corev1alpha1.TaskPhaseCancelled {
+		return nil
+	}
+	err := r.cancelChildTasks(ctx, task)
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "failed to cancel the Task's child Tasks")
+	}
+	return err
+}
+
+// cancelChildTasks requests cancellation of the Tasks a cancelled Task
+// delegated, at every depth. Every real child is walked: a finished one
+// keeps its outcome, because work it delegated can outlive it, and one
+// already cancel-requested may never cascade itself.
+func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
+	// One snapshot of every delegated Task in reach serves the whole walk,
+	// so a large tree costs at most two list requests, not one per Task.
+	index, err := r.delegatedTaskIndex(ctx, task)
+	if err != nil {
+		return err
+	}
+	visited := map[types.NamespacedName]bool{client.ObjectKeyFromObject(task): true}
+	parents := []*corev1alpha1.Task{task}
+	var errs []error
+	for len(parents) > 0 {
+		parent := parents[0]
+		parents = parents[1:]
+		message := "cancelled with its parent task " + parent.Name
+		if parent != task {
+			message = "cancelled with its ancestor task " + task.Name
+		}
+		children := index[labels.SelectorValue(parent.Name)]
+		for _, candidate := range children {
+			child := candidate.DeepCopy()
+			// A scheduled child is a template; cancelling it would end its
+			// future runs, so it is left for its own owner.
+			if visited[client.ObjectKeyFromObject(child)] || !delegatedBy(child, parent) ||
+				strings.TrimSpace(child.Spec.Schedule) != "" {
+				continue
+			}
+			visited[client.ObjectKeyFromObject(child)] = true
+			// Every real child is walked, a deleting one included: its own
+			// cascade may never run, as when its status write or finalizer
+			// keeps failing.
+			parents = append(parents, child)
+			if !child.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
+				continue
+			}
+			if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
+				continue
+			}
+			base := child.DeepCopy()
+			if child.Annotations == nil {
+				child.Annotations = map[string]string{}
+			}
+			child.Annotations[labels.AnnotationCancelRequested] = message
+			if err := r.Patch(ctx, child, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil &&
+				!apierrors.IsNotFound(err) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// delegatedTaskIndex lists every Task that names a parent, grouped by the
+// parent label value, for one cascade's walk. It reads the API server, not
+// the cache: a child in another namespace enqueues no reconcile of its parent
+// when it reaches the cache. The root's namespace is always listed. Children
+// elsewhere carry no owner reference and exist only when namespace isolation
+// is off, so other namespaces are listed then, and only where the controller
+// may list Tasks cluster-wide; delegatedBy keeps only real children.
+func (r *TaskReconciler) delegatedTaskIndex(ctx context.Context, root *corev1alpha1.Task) (map[string][]corev1alpha1.Task, error) {
+	selector := client.HasLabels{labels.LabelParentTask}
+	var local corev1alpha1.TaskList
+	if err := r.taskMetadataReader().List(ctx, &local, client.InNamespace(root.Namespace), selector); err != nil {
+		return nil, err
+	}
+	tasks := local.Items
+	if !r.EnforceNamespaceIsolation {
+		var all corev1alpha1.TaskList
+		switch err := r.taskMetadataReader().List(ctx, &all, selector); {
+		case err == nil:
+			for _, task := range all.Items {
+				if task.Namespace != root.Namespace {
+					tasks = append(tasks, task)
+				}
+			}
+		case apierrors.IsForbidden(err):
+			// Task access granted per namespace, as the standard install
+			// does, cannot list other namespaces; children there stay out
+			// of reach and must be cancelled directly.
+		default:
+			return nil, err
+		}
+	}
+	index := make(map[string][]corev1alpha1.Task, len(tasks))
+	for _, task := range tasks {
+		parent := task.Labels[labels.LabelParentTask]
+		index[parent] = append(index[parent], task)
+	}
+	return index, nil
+}
+
+// delegatedBy reports whether parent delegated child. In the parent's
+// namespace the controller owner reference says so. Owner references cannot
+// cross namespaces, so a child elsewhere must record the parent's UID, an
+// annotation only the controller and trusted workers may write.
+func delegatedBy(child, parent *corev1alpha1.Task) bool {
+	if child.Namespace == parent.Namespace {
+		return metav1.IsControlledBy(child, parent)
+	}
+	return parent.UID != "" && strings.TrimSpace(child.Annotations[labels.AnnotationParentTaskUID]) == string(parent.UID)
+}
+
 // requestedTaskCancellation returns the terminal message of a recorded
-// cancel_task request that this reconciler may complete. Agent Tasks and Tasks
-// with ACP execution are excluded: their terminal status needs the controller
-// epoch mutation guard, and the cancel endpoint refuses them.
+// cancel request that this reconciler may complete through the native
+// terminal path. Agent Tasks and Tasks with ACP execution are excluded: they
+// are cancelled by cancelRequestedAgentTask under the controller epoch guard.
 func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	message, ok := task.Annotations[labels.AnnotationCancelRequested]
 	if !ok || task.Spec.Type == corev1alpha1.TaskTypeAgent ||
@@ -2781,9 +2946,10 @@ func requestedTaskCancellation(task *corev1alpha1.Task) (string, bool) {
 	if strings.TrimSpace(message) == "" {
 		message = "cancelled by parent task"
 	}
-	return message, true
+	return boundACPStatusMessage(message), true
 }
 
+// completeTask marks a task as completed without asserting that workload execution started.
 func (r *TaskReconciler) completeTask(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -2944,8 +3110,9 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 		}
 	}
 
-	// Clean up plan state on completion (best-effort)
-	if r.PlanStore != nil {
+	// Clean up plan state on completion (best-effort). A cancelled Task keeps
+	// its plan, which shows how far it got; deletion removes it.
+	if r.PlanStore != nil && phase != corev1alpha1.TaskPhaseCancelled {
 		if err := r.PlanStore.DeletePlan(ctx, task.Namespace, task.Name); err != nil {
 			log.Error(err, "failed to delete plan state on completion")
 		}

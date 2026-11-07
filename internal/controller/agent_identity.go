@@ -878,8 +878,10 @@ func classificationActsForRequester(classified map[string]connectorToolInfo) boo
 	return false
 }
 
-// DelegationLiveness checks that a Delegated call's Task is still running and
-// its Session still open, reading both live.
+// DelegationLiveness checks that a Delegated call's Task is still running,
+// with no cancellation requested, and that its Session still exists, reading
+// both live. Stopping a Session's turn cancels its Task, so the Task check
+// covers it.
 type DelegationLiveness struct {
 	Reader   client.Reader
 	Sessions store.SessionStore

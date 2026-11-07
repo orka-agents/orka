@@ -194,6 +194,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.chatHandler = NewChatHandler(c, config.APIReader, sessionManager, config.Chat, config.WatchNamespace, config.EnforceNamespaceIsolation, config.SessionStore, config.ResultStore, resolver, config.Clientset)
 	server.chatHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.chatHandler.gatewayEventStore = config.GatewayEventStore
+	server.handlers.chatTurns = server.chatHandler
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
@@ -362,6 +363,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks", s.handlers.ListTasks)
 	api.Get("/tasks/:id", s.handlers.GetTask)
 	api.Delete("/tasks/:id", s.handlers.DeleteTask)
+	api.Post("/tasks/:id/cancel", s.handlers.CancelTask)
 	api.Get("/tasks/:id/logs", s.handlers.GetTaskLogs)
 	api.Get("/tasks/:id/events", s.handlers.ListTaskEvents)
 	api.Get("/tasks/:id/stream", s.handlers.StreamTaskEvents)
@@ -383,6 +385,7 @@ func (s *Server) setupRoutes() {
 	api.Get("/sessions/:id/events", s.handlers.ListSessionEvents)
 	api.Get("/sessions/:id/stream", s.handlers.StreamSessionEvents)
 	api.Delete("/sessions/:id", s.handlers.DeleteSession)
+	api.Post("/sessions/:id/cancel", s.handlers.CancelSession)
 
 	// Generic gateway operator endpoints.
 	api.Get("/gatewayclasses", s.handlers.ListGatewayClasses)

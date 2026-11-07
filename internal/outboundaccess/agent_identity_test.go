@@ -493,7 +493,7 @@ func TestKubernetesResolverDelegatedAgentIdentityMode(t *testing.T) {
 		"no frozen Connection":     {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.FrozenConnections = nil }, want: "link to"},
 		"tool the provider lacks":  {spec: delegatedPolicySpec(nil), request: func(r *ResolveRequest) { r.Tool.Name = "other_tool" }, want: "tool"},
 		"no liveness check":        {spec: delegatedPolicySpec(nil), noLive: true, want: "Task and Session check"},
-		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task's Session was cancelled"), want: "no longer live"},
+		"Task or Session not live": {spec: delegatedPolicySpec(nil), live: errors.New("the Task is Cancelled"), want: "no longer live"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := resolver(tc.spec, connection(), &fakeAgentIdentitySource{token: "t"})
