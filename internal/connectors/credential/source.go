@@ -220,6 +220,22 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if grant != req.Frozen.GrantSequence {
 		return errors.New("connection was re-linked since the task was dispatched; re-dispatch to use it")
 	}
+	// The provider can change during the exchange too, before the
+	// Connection's status shows it: it must still be accepted, match the
+	// consent, and declare the Tool, as when the credential was resolved.
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
+		return errors.New("connector provider is unavailable")
+	}
+	if !connectors.ProviderAccepted(provider) {
+		return errors.New("connector provider is not accepted")
+	}
+	if !connectors.ConsentMatchesProvider(connection, provider) {
+		return errors.New("connector provider changed since consent; the person must consent again")
+	}
+	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
+		return err
+	}
 	return nil
 }
 
