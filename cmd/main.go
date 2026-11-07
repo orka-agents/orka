@@ -1441,7 +1441,7 @@ func main() {
 		}
 		outboundAccessResolver.AuditPseudonymKey = auditKey
 		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
-			Reader: mgr.GetAPIReader(), Sessions: sqliteStore,
+			Reader: mgr.GetAPIReader(), Sessions: appStorage,
 		}.Check
 	}
 	if err := mgr.Add(sqliteStore); err != nil {
