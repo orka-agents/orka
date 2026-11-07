@@ -3178,12 +3178,21 @@ func TestACPDispatcherRateLimitedTaskScopedPromptRecordsCleanupBeforeRequeue(t *
 }
 
 // When the rejected task-scoped RuntimeSession cannot be proven retired, the
-// requeued Task keeps naming it so its cleanup obligation is not lost.
+// requeued Task keeps naming it so its cleanup obligation is not lost. Every
+// later dispatch first retries deleting that exact retained generation: while
+// deletion keeps failing the binding stays untouched and no new generation is
+// created, and only a recorded receipt lets a new generation proceed.
 func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testing.T) {
 	var rejections atomic.Int32
+	var deleteFails atomic.Bool
+	var deleteAttempts atomic.Int32
+	deleteFails.Store(true)
 	fixture := newExternalACPDispatchFixtureWithOptions(t, "external-v2", testAgentRuntimeMCPPolicy(), externalACPDispatchFixtureOptions{
 		rejectPrompt: func() bool { return rejections.Add(1) == 1 },
-		failDelete:   func() bool { return true },
+		failDelete: func() bool {
+			deleteAttempts.Add(1)
+			return deleteFails.Load()
+		},
 	})
 	queued := fixture.queueTask(t, "external-rate-limited-unretired", types.UID("external-rate-limited-unretired-uid"), "retry after admission", nil)
 	reserved, target, err := fixture.dispatcher.reserveTask(fixture.ctx, queued.DeepCopy())
@@ -3194,22 +3203,55 @@ func TestACPDispatcherRateLimitedTaskScopedPromptKeepsUnretiredBinding(t *testin
 	go func() { created <- <-fixture.createRequests }()
 	_ = fixture.dispatcher.executeReservedTask(fixture.ctx, reserved, target)
 	first := <-created
-	requeued := &corev1alpha1.Task{}
-	if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), requeued); err != nil {
-		t.Fatal(err)
+	current := func() *corev1alpha1.Task {
+		t.Helper()
+		task := &corev1alpha1.Task{}
+		if err := fixture.client.Get(fixture.ctx, client.ObjectKeyFromObject(queued), task); err != nil {
+			t.Fatal(err)
+		}
+		return task
 	}
-	execution := requeued.Status.Execution
-	if execution == nil || execution.State != corev1alpha1.TaskExecutionStateReserved {
-		t.Fatalf("rate-limited task-scoped Task = %#v, want requeued Reserved", execution)
+	retainsFirst := func(task *corev1alpha1.Task) bool {
+		execution := task.Status.Execution
+		return execution != nil && execution.RuntimeInstanceID == string(first.Metadata.Fence.RuntimeInstanceID) &&
+			execution.RuntimeSessionUID == string(first.Metadata.Fence.RuntimeSessionUID) &&
+			execution.RuntimeSessionGeneration == int64(first.Metadata.Fence.RuntimeSessionGeneration)
 	}
-	if execution.RuntimeInstanceID != string(first.Metadata.Fence.RuntimeInstanceID) || execution.RuntimeSessionUID != string(first.Metadata.Fence.RuntimeSessionUID) ||
-		execution.RuntimeSessionGeneration != int64(first.Metadata.Fence.RuntimeSessionGeneration) {
-		t.Fatalf("requeue dropped the unretired task-scoped binding: %#v", execution)
+	requeued := current()
+	if requeued.Status.Execution == nil || requeued.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved || !retainsFirst(requeued) {
+		t.Fatalf("requeue dropped the unretired task-scoped binding: %#v", requeued.Status.Execution)
 	}
-	if runtimeSessionCleanupCompleteForUID(requeued, acpTaskControlUID(requeued)) {
+	if runtimeSessionCleanupCompleteForUID(requeued, acpTaskControlUID(requeued)) || !taskScopedRuntimeSessionCleanupUnconfirmed(requeued) {
 		t.Fatal("unretired task-scoped RuntimeSession reported its cleanup as complete")
 	}
-	if !taskScopedRuntimeSessionCleanupUnconfirmed(requeued, "replacement-instance") || taskScopedRuntimeSessionCleanupUnconfirmed(requeued, first.Metadata.Fence.RuntimeInstanceID) {
-		t.Fatal("dispatch fence does not hold a replacement instance until the unretired session's receipt is recorded")
+
+	// The next dispatch reaches the same instance and deletion fails again.
+	attemptsBefore := deleteAttempts.Load()
+	held := fixture.dispatch(t, requeued)
+	if !retainsFirst(held) || held.Status.Execution.State != corev1alpha1.TaskExecutionStateReserved ||
+		runtimeSessionCleanupCompleteForUID(held, acpTaskControlUID(held)) {
+		t.Fatalf("failed retained cleanup overwrote or released the binding: %#v", held.Status.Execution)
+	}
+	if fixture.createCalls.Load() != 1 {
+		t.Fatalf("CreateRuntimeSession calls while retained cleanup is unconfirmed = %d, want 1", fixture.createCalls.Load())
+	}
+	if deleteAttempts.Load() == attemptsBefore {
+		t.Fatal("the next dispatch did not retry deleting the retained generation")
+	}
+
+	// Once the exact retained generation is deleted, its receipt is recorded
+	// and a new generation proceeds to completion.
+	deleteFails.Store(false)
+	go func() { created <- <-fixture.createRequests }()
+	completed := fixture.dispatch(t, held)
+	second := <-created
+	if second.Metadata.Fence.RuntimeSessionGeneration <= first.Metadata.Fence.RuntimeSessionGeneration {
+		t.Fatalf("new task-scoped generation = %d, want later than retained %d", second.Metadata.Fence.RuntimeSessionGeneration, first.Metadata.Fence.RuntimeSessionGeneration)
+	}
+	if completed.Status.Phase != corev1alpha1.TaskPhaseSucceeded {
+		t.Fatalf("Task after retained cleanup = %#v", completed.Status)
+	}
+	if fixture.createCalls.Load() != 2 {
+		t.Fatalf("CreateRuntimeSession calls = %d, want the retained and one new generation", fixture.createCalls.Load())
 	}
 }

@@ -1188,11 +1188,8 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		runtimeFence.RuntimeSessionUID = harnessv2.RuntimeSessionUID(taskRuntimeSessionUID(task))
 		runtimeFence.RuntimeSessionGeneration = taskScopedGeneration
 		leaseGeneration = int64(taskScopedGeneration)
-		if taskScopedRuntimeSessionCleanupUnconfirmed(task, runtimeFence.RuntimeInstanceID) {
-			// Binding a new instance would overwrite the only record of an
-			// unretired session; wait until its cleanup receipt is recorded.
-			return d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation,
-				errors.New("a task-scoped RuntimeSession on a previous runtime instance has no cleanup receipt"))
+		if held, err := d.settleRetainedTaskScopedRuntimeSession(ctx, runtimeClient, task, reservedAttempt, runtimeFence); held || err != nil {
+			return err
 		}
 	}
 	sessionTrace.setRuntimeSession(string(runtimeFence.RuntimeSessionUID), runtimeFence.RuntimeSessionGeneration)
@@ -6041,15 +6038,62 @@ func frozenMCPPermissionDecision(
 }
 
 // taskScopedRuntimeSessionCleanupUnconfirmed reports whether the Task still
-// names a task-scoped RuntimeSession on another runtime instance whose cleanup
-// receipt has not been recorded.
-func taskScopedRuntimeSessionCleanupUnconfirmed(task *corev1alpha1.Task, runtimeInstanceID harnessv2.RuntimeInstanceID) bool {
+// names a task-scoped RuntimeSession whose cleanup receipt has not been
+// recorded.
+func taskScopedRuntimeSessionCleanupUnconfirmed(task *corev1alpha1.Task) bool {
 	if task == nil || task.Status.Execution == nil {
 		return false
 	}
 	execution := task.Status.Execution
 	return strings.TrimSpace(execution.RuntimeSessionUID) != "" && strings.TrimSpace(execution.RuntimeInstanceID) != "" &&
-		execution.RuntimeInstanceID != string(runtimeInstanceID) && !runtimeSessionCleanupCompleteForUID(task, acpTaskControlUID(task))
+		!runtimeSessionCleanupCompleteForUID(task, acpTaskControlUID(task))
+}
+
+// settleRetainedTaskScopedRuntimeSession retires a task-scoped RuntimeSession
+// that the Task still names without a cleanup receipt before another
+// generation is planned, because planning overwrites that binding. A binding
+// the reserved attempt still owns is the session the retry reuses and is left
+// alone; only a binding the attempt released is retired here. On the
+// same runtime instance it deletes the exact retained generation and records
+// its receipt. Otherwise, or when deletion is not proven, it holds the Task
+// with the retained binding untouched until a receipt exists, which the
+// instance's retirement can also record. It reports whether the Task was held.
+func (d *ACPDispatcher) settleRetainedTaskScopedRuntimeSession(
+	ctx context.Context,
+	runtimeClient *harnessv2.Client,
+	task *corev1alpha1.Task,
+	attempt *store.PromptAttempt,
+	runtimeFence harnessv2.Fence,
+) (bool, error) {
+	if !taskScopedRuntimeSessionCleanupUnconfirmed(task) {
+		return false, nil
+	}
+	execution := task.Status.Execution
+	if attempt != nil && attempt.RuntimeInstanceID == execution.RuntimeInstanceID && attempt.SessionUID == execution.RuntimeSessionUID &&
+		attempt.SessionLeaseGeneration == execution.RuntimeSessionGeneration {
+		return false, nil
+	}
+	hold := func(cause error) (bool, error) {
+		return true, d.requeueReservedTask(ctx, task, acpReservedRetrySessionPreparation, cause)
+	}
+	if execution.RuntimeInstanceID != string(runtimeFence.RuntimeInstanceID) || execution.RuntimeSessionGeneration < 1 {
+		return hold(errors.New("a retained task-scoped RuntimeSession on another runtime instance has no cleanup receipt"))
+	}
+	retained := runtimeFence
+	retained.RuntimeSessionUID = harnessv2.RuntimeSessionUID(execution.RuntimeSessionUID)
+	retained.RuntimeSessionGeneration = uint64(execution.RuntimeSessionGeneration)
+	if err := d.deleteRuntimeSession(
+		context.WithoutCancel(ctx), runtimeClient, harnessv2.RuntimeSessionID(runtimeSessionID(retained)), task, retained,
+		"retained_task_scoped_cleanup",
+	); err != nil {
+		return hold(err)
+	}
+	if err := d.markTaskScopedRuntimeSessionCleanupComplete(
+		context.WithoutCancel(ctx), task, task.UID, execution.RuntimeInstanceID, execution.RuntimeSessionUID, execution.RuntimeSessionGeneration,
+	); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 // errACPPromptAdmissionInstanceRetiring reports that the execution-workspace
