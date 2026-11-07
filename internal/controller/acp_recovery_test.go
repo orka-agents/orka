@@ -39,6 +39,7 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 	kubestore "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -1701,12 +1702,12 @@ func TestDeletingRestoredACPTaskReclaimsSourcePromptAttemptAndRemovesFinalizer(t
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			persistence := sqlite.NewStore(db, "restored-finalizer")
+			persistence := sealedStore(t, sqlite.NewStore(db, "restored-finalizer"))
 			controlStore, err := kubestore.NewComposite(intercepted, "default", persistence, kubestore.WithAPIReader(intercepted))
 			if err != nil {
 				t.Fatal(err)
 			}
-			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1))
+			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "restored-finalizer-"+strconv.Itoa(index+1), persistence)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
 			if err != nil {
@@ -2977,7 +2978,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "test"))
 
 	scheme := runtime.NewScheme()
 	if err := corev1alpha1.AddToScheme(scheme); err != nil {
@@ -3018,7 +3019,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old")
+	oldEpochs, stopOldEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "controller-old", sqliteStore)
 	oldFence, err := oldEpochs.CurrentFence(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -3130,7 +3131,7 @@ func TestACPDispatcherRecoveryResumesCommittedSessionTurnFinalization(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new")
+	newEpochs, stopNewEpoch := startACPRecoveryEpochManager(t, ctx, restartedStore, "controller-new", sqliteStore)
 	defer stopNewEpoch()
 	newContinuity := newACPRecoveryContinuity(t, restartedStore, sqliteStore, control.SessionUID)
 	dispatcher := &ACPDispatcher{
@@ -3522,9 +3523,14 @@ func newACPRecoveryContinuity(t *testing.T, controls store.DurableControlStore, 
 	return continuity
 }
 
-func startACPRecoveryEpochManager(t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string) (*ControllerEpochManager, func()) {
+func startACPRecoveryEpochManager(
+	t *testing.T, ctx context.Context, epochStore store.ControllerEpochStore, holder string, datasets ...EpochDataset,
+) (*ControllerEpochManager, func()) {
 	t.Helper()
 	manager := NewControllerEpochManager(epochStore, holder)
+	for _, dataset := range datasets {
+		manager.WithStorage(storagev1.StateContract, dataset)
+	}
 	epochCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- manager.Start(epochCtx) }()

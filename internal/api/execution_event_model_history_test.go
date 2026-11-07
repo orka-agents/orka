@@ -168,7 +168,7 @@ func newModelHistoryJournal(t *testing.T, model string) (eventjournal.Journal, *
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	journal := eventjournal.Journal{
-		EventStore: sqlite.NewStore(db, dbPath),
+		EventStore: testStorageClient(sqlite.NewStore(db, dbPath)),
 		MapContext: eventjournal.MapContext{
 			Namespace: defaultNamespace, TaskName: modelHistoryTaskName, SessionName: "model-history-session", Model: model,
 		},

@@ -330,7 +330,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 	if err := r.retainUsageTask(ctx, task); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}
@@ -414,6 +414,15 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	if !isTerminalTaskPhase(task.Status.Phase) {
+		intent, err := r.loadDeferredTaskFinalization(ctx, task)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if intent != nil {
+			return r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+		}
+	}
 	if message, ok := requestedTaskCancellation(task); ok {
 		return r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
 	}
@@ -664,7 +673,7 @@ func (r *TaskReconciler) handleDeletion(ctx context.Context, task *corev1alpha1.
 
 		// Clean up artifacts
 		if r.ArtifactStore != nil {
-			if err := r.ArtifactStore.DeleteArtifacts(ctx, task.Namespace, task.Name); err != nil {
+			if err := r.ArtifactStore.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}); err != nil {
 				return ctrl.Result{}, fmt.Errorf("delete artifacts for task %s/%s: %w", task.Namespace, task.Name, err)
 			}
 		}
@@ -1811,26 +1820,35 @@ func (r *TaskReconciler) handleRunning(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
-	// Check timeout
+	// Check timeout. A Job that succeeded before the deadline is completed
+	// below instead: its completion may have been deferred past the timeout,
+	// for example by a storage write the store had not accepted yet.
 	if task.Spec.Timeout != nil && task.Status.StartTime != nil {
 		elapsed := time.Since(task.Status.StartTime.Time)
+		deadline := task.Status.StartTime.Add(task.Spec.Timeout.Duration)
 		if elapsed > task.Spec.Timeout.Duration {
-			if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
-				return result, err
-			}
-			log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
-			validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+			succeeded, err := r.taskJobSucceededBy(ctx, task, deadline)
 			if err != nil {
-				log.Error(err, "failed to classify timed-out repository validation")
-				if errors.Is(err, errRepositoryMonitorValidationConfinement) {
-					return r.failTask(ctx, task, err.Error())
-				}
 				return ctrl.Result{}, err
 			}
-			if validationCommandStarted {
-				return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
+			if !succeeded {
+				if result, handled, err := r.handleAutonomousApprovalState(ctx, task); err != nil || handled {
+					return result, err
+				}
+				log.Info("task timed out", "elapsed", elapsed, "timeout", task.Spec.Timeout.Duration)
+				validationCommandStarted, err := r.repositoryMonitorValidationCommandStarted(ctx, task)
+				if err != nil {
+					log.Error(err, "failed to classify timed-out repository validation")
+					if errors.Is(err, errRepositoryMonitorValidationConfinement) {
+						return r.failTask(ctx, task, err.Error())
+					}
+					return ctrl.Result{}, err
+				}
+				if validationCommandStarted {
+					return r.completeExecutedTask(ctx, task, corev1alpha1.TaskPhaseFailed, timedOutTaskMessage(task))
+				}
+				return r.failTask(ctx, task, timedOutTaskMessage(task))
 			}
-			return r.failTask(ctx, task, timedOutTaskMessage(task))
 		}
 	}
 
@@ -2099,6 +2117,38 @@ func (r *TaskReconciler) syncPodWaitingMessage(ctx context.Context, task *corev1
 		}
 		t.Status.Message = message
 	})
+}
+
+// taskJobSucceededBy reports whether the Task's current Job succeeded no later
+// than deadline, so that a completion deferred past the Task timeout records
+// the Job's outcome rather than a timeout. A Job that finished after the
+// deadline, or whose completion time is unknown, does not qualify. Nor does
+// an autonomous Task: its timeout ends the loop even after a successful
+// iteration. Transient Job or Agent lookup errors leave the outcome unsettled
+// until a later reconciliation can observe the required state.
+func (r *TaskReconciler) taskJobSucceededBy(ctx context.Context, task *corev1alpha1.Task, deadline time.Time) (bool, error) {
+	if strings.TrimSpace(task.Status.JobName) == "" {
+		return false, nil
+	}
+	job := &batchv1.Job{}
+	if err := r.Get(ctx, types.NamespacedName{Name: task.Status.JobName, Namespace: task.Namespace}, job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if task.Status.JobUID != "" && task.Status.JobUID != string(job.UID) {
+		return false, nil
+	}
+	if job.Status.Succeeded == 0 || job.Status.CompletionTime == nil || job.Status.CompletionTime.After(deadline) {
+		return false, nil
+	}
+	autonomous, err := r.taskAutonomousMode(ctx, task)
+	if apierrors.IsNotFound(err) {
+		// Match normal Job completion when the Agent has been deleted.
+		return true, nil
+	}
+	return !autonomous && err == nil, err
 }
 
 // timedOutTaskMessage keeps the last published Pod waiting reason, such as an
@@ -2562,6 +2612,9 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	if waitingForJob {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if err := r.cleanupDeferredTaskFinalization(ctx, task); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	if !terminalEventRecorded {
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -2599,18 +2652,17 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 
 	// Send optional webhooks only after durable ACP artifact identities have
-	// retired. Failed delivery may retry indefinitely without delaying artifact
-	// reclamation; retirement itself retains the capability safety grace period.
-	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
-		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
-			log.Error(err, "failed to send webhook")
-			// Don't fail the task, just retry webhook later
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		task.Status.WebhookDelivered = true
-		if err := r.Status().Update(ctx, task); err != nil {
-			log.Error(err, "failed to update webhook status")
+	// retired. Delivery state is durable in Task status and bounded; failed
+	// delivery never delays artifact reclamation, and retirement itself retains
+	// the capability safety grace period.
+	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered && r.WebhookNotifier != nil {
+		requeueAfter, err := r.WebhookNotifier.reconcileDelivery(ctx, r.Status(), task)
+		if err != nil {
+			log.Error(err, "failed to advance webhook delivery")
 			return ctrl.Result{}, err
+		}
+		if requeueAfter > 0 {
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
 
@@ -2778,7 +2830,7 @@ func (r *TaskReconciler) beginTaskFinalization(
 	log := logf.FromContext(ctx)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result before workspace finalization")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
+		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
 			return ctrl.Result{}, err
 		}
 	}
@@ -2824,17 +2876,37 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	task.Status.CompletionTime = &now
 	task.Status.Message = message
 
+	// Collect available output before cleanup, but stop failed or cancelled work even
+	// when storage finalization must wait for recovery. Keep the Task
+	// nonterminal in Kubernetes so those writes are retried.
+	retryFinalization := func(err error) (ctrl.Result, error) {
+		if phase == corev1alpha1.TaskPhaseCancelled || phase == corev1alpha1.TaskPhaseFailed {
+			cleanupErr := r.stopJobForDeferredFinalization(ctx, task, deferredTaskFinalization{
+				Phase: phase, OutcomePhase: outcomePhase, Message: message, RecordOutcome: recordOutcome,
+			})
+			err = errors.Join(err, cleanupErr)
+		}
+		return ctrl.Result{}, err
+	}
+
 	if s := trace.SpanFromContext(ctx); s.IsRecording() {
 		s.AddEvent("phase.transition", trace.WithAttributes(
 			attribute.String("task.phase", string(phase)),
 		))
 	}
 
+	deferredIntent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Collect result from Job output
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect result")
-		if errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) {
-			return ctrl.Result{}, err
+		// A result the store has not accepted yet, or may have saved, is
+		// collected again on the next attempt rather than dropped.
+		if deferredIntent != nil || errors.Is(err, errRepositoryMonitorValidationClassificationUnavailable) || store.IsTemporaryStorageError(err) {
+			return retryFinalization(err)
 		}
 		// Continue anyway, result collection is best-effort
 	}
@@ -2844,6 +2916,12 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	if task.Spec.SessionRef != nil && task.Spec.SessionRef.Append {
 		if err := r.SessionManager.AppendMessages(ctx, task, r.ResultStore); err != nil {
 			log.Error(err, "failed to append session messages")
+			// A transcript the store has not accepted yet, or may have saved,
+			// is appended again on the next attempt, before the lock is
+			// released; its stable message IDs make that safe.
+			if store.IsTemporaryStorageError(err) {
+				return retryFinalization(err)
+			}
 			// Continue anyway
 		}
 		var err error
@@ -2857,6 +2935,12 @@ func (r *TaskReconciler) completeTaskWithOutcome(
 	if task.Spec.SessionRef != nil {
 		if err := r.SessionManager.ReleaseLockWithTokenUsage(ctx, task, inputTokens, outputTokens); err != nil {
 			log.Error(err, "failed to release session lock")
+			// A release the store has not accepted yet is retried rather
+			// than leaving the terminal Task holding the Session; a release
+			// that committed leaves no lock, so retrying it changes nothing.
+			if store.IsTemporaryStorageError(err) {
+				return retryFinalization(err)
+			}
 		}
 	}
 
@@ -3122,34 +3206,25 @@ func (r *TaskReconciler) collectResult(ctx context.Context, task *corev1alpha1.T
 		return nil
 	}
 
-	// No result yet — capture pod logs for tasks that actually created a Job.
-	// Some validation failures happen before Job creation; those terminal tasks should
-	// not produce noisy best-effort log collection errors for a non-existent Job.
-	stdoutResult := taskUsesStdoutResult(task)
-	if (task.Spec.Type != corev1alpha1.TaskTypeContainer && !stdoutResult) || r.KubeClient == nil || task.Status.JobName == "" {
-		return nil
+	// Prefer the durable snapshot after outage cleanup has removed the Pods.
+	// An intent with no chunks records that the workload had no output yet;
+	// recovery must not depend on logs from a Pod that never started.
+	intent, err := r.loadDeferredTaskFinalization(ctx, task)
+	if err != nil {
+		return err
 	}
-
 	var result []byte
-	if stdoutResult {
-		logs, err := r.readStdoutResultPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading stdout result pod logs: %w", err)
-		}
-		stdoutPayload, ok, decodeErr := extractStdoutTaskResult(logs)
-		if decodeErr != nil {
-			return decodeErr
-		}
-		if !ok {
-			return nil
-		}
-		result = stdoutPayload
+	var available bool
+	if intent != nil {
+		result, available, err = r.deferredTaskResult(ctx, task, intent)
 	} else {
-		logs, err := r.readPodLogs(ctx, task)
-		if err != nil {
-			return fmt.Errorf("reading pod logs: %w", err)
-		}
-		result = []byte(logs)
+		result, available, err = r.taskPodResult(ctx, task, false)
+	}
+	if err != nil {
+		return err
+	}
+	if !available {
+		return nil
 	}
 
 	if err := r.ResultStore.SaveResult(ctx, task.Namespace, task.Name, result); err != nil {
@@ -4605,8 +4680,15 @@ func subjectsEqual(a, b []rbacv1.Subject) bool {
 
 // isAutonomousTask checks if this task has autonomous mode enabled via its agent.
 func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha1.Task) bool {
+	autonomous, _ := r.taskAutonomousMode(ctx, task)
+	return autonomous
+}
+
+// taskAutonomousMode preserves lookup errors when the mode affects a terminal
+// decision. Other callers retain the existing best-effort boolean behavior.
+func (r *TaskReconciler) taskAutonomousMode(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if task.Spec.AgentRef == nil {
-		return false
+		return false, nil
 	}
 
 	agent := &corev1alpha1.Agent{}
@@ -4615,10 +4697,10 @@ func (r *TaskReconciler) isAutonomousTask(ctx context.Context, task *corev1alpha
 		agentNS = task.Spec.AgentRef.Namespace
 	}
 	if err := r.Get(ctx, types.NamespacedName{Name: task.Spec.AgentRef.Name, Namespace: agentNS}, agent); err != nil {
-		return false
+		return false, err
 	}
 
-	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous
+	return agent.Spec.Coordination != nil && agent.Spec.Coordination.Autonomous, nil
 }
 
 func (r *TaskReconciler) pendingApprovalsForTask(ctx context.Context, task *corev1alpha1.Task) ([]approvals.Approval, error) {
@@ -4844,6 +4926,9 @@ func (r *TaskReconciler) handleAutonomousIteration(ctx context.Context, task *co
 	// Collect result from this iteration (best-effort)
 	if err := r.collectResult(ctx, task); err != nil {
 		log.Error(err, "failed to collect iteration result")
+		if store.IsTemporaryStorageError(err) {
+			return ctrl.Result{}, err
+		}
 	}
 
 	if result, parked, err := r.parkOnPendingApproval(ctx, task); err != nil || parked {

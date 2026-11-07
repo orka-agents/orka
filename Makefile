@@ -147,8 +147,9 @@ sync-helm-crds: ## Synchronize generated CRDs into the promoted Helm chart while
 	scripts/sync-helm-crds.sh
 
 .PHONY: generate
-generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen ## Generate DeepCopy implementations and the storage client's write envelope decorators.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt" paths="github.com/orka-agents/orka/..."
+	go generate ./internal/storageclient
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

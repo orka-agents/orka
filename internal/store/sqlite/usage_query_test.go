@@ -53,7 +53,7 @@ func TestUsageLoadSelectsCohortAndPreservesCounterHistory(t *testing.T) {
 	usageTask(t, s, "b", otherTeam, "selected", "Succeeded", start)
 	usageSample(t, s, "b", "selected", "other-team", 1000, start)
 	// Unrelated history must not be decoded for a small date/model selection.
-	require.NoError(t, s.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+	require.NoError(t, s.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		for i := range 2000 {
 			id := fmt.Sprint("unrelated-", i)
 			if err := s.RecordUsage(ctx, store.UsageObservation{Namespace: "a", TaskUID: "previous", ID: id, CounterID: id,
@@ -379,7 +379,7 @@ func TestUsageLoadBoundsPRRefreshHistoryWithoutChangingOutcomes(t *testing.T) {
 	pr := store.UsagePullRequest{Namespace: "team", NamespaceUID: "current-namespace", Repository: "org/repo", Number: 42,
 		GitHubID: "42", State: "open", Ready: true, HeadSHA: "head"}
 	const observations = 26000 // A PR open for roughly 90 days at five-minute refresh intervals.
-	require.NoError(t, s.WithTaskDataTransaction(t.Context(), func(ctx context.Context) error {
+	require.NoError(t, s.withTaskDataTransaction(t.Context(), func(ctx context.Context) error {
 		for i := range observations {
 			pr.ObservedAt = start.Add(time.Duration(i) * 5 * time.Minute)
 			if err := s.RecordUsagePullRequest(ctx, pr); err != nil {
