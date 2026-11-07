@@ -273,7 +273,10 @@ instance, and spans carry the Agent UID as `gen_ai.agent.id`. The Agent's
 for the identity from its issuer, and the controller asks again at least hourly; a
 refusal sets it `False`, makes the Agent not Ready, and stops its identity-backed calls; an issuer that cannot answer sets it `Unknown` instead. Tokens for the identity are
 issued only by the controller, through `agentIdentity`-mode outbound access
-policies, and never reach the runtime.
+policies, and never reach the runtime. In `Delegated` mode the Agent acts for the
+Task's requester with their own linked grant: only the provider's curated tools,
+only on built-in RuntimePools, only within `maxDelegationAge` of the requester's
+last action, and every write needs the requester's own approval.
 
 The controller's blueprint credential is a projected token on the node that
 runs it. AI workers can create Jobs in the release namespace, and a privileged

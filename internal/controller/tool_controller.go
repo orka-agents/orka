@@ -254,7 +254,8 @@ func (r *ToolReconciler) toolPolicyIsConnectionMode(ctx context.Context, tool *c
 	if err := r.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: tool.Namespace}, policy); err != nil {
 		return false, fmt.Errorf("failed to get outbound access policy %q: %w", ref.Name, err)
 	}
-	return policy.Spec.Connection != nil, nil
+	_, connectorBacked := outboundaccess.ConnectionProviderName(policy)
+	return connectorBacked, nil
 }
 
 // validateToolHTTPURL checks the Tool's endpoint. With allowPrivate the

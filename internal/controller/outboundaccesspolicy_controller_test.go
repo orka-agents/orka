@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -840,5 +841,50 @@ func TestToolReconcilerDirectPolicyDefersMCPResolvedEndpointValidation(t *testin
 	tool.Status.Endpoint = "http://actor.example.test/mcp"
 	if err := reconciler.validateToolHTTPAuth(context.Background(), tool); err == nil {
 		t.Fatal("plaintext resolved endpoint accepted")
+	}
+}
+
+func TestOutboundAccessPolicyReconcilerReportsACappedDelegationAge(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, rbacv1.AddToScheme, corev1alpha1.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		age  *metav1.Duration
+		cap  time.Duration
+		want string
+	}{
+		"over the cap":           {age: &metav1.Duration{Duration: 48 * time.Hour}, cap: 2 * time.Hour, want: "maxDelegationAge 48h0m0s exceeds the controller's cap, so 2h0m0s applies"},
+		"within the cap":         {age: &metav1.Duration{Duration: time.Hour}, cap: 2 * time.Hour, want: "Policy structure is valid"},
+		"default over a low cap": {cap: 10 * time.Minute, want: "maxDelegationAge 1h0m0s exceeds the controller's cap, so 10m0s applies"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			policy := &corev1alpha1.OutboundAccessPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: "tenant", Generation: 1},
+				Spec: corev1alpha1.OutboundAccessPolicySpec{AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{
+					Mode: corev1alpha1.OutboundAgentIdentityModeDelegated,
+					Delegated: &corev1alpha1.DelegatedAgentIdentity{
+						ProviderRef:      corev1alpha1.LocalObjectReference{Name: "entra-signin"},
+						MaxDelegationAge: tc.age,
+					},
+					Entra: &corev1alpha1.EntraOutboundTarget{Resource: "https://graph.microsoft.com"},
+				}},
+			}
+			client := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy).WithStatusSubresource(policy).Build()
+			reconciler := &OutboundAccessPolicyReconciler{Client: client, APIReader: client, Scheme: scheme, MaxDelegationAge: tc.cap}
+			if _, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "tenant", Name: "policy"}}); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			updated := &corev1alpha1.OutboundAccessPolicy{}
+			if err := client.Get(context.Background(), types.NamespacedName{Namespace: "tenant", Name: "policy"}, updated); err != nil {
+				t.Fatal(err)
+			}
+			accepted := meta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.OutboundAccessPolicyConditionAccepted)
+			if accepted == nil || accepted.Status != metav1.ConditionTrue || !strings.Contains(accepted.Message, tc.want) {
+				t.Fatalf("Accepted = %#v, want True with %q", accepted, tc.want)
+			}
+		})
 	}
 }

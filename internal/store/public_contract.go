@@ -142,6 +142,7 @@ type (
 	PromptResultReceipt                       = storagev1.PromptResultReceipt
 	PromptResultReceiptStore                  = storagev1.PromptResultReceiptStore
 	SessionStore                              = storagev1.SessionStore
+	SessionCreationReader                     = storagev1.SessionCreationReader
 	SessionTurnCommitter                      = storagev1.SessionTurnCommitter
 	FencedSessionWriteStore                   = storagev1.FencedSessionWriteStore
 	GatewayEventStore                         = storagev1.GatewayEventStore

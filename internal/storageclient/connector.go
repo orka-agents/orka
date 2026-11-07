@@ -437,6 +437,31 @@ func (c *Client) GetConnectorCredential(ctx context.Context, ref store.Connector
 	return openStoredConnectorCredential(keys, ref, sealed)
 }
 
+// GetConnectorCredentialGrant implements store.ConnectorGrantReader. The
+// provider's grant sequence column is not authenticated, so the grant and its
+// scopes come from the sealed record, which is opened, checked against the
+// column, and then dropped.
+func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	if err := ref.Validate(); err != nil {
+		return store.ConnectorGrant{}, err
+	}
+	custody, err := c.readConnectorCustody(ctx, ref.ConnectionUID)
+	if err != nil {
+		return store.ConnectorGrant{}, err
+	}
+	if custody.Tombstoned {
+		return store.ConnectorGrant{}, store.ErrConnectorCustodyTombstoned
+	}
+	if custody.Credential == nil {
+		return store.ConnectorGrant{}, store.ErrNotFound
+	}
+	credential, err := c.GetConnectorCredential(ctx, ref)
+	if err != nil {
+		return store.ConnectorGrant{}, err
+	}
+	return store.ConnectorGrant{Sequence: credential.GrantSequence, Scopes: credential.Scopes}, nil
+}
+
 // ListRetiredConnectorCredentials implements store.ConnectorCredentialStore.
 func (c *Client) ListRetiredConnectorCredentials(ctx context.Context, ref store.ConnectorCredentialRef) ([]store.ConnectorCredential, error) {
 	keys, err := c.activeCustody()

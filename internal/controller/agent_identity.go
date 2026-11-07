@@ -23,6 +23,7 @@ import (
 	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // errIdentityClaimPending marks a Task waiting for its Agent to hold the
@@ -624,6 +625,12 @@ func requireParentOwnsIdentityAgent(
 	recorded := strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID])
 	if owner == nil || owner.Kind != taskResourceKind || owner.APIVersion != corev1alpha1.GroupVersion.String() ||
 		owner.Name != parentName || owner.UID != parent.UID || (recorded != "" && recorded != string(parent.UID)) {
+		if owner == nil && strings.TrimSpace(task.Annotations[labels.AnnotationForkSourceTask]) != "" {
+			// The message only explains the refusal; the decision above
+			// never depends on the fork annotation.
+			return permanentACPAgentConfiguration(fmt.Errorf(
+				"a fork does not carry its source Task's identity-bound Agent %q; create a new Task to use it", agent.Name))
+		}
 		return permanentACPAgentConfiguration(fmt.Errorf(
 			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
@@ -656,18 +663,127 @@ func requireParentOwnsIdentityAgent(
 }
 
 // agentIdentityBindingFromTask returns the identity frozen into an ACP Task's
-// binding, for agentIdentity-mode outbound access.
-func agentIdentityBindingFromTask(task *corev1alpha1.Task) *outboundaccess.AgentIdentityBinding {
+// binding, for agentIdentity-mode outbound access, with what Delegated mode
+// needs: when the root requester last acted, and whether the Task runs where
+// Orka controls the network.
+func agentIdentityBindingFromTask(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (*outboundaccess.AgentIdentityBinding, error) {
 	if task == nil || task.Status.AgentExecutionBinding == nil || task.Status.AgentExecutionBinding.Agent == nil ||
 		task.Status.AgentExecutionBinding.Agent.Identity == nil {
-		return nil
+		return nil, nil
 	}
-	agent := task.Status.AgentExecutionBinding.Agent
+	binding := task.Status.AgentExecutionBinding
+	agent := binding.Agent
+	// Only a binding that acts for its requester needs the delegation start,
+	// so a Self-mode Task never walks its parent chain. A Delegated call on a
+	// binding without it finds no start and is refused as expired.
+	var start time.Time
+	if agent.Identity.ActsForRequester {
+		var err error
+		if start, err = delegationStart(ctx, reader, task); err != nil {
+			return nil, err
+		}
+	}
+	workspaceBacked := task.Spec.Execution != nil && task.Spec.Execution.Workspace != nil
 	return &outboundaccess.AgentIdentityBinding{
 		Identity: *agent.Identity, AgentNamespace: agent.Namespace, AgentName: agent.Name,
-		AgentUID: string(agent.UID), AgentGeneration: agent.Generation, TaskUID: string(task.UID),
-		TaskCreated: task.CreationTimestamp.Time,
+		AgentUID: string(agent.UID), AgentGeneration: agent.Generation,
+		TaskNamespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
+		TaskCreated:     task.CreationTimestamp.Time,
+		DelegationStart: start,
+		ManagedEgress:   binding.Backend == corev1alpha1.AgentExecutionBackendRuntimePool && !workspaceBacked,
+	}, nil
+}
+
+// maxDelegationChainDepth bounds the parent walk to the root requester's Task.
+const maxDelegationChainDepth = 32
+
+// delegationStart returns when the root requester last acted in the Task
+// chain: the creation of the chain's root Task, which the requester created
+// directly or with a Session message. Child Tasks, retries, and agents woken
+// later never move it. A chain that cannot be proven (including a fork, which
+// names its source without a UID pin), or that passes through a Task acting
+// for another requester, returns the zero time, which Delegated mode refuses.
+func delegationStart(ctx context.Context, reader client.Reader, task *corev1alpha1.Task) (time.Time, error) {
+	current := task
+	for range maxDelegationChainDepth {
+		if !sameRequester(current.Spec.RequestedBy, task.Spec.RequestedBy) {
+			return time.Time{}, nil
+		}
+		if !namesDelegatingTask(current) {
+			return current.CreationTimestamp.Time, nil
+		}
+		if reader == nil {
+			return time.Time{}, nil
+		}
+		parent, err := delegatingTask(ctx, reader, current)
+		if errors.Is(err, errDelegationChainBroken) {
+			return time.Time{}, nil
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		current = parent
 	}
+	return time.Time{}, nil
+}
+
+// errDelegationChainBroken marks a Task chain that cannot be proven.
+var errDelegationChainBroken = errors.New("the delegation chain is broken")
+
+// namesDelegatingTask reports whether a Task names a Task it was delegated
+// from, by parent metadata, a pinned parent UID, or a Task controller owner.
+func namesDelegatingTask(task *corev1alpha1.Task) bool {
+	return labels.ParentTaskName(task.Labels, task.Annotations) != "" ||
+		strings.TrimSpace(task.Annotations[labels.AnnotationParentTaskUID]) != "" ||
+		taskControllerOwner(task) != nil
+}
+
+func taskControllerOwner(task *corev1alpha1.Task) *metav1.OwnerReference {
+	owner := metav1.GetControllerOf(task)
+	if owner == nil || owner.APIVersion != corev1alpha1.GroupVersion.String() || owner.Kind != taskResourceKind {
+		return nil
+	}
+	return owner
+}
+
+// delegatingTask returns the Task current was delegated from. The link counts
+// only when an immutable UID pins it: the parent UID a brokered delegation
+// records, or the controller owner reference. A parent named without a pin
+// (such as a child Kubernetes orphaned), gone, or recreated under its name
+// cannot be proven, and fails with errDelegationChainBroken.
+func delegatingTask(ctx context.Context, reader client.Reader, current *corev1alpha1.Task) (*corev1alpha1.Task, error) {
+	name := labels.ParentTaskName(current.Labels, current.Annotations)
+	pinned := strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskUID])
+	if owner := taskControllerOwner(current); owner != nil {
+		if name == "" {
+			name = owner.Name
+		}
+		if owner.Name != name || (pinned != "" && pinned != string(owner.UID)) {
+			return nil, fmt.Errorf("%w: a Task it was delegated from is named inconsistently", errDelegationChainBroken)
+		}
+		pinned = string(owner.UID)
+	}
+	if name == "" || pinned == "" {
+		return nil, fmt.Errorf("%w: no UID pins a Task it was delegated from", errDelegationChainBroken)
+	}
+	parent := &corev1alpha1.Task{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: current.Namespace, Name: name}, parent); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: a Task it was delegated from is gone", errDelegationChainBroken)
+		}
+		return nil, fmt.Errorf("read the delegating Task: %w", err)
+	}
+	if string(parent.UID) != pinned {
+		return nil, fmt.Errorf("%w: a Task it was delegated from was replaced", errDelegationChainBroken)
+	}
+	return parent, nil
+}
+
+func sameRequester(a, b *corev1alpha1.RequestedBy) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Issuer == b.Issuer && a.Subject == b.Subject
 }
 
 // taskExecutionReasonIdentityUnavailable fails a Task whose bound identity
@@ -749,3 +865,181 @@ func boundIdentityUnavailable(
 
 // agentIdentityReleaseRecheck is how soon a releasing claim is checked again.
 const agentIdentityReleaseRecheck = 10 * time.Second
+
+// classificationActsForRequester reports whether a frozen connector
+// classification includes a Tool that acts for the requester through the
+// Agent's identity.
+func classificationActsForRequester(classified map[string]connectorToolInfo) bool {
+	for _, info := range classified {
+		if info.Delegated {
+			return true
+		}
+	}
+	return false
+}
+
+// DelegationLiveness checks that a Delegated call's Task is still running and
+// its Session still open, reading both live.
+type DelegationLiveness struct {
+	Reader   client.Reader
+	Sessions store.SessionStore
+}
+
+// requireLiveAncestors refuses a delegated call from a child Task once any
+// Task above it in the delegation chain was cancelled, had its cancellation
+// requested, is being deleted, is gone, or had its Session deleted: stopping
+// a parent stops every child acting for the same requester. A parent that
+// finished normally does not stop its children. A link no UID proves, such
+// as a fork's or an orphaned child's, fails closed.
+func (d DelegationLiveness) requireLiveAncestors(ctx context.Context, task *corev1alpha1.Task) error {
+	current := task
+	for range maxDelegationChainDepth {
+		if !namesDelegatingTask(current) {
+			return nil
+		}
+		parent, err := delegatingTask(ctx, d.Reader, current)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !parent.DeletionTimestamp.IsZero():
+			return errors.New("a Task it was delegated from is being deleted")
+		case parent.Status.Phase == corev1alpha1.TaskPhaseCancelled:
+			return errors.New("a Task it was delegated from was cancelled")
+		}
+		if _, requested := parent.Annotations[labels.AnnotationCancelRequested]; requested {
+			return errors.New("the cancellation of a Task it was delegated from was requested")
+		}
+		if err := d.requireLiveSessions(ctx, parent, "the Session of a Task it was delegated from"); err != nil {
+			return err
+		}
+		current = parent
+	}
+	return errors.New("the delegating Task chain is too deep")
+}
+
+// requireLiveSessions refuses once a Session the Task runs in is gone or
+// being deleted: its spec.sessionRef, or the chat Session the chat API
+// recorded in the orka.ai/chat-session label, looked up in the chat's
+// namespace from orka.ai/chat-session-namespace or else the Task's own. A
+// chat Session must also be the incarnation the chat API pinned in
+// orka.ai/chat-session-epoch when it created the Task, so a chat deleted and
+// recreated under its name does not keep the Task acting for the requester;
+// admission keeps the chat labels immutable. It reads Session metadata only,
+// never the transcript.
+func (d DelegationLiveness) requireLiveSessions(ctx context.Context, task *corev1alpha1.Task, subject string) error {
+	if task.Spec.SessionRef != nil {
+		if name := strings.TrimSpace(task.Spec.SessionRef.Name); name != "" {
+			if err := d.requireSessionExists(ctx, task.Namespace, name, subject); err != nil {
+				return err
+			}
+			if err := d.requireNoSessionCleanup(ctx, task.Namespace, name, subject); err != nil {
+				return err
+			}
+		}
+	}
+	chat := strings.TrimSpace(task.Labels[labels.LabelChatSession])
+	if chat == "" {
+		return nil
+	}
+	// A chat may create Tasks in another namespace; its Session stays in the
+	// chat's own, which the chat API records.
+	chatNamespace := strings.TrimSpace(task.Labels[labels.LabelChatSessionNamespace])
+	if chatNamespace == "" {
+		chatNamespace = task.Namespace
+	}
+	reader, ok := d.Sessions.(store.SessionCreationReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot identify %s", subject)
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, chatNamespace, chat)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
+	}
+	pinned := strings.TrimSpace(task.Labels[labels.LabelChatSessionEpoch])
+	if pinned == "" {
+		return fmt.Errorf("%s has no pinned incarnation", subject)
+	}
+	if labels.SessionEpoch(createdAt) != pinned {
+		return fmt.Errorf("%s was deleted and replaced", subject)
+	}
+	return d.requireNoSessionCleanup(ctx, chatNamespace, chat, subject)
+}
+
+// sessionCleanupIntentReader reports whether a Session's deletion has
+// recorded its durable cleanup intent.
+type sessionCleanupIntentReader interface {
+	HasSessionCleanupIntent(ctx context.Context, namespace, sessionName string) (bool, error)
+}
+
+// requireNoSessionCleanup refuses once the Session's deletion has started: its
+// record stays until runtime retirement finishes, but the requester already
+// deleted it. A store that cannot tell fails closed.
+func (d DelegationLiveness) requireNoSessionCleanup(ctx context.Context, namespace, name, subject string) error {
+	reader, ok := d.Sessions.(sessionCleanupIntentReader)
+	if !ok {
+		return fmt.Errorf("the Session store cannot tell whether %s is being deleted", subject)
+	}
+	pending, err := reader.HasSessionCleanupIntent(ctx, namespace, name)
+	if err != nil {
+		return fmt.Errorf("read the deletion state of %s: %w", subject, err)
+	}
+	if pending {
+		return fmt.Errorf("%s is being deleted", subject)
+	}
+	return nil
+}
+
+func (d DelegationLiveness) requireSessionExists(ctx context.Context, namespace, name, subject string) error {
+	if d.Sessions == nil {
+		return errors.New("no Session store is configured")
+	}
+	var err error
+	if reader, ok := d.Sessions.(sessionTypeReader); ok {
+		_, err = reader.GetSessionType(ctx, namespace, name)
+	} else {
+		var session *store.SessionRecord
+		if session, err = d.Sessions.GetSession(ctx, namespace, name); err == nil && session == nil {
+			err = store.ErrNotFound
+		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s was deleted", subject)
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", subject, err)
+	}
+	return nil
+}
+
+// Check implements outboundaccess.KubernetesResolver.DelegationLive.
+func (d DelegationLiveness) Check(ctx context.Context, binding outboundaccess.AgentIdentityBinding) error {
+	if d.Reader == nil {
+		return errors.New("no Task reader is configured")
+	}
+	task := &corev1alpha1.Task{}
+	if err := d.Reader.Get(ctx, types.NamespacedName{Namespace: binding.TaskNamespace, Name: binding.TaskName}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return errors.New("the Task is gone")
+		}
+		return fmt.Errorf("read the Task: %w", err)
+	}
+	switch {
+	case string(task.UID) != binding.TaskUID:
+		return errors.New("the Task was replaced")
+	case !task.DeletionTimestamp.IsZero():
+		return errors.New("the Task is being deleted")
+	case isTerminalTaskPhase(task.Status.Phase):
+		return fmt.Errorf("the Task is %s", task.Status.Phase)
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
+		return errors.New("the Task's cancellation was requested")
+	}
+	if err := d.requireLiveSessions(ctx, task, "the Task's Session"); err != nil {
+		return err
+	}
+	return d.requireLiveAncestors(ctx, task)
+}
