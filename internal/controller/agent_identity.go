@@ -512,9 +512,9 @@ func requireTaskSourceCoveredByClaim(
 	}
 	var source client.Object
 	switch owner.Kind {
-	case "RepositoryScan":
+	case repositoryScanResourceKind:
 		source = &corev1alpha1.RepositoryScan{}
-	case "RepositoryMonitor":
+	case repositoryMonitorResourceKind:
 		source = &corev1alpha1.RepositoryMonitor{}
 	default:
 		return nil
@@ -536,14 +536,20 @@ func requireTaskSourceCoveredByClaim(
 	return nil
 }
 
+// The kinds of automation that create Tasks with their own broad use grant.
+const (
+	repositoryScanResourceKind    = "RepositoryScan"
+	repositoryMonitorResourceKind = "RepositoryMonitor"
+)
+
 // taskAutomationMarker names the kind of automation whose markers a Task
 // carries, or "".
 func taskAutomationMarker(task *corev1alpha1.Task) string {
 	switch {
 	case task.Labels[labels.LabelRepositoryMonitor] != "" || task.Annotations[labels.AnnotationRepositoryMonitorName] != "":
-		return "RepositoryMonitor"
+		return repositoryMonitorResourceKind
 	case task.Labels[labels.LabelSecurityScanID] != "":
-		return "RepositoryScan"
+		return repositoryScanResourceKind
 	}
 	return ""
 }
