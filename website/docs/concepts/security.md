@@ -232,9 +232,15 @@ Creating a Task authorizes the Task, not the Agent it runs as. With
 running work as an Agent also needs the `use` verb on that Agent, the way
 workspace classes already need it. The API checks its caller, and
 ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
-RepositoryMonitors, and GatewayBindings that newly name an Agent. Orka's own
-components (the controller, API, gateways, monitors, and workers) hold `use`
-broadly, because they create Tasks only for callers they have already checked.
+RepositoryMonitors, and GatewayBindings that newly name an Agent. The Helm value
+installs those policies; without Helm, also apply `config/agent-use-policy`, or
+direct Kubernetes writes go unchecked. Orka's own components (the controller,
+API, gateways, monitors, and workers) hold `use` broadly. Callers are checked
+only when a request newly names an Agent: a RepositoryMonitor run starts with
+no Agent `use` check, and Agent references an object already names, including
+ones set before the check was enabled, are not checked again on edit. Review
+existing configurations and who may `patch` RepositoryMonitors before you
+enable the check.
 Delegation is the exception: a worker creates a child Task for any Agent the
 parent Agent's owner listed in `spec.coordination.allowedAgents`, without
 checking the root caller's `use` on the child Agent. Whoever may use a parent
