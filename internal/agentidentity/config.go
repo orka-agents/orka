@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -46,6 +47,12 @@ type Config struct {
 	// ValidatingAdmissionPolicies are installed, which the Helm value does
 	// together with the flag; the controller does not detect them.
 	AgentUseAuthorization bool
+	// EnforcedSince is when this controller's current, unbroken period of
+	// Agent use enforcement began, by the API server's clock; see
+	// EstablishEnforcementPeriod. Objects created before it may have been
+	// created while the check was off, so no claim covers them. Zero leaves
+	// claims judged by their grant time alone.
+	EnforcedSince time.Time
 }
 
 // Validate rejects a partly or wrongly configured issuer at startup.

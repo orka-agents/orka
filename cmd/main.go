@@ -1185,6 +1185,12 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+	// Record whether Agent use is enforced before anything serves requests,
+	// so work created while it was off can never bind an Agent identity.
+	if err := establishAgentUseEnforcementPeriod(restConfig, watchNamespace, &agentIdentityConfig); err != nil {
+		setupLog.Error(err, "unable to record the Agent use enforcement period")
+		os.Exit(1)
+	}
 	webhookCertsReady, err := setupWebhookCertRotation(mgr, currentPodNamespace(), webhookCertRotation)
 	if err != nil {
 		setupLog.Error(err, "unable to set up webhook certificate rotation")
@@ -2619,6 +2625,24 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 		options.ByObject[key] = cache.ByObject{Namespaces: namespaces}
 	}
 	return options
+}
+
+// establishAgentUseEnforcementPeriod records this run's Agent use
+// enforcement with a direct client, since the manager's cache is not running
+// yet, and stores when the current enforcement period began.
+func establishAgentUseEnforcementPeriod(restConfig *rest.Config, namespace string, config *agentidentity.Config) error {
+	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	since, err := agentidentity.EstablishEnforcementPeriod(ctx, directClient, namespace, config.AgentUseAuthorization)
+	if err != nil {
+		return err
+	}
+	config.EnforcedSince = since
+	return nil
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
