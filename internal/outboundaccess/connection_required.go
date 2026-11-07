@@ -93,9 +93,15 @@ func (e *ConnectionRequiredError) Error() string {
 	case ConnectionNoCredential:
 		return theLink + " holds no credential. " + link
 	case ConnectionAmbiguous:
+		// The commands name the Task's namespace when it is known, so the
+		// person lists and deletes links there, not in their CLI default.
+		scope := ""
+		if namespace := strings.TrimSpace(e.Namespace); namespace != "" {
+			scope = " -n " + namespace
+		}
 		return fmt.Sprintf("The person who asked has %d links to %s, so Orka uses none. "+
-			"They need to keep one (`orka connection list`, then `orka connection delete <name>`), then run this Task again.",
-			e.Links, cmp.Or(name, "this provider"))
+			"They need to keep one (`orka connection list%s`, then `orka connection delete <name>%s`), then run this Task again.",
+			e.Links, cmp.Or(name, "this provider"), scope, scope)
 	case ConnectionNotBound:
 		return theLink + " does not match what the provider requires now (its consent or granted scopes differ). " + link
 	case ConnectionRevoked:

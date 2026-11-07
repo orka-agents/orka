@@ -59,7 +59,7 @@ func TestAzureGatewayServesTheRealAzureCLI(t *testing.T) {
 		}
 	}
 	output, err := run("group", "list", "--query", "[].name", "--output", "tsv")
-	if err != nil || strings.Fields(output)[0] != "rg-one" || !strings.Contains(output, "rg-two") {
+	if fields := strings.Fields(output); err != nil || len(fields) == 0 || fields[0] != "rg-one" || !strings.Contains(output, "rg-two") {
 		t.Fatalf("az group list (with a second page): %v\n%s", err, output)
 	}
 	if os.Getenv("ORKA_TEST_AZ_CLI_SIGNS_IN") != "" {

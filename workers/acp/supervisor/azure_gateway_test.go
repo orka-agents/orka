@@ -427,3 +427,29 @@ func TestAzureGatewaySharesTheRuntimeWideCallLimit(t *testing.T) {
 		t.Fatalf("slots held after the call = %d, want the slot released", len(slots))
 	}
 }
+
+// TestAzureGatewayRefusesAChunkedBody covers a GET whose body has no declared
+// length: forwarding would drop the body, so the gateway refuses it before
+// calling the broker.
+func TestAzureGatewayRefusesAChunkedBody(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	token := fixture.token(t)
+	request, err := http.NewRequest(http.MethodGet, fixture.base()+"/subscriptions?api-version=2022-12-01", io.NopCloser(strings.NewReader("hidden")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ContentLength = -1
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := fixture.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close() //nolint:errcheck
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "OrkaReadOnly") {
+		t.Fatalf("chunked GET: status %d, body %s", response.StatusCode, body)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 0 {
+		t.Fatalf("broker calls = %d, want none for a request with a body", len(calls))
+	}
+}

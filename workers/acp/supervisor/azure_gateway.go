@@ -39,12 +39,11 @@ import (
 // tool policy, attaches the real credential, and sends the request to the
 // Tool's origin. The real credential never enters the runtime.
 const (
-	azureCloudName           = "OrkaAzure"
-	azureIdentityPath        = "/msi/token"
-	azureMetadataPath        = "/metadata/endpoints"
-	azureIdentityHeaderName  = "X-Identity-Header"
-	azureTokenLifetime       = time.Hour
-	azureMaxRequestBodyBytes = 0
+	azureCloudName          = "OrkaAzure"
+	azureIdentityPath       = "/msi/token"
+	azureMetadataPath       = "/metadata/endpoints"
+	azureIdentityHeaderName = "X-Identity-Header"
+	azureTokenLifetime      = time.Hour
 	// azurePlaceholderAlgorithm marks the placeholder as unsigned: az decodes
 	// it without verifying, and nothing else accepts it.
 	azurePlaceholderAlgorithm = "none"
@@ -365,7 +364,10 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 			"Orka forwards only read requests (GET) to Azure Resource Manager; this az command changes or acts on a resource.")
 		return
 	}
-	if r.ContentLength > azureMaxRequestBodyBytes {
+	// A chunked request reports an unknown length (-1); it may still carry a
+	// body that forwarding would drop, so only a request known to be empty
+	// passes.
+	if r.ContentLength != 0 {
 		writeAzureError(w, http.StatusBadRequest, "OrkaReadOnly", "Read requests carry no body.")
 		return
 	}
