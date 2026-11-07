@@ -79,6 +79,11 @@ lease.
   egress proxies must be fronted by one.
 - Deleting a Task drops its pending notice, as before.
 - Installs gain one namespace and a controller-only Role in it.
+- The namespace protects the key from `secretRef` and from worker roles, not
+  from a worker that can act as the controller. The default AI worker profile
+  can create Secrets and Jobs in the release namespace, either of which can use
+  the controller's ServiceAccount. Signatures are trustworthy only under the
+  restricted profile.
 - Rotation is an operator edit of one Secret. Replicas reload within 15
   seconds. Receivers must refetch the JWKS on an unknown `kid`, and `previous`
   must stay published for at least the token TTL plus that reload window.

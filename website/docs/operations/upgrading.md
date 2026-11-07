@@ -81,7 +81,10 @@ upgrading:
   Secret and mints the key on first use. Installs that grant RBAC some other way must
   grant the controller `get` and `update` on that Secret and `create` on Secrets there.
   The controller refuses to start if the signing namespace is its own, the watch, ACP
-  runtime or agent-host namespace. See
+  runtime or agent-host namespace. Under the default AI worker RBAC profile the AI worker
+  can still act as the controller (it can create Secrets and Jobs in the release
+  namespace), so use `workers.ai.rbacProfile: restricted` if receivers rely on
+  signatures. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
 - Builds of `main` from before this change kept the key in the controller namespace,
   where Tasks could mount it. They mint a new key in the new namespace, so receivers see a

@@ -222,13 +222,21 @@ signing is enabled again.
 
 Anyone who can read or change the signing Secret can forge notices, so it
 lives alone in its own namespace and only the controller is bound there:
-`get` and `update` on that one Secret, and `create` on Secrets there. Nothing
-that runs agent code can reach it:
+`get` and `update` on that one Secret, and `create` on Secrets there. This
+closes two paths:
 
-- Worker roles, including the default AI worker profile that can read and
-  write Secrets, are bound in the release namespace only.
-- A Task's or Agent's `secretRef` mounts a Secret from the Task's namespace,
-  and Tasks live in the release namespace.
+- A Task's or Agent's `secretRef` mounts a Secret from the Task's namespace.
+  Tasks live in the release namespace, so a `secretRef` cannot name the key.
+- Worker roles are bound in the release namespace only, so no worker can read
+  or replace the key with its own permissions.
+
+That protection is only as strong as the controller's identity. Under the
+default AI worker RBAC profile (`workers.ai.rbacProfile: default`), the AI
+worker can create Secrets and Jobs in the release namespace. A
+ServiceAccount-token Secret or a Job can name the controller's ServiceAccount,
+which gives the worker the controller's permissions, including this key. If
+receivers rely on signatures, install with `workers.ai.rbacProfile: restricted`,
+which grants the AI worker no Secret or Job writes.
 
 The chart and the controller both refuse a signing namespace that is the
 release (watch), controller, client, ACP runtime or agent-host namespace. Keep
