@@ -219,6 +219,44 @@ func TestCancelSessionCancelsAChatCreatedTurn(t *testing.T) {
 	}
 }
 
+// TestCancelSessionSkipsTurnsOfAnEarlierIncarnation covers a chat deleted and
+// recreated under its name while a Task of the old chat still runs: stopping
+// the new chat's turn cancels only Tasks pinned to its own incarnation.
+func TestCancelSessionSkipsTurnsOfAnEarlierIncarnation(t *testing.T) {
+	current := cancelTestTask("current-turn", corev1alpha1.TaskPhaseRunning, "")
+	earlier := cancelTestTask("earlier-turn", corev1alpha1.TaskPhaseRunning, "")
+	h, app := setupCancelTest(t, current, earlier)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{
+		Namespace: "default", Name: "recreated", SessionType: store.SessionTypeChat, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	epoch := chatSessionEpoch(context.Background(), h.sessionStore, "default", "recreated")
+	if epoch == "" {
+		t.Fatal("the test session store reports no creation time")
+	}
+	for name, pinned := range map[string]string{"current-turn": epoch, "earlier-turn": "1"} {
+		task := &corev1alpha1.Task{}
+		if err := h.client.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, task); err != nil {
+			t.Fatal(err)
+		}
+		task.Labels = map[string]string{labels.LabelChatSession: "recreated", labels.LabelChatSessionEpoch: pinned}
+		if err := h.client.Update(context.Background(), task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, body := postCancel(t, app, "/sessions/recreated/cancel", "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %v", resp.StatusCode, body)
+	}
+	if got, _ := cancelAnnotation(t, h, "current-turn"); got == "" {
+		t.Fatal("the current chat's turn must be cancelled")
+	}
+	if _, ok := cancelAnnotation(t, h, "earlier-turn"); ok {
+		t.Fatal("a Task of the chat's earlier incarnation must not be cancelled")
+	}
+}
+
 func TestCancelSessionStopsAnInFlightChatRequest(t *testing.T) {
 	h, app := setupCancelTest(t)
 	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {

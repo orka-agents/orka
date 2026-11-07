@@ -148,6 +148,10 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		}
 		result.ChatTurnStopped = stopped
 	}
+	epoch := ""
+	if sessionType == store.SessionTypeChat {
+		epoch = chatSessionEpoch(ctx, h.sessionStore, namespace, name)
+	}
 	tasks, err := h.sessionTaskCandidates(ctx, namespace, name, sessionType == store.SessionTypeChat)
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
@@ -155,7 +159,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for i := range tasks {
 		task := &tasks[i]
-		if !cancellableTask(task) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat) {
+		if !cancellableTask(task) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat, epoch) {
 			continue
 		}
 		if task.Namespace != namespace {
@@ -215,7 +219,12 @@ func (h *Handlers) sessionTaskCandidates(ctx context.Context, namespace, name st
 // for a chat Session, through the chat labels. A chat-created Task may carry
 // both, naming its continuity Session in spec.sessionRef. A chat Task without
 // the chat namespace label belongs to a chat in its own namespace.
-func taskInSession(task *corev1alpha1.Task, namespace, name string, chat bool) bool {
+func taskInSession(task *corev1alpha1.Task, namespace, name string, chat bool, epoch string) bool {
+	// A chat Task pinned to another incarnation of the chat, one deleted and
+	// recreated under this name, is not this Session's turn.
+	if pinned := strings.TrimSpace(task.Labels[labels.LabelChatSessionEpoch]); chat && epoch != "" && pinned != "" && pinned != epoch {
+		return false
+	}
 	if task.Namespace == namespace && sessionNameForTask(task) == name {
 		return true
 	}
