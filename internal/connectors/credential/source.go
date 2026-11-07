@@ -249,6 +249,12 @@ func (s *Source) RequireLiveConnection(ctx context.Context, req outboundaccess.C
 	if _, err := outboundaccess.DeclaredConnectorTool(provider, req.Tool); err != nil {
 		return err
 	}
+	// The person can disconnect or change the link while custody answers,
+	// and custody may report the grant it held before: the Connection must
+	// still be the frozen, Ready one once custody has answered.
+	if _, err := s.loadLiveConnection(ctx, req); err != nil {
+		return err
+	}
 	return nil
 }
 

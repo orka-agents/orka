@@ -1854,7 +1854,13 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 		// started; that and any wait for capacity can outlast the claim, so
 		// every submission, the first included, is made only while the
 		// claim still covers the Task.
-		if unavailable := d.identityUnavailableBeforeSubmission(ctx, task); unavailable != "" {
+		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
+		if err != nil {
+			// The claim could not be confirmed either way: nothing is sent,
+			// and the prompt is retried like any other pre-submission error.
+			return fmt.Errorf("confirm the Agent identity claim before the prompt: %w", err)
+		}
+		if unavailable != "" {
 			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
 			return recordACPPromptOutcomeIfSettled(
 				ctx, promptTrace, acpPromptOutcomeFailed,
@@ -7024,24 +7030,25 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 // identityUnavailableBeforeSubmission says why a Task bound to an identity
 // must not send a prompt the runtime has not yet accepted, or "" when its
 // Agent still holds the identity for it (ADR 0039). A claim that cannot be
-// read counts as unavailable.
-func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) string {
+// read, or an enforcement period still unrecorded, is an error: the prompt
+// is neither sent nor failed, and is retried.
+func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
 	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 	// A controller that just won leadership records its enforcement period
-	// within moments; a prompt waits for it rather than fail its Task.
+	// within moments; a prompt waits for it here before it is retried.
 	for deadline := time.Now().Add(identityEnforcementPeriodWait); errors.Is(err, errEnforcementPeriodPending) && time.Now().Before(deadline); {
 		select {
 		case <-ctx.Done():
-			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+			return "", ctx.Err()
 		case <-time.After(250 * time.Millisecond):
 		}
 		unavailable, err = boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 	}
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent", "namespace", task.Namespace, "task", task.Name)
-		return "the Agent's identity claim could not be confirmed before the prompt was sent"
+		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent; retrying", "namespace", task.Namespace, "task", task.Name)
+		return "", err
 	}
-	return unavailable
+	return unavailable, nil
 }
 
 // identityEnforcementPeriodWait bounds how long a prompt waits for a new
