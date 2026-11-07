@@ -56,16 +56,24 @@ func identityClaimCoversCreation(claim *corev1alpha1.AgentIdentityClaim, created
 // enforcement sees it: a grant from before that period began counts from its
 // start, so a Task or source created while the check was off is never covered,
 // even when the Agent did not reconcile while it was off.
-func enforcedIdentityClaim(claim *corev1alpha1.AgentIdentityClaim, config agentidentity.Config) *corev1alpha1.AgentIdentityClaim {
-	since := config.EnforcedSince
+// It returns errEnforcementPeriodPending until the period's start is known.
+func enforcedIdentityClaim(claim *corev1alpha1.AgentIdentityClaim, config agentidentity.Config) (*corev1alpha1.AgentIdentityClaim, error) {
+	since, started := config.EnforcementStart()
+	if !started {
+		return nil, errEnforcementPeriodPending
+	}
 	if claim == nil || claim.GrantedAt == nil || since.IsZero() || !claim.GrantedAt.Time.Before(since) {
-		return claim
+		return claim, nil
 	}
 	enforced := claim.DeepCopy()
 	start := metav1.NewTime(since)
 	enforced.GrantedAt = &start
-	return enforced
+	return enforced, nil
 }
+
+// errEnforcementPeriodPending marks an identity decision that waits for this
+// controller to record when its period of Agent use enforcement began.
+var errEnforcementPeriodPending = errors.New("the Agent use enforcement period has not started yet")
 
 func identityClaimBindable(claim *corev1alpha1.AgentIdentityClaim, issuer, id string) bool {
 	return identityClaimMatches(claim, issuer, id) && !claim.Releasing && claim.GrantedAt != nil
@@ -460,7 +468,10 @@ func (r *TaskReconciler) agentExecutionIdentity(
 	if live.UID != agent.UID || !identityClaimBindable(live.Status.IdentityClaim, issuer, id) {
 		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, errIdentityClaimPending)
 	}
-	claim := enforcedIdentityClaim(live.Status.IdentityClaim, r.Identity)
+	claim, err := enforcedIdentityClaim(live.Status.IdentityClaim, r.Identity)
+	if err != nil {
+		return nil, fmt.Errorf("identity %s/%s: %w", issuer, id, err)
+	}
 	if !identityClaimCoversTask(claim, task) {
 		return nil, permanentACPAgentConfiguration(fmt.Errorf(
 			"the Task was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; create the Task again",
@@ -804,7 +815,11 @@ func boundIdentityUnavailable(
 		return "", fmt.Errorf("read the Agent's identity claim: %w", err)
 	}
 	if err == nil && live.UID == frozen.UID && identityClaimBindable(live.Status.IdentityClaim, frozen.Identity.Issuer, frozen.Identity.ID) {
-		if identityClaimCoversTask(enforcedIdentityClaim(live.Status.IdentityClaim, config), task) {
+		claim, err := enforcedIdentityClaim(live.Status.IdentityClaim, config)
+		if err != nil {
+			return "", err
+		}
+		if identityClaimCoversTask(claim, task) {
 			return "", nil
 		}
 		// The claim was released and granted again after the Task was created.

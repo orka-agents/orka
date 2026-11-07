@@ -7027,12 +7027,26 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 // read counts as unavailable.
 func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) string {
 	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	// A controller that just won leadership records its enforcement period
+	// within moments; a prompt waits for it rather than fail its Task.
+	for deadline := time.Now().Add(identityEnforcementPeriodWait); errors.Is(err, errEnforcementPeriodPending) && time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return "the Agent's identity claim could not be confirmed before the prompt was sent"
+		case <-time.After(250 * time.Millisecond):
+		}
+		unavailable, err = boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	}
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent", "namespace", task.Namespace, "task", task.Name)
 		return "the Agent's identity claim could not be confirmed before the prompt was sent"
 	}
 	return unavailable
 }
+
+// identityEnforcementPeriodWait bounds how long a prompt waits for a new
+// leader to record its period of Agent use enforcement.
+const identityEnforcementPeriodWait = 30 * time.Second
 
 // failPromptForUnavailableIdentity settles a prompt the runtime never
 // accepted, and its Task, as IdentityUnavailable.
