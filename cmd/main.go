@@ -1464,13 +1464,15 @@ func main() {
 		setupLog.Error(err, "unable to configure native session store limit")
 		os.Exit(1)
 	}
+	// Identity-use records pseudonymize the requester with this key, also for
+	// calls refused while no issuer is configured.
+	auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
+	if keyErr != nil {
+		setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
+		os.Exit(1)
+	}
+	outboundAccessResolver.AuditPseudonymKey = auditKey
 	if agentIdentitySource != nil {
-		auditKey, keyErr := hkdf.Key(sha256.New, snapshotKey, nil, agentIdentityAuditKeyInfo, 32)
-		if keyErr != nil {
-			setupLog.Error(keyErr, "unable to derive the agent identity audit pseudonym key")
-			os.Exit(1)
-		}
-		outboundAccessResolver.AuditPseudonymKey = auditKey
 		outboundAccessResolver.DelegationLive = controller.DelegationLiveness{
 			Reader: mgr.GetAPIReader(), Sessions: appStorage,
 		}.Check
