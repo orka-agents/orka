@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/labels"
 )
 
@@ -113,6 +114,68 @@ func TestTaskProvenanceValidatorCoordinationAncestryImmutable(t *testing.T) {
 			require.True(t, resp.Allowed)
 			resp = validator.Handle(t.Context(), admissionRequest(t, admissionv1.Update, user, child, orphaned, ""))
 			require.False(t, resp.Allowed, "cleanup cannot establish new coordination ownership")
+		})
+	}
+}
+
+// TestTaskProvenanceValidatorAutomationOwnerImmutable holds the
+// RepositoryScan or RepositoryMonitor that created a Task: removing or
+// replacing it would let the Task pass as a root Task when it binds to an
+// identity-bound Agent. The garbage collector may still orphan it.
+func TestTaskProvenanceValidatorAutomationOwnerImmutable(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	for _, kind := range []string{"RepositoryMonitor", "RepositoryScan"} {
+		owned := newAdmissionTestTask()
+		controller := true
+		owned.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: corev1alpha1.GroupVersion.String(), Kind: kind,
+			Name: "source", UID: "source-uid", Controller: &controller,
+		}}
+		for name, change := range map[string]func(*corev1alpha1.Task){
+			"remove owner":         func(task *corev1alpha1.Task) { task.OwnerReferences = nil },
+			"replace owner UID":    func(task *corev1alpha1.Task) { task.OwnerReferences[0].UID = "other-uid" },
+			"drop controller flag": func(task *corev1alpha1.Task) { task.OwnerReferences[0].Controller = nil },
+		} {
+			for _, user := range []string{untrustedUsername, trustedControllerUser} {
+				t.Run(kind+"/"+user+"/"+name, func(t *testing.T) {
+					updated := owned.DeepCopy()
+					change(updated)
+					resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Update, user, updated, owned, ""))
+					require.False(t, resp.Allowed)
+					require.Contains(t, resp.Result.Message, "metadata.ownerReferences")
+				})
+			}
+		}
+		marked := owned.DeepCopy()
+		marked.Labels = map[string]string{
+			labels.LabelRepositoryMonitor: "monitor", labels.LabelSecurityScanID: "run-1", gateway.TaskGatewayBindingLabel: "binding",
+		}
+		marked.Annotations = map[string]string{labels.AnnotationRepositoryMonitorName: "monitor", gateway.TaskGatewayBindingAnnotation: "binding"}
+		marked.OwnerReferences = nil // already orphaned by the garbage collector
+		for name, change := range map[string]func(*corev1alpha1.Task){
+			"remove monitor label":         func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelRepositoryMonitor) },
+			"remove scan label":            func(task *corev1alpha1.Task) { delete(task.Labels, labels.LabelSecurityScanID) },
+			"remove monitor annotation":    func(task *corev1alpha1.Task) { delete(task.Annotations, labels.AnnotationRepositoryMonitorName) },
+			"change monitor label":         func(task *corev1alpha1.Task) { task.Labels[labels.LabelRepositoryMonitor] = "other" },
+			"remove gateway binding label": func(task *corev1alpha1.Task) { delete(task.Labels, gateway.TaskGatewayBindingLabel) },
+			"remove gateway binding annotation": func(task *corev1alpha1.Task) {
+				delete(task.Annotations, gateway.TaskGatewayBindingAnnotation)
+			},
+		} {
+			for _, user := range []string{untrustedUsername, trustedControllerUser} {
+				t.Run(kind+"/"+user+"/orphaned "+name, func(t *testing.T) {
+					updated := marked.DeepCopy()
+					change(updated)
+					resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Update, user, updated, marked, ""))
+					require.False(t, resp.Allowed)
+				})
+			}
+		}
+		t.Run(kind+"/garbage collector orphans the Task", func(t *testing.T) {
+			orphaned := owned.DeepCopy()
+			orphaned.OwnerReferences = nil
+			resp := validator.Handle(t.Context(), admissionRequest(t, admissionv1.Update, genericGarbageCollectorUsername, orphaned, owned, ""))
+			require.True(t, resp.Allowed)
 		})
 	}
 }

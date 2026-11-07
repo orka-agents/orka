@@ -217,6 +217,12 @@ rules:
 - apiGroups:
   - core.orka.ai
   resources:
+  - agentidentities/entra
+  verbs:
+  - bind
+- apiGroups:
+  - core.orka.ai
+  resources:
   - agents
   verbs:
   - create

@@ -1087,7 +1087,7 @@ func TestUpdateStatus(t *testing.T) {
 			WithStatusSubresource(agent).Build()
 		r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-		result, err := r.updateStatus(context.Background(), agent, 0, nil)
+		result, err := r.updateStatus(context.Background(), agent, 0, nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1118,7 +1118,7 @@ func TestUpdateStatus(t *testing.T) {
 			WithStatusSubresource(agent).Build()
 		r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-		_, err := r.updateStatus(context.Background(), agent, 0, errTest("bad config"))
+		_, err := r.updateStatus(context.Background(), agent, 0, errTest("bad config"), nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1146,7 +1146,7 @@ func TestUpdateStatus(t *testing.T) {
 			WithStatusSubresource(agent).Build()
 		r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-		_, err := r.updateStatus(context.Background(), agent, 3, nil)
+		_, err := r.updateStatus(context.Background(), agent, 3, nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1169,7 +1169,7 @@ func TestUpdateStatus(t *testing.T) {
 			WithStatusSubresource(agent).Build()
 		r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-		result, err := r.updateStatus(context.Background(), agent, 0, nil)
+		result, err := r.updateStatus(context.Background(), agent, 0, nil, nil)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -1404,7 +1404,7 @@ func TestUpdateStatus_TTLExpiredNoRequeue(t *testing.T) {
 		WithStatusSubresource(agent).Build()
 	r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-	result, err := r.updateStatus(context.Background(), agent, 0, nil)
+	result, err := r.updateStatus(context.Background(), agent, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1424,7 +1424,7 @@ func TestUpdateStatus_NoTTLNoLastUsed(t *testing.T) {
 		WithStatusSubresource(agent).Build()
 	r := &AgentReconciler{Client: fc, Scheme: scheme}
 
-	result, err := r.updateStatus(context.Background(), agent, 0, nil)
+	result, err := r.updateStatus(context.Background(), agent, 0, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1444,7 +1444,7 @@ func TestUpdateStatus_RechecksFailedValidation(t *testing.T) {
 	r := &AgentReconciler{Client: fc, Scheme: scheme}
 
 	// A Secret created later is not watched, so readiness must be rechecked.
-	result, err := r.updateStatus(context.Background(), agent, 0, errors.New(`referenced secret "later" not found`))
+	result, err := r.updateStatus(context.Background(), agent, 0, errors.New(`referenced secret "later" not found`), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

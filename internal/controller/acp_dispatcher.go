@@ -31,6 +31,7 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
+	"github.com/orka-agents/orka/internal/agentidentity"
 	"github.com/orka-agents/orka/internal/artifactcap"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	v2conformance "github.com/orka-agents/orka/internal/harness/v2/conformance"
@@ -94,6 +95,9 @@ const (
 // Task reconciliation only persists queued demand; this leader-elected runnable
 // reserves capacity and advances the durable attempt state machine.
 type ACPDispatcher struct {
+	// Identity is the controller's Agent identity configuration (ADR 0039),
+	// against which a Task bound to an identity is admitted.
+	Identity                 agentidentity.Config
 	Client                   client.Client
 	APIReader                client.Reader
 	Store                    store.DurableControlStore
@@ -1791,6 +1795,21 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	}
 	sessionCompleted = true
 	endSessionTrace(nil)
+	// Admission checked the identity claim before the RuntimeSession
+	// started; that and any wait for capacity can outlast the claim. It is
+	// confirmed again while the attempt is still Planned, so a claim that
+	// cannot be read yet requeues an attempt that was provably never sent.
+	unavailable, requeued, err := d.confirmIdentityWhilePlanned(ctx, task, attemptID, fence, sessionExecution)
+	if err != nil || requeued {
+		return err
+	}
+	if unavailable != "" {
+		_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+		return recordACPPromptOutcomeIfSettled(
+			ctx, promptTrace, acpPromptOutcomeFailed,
+			d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+		)
+	}
 	if err := d.transitionAttempt(ctx, attemptID, fence, store.PromptExecutionPlanned, store.PromptExecutionSubmitting, "submitting", nil); err != nil {
 		return err
 	}
@@ -1839,7 +1858,27 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	accepted := false
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
+	// lastRejection is the rate-limited admission a resubmission follows; it
+	// proves the prompt was not accepted.
+	var lastRejection error
 	for {
+		// A resubmission after a rejected admission is made only while the
+		// claim still covers the Task. A claim that stays unreadable requeues
+		// the attempt on the rejection's proof that it was never accepted.
+		if admissionRetry > 0 {
+			var confirmErr error
+			unavailable, confirmErr = d.identityUnavailableBeforeResubmission(ctx, task)
+			if confirmErr != nil {
+				return d.requeueRejectedPromptForIdentity(ctx, task, attemptID, fence, lastRejection, reservationLease, sessionExecution, confirmErr)
+			}
+		}
+		if unavailable != "" {
+			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+			)
+		}
 		promptRequest, err := d.buildPromptRequest(
 			task, runtimeFence, profile, mcpConfiguration, bootstrap, toolboxNote, userPrompt, promptLimits, admissionRetry,
 		)
@@ -2020,6 +2059,7 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 			}); err != nil {
 				return err
 			}
+			lastRejection = streamErr
 			admissionRetry++
 			reservationLease, err = d.waitForPromptCapacityReservation(runtimeCtx, task, target, fence, runtimeFence.RuntimeInstanceID)
 			if err != nil {
@@ -3805,7 +3845,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 	case hasDeadline && !now.Before(deadline):
 		operation, reason, message = "timeout-before-admission", acpTaskTimeoutReason, "task deadline exceeded before runtime admission"
 	default:
-		return false, nil
+		// A Task bound to an identity starts only while its Agent still holds
+		// the identity for it (ADR 0039).
+		unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+		if err != nil {
+			logf.FromContext(ctx).Error(err, "ACP task identity check failed; admission deferred", "namespace", task.Namespace, "task", task.Name)
+			return true, nil
+		}
+		if unavailable == "" {
+			return false, nil
+		}
+		operation, reason, message = "identity-unavailable-before-admission", taskExecutionReasonIdentityUnavailable, unavailable
 	}
 	attemptID, err := promptAttemptIDFromTask(task)
 	if err != nil {
@@ -3833,6 +3883,17 @@ func (d *ACPDispatcher) settleTaskBeforeRuntimeAdmission(ctx context.Context, ta
 				return true, releaseErr
 			}
 		}
+	}
+	if reason == taskExecutionReasonIdentityUnavailable {
+		if err := d.transitionAttemptToFailed(ctx, attemptID, fence, operation, reason, message); err != nil {
+			return true, err
+		}
+		if err := d.failTaskBeforeRuntimeAdmission(
+			ctx, task, attemptID, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, reason, message,
+		); err != nil {
+			return true, err
+		}
+		return true, d.finalizeRecoveredTaskSessionAfterTerminal(ctx, task, fence, recoveredSession, errors.New(message))
 	}
 	if err := d.settlePreSubmissionCancellation(ctx, task, attemptID, fence, operation, reason, message); err != nil {
 		return true, err
@@ -6910,6 +6971,146 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 		}
 		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, acpPromptFailedReason, message)
 	}
+}
+
+// identityUnavailableBeforeSubmission says why a Task bound to an identity
+// must not send a prompt the runtime has not yet accepted, or "" when its
+// Agent still holds the identity for it (ADR 0039). A claim that cannot be
+// read, or an enforcement period still unrecorded, is an error: the prompt
+// is neither sent nor failed, and is retried.
+func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	// A controller that just won leadership records its enforcement period
+	// within moments; a prompt waits for it here before it is retried.
+	for deadline := time.Now().Add(identityEnforcementPeriodWait); errors.Is(err, errEnforcementPeriodPending) && time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+		unavailable, err = boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
+	}
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent; retrying", "namespace", task.Namespace, "task", task.Name)
+		return "", err
+	}
+	return unavailable, nil
+}
+
+// confirmIdentityWhilePlanned confirms the identity claim for an attempt not
+// yet Submitting. A claim that cannot be confirmed requeues the attempt,
+// which was provably never sent; a lost one is returned to fail the prompt.
+func (d *ACPDispatcher) confirmIdentityWhilePlanned(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	sessionExecution *acpTaskSession,
+) (unavailable string, requeued bool, err error) {
+	unavailable, err = d.identityUnavailableBeforeSubmission(ctx, task)
+	if err == nil {
+		return unavailable, false, nil
+	}
+	identityErr := fmt.Errorf("confirm the Agent identity claim before the prompt: %w", err)
+	if sessionExecution != nil {
+		if requeueErr := d.requeuePreSubmissionTaskWithRuntimeBinding(
+			ctx, task, attemptID, fence, identityErr, &sessionExecution.Binding,
+		); requeueErr != nil {
+			return "", false, errors.Join(identityErr, requeueErr)
+		}
+		sessionExecution.requeued = true
+		return "", true, nil
+	}
+	if requeueErr := d.requeuePreSubmissionTask(ctx, task, attemptID, fence, identityErr); requeueErr != nil {
+		return "", false, errors.Join(identityErr, requeueErr)
+	}
+	return "", true, nil
+}
+
+// identityUnavailableBeforeResubmission is identityUnavailableBeforeSubmission
+// for an attempt already Submitting: it retries a claim it cannot confirm for
+// up to identityConfirmationWait, then returns the error.
+func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	deadline := time.Now().Add(identityConfirmationWait)
+	for {
+		unavailable, err := d.identityUnavailableBeforeSubmission(ctx, task)
+		if err == nil || !time.Now().Before(deadline) {
+			return unavailable, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// requeueRejectedPromptForIdentity requeues an attempt whose resubmission
+// cannot confirm the identity claim. The rate-limited rejection it follows
+// proves no prompt was accepted, so the attempt returns to dispatch.
+func (d *ACPDispatcher) requeueRejectedPromptForIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	rejection error,
+	reservationLease *acpRuntimePoolReservationLease,
+	sessionExecution *acpTaskSession,
+	confirmErr error,
+) error {
+	identityErr := fmt.Errorf("confirm the Agent identity claim before resubmitting the prompt: %w", confirmErr)
+	if reservationLease != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		releaseErr := reservationLease.release(releaseCtx)
+		cancel()
+		if releaseErr != nil {
+			return errors.Join(identityErr, releaseErr)
+		}
+	}
+	var runtimeBinding *ACPRuntimeSessionBinding
+	if sessionExecution != nil {
+		runtimeBinding = &sessionExecution.Binding
+	}
+	if err := d.requeueProvenNotAcceptedPromptAdmission(ctx, task, attemptID, fence, rejection, runtimeBinding, false); err != nil {
+		return errors.Join(identityErr, err)
+	}
+	if sessionExecution != nil {
+		sessionExecution.requeued = true
+	}
+	return nil
+}
+
+// identityConfirmationWait bounds how long a resubmission retries an
+// unreadable identity claim.
+const identityConfirmationWait = 30 * time.Second
+
+// identityEnforcementPeriodWait bounds how long a prompt waits for a new
+// leader to record its period of Agent use enforcement.
+const identityEnforcementPeriodWait = 30 * time.Second
+
+// failPromptForUnavailableIdentity settles a prompt the runtime never
+// accepted, and its Task, as IdentityUnavailable.
+func (d *ACPDispatcher) failPromptForUnavailableIdentity(
+	ctx context.Context,
+	task *corev1alpha1.Task,
+	attemptID string,
+	fence store.ControllerEpochFence,
+	session *acpTaskSession,
+	unavailable string,
+) error {
+	message := boundACPStatusMessage(unavailable)
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "identity-unavailable-before-submission", taskExecutionReasonIdentityUnavailable, message); err != nil {
+		return err
+	}
+	execution := corev1alpha1.TaskExecutionStatus{
+		State: corev1alpha1.TaskExecutionStateFailed, Outcome: corev1alpha1.TaskExecutionOutcomeFailed,
+		Attempt: task.Status.Execution.Attempt, PromptID: task.Status.Execution.PromptID,
+		Reason: taskExecutionReasonIdentityUnavailable, Message: message,
+	}
+	if err := d.finalizeTaskSessionMarker(ctx, task, fence, session, "Failed", message, corev1alpha1.TaskPhaseFailed, execution); err != nil {
+		return err
+	}
+	return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, taskExecutionReasonIdentityUnavailable, message)
 }
 
 // acpPromptFailedReason classifies a prompt that the runtime settled as failed.

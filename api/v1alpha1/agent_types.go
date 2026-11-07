@@ -8,6 +8,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -67,6 +68,14 @@ type AgentSpec struct {
 	// When set, this Agent is for type: agent tasks only (mutually exclusive with providerRef).
 	// +optional
 	Runtime *AgentCLIRuntime `json:"runtime,omitempty"`
+
+	// Identity binds this Agent to one external identity that its outbound
+	// calls can act as. Setting or changing it requires the `bind` verb on
+	// agentidentities/<issuer> for that identity. An identity-bound Agent must
+	// set runtime.ceiling.allowedTools, and Tasks using it require Agent `use`
+	// authorization on the controller.
+	// +optional
+	Identity *AgentIdentity `json:"identity,omitempty"`
 
 	// TTLAfterLastTask defines how long the agent persists after its last task completes.
 	// When set and no tasks are active, the agent is deleted after this duration.
@@ -264,6 +273,50 @@ func (in AgentCLIRuntime) MarshalJSON() ([]byte, error) {
 
 // BuiltInContractVersion returns the Agent's explicit built-in harness
 // protocol, or empty when absent. Callers must reject an absent contract.
+// AgentIdentityIssuerEntra names Microsoft Entra Agent ID identities.
+const AgentIdentityIssuerEntra = "entra"
+
+// AgentIdentity selects exactly one issuer-typed external identity.
+// +kubebuilder:validation:XValidation:rule="has(self.entra)",message="identity must set exactly one issuer"
+type AgentIdentity struct {
+	// Entra binds a Microsoft Entra Agent ID agent identity.
+	// +optional
+	Entra *EntraAgentIdentity `json:"entra,omitempty"`
+}
+
+// EntraAgentIdentity references one Entra agent identity under the blueprint
+// configured on the controller.
+type EntraAgentIdentity struct {
+	// AgentIdentityID is the agent identity's client (application) ID.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	AgentIdentityID string `json:"agentIdentityID"`
+}
+
+// IdentityRef returns the Agent's issuer type and identity ID. Identity IDs
+// compare case-insensitively, so the ID is lowercased.
+func (in *Agent) IdentityRef() (issuer, id string, ok bool) {
+	if in == nil || in.Spec.Identity == nil || in.Spec.Identity.Entra == nil {
+		return "", "", false
+	}
+	id = strings.ToLower(strings.TrimSpace(in.Spec.Identity.Entra.AgentIdentityID))
+	if id == "" {
+		return "", "", false
+	}
+	return AgentIdentityIssuerEntra, id, true
+}
+
+// HoldsIdentity reports whether the Agent declares an external identity or
+// still holds a claim to one. A claim outlives the declaration until the
+// Agent next reconciles, so an identity removed and restored in between is
+// still held throughout.
+func (in *Agent) HoldsIdentity() bool {
+	if _, _, declared := in.IdentityRef(); declared {
+		return true
+	}
+	return in != nil && in.Status.IdentityClaim != nil
+}
+
 func (in *Agent) BuiltInContractVersion() AgentRuntimeContractVersion {
 	if in == nil || in.Spec.Runtime == nil || in.Spec.Runtime.ContractVersion == nil {
 		return ""
@@ -456,6 +509,35 @@ type AgentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// IdentityClaim is the external identity this Agent holds. The controller
+	// grants a claim only when no other Agent holds it, and keeps it after the
+	// spec changes until every Task bound to it has finished.
+	// +optional
+	IdentityClaim *AgentIdentityClaim `json:"identityClaim,omitempty"`
+}
+
+// AgentIdentityClaim records an Agent's exclusive hold on one identity.
+type AgentIdentityClaim struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Issuer string `json:"issuer"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+	// Releasing marks a claim the Agent's spec no longer names. New Task
+	// bindings refuse it, and the controller releases it on a later pass once
+	// no unfinished Task is bound to it.
+	// +optional
+	Releasing bool `json:"releasing,omitempty"`
+	// GrantedAt is when the claim was granted, while Agent use authorization
+	// was enforced, by the API server's clock: the latest write time it
+	// recorded on the Agent after the granting write. A claim without it binds
+	// no Task. A Task binds the identity only if it was created strictly after
+	// this time (both have one-second precision), so its creation was checked
+	// for Agent use while the Agent named the identity.
+	// +optional
+	GrantedAt *metav1.Time `json:"grantedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true
