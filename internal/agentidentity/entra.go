@@ -354,7 +354,7 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 	// A redirect would replay the form, which carries the controller's
 	// federated credential or the blueprint's exchange token, to wherever
 	// the response points. Entra's token endpoint never redirects, so the
-	// 3xx is returned as a refusal instead.
+	// 3xx is returned as is, and counts as the issuer being unavailable.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(request)
 	if err != nil {
@@ -378,8 +378,11 @@ func (i *EntraIssuer) requestToken(ctx context.Context, step string, form url.Va
 	if response.StatusCode != http.StatusOK || parsed.AccessToken == "" {
 		code := entraOAuthErrorCode(parsed.Error)
 		reason = code
+		// Only an OAuth error Entra defines refuses the identity. Anything
+		// else, such as a proxy's JSON answer or redirect, says nothing about
+		// it and must not be kept as a refusal.
 		if response.StatusCode >= http.StatusInternalServerError || response.StatusCode == http.StatusTooManyRequests ||
-			code == "temporarily_unavailable" || code == "server_error" {
+			code == "temporarily_unavailable" || code == "server_error" || code == entraUnknownOAuthError {
 			return "", 0, fmt.Errorf("Entra could not answer the token request: %s (HTTP %d): %w", code, response.StatusCode, ErrIssuerUnavailable) //nolint:staticcheck // Product name begins the message.
 		}
 		if len(parsed.ErrorCodes) > 0 {
@@ -401,9 +404,13 @@ func entraOAuthErrorCode(value string) string {
 		"interaction_required", "consent_required", "server_error", "temporarily_unavailable":
 		return code
 	default:
-		return "unknown_error"
+		return entraUnknownOAuthError
 	}
 }
+
+// entraUnknownOAuthError stands for an error response that carries no OAuth
+// error code Orka knows.
+const entraUnknownOAuthError = "unknown_error"
 
 // parseExpiresIn accepts expires_in as a number or a numeric string. An
 // unknown lifetime is treated as zero, so the token is used once and not cached.

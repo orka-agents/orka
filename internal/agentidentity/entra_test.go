@@ -397,6 +397,10 @@ func TestEntraUnavailabilityIsDistinctFromRefusal(t *testing.T) {
 		"server error as 400":     {status: http.StatusBadRequest, body: map[string]any{"error": "server_error"}, unavailable: true},
 		"token without a value":   {status: http.StatusOK, body: map[string]any{"token_type": "Bearer"}, unavailable: true},
 		"refused":                 {status: http.StatusBadRequest, body: map[string]any{"error": "unauthorized_client", "error_codes": []int{7000112}}},
+		"proxy JSON":              {status: http.StatusForbidden, body: map[string]any{"message": "blocked by egress policy"}, unavailable: true},
+		"proxy auth":              {status: http.StatusProxyAuthRequired, body: map[string]any{}, unavailable: true},
+		"redirect":                {status: http.StatusFound, body: map[string]any{"location": "elsewhere"}, unavailable: true},
+		"unknown OAuth code":      {status: http.StatusBadRequest, body: map[string]any{"error": "not_an_oauth_code"}, unavailable: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
