@@ -4,7 +4,8 @@ Date: 2026-11-05
 
 ## Status
 
-Proposed. Read requests from the Azure CLI are implemented. Builds on ADR
+Proposed. Read requests from the Azure CLI are implemented, and writes are
+being added (see "Writes" below). Builds on ADR
 0039 (agent identities) and ADR 0033 (per-user connectors); extends ADR 0034's
 ceilings to the new Tool kind without changing them.
 
@@ -62,6 +63,55 @@ be pointed at a local endpoint and signed in without a real credential.
 - The toolbox image (`examples/azure-cli`) holds the Azure CLI and a wrapper
   that signs in on the first command. It carries no credential.
 
+## Writes
+
+An Azure forwarding Tool can opt in to writes with `http.forward.writes`:
+
+```yaml
+http:
+  url: https://management.azure.com
+  forward:
+    protocol: AzureResourceManager
+    writes:
+      approval: Required   # the default; None sends writes without approval
+```
+
+- A Tool with writes becomes two tools in a prompt's tool policy. Its own name
+  carries `GET` and `HEAD` as before, read-only and never approved. A derived
+  tool, `<name>:write`, carries `PUT`, `PATCH`, `DELETE`, and `POST`. The
+  colon cannot appear in a Kubernetes name, so the derived name never meets a
+  real Tool. Everything Orka keys by tool name, such as effects, approvals,
+  and prompt authority, then works per method class without a per-call
+  exception, and a long-running operation's polling stays a plain read.
+- The derived tool is consequential. Every write runs under the external-effect
+  ledger, so a lost result settles `OutcomeUnknown` and is never retried
+  blindly. With `approval: Required` the write tool is approval-required: the
+  broker records the request (method, path, query, and body) and waits for a
+  person, while the gateway holds the CLI's request open. Built-in runtimes
+  otherwise cannot ask for approval
+  ([#770](https://github.com/orka-agents/orka/issues/770)), but here the
+  waiting client is the gateway, not the agent's MCP client, so forwarded
+  writes are the one approval-required tool built-in runtimes accept.
+- A write request carries its body, JSON only, up to the broker's argument
+  limit, and `Content-Type: application/json`. Client headers stay dropped.
+- Retries join. The Azure SDK times out a read after 300 seconds and retries,
+  keeping the same `x-ms-client-request-id`. The gateway derives a write's
+  call ID from that header, the method, the path, the query, and the body's
+  digest, so a retry joins the same pending approval or replays the recorded
+  result instead of writing twice. A write without the header gets a fresh
+  call ID and is never joined.
+- `POST` actions are forwarded too, so `az aks get-credentials` and actions
+  such as start and stop work. An action that returns a secret, such as
+  `listKeys` or `listClusterUserCredential`, hands it to the runtime, as the
+  same command would on a developer's machine. Reviewers approving a
+  `POST` see its path; Tools that must not return secrets need
+  `approval: Required` or no writes.
+- Writes follow each credential mode's own write rules: the Agent's identity
+  (Self), a Delegated token for the requester, or a `readWrite` Connection. A
+  `readOnly` Connection keeps the reads and hides the write tool. Delegated
+  writes follow the Tool's approval setting; when one is approved, only the
+  requester can approve it, as ADR 0039 requires.
+
 ## Rejected alternatives
 
 - **A credential in the runtime**, even short-lived: a prompt-injected agent
@@ -85,9 +135,10 @@ be pointed at a local endpoint and signed in without a real credential.
   recorded as an identity use when the policy is identity-backed, and stops
   when the Task is cancelled, the Session is stopped, or the identity is
   disabled.
-- Writes and actions (`PUT`, `PATCH`, `DELETE`, `POST`, including listing keys)
-  are refused. Supporting them needs approval, idempotency, and effect records
-  per request, and is future work.
+- Writes and actions (`PUT`, `PATCH`, `DELETE`, `POST`) are refused unless the
+  Tool sets `http.forward.writes`; see "Writes".
+- A write waiting for approval holds one of the session's two broker call
+  slots and the CLI's request for up to the approval window, ten minutes.
 - Only Resource Manager is forwarded. Commands that call other services, such
   as Microsoft Graph (`az ad`), Key Vault data, or Storage data, fail with a
   clear error. Each would need its own forwarding protocol and token audience.

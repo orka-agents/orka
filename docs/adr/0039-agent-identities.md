@@ -361,7 +361,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   bypass it. Until built-in runtimes can ask for approval
   ([#770](https://github.com/orka-agents/orka/issues/770)), Orka hides
   write-class connector tools from them, and delegated mode runs only on
-  built-in runtimes, so delegated mode is read-only in practice.
+  built-in runtimes, so delegated mode is read-only in practice. Forwarded
+  Resource Manager writes (ADR 0040) are the exception: they follow the
+  forwarding Tool's own approval setting, and when that setting requires
+  approval, only the requester can approve.
 - The Connection must have been issued for the bound identity. Each issuer
   type defines the check, such as the user token's audience. Where an issuer
   addresses user tokens to each agent client, a requester links once per
