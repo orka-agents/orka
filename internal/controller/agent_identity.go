@@ -644,6 +644,12 @@ func requireParentOwnsIdentityAgent(
 				"scheduled Task %q was created before Agent %q was granted identity %s/%s, so its creation was not checked for it; re-create the scheduled Task",
 				parent.Name, agent.Name, ref.Issuer, ref.ID))
 		}
+		// A scheduled Task a worker delegated was created under the worker's
+		// broad Agent use, so its creation was never checked for this
+		// Agent: the Task that delegated it must own the identity itself.
+		if grandparent := labels.ParentTaskName(parent.Labels, parent.Annotations); grandparent != "" {
+			return requireParentOwnsIdentityAgent(ctx, reader, parent, grandparent, agent, ref, claim)
+		}
 		return nil
 	}
 	binding := parent.Status.AgentExecutionBinding

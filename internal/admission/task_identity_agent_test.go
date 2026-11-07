@@ -27,7 +27,15 @@ func TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents(t *te
 		}},
 	}
 	plainAgent := &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: "helper", Namespace: admissionTestNamespace}}
-	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(identityAgent, plainAgent).Build()
+	// The identity was removed from the spec, but the claim is not released
+	// until the Agent reconciles; restoring it in between keeps the grant.
+	removedAgent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "between-edits", Namespace: admissionTestNamespace},
+		Status: corev1alpha1.AgentStatus{IdentityClaim: &corev1alpha1.AgentIdentityClaim{
+			Issuer: corev1alpha1.AgentIdentityIssuerEntra, ID: "33333333-3333-3333-3333-33333333aaaa",
+		}},
+	}
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(identityAgent, plainAgent, removedAgent).Build()
 	validator := NewTaskProvenanceValidator(scheme, NewTaskProvenanceConfig(true, "", "", "", "orka-system"), reader)
 	task := func(agent string) *corev1alpha1.Task {
 		created := newAdmissionTestTask()
@@ -42,6 +50,9 @@ func TestTaskProvenanceValidatorKeepsWorkersFromRootTasksForIdentityAgents(t *te
 
 	resp = validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, trustedWorkerUser, task("helper"), nil, ""))
 	require.True(t, resp.Allowed, "a worker's parentless Task may name another Agent: %s", resp.Result.Message)
+
+	resp = validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, trustedWorkerUser, task("between-edits"), nil, ""))
+	require.False(t, resp.Allowed, "an Agent that still holds an identity claim is identity-bound")
 
 	resp = validator.Handle(t.Context(), admissionRequest(t, admissionv1.Create, untrustedUsername, task("reviewer"), nil, ""))
 	require.True(t, resp.Allowed, "a non-worker caller is judged by the Agent use check, not here: %s", resp.Result.Message)
