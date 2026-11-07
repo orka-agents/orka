@@ -1277,12 +1277,59 @@ func TestRequireLiveConnectionRefusesScopesThePersonDidNotGrant(t *testing.T) {
 	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
 		t.Fatalf("a newly required scope: err = %v, want a refusal", err)
 	}
+	// The person consents again: custody and the status both hold the scope.
+	h.put(store.ConnectorCredential{AccessToken: "gho_regranted", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour), Scopes: []string{"read:org"}})
 	live := h.reload()
 	live.Status.GrantedScopes = append(live.Status.GrantedScopes, "read:org")
 	if err := h.client.Status().Update(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+	if err := h.source.RequireLiveConnection(context.Background(), h.request()); err != nil {
 		t.Fatalf("a granted scope: %v", err)
+	}
+}
+
+// TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes covers a refresh
+// that commits narrower scopes under the same grant while the Connection's
+// status still shows the old ones: custody's scopes no longer cover the mode,
+// so the exchanged credential is refused.
+func TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes(t *testing.T) {
+	h := newHarness(t)
+	provider := &corev1alpha1.ConnectorProvider{}
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "github"}, provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Spec.OAuth.Scopes.Read = []string{"repo"}
+	if err := h.client.Update(context.Background(), provider); err != nil {
+		t.Fatal(err)
+	}
+	h.put(store.ConnectorCredential{AccessToken: "gho_wide", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour), Scopes: []string{"repo"}})
+	live := h.reload()
+	live.Status.GrantedScopes = []string{"repo"}
+	if err := h.client.Status().Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	request := h.request()
+	if err := h.source.RequireLiveConnection(context.Background(), request); err != nil {
+		t.Fatalf("covering scopes: %v", err)
+	}
+	ref, err := connectors.CredentialRef(h.reload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := h.store.GetConnectorCredential(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrowed := held
+	narrowed.AccessToken, narrowed.Scopes = "gho_narrow", []string{"public_repo"}
+	if err := h.store.ReplaceConnectorCredential(context.Background(), ref, narrowed, held.Version); err != nil {
+		t.Fatal(err)
+	}
+	if current := h.reload(); current.Status.GrantSequence != request.Frozen.GrantSequence || len(current.Status.GrantedScopes) != 1 {
+		t.Fatal("the status must still show the frozen grant and its old scopes")
+	}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "did not grant") {
+		t.Fatalf("err = %v, want the narrowed credential refused", err)
 	}
 }
