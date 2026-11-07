@@ -292,6 +292,7 @@ func main() {
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
 	var taskWebhookSigningSecret string
+	var taskWebhookSigningNamespace string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
@@ -527,9 +528,13 @@ func main() {
 	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
 		"Item inside --agent-execution-snapshot-secret that holds the key.")
 	flag.StringVar(&taskWebhookSigningSecret, "task-webhook-signing-secret", "orka-task-webhook-signing",
-		"Name of the Secret in the controller Pod namespace that holds the Ed25519 keys signing Task webhook "+
+		"Name of the Secret in --task-webhook-signing-namespace that holds the Ed25519 keys signing Task webhook "+
 			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
 			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
+	flag.StringVar(&taskWebhookSigningNamespace, "task-webhook-signing-namespace", defaultTaskWebhookSigningNamespace,
+		"Namespace holding --task-webhook-signing-secret. It must hold nothing else: Task and Agent secretRefs and "+
+			"worker roles reach Secrets in the watch namespace, so it must differ from --watch-namespace, the "+
+			"controller Pod namespace, --acp-runtime-namespace and --agent-host-namespace.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -835,6 +840,11 @@ func main() {
 	if err := validateAgentHostConfig(agentHostsEnabled, agentHostNamespace, agentHostAgentImage,
 		watchNamespace, acpRuntimeNamespace, currentPodNamespace()); err != nil {
 		setupLog.Error(err, "invalid agent host configuration")
+		os.Exit(1)
+	}
+	if err := validateTaskWebhookSigningNamespace(taskWebhookSigningSecret, taskWebhookSigningNamespace,
+		watchNamespace, currentPodNamespace(), acpRuntimeNamespace, agentHostNamespace); err != nil {
+		setupLog.Error(err, "invalid Task webhook signing configuration")
 		os.Exit(1)
 	}
 
@@ -1585,7 +1595,7 @@ func main() {
 		taskWebhookKeys = &taskwebhook.SecretKeySource{
 			Reader:    mgr.GetAPIReader(),
 			Writer:    mgr.GetClient(),
-			Namespace: currentPodNamespace(),
+			Namespace: strings.TrimSpace(taskWebhookSigningNamespace),
 			Name:      name,
 		}
 		webhookNotifier.SetKeySource(taskWebhookKeys)
@@ -2518,6 +2528,34 @@ func validateAgentHostConfig(enabled bool, hostNamespace, agentImage string, res
 	}
 	if !agentHostImagePattern.MatchString(strings.TrimSpace(agentImage)) {
 		return fmt.Errorf("--agent-host-agent-image must be pinned by digest with --enable-agent-hosts")
+	}
+	return nil
+}
+
+const defaultTaskWebhookSigningNamespace = "orka-task-webhook-signing"
+
+// validateTaskWebhookSigningNamespace keeps the webhook signing key out of
+// every namespace whose Secrets a Task can reach. A Task's or Agent's
+// secretRef mounts any Secret in the Task namespace, and worker roles are
+// bound there, so a key beside Tasks lets them forge notices. The reserved
+// namespaces are the watch namespace, the controller Pod namespace, and the
+// ACP runtime and agent-host namespaces, whose Pods run agent code.
+func validateTaskWebhookSigningNamespace(secretName, namespace string, reserved ...string) error {
+	if strings.TrimSpace(secretName) == "" {
+		return nil
+	}
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return fmt.Errorf("--task-webhook-signing-namespace is required while --task-webhook-signing-secret is set")
+	}
+	if problems := validation.IsDNS1123Label(namespace); len(problems) > 0 {
+		return fmt.Errorf("--task-webhook-signing-namespace %q is not a namespace name: %s", namespace, strings.Join(problems, "; "))
+	}
+	for _, other := range reserved {
+		if namespace == strings.TrimSpace(other) {
+			return fmt.Errorf("--task-webhook-signing-namespace %q is used by Tasks, the controller, ACP runtimes or agent hosts; "+
+				"keep the signing key in a namespace that holds nothing else", namespace)
+		}
 	}
 	return nil
 }

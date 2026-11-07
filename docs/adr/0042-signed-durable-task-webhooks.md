@@ -35,8 +35,12 @@ with a selector and a ClusterIP, which is dialed by its ClusterIPs with no DNS.
 `alg: EdDSA`, a `kid` equal to the RFC 7638 thumbprint, and claims binding the
 issuer, the exact webhook URL as audience, the Task UID/namespace/name, the
 event type, the delivery ID and attempt, and the SHA-256 of the body, valid for
-five minutes. The key lives in one Secret in the controller namespace. `current`
-signs. `previous` is published but never signs. The controller creates the
+five minutes. The key lives in one Secret in a dedicated namespace that holds
+nothing else and binds only the controller. A Secret beside Tasks is reachable
+by anyone who can create a Task or Agent there, because `secretRef` mounts any
+Secret in the Task namespace, and by worker roles bound there. The controller
+refuses to start if the signing namespace is the watch, controller, ACP
+runtime or agent-host namespace. `current` signs. `previous` is published but never signs. The controller creates the
 Secret and mints `current` when either is missing, but never overwrites an
 invalid key. With no key, nothing is sent. Public keys are served without
 authentication at `/.well-known/orka/task-webhook-jwks.json` on the API.
@@ -74,6 +78,7 @@ lease.
   did before. In-cluster receivers must be same-namespace Services, and
   egress proxies must be fronted by one.
 - Deleting a Task drops its pending notice, as before.
+- Installs gain one namespace and a controller-only Role in it.
 - Rotation is an operator edit of one Secret. Replicas reload within 15
   seconds. Receivers must refetch the JWKS on an unknown `kid`, and `previous`
   must stay published for at least the token TTL plus that reload window.

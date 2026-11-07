@@ -175,9 +175,12 @@ status:
 ## Signing keys and rotation
 
 The controller signs with the Ed25519 key in the `current` item of a Secret in
-its own namespace: `<fullname>-task-webhook-signing` for the Helm chart, where
-`<fullname>` is the chart's full name (`orka` for a release named `orka`;
-override the Secret name with `controller.taskWebhooks.signingSecretName`), or
+the `orka-task-webhook-signing` namespace (Helm value
+`controller.taskWebhooks.signingNamespace`, flag
+`--task-webhook-signing-namespace`). The Secret is
+`<fullname>-task-webhook-signing` for the Helm chart, where `<fullname>` is the
+chart's full name (`orka` for a release named `orka`; override the Secret name
+with `controller.taskWebhooks.signingSecretName`), or
 `orka-task-webhook-signing` for the kustomize install. On first use, the
 controller creates that Secret and mints `current` if either is missing. Keys
 are PEM-encoded PKCS#8, which is what
@@ -188,8 +191,8 @@ Every replica rereads the Secret at least every 15 seconds, so rotation needs no
 restart. To rotate:
 
 ```bash
-NS=orka-system
-SECRET=orka-task-webhook-signing
+NS=orka-task-webhook-signing
+SECRET=orka-task-webhook-signing  # <fullname>-task-webhook-signing for Helm
 openssl genpkey -algorithm ed25519 -out new.pem
 OLD=$(kubectl -n "$NS" get secret "$SECRET" -o jsonpath='{.data.current}')
 kubectl -n "$NS" patch secret "$SECRET" --type merge \
@@ -217,16 +220,17 @@ signing is enabled again.
 
 ### Who can read the signing key
 
-Anyone who can read the signing Secret can forge notices. The controller needs
-that access, but under the default AI worker RBAC profile
-(`workers.ai.rbacProfile: default`) the AI worker service account can also
-`get` Secrets in the release namespace, including this one, so an AI Task there
-could read the private key. If receivers rely on signatures, install with
-`workers.ai.rbacProfile: restricted`, which grants the AI worker no Secret
-access, and restrict any other Secret readers in that namespace.
+Anyone who can read or change the signing Secret can forge notices, so it
+lives alone in its own namespace and only the controller is bound there:
+`get` and `update` on that one Secret, and `create` on Secrets there. Nothing
+that runs agent code can reach it:
 
-The worker's RBAC is not the only path. A trusted Task's or Agent's `secretRef`
-mounts the named Secret from its own namespace into the worker, so anyone who
-can create Tasks or Agents in the release namespace can mount the signing key
-(and the controller's other Secrets there). Do not let untrusted users create
-Tasks or Agents in the release namespace.
+- Worker roles, including the default AI worker profile that can read and
+  write Secrets, are bound in the release namespace only.
+- A Task's or Agent's `secretRef` mounts a Secret from the Task's namespace,
+  and Tasks live in the release namespace.
+
+The chart and the controller both refuse a signing namespace that is the
+release (watch), controller, client, ACP runtime or agent-host namespace. Keep
+the signing namespace free of other workloads and of role bindings beyond the
+controller's and your cluster administrators'.

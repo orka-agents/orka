@@ -13,6 +13,7 @@ resources:
   - ../policy
   - runtime_namespace.yaml
   - runtime_rbac.yaml
+  - task_webhook_signing.yaml
   - v2_controller_cluster_role.yaml
   - metrics_service.yaml
   - api_service.yaml

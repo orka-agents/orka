@@ -74,12 +74,19 @@ upgrading:
   `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
   against `/.well-known/orka/task-webhook-jwks.json`. See
   [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
-- The controller creates the signing Secret in its namespace on first use. It needs the
-  Secret `create` and `update` access the controller role already grants. Under the
-  default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
-  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures, and do not let
-  untrusted users create Tasks or Agents there, since a `secretRef` can mount it. See
+- The signing key lives in a new namespace, `orka-task-webhook-signing` (Helm value
+  `controller.taskWebhooks.signingNamespace`, flag `--task-webhook-signing-namespace`),
+  that holds only that Secret and binds only the controller. The chart and the kustomize
+  install create the namespace and a controller Role in it; the controller creates the
+  Secret and mints the key on first use. Installs that grant RBAC some other way must
+  grant the controller `get` and `update` on that Secret and `create` on Secrets there.
+  The controller refuses to start if the signing namespace is its own, the watch, ACP
+  runtime or agent-host namespace. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- Builds of `main` from before this change kept the key in the controller namespace,
+  where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+  new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
+  or `orka-task-webhook-signing` in the controller namespace) after upgrading.
 - With signing enabled but no usable key (the Secret cannot be read or holds a malformed
   key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
   key is available.
