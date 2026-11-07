@@ -1045,8 +1045,8 @@ func TestACPDispatcherRechecksIdentityBeforeSubmittingAPrompt(t *testing.T) {
 		}
 	}
 
-	unavailable := dispatcher.identityUnavailableBeforeSubmission(ctx, task)
-	if !strings.Contains(unavailable, "no longer holds identity") {
+	unavailable, err := dispatcher.identityUnavailableBeforeSubmission(ctx, task)
+	if err != nil || !strings.Contains(unavailable, "no longer holds identity") {
 		t.Fatalf("unavailable = %q, want the lost identity named", unavailable)
 	}
 	if err := dispatcher.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, nil, unavailable); err != nil {
@@ -1196,5 +1196,34 @@ func TestIssuerRefusalStandsUntilTheIdentityIsVerified(t *testing.T) {
 	}
 	if state := r.verifyAgentIdentity(ctx, agent, errors.New("spec.runtime is invalid")); state.err != nil {
 		t.Fatalf("an invalid edit after verification = %+v, want no refusal", state)
+
+// TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm covers a claim
+// the dispatcher cannot read, and an enforcement period not yet recorded:
+// both are errors the prompt is retried on, never a reason to fail the
+// Task as IdentityUnavailable.
+func TestIdentityCheckBeforeSubmissionRetriesWhatItCannotConfirm(t *testing.T) {
+	agent := claimedAgent(identityBoundTestAgent("reviewer", time.Now()))
+	task := boundTask("work", agent, corev1alpha1.TaskPhaseRunning)
+	base := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent).Build()
+	failing := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isAgent := obj.(*corev1alpha1.Agent); isAgent {
+				return errors.New("apiserver unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	dispatcher := &ACPDispatcher{Identity: testIdentityConfig(), Client: failing, APIReader: failing}
+	if unavailable, err := dispatcher.identityUnavailableBeforeSubmission(context.Background(), task); err == nil || unavailable != "" {
+		t.Fatalf("unreadable claim: unavailable = %q, err = %v; want a retryable error", unavailable, err)
+	}
+
+	pending := testIdentityConfig()
+	pending.Enforcement = &agentidentity.EnforcementPeriod{}
+	dispatcher = &ACPDispatcher{Identity: pending, Client: base, APIReader: base}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	if unavailable, err := dispatcher.identityUnavailableBeforeSubmission(ctx, task); err == nil || unavailable != "" {
+		t.Fatalf("unrecorded period: unavailable = %q, err = %v; want a retryable error", unavailable, err)
 	}
 }
