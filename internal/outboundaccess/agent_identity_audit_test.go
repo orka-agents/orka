@@ -55,6 +55,19 @@ func TestAgentIdentityCallsWriteUseRecords(t *testing.T) {
 			}
 		}
 	}
+	// A non-default authority is part of the issuer instance; the record
+	// names it by digest, never as a URL.
+	sovereign := delegatedRequest(now.Add(-time.Minute))
+	instance := sovereign.AgentIdentity.Identity.Instance
+	sovereign.AgentIdentity.Identity.Instance = instance + "@https://proxy.example/Entra"
+	_, _ = resolver.Resolve(context.Background(), sovereign)
+	if len(lines) != 3 {
+		t.Fatalf("records = %d, want one for the sovereign call", len(lines))
+	}
+	if record := lines[2]; strings.Contains(record, "proxy.example") ||
+		!strings.Contains(record, `"issuerInstance"="`+instance+`@sha256:`) {
+		t.Fatalf("sovereign record must name the authority only by digest: %s", record)
+	}
 	pseudonym := func(line string) string {
 		_, after, _ := strings.Cut(line, `"requester"="`)
 		value, _, _ := strings.Cut(after, `"`)

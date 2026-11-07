@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/go-logr/logr/funcr"
 
@@ -106,7 +107,7 @@ func (r *KubernetesResolver) auditAgentIdentityUse(policy *corev1alpha1.Outbound
 			"agentNamespace", binding.AgentNamespace, "agentName", binding.AgentName,
 			"agentUID", binding.AgentUID, "agentGeneration", binding.AgentGeneration,
 			"identityIssuer", binding.Identity.Issuer, "identityID", binding.Identity.ID,
-			"issuerInstance", binding.Identity.Instance,
+			"issuerInstance", auditIssuerInstance(binding.Identity.Instance),
 		)
 	}
 	if mode == corev1alpha1.OutboundAgentIdentityModeDelegated {
@@ -139,6 +140,18 @@ func (r *KubernetesResolver) requesterPseudonym(requester *corev1alpha1.Requeste
 	mac := hmac.New(sha256.New, r.AuditPseudonymKey)
 	_, _ = mac.Write([]byte(requester.Issuer + "\x00" + requester.Subject))
 	return "hmac-sha256:" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// auditIssuerInstance names the issuer instance without the authority URL a
+// non-default authority adds after "@": records carry no full URLs, so the
+// authority appears as a stable digest that still tells two apart.
+func auditIssuerInstance(instance string) string {
+	issuer, authority, ok := strings.Cut(instance, "@")
+	if !ok {
+		return instance
+	}
+	sum := sha256.Sum256([]byte(authority))
+	return issuer + "@sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func argumentsDigest(tool string, arguments []byte) string {
