@@ -93,10 +93,12 @@ func TestCancelTaskRefusesFinishedAndMissingTasks(t *testing.T) {
 		cancelTestTask("cancelled", corev1alpha1.TaskPhaseCancelled, ""),
 		cancelTestTask("scheduled", corev1alpha1.TaskPhaseScheduled, ""),
 		cancelTestTask("pending", corev1alpha1.TaskPhasePending, ""),
+		newCronTemplate("new-cron", ""),
+		newCronTemplate("pending-cron", corev1alpha1.TaskPhasePending),
 	)
 	for name, want := range map[string]int{
 		"done": http.StatusConflict, "scheduled": http.StatusConflict, "cancelled": http.StatusOK,
-		"missing": http.StatusNotFound,
+		"missing": http.StatusNotFound, "new-cron": http.StatusConflict, "pending-cron": http.StatusConflict,
 	} {
 		resp, body := postCancel(t, app, "/tasks/"+name+"/cancel", "")
 		if resp.StatusCode != want {
@@ -108,6 +110,11 @@ func TestCancelTaskRefusesFinishedAndMissingTasks(t *testing.T) {
 	}
 	if _, ok := cancelAnnotation(t, h, "cancelled"); ok {
 		t.Fatal("an already Cancelled Task needs no cancel request")
+	}
+	for _, name := range []string{"new-cron", "pending-cron"} {
+		if _, ok := cancelAnnotation(t, h, name); ok {
+			t.Fatalf("%s: a cron template must not get a cancel request before it is Scheduled", name)
+		}
 	}
 	if resp, _ := postCancel(t, app, "/tasks/pending/cancel", `{"uid":"an-older-uid"}`); resp.StatusCode != http.StatusConflict {
 		t.Fatalf("a replaced Task: status = %d, want 409", resp.StatusCode)
@@ -489,4 +496,12 @@ func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 			t.Fatalf("allow=%v: access reviews = %+v, want update tasks/cancel in the Task's namespace", allow, *seen)
 		}
 	}
+}
+
+// newCronTemplate is a scheduled Task the controller has not yet moved to
+// Scheduled: a cron template still, whatever its phase.
+func newCronTemplate(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+	task := cancelTestTask(name, phase, "")
+	task.Spec.Schedule = "*/5 * * * *"
+	return task
 }
