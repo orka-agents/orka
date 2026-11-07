@@ -150,8 +150,10 @@ requires stage 1; stage 4 requires stages 1 and 3 and ADR 0033 Connections.
   dispatcher checks again that the controller still enforces the check, that
   the issuer instance the Task froze is still configured, and that the Agent
   still holds a non-releasing claim the Task satisfies, and otherwise fails
-  the Task with `IdentityUnavailable`. That includes resending a prompt a
-  RuntimePool turned away for capacity, since the wait can outlast the claim.
+  the Task with `IdentityUnavailable`. The same check runs again just before
+  every prompt submission, the first and any resent after a RuntimePool
+  turned it away for capacity, since the RuntimeSession start and the wait
+  can outlast the claim.
 - A delegated child Task may name an identity-bound Agent only when it is the
   parent's own Agent. Delegation targets have no ceiling yet (ADR 0034), so a
   child must not borrow an identity its root requester was never checked

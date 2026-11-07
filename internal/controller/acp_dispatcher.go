@@ -1850,6 +1850,17 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 	var cancellationReason harnessv2.CancelReason
 	admissionRetry := 0
 	for {
+		// Admission checked the identity claim before the RuntimeSession
+		// started; that and any wait for capacity can outlast the claim, so
+		// every submission, the first included, is made only while the
+		// claim still covers the Task.
+		if unavailable := d.identityUnavailableBeforeSubmission(ctx, task); unavailable != "" {
+			_ = cleanupRuntimeSession("identity_unavailable_before_submission")
+			return recordACPPromptOutcomeIfSettled(
+				ctx, promptTrace, acpPromptOutcomeFailed,
+				d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
+			)
+		}
 		promptRequest, err := d.buildPromptRequest(
 			task, runtimeFence, profile, mcpConfiguration, bootstrap, toolboxNote, userPrompt, promptLimits, admissionRetry,
 		)
@@ -2043,15 +2054,6 @@ func (d *ACPDispatcher) executeReservedTask(ctx context.Context, task *corev1alp
 				return recordACPPromptOutcomeIfSettled(
 					ctx, promptTrace, acpPromptOutcomeFailed,
 					d.finishNonSuccess(ctx, task, attemptID, fence, sessionExecution, harnessv2.Event{Type: harnessv2.EventFailed}),
-				)
-			}
-			// The wait for capacity can outlast the Agent's identity claim, so
-			// the prompt is sent again only while the claim still covers it.
-			if unavailable := d.identityUnavailableBeforeResubmission(ctx, task); unavailable != "" {
-				_ = cleanupRuntimeSession("identity_unavailable_before_resubmission")
-				return recordACPPromptOutcomeIfSettled(
-					ctx, promptTrace, acpPromptOutcomeFailed,
-					d.failPromptForUnavailableIdentity(ctx, task, attemptID, fence, sessionExecution, unavailable),
 				)
 			}
 			continue
@@ -7019,15 +7021,15 @@ func (d *ACPDispatcher) finishNonSuccessWithCancellationReason(
 	}
 }
 
-// identityUnavailableBeforeResubmission says why a Task bound to an identity
+// identityUnavailableBeforeSubmission says why a Task bound to an identity
 // must not send a prompt the runtime has not yet accepted, or "" when its
 // Agent still holds the identity for it (ADR 0039). A claim that cannot be
 // read counts as unavailable.
-func (d *ACPDispatcher) identityUnavailableBeforeResubmission(ctx context.Context, task *corev1alpha1.Task) string {
+func (d *ACPDispatcher) identityUnavailableBeforeSubmission(ctx context.Context, task *corev1alpha1.Task) string {
 	unavailable, err := boundIdentityUnavailable(ctx, uncachedReader(d.APIReader, d.Client), d.Identity, task, task.Status.AgentExecutionBinding)
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent again", "namespace", task.Namespace, "task", task.Name)
-		return "the Agent's identity claim could not be confirmed before the prompt was sent again"
+		logf.FromContext(ctx).Error(err, "ACP task identity check failed before the prompt was sent", "namespace", task.Namespace, "task", task.Name)
+		return "the Agent's identity claim could not be confirmed before the prompt was sent"
 	}
 	return unavailable
 }
@@ -7043,7 +7045,7 @@ func (d *ACPDispatcher) failPromptForUnavailableIdentity(
 	unavailable string,
 ) error {
 	message := boundACPStatusMessage(unavailable)
-	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "identity-unavailable-before-resubmission", taskExecutionReasonIdentityUnavailable, message); err != nil {
+	if err := d.transitionAttemptToFailed(ctx, attemptID, fence, "identity-unavailable-before-submission", taskExecutionReasonIdentityUnavailable, message); err != nil {
 		return err
 	}
 	execution := corev1alpha1.TaskExecutionStatus{
