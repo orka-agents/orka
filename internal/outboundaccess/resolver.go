@@ -479,7 +479,16 @@ func DeclaredConnectorTool(provider *corev1alpha1.ConnectorProvider, tool ToolBi
 		if strings.TrimSpace(tool.URL) != candidate.HTTP.URL || (tool.Forward == "" && toolMethod != method) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q does not match the endpoint declared by provider %q", name, provider.Name)
 		}
-		if string(candidate.Class) != string(tool.Class) {
+		// A forwarding Tool's writes run as class write, but the provider
+		// declares the forwarding tool as a read that also allows writes, so
+		// a write matches only a declaration that grants them, and is judged
+		// as a write from here on (a readWrite link, readWrite scopes).
+		if tool.Forward != "" && tool.Class == corev1alpha1.AgentRuntimeBrokeredToolClassWrite {
+			if candidate.Class != corev1alpha1.ConnectorToolClassRead || candidate.HTTP.Forward.Writes == nil {
+				return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q writes, which provider %q does not declare for it", name, provider.Name)
+			}
+			candidate.Class = corev1alpha1.ConnectorToolClassWrite
+		} else if string(candidate.Class) != string(tool.Class) {
 			return corev1alpha1.ConnectorTool{}, fmt.Errorf("tool %q class does not match the class declared by provider %q", name, provider.Name)
 		}
 		if !sameStaticHeaders(candidate.HTTP.Headers, tool.Headers) {

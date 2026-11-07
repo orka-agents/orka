@@ -102,14 +102,23 @@ func (d MCPToolDescriptor) Validate() error {
 		return fmt.Errorf("provider-native tool %q must not carry an MCP input schema", d.Name)
 	}
 	if d.Forward != nil {
-		if d.Source != MCPToolSourceBrokeredCustom || d.Effect != MCPToolEffectReadOnly {
-			return fmt.Errorf("forwarding tool %q must be a read-only custom tool", d.Name)
+		// Reads are read-only; the derived write tool is consequential and
+		// named after its Tool.
+		effect := MCPToolEffectReadOnly
+		if d.Forward.Write {
+			effect = MCPToolEffectConsequential
+		}
+		if d.Source != MCPToolSourceBrokeredCustom || d.Effect != effect {
+			return fmt.Errorf("forwarding tool %q must be a custom tool whose effect matches its methods", d.Name)
+		}
+		if d.Forward.Write != strings.HasSuffix(d.Name, MCPForwardWriteSuffix) {
+			return fmt.Errorf("forwarding tool %q: only a write tool is named with %q", d.Name, MCPForwardWriteSuffix)
 		}
 		if err := d.Forward.Validate(); err != nil {
 			return fmt.Errorf("forwarding tool %q: %w", d.Name, err)
 		}
 		got, gotErr := CanonicalJSON(d.InputSchema)
-		want, wantErr := CanonicalJSON(MCPForwardInputSchema)
+		want, wantErr := CanonicalJSON(d.Forward.InputSchema())
 		if gotErr != nil || wantErr != nil || !bytes.Equal(got, want) {
 			return fmt.Errorf("forwarding tool %q must carry the fixed forwarding input schema", d.Name)
 		}
@@ -395,7 +404,11 @@ func (c MCPToolCall) ValidateAt(auth PromptMCPAuthorization, _ time.Time) (MCPTo
 		return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q must not carry runtime-supplied approval evidence", c.ToolName)
 	}
 	if descriptor.Forward != nil {
-		if _, err := DecodeMCPForwardRequest(c.Arguments); err != nil {
+		request, err := DecodeMCPForwardRequest(c.Arguments)
+		if err == nil {
+			err = request.ValidateFor(*descriptor.Forward)
+		}
+		if err != nil {
 			return MCPToolDescriptor{}, fmt.Errorf("MCP tool %q: %w", c.ToolName, err)
 		}
 	}

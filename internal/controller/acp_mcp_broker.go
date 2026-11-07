@@ -486,10 +486,14 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		// Descriptor and Task authority mismatches remain definitive.
 		e.Reader = acpMCPAuthorityReader{e.Reader}
 		tool := &corev1alpha1.Tool{}
-		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: descriptor.Name}, tool); getErr != nil {
-			return nil, fmt.Errorf("load custom MCP tool %q: %w", descriptor.Name, getErr)
+		resource := harnessv2.MCPForwardToolResource(descriptor.Name)
+		if getErr := e.Reader.Get(ctx, client.ObjectKey{Namespace: request.Namespace, Name: resource}, tool); getErr != nil {
+			return nil, fmt.Errorf("load custom MCP tool %q: %w", resource, getErr)
 		}
 		currentDescriptor, descriptorErr := customACPMCPToolDescriptor(tool)
+		if descriptorErr == nil && resource != descriptor.Name {
+			currentDescriptor, descriptorErr = forwardingWriteDescriptor(tool, currentDescriptor)
+		}
 		if descriptorErr != nil {
 			return nil, descriptorErr
 		}
@@ -502,6 +506,12 @@ func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 		executor.SetTransactionExchangeConfig(e.TransactionExchange)
 		if descriptor.Forward != nil {
 			executor.AllowForwarding()
+			if descriptor.Forward.Write {
+				// The write tool resolves its credential as a write, so a
+				// linked account must allow writes.
+				tool = tool.DeepCopy()
+				tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
+			}
 		}
 		if bindErr := e.bindTaskTransactionAuthority(ctx, request, executor); bindErr != nil {
 			return nil, bindErr

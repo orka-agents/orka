@@ -283,7 +283,14 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	action := "Execute " + call.Request.Call.ToolName
-	if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// The approver sees the forwarded request itself, not only the tool.
+		var request harnessv2.MCPForwardRequest
+		if json.Unmarshal(call.Request.Call.Arguments, &request) == nil && request.Method != "" && request.Path != "" {
+			path, _, _ := events.RedactAndTruncateExecutionEventText(request.Path, 300)
+			action = "Send " + request.Method + " " + path + " via " + call.Request.Call.ToolName
+		}
+	} else if call.Request.Call.ToolName == "call-tool" || call.Request.Call.ToolName == "call_tool" {
 		var args struct {
 			Name      json.RawMessage `json:"name"`
 			ToolName  json.RawMessage `json:"toolName"`

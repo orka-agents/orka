@@ -224,6 +224,23 @@ spec:
                               enum:
                               - AzureResourceManager
                               type: string
+                            writes:
+                              description: |-
+                                Writes lets the client send write requests (PUT, PATCH, DELETE, and
+                                POST) through this Tool, each recorded as an external effect. Without
+                                it only reads are forwarded. On a ConnectorProvider tool it grants
+                                writes to the matching Tool through readWrite links; the Tool's own
+                                approval setting governs them.
+                              properties:
+                                approval:
+                                  default: Required
+                                  description: Approval decides whether each write
+                                    waits for a person's approval.
+                                  enum:
+                                  - Required
+                                  - None
+                                  type: string
+                              type: object
                           required:
                           - protocol
                           type: object

@@ -16,8 +16,12 @@ func TestMCPForwardRequestStaysOnTheOrigin(t *testing.T) {
 		{"head", MCPForwardRequest{Method: "HEAD", Path: "/subscriptions/s1/resourcegroups/rg1"}, true},
 		{"encoded space", MCPForwardRequest{Method: "GET", Path: "/subscriptions/s1/resourceGroups/my%20rg"}, true},
 		{"skiptoken", MCPForwardRequest{Method: "GET", Path: "/subscriptions", Query: "api-version=1&$skiptoken=a%3D%3D"}, true},
-		{"put", MCPForwardRequest{Method: "PUT", Path: "/subscriptions"}, false},
-		{"post", MCPForwardRequest{Method: "POST", Path: "/subscriptions"}, false},
+		{"put", MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: `{"location":"eastus"}`}, true},
+		{"post without body", MCPForwardRequest{Method: "POST", Path: "/subscriptions/s1/providers/x/listCredential"}, true},
+		{"delete", MCPForwardRequest{Method: "DELETE", Path: "/subscriptions/s1/resourcegroups/rg1"}, true},
+		{"trace", MCPForwardRequest{Method: "TRACE", Path: "/subscriptions"}, false},
+		{"read with body", MCPForwardRequest{Method: "GET", Path: "/subscriptions", Body: `{}`}, false},
+		{"write with non-JSON body", MCPForwardRequest{Method: "PUT", Path: "/subscriptions", Body: "location=eastus"}, false},
 		{"relative", MCPForwardRequest{Method: "GET", Path: "subscriptions"}, false},
 		{"scheme relative", MCPForwardRequest{Method: "GET", Path: "//evil.example/x"}, false},
 		{"dot dot", MCPForwardRequest{Method: "GET", Path: "/subscriptions/../tenants"}, false},
@@ -66,7 +70,7 @@ func TestForwardOriginAcceptsOnlyHTTPSOrigins(t *testing.T) {
 }
 
 func TestDecodeMCPForwardRequestIsStrict(t *testing.T) {
-	if _, err := DecodeMCPForwardRequest(json.RawMessage(`{"method":"GET","path":"/subscriptions","body":"x"}`)); err == nil {
+	if _, err := DecodeMCPForwardRequest(json.RawMessage(`{"method":"GET","path":"/subscriptions","headers":"x"}`)); err == nil {
 		t.Fatal("an unknown argument was accepted")
 	}
 	if _, err := DecodeMCPForwardRequest(json.RawMessage(`{"method":"GET","path":"/subscriptions"} {}`)); err == nil {
@@ -108,6 +112,63 @@ func TestForwardingDescriptorMustBeAReadOnlyCustomTool(t *testing.T) {
 		},
 		"origin": func(d *MCPToolDescriptor) {
 			d.Forward = &MCPToolForward{Protocol: MCPForwardProtocolAzureResourceManager, Origin: "https://x.example/p"}
+		},
+	} {
+		copied := descriptor
+		mutate(&copied)
+		if copied.Validate() == nil {
+			t.Errorf("%s: descriptor was accepted", name)
+		}
+	}
+}
+
+// TestForwardRequestsGoToTheToolForTheirMethod covers the split between a
+// forwarding Tool, which carries reads, and its write tool, which carries
+// writes: neither accepts the other's methods.
+func TestForwardRequestsGoToTheToolForTheirMethod(t *testing.T) {
+	read := MCPToolForward{Protocol: MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com"}
+	write := read
+	write.Write = true
+	get := MCPForwardRequest{Method: "GET", Path: "/subscriptions"}
+	put := MCPForwardRequest{Method: "PUT", Path: "/subscriptions/s1/resourcegroups/rg1", Body: `{"location":"eastus"}`}
+	if err := get.ValidateFor(read); err != nil {
+		t.Fatalf("a read on the read tool: %v", err)
+	}
+	if err := put.ValidateFor(write); err != nil {
+		t.Fatalf("a write on the write tool: %v", err)
+	}
+	if err := put.ValidateFor(read); err == nil {
+		t.Fatal("a write on the read tool must be refused")
+	}
+	if err := get.ValidateFor(write); err == nil {
+		t.Fatal("a read on the write tool must be refused")
+	}
+	if MCPForwardWriteToolName("azure-arm") != "azure-arm:write" || MCPForwardToolResource("azure-arm:write") != "azure-arm" ||
+		MCPForwardToolResource("azure-arm") != "azure-arm" {
+		t.Fatal("the write tool is named after its Tool")
+	}
+}
+
+// TestForwardingWriteDescriptorMustBeConsequential covers a write tool's
+// descriptor: consequential, named after its Tool, with the write schema.
+func TestForwardingWriteDescriptorMustBeConsequential(t *testing.T) {
+	forward := &MCPToolForward{Protocol: MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com", Write: true}
+	descriptor := MCPToolDescriptor{
+		Name: MCPForwardWriteToolName("azure_arm"), Description: "Azure", InputSchema: forward.InputSchema(),
+		Source: MCPToolSourceBrokeredCustom, Effect: MCPToolEffectConsequential, DefinitionDigest: "sha256:" + strings.Repeat("a", 64),
+		Forward: forward,
+	}
+	if err := descriptor.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*MCPToolDescriptor){
+		"read only":   func(d *MCPToolDescriptor) { d.Effect = MCPToolEffectReadOnly },
+		"read schema": func(d *MCPToolDescriptor) { d.InputSchema = MCPForwardInputSchema },
+		"read name":   func(d *MCPToolDescriptor) { d.Name = "azure_arm" },
+		"read forward": func(d *MCPToolDescriptor) {
+			read := *forward
+			read.Write = false
+			d.Forward = &read
 		},
 	} {
 		copied := descriptor

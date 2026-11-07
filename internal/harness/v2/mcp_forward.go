@@ -22,17 +22,47 @@ const (
 )
 
 // MCPForwardInputSchema is the fixed argument schema of every forwarding
-// Tool. The runtime builds these arguments from a client request; the model
-// never sees the Tool.
+// Tool's reads. The runtime builds these arguments from a client request; the
+// model never sees the Tool.
 var MCPForwardInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["GET","HEAD"]},"path":{"type":"string"},"query":{"type":"string"}}}`)
+
+// MCPForwardWriteInputSchema is the fixed argument schema of a forwarding
+// Tool's write tool: a write method and an optional JSON body.
+var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":"string"}}}`)
+
+// MCPForwardWriteSuffix ends the name of a forwarding Tool's write tool. A
+// colon cannot appear in a Kubernetes name, so the derived name never meets
+// a real Tool.
+const MCPForwardWriteSuffix = ":write"
+
+// MCPForwardWriteToolName names the write tool of the forwarding Tool name.
+func MCPForwardWriteToolName(name string) string {
+	return name + MCPForwardWriteSuffix
+}
+
+// MCPForwardToolResource returns the Tool resource a forwarding tool name
+// belongs to: the name itself, or the name a write tool was derived from.
+func MCPForwardToolResource(name string) string {
+	return strings.TrimSuffix(name, MCPForwardWriteSuffix)
+}
 
 // MCPToolForward marks a forwarding Tool in a prompt's tool policy. The
 // runtime serves Protocol on loopback and sends each client request through
 // the broker as a call to this Tool; responses name Origin, which the runtime
-// rewrites to its local endpoint.
+// rewrites to its local endpoint. Write marks the derived tool that carries
+// the Tool's write requests.
 type MCPToolForward struct {
 	Protocol string `json:"protocol"`
 	Origin   string `json:"origin"`
+	Write    bool   `json:"write,omitempty"`
+}
+
+// InputSchema returns the fixed argument schema of the forwarding tool.
+func (f MCPToolForward) InputSchema() json.RawMessage {
+	if f.Write {
+		return MCPForwardWriteInputSchema
+	}
+	return MCPForwardInputSchema
 }
 
 func (f MCPToolForward) Validate() error {
@@ -63,11 +93,23 @@ func ForwardHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ":443")
 }
 
-// MCPForwardRequest is the argument object of a forwarding Tool call.
+// MCPForwardRequest is the argument object of a forwarding Tool call. Only a
+// write carries a body, which is JSON text.
 type MCPForwardRequest struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
 	Query  string `json:"query,omitempty"`
+	Body   string `json:"body,omitempty"`
+}
+
+// ForwardWriteMethod reports whether method is a write a forwarding Tool's
+// write tool carries.
+func ForwardWriteMethod(method string) bool {
+	switch method {
+	case http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodPost:
+		return true
+	}
+	return false
 }
 
 // DecodeMCPForwardRequest strictly decodes and validates forwarding arguments.
@@ -76,7 +118,7 @@ func DecodeMCPForwardRequest(arguments json.RawMessage) (MCPForwardRequest, erro
 	decoder.DisallowUnknownFields()
 	var request MCPForwardRequest
 	if err := decoder.Decode(&request); err != nil {
-		return MCPForwardRequest{}, fmt.Errorf("forwarding arguments must be an object with method, path, and query")
+		return MCPForwardRequest{}, fmt.Errorf("forwarding arguments must be an object with method, path, query, and body")
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return MCPForwardRequest{}, fmt.Errorf("forwarding arguments have trailing data")
@@ -84,17 +126,37 @@ func DecodeMCPForwardRequest(arguments json.RawMessage) (MCPForwardRequest, erro
 	return request, request.Validate()
 }
 
-// Validate keeps a forwarded request on the Tool's origin: a read method, an
-// absolute path with no dot segments, encoded separators, or characters that a
-// server could read differently, and a well-formed query.
+// Validate keeps a forwarded request on the Tool's origin: a read or write
+// method, an absolute path with no dot segments, encoded separators, or
+// characters that a server could read differently, a well-formed query, and,
+// for a write only, a JSON body.
 func (r MCPForwardRequest) Validate() error {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		return fmt.Errorf("forwarding Tools carry only GET and HEAD requests")
+	write := ForwardWriteMethod(r.Method)
+	if !write && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return fmt.Errorf("forwarding Tools carry GET, HEAD, PUT, PATCH, DELETE, and POST requests only")
+	}
+	if r.Body != "" && (!write || !json.Valid([]byte(r.Body))) {
+		return fmt.Errorf("only a forwarded write carries a body, and it must be JSON")
 	}
 	if err := validateForwardPath(r.Path); err != nil {
 		return err
 	}
 	return validateForwardQuery(r.Query)
+}
+
+// ValidateFor checks the request and that forward is the tool for its
+// method: reads go to a forwarding Tool, writes to its write tool.
+func (r MCPForwardRequest) ValidateFor(forward MCPToolForward) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	if ForwardWriteMethod(r.Method) != forward.Write {
+		if forward.Write {
+			return fmt.Errorf("a forwarding write tool carries only PUT, PATCH, DELETE, and POST requests")
+		}
+		return fmt.Errorf("forwarding Tools carry only GET and HEAD requests; writes go to the write tool")
+	}
+	return nil
 }
 
 // Target returns the request URL on origin.

@@ -107,10 +107,18 @@ http:
   `POST` see its path; Tools that must not return secrets need
   `approval: Required` or no writes.
 - Writes follow each credential mode's own write rules: the Agent's identity
-  (Self), a Delegated token for the requester, or a `readWrite` Connection. A
-  `readOnly` Connection keeps the reads and hides the write tool. Delegated
-  writes follow the Tool's approval setting; when one is approved, only the
-  requester can approve it, as ADR 0039 requires.
+  (Self), a Delegated token for the requester, or a `readWrite` Connection.
+  A linked account writes only when the provider's forwarding tool also sets
+  `forward.writes` (its `approval` is unused), which changes the provider's
+  authority digest, so people consent again. A write then matches as class
+  `write` and needs a `readWrite` link; on a `readOnly` link the write tool
+  stays offered and fails at call time, as connection-mode write Tools do.
+  Delegated writes follow the Tool's approval setting; when one needs
+  approval, only the requester can approve it, as ADR 0039 requires.
+- A decided write gets a final answer, never a status the Azure SDK retries:
+  a declined, expired, cancelled, or stale approval is `403
+  OrkaApprovalNotGranted`, and a write whose outcome is unknown is `409
+  OrkaOutcomeUnknown`. The approval names the method and path.
 
 ## Rejected alternatives
 

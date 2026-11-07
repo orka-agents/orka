@@ -109,14 +109,32 @@ spec:
                       runtime uses, instead of a function the model calls. The runtime serves
                       the client's protocol on loopback and sends each request through the
                       broker to this Tool's origin, where the outbound access policy supplies
-                      the credential. The client never holds it. Only read requests (GET and
-                      HEAD) are forwarded, and the Tool is not listed to the model.
+                      the credential. The client never holds it. Read requests (GET and HEAD)
+                      are forwarded; writes only when Writes is set. The Tool is not listed to
+                      the model.
                     properties:
                       protocol:
                         description: Protocol is the client protocol the runtime serves.
                         enum:
                         - AzureResourceManager
                         type: string
+                      writes:
+                        description: |-
+                          Writes lets the client send write requests (PUT, PATCH, DELETE, and
+                          POST) through this Tool, each recorded as an external effect. Without
+                          it only reads are forwarded. On a ConnectorProvider tool it grants
+                          writes to the matching Tool through readWrite links; the Tool's own
+                          approval setting governs them.
+                        properties:
+                          approval:
+                            default: Required
+                            description: Approval decides whether each write waits
+                              for a person's approval.
+                            enum:
+                            - Required
+                            - None
+                            type: string
+                        type: object
                     required:
                     - protocol
                     type: object

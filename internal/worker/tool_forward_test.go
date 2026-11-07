@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -114,10 +115,11 @@ func TestForwardingToolRefusals(t *testing.T) {
 		want      string
 	}{
 		{"outside the ACP broker", false, agentIdentityResolver(), `{"method":"GET","path":"/subscriptions"}`, "runs only through an ACP runtime"},
-		{"write", true, agentIdentityResolver(), `{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg"}`, "only GET and HEAD"},
+		{"write on a read-only Tool", true, agentIdentityResolver(), `{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg"}`, "does not forward PUT"},
 		{"dot segment", true, agentIdentityResolver(), `{"method":"GET","path":"/subscriptions/../tenants"}`, "dot segments"},
 		{"another origin", true, agentIdentityResolver(), `{"method":"GET","path":"//evil.example/x"}`, "absolute"},
-		{"extra argument", true, agentIdentityResolver(), `{"method":"GET","path":"/subscriptions","body":"x"}`, "forwarding arguments"},
+		{"extra argument", true, agentIdentityResolver(), `{"method":"GET","path":"/subscriptions","headers":"x"}`, "forwarding arguments"},
+		{"read with a body", true, agentIdentityResolver(), `{"method":"GET","path":"/subscriptions","body":"{}"}`, "only a forwarded write carries a body"},
 		{"gateway policy", true, &fakeOutboundAccessResolver{resolution: outboundaccess.Resolution{Adapter: outboundaccess.AdapterGateway}},
 			`{"method":"GET","path":"/subscriptions"}`, "not a gateway"},
 	} {
@@ -378,5 +380,81 @@ func TestRedactForwardedTextRestoresManyContinuationTokens(t *testing.T) {
 	}
 	if got := redactForwardedText(text.String(), "opaque-example-value"); got != text.String() {
 		t.Fatal("continuation parameters were not all restored in place")
+	}
+}
+
+// writeForwardingTestTool is a forwarding Tool that allows writes, as the
+// broker hands it to the executor for its write tool: with the write class.
+func writeForwardingTestTool(url string) *corev1alpha1.Tool {
+	tool := forwardingTestTool(url)
+	tool.Spec.BrokeredToolClass = corev1alpha1.AgentRuntimeBrokeredToolClassWrite
+	tool.Spec.HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	return tool
+}
+
+// TestForwardingToolSendsAWriteWithItsBody covers a forwarded write: the
+// upstream gets the method, the JSON body, and the credential, and the
+// credential is resolved as a write.
+func TestForwardingToolSendsAWriteWithItsBody(t *testing.T) {
+	var got *http.Request
+	var gotBody string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Clone(context.Background())
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Header().Set("Azure-AsyncOperation", "https://"+r.Host+"/subscriptions/s1/providers/x/operations/op1")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"name":"aks1"}`))
+	}))
+	defer server.Close()
+	resolver := agentIdentityResolver()
+	executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: resolver, skipDirectPublicValidation: true}
+	executor.AllowForwarding()
+	body := `{"location":"eastus","properties":{"dnsPrefix":"aks1"}}`
+	arguments, _ := json.Marshal(harnessv2.MCPForwardRequest{
+		Method: http.MethodPut, Path: "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.ContainerService/managedClusters/aks1",
+		Query: "api-version=2024-09-01", Body: body,
+	})
+	result, err := executor.Execute(context.Background(), writeForwardingTestTool(server.URL), arguments)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got == nil || got.Method != http.MethodPut || gotBody != body || got.Header.Get("Content-Type") != "application/json" ||
+		got.Header.Get("Authorization") != "Bearer arm-token-secret" {
+		t.Fatalf("upstream request = %#v, body %q", got, gotBody)
+	}
+	if resolver.request.Tool.Class != corev1alpha1.AgentRuntimeBrokeredToolClassWrite || resolver.request.Tool.Method != http.MethodPut {
+		t.Fatalf("resolver tool binding = %#v, want a write", resolver.request.Tool)
+	}
+	response, err := harnessv2.DecodeMCPForwardResponse(json.RawMessage(result))
+	if err != nil || response.Status != http.StatusCreated || response.Headers["Azure-Asyncoperation"] == "" {
+		t.Fatalf("response = %#v, %v", response, err)
+	}
+}
+
+// TestForwardingToolRefusesWritesItWasNotGranted covers a write that reaches
+// the executor without both the write class and the Tool's writes setting,
+// and a read sent as the write tool.
+func TestForwardingToolRefusesWritesItWasNotGranted(t *testing.T) {
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	noWrites := writeForwardingTestTool(server.URL)
+	noWrites.Spec.HTTP.Forward.Writes = nil
+	for name, tc := range map[string]struct {
+		tool      *corev1alpha1.Tool
+		arguments string
+	}{
+		"write class without writes": {noWrites, `{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg"}`},
+		"read as the write tool":     {writeForwardingTestTool(server.URL), `{"method":"GET","path":"/subscriptions"}`},
+	} {
+		executor := &ToolExecutor{client: server.Client(), namespace: "tenant", outboundResolver: agentIdentityResolver(), skipDirectPublicValidation: true}
+		executor.AllowForwarding()
+		if _, err := executor.Execute(context.Background(), tc.tool, json.RawMessage(tc.arguments)); err == nil || !strings.Contains(err.Error(), "does not forward") {
+			t.Fatalf("%s: Execute() error = %v", name, err)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("refused writes sent %d requests", requests)
 	}
 }

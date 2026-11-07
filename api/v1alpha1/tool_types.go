@@ -106,8 +106,9 @@ type HTTPExecution struct {
 	// runtime uses, instead of a function the model calls. The runtime serves
 	// the client's protocol on loopback and sends each request through the
 	// broker to this Tool's origin, where the outbound access policy supplies
-	// the credential. The client never holds it. Only read requests (GET and
-	// HEAD) are forwarded, and the Tool is not listed to the model.
+	// the credential. The client never holds it. Read requests (GET and HEAD)
+	// are forwarded; writes only when Writes is set. The Tool is not listed to
+	// the model.
 	// +optional
 	Forward *HTTPForward `json:"forward,omitempty"`
 }
@@ -128,6 +129,42 @@ const (
 type HTTPForward struct {
 	// Protocol is the client protocol the runtime serves.
 	Protocol HTTPForwardProtocol `json:"protocol"`
+
+	// Writes lets the client send write requests (PUT, PATCH, DELETE, and
+	// POST) through this Tool, each recorded as an external effect. Without
+	// it only reads are forwarded. On a ConnectorProvider tool it grants
+	// writes to the matching Tool through readWrite links; the Tool's own
+	// approval setting governs them.
+	// +optional
+	Writes *HTTPForwardWrites `json:"writes,omitempty"`
+}
+
+// HTTPForwardWriteApproval decides whether a forwarded write waits for a
+// person's approval.
+// +kubebuilder:validation:Enum=Required;None
+type HTTPForwardWriteApproval string
+
+const (
+	// HTTPForwardWriteApprovalRequired holds each write until a person
+	// approves it.
+	HTTPForwardWriteApprovalRequired HTTPForwardWriteApproval = "Required"
+	// HTTPForwardWriteApprovalNone sends writes without approval; the
+	// credential's own permissions are the only limit.
+	HTTPForwardWriteApprovalNone HTTPForwardWriteApproval = "None"
+)
+
+// HTTPForwardWrites configures forwarded writes.
+type HTTPForwardWrites struct {
+	// Approval decides whether each write waits for a person's approval.
+	// +kubebuilder:default=Required
+	// +optional
+	Approval HTTPForwardWriteApproval `json:"approval,omitempty"`
+}
+
+// WriteApprovalRequired reports whether forwarded writes wait for approval.
+// An unset approval is Required.
+func (w *HTTPForwardWrites) WriteApprovalRequired() bool {
+	return w == nil || w.Approval != HTTPForwardWriteApprovalNone
 }
 
 // LocalObjectReference selects an object in the same namespace.

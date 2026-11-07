@@ -40,6 +40,13 @@ func (f *azureGatewayFixture) brokerCalls() []harnessv2.MCPBrokerCallRequest {
 
 func forwardingTestAuthorization(t *testing.T, fence harnessv2.Fence, now time.Time, forwarders int) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
 	t.Helper()
+	return forwardingTestAuthorizationWith(t, fence, now, forwarders, false)
+}
+
+// forwardingTestAuthorizationWith builds the authorization, and, with
+// writes, the first forwarding Tool's write tool.
+func forwardingTestAuthorizationWith(t *testing.T, fence harnessv2.Fence, now time.Time, forwarders int, writes bool) (harnessv2.PromptMCPAuthorization, harnessv2.PromptLease) {
+	t.Helper()
 	authorization, lease := buildTestMCPAuthorization(t, fence, now, "lookup", harnessv2.MCPToolEffectReadOnly, false)
 	tools := append([]harnessv2.MCPToolDescriptor(nil), authorization.ToolPolicy.Tools...)
 	names := append([]string(nil), authorization.ToolPolicy.AllowedToolNames...)
@@ -55,6 +62,15 @@ func forwardingTestAuthorization(t *testing.T, fence harnessv2.Fence, now time.T
 			Forward:          &harnessv2.MCPToolForward{Protocol: harnessv2.MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com"},
 		})
 		names = append(names, name)
+		if writes && index == 0 {
+			write := tools[len(tools)-1]
+			write.Name = harnessv2.MCPForwardWriteToolName(name)
+			write.InputSchema = harnessv2.MCPForwardWriteInputSchema
+			write.Effect = harnessv2.MCPToolEffectConsequential
+			write.Forward = &harnessv2.MCPToolForward{Protocol: harnessv2.MCPForwardProtocolAzureResourceManager, Origin: "https://management.azure.com", Write: true}
+			tools = append(tools, write)
+			names = append(names, write.Name)
+		}
 	}
 	slices.SortFunc(tools, func(a, b harnessv2.MCPToolDescriptor) int { return strings.Compare(a.Name, b.Name) })
 	slices.Sort(names)
@@ -75,6 +91,11 @@ func forwardingTestAuthorization(t *testing.T, fence harnessv2.Fence, now time.T
 }
 
 func newAzureGatewayFixture(t *testing.T) *azureGatewayFixture {
+	t.Helper()
+	return newAzureGatewayFixtureWith(t, false)
+}
+
+func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture {
 	t.Helper()
 	fixture := &azureGatewayFixture{}
 	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
@@ -109,7 +130,7 @@ func newAzureGatewayFixture(t *testing.T) *azureGatewayFixture {
 		ProfileDigestSchemaVersion: harnessv2.ProfileDigestSchemaVersion,
 	}
 	now := time.Now().UTC()
-	authorization, lease := forwardingTestAuthorization(t, fence, now, 1)
+	authorization, lease := forwardingTestAuthorizationWith(t, fence, now, 1, writes)
 	session, binding, err := proxy.newSession(fence, authorization.Configuration())
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +166,16 @@ func (f *azureGatewayFixture) base() string {
 
 func (f *azureGatewayFixture) do(t *testing.T, method, path string, header http.Header) (*http.Response, string) {
 	t.Helper()
-	request, err := http.NewRequest(method, f.base()+path, nil)
+	return f.send(t, method, path, header, "")
+}
+
+func (f *azureGatewayFixture) send(t *testing.T, method, path string, header http.Header, body string) (*http.Response, string) {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	request, err := http.NewRequest(method, f.base()+path, reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,8 +189,8 @@ func (f *azureGatewayFixture) do(t *testing.T, method, path string, header http.
 		t.Fatal(err)
 	}
 	defer response.Body.Close() //nolint:errcheck
-	body, _ := io.ReadAll(response.Body)
-	return response, string(body)
+	answer, _ := io.ReadAll(response.Body)
+	return response, string(answer)
 }
 
 func (f *azureGatewayFixture) token(t *testing.T) string {
@@ -367,7 +397,7 @@ func TestForwardingToolIsHiddenFromTheModel(t *testing.T) {
 func TestAzureForwardingToolRefusesTwo(t *testing.T) {
 	fence := harnessv2.Fence{RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 1}
 	authorization, _ := forwardingTestAuthorization(t, fence, time.Now().UTC(), 2)
-	if _, _, err := azureForwardingTool(authorization.Configuration()); err == nil {
+	if _, _, _, err := azureForwardingTool(authorization.Configuration()); err == nil {
 		t.Fatal("two Azure forwarding Tools were accepted")
 	}
 }
@@ -451,5 +481,118 @@ func TestAzureGatewayRefusesAChunkedBody(t *testing.T) {
 	}
 	if calls := fixture.brokerCalls(); len(calls) != 0 {
 		t.Fatalf("broker calls = %d, want none for a request with a body", len(calls))
+	}
+}
+
+// TestAzureGatewaySendsWritesToTheWriteTool covers a Tool that allows writes:
+// a PUT reaches the broker as a call to the write tool with its JSON body,
+// and the same write retried with the SDK's request ID keeps its call ID, so
+// it joins rather than writes twice. A different body, or a write without
+// the request ID, gets its own call.
+func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
+	fixture := newAzureGatewayFixtureWith(t, true)
+	token := fixture.token(t)
+	header := func(requestID string) http.Header {
+		h := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json; charset=utf-8"}}
+		if requestID != "" {
+			h.Set("X-Ms-Client-Request-Id", requestID)
+		}
+		return h
+	}
+	path := "/subscriptions/s1/resourcegroups/rg1?api-version=2021-04-01"
+	body := `{"location":"eastus"}`
+	for range 2 {
+		if response, text := fixture.send(t, http.MethodPut, path, header("req-1"), body); response.StatusCode != http.StatusOK {
+			t.Fatalf("PUT status = %d, body = %s", response.StatusCode, text)
+		}
+	}
+	if response, _ := fixture.send(t, http.MethodPut, path, header("req-1"), `{"location":"westus"}`); response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT with another body status = %d", response.StatusCode)
+	}
+	if response, _ := fixture.send(t, http.MethodPut, path, header(""), body); response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT without a request ID status = %d", response.StatusCode)
+	}
+	calls := fixture.brokerCalls()
+	if len(calls) != 4 {
+		t.Fatalf("broker calls = %d, want 4", len(calls))
+	}
+	write := harnessv2.MCPForwardWriteToolName(testForwardTool)
+	for _, call := range calls {
+		if call.Call.ToolName != write {
+			t.Fatalf("write went to tool %q, want %q", call.Call.ToolName, write)
+		}
+	}
+	request, err := harnessv2.DecodeMCPForwardRequest(calls[0].Call.Arguments)
+	if err != nil || request.Method != http.MethodPut || request.Body != body || request.Query != "api-version=2021-04-01" {
+		t.Fatalf("forwarded write = %+v, %v", request, err)
+	}
+	if calls[0].Call.CallID != calls[1].Call.CallID {
+		t.Fatal("a retried write must keep its call ID")
+	}
+	if calls[2].Call.CallID == calls[0].Call.CallID || calls[3].Call.CallID == calls[0].Call.CallID {
+		t.Fatal("a write with another body, or without a request ID, must get its own call ID")
+	}
+	// Reads still go to the Tool itself.
+	if response, _ := fixture.do(t, http.MethodGet, "/subscriptions", http.Header{"Authorization": {"Bearer " + token}}); response.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d", response.StatusCode)
+	}
+	if last := fixture.brokerCalls(); last[len(last)-1].Call.ToolName != testForwardTool {
+		t.Fatalf("read went to tool %q, want %q", last[len(last)-1].Call.ToolName, testForwardTool)
+	}
+}
+
+// TestAzureGatewayRefusesBodiesItCannotForward covers a write body that is
+// not JSON or too large to fit the broker's argument limit.
+func TestAzureGatewayRefusesBodiesItCannotForward(t *testing.T) {
+	fixture := newAzureGatewayFixtureWith(t, true)
+	token := fixture.token(t)
+	path := "/subscriptions/s1/resourcegroups/rg1"
+	text := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"text/plain"}}
+	if response, _ := fixture.send(t, http.MethodPut, path, text, `{"location":"eastus"}`); response.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-JSON body status = %d, want 415", response.StatusCode)
+	}
+	jsonHeader := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}}
+	large := `{"tags":{"t":"` + strings.Repeat("a", maxAzureRequestBodyBytes) + `"}}`
+	if response, _ := fixture.send(t, http.MethodPut, path, jsonHeader, large); response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status = %d, want 413", response.StatusCode)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 0 {
+		t.Fatalf("refused writes reached the broker: %d calls", len(calls))
+	}
+}
+
+// TestAzureForwardingToolPairsItsWriteTool covers a session whose policy
+// carries a forwarding Tool and its write tool: one gateway serves both.
+func TestAzureForwardingToolPairsItsWriteTool(t *testing.T) {
+	fence := harnessv2.Fence{RuntimeSessionUID: "session-uid", RuntimeSessionGeneration: 1}
+	authorization, _ := forwardingTestAuthorizationWith(t, fence, time.Now().UTC(), 1, true)
+	descriptor, writeName, ok, err := azureForwardingTool(authorization.Configuration())
+	if err != nil || !ok || descriptor.Name != testForwardTool || writeName != harnessv2.MCPForwardWriteToolName(testForwardTool) {
+		t.Fatalf("azureForwardingTool() = %q, %q, %t, %v", descriptor.Name, writeName, ok, err)
+	}
+}
+
+// TestAzureGatewayAnswersDecidedWritesWithFinalStatuses covers approval
+// outcomes: az must not retry a write a reviewer declined, or one that may
+// already have reached Azure, so neither is answered with a retryable 5xx.
+func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
+	fixture := newAzureGatewayFixtureWith(t, true)
+	token := fixture.token(t)
+	header := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}}
+	for code, want := range map[string]struct {
+		status int
+		error  string
+	}{
+		"approval_declined":    {http.StatusForbidden, "OrkaApprovalNotGranted"},
+		"approval_expired":     {http.StatusForbidden, "OrkaApprovalNotGranted"},
+		"tool_outcome_unknown": {http.StatusConflict, "OrkaOutcomeUnknown"},
+	} {
+		fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+			return json.RawMessage(`{"isError":true,"code":"` + code + `","error":"decided"}`)
+		}
+		response, body := fixture.send(t, http.MethodDelete, "/subscriptions/s1/resourcegroups/rg1", header, "")
+		if response.StatusCode != want.status || !strings.Contains(body, want.error) {
+			t.Errorf("%s: status = %d: %s", code, response.StatusCode, body)
+		}
 	}
 }

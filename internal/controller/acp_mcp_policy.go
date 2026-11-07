@@ -323,7 +323,7 @@ func buildMCPPolicyConfigurationWithRegistry(
 	approval harnessv2.MCPApprovalPolicy,
 	registry *tools.Registry,
 ) (harnessv2.MCPPolicyConfiguration, error) {
-	if len(approval.RequiredTools) > 0 && !runtimeSupportsMCPApprovals(profile) {
+	if len(approval.RequiredTools) > 0 && !runtimeSupportsMCPApprovals(profile) && !onlyForwardingWritesNeedApproval(approval) {
 		return harnessv2.MCPPolicyConfiguration{}, permanentACPAgentConfiguration(
 			fmt.Errorf("approval-required MCP tools require a qualified AgentKit or Foundry runtime"),
 		)
@@ -432,17 +432,25 @@ func buildCanonicalMCPToolDescriptors(
 		if reader == nil {
 			return nil, permanentACPAgentConfiguration(fmt.Errorf("allowed tool %q is not a known provider-native or brokered built-in tool", name))
 		}
+		// A forwarding Tool's write tool is derived from that Tool, which
+		// must still allow writes.
+		resource := harnessv2.MCPForwardToolResource(name)
 		custom := &corev1alpha1.Tool{}
-		err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, custom)
+		err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: resource}, custom)
 		if apierrors.IsNotFound(err) {
 			return nil, permanentACPAgentConfiguration(fmt.Errorf("allowed tool %q is not a known provider-native, built-in, or Tool resource", name))
 		}
 		if err != nil {
-			return nil, fmt.Errorf("load allowed Tool %q: %w", name, err)
+			return nil, fmt.Errorf("load allowed Tool %q: %w", resource, err)
 		}
 		descriptor, descriptorErr := customACPMCPToolDescriptor(custom)
 		if descriptorErr != nil {
 			return nil, descriptorErr
+		}
+		if resource != name {
+			if descriptor, descriptorErr = forwardingWriteDescriptor(custom, descriptor); descriptorErr != nil {
+				return nil, permanentACPAgentConfiguration(descriptorErr)
+			}
 		}
 		if descriptor.Forward != nil {
 			policy := &corev1alpha1.OutboundAccessPolicy{}
@@ -548,6 +556,94 @@ func forwardingToolDescriptor(tool *corev1alpha1.Tool) (harnessv2.MCPToolForward
 		return harnessv2.MCPToolForward{}, fmt.Errorf("forwarding tool %q: %w", tool.Name, err)
 	}
 	return harnessv2.MCPToolForward{Protocol: string(spec.Forward.Protocol), Origin: origin}, nil
+}
+
+// forwardingWriteDescriptor derives the write tool of a forwarding Tool that
+// allows writes: the same Tool, named with the write suffix, consequential,
+// and carrying the write methods' schema.
+func forwardingWriteDescriptor(tool *corev1alpha1.Tool, read harnessv2.MCPToolDescriptor) (harnessv2.MCPToolDescriptor, error) {
+	if read.Forward == nil || tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil || tool.Spec.HTTP.Forward.Writes == nil {
+		return harnessv2.MCPToolDescriptor{}, fmt.Errorf("tool %q does not allow forwarded writes", tool.Name)
+	}
+	write := read
+	write.Name = harnessv2.MCPForwardWriteToolName(tool.Name)
+	write.Effect = harnessv2.MCPToolEffectConsequential
+	forward := *read.Forward
+	forward.Write = true
+	write.Forward = &forward
+	write.InputSchema = append(json.RawMessage(nil), harnessv2.MCPForwardWriteInputSchema...)
+	if err := write.Validate(); err != nil {
+		return harnessv2.MCPToolDescriptor{}, err
+	}
+	return write, nil
+}
+
+// onlyForwardingWritesNeedApproval reports whether every approval-required
+// tool is a forwarding write tool. A runtime that cannot ask for approval
+// still carries those, because the runtime's gateway, not the agent's MCP
+// client, waits for the decision.
+func onlyForwardingWritesNeedApproval(approval harnessv2.MCPApprovalPolicy) bool {
+	for _, name := range approval.RequiredTools {
+		if !strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
+			return false
+		}
+	}
+	return len(approval.RequiredTools) > 0
+}
+
+// adjustInputsForForwardingWrites returns planning inputs that allow each
+// allowed forwarding Tool's write tool when the Tool allows writes, and that
+// require approval for it unless the Tool waives it. Like the connector
+// rules, it works on copies so the plan, the MCP policy, and the frozen
+// snapshot agree.
+func adjustInputsForForwardingWrites(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+	agent *corev1alpha1.Agent,
+) (*corev1alpha1.Task, *corev1alpha1.Agent, error) {
+	if reader == nil || task == nil || agent == nil || agent.Spec.Runtime == nil {
+		return task, agent, nil
+	}
+	allowed := effectiveACPAllowedTools(task, agent)
+	var writes, approvals []string
+	for _, name := range allowed {
+		if strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
+			// Write tools are derived, never requested by name.
+			return nil, nil, permanentACPAgentConfiguration(fmt.Errorf("allowed tool %q names a forwarding write tool; allow the Tool itself", name))
+		}
+		tool := &corev1alpha1.Tool{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: task.Namespace, Name: name}, tool); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, nil, fmt.Errorf("load allowed Tool %q: %w", name, err)
+		}
+		if tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil || tool.Spec.HTTP.Forward.Writes == nil {
+			continue
+		}
+		write := harnessv2.MCPForwardWriteToolName(name)
+		writes = append(writes, write)
+		if tool.Spec.HTTP.Forward.Writes.WriteApprovalRequired() {
+			approvals = append(approvals, write)
+		}
+	}
+	if len(writes) == 0 {
+		return task, agent, nil
+	}
+	task = task.DeepCopy()
+	if task.Spec.AgentRuntime == nil {
+		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
+	}
+	task.Spec.AgentRuntime.AllowedTools = sortedUnique(append(append([]string(nil), allowed...), writes...))
+	if len(approvals) > 0 {
+		agent = agent.DeepCopy()
+		if agent.Spec.Coordination == nil {
+			agent.Spec.Coordination = &corev1alpha1.CoordinationConfig{}
+		}
+		agent.Spec.Coordination.ApprovalRequiredTools = sortedUnique(append(agent.Spec.Coordination.ApprovalRequiredTools, approvals...))
+	}
+	return task, agent, nil
 }
 
 // forwardingPolicySupported refuses a forwarding Tool whose outbound access

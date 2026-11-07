@@ -871,6 +871,11 @@ func TestValidateProviderSpecForwardingTools(t *testing.T) {
 		t.Fatalf("valid forwarding tool refused: %v", issue)
 	}
 	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
+		tool.HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	}), nil); issue != nil {
+		t.Fatalf("a forwarding tool that grants writes was refused: %v", issue)
+	}
+	if issue := ValidateProviderSpec(forwarding(func(tool *corev1alpha1.ConnectorTool) {
 		tool.HTTP.URL = "https://management.azure.com:443"
 	}), nil); issue != nil {
 		t.Fatalf("the default HTTPS port was refused: %v", issue)
@@ -918,5 +923,14 @@ func TestProviderAuthorityDigestRenewsConsentForForwarding(t *testing.T) {
 	}
 	if ProviderAuthorityDigest(provider) == plain || ConsentMatchesProvider(connection, provider) {
 		t.Fatal("turning a tool into a forwarding tool must need renewed consent")
+	}
+	reads := ProviderAuthorityDigest(provider)
+	for i := range provider.Spec.Tools {
+		if provider.Spec.Tools[i].Name == "search" {
+			provider.Spec.Tools[i].HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+		}
+	}
+	if ProviderAuthorityDigest(provider) == reads {
+		t.Fatal("letting a forwarding tool write must need renewed consent")
 	}
 }

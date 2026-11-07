@@ -627,3 +627,36 @@ func TestDeclaredConnectorToolMatchesForwarding(t *testing.T) {
 		t.Fatalf("a forwarding Tool matched a plain declaration: %v", err)
 	}
 }
+
+// TestDeclaredConnectorToolMatchesForwardedWritesItGrants covers a forwarding
+// Tool's write: it matches only a declaration that grants writes, and is
+// then judged as a write, so it needs a readWrite link.
+func TestDeclaredConnectorToolMatchesForwardedWritesItGrants(t *testing.T) {
+	provider := &corev1alpha1.ConnectorProvider{Spec: corev1alpha1.ConnectorProviderSpec{Tools: []corev1alpha1.ConnectorTool{{
+		Name: "azure_arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+		HTTP: &corev1alpha1.ConnectorHTTPTool{
+			URL: "https://management.azure.com", Method: "POST",
+			Forward: &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager},
+		},
+	}}}}
+	write := ToolBinding{
+		Name: "azure_arm", URL: "https://management.azure.com", Method: "GET", Class: corev1alpha1.AgentRuntimeBrokeredToolClassWrite,
+		Forward: corev1alpha1.HTTPForwardProtocolAzureResourceManager,
+	}
+	if _, err := DeclaredConnectorTool(provider, write); err == nil || !strings.Contains(err.Error(), "does not declare") {
+		t.Fatalf("a write matched a declaration without writes: %v", err)
+	}
+	provider.Spec.Tools[0].HTTP.Forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+	declared, err := DeclaredConnectorTool(provider, write)
+	if err != nil || declared.Class != corev1alpha1.ConnectorToolClassWrite {
+		t.Fatalf("a granted write = %v, class %q; want class write", err, declared.Class)
+	}
+	if provider.Spec.Tools[0].Class != corev1alpha1.ConnectorToolClassRead {
+		t.Fatal("matching a write changed the provider's declaration")
+	}
+	read := write
+	read.Class = corev1alpha1.AgentRuntimeBrokeredToolClassRead
+	if declared, err := DeclaredConnectorTool(provider, read); err != nil || declared.Class != corev1alpha1.ConnectorToolClassRead {
+		t.Fatalf("a read on a declaration with writes = %v, class %q", err, declared.Class)
+	}
+}

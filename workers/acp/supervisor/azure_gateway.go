@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -17,6 +18,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -137,8 +139,11 @@ func randomSerial() *big.Int {
 
 // azureGateway serves az for one RuntimeSession.
 type azureGateway struct {
-	session        *mcpProxySession
-	toolName       string
+	session  *mcpProxySession
+	toolName string
+	// writeToolName carries the Tool's writes, or is empty when the Tool
+	// forwards reads only.
+	writeToolName  string
 	origin         string
 	listener       net.Listener
 	server         *http.Server
@@ -148,27 +153,44 @@ type azureGateway struct {
 	closeOnce      sync.Once
 }
 
-// azureForwardingTool returns the session's Azure forwarding Tool, if any. A
-// session with two would leave the Tool, and so the identity, az acts as to
-// chance, so it is refused.
-func azureForwardingTool(configuration harnessv2.MCPPolicyConfiguration) (harnessv2.MCPToolDescriptor, bool, error) {
+// azureForwardingTool returns the session's Azure forwarding Tool, if any,
+// and the name of its write tool when it allows writes. A session with two
+// Tools would leave the Tool, and so the identity, az acts as to chance, so
+// it is refused, as is a write tool without its Tool.
+func azureForwardingTool(configuration harnessv2.MCPPolicyConfiguration) (harnessv2.MCPToolDescriptor, string, bool, error) {
 	var found []harnessv2.MCPToolDescriptor
+	writes := map[string]bool{}
 	for _, descriptor := range configuration.ToolPolicy.Tools {
-		if descriptor.Forward != nil && descriptor.Forward.Protocol == harnessv2.MCPForwardProtocolAzureResourceManager {
-			found = append(found, descriptor)
+		if descriptor.Forward == nil || descriptor.Forward.Protocol != harnessv2.MCPForwardProtocolAzureResourceManager {
+			continue
 		}
+		if descriptor.Forward.Write {
+			writes[descriptor.Name] = true
+			continue
+		}
+		found = append(found, descriptor)
 	}
 	switch len(found) {
 	case 0:
-		return harnessv2.MCPToolDescriptor{}, false, nil
+		if len(writes) > 0 {
+			return harnessv2.MCPToolDescriptor{}, "", false, errors.New("the session allows an Azure write tool without its forwarding Tool")
+		}
+		return harnessv2.MCPToolDescriptor{}, "", false, nil
 	case 1:
-		return found[0], true, nil
+		writeName := harnessv2.MCPForwardWriteToolName(found[0].Name)
+		if len(writes) > 1 || (len(writes) == 1 && !writes[writeName]) {
+			return harnessv2.MCPToolDescriptor{}, "", false, errors.New("the session allows an Azure write tool that is not its forwarding Tool's")
+		}
+		if !writes[writeName] {
+			writeName = ""
+		}
+		return found[0], writeName, true, nil
 	default:
-		return harnessv2.MCPToolDescriptor{}, false, fmt.Errorf("the session allows %d Azure forwarding tools; allow at most one", len(found))
+		return harnessv2.MCPToolDescriptor{}, "", false, fmt.Errorf("the session allows %d Azure forwarding tools; allow at most one", len(found))
 	}
 }
 
-func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession, descriptor harnessv2.MCPToolDescriptor) (*azureGateway, error) {
+func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession, descriptor harnessv2.MCPToolDescriptor, writeToolName string) (*azureGateway, error) {
 	if descriptor.Forward == nil {
 		return nil, errors.New("not a forwarding tool")
 	}
@@ -193,7 +215,7 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 		return nil, fmt.Errorf("start the Azure gateway listener: %w", err)
 	}
 	gateway := &azureGateway{
-		session: session, toolName: descriptor.Name, origin: origin, listener: listener,
+		session: session, toolName: descriptor.Name, writeToolName: writeToolName, origin: origin, listener: listener,
 		base: "https://" + listener.Addr().String(), identityHeader: identityHeader, tokenSecret: tokenSecret,
 	}
 	gateway.server = &http.Server{
@@ -208,11 +230,11 @@ func newAzureGateway(authority *azureGatewayAuthority, session *mcpProxySession,
 // allows an Azure forwarding Tool, and returns the environment az needs. The
 // gateway closes with the session.
 func (s *Server) attachAzureGateway(session *mcpProxySession, configuration harnessv2.MCPPolicyConfiguration, home string) (map[string]string, error) {
-	descriptor, ok, err := azureForwardingTool(configuration)
+	descriptor, writeToolName, ok, err := azureForwardingTool(configuration)
 	if err != nil || !ok {
 		return nil, err
 	}
-	gateway, err := newAzureGateway(&s.azureAuthority, session, descriptor)
+	gateway, err := newAzureGateway(&s.azureAuthority, session, descriptor, writeToolName)
 	if err != nil {
 		return nil, err
 	}
@@ -359,19 +381,27 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusUnauthorized, "OrkaGatewayUnauthorized", "Run `az login --identity` in this session first.")
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	write := harnessv2.ForwardWriteMethod(r.Method)
+	toolName := g.toolName
+	switch {
+	case write && g.writeToolName == "":
 		writeAzureError(w, http.StatusMethodNotAllowed, "OrkaReadOnly",
-			"Orka forwards only read requests (GET) to Azure Resource Manager; this az command changes or acts on a resource.")
+			"Orka forwards only read requests (GET) to Azure Resource Manager through tool "+strconv.Quote(g.toolName)+
+				"; this az command changes or acts on a resource, which needs http.forward.writes on that Tool.")
 		return
-	}
-	// A chunked request reports an unknown length (-1); it may still carry a
-	// body that forwarding would drop, so only a request known to be empty
-	// passes.
-	if r.ContentLength != 0 {
-		writeAzureError(w, http.StatusBadRequest, "OrkaReadOnly", "Read requests carry no body.")
+	case write:
+		toolName = g.writeToolName
+	case r.Method != http.MethodGet && r.Method != http.MethodHead:
+		writeAzureError(w, http.StatusMethodNotAllowed, "OrkaMethodNotForwarded", "Orka does not forward "+r.Method+" requests.")
 		return
 	}
 	request := harnessv2.MCPForwardRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
+	body, status, code, message := readAzureRequestBody(r, write)
+	if status != 0 {
+		writeAzureError(w, status, code, message)
+		return
+	}
+	request.Body = body
 	if err := request.Validate(); err != nil {
 		writeAzureError(w, http.StatusBadRequest, "OrkaRequestRefused", "Orka refused the request: "+err.Error()+".")
 		return
@@ -381,7 +411,12 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be encoded.")
 		return
 	}
-	callID, err := newAzureCallID()
+	if len(arguments) > harnessv2.MaxMCPArgumentsBytes {
+		writeAzureError(w, http.StatusRequestEntityTooLarge, "OrkaRequestTooLarge",
+			fmt.Sprintf("Orka forwards request bodies up to about %d KiB.", harnessv2.MaxMCPArgumentsBytes>>10))
+		return
+	}
+	callID, err := azureCallID(write, r.Header.Get(azureClientRequestIDHeader), request)
 	if err != nil {
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be identified.")
 		return
@@ -396,7 +431,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		}
 		defer releaseMCPSlot(g.session.proxy.slots)
 	}
-	response, err := g.session.callBrokeredTool(r.Context(), callID, g.toolName, arguments, true)
+	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true)
 	if err != nil {
 		switch {
 		case errors.Is(err, errMCPSessionAtCapacity):
@@ -404,7 +439,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 			writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")
 		case errors.Is(err, errMCPCallNotAuthorized):
 			writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
-				"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(g.toolName)+".")
+				"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
 		default:
 			writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
 		}
@@ -416,6 +451,17 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 			// should not retry or try to sign az in itself.
 			writeAzureError(w, http.StatusForbidden, "OrkaConnectionRequired",
 				brokerErrorMessage(response.Result)+". Retrying or running az login will not help.")
+			return
+		}
+		switch brokerErrorCode(response.Result) {
+		case "approval_declined", "approval_expired", "approval_cancelled", "approval_stale":
+			// A 403 is final to az; a 5xx would make it retry a decided write.
+			writeAzureError(w, http.StatusForbidden, "OrkaApprovalNotGranted",
+				"Orka did not send the request: "+brokerErrorMessage(response.Result))
+			return
+		case "tool_outcome_unknown":
+			writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+				"The request may have reached Azure. Check the resource before repeating it.")
 			return
 		}
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
@@ -444,10 +490,10 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		w.WriteHeader(forwarded.Status)
 		return
 	}
-	body := g.rewriteBody(forwarded.Body)
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	answer := g.rewriteBody(forwarded.Body)
+	w.Header().Set("Content-Length", strconv.Itoa(len(answer)))
 	w.WriteHeader(forwarded.Status)
-	_, _ = io.WriteString(w, body)
+	_, _ = io.WriteString(w, answer)
 }
 
 // azureNextLinkFields are the paging fields Resource Manager responses use.
@@ -523,12 +569,60 @@ func brokerErrorCode(result json.RawMessage) string {
 	return failure.Code
 }
 
-func newAzureCallID() (string, error) {
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
+// azureClientRequestIDHeader names the request ID the Azure SDK sets once per
+// operation and keeps across its retries.
+const azureClientRequestIDHeader = "X-Ms-Client-Request-Id"
+
+// maxAzureRequestBodyBytes bounds a write's body so its arguments fit the
+// broker's argument limit.
+const maxAzureRequestBodyBytes = harnessv2.MaxMCPArgumentsBytes - 8<<10
+
+// readAzureRequestBody reads a write's JSON body. A read carries none: a
+// chunked request reports an unknown length (-1) and may still carry one
+// that forwarding would drop, so only a read known to be empty passes. It
+// returns a nonzero status, with an error code and message, to refuse.
+func readAzureRequestBody(r *http.Request, write bool) (string, int, string, string) {
+	if !write {
+		if r.ContentLength != 0 {
+			return "", http.StatusBadRequest, "OrkaReadOnly", "Read requests carry no body."
+		}
+		return "", 0, "", ""
 	}
-	return "az-" + hex.EncodeToString(raw), nil
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxAzureRequestBodyBytes+1))
+	if err != nil {
+		return "", http.StatusBadRequest, "OrkaRequestRefused", "The request body could not be read."
+	}
+	if len(raw) > maxAzureRequestBodyBytes {
+		return "", http.StatusRequestEntityTooLarge, "OrkaRequestTooLarge",
+			fmt.Sprintf("Orka forwards request bodies up to %d KiB.", maxAzureRequestBodyBytes>>10)
+	}
+	if len(raw) == 0 {
+		return "", 0, "", ""
+	}
+	if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+		return "", http.StatusUnsupportedMediaType, "OrkaRequestRefused", "Orka forwards only JSON request bodies."
+	}
+	return string(raw), 0, "", ""
+}
+
+// azureCallID names one forwarded request. A read gets a fresh ID. A write
+// with the SDK's request ID gets an ID derived from it and the request, so a
+// retry of the same write joins its pending approval or recorded result
+// instead of writing twice; a write without one is never joined.
+func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwardRequest) (string, error) {
+	clientRequestID = strings.TrimSpace(clientRequestID)
+	if !write || clientRequestID == "" {
+		raw := make([]byte, 16)
+		if _, err := rand.Read(raw); err != nil {
+			return "", err
+		}
+		return "az-" + hex.EncodeToString(raw), nil
+	}
+	body := sha256.Sum256([]byte(request.Body))
+	digest := sha256.Sum256([]byte(strings.Join([]string{
+		"orka.azure-gateway.write.v1", clientRequestID, request.Method, request.Path, request.Query, hex.EncodeToString(body[:]),
+	}, "\x00")))
+	return "az-w-" + hex.EncodeToString(digest[:16]), nil
 }
 
 func constantTimeEqual(got, want string) bool {
