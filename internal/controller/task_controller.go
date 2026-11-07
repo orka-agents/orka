@@ -2814,9 +2814,9 @@ func (r *TaskReconciler) cascadeTaskCancellation(ctx context.Context, task *core
 }
 
 // cancelChildTasks requests cancellation of the Tasks a cancelled Task
-// delegated. A child already cancel-requested cascades on its own once it
-// ends. A child that finished is passed through without changing its outcome,
-// because work it delegated can outlive it.
+// delegated, at every depth. Every real child is walked: a finished one
+// keeps its outcome, because work it delegated can outlive it, and one
+// already cancel-requested may never cascade itself.
 func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha1.Task) error {
 	visited := map[types.NamespacedName]bool{client.ObjectKeyFromObject(task): true}
 	parents := []*corev1alpha1.Task{task}
@@ -2842,11 +2842,13 @@ func (r *TaskReconciler) cancelChildTasks(ctx context.Context, task *corev1alpha
 				continue
 			}
 			visited[client.ObjectKeyFromObject(child)] = true
+			// Every real child is walked: its own cascade may never run, as
+			// when its status write keeps failing.
+			parents = append(parents, child)
 			if _, requested := child.Annotations[labels.AnnotationCancelRequested]; requested {
 				continue
 			}
 			if phase := child.Status.Phase; phase != "" && phase != corev1alpha1.TaskPhasePending && phase != corev1alpha1.TaskPhaseRunning {
-				parents = append(parents, child)
 				continue
 			}
 			base := child.DeepCopy()

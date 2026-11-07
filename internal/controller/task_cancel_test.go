@@ -888,3 +888,46 @@ func TestCancelReachesLocalChildrenWithNamespaceScopedTaskAccess(t *testing.T) {
 		}
 	}
 }
+
+// TestCancelReachesGrandchildrenThroughACancelRequestedChild covers a child
+// already asked to cancel whose own cascade never runs, as when its status
+// write keeps failing: the cancelled ancestor still reaches its running
+// grandchild.
+func TestCancelReachesGrandchildrenThroughACancelRequestedChild(t *testing.T) {
+	controller := true
+	owner := func(name string, uid types.UID) []metav1.OwnerReference {
+		return []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: name, UID: uid, Controller: &controller}}
+	}
+	parent := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "parent-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseCancelled},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child", Namespace: "default", UID: "child-uid", OwnerReferences: owner("parent", "parent-uid"),
+			Labels:      map[string]string{labels.LabelParentTask: "parent"},
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled with its parent task parent"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	grandchild := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "grandchild", Namespace: "default", UID: "grandchild-uid", OwnerReferences: owner("child", "child-uid"),
+			Labels: map[string]string{labels.LabelParentTask: "child"},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(parent, child, grandchild).Build()
+	if err := (&TaskReconciler{Client: c}).cancelChildTasks(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(grandchild), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
+		t.Fatal("a running grandchild under a cancel-requested child must be cancelled")
+	}
+}

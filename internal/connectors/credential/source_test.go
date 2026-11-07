@@ -1333,3 +1333,42 @@ func TestRequireLiveConnectionRefusesARefreshThatNarrowedScopes(t *testing.T) {
 		t.Fatalf("err = %v, want the narrowed credential refused", err)
 	}
 }
+
+// grantReadHook runs a change while custody answers a grant read.
+type grantReadHook struct {
+	*storageclient.Client
+	during func()
+}
+
+func (h grantReadHook) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	grant, err := h.Client.GetConnectorCredentialGrant(ctx, ref)
+	if h.during != nil {
+		h.during()
+	}
+	return grant, err
+}
+
+// TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead covers a
+// person disconnecting while custody reports the grant it held: the grant
+// still matches, but the Connection is no longer Ready, so the exchanged
+// credential is refused.
+func TestRequireLiveConnectionRefusesALinkThatChangedDuringTheGrantRead(t *testing.T) {
+	h := newHarness(t)
+	h.put(store.ConnectorCredential{AccessToken: "gho_fresh", RefreshToken: "ghr", TokenType: "bearer", ExpiresAt: h.now.Add(2 * time.Hour)})
+	request := h.request()
+	h.source.Credentials = grantReadHook{Client: h.store, during: func() {
+		live := h.reload()
+		live.Status.State = corev1alpha1.ConnectionStateRevoked
+		for i := range live.Status.Conditions {
+			if live.Status.Conditions[i].Type == corev1alpha1.ConnectionConditionReady {
+				live.Status.Conditions[i].Status = metav1.ConditionFalse
+			}
+		}
+		if err := h.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil {
+		t.Fatal("a link disconnected during the grant read must refuse the exchanged credential")
+	}
+}
