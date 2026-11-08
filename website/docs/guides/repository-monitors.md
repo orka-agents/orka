@@ -303,7 +303,21 @@ The published review lists the open findings (marking those open since an earlie
 
 With `spec.review.exhaustive: true`, a full review repeats on the same head until a pass finds nothing new, at most three passes, so follow-up reviews start from every finding instead of uncovering them one round at a time. Each pass sees the findings already recorded and reports only additional ones. Until the last pass, the head does not count as reviewed: readiness and repairs wait, and only the last pass is published, with every finding. With `review.requireGreenCI`, only the first pass waits for green CI, so CI that fails between passes does not stall the chain. Follow-up reviews run once.
 
+Each review asks the reviewer to report a defect that repeats a pattern once, naming the pattern and listing every other place it occurs, and each repair asks the repairer to fix every listed instance, so one round can fix a whole class of defect.
+
+With `spec.review.maxRounds`, Orka stops a pull request that keeps failing review from cycling indefinitely. It counts the heads reviewed since the pull request's last passed review, counting several reviews of one head once and skipping failed or stale reviews. When a `needs_changes` review is of the head that reaches the limit, Orka records `needs_human` instead and prefixes the summary with a note asking the author to reconsider the approach. The findings stay open and published, but automatic repair of review findings stops; CI repair is unaffected. A later review that passes resets the count. The limit is unset by default; `3` is a reasonable starting point.
+
 With `spec.review.trigger: open`, Orka reviews each pull request once; later heads are reviewed only on a `review` command. `staleReviewTTL` still applies to the reviewed head, so an unchanged head is reviewed again once its review is older than the TTL; leave the TTL unset for strictly one review per pull request. Pull requests that automatic repair may fix are still reviewed on every push, because each pushed fix needs a review.
+
+### Review metrics
+
+The controller exports three Prometheus metrics for judging whether reviews converge and how noisy they are:
+
+- `orka_repository_monitor_reviews_total{mode, verdict}` counts review records by review mode (`full`, `incremental`, or `same_head`) and recorded verdict, rejected reviews included.
+- `orka_repository_monitor_review_findings_total{priority, outcome}` counts findings when first `reported` and when a later review marks them `fixed`. A low fixed-to-reported ratio suggests findings that authors do not act on.
+- `orka_repository_monitor_review_rounds_to_pass` records, at each pull request's first passed review, how many heads were reviewed to get there. Its `le="1"` bucket divided by its count is the share of pull requests that passed on their first reviewed head; its sum divided by its count is the mean.
+
+These metrics have no per-monitor labels, and like other Prometheus counters they reset when the controller restarts.
 
 For status summaries, open PRs with `needs_changes`, `needs_human`, `security_sensitive`, stale, failed, or skipped review state count as blocked items. Open PRs with queued review work count as pending reviews.
 
