@@ -20,13 +20,14 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func (e *experimentEnv) experimentEntry(candidateUID string) store.EvalExperimentEntry {
+// experimentEntry returns the stored experiment of the candidate run.
+func (e *experimentEnv) experimentEntry() store.EvalExperimentEntry {
 	e.t.Helper()
-	entries, err := e.store.ListEvalExperiments(context.Background(), evalTestNamespace, candidateUID)
-	if err != nil || len(entries) != 1 {
-		e.t.Fatalf("experiments = %+v, %v", entries, err)
+	page, err := e.store.ListEvalExperiments(context.Background(), evalTestNamespace, store.EvalExperimentListOptions{CandidateRunUID: "candidate-uid"})
+	if err != nil || len(page.Items) != 1 {
+		e.t.Fatalf("experiments = %+v, %v", page, err)
 	}
-	return entries[0]
+	return page.Items[0]
 }
 
 // A decided experiment's outcome is stored with what an approval binds to,
@@ -39,7 +40,7 @@ func TestEvalExperimentOutcomeIsStoredOnceAndOutlivesTheRuns(t *testing.T) {
 	env.runToEnd("candidate", "needs_changes")
 	env.reconcileRun("candidate")
 	decided := env.getRun("candidate")
-	outcome := env.experimentEntry("candidate-uid").Outcome
+	outcome := env.experimentEntry().Outcome
 	if outcome == nil || outcome.Result != store.EvalExperimentResultPassed || outcome.Binding == nil {
 		t.Fatalf("outcome = %+v", outcome)
 	}
@@ -54,10 +55,7 @@ func TestEvalExperimentOutcomeIsStoredOnceAndOutlivesTheRuns(t *testing.T) {
 		binding.MonitorUID != "monitor-uid" || binding.MonitorGeneration != 3 {
 		t.Fatalf("binding = %+v", binding)
 	}
-	if outcome.Candidate.Agent.Name != "candidate-agent" || len(outcome.Candidate.Trials) != 9 || len(outcome.Baseline.Trials) != 9 ||
-		len(outcome.Candidate.Trials[0].Grades) == 0 || outcome.Baseline.RunUID != "baseline-uid" {
-		t.Fatalf("arms = %+v / %+v", outcome.Candidate, outcome.Baseline)
-	}
+	checkOutcomeEvidence(t, outcome, decided)
 
 	// A decision repeated after a lost status update reports the stored one.
 	decided.Status.Experiment.Result = corev1alpha1.EvalExperimentPending
@@ -81,8 +79,22 @@ func TestEvalExperimentOutcomeIsStoredOnceAndOutlivesTheRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if kept := env.experimentEntry("candidate-uid").Outcome; kept == nil || *kept.Binding != binding {
+	if kept := env.experimentEntry().Outcome; kept == nil || *kept.Binding != binding {
 		t.Fatalf("outcome after deletion = %+v", kept)
+	}
+}
+
+// checkOutcomeEvidence checks the target and both arms of a compared outcome.
+func checkOutcomeEvidence(t *testing.T, outcome *store.EvalExperimentOutcome, decided *corev1alpha1.EvalRun) {
+	t.Helper()
+	if outcome.Target.Grader != "verdict" || outcome.Target.Tag != "defect" ||
+		outcome.Candidate.CaseSetDigest != decided.Status.Snapshot.CaseSetDigest || outcome.Baseline.GraderSetDigest == "" ||
+		outcome.Baseline.TrialPlanDigest == "" || outcome.Baseline.MonitorUID != "monitor-uid" {
+		t.Fatalf("outcome target and snapshots = %+v / %+v / %+v", outcome.Target, outcome.Candidate, outcome.Baseline)
+	}
+	if outcome.Candidate.Agent.Name != "candidate-agent" || len(outcome.Candidate.Trials) != 9 || len(outcome.Baseline.Trials) != 9 ||
+		len(outcome.Candidate.Trials[0].Grades) == 0 || outcome.Baseline.RunUID != "baseline-uid" {
+		t.Fatalf("arms = %+v / %+v", outcome.Candidate, outcome.Baseline)
 	}
 }
 
@@ -93,7 +105,7 @@ func TestCurrentEvalDecisionBindingTracksTheLiveConfiguration(t *testing.T) {
 	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
 	env.runToEnd("candidate", "needs_changes")
 	env.reconcileRun("candidate")
-	recorded := *env.experimentEntry("candidate-uid").Outcome.Binding
+	recorded := *env.experimentEntry().Outcome.Binding
 	current, err := env.reconciler.CurrentEvalDecisionBinding(context.Background(), env.getRun("candidate"))
 	if err != nil || *current != recorded {
 		t.Fatalf("current binding = %+v, %v; recorded %+v", current, err, recorded)
@@ -165,5 +177,27 @@ func TestAddEvalTokens(t *testing.T) {
 	total = addEvalTokens(total, &seven)
 	if total == nil || *total != 12 {
 		t.Fatalf("total = %v", total)
+	}
+}
+
+// A candidate that did not succeed is Incomparable, and its outcome still
+// keeps the finished baseline's evidence.
+func TestEvalExperimentOutcomeKeepsTheBaselineWhenTheCandidateFails(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	run := env.getRun("candidate")
+	run.Status.Phase = corev1alpha1.EvalRunPhaseFailed
+	if err := env.client.Status().Update(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	outcome := env.experimentEntry().Outcome
+	if outcome == nil || outcome.Result != store.EvalExperimentResultIncomparable || outcome.Binding != nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if outcome.Baseline.Agent.Name != "reviewer" || len(outcome.Baseline.Trials) != 9 || outcome.Baseline.CaseSetDigest == "" {
+		t.Fatalf("baseline arm = %+v", outcome.Baseline)
 	}
 }

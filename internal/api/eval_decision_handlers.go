@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,8 +54,9 @@ func evalExperimentResponse(entry store.EvalExperimentEntry) EvalExperimentRespo
 }
 
 // ListEvalExperiments returns a namespace's experiments with their outcomes
-// and decisions, including those whose EvalRuns are gone. Reading them is
-// authorized like listing EvalRuns.
+// and decisions, including those whose EvalRuns are gone, a page at a time
+// (limit, and continue from the previous page). Reading them is authorized
+// like listing EvalRuns.
 func (h *Handlers) ListEvalExperiments(c fiber.Ctx) error {
 	if h.evalExperimentStore == nil {
 		return fiber.NewError(fiber.StatusNotImplemented, "eval experiment store not configured")
@@ -66,15 +68,29 @@ func (h *Handlers) ListEvalExperiments(c fiber.Ctx) error {
 	if err != nil {
 		return err
 	}
-	entries, err := h.evalExperimentStore.ListEvalExperiments(c.Context(), namespace, "")
+	limit := 0
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if limit, err = strconv.Atoi(raw); err != nil || limit < 1 || limit > store.MaxEvalExperimentListLimit {
+			return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("limit must be 1 to %d", store.MaxEvalExperimentListLimit))
+		}
+	}
+	page, err := h.evalExperimentStore.ListEvalExperiments(c.Context(), namespace,
+		store.EvalExperimentListOptions{After: c.Query("continue"), Limit: limit})
+	if errors.Is(err, store.ErrValidation) {
+		return fiber.NewError(fiber.StatusBadRequest, err.Error())
+	}
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list eval experiments: %v", err))
 	}
-	items := make([]EvalExperimentResponse, 0, len(entries))
-	for _, entry := range entries {
+	items := make([]EvalExperimentResponse, 0, len(page.Items))
+	for _, entry := range page.Items {
 		items = append(items, evalExperimentResponse(entry))
 	}
-	return c.JSON(fiber.Map{apiFieldItems: items})
+	response := fiber.Map{apiFieldItems: items}
+	if page.Next != "" {
+		response["continue"] = page.Next
+	}
+	return c.JSON(response)
 }
 
 // GetEvalRunDecisions returns a candidate run's experiment, its decisions
@@ -196,7 +212,11 @@ func (h *Handlers) evalPromoter(c fiber.Ctx) (store.EvalDecisionActor, error) {
 	if len(groups) == 0 {
 		return store.EvalDecisionActor{}, fiber.NewError(fiber.StatusForbidden, "eval decisions need membership in a promoter group")
 	}
-	return store.EvalDecisionActor{Username: ui.Username, UID: ui.UID, Groups: groups}, nil
+	actor := store.EvalDecisionActor{Username: ui.Username, UID: ui.UID, Groups: groups}
+	if ui.AuthType == AuthTypeOIDC {
+		actor.Issuer, actor.Subject = ui.Issuer, ui.Subject
+	}
+	return actor, nil
 }
 
 // evalRunExperiment loads a live candidate run and its stored experiment.
@@ -211,14 +231,15 @@ func (h *Handlers) evalRunExperiment(c fiber.Ctx) (*corev1alpha1.EvalRun, *store
 	if run.Spec.Experiment == nil {
 		return nil, nil, fiber.NewError(fiber.StatusConflict, "eval run is not an experiment candidate")
 	}
-	entries, err := h.evalExperimentStore.ListEvalExperiments(c.Context(), run.Namespace, string(run.UID))
+	page, err := h.evalExperimentStore.ListEvalExperiments(c.Context(), run.Namespace,
+		store.EvalExperimentListOptions{CandidateRunUID: string(run.UID), Limit: 1})
 	if err != nil {
 		return nil, nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to read the experiment: %v", err))
 	}
-	if len(entries) == 0 {
+	if len(page.Items) == 0 {
 		return nil, nil, fiber.NewError(fiber.StatusConflict, "the experiment holds no attempt; it never started")
 	}
-	return run, &entries[0], nil
+	return run, &page.Items[0], nil
 }
 
 // recheckEvalApproval compares an approval's binding with the live one.

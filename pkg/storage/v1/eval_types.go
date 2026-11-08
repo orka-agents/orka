@@ -224,10 +224,18 @@ type EvalExperimentArmOutcome struct {
 	Model              string            `json:"model,omitempty"`
 	SystemPromptDigest string            `json:"systemPromptDigest,omitempty"`
 	RuntimeImageDigest string            `json:"runtimeImageDigest,omitempty"`
-	Planned            int32             `json:"planned"`
-	Completed          int32             `json:"completed"`
-	Passed             int32             `json:"passed"`
-	Failed             int32             `json:"failed"`
+	// The run's frozen snapshot, kept so an Incomparable verdict stays
+	// explainable after the run is gone.
+	MonitorUID           string `json:"monitorUID,omitempty"`
+	MonitorGeneration    int64  `json:"monitorGeneration,omitempty"`
+	PromptTemplateDigest string `json:"promptTemplateDigest,omitempty"`
+	CaseSetDigest        string `json:"caseSetDigest,omitempty"`
+	GraderSetDigest      string `json:"graderSetDigest,omitempty"`
+	TrialPlanDigest      string `json:"trialPlanDigest,omitempty"`
+	Planned              int32  `json:"planned"`
+	Completed            int32  `json:"completed"`
+	Passed               int32  `json:"passed"`
+	Failed               int32  `json:"failed"`
 	// InfraError counts trials excluded from scores.
 	InfraError int32 `json:"infraError"`
 	// InputTokens and OutputTokens sum the trials that reported them, and
@@ -240,6 +248,10 @@ type EvalExperimentArmOutcome struct {
 
 // EvalExperimentTargetOutcome compares the target result of the two arms.
 type EvalExperimentTargetOutcome struct {
+	// Grader and Tag name the target: the grader, on the cases with the tag
+	// or on every case when the tag is empty.
+	Grader                string `json:"grader"`
+	Tag                   string `json:"tag,omitempty"`
 	BaselinePassedTrials  int32  `json:"baselinePassedTrials"`
 	BaselineTrials        int32  `json:"baselineTrials"`
 	CandidatePassedTrials int32  `json:"candidatePassedTrials"`
@@ -271,6 +283,10 @@ type EvalExperimentOutcome struct {
 type EvalDecisionActor struct {
 	Username string `json:"username"`
 	UID      string `json:"uid,omitempty"`
+	// Issuer and Subject identify a direct OIDC sign-in, which survive a
+	// change of display name.
+	Issuer  string `json:"issuer,omitempty"`
+	Subject string `json:"subject,omitempty"`
 	// Groups are the promoter groups that admitted the actor.
 	Groups []string `json:"groups,omitempty"`
 }
@@ -301,6 +317,29 @@ type EvalExperimentEntry struct {
 	Decisions []EvalDecisionRecord `json:"decisions,omitempty"`
 }
 
+// Experiment listing page sizes.
+const (
+	DefaultEvalExperimentListLimit = 50
+	MaxEvalExperimentListLimit     = 200
+)
+
+// EvalExperimentListOptions selects one page of experiments.
+type EvalExperimentListOptions struct {
+	// CandidateRunUID selects one candidate incarnation's experiment.
+	CandidateRunUID string `json:"candidateRunUID,omitempty"`
+	// After is the Next of the previous page.
+	After string `json:"after,omitempty"`
+	// Limit bounds the page; 0 means DefaultEvalExperimentListLimit.
+	Limit int `json:"limit,omitempty"`
+}
+
+// EvalExperimentPage is one page of experiments.
+type EvalExperimentPage struct {
+	Items []EvalExperimentEntry `json:"items"`
+	// Next continues the listing, and is empty on the last page.
+	Next string `json:"next,omitempty"`
+}
+
 // EvalExperimentStore keeps experiment attempts, outcomes and decisions.
 // Only the EvalRun controller and its API write them, and nothing deletes
 // them.
@@ -324,8 +363,9 @@ type EvalExperimentStore interface {
 	// repeat of the same ID is a no-op, and a different record under that
 	// ID returns ErrDuplicateMismatch.
 	AppendEvalDecision(ctx context.Context, decision *EvalDecisionRecord) error
-	// ListEvalExperiments returns a namespace's experiments, or the one a
-	// candidate incarnation holds when candidateRunUID is set, ordered by
-	// reservation time.
-	ListEvalExperiments(ctx context.Context, namespace, candidateRunUID string) ([]EvalExperimentEntry, error)
+	// ListEvalExperiments returns a page of a namespace's experiments, or
+	// the one a candidate incarnation holds, ordered by reservation time and
+	// read from one snapshot. An invalid After or a Limit above
+	// MaxEvalExperimentListLimit is a validation error.
+	ListEvalExperiments(ctx context.Context, namespace string, options EvalExperimentListOptions) (*EvalExperimentPage, error)
 }

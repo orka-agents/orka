@@ -121,7 +121,8 @@ func setupEvalDecisionHandlers(t *testing.T, result string, promoterGroups ...st
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", Groups: []string{"promoters"}, AuthType: AuthTypeContextToken, ContextToken: &ContextToken{}})
 		default:
 			c.Locals(UserInfoContextKey, &UserInfo{Username: c.Get("X-Test-User"), UID: "user-uid",
-				Groups: strings.Split(c.Get("X-Test-Groups"), ","), AuthType: AuthTypeOIDC})
+				Groups: strings.Split(c.Get("X-Test-Groups"), ","), AuthType: AuthTypeOIDC,
+				Issuer: "https://issuer.example", Subject: "sub-" + c.Get("X-Test-User")})
 		}
 		return c.Next()
 	})
@@ -182,7 +183,8 @@ func TestDecideEvalRunAdmitsOnlyHumanPromoters(t *testing.T) {
 			if status == http.StatusCreated {
 				var decision store.EvalDecisionRecord
 				require.NoError(t, json.Unmarshal([]byte(body), &decision))
-				require.Equal(t, store.EvalDecisionActor{Username: "alice", UID: "user-uid", Groups: []string{"promoters"}}, decision.Actor)
+				require.Equal(t, store.EvalDecisionActor{Username: "alice", UID: "user-uid", Issuer: "https://issuer.example",
+					Subject: "sub-alice", Groups: []string{"promoters"}}, decision.Actor)
 				require.Equal(t, env.binding, *decision.Binding)
 			}
 		})
@@ -268,7 +270,8 @@ func TestEvalDecisionsAppendAndStayQueryable(t *testing.T) {
 	require.NoError(t, env.client.Get(t.Context(), client.ObjectKey{Namespace: "demo", Name: "candidate"}, run))
 	require.NoError(t, env.client.Delete(t.Context(), run))
 	var list struct {
-		Items []EvalExperimentResponse `json:"items"`
+		Items    []EvalExperimentResponse `json:"items"`
+		Continue string                   `json:"continue"`
 	}
 	env.get(t, "/evals/experiments?namespace=demo", &list)
 	require.Len(t, list.Items, 1)
@@ -276,4 +279,12 @@ func TestEvalDecisionsAppendAndStayQueryable(t *testing.T) {
 	require.Equal(t, store.EvalExperimentResultPassed, list.Items[0].Outcome.Result)
 	require.Len(t, list.Items[0].Decisions, 2)
 	require.Equal(t, store.EvalDecisionRejected, list.Items[0].Effective.Decision)
+	require.Empty(t, list.Continue)
+
+	resp, err := env.app.Test(httptest.NewRequest(http.MethodGet, "/evals/experiments?namespace=demo&limit=0", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	resp, err = env.app.Test(httptest.NewRequest(http.MethodGet, "/evals/experiments?namespace=demo&continue=bogus", nil))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }

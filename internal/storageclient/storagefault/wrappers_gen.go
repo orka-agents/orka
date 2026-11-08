@@ -1680,14 +1680,14 @@ func (p *stateProvider) ListDroppedFindings(ctx context.Context, a1 storagev1.Dr
 	return r0, r1, err
 }
 
-func (p *stateProvider) ListEvalExperiments(ctx context.Context, a1 string, a2 string) ([]storagev1.EvalExperimentEntry, error) {
-	var r0 []storagev1.EvalExperimentEntry
+func (p *stateProvider) ListEvalExperiments(ctx context.Context, a1 string, a2 storagev1.EvalExperimentListOptions) (*storagev1.EvalExperimentPage, error) {
+	var r0 *storagev1.EvalExperimentPage
 	injected, err := p.injector.call(ctx, p.contract, "ListEvalExperiments", func(ctx context.Context) (err error) {
 		r0, err = p.inner.ListEvalExperiments(ctx, a1, a2)
 		return err
 	})
 	if injected {
-		var z0 []storagev1.EvalExperimentEntry
+		var z0 *storagev1.EvalExperimentPage
 		return z0, err
 	}
 	return r0, err

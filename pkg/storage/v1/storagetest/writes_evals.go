@@ -118,9 +118,9 @@ func catalogEvalDecision(id string) *storagev1.EvalDecisionRecord {
 
 func observeEvalExperimentEntries(t *testing.T, p storagev1.StateProvider) any {
 	t.Helper()
-	entries, err := p.ListEvalExperiments(t.Context(), workflowNamespace, "")
+	page, err := p.ListEvalExperiments(t.Context(), workflowNamespace, storagev1.EvalExperimentListOptions{})
 	require.NoError(t, err)
-	return entries
+	return page
 }
 
 func reserveCatalogEvalExperiment(t *testing.T, p storagev1.StateProvider) {

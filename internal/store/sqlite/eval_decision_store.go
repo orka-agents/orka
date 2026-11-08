@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -205,9 +207,57 @@ func (s *Store) appendEvalDecisionWrite(ctx context.Context, decision *store.Eva
 	return err
 }
 
-// ListEvalExperiments returns experiments with their outcomes and decisions.
-func (s *Store) ListEvalExperiments(ctx context.Context, namespace, candidateRunUID string) ([]store.EvalExperimentEntry, error) {
-	executor := s.taskDataExecutor(ctx)
+// evalExperimentCursor is the position after the last experiment of a page.
+type evalExperimentCursor struct {
+	ReservedAt      time.Time `json:"reservedAt"`
+	CandidateRunUID string    `json:"candidateRunUID"`
+}
+
+func encodeEvalExperimentCursor(record store.EvalExperimentRecord) string {
+	encoded, _ := json.Marshal(evalExperimentCursor{ReservedAt: record.ReservedAt.UTC(), CandidateRunUID: record.CandidateRunUID})
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeEvalExperimentCursor(after string) (*evalExperimentCursor, error) {
+	if after == "" {
+		return nil, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(after)
+	var cursor evalExperimentCursor
+	if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.ReservedAt.IsZero() || cursor.CandidateRunUID == "" {
+		return nil, store.ValidationErrorf("eval experiment listing position is invalid")
+	}
+	cursor.ReservedAt = cursor.ReservedAt.UTC()
+	return &cursor, nil
+}
+
+// ListEvalExperiments returns one page of experiments with their outcomes
+// and decisions, read from one snapshot.
+func (s *Store) ListEvalExperiments(ctx context.Context, namespace string, options store.EvalExperimentListOptions) (*store.EvalExperimentPage, error) {
+	limit := options.Limit
+	if limit == 0 {
+		limit = store.DefaultEvalExperimentListLimit
+	}
+	if limit < 0 || limit > store.MaxEvalExperimentListLimit {
+		return nil, store.ValidationErrorf("eval experiment listing limit must be 1 to %d", store.MaxEvalExperimentListLimit)
+	}
+	cursor, err := decodeEvalExperimentCursor(options.After)
+	if err != nil {
+		return nil, err
+	}
+	page := &store.EvalExperimentPage{Items: []store.EvalExperimentEntry{}}
+	err = s.readSnapshot(ctx, func(executor taskDataExecutor) error {
+		page.Items, page.Next = page.Items[:0], ""
+		return listEvalExperimentsRead(ctx, executor, namespace, options.CandidateRunUID, cursor, limit, page)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return page, nil
+}
+
+func listEvalExperimentsRead(ctx context.Context, executor taskDataExecutor, namespace, candidateRunUID string,
+	cursor *evalExperimentCursor, limit int, page *store.EvalExperimentPage) error {
 	query := `SELECT e.record_json, o.record_json FROM eval_experiments e
 		LEFT JOIN eval_experiment_outcomes o ON o.namespace = e.namespace AND o.candidate_run_uid = e.candidate_run_uid
 		WHERE e.namespace = ?`
@@ -216,63 +266,72 @@ func (s *Store) ListEvalExperiments(ctx context.Context, namespace, candidateRun
 		query += ` AND e.candidate_run_uid = ?`
 		args = append(args, candidateRunUID)
 	}
-	rows, err := executor.QueryContext(ctx, query+` ORDER BY e.reserved_at, e.candidate_run_uid`, args...)
+	if cursor != nil {
+		query += ` AND (e.reserved_at > ? OR (e.reserved_at = ? AND e.candidate_run_uid > ?))`
+		args = append(args, cursor.ReservedAt, cursor.ReservedAt, cursor.CandidateRunUID)
+	}
+	rows, err := executor.QueryContext(ctx, query+` ORDER BY e.reserved_at, e.candidate_run_uid LIMIT ?`, append(args, limit+1)...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = rows.Close() }()
-	var entries []store.EvalExperimentEntry
 	index := map[string]int{}
 	for rows.Next() {
 		var experimentJSON string
 		var outcomeJSON sql.NullString
 		if err := rows.Scan(&experimentJSON, &outcomeJSON); err != nil {
-			return nil, err
+			return err
 		}
 		var entry store.EvalExperimentEntry
 		if err := json.Unmarshal([]byte(experimentJSON), &entry.Experiment); err != nil {
-			return nil, fmt.Errorf("decode eval experiment record: %w", err)
+			return fmt.Errorf("decode eval experiment record: %w", err)
 		}
 		if outcomeJSON.Valid {
 			entry.Outcome = &store.EvalExperimentOutcome{}
 			if err := json.Unmarshal([]byte(outcomeJSON.String), entry.Outcome); err != nil {
-				return nil, fmt.Errorf("decode eval experiment outcome: %w", err)
+				return fmt.Errorf("decode eval experiment outcome: %w", err)
 			}
 		}
-		index[entry.Experiment.CandidateRunUID] = len(entries)
-		entries = append(entries, entry)
+		index[entry.Experiment.CandidateRunUID] = len(page.Items)
+		page.Items = append(page.Items, entry)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	if len(entries) == 0 {
-		return nil, nil
+	_ = rows.Close()
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		page.Next = encodeEvalExperimentCursor(page.Items[limit-1].Experiment)
 	}
-	query = `SELECT candidate_run_uid, record_json FROM eval_decisions WHERE namespace = ?`
-	args = []any{namespace}
-	if candidateRunUID != "" {
-		query += ` AND candidate_run_uid = ?`
-		args = append(args, candidateRunUID)
+	if len(page.Items) == 0 {
+		return nil
 	}
-	decisionRows, err := executor.QueryContext(ctx, query+` ORDER BY seq`, args...)
+	uids := make([]any, 0, len(page.Items)+1)
+	uids = append(uids, namespace)
+	for _, entry := range page.Items {
+		uids = append(uids, entry.Experiment.CandidateRunUID)
+	}
+	decisionRows, err := executor.QueryContext(ctx,
+		`SELECT candidate_run_uid, record_json FROM eval_decisions WHERE namespace = ? AND candidate_run_uid IN (?`+
+			strings.Repeat(", ?", len(page.Items)-1)+`) ORDER BY seq`, uids...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = decisionRows.Close() }()
 	for decisionRows.Next() {
 		var uid, encoded string
 		if err := decisionRows.Scan(&uid, &encoded); err != nil {
-			return nil, err
+			return err
 		}
 		var decision store.EvalDecisionRecord
 		if err := json.Unmarshal([]byte(encoded), &decision); err != nil {
-			return nil, fmt.Errorf("decode eval decision: %w", err)
+			return fmt.Errorf("decode eval decision: %w", err)
 		}
-		if i, ok := index[uid]; ok {
-			entries[i].Decisions = append(entries[i].Decisions, decision)
+		if i, ok := index[uid]; ok && i < len(page.Items) {
+			page.Items[i].Decisions = append(page.Items[i].Decisions, decision)
 		}
 	}
-	return entries, decisionRows.Err()
+	return decisionRows.Err()
 }
 
 func requireEvalExperimentReservation(ctx context.Context, executor taskDataExecutor, namespace, candidateRunUID string) error {

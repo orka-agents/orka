@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -78,8 +79,7 @@ func TestRecordEvalExperimentOutcomeIsWrittenOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, first, stored)
 
-	entries, err := s.ListEvalExperiments(t.Context(), "team-a", "")
-	require.NoError(t, err)
+	entries := listEvalTestExperiments(t, s, "team-a", "")
 	require.Len(t, entries, 1)
 	require.Equal(t, *record, entries[0].Experiment)
 	require.Equal(t, first, entries[0].Outcome)
@@ -138,13 +138,11 @@ func TestAppendEvalDecision(t *testing.T) {
 	require.NoError(t, s.AppendEvalDecision(t.Context(), reject))
 	require.NoError(t, s.AppendEvalDecision(t.Context(), evalDecisionTestRecord(failedOutcome, "d5", store.EvalDecisionRejected)))
 
-	entries, err := s.ListEvalExperiments(t.Context(), "team-a", passed.CandidateRunUID)
-	require.NoError(t, err)
+	entries := listEvalTestExperiments(t, s, "team-a", passed.CandidateRunUID)
 	require.Len(t, entries, 1)
 	require.Equal(t, []store.EvalDecisionRecord{*approve, *reject}, entries[0].Decisions)
 
-	entries, err = s.ListEvalExperiments(t.Context(), "team-a", "")
-	require.NoError(t, err)
+	entries = listEvalTestExperiments(t, s, "team-a", "")
 	require.Len(t, entries, 3)
 	byRun := map[string]store.EvalExperimentEntry{}
 	for _, entry := range entries {
@@ -155,9 +153,7 @@ func TestAppendEvalDecision(t *testing.T) {
 	require.Nil(t, byRun["undecided"].Outcome)
 	require.Empty(t, byRun["undecided"].Decisions)
 
-	other, err := s.ListEvalExperiments(t.Context(), "team-b", "")
-	require.NoError(t, err)
-	require.Empty(t, other)
+	require.Empty(t, listEvalTestExperiments(t, s, "team-b", ""))
 }
 
 func TestAppendEvalDecisionValidates(t *testing.T) {
@@ -181,4 +177,55 @@ func TestAppendEvalDecisionValidates(t *testing.T) {
 			require.ErrorIs(t, s.AppendEvalDecision(t.Context(), decision), store.ErrValidation)
 		})
 	}
+}
+
+func listEvalTestExperiments(t *testing.T, s *Store, namespace, candidateRunUID string) []store.EvalExperimentEntry {
+	t.Helper()
+	page, err := s.ListEvalExperiments(t.Context(), namespace, store.EvalExperimentListOptions{CandidateRunUID: candidateRunUID})
+	require.NoError(t, err)
+	require.Empty(t, page.Next)
+	return page.Items
+}
+
+// The listing pages by reservation time and then candidate UID, so
+// experiments reserved in the same instant are neither skipped nor
+// repeated, and each page carries its own decisions.
+func TestListEvalExperimentsPages(t *testing.T) {
+	s := newEvalTrialTestStore(t)
+	want := make([]string, 0, 5)
+	for i := range 5 {
+		record := evalExperimentTestRecord(fmt.Sprintf("c%d", i), "baseline-uid", fmt.Sprintf("sha256:k%d", i))
+		if i >= 2 {
+			record.ReservedAt = record.ReservedAt.Add(time.Minute) // three share one instant
+		}
+		reservation, err := s.ReserveEvalExperiment(t.Context(), record, store.EvalExperimentLimits{MaxPerBaseline: 10, MaxPerCase: 10})
+		require.NoError(t, err)
+		require.True(t, reservation.Granted)
+		outcome, err := s.RecordEvalExperimentOutcome(t.Context(), evalOutcomeTestRecord(record, store.EvalExperimentResultFailed))
+		require.NoError(t, err)
+		require.NoError(t, s.AppendEvalDecision(t.Context(), evalDecisionTestRecord(outcome, "d"+record.CandidateRun, store.EvalDecisionRejected)))
+		want = append(want, record.CandidateRun)
+	}
+	var got []string
+	after := ""
+	for pages := 0; ; pages++ {
+		require.Less(t, pages, 5)
+		page, err := s.ListEvalExperiments(t.Context(), "team-a", store.EvalExperimentListOptions{After: after, Limit: 2})
+		require.NoError(t, err)
+		for _, entry := range page.Items {
+			got = append(got, entry.Experiment.CandidateRun)
+			require.Len(t, entry.Decisions, 1)
+			require.Equal(t, "d"+entry.Experiment.CandidateRun, entry.Decisions[0].ID)
+		}
+		if page.Next == "" {
+			break
+		}
+		after = page.Next
+	}
+	require.Equal(t, want, got)
+
+	_, err := s.ListEvalExperiments(t.Context(), "team-a", store.EvalExperimentListOptions{After: "not-a-position"})
+	require.ErrorIs(t, err, store.ErrValidation)
+	_, err = s.ListEvalExperiments(t.Context(), "team-a", store.EvalExperimentListOptions{Limit: store.MaxEvalExperimentListLimit + 1})
+	require.ErrorIs(t, err, store.ErrValidation)
 }

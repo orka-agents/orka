@@ -25,6 +25,8 @@ type (
 	EvalDecisionActor           = storagev1.EvalDecisionActor
 	EvalDecisionRecord          = storagev1.EvalDecisionRecord
 	EvalExperimentEntry         = storagev1.EvalExperimentEntry
+	EvalExperimentListOptions   = storagev1.EvalExperimentListOptions
+	EvalExperimentPage          = storagev1.EvalExperimentPage
 )
 
 const (
@@ -45,4 +47,6 @@ const (
 	EvalDecisionRejected               = storagev1.EvalDecisionRejected
 	MaxEvalExperimentOutcomeBytes      = storagev1.MaxEvalExperimentOutcomeBytes
 	MaxEvalDecisionReasonBytes         = storagev1.MaxEvalDecisionReasonBytes
+	DefaultEvalExperimentListLimit     = storagev1.DefaultEvalExperimentListLimit
+	MaxEvalExperimentListLimit         = storagev1.MaxEvalExperimentListLimit
 )
