@@ -311,7 +311,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 	}
 	// A forwarding Tool that allows writes brings its write tool, approved
 	// unless the Tool waives it.
-	if task, agent, err = adjustInputsForForwardingWrites(ctx, reader, task, agent); err != nil {
+	if task, agent, err = adjustInputsForForwardingWrites(ctx, reader, task, agent, connectorClassification); err != nil {
 		return nil, err
 	}
 	if len(agentToolboxes(agent)) > 0 && (strings.TrimSpace(workspaceSessionUID) != "" || taskRequestsExecutionWorkspace(task)) {

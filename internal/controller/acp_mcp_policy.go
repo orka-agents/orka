@@ -603,6 +603,7 @@ func adjustInputsForForwardingWrites(
 	reader client.Reader,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
+	connectorTools map[string]connectorToolInfo,
 ) (*corev1alpha1.Task, *corev1alpha1.Agent, error) {
 	if reader == nil || task == nil || agent == nil || agent.Spec.Runtime == nil {
 		return task, agent, nil
@@ -613,6 +614,7 @@ func adjustInputsForForwardingWrites(
 		disallowed = task.Spec.AgentRuntime.DisallowedTools
 	}
 	var writes, approvals []string
+	modes := map[string]string{}
 	for _, name := range allowed {
 		if strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
 			// Write tools are derived, never requested by name.
@@ -638,6 +640,18 @@ func adjustInputsForForwardingWrites(
 		if tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil || tool.Spec.HTTP.Forward.Writes == nil {
 			continue
 		}
+		if info, linked := connectorTools[name]; linked {
+			// A linked account writes only through a readWrite link, so, as
+			// for write-class connector Tools, the write tool is hidden
+			// rather than offered to fail (after an approval) at call time.
+			mode, err := requesterLinkMode(ctx, reader, task, info.Provider, modes)
+			if err != nil {
+				return nil, nil, err
+			}
+			if mode != corev1alpha1.ConnectionModeReadWrite {
+				continue
+			}
+		}
 		write := harnessv2.MCPForwardWriteToolName(name)
 		writes = append(writes, write)
 		if tool.Spec.HTTP.Forward.Writes.WriteApprovalRequired() {
@@ -660,6 +674,26 @@ func adjustInputsForForwardingWrites(
 		agent.Spec.Coordination.ApprovalRequiredTools = sortedUnique(append(agent.Spec.Coordination.ApprovalRequiredTools, approvals...))
 	}
 	return task, agent, nil
+}
+
+// requesterLinkMode returns the mode of the requester's link to provider,
+// "" without one, caching it per provider in modes.
+func requesterLinkMode(ctx context.Context, reader client.Reader, task *corev1alpha1.Task, provider string, modes map[string]string) (string, error) {
+	if mode, cached := modes[provider]; cached {
+		return mode, nil
+	}
+	connection, err := requesterConnection(ctx, reader, task, provider)
+	if err != nil {
+		return "", fmt.Errorf("read the requester's %q link: %w", provider, err)
+	}
+	mode := ""
+	if connection != nil {
+		if mode = connection.Spec.Mode; mode == "" {
+			mode = corev1alpha1.ConnectionModeReadOnly
+		}
+	}
+	modes[provider] = mode
+	return mode, nil
 }
 
 // forwardingPolicySupported refuses a forwarding Tool whose outbound access

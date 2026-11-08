@@ -387,7 +387,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	case write && g.writeToolName == "":
 		writeAzureError(w, http.StatusMethodNotAllowed, "OrkaReadOnly",
 			"Orka forwards only read requests (GET) to Azure Resource Manager through tool "+strconv.Quote(g.toolName)+
-				"; this az command changes or acts on a resource, which needs http.forward.writes on that Tool.")
+				"; this az command changes or acts on a resource, which this Task cannot do. Writes need http.forward.writes on that Tool and, for a linked account, a readWrite link.")
 		return
 	case write:
 		toolName = g.writeToolName

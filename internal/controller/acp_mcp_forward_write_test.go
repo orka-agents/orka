@@ -8,6 +8,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -53,7 +54,7 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 		"reads only":        {forwardingDescriptorTool(), false, false},
 	} {
 		reader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(tc.tool).Build()
-		task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, forwardingWriteTask(), forwardingWriteAgent())
+		task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, forwardingWriteTask(), forwardingWriteAgent(), nil)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -70,7 +71,7 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{denied}}
 		reader := fake.NewClientBuilder().WithScheme(newTestScheme()).
 			WithObjects(writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)).Build()
-		task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, forwardingWriteAgent())
+		task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, forwardingWriteAgent(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,14 +85,14 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 	nativeAgent := forwardingWriteAgent()
 	nativeAgent.Spec.Runtime.DefaultAllowedTools = []string{"read"}
 	shadowReader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(native).Build()
-	if task, agent, err := adjustInputsForForwardingWrites(context.Background(), shadowReader, forwardingWriteTask(), nativeAgent); err != nil ||
+	if task, agent, err := adjustInputsForForwardingWrites(context.Background(), shadowReader, forwardingWriteTask(), nativeAgent, nil); err != nil ||
 		slices.ContainsFunc(effectiveACPAllowedTools(task, agent), func(name string) bool { return strings.HasSuffix(name, ":write") }) {
 		t.Fatalf("a native tool name brought a write tool: %v", err)
 	}
 	named := forwardingWriteAgent()
 	named.Spec.Runtime.DefaultAllowedTools = []string{write}
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
-	if _, _, err := adjustInputsForForwardingWrites(context.Background(), reader, forwardingWriteTask(), named); err == nil ||
+	if _, _, err := adjustInputsForForwardingWrites(context.Background(), reader, forwardingWriteTask(), named, nil); err == nil ||
 		!isPermanentACPAgentConfigurationError(err) {
 		t.Fatalf("a directly named write tool: err = %v, want a permanent refusal", err)
 	}
@@ -200,7 +201,7 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	agent.Spec.Runtime.DefaultAllowedTools = append(acp.BuiltInRuntimeNativeToolNames("codex"), "azure-arm")
 	task := forwardingWriteTask()
 	task.UID = "task-uid"
-	task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, agent)
+	task, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, agent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,5 +232,35 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	if _, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, task, unapproved, plan.Profile, tools.NewRegistry()); err == nil ||
 		!strings.Contains(err.Error(), "requires approval") {
 		t.Fatalf("a policy without the write tool's approval: %v", err)
+	}
+}
+
+// TestForwardingWritesNeedAReadWriteLink covers a forwarding Tool behind
+// the requester's linked account: its write tool is offered only with a
+// readWrite link, as write-class connector Tools are, and hidden with a
+// readOnly link or none rather than left to fail after an approval.
+func TestForwardingWritesNeedAReadWriteLink(t *testing.T) {
+	_, _, linked, task := freezeFixtures(true)
+	connection := linked.(*corev1alpha1.Connection)
+	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	classification := map[string]connectorToolInfo{"azure-arm": {PolicyName: "azure", Provider: "github", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}}
+	readOnly := connection.DeepCopy()
+	readOnly.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	for name, tc := range map[string]struct {
+		objects []ctrlclient.Object
+		want    bool
+	}{
+		"readWrite link": {[]ctrlclient.Object{tool, freezeProvider(), connection}, true},
+		"readOnly link":  {[]ctrlclient.Object{tool, freezeProvider(), readOnly}, false},
+		"no link":        {[]ctrlclient.Object{tool, freezeProvider()}, false},
+	} {
+		reader := fake.NewClientBuilder().WithScheme(connectorTestScheme(t)).WithObjects(tc.objects...).Build()
+		adjusted, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, forwardingWriteAgent(), classification)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := slices.Contains(effectiveACPAllowedTools(adjusted, agent), "azure-arm:write"); got != tc.want {
+			t.Errorf("%s: write tool offered = %t, want %t", name, got, tc.want)
+		}
 	}
 }

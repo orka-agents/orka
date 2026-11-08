@@ -127,8 +127,9 @@ http:
   A linked account writes only when the provider's forwarding tool also sets
   `forward.writes` (its `approval` is unused), which changes the provider's
   authority digest, so people consent again. A write then matches as class
-  `write` and needs a `readWrite` link; on a `readOnly` link the write tool
-  stays offered and fails at call time, as connection-mode write Tools do.
+  `write` and needs a `readWrite` link. Without one (a `readOnly` link or none
+  when the Task is planned) the write tool is not offered, as write-class
+  connector Tools are hidden; the reads stay.
   Delegated writes follow the Tool's approval setting; when one needs
   approval, only the requester can approve it, as ADR 0039 requires.
 - A decided write gets a final answer, never a status the Azure SDK retries:

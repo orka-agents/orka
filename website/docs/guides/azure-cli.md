@@ -212,8 +212,8 @@ Add `writes` to let `az` change resources:
 - For a linked account, the provider's tool needs `writes` too (its
   `approval` is not used), and each person links with
   `orka connect azure -n team-a --mode readWrite`. Adding `writes` to a
-  provider asks everyone to consent again. A `readOnly` link keeps reads and
-  refuses writes.
+  provider asks everyone to consent again. With a `readOnly` link, or none,
+  the agent gets reads only.
 
 ## 4. Give the Agent the toolbox and the Tool
 
@@ -252,7 +252,7 @@ runs `az group list` as usual.
 
 | What az prints | Why |
 | --- | --- |
-| `(OrkaReadOnly)` | The command writes or acts on a resource, and the Tool has no `forward.writes`. |
+| `(OrkaReadOnly)` | The command writes or acts on a resource, and this Task has no write tool: the Tool has no `forward.writes`, the Task disallows it, or the requester's link was not `readWrite` when the Task started. |
 | `(OrkaApprovalNotGranted)` | A reviewer declined the write, or nobody approved it within 10 minutes. Nothing was sent to Azure. |
 | `(OrkaOutcomeUnknown)` | The write may have reached Azure. Check the resource before running the command again. |
 | `(OrkaResourceNotForwarded)` | The command needs a service other than Resource Manager. |
