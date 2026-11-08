@@ -115,6 +115,27 @@ func runExternalEffectWithReplay[T any](
 	)
 }
 
+// errExternalEffectAlreadyStarted reports an effect a previous delivery
+// already claimed, which a run that never reclaims refuses to execute again.
+var errExternalEffectAlreadyStarted = errors.New("external effect was already started")
+
+// runExternalEffectOnceWithReplay is runExternalEffectWithReplay for an
+// effect that is not idempotent: an identity a previous delivery claimed is
+// never claimed again, even after its lease expires, so a request that may
+// have been delivered is never sent twice.
+func runExternalEffectOnceWithReplay[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayMode(
+		ctx, effects, fence, identity, request, externalEffectCallTimeout(identity), false, call,
+	)
+}
+
 // runExternalEffectWithReplayCallTimeout runs one external effect with an
 // explicit bounded call duration. Callers that know the operation's real
 // configured deadline (for example a brokered Tool's spec.http.timeout) use it
@@ -128,6 +149,19 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	identity store.ExternalEffectIdentity,
 	request any,
 	callTimeout time.Duration,
+	call func(context.Context) (T, error),
+) (T, bool, error) {
+	return runExternalEffectWithReplayMode(ctx, effects, fence, identity, request, callTimeout, true, call)
+}
+
+func runExternalEffectWithReplayMode[T any](
+	ctx context.Context,
+	effects store.ExternalEffectStore,
+	fence store.ControllerEpochFence,
+	identity store.ExternalEffectIdentity,
+	request any,
+	callTimeout time.Duration,
+	reclaim bool,
 	call func(context.Context) (T, error),
 ) (T, bool, error) {
 	var zero T
@@ -159,6 +193,9 @@ func runExternalEffectWithReplayCallTimeout[T any](
 	}
 	if effect.State == store.ExternalEffectFailed || effect.State == store.ExternalEffectOutcomeUnknown {
 		return zero, false, fmt.Errorf("external effect %s is terminal in state %s", effect.ID, effect.State)
+	}
+	if !reclaim && effect.State == store.ExternalEffectInFlight {
+		return zero, false, errExternalEffectAlreadyStarted
 	}
 	// Size the lease from this effect's bounded call duration so the outcome of
 	// a call that runs to its deadline can still be committed under a valid

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -77,6 +78,16 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 			t.Errorf("a Task that denies %q still got the write tool", denied)
 		}
 	}
+	// A Tool named after a provider-native tool is shadowed by it.
+	native := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	native.Name = "read"
+	nativeAgent := forwardingWriteAgent()
+	nativeAgent.Spec.Runtime.DefaultAllowedTools = []string{"read"}
+	shadowReader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(native).Build()
+	if task, agent, err := adjustInputsForForwardingWrites(context.Background(), shadowReader, forwardingWriteTask(), nativeAgent); err != nil ||
+		slices.ContainsFunc(effectiveACPAllowedTools(task, agent), func(name string) bool { return strings.HasSuffix(name, ":write") }) {
+		t.Fatalf("a native tool name brought a write tool: %v", err)
+	}
 	named := forwardingWriteAgent()
 	named.Spec.Runtime.DefaultAllowedTools = []string{write}
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()
@@ -105,6 +116,11 @@ func TestForwardingWriteDescriptorIsConsequential(t *testing.T) {
 	}
 	if _, err := forwardingWriteDescriptor(forwardingDescriptorTool(), read); err == nil {
 		t.Fatal("a Tool without writes must not get a write tool")
+	}
+	slow := tool.DeepCopy()
+	slow.Spec.HTTP.Timeout = &metav1.Duration{Duration: maxACPExternalEffectCallDuration + time.Second}
+	if _, err := forwardingWriteDescriptor(slow, read); err == nil || !strings.Contains(err.Error(), "maximum forwarded write duration") {
+		t.Fatalf("a write timeout past the ledger's call duration: %v", err)
 	}
 }
 

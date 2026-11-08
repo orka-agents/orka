@@ -85,7 +85,11 @@ http:
   exception, and a long-running operation's polling stays a plain read.
 - The derived tool is consequential. Every write runs under the external-effect
   ledger, so a lost result settles `OutcomeUnknown` and is never retried
-  blindly. With `approval: Required` the write tool is approval-required: the
+  blindly. Because a forwarded `POST` or `PATCH` need not be idempotent, a
+  write's effect record is never reclaimed: a redelivery that finds it in
+  flight, even after its lease expires, answers with an unknown outcome
+  instead of sending it again. Its Tool's `timeout` must fit the ledger's
+  call duration. With `approval: Required` the write tool is approval-required: the
   broker records the request (method, path, query, and body) and waits for a
   person, while the gateway holds the CLI's request open. Built-in runtimes
   otherwise cannot ask for approval

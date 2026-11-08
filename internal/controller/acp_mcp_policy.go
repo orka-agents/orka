@@ -579,6 +579,14 @@ func forwardingWriteDescriptor(tool *corev1alpha1.Tool, read harnessv2.MCPToolDe
 	forward.Write = true
 	write.Forward = &forward
 	write.InputSchema = append(json.RawMessage(nil), harnessv2.MCPForwardWriteInputSchema...)
+	// The write tool is consequential although its Tool is class read, so it
+	// is held to the ledger's call duration here.
+	if timeout := tool.Spec.HTTP.Timeout; timeout != nil && timeout.Duration > maxACPExternalEffectCallDuration {
+		return harnessv2.MCPToolDescriptor{}, fmt.Errorf(
+			"tool %q spec.http.timeout %s exceeds the maximum forwarded write duration %s",
+			tool.Name, timeout.Duration, maxACPExternalEffectCallDuration,
+		)
+	}
 	if err := write.Validate(); err != nil {
 		return harnessv2.MCPToolDescriptor{}, err
 	}
@@ -609,6 +617,11 @@ func adjustInputsForForwardingWrites(
 		if strings.HasSuffix(name, harnessv2.MCPForwardWriteSuffix) {
 			// Write tools are derived, never requested by name.
 			return nil, nil, permanentACPAgentConfiguration(fmt.Errorf("allowed tool %q names a forwarding write tool; allow the Tool itself", name))
+		}
+		// A provider-native tool wins over a Tool of the same name, so such
+		// a Tool brings no write tool (admission also forbids the name).
+		if _, isNative := providerNativeTools[strings.ToLower(string(agent.Spec.Runtime.Type))][strings.ToLower(name)]; isNative {
+			continue
 		}
 		// A Task that denies the Tool denies its writes; denying only the
 		// write tool keeps the Tool's reads.

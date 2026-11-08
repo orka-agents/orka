@@ -899,9 +899,17 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				effectRequest["connection"] = digest
 			}
 		}
-		result, replayed, err = runExternalEffectWithReplay(
-			promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call,
-		)
+		run := runExternalEffectWithReplay[json.RawMessage]
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarded POST or PATCH need not be idempotent.
+			run = runExternalEffectOnceWithReplay[json.RawMessage]
+		}
+		result, replayed, err = run(promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call)
+		if errors.Is(err, errExternalEffectAlreadyStarted) {
+			// Another delivery claimed it and may have sent it. Leave its
+			// record to that delivery or to reconciliation.
+			result, err = json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`), nil
+		}
 	} else {
 		result, err = call(promptCtx)
 	}
