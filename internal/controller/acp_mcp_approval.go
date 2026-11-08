@@ -314,6 +314,16 @@ func (b *ACPMCPBroker) requestToolApproval(ctx context.Context, call *acpMCPAppr
 		return err
 	}
 	target.ApprovalID = call.ID
+	if forward := call.Descriptor.Forward; forward != nil && forward.Write {
+		// A request body can carry a secret under any field name, such as a
+		// function key's value, so reviewers see its fields, not its values.
+		masked, maskErr := approvals.NewApprovalTarget(call.Task.Namespace, call.Task.Name, call.Task.UID,
+			call.Request.Call.ToolName, maskForwardedWriteArguments(call.Request.Call.Arguments), action, "", "warning", specDigest)
+		if maskErr != nil {
+			return maskErr
+		}
+		target.TargetArgsPreview = masked.TargetArgsPreview
+	}
 	// Runtime call IDs can contain private text that generic redaction misses.
 	binding := approvalCallBinding(call)
 	_, err = b.appendApprovalEvent(ctx, call, events.ExecutionEventTypeApprovalRequested, "requested", target.Action, struct {
@@ -844,7 +854,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	// The caller gets the answer; the record and its event keep what they may.
 	kept := result
 	if executeErr == nil {
-		kept = forwardedWriteKeptResult(call.Descriptor, call.Request, result)
+		kept = forwardedWriteKeptResult(call.Descriptor, result)
 		_, executeErr = b.Effects.TransitionExternalEffect(callCtx, store.ExternalEffectTransition{
 			ID: claimed.ID, Fence: credentials.ControllerFence, ExpectedVersion: claimed.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectSucceeded,

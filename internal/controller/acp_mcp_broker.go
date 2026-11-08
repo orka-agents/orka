@@ -341,17 +341,13 @@ func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *too
 
 // forwardedWriteKeptResult returns the form of a forwarded write's result
 // that its effect record keeps. The record is an ExternalEffect status that
-// anyone who can read the resource sees, and an Azure action (POST), such as
-// listKeys or listClusterUserCredential, can answer with keys or a
-// kubeconfig, so a POST's answer is not kept: the record keeps a note with
-// its status instead, and a redelivery that joins it gets that note. PUT,
-// PATCH, and DELETE answers describe the resource, which Resource Manager
-// returns without its secrets, and are kept so a joined retry gets them.
-func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, request harnessv2.MCPBrokerCallRequest, result json.RawMessage) json.RawMessage {
+// anyone who can read the resource sees, and any write can answer with a
+// secret: an action (POST) such as listKeys or listClusterUserCredential
+// returns keys or a kubeconfig, and a PUT of a function key echoes the key.
+// So no answer is kept: the record keeps a note with its status, and a
+// redelivery that joins it gets that note.
+func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result json.RawMessage) json.RawMessage {
 	if descriptor.Forward == nil || !descriptor.Forward.Write || mcpToolResultIsError(result) {
-		return result
-	}
-	if forwarded, err := harnessv2.DecodeMCPForwardRequest(request.Call.Arguments); err == nil && forwarded.Method != http.MethodPost {
 		return result
 	}
 	status := "an unreadable status"
@@ -366,8 +362,8 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, request ha
 		Error azureError `json:"error"`
 	}{azureError{
 		Code: "OrkaResultNotKept",
-		Message: "The action already ran, with " + status + ". Orka does not keep the answers to Azure actions, " +
-			"which can carry secrets; run the command again to read the result.",
+		Message: "The request already ran, with " + status + ". Orka does not keep the answers to Azure writes, " +
+			"which can carry secrets; check the resource, or run the command again to read the result.",
 	}})
 	kept, err := harnessv2.CanonicalValue(harnessv2.MCPForwardResponse{
 		Status: http.StatusConflict, Headers: map[string]string{"Content-Type": "application/json"}, Body: string(body),
@@ -376,6 +372,52 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, request ha
 		return json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`)
 	}
 	return kept
+}
+
+// maskForwardedWriteArguments returns a forwarded write's arguments with
+// every value in its body masked, keeping the body's shape and field names,
+// for an approval preview. Arguments that do not decode keep no body.
+func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
+	request, err := harnessv2.DecodeMCPForwardRequest(arguments)
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	var body any
+	decoder := json.NewDecoder(bytes.NewReader(request.Body))
+	decoder.UseNumber()
+	if len(request.Body) > 0 && decoder.Decode(&body) == nil {
+		body = maskJSONValues(body)
+	} else {
+		body = nil
+	}
+	masked, err := json.Marshal(struct {
+		Method string `json:"method"`
+		Path   string `json:"path"`
+		Query  string `json:"query,omitempty"`
+		Body   any    `json:"body,omitempty"`
+	}{request.Method, request.Path, request.Query, body})
+	if err != nil {
+		return json.RawMessage(`{}`)
+	}
+	return masked
+}
+
+// maskJSONValues replaces every scalar in a decoded JSON value with a mask.
+func maskJSONValues(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = maskJSONValues(item)
+		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = maskJSONValues(item)
+		}
+		return typed
+	default:
+		return "[masked]"
+	}
 }
 
 // connectorBindingDigest combines the frozen Connection identity digest with
@@ -955,7 +997,7 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return nil, callErr
 				}
 				live = answer
-				return forwardedWriteKeptResult(descriptor, request, answer), nil
+				return forwardedWriteKeptResult(descriptor, answer), nil
 			}
 		}
 		result, replayed, err = run(promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, execute)

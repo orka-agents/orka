@@ -148,22 +148,36 @@ func TestACPMCPBrokerForwardedActionAnswerIsNotKept(t *testing.T) {
 	}
 }
 
-// TestForwardedWriteKeptResultKeepsResourceAnswers covers which answers an
-// effect record keeps: a PUT's resource and any error are kept as they are.
-func TestForwardedWriteKeptResultKeepsResourceAnswers(t *testing.T) {
+// TestForwardedWriteKeptResultKeepsNoAnswer covers what an effect record
+// keeps of a forwarded write: never its answer, which can carry a secret,
+// only a note with its status; a tool error is kept as it is.
+func TestForwardedWriteKeptResultKeepsNoAnswer(t *testing.T) {
 	request, _ := testMCPBrokerForwardWriteRequest(t)
 	descriptor := request.Authorization.ToolPolicy.Tools[0]
-	put := json.RawMessage(`{"status":201,"body":"{\"name\":\"rg1\"}"}`)
-	if got := forwardedWriteKeptResult(descriptor, request, put); string(got) != string(put) {
-		t.Fatalf("PUT answer kept as %s", got)
-	}
-	request.Call.Arguments = json.RawMessage(`{"method":"POST","path":"/subscriptions/s1/x/listKeys"}`)
 	failure := json.RawMessage(`{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}`)
-	if got := forwardedWriteKeptResult(descriptor, request, failure); string(got) != string(failure) {
+	if got := forwardedWriteKeptResult(descriptor, failure); string(got) != string(failure) {
 		t.Fatalf("error kept as %s", got)
 	}
-	note, err := harnessv2.DecodeMCPForwardResponse(forwardedWriteKeptResult(descriptor, request, json.RawMessage(`{"status":200,"body":"secret"}`)))
-	if err != nil || note.Status != http.StatusConflict || !strings.Contains(note.Body, "status 200") || strings.Contains(note.Body, "secret\"") {
-		t.Fatalf("POST note = %#v, %v", note, err)
+	note, err := harnessv2.DecodeMCPForwardResponse(forwardedWriteKeptResult(descriptor,
+		json.RawMessage(`{"status":200,"body":"{\"properties\":{\"value\":\"private-function-key\"}}"}`)))
+	if err != nil || note.Status != http.StatusConflict || !strings.Contains(note.Body, "status 200") ||
+		!strings.Contains(note.Body, "OrkaResultNotKept") || strings.Contains(note.Body, "private-function-key") {
+		t.Fatalf("PUT note = %#v, %v", note, err)
+	}
+}
+
+// TestMaskForwardedWriteArgumentsKeepsOnlyTheShape covers the approval
+// preview of a forwarded write: its method, path, and body fields, with no
+// body value, whatever the field is called.
+func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
+	masked := string(maskForwardedWriteArguments(json.RawMessage(
+		`{"method":"PUT","path":"/subscriptions/s1/x/functions/f/keys/k","body":{"properties":{"name":"k","value":"private-function-key","n":[1,true]}}}`)))
+	for _, want := range []string{`"method":"PUT"`, `/functions/f/keys/k`, `"value":"[masked]"`, `"name":"[masked]"`} {
+		if !strings.Contains(masked, want) {
+			t.Errorf("masked preview %s lacks %s", masked, want)
+		}
+	}
+	if strings.Contains(masked, "private-function-key") || strings.Contains(masked, "true") {
+		t.Fatalf("masked preview kept a value: %s", masked)
 	}
 }
