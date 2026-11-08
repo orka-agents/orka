@@ -753,7 +753,7 @@ func TestMCPApprovalForwardedWriteNamesTheRequest(t *testing.T) {
 	}
 	preview := f.pending()
 	if preview.Action != "Send PUT /subscriptions/s/resourceGroups/rg via azure-arm:write" ||
-		!strings.Contains(string(preview.TargetArgsPreview), `"location"`) || strings.Contains(string(preview.TargetArgsPreview), "westus3") ||
+		!strings.Contains(string(preview.TargetArgsPreview), `"location":"westus3"`) ||
 		strings.Contains(string(preview.TargetArgsPreview), "private-test-password") || f.count.Load() != 0 {
 		t.Fatalf("forwarded write approval = %q", preview.Action)
 	}

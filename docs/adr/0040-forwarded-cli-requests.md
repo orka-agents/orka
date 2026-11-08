@@ -115,9 +115,11 @@ http:
   result instead of writing twice. A write without the header gets a fresh
   call ID and is never joined. Azure's own answers, including `429` and
   `5xx`, pass through unchanged, so the client retries them as it would
-  against Azure directly; with the header, such a retry replays the recorded
-  answer instead of resending, so a throttled write fails after the SDK's
-  retries and the agent runs the command again.
+  against Azure directly. Azure did not process a throttled (`429`) write,
+  so the gateway sends the client's retry again as a new attempt, under a
+  new call ID (an approval-required write needs a new approval). Other
+  retries join, and a recorded answer the SDK retries (`408`, `429`, `5xx`)
+  keeps its status and `Retry-After` when replayed.
 - `POST` actions are forwarded too, so `az aks get-credentials` and actions
   such as start and stop work. An action that returns a secret, such as
   `listKeys` or `listClusterUserCredential`, hands it to the runtime, as the
@@ -127,7 +129,10 @@ http:
   reader of that resource sees, keeps a note with the status instead of the
   answer, and a retry that joins a recorded write gets `409
   OrkaResultNotKept`. The approval preview shows the method, path, query, and
-  the body's field names with every value masked. A Tool with writes has
+  the body's numbers and booleans. Strings are masked, except under fields
+  that only size, place, or version a resource (`location`, `vmSize`, `sku`,
+  `tier`, `kubernetesVersion`, and similar), so a reviewer can check what is
+  created without seeing a secret. A Tool with writes has
   a name of at most 247 characters, so its write tool fits the tool name
   limit. Reviewers approving a
   `POST` see its path; Tools that must not return secrets need

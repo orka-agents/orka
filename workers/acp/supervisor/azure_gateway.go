@@ -151,6 +151,45 @@ type azureGateway struct {
 	identityHeader string
 	tokenSecret    string
 	closeOnce      sync.Once
+	// throttled counts, per write call ID, the throttled answers Azure gave
+	// it. Azure did not process a throttled request, so the client's retry
+	// is a new attempt under a new call ID rather than a replay.
+	throttledMu sync.Mutex
+	throttled   map[string]int
+}
+
+// maxAzureThrottledWrites bounds the throttled-write memory of one session.
+const maxAzureThrottledWrites = 256
+
+// azureJoinableWritePrefix starts the call ID of a write that retries join.
+const azureJoinableWritePrefix = "az-w-"
+
+// attemptCallID returns the call ID for the current attempt of a joinable
+// write: a write Azure throttled is retried as a new attempt.
+func (g *azureGateway) attemptCallID(write bool, callID string) string {
+	if !write || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
+		return callID
+	}
+	g.throttledMu.Lock()
+	defer g.throttledMu.Unlock()
+	if attempts := g.throttled[callID]; attempts > 0 {
+		return callID + "-a" + strconv.Itoa(attempts)
+	}
+	return callID
+}
+
+// noteAnswer records a throttled answer to the current attempt of a joinable
+// write: Azure did not process it, so the client's retry is sent again.
+func (g *azureGateway) noteAnswer(write bool, callID string, status int) {
+	if !write || status != http.StatusTooManyRequests || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
+		return
+	}
+	g.throttledMu.Lock()
+	defer g.throttledMu.Unlock()
+	if g.throttled == nil || len(g.throttled) >= maxAzureThrottledWrites {
+		g.throttled = map[string]int{}
+	}
+	g.throttled[callID]++
 }
 
 // azureForwardingTool returns the session's Azure forwarding Tool, if any,
@@ -421,11 +460,12 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 			fmt.Sprintf("Orka forwards request bodies up to about %d KiB.", harnessv2.MaxMCPArgumentsBytes>>10))
 		return
 	}
-	callID, err := azureCallID(write, r.Header.Get(azureClientRequestIDHeader), request)
+	baseCallID, err := azureCallID(write, r.Header.Get(azureClientRequestIDHeader), request)
 	if err != nil {
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be identified.")
 		return
 	}
+	callID := g.attemptCallID(write, baseCallID)
 	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
 	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
@@ -464,6 +504,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
 		return
 	}
+	g.noteAnswer(write, baseCallID, forwarded.Status)
 	for name, value := range forwarded.Headers {
 		if name == harnessv2.ForwardHeadContentLength {
 			continue
@@ -633,12 +674,14 @@ func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwar
 		}
 		return "az-" + hex.EncodeToString(raw), nil
 	}
+	// The digest below makes the call ID joinable: retries of the same
+	// write share it.
 	body := sha256.Sum256([]byte(request.Body))
 	digest := sha256.Sum256([]byte(strings.Join([]string{
 		"orka.azure-gateway.write.v1", clientRequestID, request.Method, request.Path, request.Query, hex.EncodeToString(body[:]),
 		request.IfMatch, request.IfNoneMatch,
 	}, "\x00")))
-	return "az-w-" + hex.EncodeToString(digest[:16]), nil
+	return azureJoinableWritePrefix + hex.EncodeToString(digest[:16]), nil
 }
 
 func constantTimeEqual(got, want string) bool {

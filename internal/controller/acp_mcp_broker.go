@@ -350,9 +350,18 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result jso
 	if descriptor.Forward == nil || !descriptor.Forward.Write || mcpToolResultIsError(result) {
 		return result
 	}
-	status := "an unreadable status"
+	status, keptStatus := "an unreadable status", http.StatusConflict
+	headers := map[string]string{"Content-Type": "application/json"}
 	if response, err := harnessv2.DecodeMCPForwardResponse(result); err == nil {
 		status = "status " + strconv.Itoa(response.Status)
+		if azureRetryableStatus(response.Status) {
+			// A throttled or failing write keeps its status and delay, so a
+			// replay still tells the client to retry, as Azure did.
+			keptStatus = response.Status
+			if after := response.Headers["Retry-After"]; after != "" {
+				headers["Retry-After"] = after
+			}
+		}
 	}
 	type azureError struct {
 		Code    string `json:"code"`
@@ -362,16 +371,27 @@ func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, result jso
 		Error azureError `json:"error"`
 	}{azureError{
 		Code: "OrkaResultNotKept",
-		Message: "The request already ran, with " + status + ". Orka does not keep the answers to Azure writes, " +
+		Message: "Azure already answered this request, with " + status + ". Orka does not keep the answers to Azure writes, " +
 			"which can carry secrets; check the resource, or run the command again to read the result.",
 	}})
 	kept, err := harnessv2.CanonicalValue(harnessv2.MCPForwardResponse{
-		Status: http.StatusConflict, Headers: map[string]string{"Content-Type": "application/json"}, Body: string(body),
+		Status: keptStatus, Headers: headers, Body: string(body),
 	})
 	if err != nil {
 		return json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`)
 	}
 	return kept
+}
+
+// azureRetryableStatus reports whether the Azure SDK retries a write that
+// got status, so a replay of it must keep that status.
+func azureRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // maskForwardedWriteArguments returns a forwarded write's arguments with
@@ -386,7 +406,7 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	decoder := json.NewDecoder(bytes.NewReader(request.Body))
 	decoder.UseNumber()
 	if len(request.Body) > 0 && decoder.Decode(&body) == nil {
-		body = maskJSONValues(body)
+		body = maskJSONValues(body, "")
 	} else {
 		body = nil
 	}
@@ -404,21 +424,44 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	return masked
 }
 
-// maskJSONValues replaces every scalar in a decoded JSON value with a mask.
-func maskJSONValues(value any) any {
+// azurePreviewFields are the Resource Manager fields whose string values an
+// approval preview shows: they size, place, or version a resource and never
+// carry a secret. Every other string is masked, whatever it is called.
+var azurePreviewFields = func() map[string]bool {
+	fields := map[string]bool{}
+	for field := range strings.FieldsSeq("location vmsize tier kind type mode kubernetesversion " +
+		"orchestratorversion ostype ossku sku skuname family capacity zones apiversion kubernetesversions") {
+		fields[field] = true
+	}
+	return fields
+}()
+
+// maxAzurePreviewString bounds a shown string value.
+const maxAzurePreviewString = 128
+
+// maskJSONValues masks a decoded JSON value for an approval preview: numbers,
+// booleans, and nulls, which carry no secret, are shown; a string is shown
+// only under one of azurePreviewFields (key names its field, or the field of
+// the array that holds it) and when short; every other string is masked.
+func maskJSONValues(value any, key string) any {
 	switch typed := value.(type) {
 	case map[string]any:
-		for key, item := range typed {
-			typed[key] = maskJSONValues(item)
+		for field, item := range typed {
+			typed[field] = maskJSONValues(item, field)
 		}
 		return typed
 	case []any:
 		for index, item := range typed {
-			typed[index] = maskJSONValues(item)
+			typed[index] = maskJSONValues(item, key)
 		}
 		return typed
-	default:
+	case string:
+		if azurePreviewFields[strings.ToLower(key)] && len(typed) <= maxAzurePreviewString {
+			return typed
+		}
 		return "[masked]"
+	default:
+		return typed
 	}
 }
 

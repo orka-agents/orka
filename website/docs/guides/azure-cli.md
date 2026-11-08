@@ -194,8 +194,10 @@ Add `writes` to let `az` change resources:
   and refuses writes with `disallowedTools: [azurearm:write]`. Reads stay
   unapproved.
 - With `approval: Required`, a write waits in the Task's **Approvals** tab (or
-  for `orka task approve`) showing its method, path, and the body's field
-  names, with values masked because any of them can be a secret, while `az`
+  for `orka task approve`) showing its method, path, and body. Numbers,
+  booleans, and sizing fields such as `location`, `vmSize`, `sku`, and
+  `kubernetesVersion` are shown; other strings are masked because any of them
+  can be a secret. Meanwhile `az`
   waits for the answer. A decision is final: `az` gets Azure's response, or
   `OrkaApprovalNotGranted` if it was declined or expired after 10 minutes.
   When the Agent acts for the requester (`agentIdentity.mode: Delegated`), only

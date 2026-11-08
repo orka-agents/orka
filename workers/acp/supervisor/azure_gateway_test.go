@@ -628,3 +628,33 @@ func TestAzureGatewayAnswersDecidedWritesWithFinalStatuses(t *testing.T) {
 		t.Errorf("failed read: status = %d: %s", response.StatusCode, body)
 	}
 }
+
+// TestAzureGatewayResendsThrottledWrites covers a write Azure throttled:
+// Azure did not process it, so the client's retry, with the same request
+// ID, is a new attempt instead of a replay of the 429, and retries after a
+// processed answer join again.
+func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
+	fixture := newAzureGatewayFixtureWith(t, true)
+	token := fixture.token(t)
+	header := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}, "X-Ms-Client-Request-Id": {"req-throttled"}}
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		return json.RawMessage(`{"status":429,"headers":{"Retry-After":"1"},"body":"{}"}`)
+	}
+	path, body := "/subscriptions/s1/resourcegroups/rg1", `{"location":"eastus"}`
+	if response, _ := fixture.send(t, http.MethodPut, path, header, body); response.StatusCode != http.StatusTooManyRequests ||
+		response.Header.Get("Retry-After") != "1" {
+		t.Fatalf("throttled write status = %d, Retry-After %q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	fixture.mu.Lock()
+	fixture.respond = nil
+	fixture.mu.Unlock()
+	for range 2 {
+		if response, _ := fixture.send(t, http.MethodPut, path, header, body); response.StatusCode != http.StatusOK {
+			t.Fatalf("retried write status = %d", response.StatusCode)
+		}
+	}
+	calls := fixture.brokerCalls()
+	if len(calls) != 3 || calls[1].Call.CallID != calls[0].Call.CallID+"-a1" || calls[2].Call.CallID != calls[1].Call.CallID {
+		t.Fatalf("call IDs = %q, %q, %q; want a new attempt after the 429, then a join", calls[0].Call.CallID, calls[1].Call.CallID, calls[2].Call.CallID)
+	}
+}
