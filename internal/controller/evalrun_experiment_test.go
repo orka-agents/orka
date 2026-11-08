@@ -222,6 +222,35 @@ func TestEvalExperimentWaitsForTheBaseline(t *testing.T) {
 	}
 }
 
+// A baseline whose TTL passes while a candidate still runs is kept until the
+// candidate is decided, then deleted.
+func TestEvalExperimentRetainsTheBaselineForItsCandidates(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	ttl := int32(60)
+	baseline.Spec.TTLSecondsAfterFinished = &ttl
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.reconcileRun("candidate") // finalizer
+	env.reconcileRun("candidate") // snapshot and reservation
+	env.now = env.now.Add(2 * time.Hour)
+	env.reconcileRun("baseline")
+	if !env.getRun("baseline").DeletionTimestamp.IsZero() {
+		t.Fatal("the baseline was deleted while its candidate was running")
+	}
+	env.runToEnd("candidate", "needs_changes")
+	env.reconcileRun("candidate")
+	if got := env.getRun("candidate").Status.Experiment.Result; got == corev1alpha1.EvalExperimentPending ||
+		got == corev1alpha1.EvalExperimentIncomparable {
+		t.Fatalf("result = %q", got)
+	}
+	env.reconcileRun("baseline")
+	run := &corev1alpha1.EvalRun{}
+	err := env.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: "baseline"}, run)
+	if err == nil && run.DeletionTimestamp.IsZero() {
+		t.Fatal("the baseline outlived its TTL after its candidate was decided")
+	}
+}
+
 // A candidate that waited for its baseline past its TTL keeps the whole
 // retention window after the decision, so the verdict can be read.
 func TestEvalExperimentRetainsTheCandidateAfterTheDecision(t *testing.T) {

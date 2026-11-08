@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
@@ -92,6 +93,32 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 	subject := run.Spec.Subject.RepositoryMonitorReview
 	return subject != nil && subject.AgentRef != nil
+}
+
+// hasUndecidedCandidates reports whether a candidate still pairs, or may
+// pair, with this run: one that froze this incarnation as its baseline and is
+// Pending, or one that names it and has not prepared its experiment yet.
+func (r *EvalRunReconciler) hasUndecidedCandidates(ctx context.Context, baseline *corev1alpha1.EvalRun) (bool, error) {
+	var runs corev1alpha1.EvalRunList
+	if err := r.List(ctx, &runs, client.InNamespace(baseline.Namespace)); err != nil {
+		return false, err
+	}
+	for i := range runs.Items {
+		candidate := &runs.Items[i]
+		if candidate.Spec.Experiment == nil || candidate.UID == baseline.UID || !candidate.DeletionTimestamp.IsZero() {
+			continue
+		}
+		status := candidate.Status.Experiment
+		switch {
+		case status != nil && status.BaselineRun != nil:
+			if status.BaselineRun.UID == baseline.UID && status.Result == corev1alpha1.EvalExperimentPending {
+				return true, nil
+			}
+		case candidate.Spec.Experiment.BaselineRunRef.Name == baseline.Name && !evalRunFinished(candidate.Status.Phase):
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // refuseUnpairedHeldOutCandidate fails a run that reviews with a candidate

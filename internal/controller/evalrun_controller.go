@@ -194,6 +194,10 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 	if remaining := expiry.Sub(r.now()); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
+	// A baseline outlives its TTL while a candidate still needs its trials.
+	if waiting, err := r.hasUndecidedCandidates(ctx, run); err != nil || waiting {
+		return ctrl.Result{RequeueAfter: evalRunRequeueInterval}, err
+	}
 	logf.FromContext(ctx).Info("Deleting EvalRun after ttlSecondsAfterFinished", "evalRun", run.Name)
 	propagation := metav1.DeletePropagationBackground
 	if err := r.Delete(ctx, run, &client.DeleteOptions{
