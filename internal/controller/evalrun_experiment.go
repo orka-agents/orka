@@ -128,7 +128,8 @@ func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, 
 		configMap := &corev1.ConfigMap{}
 		if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, configMap); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue
+				return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
+					"held-out case set %s, listed in the protected set, was not found; runs with agentRef wait for it", listed)
 			}
 			return err
 		}

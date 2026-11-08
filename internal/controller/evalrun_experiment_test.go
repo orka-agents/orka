@@ -312,6 +312,8 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 		"held out": {gate: evalTestGate, wantFail: true},
 		// The same cases copied into an unlisted ConfigMap are still
 		// held-out evidence.
+		// A listed held-out set that is missing cannot be checked.
+		"missing held-out set": {gate: strings.Replace(evalTestGate, "name: cases,", "name: gone,", 1), wantFail: true},
 		"copied held-out cases": {gate: strings.Replace(evalTestGate, "name: cases,", "name: protected-cases,", 1), copied: true,
 			wantFail: true},
 		"training":   {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1)},
