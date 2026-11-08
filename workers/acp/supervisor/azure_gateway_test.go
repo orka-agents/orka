@@ -743,7 +743,14 @@ func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
 	if err := g.admitWrite("w", "p2", now.Add(time.Minute+azureWritePromptMemory)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
 		t.Fatalf("a resend within the span of the last refused one: %v", err)
 	}
-	if err := g.admitWrite("w", "p2", now.Add(2*time.Minute+2*azureWritePromptMemory)); err != nil {
+	// A request turned away before admission, such as one refused as busy,
+	// keeps it remembered too.
+	busy := now.Add(time.Minute + azureWritePromptMemory + azureWritePromptMemory*5/6)
+	g.touchWrite("w", busy)
+	if err := g.admitWrite("w", "p3", busy.Add(azureWritePromptMemory/2)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
+		t.Fatalf("a resend after a busy refusal: %v", err)
+	}
+	if err := g.admitWrite("w", "p2", busy.Add(2*azureWritePromptMemory)); err != nil {
 		t.Fatalf("a write unseen for the memory's span: %v", err)
 	}
 	for index := len(g.writePrompts); index < maxAzureWritePrompts; index++ {

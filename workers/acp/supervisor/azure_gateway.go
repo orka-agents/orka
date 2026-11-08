@@ -186,6 +186,16 @@ var (
 	errAzureTooManyWrites          = errors.New("the session sent too many writes to remember another")
 )
 
+// touchWrite keeps a remembered write remembered for another span, under its
+// first prompt, without admitting it.
+func (g *azureGateway) touchWrite(callID string, now time.Time) {
+	g.writePromptsMu.Lock()
+	defer g.writePromptsMu.Unlock()
+	if known, ok := g.writePrompts[callID]; ok && now.Sub(known.seen) < azureWritePromptMemory {
+		g.writePrompts[callID] = azureWritePrompt{prompt: known.prompt, seen: now}
+	}
+}
+
 // admitWrite records the prompt a joinable write is sent under, and refuses
 // it when an earlier prompt already sent it: a later prompt is a different
 // call to the broker, which would send the write again.
@@ -547,6 +557,11 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	callID, attempt := g.attemptCallID(write, baseCallID)
+	joinable := write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix)
+	if joinable {
+		// A request turned away as busy below still counts as seen.
+		g.touchWrite(baseCallID, time.Now())
+	}
 	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
 	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
@@ -558,7 +573,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		defer releaseMCPSlot(g.session.proxy.slots)
 	}
 	var admit func(harnessv2.PromptID) error
-	if write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix) {
+	if joinable {
 		admit = func(prompt harnessv2.PromptID) error { return g.admitWrite(baseCallID, prompt, time.Now()) }
 	}
 	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true, admit)
