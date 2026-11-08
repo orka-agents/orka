@@ -130,6 +130,7 @@ How monitors review and repair pull requests.
 | # | Decision | Status |
 | --- | --- | --- |
 | [0038](0038-repository-monitor-repair-validation.md) | Validate repository monitor repairs before publishing them | Accepted, not implemented |
+| [0047](0047-throwaway-validation-clusters.md) | Throwaway AKS clusters for validating Kubernetes projects | Proposed |
 
 ## Writing a new one
 
