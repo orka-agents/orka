@@ -13,7 +13,7 @@ Almost every `/api/v1/*` endpoint requires authentication. Kubernetes ServiceAcc
 operators can also enable OIDC or context-token authentication. The header requirements
 for each mode are listed below.
 
-Four routes are deliberately outside that middleware, because they authenticate a different
+Five routes are deliberately outside that middleware, because they authenticate a different
 way:
 
 | Route | How it authenticates instead |
@@ -21,6 +21,7 @@ way:
 | `GET /healthz`, `GET /readyz` | Not authenticated. Kubernetes probes them. |
 | `POST /api/v1/gateways/:namespace/:name/events` | The Gateway's own inbound bearer Secret, not a user token. |
 | `POST /webhooks/github` | HMAC over the request body (`X-Hub-Signature-256`). |
+| `GET /.well-known/orka/task-webhook-jwks.json` | Not authenticated. Publishes only the public keys that verify [Task webhook](../guides/task-webhooks.md) signatures. |
 | `/internal/v2/acp/*` | Pool-scoped bearer credentials checked by the ACP handlers themselves. Not for client use. |
 
 ## Authentication
