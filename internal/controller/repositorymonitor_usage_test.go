@@ -19,8 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/usage"
 )
 
@@ -128,7 +128,7 @@ func TestUsageCreatedPullRequestValidatesCanonicalRepositoryIdentity(t *testing.
 }
 
 type failUsagePRLinkStore struct {
-	*sqlite.Store
+	*storageclient.Client
 	fail bool
 }
 
@@ -137,14 +137,14 @@ func (s *failUsagePRLinkStore) LinkUsagePullRequest(ctx context.Context, link st
 		s.fail = false
 		return fmt.Errorf("usage link unavailable")
 	}
-	return s.Store.LinkUsagePullRequest(ctx, link)
+	return s.Client.LinkUsagePullRequest(ctx, link)
 }
 
 func TestUsagePullRequestOriginSurvivesLinkWriteFailure(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(fmt.Sprint("existing=", existing), func(t *testing.T) {
 			backend := setupControllerSQLiteStore(t)
-			linkStore := &failUsagePRLinkStore{Store: backend, fail: true}
+			linkStore := &failUsagePRLinkStore{Client: backend, fail: true}
 			scheme := runtime.NewScheme()
 			require.NoError(t, corev1.AddToScheme(scheme))
 			require.NoError(t, corev1alpha1.AddToScheme(scheme))

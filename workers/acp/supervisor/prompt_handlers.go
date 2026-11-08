@@ -1230,7 +1230,7 @@ func (s *Server) handleFinalizeSessionPublication(w http.ResponseWriter, r *http
 			writeError(w, http.StatusConflict, harnessv2.ErrorCodeSessionPoisoned, err.Error(), nil, false)
 			return
 		}
-		state.descriptor.State = harnessv2.RuntimeSessionStateFinalizing
+		setSessionState(state, harnessv2.RuntimeSessionStateFinalizing)
 		state.publicationFinalization = &receipt
 	}
 	state.descriptor.LastTransitionAt = now
@@ -1397,7 +1397,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if providerCleanupErr != nil || deleteErr != nil || !cleanup.Proven {
 		s.poisonPool("descendant_cleanup_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, harnessv2.ErrorCodeSessionPoisoned, "runtime descendant cleanup could not be proven", nil, false)
@@ -1407,7 +1407,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		slog.Error("ACP runtime session deletion failed", "stage", "ownership reclaim")
 		s.poisonPool("session_root_ownership_reclaim_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(
@@ -1419,7 +1419,7 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if err := s.removeSessionPrivateFiles(state); err != nil {
 		s.poisonPool("session_root_cleanup_unproven")
 		s.mu.Lock()
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 		state.descriptor.LastTransitionAt = time.Now().UTC()
 		s.mu.Unlock()
 		writeError(
@@ -1492,12 +1492,12 @@ func prepareSessionDeletionLocked(state *sessionState, publicationFinalized bool
 	promptSettled := state.prompt == nil || state.prompt.settlement != nil
 	if state.creating || state.runtime == nil || !promptSettled || nextState != harnessv2.RuntimeSessionStateDeleting {
 		if !state.creating && nextState == harnessv2.RuntimeSessionStateCancelling && state.descriptor.State != nextState {
-			state.descriptor.State = nextState
+			setSessionState(state, nextState)
 			state.descriptor.LastTransitionAt = now
 		}
 		return false, nil
 	}
-	state.descriptor.State = nextState
+	setSessionState(state, nextState)
 	state.descriptor.LastTransitionAt = now
 	return true, nil
 }
@@ -2023,13 +2023,13 @@ func (s *Server) handleWorkspaceDelta(w http.ResponseWriter, r *http.Request) {
 	nextMCPState := harnessv2.RuntimeSessionStatePoisoned
 	switch descriptor.State {
 	case harnessv2.WorkspaceDeltaNoChange:
-		state.descriptor.State = harnessv2.RuntimeSessionStateIdle
+		setSessionState(state, harnessv2.RuntimeSessionStateIdle)
 		nextMCPState = harnessv2.RuntimeSessionStateIdle
 	case harnessv2.WorkspaceDeltaPrepared:
-		state.descriptor.State = harnessv2.RuntimeSessionStatePublicationPrepared
+		setSessionState(state, harnessv2.RuntimeSessionStatePublicationPrepared)
 		nextMCPState = harnessv2.RuntimeSessionStatePublicationPrepared
 	case harnessv2.WorkspaceDeltaReadOnlyModified:
-		state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+		setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	}
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	mcpProxy := state.mcpProxy
@@ -2060,7 +2060,7 @@ func (s *Server) poisonSession(state *sessionState, _ string) {
 		state.mcpProxy.revoke(harnessv2.RuntimeSessionStatePoisoned)
 	}
 	s.mu.Lock()
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 	state.descriptor.LastTransitionAt = time.Now().UTC()
 	cleanup := !state.creating && state.runtime != nil && !state.drainCleanupScheduled
 	if cleanup {
@@ -2085,7 +2085,7 @@ func (s *Server) mapRuntimeEvent(state *sessionState, prompt *promptState, event
 		prompt.acceptedAt = event.Timestamp
 		prompt.operation = operationRecord(prompt.request.Metadata, harnessv2.OperationPhaseAccepted, "", event.Timestamp)
 		recordPromptAdmissionLocked(state, prompt)
-		state.descriptor.State = harnessv2.RuntimeSessionStatePromptRunning
+		setSessionState(state, harnessv2.RuntimeSessionStatePromptRunning)
 		state.descriptor.LastTransitionAt = event.Timestamp
 		return &harnessv2.Event{Protocol: harnessv2.ProtocolVersion, Type: harnessv2.EventAccepted, Identity: identity, Accepted: &harnessv2.AcceptedEvent{AcceptedAt: event.Timestamp, Lease: prompt.lease, ACPVersion: harnessv2.ACPProfileV1}}, nil
 	case acp.PromptEventUpdate:
@@ -2523,10 +2523,11 @@ func recordPromptSettlementLocked(state *sessionState, prompt *promptState, sett
 	default:
 		return settlement
 	}
-	state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+	next := harnessv2.RuntimeSessionStatePoisoned
 	if settlement.TerminalEvent == harnessv2.EventCompleted {
-		state.descriptor.State = harnessv2.RuntimeSessionStateValidating
+		next = harnessv2.RuntimeSessionStateValidating
 	}
+	setSessionState(state, next)
 	state.descriptor.LastTransitionAt = settlement.SettledAt
 	return settlement
 }
@@ -2658,7 +2659,7 @@ func (s *Server) handlePromptStartFailureLocked(w http.ResponseWriter, state *se
 	sessionCleanup := false
 	if s.sessions[state.id] == state && state.prompt == prompt {
 		if terminalAdmissionFailure && (state.descriptor.State == harnessv2.RuntimeSessionStateIdle || state.descriptor.State == harnessv2.RuntimeSessionStatePromptRunning) {
-			state.descriptor.State = harnessv2.RuntimeSessionStatePoisoned
+			setSessionState(state, harnessv2.RuntimeSessionStatePoisoned)
 			state.descriptor.LastTransitionAt = time.Now().UTC()
 		}
 		next := state.descriptor.State

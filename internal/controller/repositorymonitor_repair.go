@@ -729,7 +729,10 @@ func (r *RepositoryMonitorReconciler) completeRepositoryMonitorUpdateBranch(ctx 
 	item.HeadSHA = pr.HeadSHA
 	item.BaseSHA = pr.BaseSHA
 	if pr.Merged {
+		// A merged PR no longer has a pending or ready automerge state; keep
+		// both fields in step so retirement does not leave a stale merge_ready.
 		item.State = repositoryMonitorAutomergeStateMerged
+		item.AutomergeState = repositoryMonitorAutomergeStateMerged
 	}
 	item.RepairState = repositoryMonitorRepairPhaseSucceeded
 	item.SkipReason = ""
