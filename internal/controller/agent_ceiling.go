@@ -177,10 +177,16 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 // Tool names match without regard to case, but scopes must match exactly
 // because they carry command or path text. A bare ceiling entry also covers
 // scoped requests of the same tool; a scoped entry covers only its own scope.
+// An entry for a forwarding Tool covers its derived write tool, which a
+// registered external runtime lists by name; the Tool decides whether it has
+// writes at all.
 func ceilingAllowsTool(ceiling []string, tool string) bool {
 	tool = strings.TrimSpace(tool)
 	if tool == "" {
 		return true
+	}
+	if parent, ok := strings.CutSuffix(tool, harnessv2.MCPForwardWriteSuffix); ok && parent != "" {
+		return ceilingAllowsTool(ceiling, parent)
 	}
 	base, scope, scoped := splitCeilingTool(tool)
 	return slices.ContainsFunc(ceiling, func(entry string) bool {

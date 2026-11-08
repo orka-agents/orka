@@ -476,3 +476,29 @@ func TestRuntimeRefCeilingJudgesRegisteredPolicy(t *testing.T) {
 		t.Fatal("registration exposing a tool outside the ceiling: error = nil, want ceiling rejection")
 	}
 }
+
+// TestCeilingCoversForwardingWriteTools covers a registered external runtime
+// that lists a forwarding Tool's write tool by name: the ceiling entry for
+// the Tool covers it, and no other entry does.
+func TestCeilingCoversForwardingWriteTools(t *testing.T) {
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "fibey", Namespace: "team-a"},
+		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
+			RuntimeRef: &corev1alpha1.AgentRuntimeReference{Name: "fibey-runtime"},
+			Ceiling:    &corev1alpha1.AgentRuntimeCeiling{AllowedTools: []string{"azure-arm"}},
+		}},
+	}
+	registered := &corev1alpha1.AgentRuntimeMCPPolicySpec{AllowedTools: []string{"azure-arm", "azure-arm:write"}}
+	task := ceilingTestTask([]string{"azure-arm", "azure-arm:write"}, nil)
+	if err := validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, registered); err != nil {
+		t.Fatalf("a ceiling naming the Tool refused its write tool: %v", err)
+	}
+	agent.Spec.Runtime.Ceiling.AllowedTools = []string{"other"}
+	if err := validateAgentRuntimeCeilingWithRegisteredPolicy(task, agent, registered); err == nil ||
+		!strings.Contains(err.Error(), "ceiling does not allow tool") {
+		t.Fatalf("a ceiling without the Tool: %v", err)
+	}
+	if ceilingAllowsTool([]string{"azure-arm"}, ":write") || !ceilingAllowsTool([]string{"Azure-Arm"}, "azure-arm:write") {
+		t.Fatal("write tool coverage follows the Tool's ceiling entry")
+	}
+}
