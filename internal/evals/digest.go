@@ -88,3 +88,9 @@ func TrialPlanDigest(plan []PlannedTrial) (string, error) {
 		Plan   []PlannedTrial `json:"plan"`
 	}{Schema: "orka.eval.trialPlan.v1", Plan: plan})
 }
+
+// DigestJSON digests value's JSON encoding, for snapshot digests built
+// outside this package.
+func DigestJSON(value any) (string, error) {
+	return digestJSON(value)
+}

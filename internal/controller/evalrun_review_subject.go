@@ -105,6 +105,11 @@ func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.R
 		return nil, err
 	}
 	fixtureMonitor := evalReviewMonitorForFixture(monitor, input.RepoURL, owner, repository)
+	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
+		// The trial reviews with the candidate Agent, the same one the
+		// snapshot froze, instead of the monitor's reviewer.
+		fixtureMonitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: agentRef.Name}
+	}
 	pr := evalReviewPullRequest(input, owner, repository)
 	files := evalReviewFiles(input)
 	reviewContext := repositoryMonitorReviewContextBindChangedFileCount(
@@ -262,6 +267,11 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		return nil, err
 	}
 	reviewerRef := monitor.Spec.Agents.Reviewer
+	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
+		// A candidate reviews with its own Agent; the monitor still supplies
+		// every other review setting.
+		reviewerRef = &corev1alpha1.AgentReference{Name: agentRef.Name}
+	}
 	if reviewerRef == nil || strings.TrimSpace(reviewerRef.Name) == "" {
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "RepositoryMonitor %q has no reviewer agent", monitor.Name)
 	}

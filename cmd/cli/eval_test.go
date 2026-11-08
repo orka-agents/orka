@@ -425,3 +425,22 @@ func TestEvalGetFollowsAnExistingRun(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEvalGetPrintsTheExperiment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"cand","namespace":"team-a"},
+			"spec":{"experiment":{"hypothesis":"h","baselineRunRef":{"name":"base"},"target":{"grader":"verdict","tag":"defect"}}},
+			"status":{"phase":"Succeeded","experiment":{"result":"Failed","reasons":["contract regressed from 8/8 to 6/8"],
+			"target":{"baselinePassedTrials":1,"baselineTrials":9,"candidatePassedTrials":7,"candidateTrials":9,
+			"improvedPairs":6,"regressedPairs":0,"improvementPoints":"66.6667","pValue":"0.015625"}}}}`))
+	}))
+	defer srv.Close()
+	out, err := runEvalCommand(t, "eval", "get", "cand", "--server", srv.URL, "--token", "tok")
+	for _, want := range []string{"Experiment: Failed against baseline base (target verdict on defect)",
+		"1/9 -> 7/9 (66.6667 points); paired trials 6 improved, 0 regressed; p = 0.015625", "  - contract regressed"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("Execute() = %v, output lacks %q:\n%s", err, want, out)
+		}
+	}
+}

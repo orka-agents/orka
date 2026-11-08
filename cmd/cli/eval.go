@@ -319,6 +319,11 @@ func printEvalRunResults(out io.Writer, run *corev1alpha1.EvalRun) {
 	counts := run.Status.Counts
 	_, _ = fmt.Fprintf(out, "Trials: %d planned, %d completed, %d passed, %d failed, %d infra errors\n",
 		counts.Planned, counts.Completed, counts.Passed, counts.Failed, counts.InfraError)
+	defer func() {
+		for _, line := range evalExperimentLines(run) {
+			_, _ = fmt.Fprintln(out, line)
+		}
+	}()
 	if len(run.Status.Results) == 0 {
 		return
 	}
@@ -336,6 +341,30 @@ func printEvalRunResults(out io.Writer, run *corev1alpha1.EvalRun) {
 	if len(run.Status.SuspectCases) > 0 {
 		_, _ = fmt.Fprintf(out, "Suspect cases (no passing trial): %s\n", strings.Join(run.Status.SuspectCases, ", "))
 	}
+}
+
+// evalExperimentLines describes a candidate run's experiment result.
+func evalExperimentLines(run *corev1alpha1.EvalRun) []string {
+	experiment := run.Status.Experiment
+	if experiment == nil || run.Spec.Experiment == nil {
+		return nil
+	}
+	target := run.Spec.Experiment.Target
+	name := string(target.Grader)
+	if target.Tag != "" {
+		name += " on " + target.Tag
+	}
+	baseline := run.Spec.Experiment.BaselineRunRef.Name
+	lines := []string{fmt.Sprintf("Experiment: %s against baseline %s (target %s)", experiment.Result, baseline, name)}
+	if t := experiment.Target; t != nil {
+		lines = append(lines, fmt.Sprintf("Target pass@1: %d/%d -> %d/%d (%s points); paired trials %d improved, %d regressed; p = %s",
+			t.BaselinePassedTrials, t.BaselineTrials, t.CandidatePassedTrials, t.CandidateTrials, t.ImprovementPoints,
+			t.ImprovedPairs, t.RegressedPairs, t.PValue))
+	}
+	for _, reason := range experiment.Reasons {
+		lines = append(lines, "  - "+reason)
+	}
+	return lines
 }
 
 func evalRunCompletedCondition(run *corev1alpha1.EvalRun) *metav1.Condition {
@@ -491,6 +520,13 @@ func evalRunSummaryMarkdown(run *corev1alpha1.EvalRun, trials []store.EvalTrialR
 			}
 			fmt.Fprintf(&b, "| %s | %s | %d/%d | %d/%d | %d/%d |\n", result.Grader, tag, result.PassedTrials, result.Trials,
 				result.CasesAnyPassed, result.Cases, result.CasesAllPassed, result.Cases)
+		}
+		b.WriteString("\n")
+	}
+	if lines := evalExperimentLines(run); len(lines) > 0 {
+		b.WriteString("## Experiment\n\n")
+		for _, line := range lines {
+			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n")
 	}

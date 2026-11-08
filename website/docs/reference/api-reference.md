@@ -475,6 +475,16 @@ See [Repository Monitors](../guides/repository-monitors.md) for the full workflo
 
 `POST /api/v1/evals/runs` takes `{"metadata": {"name" or "generateName", "namespace", "labels", "annotations"}, "spec": {...}}`, the same shape as the EvalRun resource, and returns the created EvalRun. The EvalRun's own validation applies; a duplicate name is `409`. Creating needs `create` on `evalruns` in the target namespace, and reading needs `get`. `orka eval run` uses these endpoints.
 
+An EvalRun with `spec.experiment` is the candidate arm of an improvement experiment: it names a baseline EvalRun with `baselineRunRef`, reviews with `spec.subject.repositoryMonitorReview.agentRef` instead of the monitor's reviewer, and names the `target` grader (optionally on one case tag) it must improve. When both runs finish, `status.experiment` records the verdict: `Passed`, `Failed`, `Incomparable`, or `Pending` while the baseline runs.
+
+- **Before the first trial** the candidate freezes the gate from the ConfigMap named by `--eval-gate-configmap` and the baseline's UID. It fails if either is missing, if the baseline is itself a candidate, or if the baseline already has `maxCandidatesPerBaseline` candidates.
+- **Incomparable** means the runs differ in anything but the reviewer: case set, grader set, trial plan, monitor UID and generation, review prompt template, runtime image, subject, graders or `maxInfraErrorPercent`. It also covers a run that did not succeed, or a baseline that was deleted or recreated.
+- **Passed** needs every check:
+  - neither run spent more than the gate's infra error budget;
+  - the target pass@1 rose by at least `minTargetImprovementPoints`;
+  - a one-sided exact sign test over paired trials (same case and trial, graded in both runs) is at or below `significance / maxExperimentsPerHeldOutSet`;
+  - no grader's overall pass@1 fell.
+
 Trial records (`orka.eval.trial.v1`) hold the case id, trial number, Task name, outcome (`pass`, `fail` or `infraError`), infra class, each grader's result, the verdict, token and tool-call counts, latency and the run snapshot digests. They never hold transcripts; read those from `/api/v1/tasks/{name}/events`. The response is `{"items": [...]}`, or one record per line with `?format=jsonl` or `Accept: application/jsonl`. Access needs `get` on the EvalRun; transaction-token callers are refused. Records are deleted with the EvalRun. The EvalRun controller runs only with `--enable-evals`.
 
 ## Auth

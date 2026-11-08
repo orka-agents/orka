@@ -93,6 +93,9 @@ type EvalRunReconciler struct {
 	RuntimeImages ACPRuntimeImages
 	Graders       *evals.Registry
 	Now           func() time.Time
+	// GateConfigMap names the protected-set ConfigMap whose gate section
+	// judges experiments. Empty fails every experiment closed.
+	GateConfigMap types.NamespacedName
 }
 
 // evalRunObservation is what one reconcile resolves from the cluster.
@@ -171,6 +174,10 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 			return ctrl.Result{}, err
 		}
 	}
+	// Judge an experiment before the TTL can delete the candidate's records.
+	if experiment := run.Status.Experiment; experiment != nil && experiment.Result == corev1alpha1.EvalExperimentPending {
+		return r.decideExperiment(ctx, run)
+	}
 	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
 		return ctrl.Result{}, nil
 	}
@@ -203,6 +210,16 @@ func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *cor
 			"the run configuration changed after it started: "+configErr.message)
 	}
 	if run.Status.Snapshot == nil {
+		if run.Spec.Experiment != nil {
+			experiment, err := r.prepareExperiment(ctx, run, observed.Snapshot)
+			if err != nil {
+				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
+				}
+				return ctrl.Result{}, err
+			}
+			run.Status.Experiment = experiment
+		}
 		return ctrl.Result{}, r.startEvalRun(ctx, run, observed)
 	}
 	if changed := evalRunSnapshotChanges(*run.Status.Snapshot, observed.Snapshot); len(changed) > 0 {

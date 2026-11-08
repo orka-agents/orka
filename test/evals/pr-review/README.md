@@ -96,3 +96,33 @@ orka eval run -f evalrun.yaml --output-dir ./results
 
 Results are in `status.results`; per-trial records are at
 `GET /api/v1/evals/runs/<name>/trials`.
+
+## Compare a candidate reviewer
+
+An experiment pairs a baseline run with a candidate run that reviews with a
+different Agent. Create the baseline first, then the candidate:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: EvalRun
+metadata: {name: pr-review-candidate, namespace: <namespace>}
+spec:
+  subject:
+    type: repositoryMonitorReview
+    repositoryMonitorReview:
+      monitorRef: {name: <monitor>}
+      agentRef: {name: <candidate-agent>}     # reviews instead of the monitor's reviewer
+  cases:
+    configMapRef: {name: pr-review-cases, key: cases.jsonl}
+  trials: 3                                   # same cases, trials and graders as the baseline
+  graders: [verdict, localization, contract, honesty]
+  experiment:
+    hypothesis: The candidate prompt catches more defects.
+    baselineRunRef: {name: <baseline-run>}
+    target: {grader: verdict, tag: defect}
+```
+
+The controller must run with `--eval-gate-configmap` naming the protected-set
+ConfigMap. Its `gate` holds the thresholds. When both runs finish,
+`orka eval get <candidate>` prints the verdict, the paired target comparison
+and the reasons.

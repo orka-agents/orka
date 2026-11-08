@@ -102,6 +102,59 @@ spec:
                 x-kubernetes-validations:
                 - message: cases.configMapRef is required
                   rule: has(self.configMapRef)
+              experiment:
+                description: |-
+                  Experiment makes this run the candidate arm of an improvement
+                  experiment. The controller compares it with the baseline run once both
+                  finish and records the gate's result in status.experiment.
+                properties:
+                  baselineRunRef:
+                    description: |-
+                      BaselineRunRef names the baseline EvalRun in this namespace: the same
+                      monitor, cases, trials and graders with the stable reviewer.
+                    properties:
+                      name:
+                        description: Name is the object name.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  hypothesis:
+                    description: Hypothesis states in one sentence what the candidate
+                      should improve.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                  target:
+                    description: Target is the result the candidate must raise.
+                    properties:
+                      grader:
+                        description: |-
+                          Grader is the grader whose pass@1 must improve. It must be one of the
+                          run's graders.
+                        enum:
+                        - verdict
+                        - localization
+                        - contract
+                        - honesty
+                        type: string
+                      tag:
+                        description: Tag limits the target to cases with this tag.
+                          Empty means every case.
+                        maxLength: 63
+                        pattern: ^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$
+                        type: string
+                    required:
+                    - grader
+                    type: object
+                required:
+                - baselineRunRef
+                - hypothesis
+                - target
+                type: object
               graders:
                 description: Graders lists the code graders applied to every trial.
                 items:
@@ -141,6 +194,21 @@ spec:
                     description: RepositoryMonitorReview configures the repositoryMonitorReview
                       subject.
                     properties:
+                      agentRef:
+                        description: |-
+                          AgentRef names an Agent in the EvalRun's namespace to review with
+                          instead of the monitor's reviewer, such as a candidate in an
+                          experiment. The monitor still supplies every other review setting.
+                        properties:
+                          name:
+                            description: Name is the object name.
+                            maxLength: 253
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                            type: string
+                        required:
+                        - name
+                        type: object
                       monitorRef:
                         description: MonitorRef names a RepositoryMonitor in the EvalRun's
                           namespace.
@@ -211,10 +279,14 @@ spec:
                 == has(oldSelf.maxInfraErrorPercent) && (!has(self.maxInfraErrorPercent)
                 || self.maxInfraErrorPercent == oldSelf.maxInfraErrorPercent) && has(self.ttlSecondsAfterFinished)
                 == has(oldSelf.ttlSecondsAfterFinished) && (!has(self.ttlSecondsAfterFinished)
-                || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished)'
+                || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished)
+                && has(self.experiment) == has(oldSelf.experiment) && (!has(self.experiment)
+                || self.experiment == oldSelf.experiment)'
             - message: cases × trials must be at most 500
               rule: '!has(self.cases.ids) || size(self.cases.ids) * self.trials <=
                 500'
+            - message: experiment.target.grader must be one of graders
+              rule: '!has(self.experiment) || self.experiment.target.grader in self.graders'
           status:
             description: |-
               EvalRunStatus is the observed state of an EvalRun. Per-trial records live in
@@ -309,6 +381,132 @@ spec:
                     format: int32
                     minimum: 0
                     type: integer
+                type: object
+              experiment:
+                description: Experiment is the experiment gate's result for a candidate
+                  run.
+                properties:
+                  baselineRun:
+                    description: |-
+                      BaselineRun is the baseline run's identity, frozen when the candidate
+                      started, so a recreated baseline is not mistaken for it.
+                    properties:
+                      generation:
+                        description: Generation is the object generation.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      name:
+                        description: Name is the object name.
+                        maxLength: 253
+                        type: string
+                      uid:
+                        description: UID is the object UID.
+                        type: string
+                    type: object
+                  candidateDigest:
+                    description: |-
+                      CandidateDigest digests the candidate's promotable fields: the
+                      reviewer Agent's identity, resolved system prompt, model and runtime
+                      image.
+                    maxLength: 128
+                    type: string
+                  gate:
+                    description: Gate is the gate the experiment was judged by.
+                    properties:
+                      maxCandidatesPerBaseline:
+                        format: int32
+                        type: integer
+                      maxExperimentsPerHeldOutSet:
+                        format: int32
+                        type: integer
+                      maxInfraErrorPercent:
+                        format: int32
+                        type: integer
+                      minTargetImprovementPoints:
+                        format: int32
+                        type: integer
+                      significance:
+                        description: |-
+                          Significance is the one-sided test level before it is divided by
+                          MaxExperimentsPerHeldOutSet, as a decimal string such as "0.05".
+                        maxLength: 32
+                        type: string
+                    required:
+                    - maxCandidatesPerBaseline
+                    - maxExperimentsPerHeldOutSet
+                    - maxInfraErrorPercent
+                    - minTargetImprovementPoints
+                    - significance
+                    type: object
+                  gateDigest:
+                    description: GateDigest digests the frozen gate.
+                    maxLength: 128
+                    type: string
+                  reasons:
+                    description: |-
+                      Reasons explain a result other than Passed, and the checks a Passed
+                      result cleared.
+                    items:
+                      type: string
+                    maxItems: 32
+                    type: array
+                  result:
+                    description: Result is the gate's verdict.
+                    enum:
+                    - Pending
+                    - Passed
+                    - Failed
+                    - Incomparable
+                    type: string
+                  target:
+                    description: Target compares the target result of the two arms.
+                    properties:
+                      baselinePassedTrials:
+                        format: int32
+                        type: integer
+                      baselineTrials:
+                        format: int32
+                        type: integer
+                      candidatePassedTrials:
+                        format: int32
+                        type: integer
+                      candidateTrials:
+                        format: int32
+                        type: integer
+                      improvedPairs:
+                        description: |-
+                          ImprovedPairs counts paired trials the baseline failed and the
+                          candidate passed; RegressedPairs counts the reverse.
+                        format: int32
+                        type: integer
+                      improvementPoints:
+                        description: |-
+                          ImprovementPoints is candidate minus baseline pass@1 in percentage
+                          points, as a decimal string.
+                        maxLength: 32
+                        type: string
+                      pValue:
+                        description: |-
+                          PValue is the one-sided exact sign test over the paired trials, as a
+                          decimal string.
+                        maxLength: 32
+                        type: string
+                      regressedPairs:
+                        format: int32
+                        type: integer
+                    required:
+                    - baselinePassedTrials
+                    - baselineTrials
+                    - candidatePassedTrials
+                    - candidateTrials
+                    - improvedPairs
+                    - improvementPoints
+                    - pValue
+                    - regressedPairs
+                    type: object
+                required:
+                - result
                 type: object
               phase:
                 description: Phase is the run phase.

@@ -834,3 +834,22 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
 	}
 }
+
+func TestParseEvalGateConfigMap(t *testing.T) {
+	for _, test := range []struct {
+		value, want string
+		ok          bool
+	}{
+		{"", "/", true},
+		{"orka-protected-set", "orka-system/orka-protected-set", true},
+		{"evals/protected-set", "evals/protected-set", true},
+		{"Bad/protected-set", "", false},
+		{"evals/Bad_Name", "", false},
+		{"evals/a/b", "", false},
+	} {
+		got, err := parseEvalGateConfigMap(test.value, "orka-system")
+		if (err == nil) != test.ok || (test.ok && got.String() != test.want) {
+			t.Errorf("parseEvalGateConfigMap(%q) = %v, %v", test.value, got, err)
+		}
+	}
+}
