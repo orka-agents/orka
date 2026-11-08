@@ -405,7 +405,7 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	var body any
 	decoder := json.NewDecoder(bytes.NewReader(request.Body))
 	decoder.UseNumber()
-	var shown map[string]bool
+	var shown map[string]azurePreviewKind
 	if request.Method == http.MethodPut || request.Method == http.MethodPatch {
 		shown = azurePreviewSchemas[azureResourceType(request.Path)]
 	}
@@ -430,28 +430,40 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 
 // azurePreviewSchemas lists, per Resource Manager resource type, the
 // request-body paths a PUT or PATCH of that resource carries that only size,
-// place, or version it and never a secret. Paths start at the body's root;
-// "*" stands for any array element. A write to any other resource type, and
-// every action (POST), whose body is the action's own parameters, keeps every
+// place, or version it and never a secret, each with the JSON type its
+// value must have to be shown. Paths start at the body's root; "*" stands
+// for any array element. A write to any other resource type, and every
+// action (POST), whose body is the action's own parameters, keeps every
 // value masked.
-var azurePreviewSchemas = func() map[string]map[string]bool {
-	pool := "mode ostype ossku orchestratorversion count vmsize enableautoscaling mincount maxcount"
+var azurePreviewSchemas = func() map[string]map[string]azurePreviewKind {
+	pool := "mode:s ostype:s ossku:s orchestratorversion:s count:n vmsize:s enableautoscaling:b mincount:n maxcount:n"
 	schemas := map[string]string{
-		azureResourceGroupType: "location",
-		"microsoft.containerservice/managedclusters": "location zones.* sku.name sku.tier identity.type " +
-			"properties.kubernetesversion properties.agentpoolprofiles.*.name " + prefixed("properties.agentpoolprofiles.*.", pool),
+		azureResourceGroupType: "location:s",
+		"microsoft.containerservice/managedclusters": "location:s zones.*:s sku.name:s sku.tier:s identity.type:s " +
+			"properties.kubernetesversion:s properties.agentpoolprofiles.*.name:s " + prefixed("properties.agentpoolprofiles.*.", pool),
 		"microsoft.containerservice/managedclusters/agentpools": prefixed("properties.", pool),
-		"microsoft.compute/virtualmachines":                     "location zones.* properties.hardwareprofile.vmsize",
+		"microsoft.compute/virtualmachines":                     "location:s zones.*:s properties.hardwareprofile.vmsize:s",
 	}
-	out := make(map[string]map[string]bool, len(schemas))
+	kinds := map[string]azurePreviewKind{"s": azurePreviewString, "n": azurePreviewNumber, "b": azurePreviewBool}
+	out := make(map[string]map[string]azurePreviewKind, len(schemas))
 	for resourceType, paths := range schemas {
-		out[resourceType] = map[string]bool{}
-		for path := range strings.FieldsSeq(paths) {
-			out[resourceType][path] = true
+		out[resourceType] = map[string]azurePreviewKind{}
+		for field := range strings.FieldsSeq(paths) {
+			path, kind, _ := strings.Cut(field, ":")
+			out[resourceType][path] = kinds[kind]
 		}
 	}
 	return out
 }()
+
+// azurePreviewKind is the JSON type a shown preview value must have.
+type azurePreviewKind int
+
+const (
+	azurePreviewString azurePreviewKind = iota + 1
+	azurePreviewNumber
+	azurePreviewBool
+)
 
 // azureResourceGroupType names a resource group path in azurePreviewSchemas.
 const azureResourceGroupType = "resourcegroups"
@@ -496,11 +508,12 @@ func azureResourceType(path string) string {
 const maxAzurePreviewString = 128
 
 // maskJSONValues masks a decoded JSON value for an approval preview: a value
-// at one of shown (path names it from the body's root) is shown when it is
-// not a long string; every other value is masked. A key that is empty or
-// holds a separator or the wildcard could pose as another path, so it, and
-// everything under it, never matches.
-func maskJSONValues(value any, path string, shown map[string]bool) any {
+// at one of shown (path names it from the body's root) is shown when it has
+// the type shown expects and is not a long string; every other value is
+// masked, so a secret sent in a sizing field of the wrong type stays
+// hidden. A key that is empty or holds a separator or the wildcard could
+// pose as another path, so it, and everything under it, never matches.
+func maskJSONValues(value any, path string, shown map[string]azurePreviewKind) any {
 	child := func(segment string) string {
 		if path == "" {
 			return segment
@@ -523,10 +536,24 @@ func maskJSONValues(value any, path string, shown map[string]bool) any {
 		}
 		return typed
 	}
-	if text, isString := value.(string); shown[path] && (!isString || len(text) <= maxAzurePreviewString) {
+	if azurePreviewShows(shown[path], value) {
 		return value
 	}
 	return "[masked]"
+}
+
+// azurePreviewShows reports whether a preview may show value as kind: a
+// short string as a string, a number as a number, a boolean as a boolean.
+func azurePreviewShows(kind azurePreviewKind, value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return kind == azurePreviewString && len(typed) <= maxAzurePreviewString
+	case json.Number:
+		return kind == azurePreviewNumber
+	case bool:
+		return kind == azurePreviewBool
+	}
+	return false
 }
 
 // connectorBindingDigest combines the frozen Connection identity digest with

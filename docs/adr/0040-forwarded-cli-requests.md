@@ -117,8 +117,10 @@ http:
   `5xx`, pass through unchanged, so the client retries them as it would
   against Azure directly. Azure did not process a throttled (`429`) write,
   so the gateway sends the client's retry again as a new attempt, under a
-  new call ID (an approval-required write needs a new approval). Other
-  retries join, and a recorded answer the SDK retries (`408`, `429`, `5xx`)
+  new call ID (an approval-required write needs a new approval). A session
+  tracks up to 256 throttled writes and never forgets one, since that could
+  resend a write that already succeeded; a further throttled write gets a
+  final `409 OrkaThrottled` instead of the `429`. Other retries join, and a recorded answer the SDK retries (`408`, `429`, `5xx`)
   keeps its status and `Retry-After` when replayed.
 - `POST` actions are forwarded too, so `az aks get-credentials` and actions
   such as start and stop work. An action that returns a secret, such as

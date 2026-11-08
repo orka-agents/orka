@@ -183,24 +183,30 @@ func (g *azureGateway) attemptCallID(write bool, callID string) (string, int) {
 // Only the current attempt's 429 advances it; a late 429 of an earlier
 // attempt, which another request may have joined, never does, so a write
 // that later succeeded is never sent again.
-func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int) {
+//
+// It reports false when it cannot record the throttle because the session
+// already tracks its most writes. Tracked writes keep their place, since
+// forgetting one could resend a write that already succeeded, so the
+// caller must answer with an error az does not retry: a retry would only
+// rejoin, and replay, the throttled attempt.
+func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int) bool {
 	if !write || status != http.StatusTooManyRequests || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
-		return
+		return true
 	}
 	g.throttledMu.Lock()
 	defer g.throttledMu.Unlock()
-	if g.throttled[callID] != attempt {
-		return
+	current, tracked := g.throttled[callID]
+	if current != attempt {
+		return true
 	}
-	if g.throttled == nil || len(g.throttled) >= maxAzureThrottledWrites {
+	if !tracked && len(g.throttled) >= maxAzureThrottledWrites {
+		return false
+	}
+	if g.throttled == nil {
 		g.throttled = map[string]int{}
-		if attempt > 0 {
-			// The map was reset; keep this write's place so it never rejoins
-			// an attempt it has already passed.
-			g.throttled[callID] = attempt
-		}
 	}
-	g.throttled[callID]++
+	g.throttled[callID] = current + 1
+	return true
 }
 
 // azureForwardingTool returns the session's Azure forwarding Tool, if any,
@@ -515,7 +521,11 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
 		return
 	}
-	g.noteAnswer(write, baseCallID, attempt, forwarded.Status)
+	if !g.noteAnswer(write, baseCallID, attempt, forwarded.Status) {
+		writeAzureError(w, http.StatusConflict, "OrkaThrottled",
+			"Azure throttled the request and did not process it, and this session already tracks its most throttled writes. Run the command again later.")
+		return
+	}
 	for name, value := range forwarded.Headers {
 		if name == harnessv2.ForwardHeadContentLength {
 			continue

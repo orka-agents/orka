@@ -200,8 +200,11 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	// Nothing outside a known resource's sizing paths is shown: a
 	// deployment's secure parameters, an action's own parameters, a resource
 	// type without a known schema, an empty key posing as the root, and a
-	// literal key that spells a nested path.
+	// literal key that spells a nested path, and a sizing field holding a
+	// value of the wrong type.
 	for _, request := range []string{
+		`{"method":"PUT","path":"` + aks + `","body":{"location":482913,"properties":{"agentPoolProfiles":[` +
+			`{"count":"private-count","enableAutoScaling":"private-flag","vmSize":true,"maxCount":{"v":"private-nested"}}]}}}`,
 		`{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg/providers/Microsoft.Resources/deployments/d","body":` +
 			`{"properties":{"mode":"Incremental","parameters":{"credentials":{"value":{"pin":482913,"location":"private-decoy"}}}}}}`,
 		`{"method":"POST","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DataFactory/factories/f/pipelines/p/createRun","body":{"location":"private-param"}}`,

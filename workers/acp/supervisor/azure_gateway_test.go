@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -657,6 +658,24 @@ func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 	if len(calls) != 3 || calls[1].Call.CallID != calls[0].Call.CallID+"-a1" || calls[2].Call.CallID != calls[1].Call.CallID {
 		t.Fatalf("call IDs = %q, %q, %q; want a new attempt after the 429, then a join", calls[0].Call.CallID, calls[1].Call.CallID, calls[2].Call.CallID)
 	}
+	// Past the session's limit, a new throttled write gets an answer az
+	// does not retry, since its retry could only replay the 429.
+	fixture.mu.Lock()
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		return json.RawMessage(`{"status":429,"headers":{"Retry-After":"1"},"body":"{}"}`)
+	}
+	fixture.mu.Unlock()
+	for index := 1; index <= maxAzureThrottledWrites; index++ {
+		header.Set("X-Ms-Client-Request-Id", "req-limit-"+strconv.Itoa(index))
+		response, answer := fixture.send(t, http.MethodPut, path, header, body)
+		want := http.StatusTooManyRequests
+		if index == maxAzureThrottledWrites {
+			want = http.StatusConflict
+		}
+		if response.StatusCode != want || (want == http.StatusConflict && !strings.Contains(answer, "OrkaThrottled")) {
+			t.Fatalf("throttled write %d status = %d: %s", index, response.StatusCode, answer)
+		}
+	}
 }
 
 // TestAzureGatewayIgnoresStaleThrottles covers two requests that joined the
@@ -681,5 +700,41 @@ func TestAzureGatewayIgnoresStaleThrottles(t *testing.T) {
 	}
 	if callID, _ = g.attemptCallID(true, "az-random"); callID != "az-random" {
 		t.Fatal("an unjoinable call ID must not change")
+	}
+}
+
+// TestAzureGatewayThrottleMemoryKeepsTrackedWrites covers a session at its
+// throttled-write limit: writes it already tracks keep their attempts and
+// still advance, and a new throttled write it cannot track is refused, so
+// no write rejoins an attempt it has passed and none replays its 429.
+func TestAzureGatewayThrottleMemoryKeepsTrackedWrites(t *testing.T) {
+	g := &azureGateway{}
+	succeeded, throttled := azureJoinableWritePrefix+"succeeded", azureJoinableWritePrefix+"throttled"
+	if !g.noteAnswer(true, succeeded, 0, http.StatusTooManyRequests) || !g.noteAnswer(true, throttled, 0, http.StatusTooManyRequests) {
+		t.Fatal("a throttle below the limit must be tracked")
+	}
+	g.noteAnswer(true, succeeded, 1, http.StatusOK)
+	for index := len(g.throttled); index < maxAzureThrottledWrites; index++ {
+		if !g.noteAnswer(true, azureJoinableWritePrefix+strconv.Itoa(index), 0, http.StatusTooManyRequests) {
+			t.Fatalf("throttle %d refused below the limit", index)
+		}
+	}
+	if g.noteAnswer(true, azureJoinableWritePrefix+"new", 0, http.StatusTooManyRequests) {
+		t.Fatal("a new throttled write past the limit must be refused")
+	}
+	if !g.noteAnswer(true, azureJoinableWritePrefix+"new", 0, http.StatusOK) {
+		t.Fatal("an unthrottled answer must pass")
+	}
+	if callID, _ := g.attemptCallID(true, succeeded); callID != succeeded+"-a1" {
+		t.Fatalf("succeeded write = %q; want it to keep its attempt", callID)
+	}
+	if !g.noteAnswer(true, throttled, 1, http.StatusTooManyRequests) {
+		t.Fatal("a tracked write must still advance at the limit")
+	}
+	if callID, _ := g.attemptCallID(true, throttled); callID != throttled+"-a2" {
+		t.Fatalf("throttled write = %q; want its third attempt", callID)
+	}
+	if len(g.throttled) != maxAzureThrottledWrites {
+		t.Fatalf("tracked %d writes, want %d", len(g.throttled), maxAzureThrottledWrites)
 	}
 }
