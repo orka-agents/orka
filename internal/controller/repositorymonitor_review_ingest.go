@@ -344,7 +344,13 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
-	recordRepositoryMonitorReviewMetrics(plan, ledger, record, rounds)
+	passPending := false
+	if record.Verdict == repositoryMonitorReviewVerdictPassed {
+		if passPending, err = r.repositoryMonitorExhaustivePassPending(ctx, monitor, record); err != nil {
+			return false, err
+		}
+	}
+	recordRepositoryMonitorReviewMetrics(plan, ledger, record, rounds, passPending)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
@@ -981,7 +987,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
-	metrics.RecordRepositoryMonitorReview(firstNonEmptyString(strings.TrimSpace(task.Annotations[repositoryMonitorAnnotationReviewMode]), repositoryMonitorReviewModeFull), record.Verdict)
+	metrics.RecordRepositoryMonitorReview(repositoryMonitorReviewMetricMode(task.Annotations[repositoryMonitorAnnotationReviewMode]), record.Verdict)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
