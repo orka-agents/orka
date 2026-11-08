@@ -136,9 +136,12 @@ fresh. When both runs finish,
 `orka eval get <candidate>` prints the verdict, the paired target comparison
 and the reasons. With `--wait` it exits non-zero unless the experiment passed.
 
-A person then records the decision. Bind the `orka-eval-promoter` ClusterRole
-to them and start the controller with `--eval-promoter-groups` naming a group
-they are in; ServiceAccounts are always refused:
+A person then records the decision. Bind the eval promoter ClusterRole to them
+(`orka-eval-promoter` from the kustomize manifests; from the Helm chart, the
+ClusterRole ending in `-cluster-eval-promoter`, `orka-controller-cluster-eval-promoter`
+for a release named `orka`), and start the controller with
+`--eval-promoter-groups` naming a group they are in. ServiceAccounts are always
+refused:
 
 ```bash
 curl -X POST "$ORKA/api/v1/evals/runs/pr-review-candidate/decisions?namespace=<namespace>" \
