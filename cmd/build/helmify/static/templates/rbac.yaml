@@ -1,3 +1,4 @@
+{{- $aiWorkerRBACProfile := include "orka.aiWorkerRBACProfile" . -}}
 {{- if .Values.rbac.create -}}
 # Controller tenant Role. The release namespace is also the immutable watch namespace.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -535,7 +536,7 @@ subjects:
     namespace: {{ include "orka.clientNamespace" . }}
 {{- end }}
 ---
-# AI Worker Role (trusted worker with Kubernetes tool and code_exec permissions)
+# AI Worker Role (default grants or an opt-in read-only profile)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -543,6 +544,20 @@ metadata:
   labels:
     {{- include "orka.labels" . | nindent 4 }}
 rules:
+  {{- if eq $aiWorkerRBACProfile "restricted" }}
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tools", "outboundaccesspolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["agents", "agentruntimes"]
+    verbs: ["get"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks"]
+    verbs: ["get", "list", "watch"]
+  {{- else }}
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "delete"]
@@ -609,6 +624,7 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods", "nodes"]
     verbs: ["get", "list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
