@@ -191,6 +191,14 @@ func runExternalEffectWithReplayMode[T any](
 		}
 		return response, true, nil
 	}
+	if !reclaim && effect.State == store.ExternalEffectFailed && len(effect.Response) > 0 {
+		// A run that never reclaims settles a definite failure with its
+		// answer, so a redelivery replays that answer.
+		var response T
+		if json.Unmarshal(effect.Response, &response) == nil {
+			return response, true, nil
+		}
+	}
 	if effect.State == store.ExternalEffectFailed || effect.State == store.ExternalEffectOutcomeUnknown {
 		return zero, false, fmt.Errorf("external effect %s is terminal in state %s", effect.ID, effect.State)
 	}

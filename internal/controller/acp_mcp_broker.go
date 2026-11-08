@@ -910,6 +910,16 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// record to that delivery or to reconciliation.
 			result, err = json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`), nil
 		}
+		if noEffect, ok := errors.AsType[*tools.NoEffectError](err); ok && descriptor.Forward != nil && descriptor.Forward.Write {
+			// A forwarded write refused before it was sent is a definite
+			// failure, as on the approval path, not an unknown outcome.
+			failure := acpApprovalResult("", acpApprovalCodeNoEffect, acpApprovalFailureSummary(noEffect.Summary))
+			settleCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Second)
+			if settleErr := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, identity, store.ExternalEffectFailed, failure); settleErr == nil {
+				result, err = failure, nil
+			}
+			cancel()
+		}
 	} else {
 		result, err = call(promptCtx)
 	}
