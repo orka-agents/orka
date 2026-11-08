@@ -75,3 +75,6 @@ data:
     gate:                          # improvement thresholds, see #994
       maxInfraErrorPercent: 10
       maxCandidatesPerBaseline: 3
+      maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
+      minTargetImprovementPoints: 5     # target pass@1 must rise by at least this many points
+      significance: 0.05                # one-sided paired test, divided by maxExperimentsPerHeldOutSet

@@ -131,6 +131,10 @@ func TestParseRejectsInvalidDeclarations(t *testing.T) {
 		"missing gate":        "schemaVersion: orka.protectedSet.v1\npaths: [\"a/**\"]\n",
 		"gate out of range":   strings.Replace(validMinimalSetDoc, "maxInfraErrorPercent: 10", "maxInfraErrorPercent: 101", 1),
 		"no candidates":       strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 0", 1),
+		"no experiments":      strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 3, maxExperimentsPerHeldOutSet: 0", 1),
+		"improvement range":   strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 3, minTargetImprovementPoints: 101", 1),
+		"zero significance":   strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 3, significance: 0", 1),
+		"large significance":  strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 3, significance: 0.6", 1),
 		"bad split":           validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: test}]\n",
 		"bad namespace":       validMinimalSetDoc + "caseSets: [{namespace: Evals, name: cases, split: train}]\n",
 		"duplicate case set":  validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: train}, {namespace: evals, name: cases, split: heldOut}]\n",
@@ -269,5 +273,22 @@ func TestSourceLoadFailsClosed(t *testing.T) {
 	}
 	if loaded.Digest() != set.Digest() {
 		t.Fatalf("loaded digest = %s, want %s", loaded.Digest(), set.Digest())
+	}
+}
+
+// The experiment gate's fields are optional for proposer flows but parsed
+// and kept when present.
+func TestParseKeepsTheExperimentGate(t *testing.T) {
+	document := strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3",
+		"maxCandidatesPerBaseline: 3, maxExperimentsPerHeldOutSet: 10, minTargetImprovementPoints: 5, significance: 0.05", 1)
+	set, err := Parse([]byte(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := set.Gate
+	if gate.MaxExperimentsPerHeldOutSet == nil || *gate.MaxExperimentsPerHeldOutSet != 10 ||
+		gate.MinTargetImprovementPoints == nil || *gate.MinTargetImprovementPoints != 5 ||
+		gate.Significance == nil || *gate.Significance != 0.05 {
+		t.Fatalf("gate = %+v", gate)
 	}
 }

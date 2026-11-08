@@ -78,10 +78,20 @@ type CaseSet struct {
 	Split     string `json:"split"`
 }
 
-// Gate holds the improvement thresholds frozen into experiments.
+// Gate holds the improvement thresholds frozen into experiments. The last
+// three fields are read only by the EvalRun experiment gate (#993), which
+// requires them; proposer flows run without them.
 type Gate struct {
 	MaxInfraErrorPercent     *int32 `json:"maxInfraErrorPercent"`
 	MaxCandidatesPerBaseline *int32 `json:"maxCandidatesPerBaseline"`
+	// MaxExperimentsPerHeldOutSet is the held-out case set's usage budget.
+	MaxExperimentsPerHeldOutSet *int32 `json:"maxExperimentsPerHeldOutSet,omitempty"`
+	// MinTargetImprovementPoints is how many percentage points the target
+	// pass@1 must rise by.
+	MinTargetImprovementPoints *int32 `json:"minTargetImprovementPoints,omitempty"`
+	// Significance is the one-sided paired test's level before it is divided
+	// by MaxExperimentsPerHeldOutSet.
+	Significance *float64 `json:"significance,omitempty"`
 }
 
 // Parse strictly decodes and validates a declaration. Unknown fields are
@@ -174,6 +184,15 @@ func (s *Set) normalize() error {
 	}
 	if s.Gate.MaxCandidatesPerBaseline == nil || *s.Gate.MaxCandidatesPerBaseline < 1 {
 		return fmt.Errorf("protected set gate.maxCandidatesPerBaseline must be set and at least 1")
+	}
+	if v := s.Gate.MaxExperimentsPerHeldOutSet; v != nil && *v < 1 {
+		return fmt.Errorf("protected set gate.maxExperimentsPerHeldOutSet must be at least 1")
+	}
+	if v := s.Gate.MinTargetImprovementPoints; v != nil && (*v < 0 || *v > 100) {
+		return fmt.Errorf("protected set gate.minTargetImprovementPoints must be between 0 and 100")
+	}
+	if v := s.Gate.Significance; v != nil && (*v <= 0 || *v > 0.5) {
+		return fmt.Errorf("protected set gate.significance must be greater than 0 and at most 0.5")
 	}
 	return nil
 }
