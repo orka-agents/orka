@@ -400,6 +400,11 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 ) (json.RawMessage, error) {
 	call, err := e.prepareACPMCPTool(ctx, request, descriptor)
 	if err != nil {
+		if descriptor.Forward != nil && descriptor.Forward.Write {
+			// Preparation sends nothing, so a forwarded write refused here
+			// is reported as refused, never as possibly applied.
+			return nil, &tools.NoEffectError{Summary: "The tool refused the request before sending it.", Err: err}
+		}
 		return nil, err
 	}
 	return call(ctx)

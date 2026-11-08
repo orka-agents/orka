@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -262,5 +264,26 @@ func TestForwardingWritesNeedAReadWriteLink(t *testing.T) {
 		if got := slices.Contains(effectiveACPAllowedTools(adjusted, agent), "azure-arm:write"); got != tc.want {
 			t.Errorf("%s: write tool offered = %t, want %t", name, got, tc.want)
 		}
+	}
+}
+
+// TestForwardingWritePreparationFailuresHaveNoEffect covers a forwarded
+// write refused while it is prepared, here because its Tool no longer
+// allows writes: nothing was sent, so the failure is a no-effect refusal.
+func TestForwardingWritePreparationFailuresHaveNoEffect(t *testing.T) {
+	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalNone)
+	read, err := customACPMCPToolDescriptor(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write, err := forwardingWriteDescriptor(tool, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withdrawn := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(forwardingDescriptorTool()).Build()
+	executor := RegistryACPMCPToolExecutor{Reader: withdrawn, KubeClient: k8sfake.NewSimpleClientset()}
+	_, err = executor.ExecuteACPMCPTool(context.Background(), harnessv2.MCPBrokerCallRequest{Namespace: "tenant"}, write)
+	if _, ok := errors.AsType[*tools.NoEffectError](err); !ok {
+		t.Fatalf("preparation failure = %v, want a no-effect refusal", err)
 	}
 }
