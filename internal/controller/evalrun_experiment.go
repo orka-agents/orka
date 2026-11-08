@@ -94,6 +94,26 @@ func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 	return subject != nil && subject.AgentRef != nil
 }
 
+// refuseUnpairedHeldOutCandidate fails a run that reviews with a candidate
+// Agent on a held-out case set outside an experiment: such a run would test
+// a candidate against the held-out cases without spending an attempt. With
+// no gate configured there are no held-out sets; a configured gate that
+// cannot be read fails closed.
+func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, run *corev1alpha1.EvalRun) error {
+	if r.GateConfigMap.Name == "" {
+		return nil
+	}
+	_, _, heldOut, err := r.loadExperimentGate(ctx)
+	if err != nil {
+		return err
+	}
+	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && heldOut[run.Namespace+"/"+ref.Name] {
+		return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"a run that sets agentRef on a held-out case set must be an experiment; add spec.experiment")
+	}
+	return nil
+}
+
 // reserveExperiment spends one of the gate's attempts on this candidate
 // before its first trial. Attempts are durable: deleting a candidate, or its
 // TTL, never returns one, so a proposer cannot retry against the held-out

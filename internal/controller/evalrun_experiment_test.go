@@ -301,6 +301,38 @@ func TestEvalExperimentIncomparableWhenTheBaselineIsGone(t *testing.T) {
 	}
 }
 
+// A candidate Agent may not review the held-out cases outside an experiment,
+// where it would spend no attempt. On other cases it may.
+func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
+	for name, test := range map[string]struct {
+		gate     string
+		wantFail bool
+	}{
+		"held out":   {gate: evalTestGate, wantFail: true},
+		"training":   {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1)},
+		"no gate":    {},
+		"unreadable": {gate: "{", wantFail: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			baseline, candidate := experimentRuns(1, 1)
+			candidate.Spec.Experiment = nil
+			env := newExperimentEnv(t, baseline, candidate, test.gate)
+			if test.gate == "" {
+				env.reconciler.GateConfigMap = types.NamespacedName{}
+			}
+			env.reconcileRun("candidate")
+			env.reconcileRun("candidate")
+			run := env.getRun("candidate")
+			if failed := run.Status.Phase == corev1alpha1.EvalRunPhaseFailed; failed != test.wantFail {
+				t.Fatalf("phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+			}
+			if test.wantFail && len(env.tasksOf("candidate")) != 0 {
+				t.Fatal("an unpaired candidate started trials on held-out cases")
+			}
+		})
+	}
+}
+
 // A candidate that cannot be paired fails before any trial starts.
 func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 	for name, test := range map[string]struct {

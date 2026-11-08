@@ -219,6 +219,14 @@ func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *cor
 			"the run configuration changed after it started: "+configErr.message)
 	}
 	if run.Status.Snapshot == nil {
+		if run.Spec.Experiment == nil && evalRunAgentOverride(run) {
+			if err := r.refuseUnpairedHeldOutCandidate(ctx, run); err != nil {
+				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
+				}
+				return ctrl.Result{}, err
+			}
+		}
 		if run.Spec.Experiment != nil {
 			experiment, err := r.prepareExperiment(ctx, run, observed)
 			if err != nil {
