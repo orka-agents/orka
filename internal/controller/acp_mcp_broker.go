@@ -405,8 +405,12 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	var body any
 	decoder := json.NewDecoder(bytes.NewReader(request.Body))
 	decoder.UseNumber()
+	var shown map[string]bool
+	if request.Method == http.MethodPut || request.Method == http.MethodPatch {
+		shown = azurePreviewSchemas[azureResourceType(request.Path)]
+	}
 	if len(request.Body) > 0 && decoder.Decode(&body) == nil {
-		body = maskJSONValues(body, "")
+		body = maskJSONValues(body, "", shown)
 	} else {
 		body = nil
 	}
@@ -424,34 +428,79 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	return masked
 }
 
-// azurePreviewPaths are the request-body paths, anchored at the body's root,
-// whose values an approval preview shows: they size, place, or version the
-// resource being written and never carry a secret. "*" stands for any array
-// element. Every other value is masked, a number or a boolean too, so a
-// field that only looks like one of these inside an arbitrary or secure
-// object (such as a deployment parameter) stays hidden.
-var azurePreviewPaths = func() map[string]bool {
-	paths := map[string]bool{}
-	for path := range strings.FieldsSeq("location kind zones.* identity.type " +
-		"sku.name sku.tier sku.capacity sku.family sku.size " +
-		"properties.kubernetesversion properties.hardwareprofile.vmsize " +
-		"properties.agentpoolprofiles.*.name properties.agentpoolprofiles.*.count " +
-		"properties.agentpoolprofiles.*.vmsize properties.agentpoolprofiles.*.mode " +
-		"properties.agentpoolprofiles.*.ostype properties.agentpoolprofiles.*.ossku " +
-		"properties.agentpoolprofiles.*.orchestratorversion properties.agentpoolprofiles.*.enableautoscaling " +
-		"properties.agentpoolprofiles.*.mincount properties.agentpoolprofiles.*.maxcount") {
-		paths[path] = true
+// azurePreviewSchemas lists, per Resource Manager resource type, the
+// request-body paths a PUT or PATCH of that resource carries that only size,
+// place, or version it and never a secret. Paths start at the body's root;
+// "*" stands for any array element. A write to any other resource type, and
+// every action (POST), whose body is the action's own parameters, keeps every
+// value masked.
+var azurePreviewSchemas = func() map[string]map[string]bool {
+	pool := "mode ostype ossku orchestratorversion count vmsize enableautoscaling mincount maxcount"
+	schemas := map[string]string{
+		azureResourceGroupType: "location",
+		"microsoft.containerservice/managedclusters": "location zones.* sku.name sku.tier identity.type " +
+			"properties.kubernetesversion properties.agentpoolprofiles.*.name " + prefixed("properties.agentpoolprofiles.*.", pool),
+		"microsoft.containerservice/managedclusters/agentpools": prefixed("properties.", pool),
+		"microsoft.compute/virtualmachines":                     "location zones.* properties.hardwareprofile.vmsize",
 	}
-	return paths
+	out := make(map[string]map[string]bool, len(schemas))
+	for resourceType, paths := range schemas {
+		out[resourceType] = map[string]bool{}
+		for path := range strings.FieldsSeq(paths) {
+			out[resourceType][path] = true
+		}
+	}
+	return out
 }()
+
+// azureResourceGroupType names a resource group path in azurePreviewSchemas.
+const azureResourceGroupType = "resourcegroups"
+
+// prefixed returns each space-separated field of fields with prefix.
+func prefixed(prefix, fields string) string {
+	var out []string
+	for field := range strings.FieldsSeq(fields) {
+		out = append(out, prefix+field)
+	}
+	return strings.Join(out, " ")
+}
+
+// azureResourceType returns the lowercase resource type a Resource Manager
+// path names the resource itself of, such as
+// "microsoft.containerservice/managedclusters", or "" for an action or
+// collection path.
+func azureResourceType(path string) string {
+	segments := strings.Split(strings.Trim(strings.ToLower(path), "/"), "/")
+	if len(segments) == 4 && segments[0] == "subscriptions" && segments[2] == azureResourceGroupType {
+		return azureResourceGroupType
+	}
+	providers := -1
+	for index, segment := range segments {
+		if segment == "providers" {
+			providers = index
+		}
+	}
+	rest := segments[providers+1:]
+	// A namespace, then type/name pairs: an odd tail is an action or a list.
+	if providers < 0 || len(rest) < 3 || len(rest)%2 == 0 {
+		return ""
+	}
+	resourceTypes := []string{rest[0]}
+	for index := 1; index < len(rest); index += 2 {
+		resourceTypes = append(resourceTypes, rest[index])
+	}
+	return strings.Join(resourceTypes, "/")
+}
 
 // maxAzurePreviewString bounds a shown string value.
 const maxAzurePreviewString = 128
 
 // maskJSONValues masks a decoded JSON value for an approval preview: a value
-// at one of azurePreviewPaths (path names it from the body's root) is shown
-// when it is not a long string; every other value is masked.
-func maskJSONValues(value any, path string) any {
+// at one of shown (path names it from the body's root) is shown when it is
+// not a long string; every other value is masked. A key that is empty or
+// holds a separator or the wildcard could pose as another path, so it, and
+// everything under it, never matches.
+func maskJSONValues(value any, path string, shown map[string]bool) any {
 	child := func(segment string) string {
 		if path == "" {
 			return segment
@@ -462,21 +511,19 @@ func maskJSONValues(value any, path string) any {
 	case map[string]any:
 		for field, item := range typed {
 			segment := strings.ToLower(field)
-			if strings.ContainsAny(segment, ".*") {
-				// A key holding a separator or the wildcard could pose as a
-				// nested path, so it, and everything under it, never matches.
+			if segment == "" || strings.ContainsAny(segment, ".*\x00") {
 				segment = "\x00"
 			}
-			typed[field] = maskJSONValues(item, child(segment))
+			typed[field] = maskJSONValues(item, child(segment), shown)
 		}
 		return typed
 	case []any:
 		for index, item := range typed {
-			typed[index] = maskJSONValues(item, child("*"))
+			typed[index] = maskJSONValues(item, child("*"), shown)
 		}
 		return typed
 	}
-	if text, isString := value.(string); azurePreviewPaths[path] && (!isString || len(text) <= maxAzurePreviewString) {
+	if text, isString := value.(string); shown[path] && (!isString || len(text) <= maxAzurePreviewString) {
 		return value
 	}
 	return "[masked]"

@@ -180,12 +180,13 @@ func TestForwardedWriteKeptResultKeepsNoAnswer(t *testing.T) {
 // preview of a forwarded write: its method, path, and body fields, with no
 // body value, whatever the field is called.
 func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
+	aks := "/subscriptions/s1/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks1"
 	masked := string(maskForwardedWriteArguments(json.RawMessage(
-		`{"method":"PUT","path":"/subscriptions/s1/x/functions/f/keys/k","body":{"location":"westus2","sku":{"name":"Base","tier":"Free"},` +
+		`{"method":"PUT","path":"` + aks + `","body":{"location":"westus2","sku":{"name":"Base","tier":"Free"},` +
 			`"properties":{"name":"k","value":"private-function-key","adminPassword":"private-password","n":[1,true],` +
 			`"agentPoolProfiles":[{"count":1,"vmSize":"Standard_B2s","enableAutoScaling":false}]}}}`)))
 	for _, want := range []string{
-		`"method":"PUT"`, `/functions/f/keys/k`, `"value":"[masked]"`, `"name":"[masked]"`, `"adminPassword":"[masked]"`,
+		`"method":"PUT"`, `/managedClusters/aks1`, `"value":"[masked]"`, `"name":"[masked]"`, `"adminPassword":"[masked]"`,
 		`"location":"westus2"`, `"tier":"Free"`, `"count":1`, `"vmSize":"Standard_B2s"`, `"enableAutoScaling":false`,
 		`"n":["[masked]","[masked]"]`,
 	} {
@@ -196,19 +197,33 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	if strings.Contains(masked, "private-") {
 		t.Fatalf("masked preview kept a secret: %s", masked)
 	}
-	// A deployment's secure parameters stay masked, a number or a field
-	// named like a sizing field included: only root-anchored paths show.
-	deployment := string(maskForwardedWriteArguments(json.RawMessage(
+	// Nothing outside a known resource's sizing paths is shown: a
+	// deployment's secure parameters, an action's own parameters, a resource
+	// type without a known schema, an empty key posing as the root, and a
+	// literal key that spells a nested path.
+	for _, request := range []string{
 		`{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg/providers/Microsoft.Resources/deployments/d","body":` +
-			`{"properties":{"mode":"Incremental","parameters":{"credentials":{"value":{"pin":482913,"location":"private-decoy","sku":{"name":"private-sku"}}}}}}}`)))
-	if strings.Contains(deployment, "482913") || strings.Contains(deployment, "private-") || !strings.Contains(deployment, `"pin":"[masked]"`) {
-		t.Fatalf("deployment preview exposed a secure parameter: %s", deployment)
+			`{"properties":{"mode":"Incremental","parameters":{"credentials":{"value":{"pin":482913,"location":"private-decoy"}}}}}}`,
+		`{"method":"POST","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.DataFactory/factories/f/pipelines/p/createRun","body":{"location":"private-param"}}`,
+		`{"method":"PUT","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/s/host/default/functionKeys/k","body":{"location":"private-unknown"}}`,
+		`{"method":"PUT","path":"` + aks + `","body":{"":{"location":"private-empty"}}}`,
+		`{"method":"PUT","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm","body":` +
+			`{"properties":{"hardwareProfile.vmSize":"private-dotted","*":{"vmSize":"private-star"}}}}`,
+	} {
+		if preview := string(maskForwardedWriteArguments(json.RawMessage(request))); strings.Contains(preview, "private-") || strings.Contains(preview, "482913") {
+			t.Errorf("preview exposed a value: %s", preview)
+		}
 	}
-	// A literal key that spells a nested path is not that path.
-	dotted := string(maskForwardedWriteArguments(json.RawMessage(
-		`{"method":"PUT","path":"/subscriptions/s1/x","body":{"properties":{"hardwareProfile.vmSize":"private-dotted","*":{"vmSize":"private-star"}}}}`)))
-	if strings.Contains(dotted, "private-") {
-		t.Fatalf("a dotted or wildcard key exposed a value: %s", dotted)
+	for path, want := range map[string]string{
+		"/subscriptions/s1/resourceGroups/rg": "resourcegroups",
+		aks:                                   "microsoft.containerservice/managedclusters",
+		aks + "/agentPools/p":                 "microsoft.containerservice/managedclusters/agentpools",
+		aks + "/listClusterUserCredential":    "",
+		"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters": "",
+	} {
+		if got := azureResourceType(path); got != want {
+			t.Errorf("azureResourceType(%q) = %q, want %q", path, got, want)
+		}
 	}
 }
 

@@ -129,12 +129,13 @@ http:
   reader of that resource sees, keeps a note with the status instead of the
   answer, and a retry that joins a recorded write gets `409
   OrkaResultNotKept`. The approval preview shows the method, path, query, and
-  values at a fixed set of paths from the body's root that only size, place,
-  or version the resource (`location`, `sku`, `zones`, `kubernetesVersion`,
-  each agent pool's `count` and `vmSize`, and similar), so a reviewer can
-  check what is created. Every other value is masked, numbers included, so
-  a field that only looks like one of these inside a deployment's secure
-  parameters stays hidden. A Tool with writes has
+  for a `PUT` or `PATCH` of a resource type whose body Orka knows (resource
+  groups, AKS clusters and agent pools, and virtual machines), the values at
+  fixed paths from the body's root that only size, place, or version it
+  (`location`, `sku`, `zones`, `kubernetesVersion`, each agent pool's `count`
+  and `vmSize`, and similar), so a reviewer can check what is created. Every
+  other value is masked, numbers included, and an action's body (`POST`),
+  which is its own parameters, is masked whole. A Tool with writes has
   a name of at most 247 characters, so its write tool fits the tool name
   limit. Reviewers approving a
   `POST` see its path; Tools that must not return secrets need
