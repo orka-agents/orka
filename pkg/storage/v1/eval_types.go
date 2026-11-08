@@ -148,8 +148,160 @@ type EvalExperimentReservation struct {
 	CaseAttempts     int32 `json:"caseAttempts"`
 }
 
-// EvalExperimentStore reserves experiment attempts. Only the EvalRun
-// controller writes them, and nothing deletes them.
+// EvalExperimentOutcomeSchemaVersion is the schema of one stored experiment
+// outcome.
+const EvalExperimentOutcomeSchemaVersion = "orka.eval.experimentOutcome.v1"
+
+// EvalDecisionSchemaVersion is the schema of one stored experiment decision.
+const EvalDecisionSchemaVersion = "orka.eval.decision.v1"
+
+// Experiment results, as EvalRun status reports them.
+const (
+	EvalExperimentResultPassed       = "Passed"
+	EvalExperimentResultFailed       = "Failed"
+	EvalExperimentResultIncomparable = "Incomparable"
+)
+
+// Experiment decisions.
+const (
+	EvalDecisionApproved = "approved"
+	EvalDecisionRejected = "rejected"
+)
+
+// MaxEvalExperimentOutcomeBytes bounds one encoded experiment outcome.
+const MaxEvalExperimentOutcomeBytes = 4 << 20
+
+// MaxEvalDecisionReasonBytes bounds a decision's reason.
+const MaxEvalDecisionReasonBytes = 2048
+
+// EvalAgentIdentity identifies one Agent incarnation and generation.
+type EvalAgentIdentity struct {
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	Generation int64  `json:"generation"`
+}
+
+// EvalDecisionBinding is everything an approval depends on. The controller
+// records it with the outcome; an approval binds to it, and stops matching
+// when any element changes.
+type EvalDecisionBinding struct {
+	// CandidateAgent and CandidateDigest are the Agent the candidate
+	// reviewed with and the digest of its promotable fields.
+	CandidateAgent  EvalAgentIdentity `json:"candidateAgent"`
+	CandidateDigest string            `json:"candidateDigest"`
+	// BaselineAgent and BaselineDigest are the monitor's own reviewer as the
+	// baseline ran it: the rollback target.
+	BaselineAgent        EvalAgentIdentity `json:"baselineAgent"`
+	BaselineDigest       string            `json:"baselineDigest"`
+	MonitorUID           string            `json:"monitorUID"`
+	MonitorGeneration    int64             `json:"monitorGeneration"`
+	PromptTemplateDigest string            `json:"promptTemplateDigest"`
+	CaseSetDigest        string            `json:"caseSetDigest"`
+	GraderSetDigest      string            `json:"graderSetDigest"`
+	GateDigest           string            `json:"gateDigest"`
+}
+
+// EvalExperimentTrialOutcome is one graded trial of an experiment arm.
+type EvalExperimentTrialOutcome struct {
+	CaseID     string                `json:"caseID"`
+	Trial      int32                 `json:"trial"`
+	Outcome    string                `json:"outcome"`
+	InfraClass string                `json:"infraClass,omitempty"`
+	Grades     []EvalExperimentGrade `json:"grades,omitempty"`
+}
+
+// EvalExperimentGrade is one grader's status for a trial.
+type EvalExperimentGrade struct {
+	Grader string `json:"grader"`
+	Status string `json:"status"`
+}
+
+// EvalExperimentArmOutcome is one arm of a decided experiment.
+type EvalExperimentArmOutcome struct {
+	Run                string            `json:"run"`
+	RunUID             string            `json:"runUID"`
+	Agent              EvalAgentIdentity `json:"agent"`
+	Model              string            `json:"model,omitempty"`
+	SystemPromptDigest string            `json:"systemPromptDigest,omitempty"`
+	RuntimeImageDigest string            `json:"runtimeImageDigest,omitempty"`
+	Planned            int32             `json:"planned"`
+	Completed          int32             `json:"completed"`
+	Passed             int32             `json:"passed"`
+	Failed             int32             `json:"failed"`
+	// InfraError counts trials excluded from scores.
+	InfraError   int32 `json:"infraError"`
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
+	// Trials hold grader statuses only: no review text or case content.
+	Trials []EvalExperimentTrialOutcome `json:"trials,omitempty"`
+}
+
+// EvalExperimentTargetOutcome compares the target result of the two arms.
+type EvalExperimentTargetOutcome struct {
+	BaselinePassedTrials  int32  `json:"baselinePassedTrials"`
+	BaselineTrials        int32  `json:"baselineTrials"`
+	CandidatePassedTrials int32  `json:"candidatePassedTrials"`
+	CandidateTrials       int32  `json:"candidateTrials"`
+	ImprovedPairs         int32  `json:"improvedPairs"`
+	RegressedPairs        int32  `json:"regressedPairs"`
+	ImprovementPoints     string `json:"improvementPoints"`
+	PValue                string `json:"pValue"`
+}
+
+// EvalExperimentOutcome is the evaluator's verdict on one experiment,
+// written once when it is decided and kept after both EvalRuns are deleted.
+type EvalExperimentOutcome struct {
+	SchemaVersion   string                       `json:"schemaVersion"`
+	Namespace       string                       `json:"namespace"`
+	CandidateRun    string                       `json:"candidateRun"`
+	CandidateRunUID string                       `json:"candidateRunUID"`
+	Result          string                       `json:"result"`
+	Reasons         []string                     `json:"reasons,omitempty"`
+	Target          *EvalExperimentTargetOutcome `json:"target,omitempty"`
+	// Binding is nil when the runs could not be compared.
+	Binding   *EvalDecisionBinding     `json:"binding,omitempty"`
+	Baseline  EvalExperimentArmOutcome `json:"baseline"`
+	Candidate EvalExperimentArmOutcome `json:"candidate"`
+	DecidedAt time.Time                `json:"decidedAt"`
+}
+
+// EvalDecisionActor is the person who decided.
+type EvalDecisionActor struct {
+	Username string `json:"username"`
+	UID      string `json:"uid,omitempty"`
+	// Groups are the promoter groups that admitted the actor.
+	Groups []string `json:"groups,omitempty"`
+}
+
+// EvalDecisionRecord approves or rejects one decided experiment. Records are
+// only appended; the latest one for an experiment is its effective decision.
+type EvalDecisionRecord struct {
+	SchemaVersion string `json:"schemaVersion"`
+	// ID is chosen by the writer so a retried append is recognized.
+	ID              string            `json:"id"`
+	Namespace       string            `json:"namespace"`
+	CandidateRun    string            `json:"candidateRun"`
+	CandidateRunUID string            `json:"candidateRunUID"`
+	Decision        string            `json:"decision"`
+	Reason          string            `json:"reason"`
+	Actor           EvalDecisionActor `json:"actor"`
+	// Binding is what an approval binds to: the outcome's binding at the
+	// time of the decision. A rejection may have none.
+	Binding   *EvalDecisionBinding `json:"binding,omitempty"`
+	DecidedAt time.Time            `json:"decidedAt"`
+}
+
+// EvalExperimentEntry is one experiment with everything recorded about it.
+type EvalExperimentEntry struct {
+	Experiment EvalExperimentRecord   `json:"experiment"`
+	Outcome    *EvalExperimentOutcome `json:"outcome,omitempty"`
+	// Decisions are ordered oldest first.
+	Decisions []EvalDecisionRecord `json:"decisions,omitempty"`
+}
+
+// EvalExperimentStore keeps experiment attempts, outcomes and decisions.
+// Only the EvalRun controller and its API write them, and nothing deletes
+// them.
 type EvalExperimentStore interface {
 	// ReserveEvalExperiment atomically counts the attempts already held on
 	// the record's baseline and on each of its case keys and adds the
@@ -159,4 +311,19 @@ type EvalExperimentStore interface {
 	// GetEvalExperiment returns the reservation a candidate incarnation
 	// holds, or ErrNotFound.
 	GetEvalExperiment(ctx context.Context, namespace, candidateRunUID string) (*EvalExperimentRecord, error)
+	// RecordEvalExperimentOutcome stores a reserved experiment's outcome
+	// once and returns the stored outcome: the first one written wins, so a
+	// retried or repeated decision never changes it. It returns ErrNotFound
+	// when the candidate holds no reservation.
+	RecordEvalExperimentOutcome(ctx context.Context, outcome *EvalExperimentOutcome) (*EvalExperimentOutcome, error)
+	// AppendEvalDecision appends a decision on a decided experiment. It
+	// returns ErrNotFound without an outcome, and ErrConflict for an
+	// approval of an outcome that did not pass or whose binding differs. A
+	// repeat of the same ID is a no-op, and a different record under that
+	// ID returns ErrDuplicateMismatch.
+	AppendEvalDecision(ctx context.Context, decision *EvalDecisionRecord) error
+	// ListEvalExperiments returns a namespace's experiments, or the one a
+	// candidate incarnation holds when candidateRunUID is set, ordered by
+	// reservation time.
+	ListEvalExperiments(ctx context.Context, namespace, candidateRunUID string) ([]EvalExperimentEntry, error)
 }

@@ -90,6 +90,9 @@ type ServerConfig struct {
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	EvalTrialStore            store.EvalTrialStore
+	EvalExperimentStore       store.EvalExperimentStore
+	EvalDecisionVerifier      EvalDecisionVerifier
+	EvalPromoterGroups        []string
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
@@ -181,6 +184,9 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		SecurityStore:             config.SecurityStore,
 		RepositoryMonitorStore:    config.RepositoryMonitorStore,
 		EvalTrialStore:            config.EvalTrialStore,
+		EvalExperimentStore:       config.EvalExperimentStore,
+		EvalDecisionVerifier:      config.EvalDecisionVerifier,
+		EvalPromoterGroups:        config.EvalPromoterGroups,
 		ExecutionEventStore:       config.ExecutionEventStore,
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
@@ -492,6 +498,9 @@ func (s *Server) setupRoutes() {
 	api.Post("/evals/runs", s.handlers.CreateEvalRun)
 	api.Get("/evals/runs/:name", s.handlers.GetEvalRun)
 	api.Get("/evals/runs/:name/trials", s.handlers.ListEvalRunTrials)
+	api.Get("/evals/runs/:name/decisions", s.handlers.GetEvalRunDecisions)
+	api.Post("/evals/runs/:name/decisions", s.handlers.DecideEvalRun)
+	api.Get("/evals/experiments", s.handlers.ListEvalExperiments)
 	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
 	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)
 	api.Get("/monitors/work-actions", s.handlers.ListRepositoryMonitorWorkActions)

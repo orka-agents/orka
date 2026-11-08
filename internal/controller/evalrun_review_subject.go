@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
@@ -255,12 +256,13 @@ type evalReviewSubject struct {
 	SystemPromptDigest string
 }
 
-// resolveEvalReviewSubject reads the monitor and its reviewer Agent and
-// checks that trials can run without any credential or forge effect.
-func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *corev1alpha1.EvalRun) (*evalReviewSubject, error) {
+// resolveEvalReviewSubject reads the monitor and its reviewer Agent through
+// reader and checks that trials can run without any credential or forge
+// effect.
+func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, reader client.Reader, run *corev1alpha1.EvalRun) (*evalReviewSubject, error) {
 	ref := run.Spec.Subject.RepositoryMonitorReview.MonitorRef
 	monitor := &corev1alpha1.RepositoryMonitor{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "RepositoryMonitor %q was not found", ref.Name)
 		}
@@ -286,7 +288,7 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 			"RepositoryMonitor %q runs a validation image; evals do not support validation yet", monitor.Name)
 	}
 	reviewer := &corev1alpha1.Agent{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "reviewer agent %q was not found", reviewerRef.Name)
 		}

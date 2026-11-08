@@ -46,6 +46,12 @@ func (p envelopedState) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p envelopedState) AppendEvalDecision(ctx context.Context, a1 *storagev1.EvalDecisionRecord) error {
+	return p.ops.run(ctx, writeCall{method: "AppendEvalDecision", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.AppendEvalDecision(ctx, a1)
+	})
+}
+
 func (p envelopedState) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	err := p.ops.run(ctx, writeCall{method: "AppendExecutionEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -657,6 +663,16 @@ func (p envelopedState) PutSealedConnectorCredential(ctx context.Context, a1 sto
 	err := p.ops.run(ctx, writeCall{method: "PutSealedConnectorCredential", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
 		r0, err = p.StateProvider.PutSealedConnectorCredential(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
+func (p envelopedState) RecordEvalExperimentOutcome(ctx context.Context, a1 *storagev1.EvalExperimentOutcome) (*storagev1.EvalExperimentOutcome, error) {
+	var r0 *storagev1.EvalExperimentOutcome
+	err := p.ops.run(ctx, writeCall{method: "RecordEvalExperimentOutcome", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.RecordEvalExperimentOutcome(ctx, a1)
 		return err
 	})
 	return r0, err

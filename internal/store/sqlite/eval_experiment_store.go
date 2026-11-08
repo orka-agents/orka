@@ -42,8 +42,10 @@ func validateEvalExperimentRecord(record *store.EvalExperimentRecord, limits sto
 	if record.SchemaVersion != store.EvalExperimentSchemaVersion {
 		return store.ValidationErrorf("eval experiment schemaVersion must be %q", store.EvalExperimentSchemaVersion)
 	}
+	if err := requireEvalCandidate("eval experiment", record.Namespace, record.CandidateRun, record.CandidateRunUID); err != nil {
+		return err
+	}
 	for field, value := range map[string]string{
-		"namespace": record.Namespace, "candidateRun": record.CandidateRun, "candidateRunUID": record.CandidateRunUID,
 		"baselineRun": record.BaselineRun, "baselineRunUID": record.BaselineRunUID, "caseSetDigest": record.CaseSetDigest,
 		"gateDigest": record.GateDigest,
 	} {

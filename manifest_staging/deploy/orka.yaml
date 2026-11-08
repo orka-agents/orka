@@ -817,6 +817,24 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+  name: orka-eval-promoter
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - decide
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
   name: orka-evalrun-admin-role
 rules:
@@ -825,7 +843,14 @@ rules:
   resources:
   - evalruns
   verbs:
-  - '*'
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - core.orka.ai
   resources:

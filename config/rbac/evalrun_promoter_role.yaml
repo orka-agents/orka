@@ -1,0 +1,21 @@
+# Grants approving and rejecting EvalRun experiments through
+# POST /api/v1/evals/runs/:name/decisions. It is not aggregated into "edit" or
+# "admin": bind it only to people. The API also refuses ServiceAccounts,
+# transaction-token callers and anyone outside --eval-promoter-groups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: eval-promoter
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - decide
+  - get
+  - list
+  - watch

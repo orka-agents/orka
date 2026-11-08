@@ -135,3 +135,19 @@ attempt, and reordering, renaming or subsetting cases does not make them
 fresh. When both runs finish,
 `orka eval get <candidate>` prints the verdict, the paired target comparison
 and the reasons. With `--wait` it exits non-zero unless the experiment passed.
+
+A person then records the decision. Bind the `orka-eval-promoter` ClusterRole
+to them and start the controller with `--eval-promoter-groups` naming a group
+they are in; ServiceAccounts are always refused:
+
+```bash
+curl -X POST "$ORKA/api/v1/evals/runs/pr-review-candidate/decisions?namespace=<namespace>" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"decision": "approved", "reason": "Catches the defects without new false alarms."}'
+```
+
+An approval needs a `Passed` experiment whose candidate Agent, stable
+reviewer, monitor, cases, graders and gate still match what was tested.
+`GET .../decisions` reports whether an approval is still current, and
+`GET /api/v1/evals/experiments?namespace=<namespace>` lists every experiment,
+its outcome and decisions, after the runs are deleted too.

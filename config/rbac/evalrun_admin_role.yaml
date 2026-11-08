@@ -1,6 +1,7 @@
 # Aggregates EvalRun management into the built-in "admin" ClusterRole.
 # Creating an EvalRun is equivalent to creating Tasks that run the referenced
-# monitor's reviewer Agent in that namespace.
+# monitor's reviewer Agent in that namespace. The verbs are listed rather than
+# "*" so admin never gains decide, which only orka-eval-promoter grants.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -15,7 +16,14 @@ rules:
   resources:
   - evalruns
   verbs:
-  - '*'
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - core.orka.ai
   resources:

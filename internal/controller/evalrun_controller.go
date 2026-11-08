@@ -274,7 +274,7 @@ func (r *EvalRunReconciler) observeEvalRun(ctx context.Context, run *corev1alpha
 	if err != nil {
 		return nil, err
 	}
-	subject, err := r.resolveEvalReviewSubject(ctx, run)
+	subject, err := r.resolveEvalReviewSubject(ctx, r.Client, run)
 	if err != nil {
 		return nil, err
 	}

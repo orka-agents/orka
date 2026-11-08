@@ -149,6 +149,9 @@ GET /api/v1/monitors/repositories/:name/runs | list core.orka.ai:repositorymonit
 POST /api/v1/evals/runs | create core.orka.ai:evalruns
 GET /api/v1/evals/runs/:name | get core.orka.ai:evalruns protected
 GET /api/v1/evals/runs/:name/trials | get core.orka.ai:evalruns protected
+GET /api/v1/evals/runs/:name/decisions | get core.orka.ai:evalruns protected
+POST /api/v1/evals/runs/:name/decisions | decide core.orka.ai:evalruns protected
+GET /api/v1/evals/experiments | list core.orka.ai:evalruns
 GET /api/v1/monitors/repositories/:name/items | list core.orka.ai:repositorymonitors/items protected
 POST /api/v1/monitors/repositories/:name/commands | create core.orka.ai:repositorymonitors/commands protected; create core.orka.ai:repositorymonitors/runs protected; patch core.orka.ai:repositorymonitors protected
 GET /api/v1/monitors/commands | list core.orka.ai:monitorcommands

@@ -119,6 +119,9 @@ type Handlers struct {
 	securityStore             store.SecurityStore
 	repositoryMonitorStore    store.RepositoryMonitorStore
 	evalTrialStore            store.EvalTrialStore
+	evalExperimentStore       store.EvalExperimentStore
+	evalDecisionVerifier      EvalDecisionVerifier
+	evalPromoterGroups        []string
 	executionEventStore       store.ExecutionEventStore
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
@@ -151,11 +154,16 @@ type HandlersConfig struct {
 	SecurityStore             store.SecurityStore
 	RepositoryMonitorStore    store.RepositoryMonitorStore
 	EvalTrialStore            store.EvalTrialStore
-	ExecutionEventStore       store.ExecutionEventStore
-	GatewayEventStore         store.GatewayEventStore
-	GatewayDeliveryStore      store.GatewayDeliveryStore
-	GatewayService            *gatewayruntime.Service
-	Connectors                ConnectorConfig
+	EvalExperimentStore       store.EvalExperimentStore
+	EvalDecisionVerifier      EvalDecisionVerifier
+	// EvalPromoterGroups are the groups whose members may decide
+	// experiments. Empty refuses every decision.
+	EvalPromoterGroups   []string
+	ExecutionEventStore  store.ExecutionEventStore
+	GatewayEventStore    store.GatewayEventStore
+	GatewayDeliveryStore store.GatewayDeliveryStore
+	GatewayService       *gatewayruntime.Service
+	Connectors           ConnectorConfig
 }
 
 // NewHandlers creates a new Handlers instance
@@ -184,6 +192,9 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		securityStore:             cfg.SecurityStore,
 		repositoryMonitorStore:    cfg.RepositoryMonitorStore,
 		evalTrialStore:            cfg.EvalTrialStore,
+		evalExperimentStore:       cfg.EvalExperimentStore,
+		evalDecisionVerifier:      cfg.EvalDecisionVerifier,
+		evalPromoterGroups:        append([]string(nil), cfg.EvalPromoterGroups...),
 		executionEventStore:       cfg.ExecutionEventStore,
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,

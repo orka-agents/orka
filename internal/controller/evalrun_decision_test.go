@@ -1,0 +1,131 @@
+/*
+Copyright (c) 2026.
+
+MIT License - see LICENSE file for details.
+*/
+
+package controller
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/store"
+)
+
+func (e *experimentEnv) experimentEntry(candidateUID string) store.EvalExperimentEntry {
+	e.t.Helper()
+	entries, err := e.store.ListEvalExperiments(context.Background(), evalTestNamespace, candidateUID)
+	if err != nil || len(entries) != 1 {
+		e.t.Fatalf("experiments = %+v, %v", entries, err)
+	}
+	return entries[0]
+}
+
+// A decided experiment's outcome is stored with what an approval binds to,
+// and the same decision repeated later reports the stored outcome. The
+// outcome outlives both runs.
+func TestEvalExperimentOutcomeIsStoredOnceAndOutlivesTheRuns(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	env.reconcileRun("candidate")
+	decided := env.getRun("candidate")
+	outcome := env.experimentEntry("candidate-uid").Outcome
+	if outcome == nil || outcome.Result != store.EvalExperimentResultPassed || outcome.Binding == nil {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if !outcome.DecidedAt.Equal(decided.Status.Experiment.DecidedAt.Time) || outcome.Target.CandidatePassedTrials != 9 {
+		t.Fatalf("outcome = %+v, status = %+v", outcome, decided.Status.Experiment)
+	}
+	binding := *outcome.Binding
+	if binding.CandidateAgent != (store.EvalAgentIdentity{Name: "candidate-agent", UID: "candidate-agent-uid", Generation: 1}) ||
+		binding.BaselineAgent != (store.EvalAgentIdentity{Name: "reviewer", UID: "agent-uid", Generation: 2}) ||
+		binding.CandidateDigest != decided.Status.Experiment.CandidateDigest || binding.BaselineDigest == "" ||
+		binding.CaseSetDigest != decided.Status.Snapshot.CaseSetDigest || binding.GateDigest != decided.Status.Experiment.GateDigest ||
+		binding.MonitorUID != "monitor-uid" || binding.MonitorGeneration != 3 {
+		t.Fatalf("binding = %+v", binding)
+	}
+	if outcome.Candidate.Agent.Name != "candidate-agent" || len(outcome.Candidate.Trials) != 9 || len(outcome.Baseline.Trials) != 9 ||
+		len(outcome.Candidate.Trials[0].Grades) == 0 || outcome.Baseline.RunUID != "baseline-uid" {
+		t.Fatalf("arms = %+v / %+v", outcome.Candidate, outcome.Baseline)
+	}
+
+	// A decision repeated after a lost status update reports the stored one.
+	decided.Status.Experiment.Result = corev1alpha1.EvalExperimentPending
+	decided.Status.Experiment.DecidedAt = nil
+	if err := env.client.Status().Update(context.Background(), decided); err != nil {
+		t.Fatal(err)
+	}
+	env.reconciler.Now = func() time.Time { return env.now.Add(time.Hour) }
+	env.reconcileRun("candidate")
+	if again := env.getRun("candidate").Status.Experiment; again.Result != corev1alpha1.EvalExperimentPassed || !again.DecidedAt.Time.Equal(outcome.DecidedAt) {
+		t.Fatalf("repeated decision = %+v", again)
+	}
+
+	for _, name := range []string{"candidate", "baseline"} {
+		run := env.getRun(name)
+		run.Finalizers = nil
+		if err := env.client.Update(context.Background(), run); err != nil {
+			t.Fatal(err)
+		}
+		if err := env.client.Delete(context.Background(), run); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if kept := env.experimentEntry("candidate-uid").Outcome; kept == nil || *kept.Binding != binding {
+		t.Fatalf("outcome after deletion = %+v", kept)
+	}
+}
+
+// The live binding matches the outcome until a bound element changes.
+func TestCurrentEvalDecisionBindingTracksTheLiveConfiguration(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	env.reconcileRun("candidate")
+	recorded := *env.experimentEntry("candidate-uid").Outcome.Binding
+	current, err := env.reconciler.CurrentEvalDecisionBinding(context.Background(), env.getRun("candidate"))
+	if err != nil || *current != recorded {
+		t.Fatalf("current binding = %+v, %v; recorded %+v", current, err, recorded)
+	}
+
+	for name, edit := range map[string]func(*corev1alpha1.Agent){
+		"candidate":       func(a *corev1alpha1.Agent) { a.Spec.Model.Name = "claude-opus" },
+		"stable reviewer": func(a *corev1alpha1.Agent) { a.Spec.Model.Name = "claude-opus" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			agentName := "candidate-agent"
+			if name == "stable reviewer" {
+				agentName = "reviewer"
+			}
+			agent := &corev1alpha1.Agent{}
+			key := types.NamespacedName{Namespace: evalTestNamespace, Name: agentName}
+			if err := env.client.Get(context.Background(), key, agent); err != nil {
+				t.Fatal(err)
+			}
+			original := agent.DeepCopy()
+			edit(agent)
+			if err := env.client.Update(context.Background(), agent); err != nil {
+				t.Fatal(err)
+			}
+			current, err := env.reconciler.CurrentEvalDecisionBinding(context.Background(), env.getRun("candidate"))
+			if err != nil || *current == recorded {
+				t.Fatalf("binding after editing %s = %+v, %v", agentName, current, err)
+			}
+			if err := env.client.Get(context.Background(), key, agent); err != nil {
+				t.Fatal(err)
+			}
+			agent.Spec = original.Spec
+			if err := env.client.Update(context.Background(), agent); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
