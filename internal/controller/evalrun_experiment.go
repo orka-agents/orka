@@ -484,12 +484,8 @@ func (r *EvalRunReconciler) experimentArm(ctx context.Context, run *corev1alpha1
 		return arm, err
 	}
 	for _, record := range records {
-		if record.InputTokens != nil {
-			arm.InputTokens += *record.InputTokens
-		}
-		if record.OutputTokens != nil {
-			arm.OutputTokens += *record.OutputTokens
-		}
+		arm.InputTokens = addEvalTokens(arm.InputTokens, record.InputTokens)
+		arm.OutputTokens = addEvalTokens(arm.OutputTokens, record.OutputTokens)
 		trial := store.EvalExperimentTrialOutcome{CaseID: record.CaseID, Trial: record.Trial, Outcome: record.Outcome, InfraClass: record.InfraClass}
 		for _, grade := range record.Grades {
 			trial.Grades = append(trial.Grades, store.EvalExperimentGrade{Grader: grade.Grader, Status: grade.Status})
@@ -497,6 +493,19 @@ func (r *EvalRunReconciler) experimentArm(ctx context.Context, run *corev1alpha1
 		arm.Trials = append(arm.Trials, trial)
 	}
 	return arm, nil
+}
+
+// addEvalTokens adds a trial's reported count, keeping the total unset until
+// some trial reports one.
+func addEvalTokens(total, reported *int64) *int64 {
+	if reported == nil {
+		return total
+	}
+	sum := *reported
+	if total != nil {
+		sum += *total
+	}
+	return &sum
 }
 
 func evalAgentIdentity(identity *corev1alpha1.EvalObjectIdentity) store.EvalAgentIdentity {

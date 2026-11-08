@@ -129,3 +129,18 @@ func TestCurrentEvalDecisionBindingTracksTheLiveConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// Token totals stay unset until a trial reports a count, so an arm whose
+// runtime reports none is not mistaken for one that used none.
+func TestAddEvalTokens(t *testing.T) {
+	five, seven := int64(5), int64(7)
+	if got := addEvalTokens(nil, nil); got != nil {
+		t.Fatalf("unreported = %v", *got)
+	}
+	total := addEvalTokens(nil, &five)
+	total = addEvalTokens(total, nil)
+	total = addEvalTokens(total, &seven)
+	if total == nil || *total != 12 {
+		t.Fatalf("total = %v", total)
+	}
+}

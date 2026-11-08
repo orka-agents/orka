@@ -229,9 +229,11 @@ type EvalExperimentArmOutcome struct {
 	Passed             int32             `json:"passed"`
 	Failed             int32             `json:"failed"`
 	// InfraError counts trials excluded from scores.
-	InfraError   int32 `json:"infraError"`
-	InputTokens  int64 `json:"inputTokens"`
-	OutputTokens int64 `json:"outputTokens"`
+	InfraError int32 `json:"infraError"`
+	// InputTokens and OutputTokens sum the trials that reported them, and
+	// are unset when none did.
+	InputTokens  *int64 `json:"inputTokens,omitempty"`
+	OutputTokens *int64 `json:"outputTokens,omitempty"`
 	// Trials hold grader statuses only: no review text or case content.
 	Trials []EvalExperimentTrialOutcome `json:"trials,omitempty"`
 }
