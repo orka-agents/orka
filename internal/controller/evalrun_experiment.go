@@ -99,8 +99,10 @@ func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 // pair, with this run: one that froze this incarnation as its baseline and is
 // Pending, or one that names it and has not prepared its experiment yet.
 func (r *EvalRunReconciler) hasUndecidedCandidates(ctx context.Context, baseline *corev1alpha1.EvalRun) (bool, error) {
+	// Read the API, not the cache, so a candidate created a moment ago is
+	// never missed before the baseline is deleted.
 	var runs corev1alpha1.EvalRunList
-	if err := r.List(ctx, &runs, client.InNamespace(baseline.Namespace)); err != nil {
+	if err := r.uncachedReader().List(ctx, &runs, client.InNamespace(baseline.Namespace)); err != nil {
 		return false, err
 	}
 	for i := range runs.Items {
