@@ -114,7 +114,8 @@ spec:
       agentRef: {name: <candidate-agent>}     # reviews instead of the monitor's reviewer
   cases:
     configMapRef: {name: pr-review-cases, key: cases.jsonl}
-  trials: 3                                   # same cases, trials and graders as the baseline
+  trials: 3                                   # same cases, trials, concurrency, timeout and graders as the baseline
+  maxConcurrentTrials: 3
   graders: [verdict, localization, contract, honesty]
   experiment:
     hypothesis: The candidate prompt catches more defects.
