@@ -485,7 +485,7 @@ func (s *mcpProxySession) handleToolCall(w http.ResponseWriter, r *http.Request,
 	// Reject this tool request with its own JSON-RPC ID. A transport-level
 	// rejection can close a client's shared MCP stream and strand other calls.
 	// The global HTTP guard still bounds request parsing and control messages.
-	response, err := s.callBrokeredTool(r.Context(), callID, params.Name, params.Arguments, false)
+	response, err := s.callBrokeredTool(r.Context(), callID, params.Name, params.Arguments, false, nil)
 	if err != nil {
 		switch {
 		case errors.Is(err, errMCPSessionAtCapacity):
@@ -523,9 +523,12 @@ var (
 // callBrokeredTool sends one call to the broker under the session's current
 // prompt authority. forward selects which tools the caller may name: the MCP
 // endpoint calls only model-facing tools, and a client forwarder calls only
-// its forwarding Tool.
+// its forwarding Tool. A non-nil admit sees the prompt the call would run
+// under and can refuse it with an error, which is returned unchanged before
+// anything is sent.
 func (s *mcpProxySession) callBrokeredTool(
 	requestCtx context.Context, callID, toolName string, arguments json.RawMessage, forward bool,
+	admit func(harnessv2.PromptID) error,
 ) (harnessv2.MCPBrokerCallResponse, error) {
 	if !tryAcquireMCPSlot(s.calls) {
 		return harnessv2.MCPBrokerCallResponse{}, errMCPSessionAtCapacity
@@ -536,6 +539,11 @@ func (s *mcpProxySession) callBrokeredTool(
 	if err != nil {
 		waitForPromptGateCancellation(requestCtx, gate)
 		return harnessv2.MCPBrokerCallResponse{}, errMCPCallNotAuthorized
+	}
+	if admit != nil {
+		if err := admit(authorization.PromptID); err != nil {
+			return harnessv2.MCPBrokerCallResponse{}, err
+		}
 	}
 	call := harnessv2.MCPToolCall{CallID: callID, ToolName: toolName, Arguments: arguments}
 	expiresAt := now.Add(30 * time.Second)

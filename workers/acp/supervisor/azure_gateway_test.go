@@ -678,6 +678,74 @@ func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 	}
 }
 
+// TestAzureGatewayRefusesResendsFromAnEarlierPrompt covers an az process
+// that outlives its prompt and resends a write during a later one: the
+// broker scopes a call to its prompt, so the gateway refuses the resend with
+// a final answer instead of sending the write again. A new request in the
+// later prompt is sent as usual.
+func TestAzureGatewayRefusesResendsFromAnEarlierPrompt(t *testing.T) {
+	fixture := newAzureGatewayFixtureWith(t, true)
+	token := fixture.token(t)
+	header := http.Header{"Authorization": {"Bearer " + token}, "Content-Type": {"application/json"}, "X-Ms-Client-Request-Id": {"req-across"}}
+	path, body := "/subscriptions/s1/resourcegroups/rg1", `{"location":"eastus"}`
+	if response, _ := fixture.send(t, http.MethodPut, path, header, body); response.StatusCode != http.StatusOK {
+		t.Fatalf("first write status = %d", response.StatusCode)
+	}
+	fixture.session.deactivate(fixture.authorize.PromptID, harnessv2.RuntimeSessionStateIdle)
+	now := time.Now().UTC()
+	next := clonePromptMCPAuthorization(fixture.authorize)
+	next.PromptID, next.LeaseGeneration, next.ExpiresAt = testPromptTwoID, 2, now.Add(time.Minute)
+	if err := fixture.session.activate(t.Context(), next, harnessv2.PromptLease{Generation: 2, IssuedAt: now, ExpiresAt: now.Add(2 * time.Minute)}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.session.markRunning(next.PromptID, now); err != nil {
+		t.Fatal(err)
+	}
+	if response, answer := fixture.send(t, http.MethodPut, path, header, body); response.StatusCode != http.StatusConflict ||
+		!strings.Contains(answer, "OrkaResendRefused") {
+		t.Fatalf("resend in a later prompt: status = %d: %s", response.StatusCode, answer)
+	}
+	header.Set("X-Ms-Client-Request-Id", "req-new")
+	if response, _ := fixture.send(t, http.MethodPut, path, header, body); response.StatusCode != http.StatusOK {
+		t.Fatalf("new write in the later prompt: status = %d", response.StatusCode)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 2 || calls[1].Metadata.PromptID != testPromptTwoID {
+		t.Fatalf("broker calls = %d; want the first write and the new one only", len(calls))
+	}
+}
+
+// TestAzureGatewayWritePromptMemoryIsBounded covers the memory of write
+// prompts: a write seen within the hour keeps its prompt, an older one is
+// forgotten, and a full memory forgets expired writes before it refuses one.
+func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
+	g := &azureGateway{}
+	now := time.Now()
+	if err := g.admitWrite("w", "p1", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.admitWrite("w", "p1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("a retry in the same prompt: %v", err)
+	}
+	if err := g.admitWrite("w", "p2", now.Add(2*time.Minute)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
+		t.Fatalf("a resend in a later prompt: %v", err)
+	}
+	if err := g.admitWrite("w", "p2", now.Add(time.Minute+azureWritePromptMemory)); err != nil {
+		t.Fatalf("a write unseen for the memory's span: %v", err)
+	}
+	for index := len(g.writePrompts); index < maxAzureWritePrompts; index++ {
+		if err := g.admitWrite("w"+strconv.Itoa(index), "p2", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := now.Add(azureWritePromptMemory / 2)
+	if err := g.admitWrite("full", "p2", later); !errors.Is(err, errAzureTooManyWrites) {
+		t.Fatalf("a full memory: %v", err)
+	}
+	if err := g.admitWrite("full", "p2", now.Add(azureWritePromptMemory)); err != nil {
+		t.Fatalf("a full memory of expired writes: %v", err)
+	}
+}
+
 // TestAzureGatewayIgnoresStaleThrottles covers two requests that joined the
 // same attempt: the first 429 advances the write to its next attempt, and
 // the second, late 429 of that same attempt does not advance it again, so a

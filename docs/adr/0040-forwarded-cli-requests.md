@@ -120,7 +120,12 @@ http:
   new call ID (an approval-required write needs a new approval). A session
   tracks up to 256 throttled writes and never forgets one, since that could
   resend a write that already succeeded; a further throttled write gets a
-  final `409 OrkaThrottled` instead of the `429`. Other retries join, and a recorded answer the SDK retries (`408`, `429`, `5xx`)
+  final `409 OrkaThrottled` instead of the `429`. The broker scopes a call
+  to its prompt, so the gateway also remembers, for an hour after its last
+  request, the prompt each write was first sent under, and refuses a resend
+  that arrives during a later prompt with a final `409 OrkaResendRefused`
+  rather than sending the write again; an `az` left running after its turn
+  can otherwise repeat an action. Other retries join, and a recorded answer the SDK retries (`408`, `429`, `5xx`)
   keeps its status and `Retry-After` when replayed.
 - `POST` actions are forwarded too, so `az aks get-credentials` and actions
   such as start and stop work. An action that returns a secret, such as

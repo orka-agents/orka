@@ -261,6 +261,7 @@ runs `az group list` as usual.
 | `(OrkaReadOnly)` | The command writes or acts on a resource, and this Task has no write tool: the Tool has no `forward.writes`, the Task disallows it, or the requester's link was not `readWrite` when the Task started. |
 | `(OrkaApprovalNotGranted)` | A reviewer declined the write, or nobody approved it within 10 minutes. Nothing was sent to Azure. |
 | `(OrkaResultNotKept)` | `az` resent a write that already ran, for example after a slow approval. Orka keeps no write's answer, which can carry secrets; check the resource, or run the command again. |
+| `(OrkaResendRefused)` | `az` resent a write during a later turn than the one that first sent it, for example a command left running in the background. Orka did not send it again; check the resource, or run the command again. |
 | `(OrkaThrottled)` | Azure throttled the write and did not process it, and this session has already had 256 throttled writes, so Orka cannot resend it safely. Run the command again later. |
 | `(OrkaOutcomeUnknown)` | The write may have reached Azure. Check the resource before running the command again. |
 | `(OrkaResourceNotForwarded)` | The command needs a service other than Resource Manager. |

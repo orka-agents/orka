@@ -156,6 +156,64 @@ type azureGateway struct {
 	// is a new attempt under a new call ID rather than a replay.
 	throttledMu sync.Mutex
 	throttled   map[string]int
+	// writePrompts records, per write call ID, the prompt that first sent
+	// it. Its retries share that ID, but the broker scopes a call to its
+	// prompt, so a resend during a later prompt would be a second write.
+	writePromptsMu sync.Mutex
+	writePrompts   map[string]azureWritePrompt
+}
+
+// azureWritePrompt is the prompt a write was first sent under, and when it
+// was last seen.
+type azureWritePrompt struct {
+	prompt harnessv2.PromptID
+	seen   time.Time
+}
+
+const (
+	// azureWritePromptMemory is how long a session remembers a write's
+	// prompt after its last request: far longer than any client retry.
+	azureWritePromptMemory = time.Hour
+	// maxAzureWritePrompts bounds that memory per session.
+	maxAzureWritePrompts = 4096
+)
+
+// errAzureWriteFromEarlierPrompt refuses a write first sent during an
+// earlier prompt; errAzureTooManyWrites refuses a write the session cannot
+// remember.
+var (
+	errAzureWriteFromEarlierPrompt = errors.New("the write was first sent during an earlier prompt")
+	errAzureTooManyWrites          = errors.New("the session sent too many writes to remember another")
+)
+
+// admitWrite records the prompt a joinable write is sent under, and refuses
+// it when an earlier prompt already sent it: a later prompt is a different
+// call to the broker, which would send the write again.
+func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID, now time.Time) error {
+	g.writePromptsMu.Lock()
+	defer g.writePromptsMu.Unlock()
+	if known, ok := g.writePrompts[callID]; ok && now.Sub(known.seen) < azureWritePromptMemory {
+		if known.prompt != prompt {
+			return errAzureWriteFromEarlierPrompt
+		}
+		g.writePrompts[callID] = azureWritePrompt{prompt: prompt, seen: now}
+		return nil
+	}
+	if g.writePrompts == nil {
+		g.writePrompts = map[string]azureWritePrompt{}
+	}
+	if len(g.writePrompts) >= maxAzureWritePrompts {
+		for id, known := range g.writePrompts {
+			if now.Sub(known.seen) >= azureWritePromptMemory {
+				delete(g.writePrompts, id)
+			}
+		}
+		if len(g.writePrompts) >= maxAzureWritePrompts {
+			return errAzureTooManyWrites
+		}
+	}
+	g.writePrompts[callID] = azureWritePrompt{prompt: prompt, seen: now}
+	return nil
 }
 
 // maxAzureThrottledWrites bounds the throttled-write memory of one session.
@@ -493,23 +551,13 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		}
 		defer releaseMCPSlot(g.session.proxy.slots)
 	}
-	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true)
+	var admit func(harnessv2.PromptID) error
+	if write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix) {
+		admit = func(prompt harnessv2.PromptID) error { return g.admitWrite(baseCallID, prompt, time.Now()) }
+	}
+	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true, admit)
 	if err != nil {
-		switch {
-		case errors.Is(err, errMCPSessionAtCapacity):
-			w.Header().Set("Retry-After", "1")
-			writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")
-		case errors.Is(err, errMCPCallNotAuthorized):
-			writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
-				"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
-		case write:
-			// The broker records a failed write as an unknown outcome, so a
-			// retry could only replay that; a 5xx would make az retry it.
-			writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
-				"The request may have reached Azure. Check the resource before repeating it.")
-		default:
-			writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
-		}
+		writeAzureCallError(w, err, write, toolName)
 		return
 	}
 	if response.IsError {
@@ -548,6 +596,32 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Length", strconv.Itoa(len(answer)))
 	w.WriteHeader(forwarded.Status)
 	_, _ = io.WriteString(w, answer)
+}
+
+// writeAzureCallError answers a request whose broker call failed before it
+// returned an answer.
+func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName string) {
+	switch {
+	case errors.Is(err, errAzureWriteFromEarlierPrompt):
+		writeAzureError(w, http.StatusConflict, "OrkaResendRefused",
+			"Orka received this request during an earlier turn and did not send it again. Check the resource before running the command again.")
+	case errors.Is(err, errAzureTooManyWrites):
+		writeAzureError(w, http.StatusConflict, "OrkaResendRefused",
+			"This session sent too many writes in the last hour for Orka to tell a retry from a new request; it did not send this one.")
+	case errors.Is(err, errMCPSessionAtCapacity):
+		w.Header().Set("Retry-After", "1")
+		writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")
+	case errors.Is(err, errMCPCallNotAuthorized):
+		writeAzureError(w, http.StatusForbidden, "OrkaNotAuthorized",
+			"Orka allows az only while this session's prompt is running and the Task allows tool "+strconv.Quote(toolName)+".")
+	case write:
+		// The broker records a failed write as an unknown outcome, so a
+		// retry could only replay that; a 5xx would make az retry it.
+		writeAzureError(w, http.StatusConflict, "OrkaOutcomeUnknown",
+			"The request may have reached Azure. Check the resource before repeating it.")
+	default:
+		writeAzureError(w, http.StatusBadGateway, "OrkaBrokerError", "Orka could not complete the request.")
+	}
 }
 
 // writeAzureToolError answers a request the broker answered with a tool
