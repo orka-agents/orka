@@ -144,11 +144,21 @@ func TestDecideExperimentFailures(t *testing.T) {
 			}
 		}, "contract regressed from 8/8 to 0/8"},
 		"infra budget": {func(in *ExperimentInput) { in.Candidate.InfraError = 1 }, "the candidate run had 1 infra errors"},
+		// A candidate review the target grader cannot judge counts as a
+		// failure, not as a trial left out of the comparison.
+		"ungraded candidate target": {func(in *ExperimentInput) {
+			for i := range in.Candidate.Trials {
+				if in.Candidate.Trials[i].CaseID != "case-a" {
+					in.Candidate.Trials[i].Grades["verdict"] = GradeNotApplicable
+				}
+			}
+		}, "the paired sign test p-value 0.25"},
+		// A guardrail the candidate produced no grades for counts as failed.
 		"guardrail without candidate results": {func(in *ExperimentInput) {
 			for i := range in.Candidate.Trials {
 				delete(in.Candidate.Trials[i].Grades, "contract")
 			}
-		}, "contract has 8 graded baseline trials but no graded candidate trials"},
+		}, "contract regressed from 8/8 to 0/8"},
 		"no target trials": {func(in *ExperimentInput) { in.Tag = "clean" }, "no graded trials"},
 	} {
 		t.Run(name, func(t *testing.T) {

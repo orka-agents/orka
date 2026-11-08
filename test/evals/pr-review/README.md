@@ -123,11 +123,13 @@ spec:
 ```
 
 The controller must run with `--eval-gate-configmap` naming the protected-set
-ConfigMap. Its `gate` holds the thresholds. The baseline must not set
+ConfigMap. Its `gate` holds the thresholds, and its `caseSets` must list the
+candidate's cases ConfigMap with `split: heldOut`; rotate the held-out set by
+listing a new ConfigMap of fresh commits. The baseline must not set
 `agentRef`. Each candidate spends one attempt before its first trial, against
 `maxCandidatesPerBaseline` and, for each case's reviewed commits,
 `maxExperimentsPerHeldOutSet`. Deleting a candidate does not return its
 attempt, and reordering, renaming or subsetting cases does not make them
 fresh. When both runs finish,
 `orka eval get <candidate>` prints the verdict, the paired target comparison
-and the reasons.
+and the reasons. With `--wait` it exits non-zero unless the experiment passed.

@@ -141,6 +141,9 @@ func followEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eval
 	if run.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded {
 		return fmt.Errorf("evalrun/%s ended %s", run.Name, run.Status.Phase)
 	}
+	if experiment := run.Status.Experiment; experiment != nil && experiment.Result != corev1alpha1.EvalExperimentPassed {
+		return fmt.Errorf("evalrun/%s experiment is %s", run.Name, experiment.Result)
+	}
 	return nil
 }
 

@@ -37,9 +37,13 @@ const (
 func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) (*corev1alpha1.EvalExperimentStatus, error) {
 	snapshot := observed.Snapshot
 	experiment := run.Spec.Experiment
-	gate, gateDigest, err := r.loadExperimentGate(ctx)
+	gate, gateDigest, heldOut, err := r.loadExperimentGate(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if ref := run.Spec.Cases.ConfigMapRef; ref == nil || !heldOut[run.Namespace+"/"+ref.Name] {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"an experiment must run on a held-out case set that the protected set's caseSets lists for namespace %s", run.Namespace)
 	}
 	if experiment.BaselineRunRef.Name == run.Name {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "an EvalRun cannot be its own baseline")
@@ -145,31 +149,32 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 	}
 }
 
-// loadExperimentGate reads the gate section of the protected-set ConfigMap.
-// Without one, experiments fail closed.
-func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, error) {
+// loadExperimentGate reads the gate and the held-out case sets of the
+// protected-set ConfigMap. Without them, experiments fail closed.
+func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, map[string]bool, error) {
 	if r.GateConfigMap.Name == "" {
-		return evals.ExperimentGate{}, "", evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
+		return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
 			"no experiment gate is configured; set --eval-gate-configmap to the protected-set ConfigMap")
 	}
 	configMap := &corev1.ConfigMap{}
 	if err := r.uncachedReader().Get(ctx, r.GateConfigMap, configMap); err != nil {
 		if apierrors.IsNotFound(err) {
-			return evals.ExperimentGate{}, "", evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
+			return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
 				"the experiment gate ConfigMap %s was not found", r.GateConfigMap)
 		}
-		return evals.ExperimentGate{}, "", err
+		return evals.ExperimentGate{}, "", nil, err
 	}
-	gate, err := evals.ParseExperimentGate([]byte(configMap.Data[evals.ProtectedSetConfigMapKey]))
-	if err != nil {
-		return evals.ExperimentGate{}, "", evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
-			"the experiment gate in ConfigMap %s is invalid: %v", r.GateConfigMap, err)
+	declaration := []byte(configMap.Data[evals.ProtectedSetConfigMapKey])
+	gate, err := evals.ParseExperimentGate(declaration)
+	if err == nil {
+		var heldOut map[string]bool
+		if heldOut, err = evals.HeldOutCaseSets(declaration); err == nil {
+			digest, digestErr := gate.Digest()
+			return gate, digest, heldOut, digestErr
+		}
 	}
-	digest, err := gate.Digest()
-	if err != nil {
-		return evals.ExperimentGate{}, "", err
-	}
-	return gate, digest, nil
+	return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
+		"the experiment gate in ConfigMap %s is invalid: %v", r.GateConfigMap, err)
 }
 
 // evalCandidateDigest digests the candidate's promotable fields as the

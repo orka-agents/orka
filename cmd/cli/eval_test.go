@@ -395,32 +395,42 @@ func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
 }
 
 // A finished candidate is judged later; --wait holds until the experiment
-// leaves Pending.
+// leaves Pending, and only a Passed experiment exits successfully.
 func TestEvalRunWaitHoldsForTheExperimentDecision(t *testing.T) {
-	gets := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/v1/evals/runs":
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
-		case "/api/v1/evals/runs/r":
-			gets++
-			result := "Pending"
-			if gets > 3 {
-				result = "Passed"
+	for _, decision := range []string{"Passed", "Failed", "Incomparable"} {
+		t.Run(decision, func(t *testing.T) {
+			gets := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/evals/runs":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+				case "/api/v1/evals/runs/r":
+					gets++
+					result := "Pending"
+					if gets > 3 {
+						result = decision
+					}
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded","experiment":{"result":"` +
+						result + `"}}}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+				"--token", "tok", "--wait")
+			if gets < 4 || strings.Count(out, "Waiting for the experiment decision") != 1 {
+				t.Fatalf("Execute() = %v after %d gets\n%s", err, gets, out)
 			}
-			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded","experiment":{"result":"` +
-				result + `"}}}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-	out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
-		"--token", "tok", "--wait")
-	if err != nil || gets < 4 || strings.Count(out, "Waiting for the experiment decision") != 1 {
-		t.Fatalf("Execute() = %v after %d gets\n%s", err, gets, out)
+			if decision == "Passed" && err != nil {
+				t.Fatalf("Execute() = %v for a passed experiment", err)
+			}
+			if decision != "Passed" && (err == nil || !strings.Contains(err.Error(), "experiment is "+decision)) {
+				t.Fatalf("Execute() = %v, want a failure for a %s experiment", err, decision)
+			}
+		})
 	}
 }
 

@@ -81,6 +81,33 @@ func ParseExperimentGate(declaration []byte) (ExperimentGate, error) {
 	return gate, nil
 }
 
+// HeldOutCaseSets returns the held-out case ConfigMaps the protected set
+// lists, keyed namespace/name. Experiments run only on these, so the cases a
+// candidate is judged by, and when they are rotated, stay operator choices.
+func HeldOutCaseSets(declaration []byte) (map[string]bool, error) {
+	var document struct {
+		CaseSets []struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+			Split     string `json:"split"`
+		} `json:"caseSets"`
+	}
+	raw, err := sigsyaml.YAMLToJSON(declaration)
+	if err != nil {
+		return nil, fmt.Errorf("decode protected set: %w", err)
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, fmt.Errorf("decode protected set caseSets: %w", err)
+	}
+	heldOut := map[string]bool{}
+	for _, caseSet := range document.CaseSets {
+		if caseSet.Split == "heldOut" && caseSet.Namespace != "" && caseSet.Name != "" {
+			heldOut[caseSet.Namespace+"/"+caseSet.Name] = true
+		}
+	}
+	return heldOut, nil
+}
+
 // Digest digests the gate's thresholds.
 func (g ExperimentGate) Digest() (string, error) {
 	return digestJSON(struct {
@@ -222,8 +249,9 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 	}
 
 	for _, grader := range in.Graders {
-		bp, bt := passRate(in.Baseline.Trials, grader, "", in.CaseTags)
-		cp, ct := passRate(in.Candidate.Trials, grader, "", in.CaseTags)
+		baseline, candidate := armGrades(in, grader, "")
+		bp, bt := passRate(baseline)
+		cp, ct := passRate(candidate)
 		switch {
 		case bt > 0 && ct == 0:
 			// A guardrail the candidate never produced a result for cannot
@@ -241,28 +269,15 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 
 func compareTarget(in ExperimentInput) TargetComparison {
 	var target TargetComparison
-	target.BaselinePassed, target.BaselineTrials = passRate(in.Baseline.Trials, in.Grader, in.Tag, in.CaseTags)
-	target.CandidatePassed, target.CandidateTrials = passRate(in.Candidate.Trials, in.Grader, in.Tag, in.CaseTags)
+	baseline, candidate := armGrades(in, in.Grader, in.Tag)
+	target.BaselinePassed, target.BaselineTrials = passRate(baseline)
+	target.CandidatePassed, target.CandidateTrials = passRate(candidate)
 	if target.BaselineTrials > 0 && target.CandidateTrials > 0 {
 		target.ImprovementPoints = 100 * (float64(target.CandidatePassed)/float64(target.CandidateTrials) -
 			float64(target.BaselinePassed)/float64(target.BaselineTrials))
 	}
-	type key struct {
-		caseID string
-		trial  int32
-	}
-	baseline := map[key]GradeStatus{}
-	for _, trial := range in.Baseline.Trials {
-		if status, ok := gradedStatus(trial, in.Grader, in.Tag, in.CaseTags); ok {
-			baseline[key{trial.CaseID, trial.Trial}] = status
-		}
-	}
-	for _, trial := range in.Candidate.Trials {
-		status, ok := gradedStatus(trial, in.Grader, in.Tag, in.CaseTags)
-		if !ok {
-			continue
-		}
-		before, paired := baseline[key{trial.CaseID, trial.Trial}]
+	for key, status := range candidate {
+		before, paired := baseline[key]
 		switch {
 		case !paired || before == status:
 		case status == GradePass:
@@ -275,6 +290,35 @@ func compareTarget(in ExperimentInput) TargetComparison {
 	return target
 }
 
+type trialKey struct {
+	caseID string
+	trial  int32
+}
+
+// armGrades returns each arm's pass or fail per trial for grader on the
+// tag's cases. Infra errors are left out of both arms. A candidate trial that
+// ran but has no pass or fail where the baseline's same trial does, such as a
+// malformed review an honesty grader cannot judge, counts as a failure: a
+// candidate must not drop unfavorable trials out of the comparison.
+func armGrades(in ExperimentInput, grader, tag string) (baseline, candidate map[trialKey]GradeStatus) {
+	baseline = map[trialKey]GradeStatus{}
+	for _, trial := range in.Baseline.Trials {
+		if status, ok := gradedStatus(trial, grader, tag, in.CaseTags); ok {
+			baseline[trialKey{trial.CaseID, trial.Trial}] = status
+		}
+	}
+	candidate = map[trialKey]GradeStatus{}
+	for _, trial := range in.Candidate.Trials {
+		key := trialKey{trial.CaseID, trial.Trial}
+		if status, ok := gradedStatus(trial, grader, tag, in.CaseTags); ok {
+			candidate[key] = status
+		} else if _, graded := baseline[key]; graded && !trial.Infra {
+			candidate[key] = GradeFail
+		}
+	}
+	return baseline, candidate
+}
+
 // gradedStatus is a trial's pass or fail for grader on the tag's cases;
 // infra errors and notApplicable grades are not graded.
 func gradedStatus(trial ArmTrial, grader, tag string, caseTags map[string][]string) (GradeStatus, bool) {
@@ -285,13 +329,11 @@ func gradedStatus(trial ArmTrial, grader, tag string, caseTags map[string][]stri
 	return status, status == GradePass || status == GradeFail
 }
 
-func passRate(trials []ArmTrial, grader, tag string, caseTags map[string][]string) (passed, graded int) {
-	for _, trial := range trials {
-		if status, ok := gradedStatus(trial, grader, tag, caseTags); ok {
-			graded++
-			if status == GradePass {
-				passed++
-			}
+func passRate(grades map[trialKey]GradeStatus) (passed, graded int) {
+	for _, status := range grades {
+		graded++
+		if status == GradePass {
+			passed++
 		}
 	}
 	return passed, graded

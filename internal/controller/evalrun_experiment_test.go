@@ -27,6 +27,8 @@ import (
 
 const evalTestGate = `schemaVersion: orka.protectedSet.v1
 paths: [".github/**"]
+caseSets:
+  - {namespace: team-a, name: cases, split: heldOut}
 gate:
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 2
@@ -318,6 +320,8 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 				BaselineRunRef: corev1alpha1.EvalObjectReference{Name: "other"},
 				Target:         corev1alpha1.EvalExperimentTarget{Grader: corev1alpha1.EvalGraderVerdict}}
 		}, reason: evalRunReasonExperimentInvalid},
+		"cases not held out": {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1),
+			reason: evalRunReasonExperimentInvalid},
 		"baseline sets agentRef": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
 			baseline.Spec.Subject.RepositoryMonitorReview.AgentRef = &corev1alpha1.EvalObjectReference{Name: "candidate-agent"}
 		}, reason: evalRunReasonExperimentInvalid},
