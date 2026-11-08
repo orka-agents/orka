@@ -217,6 +217,12 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 			t.Errorf("preview exposed a value: %s", preview)
 		}
 	}
+	// Query values are masked, except the API version.
+	signed := string(maskForwardedWriteArguments(json.RawMessage(
+		`{"method":"POST","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/s/restart","query":"sig=private-sig&api-version=2024-04-01&se=private-expiry&flag"}`)))
+	if strings.Contains(signed, "private-") || !strings.Contains(signed, `"query":"sig=[masked]\u0026api-version=2024-04-01\u0026se=[masked]\u0026flag"`) {
+		t.Errorf("query preview = %s", signed)
+	}
 	for path, want := range map[string]string{
 		"/subscriptions/s1/resourceGroups/rg": "resourcegroups",
 		aks:                                   "microsoft.containerservice/managedclusters",

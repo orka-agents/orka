@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -421,11 +422,32 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 		Body        any    `json:"body,omitempty"`
 		IfMatch     string `json:"ifMatch,omitempty"`
 		IfNoneMatch string `json:"ifNoneMatch,omitempty"`
-	}{request.Method, request.Path, request.Query, body, request.IfMatch, request.IfNoneMatch})
+	}{request.Method, request.Path, maskForwardedQuery(request.Query), body, request.IfMatch, request.IfNoneMatch})
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}
 	return masked
+}
+
+// maskForwardedQuery masks every query value of a forwarded write for an
+// approval preview except the API version, keeping the parameter names: a
+// value such as a signature can be a secret.
+func maskForwardedQuery(query string) string {
+	if query == "" {
+		return ""
+	}
+	parameters := strings.Split(query, "&")
+	for index, parameter := range parameters {
+		key, _, hasValue := strings.Cut(parameter, "=")
+		if !hasValue {
+			continue
+		}
+		if name, err := url.QueryUnescape(key); err == nil && strings.EqualFold(name, "api-version") {
+			continue
+		}
+		parameters[index] = key + "=[masked]"
+	}
+	return strings.Join(parameters, "&")
 }
 
 // azurePreviewSchemas lists, per Resource Manager resource type, the
