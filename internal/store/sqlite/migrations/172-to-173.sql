@@ -1,7 +1,8 @@
 -- SQLite transition: 172-to-173 (schema version 5 to 6).
 -- Adds eval experiment outcomes (orka.eval.experimentOutcome.v1), written
 -- once when an experiment is decided, and eval decisions
--- (orka.eval.decision.v1), which are only appended. Both are kept after the
+-- (orka.eval.decision.v1), which are only appended, and an index for
+-- listing experiments in reservation order. Both are kept after the
 -- EvalRuns are deleted so rejected experiments stay queryable. It adds no
 -- rows. Transaction and complete-layout validation are owned by the caller.
 
@@ -23,3 +24,5 @@ CREATE TABLE IF NOT EXISTS eval_decisions (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_decisions_id ON eval_decisions(namespace, candidate_run_uid, id);
+
+CREATE INDEX IF NOT EXISTS idx_eval_experiments_listing ON eval_experiments(namespace, reserved_at, candidate_run_uid);

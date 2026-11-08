@@ -32,6 +32,7 @@ func evalDecisionSchemaStatements() []string {
 			decided_at        TIMESTAMP NOT NULL
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_decisions_id ON eval_decisions(namespace, candidate_run_uid, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_eval_experiments_listing ON eval_experiments(namespace, reserved_at, candidate_run_uid)`,
 	}
 }
 

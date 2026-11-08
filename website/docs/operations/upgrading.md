@@ -117,7 +117,7 @@ Object counts alone do not establish compatibility.
 | 162 objects, schema version 3 | Dataset binding layout | Add the eval trial table; keep the dataset identity, binding, records, receipts and key bootstrap state. |
 | 163 objects, schema version 4 | Eval trial layout | Add the eval experiment table; keep the dataset identity, binding, records, receipts and eval trials. |
 | 166 objects, schema version 5 | Eval experiment layout | Add the eval experiment outcome and decision tables; keep the dataset identity, binding, records, receipts, eval trials and experiment reservations. |
-| 169 objects (current), schema version 6 | Eval decision layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+| 170 objects (current), schema version 6 | Eval decision layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
