@@ -739,7 +739,11 @@ func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
 	if err := g.admitWrite("w", "p2", now.Add(2*time.Minute)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
 		t.Fatalf("a resend in a later prompt: %v", err)
 	}
-	if err := g.admitWrite("w", "p2", now.Add(time.Minute+azureWritePromptMemory)); err != nil {
+	// A refused resend keeps the write remembered under its first prompt.
+	if err := g.admitWrite("w", "p2", now.Add(time.Minute+azureWritePromptMemory)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
+		t.Fatalf("a resend within the span of the last refused one: %v", err)
+	}
+	if err := g.admitWrite("w", "p2", now.Add(2*time.Minute+2*azureWritePromptMemory)); err != nil {
 		t.Fatalf("a write unseen for the memory's span: %v", err)
 	}
 	for index := len(g.writePrompts); index < maxAzureWritePrompts; index++ {

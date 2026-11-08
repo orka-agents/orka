@@ -193,10 +193,12 @@ func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID, now 
 	g.writePromptsMu.Lock()
 	defer g.writePromptsMu.Unlock()
 	if known, ok := g.writePrompts[callID]; ok && now.Sub(known.seen) < azureWritePromptMemory {
+		// Every request, refused or not, keeps the write remembered under
+		// its first prompt for another span.
+		g.writePrompts[callID] = azureWritePrompt{prompt: known.prompt, seen: now}
 		if known.prompt != prompt {
 			return errAzureWriteFromEarlierPrompt
 		}
-		g.writePrompts[callID] = azureWritePrompt{prompt: prompt, seen: now}
 		return nil
 	}
 	if g.writePrompts == nil {
