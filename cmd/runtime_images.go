@@ -25,6 +25,17 @@ const (
 	acpRuntimeImageRequestTimeout = 15 * time.Second
 )
 
+// normalizeSessionLoaderImage accepts an immutable configured image without registry I/O.
+func normalizeSessionLoaderImage(image string) (string, error) {
+	ref, err := distributionref.ParseNormalizedNamed(strings.TrimSpace(image))
+	if err == nil {
+		if digested, ok := ref.(distributionref.Digested); ok && digested.Digest().Algorithm() == "sha256" {
+			return distributionref.TrimNamed(ref).Name() + "@" + digested.Digest().String(), nil
+		}
+	}
+	return "", errors.New("--session-loader-image requires a SHA256-digest-pinned image (repository@sha256:<digest>)")
+}
+
 // Advertise coding runtimes only when their image and model connection are configured.
 func configuredACPRuntimeAvailability(
 	images controller.ACPRuntimeImages,

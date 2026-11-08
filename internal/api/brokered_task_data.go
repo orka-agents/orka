@@ -28,9 +28,9 @@ func (a brokeredTaskDataAccess) withData(ctx context.Context, backing any, autho
 	if a.guard == nil {
 		return fiber.NewError(fiber.StatusServiceUnavailable, "authenticated prompt data guard unavailable")
 	}
-	transactions, ok := backing.(store.TaskDataTransactionStore)
+	dataAccess, ok := backing.(store.TaskDataAccessStore)
 	if !ok {
-		return fiber.NewError(fiber.StatusServiceUnavailable, "task data transactions unavailable")
+		return fiber.NewError(fiber.StatusServiceUnavailable, "task data access unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -38,13 +38,14 @@ func (a brokeredTaskDataAccess) withData(ctx context.Context, backing any, autho
 		var err error
 		for range 3 {
 			// Brokered coordination can access data from several Tasks. Fence
-			// namespace cleanup, with every Kubernetes read outside the transaction.
-			err = transactions.WithAuthorizedTaskDataTransaction(guardCtx, a.taskKey.Namespace, "", func(authCtx context.Context) error {
+			// namespace cleanup; every Kubernetes read runs with no store
+			// transaction open.
+			err = dataAccess.WithAuthorizedTaskDataAccess(guardCtx, a.taskKey.Namespace, "", func(authCtx context.Context) ([]store.TaskJobIdentity, error) {
 				task, err := a.activeTask(authCtx)
 				if err != nil {
-					return err
+					return nil, err
 				}
-				return authorize(authCtx, task)
+				return nil, authorize(authCtx, task)
 			}, access)
 			if !errors.Is(err, store.ErrTaskDataCleanupChanged) {
 				break
