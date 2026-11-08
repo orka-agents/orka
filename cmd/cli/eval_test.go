@@ -394,6 +394,36 @@ func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
 	}
 }
 
+// A finished candidate is judged later; --wait holds until the experiment
+// leaves Pending.
+func TestEvalRunWaitHoldsForTheExperimentDecision(t *testing.T) {
+	gets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/evals/runs":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+		case "/api/v1/evals/runs/r":
+			gets++
+			result := "Pending"
+			if gets > 3 {
+				result = "Passed"
+			}
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded","experiment":{"result":"` +
+				result + `"}}}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+		"--token", "tok", "--wait")
+	if err != nil || gets < 4 || strings.Count(out, "Waiting for the experiment decision") != 1 {
+		t.Fatalf("Execute() = %v after %d gets\n%s", err, gets, out)
+	}
+}
+
 func TestEvalRunWaitFailsOnNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -2,6 +2,7 @@ package evals
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -166,6 +167,35 @@ func TestDecideExperimentIncomparable(t *testing.T) {
 	}
 }
 
+// An improvement exactly at the threshold passes: 2/10 to 7/10 is 50
+// points, although the float difference is just below 50.
+func TestDecideExperimentThresholdIsExact(t *testing.T) {
+	ids := cases(10)
+	baseline := map[string]bool{"case-a": true, "case-b": true}
+	candidate := map[string]bool{"case-a": true, "case-b": true, "case-c": true, "case-d": true, "case-e": true,
+		"case-f": true, "case-g": true}
+	in := experimentInput(ids, baseline, candidate)
+	in.Gate.MinTargetImprovementPoints = 50
+	if verdict := DecideExperiment(in); verdict.Result != ExperimentPassed {
+		t.Fatalf("verdict = %+v", verdict)
+	}
+	in.Gate.MinTargetImprovementPoints = 51
+	if verdict := DecideExperiment(in); verdict.Result != ExperimentFailed {
+		t.Fatalf("verdict above the threshold = %+v", verdict)
+	}
+}
+
+func TestFormatDecimalFitsTheStatusField(t *testing.T) {
+	for value, want := range map[float64]string{0.05: "0.05", 100: "100", 1e-40: "1e-40", 0.005: "0.005"} {
+		if got := FormatDecimal(value); got != want || len(got) > 32 {
+			t.Errorf("FormatDecimal(%v) = %q, want %q", value, got, want)
+		}
+	}
+	if got := FormatDecimal(math.SmallestNonzeroFloat64); len(got) > 32 {
+		t.Errorf("FormatDecimal(smallest) = %q is longer than the status field", got)
+	}
+}
+
 // Pairs that are not graded on both sides, such as an infra error, do not
 // count toward the sign test.
 func TestDecideExperimentPairsOnlyGradedTrials(t *testing.T) {
@@ -176,5 +206,33 @@ func TestDecideExperimentPairsOnlyGradedTrials(t *testing.T) {
 	verdict := DecideExperiment(in)
 	if verdict.Target.Improved != 3 {
 		t.Fatalf("target = %+v", verdict.Target)
+	}
+}
+
+// Held-out keys follow the reviewed commits only: reordering, renaming,
+// retagging or rewording cases keeps them, and a different commit does not.
+func TestHeldOutCaseKeys(t *testing.T) {
+	reviewCase := func(id, head, title string, tags ...string) Case {
+		return Case{ID: id, Tags: tags, Input: CaseInput{RepositoryMonitorReview: &ReviewCaseInput{
+			RepoURL: "https://github.com/acme/fixtures", BaseSHA: "base", HeadSHA: head, Title: title}}}
+	}
+	first, err := HeldOutCaseKeys([]Case{reviewCase("a", "head-1", "one"), reviewCase("b", "head-2", "two")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relabeled, err := HeldOutCaseKeys([]Case{reviewCase("renamed", "head-2", "reworded", "defect"), reviewCase("x", "head-1", "one"),
+		reviewCase("copy", "head-1", "again")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || !slices.Equal(first, relabeled) || !slices.IsSorted(first) {
+		t.Fatalf("keys = %v, relabeled = %v", first, relabeled)
+	}
+	other, _ := HeldOutCaseKeys([]Case{reviewCase("a", "head-3", "one")})
+	if slices.Contains(first, other[0]) {
+		t.Fatal("a different commit shares a held-out key")
+	}
+	if _, err := HeldOutCaseKeys([]Case{{ID: "empty"}}); err == nil {
+		t.Fatal("a case without input has a held-out key")
 	}
 }

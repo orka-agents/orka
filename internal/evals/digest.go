@@ -22,6 +22,35 @@ func CaseSetDigest(cases []Case) (string, error) {
 	}{Schema: corev1alpha1.EvalCaseSchemaVersion, Cases: cases})
 }
 
+// HeldOutCaseKeys returns the sorted, distinct keys of the evidence the
+// cases hold out: for a review case, the reviewed repository and commits.
+// Case IDs, order, tags, references and descriptive text do not change a
+// key, so rearranging or relabeling held-out cases never makes them fresh.
+func HeldOutCaseKeys(cases []Case) ([]string, error) {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(cases))
+	for i := range cases {
+		input := cases[i].Input.RepositoryMonitorReview
+		if input == nil {
+			return nil, fmt.Errorf("case %q has no repositoryMonitorReview input", cases[i].ID)
+		}
+		key, err := digestJSON(struct {
+			RepoURL string `json:"repoURL"`
+			BaseSHA string `json:"baseSHA"`
+			HeadSHA string `json:"headSHA"`
+		}{input.RepoURL, input.BaseSHA, input.HeadSHA})
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[key]; !dup {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
 // GraderSetDigest returns the digest of the named graders' names and
 // versions. Order and repetition of names do not matter. An unknown name is
 // an error.

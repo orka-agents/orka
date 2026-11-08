@@ -26,7 +26,7 @@ const (
 	schema169 = "4756d67c9c3850bd87286c81f4398f245163f5edb038cba38e0269d347dd09e2" // schema version 2: operation receipts and epoch advance
 	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
 	schema171 = "741173f6a2eafa38fe0ccb5d7e71a5960f7fdccf143d0aefadfdb544f84827d4" // schema version 4: eval trial records
-	schema172 = "0171a51479924e25fc53ce582c90872d7472d2f4a5c658489b422dfe5343530f" // schema version 5: eval experiment reservations
+	schema172 = "1fdc0e362c811b0bb6f8f2a860419a378f3eb520c0940de880aedafe38972a7b" // schema version 5: eval experiment reservations
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.

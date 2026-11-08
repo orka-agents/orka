@@ -53,6 +53,7 @@ func catalogEvalExperiment(candidate string) *storagev1.EvalExperimentRecord {
 		BaselineRun:     evalRunName,
 		BaselineRunUID:  evalRunUID,
 		CaseSetDigest:   "sha256:cases",
+		CaseKeys:        []string{"sha256:case-a", "sha256:case-b"},
 		GateDigest:      "sha256:gate",
 		Hypothesis:      "stricter review prompt",
 		ReservedAt:      workflowAt(1),
@@ -104,12 +105,12 @@ func init() {
 			// reservation takes the last one the limits allow.
 			setup: func(t *testing.T, p storagev1.StateProvider) {
 				granted, err := p.ReserveEvalExperiment(t.Context(), catalogEvalExperiment("candidate-a"),
-					storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCaseSet: 2})
+					storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCase: 2})
 				require.NoError(t, err)
 				require.True(t, granted.Granted)
 			},
 			args: rebuiltArgs(func() []any {
-				return []any{catalogEvalExperiment("candidate-b"), storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCaseSet: 2}}
+				return []any{catalogEvalExperiment("candidate-b"), storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCase: 2}}
 			}),
 			observe: observeEvalExperiments,
 		},

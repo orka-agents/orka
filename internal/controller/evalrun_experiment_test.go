@@ -8,8 +8,10 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,34 +81,33 @@ func newExperimentEnv(t *testing.T, baseline, candidate *corev1alpha1.EvalRun, g
 	return &experimentEnv{env}
 }
 
-// baselineCaseSetDigest snapshots the baseline and returns its case set
-// digest, which the candidate shares.
-func (e *experimentEnv) baselineCaseSetDigest() string {
-	e.t.Helper()
-	e.reconcileRun("baseline") // finalizer
-	e.reconcileRun("baseline") // snapshot
-	snapshot := e.getRun("baseline").Status.Snapshot
-	if snapshot == nil {
-		e.t.Fatal("the baseline recorded no snapshot")
-	}
-	return snapshot.CaseSetDigest
-}
-
 // reserveEarlier records the attempt of an earlier candidate that no longer
-// exists, against the given baseline and case set.
-func (e *experimentEnv) reserveEarlier(baselineUID, caseSetDigest string) {
+// exists, against the given baseline and held-out case keys.
+func (e *experimentEnv) reserveEarlier(baselineUID string, caseKeys []string) {
 	e.t.Helper()
-	if caseSetDigest == "" {
-		caseSetDigest = "sha256:other-cases"
-	}
+	slices.Sort(caseKeys)
 	granted, err := e.store.ReserveEvalExperiment(context.Background(), &store.EvalExperimentRecord{
 		SchemaVersion: store.EvalExperimentSchemaVersion, Namespace: "other-team", CandidateRun: "earlier",
-		CandidateRunUID: "earlier-uid", BaselineRun: "baseline", BaselineRunUID: baselineUID, CaseSetDigest: caseSetDigest,
-		GateDigest: "sha256:gate", Hypothesis: "earlier", ReservedAt: evalTestNow,
-	}, store.EvalExperimentLimits{MaxPerBaseline: 10, MaxPerCaseSet: 10})
+		CandidateRunUID: "earlier-uid", BaselineRun: "baseline", BaselineRunUID: baselineUID, CaseSetDigest: "sha256:other-cases",
+		CaseKeys: caseKeys, GateDigest: "sha256:gate", Hypothesis: "earlier", ReservedAt: evalTestNow,
+	}, store.EvalExperimentLimits{MaxPerBaseline: 10, MaxPerCase: 10})
 	if err != nil || !granted.Granted {
 		e.t.Fatalf("reserve the earlier attempt: %+v, %v", granted, err)
 	}
+}
+
+// experimentCaseKeys are the held-out keys of the experiment cases.
+func experimentCaseKeys(t *testing.T) []string {
+	t.Helper()
+	cases, err := evals.ParseCases([]byte(experimentCases()), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := evals.HeldOutCaseKeys(cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
 }
 
 func (e *experimentEnv) reconcileRun(name string) ctrl.Result {
@@ -233,6 +234,25 @@ func TestEvalExperimentIncomparableWhenThePlansDiffer(t *testing.T) {
 	}
 }
 
+// A different per-trial time budget or concurrency is a different execution
+// condition, and listing the same graders in another order is not.
+func TestEvalExperimentIncomparableWhenExecutionDiffers(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	candidate.Spec.TrialTimeout = &metav1.Duration{Duration: 2 * time.Hour}
+	candidate.Spec.MaxConcurrentTrials = 4
+	slices.Reverse(candidate.Spec.Graders)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	env.reconcileRun("candidate")
+	experiment := env.getRun("candidate").Status.Experiment
+	if experiment.Result != corev1alpha1.EvalExperimentIncomparable ||
+		strings.Join(experiment.Reasons, "; ") !=
+			"maxConcurrentTrials differs between the baseline and candidate runs; trial timeout differs between the baseline and candidate runs" {
+		t.Fatalf("experiment = %+v", experiment)
+	}
+}
+
 func TestEvalExperimentIncomparableWhenTheBaselineIsGone(t *testing.T) {
 	baseline, candidate := experimentRuns(1, 1)
 	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
@@ -277,9 +297,13 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 		// An earlier candidate's attempt still counts after that candidate
 		// was deleted: only its reservation remains.
 		"candidate budget spent": {gate: strings.Replace(evalTestGate, "maxCandidatesPerBaseline: 2", "maxCandidatesPerBaseline: 1", 1),
-			seed: func(env *experimentEnv) { env.reserveEarlier("baseline-uid", "") }, reason: evalRunReasonCandidateBudgetSpent},
+			seed:   func(env *experimentEnv) { env.reserveEarlier("baseline-uid", []string{"sha256:other-case"}) },
+			reason: evalRunReasonCandidateBudgetSpent},
 		"held-out budget spent": {gate: evalTestGate,
-			seed:   func(env *experimentEnv) { env.reserveEarlier("other-baseline-uid", env.baselineCaseSetDigest()) },
+			// Any one shared case spends the budget, under any baseline.
+			seed: func(env *experimentEnv) {
+				env.reserveEarlier("other-baseline-uid", []string{"sha256:aaa-other-case", experimentCaseKeys(env.t)[0]})
+			},
 			reason: evalRunReasonHeldOutBudgetSpent},
 	} {
 		t.Run(name, func(t *testing.T) {

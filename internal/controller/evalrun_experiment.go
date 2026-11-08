@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,7 +33,8 @@ const (
 // trial: the gate, the baseline's identity and the candidate's digest. A
 // missing gate or baseline, or a spent candidate budget, fails the run before
 // any trial starts.
-func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1alpha1.EvalRun, snapshot corev1alpha1.EvalRunSnapshot) (*corev1alpha1.EvalExperimentStatus, error) {
+func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) (*corev1alpha1.EvalExperimentStatus, error) {
+	snapshot := observed.Snapshot
 	experiment := run.Spec.Experiment
 	gate, gateDigest, err := r.loadExperimentGate(ctx)
 	if err != nil {
@@ -64,7 +64,7 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if err != nil {
 		return nil, err
 	}
-	if err := r.reserveExperiment(ctx, run, baseline, snapshot, gate, gateDigest); err != nil {
+	if err := r.reserveExperiment(ctx, run, baseline, observed, gate, gateDigest); err != nil {
 		return nil, err
 	}
 	return &corev1alpha1.EvalExperimentStatus{
@@ -94,9 +94,13 @@ func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 // TTL, never returns one, so a proposer cannot retry against the held-out
 // cases until a candidate passes by chance.
 func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline *corev1alpha1.EvalRun,
-	snapshot corev1alpha1.EvalRunSnapshot, gate evals.ExperimentGate, gateDigest string) error {
+	observed *evalRunObservation, gate evals.ExperimentGate, gateDigest string) error {
 	if r.ExperimentStore == nil {
 		return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable, "no experiment store is configured")
+	}
+	caseKeys, err := evals.HeldOutCaseKeys(observed.Cases)
+	if err != nil {
+		return evalRunConfigErrorf(evalRunReasonExperimentInvalid, "%v", err)
 	}
 	record := &store.EvalExperimentRecord{
 		SchemaVersion:   store.EvalExperimentSchemaVersion,
@@ -105,7 +109,8 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 		CandidateRunUID: string(run.UID),
 		BaselineRun:     baseline.Name,
 		BaselineRunUID:  string(baseline.UID),
-		CaseSetDigest:   snapshot.CaseSetDigest,
+		CaseSetDigest:   observed.Snapshot.CaseSetDigest,
+		CaseKeys:        caseKeys,
 		GateDigest:      gateDigest,
 		Hypothesis:      run.Spec.Experiment.Hypothesis,
 		// The creation time keeps a retried reservation identical.
@@ -116,7 +121,7 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 	}
 	reservation, err := r.ExperimentStore.ReserveEvalExperiment(ctx, record, store.EvalExperimentLimits{
 		MaxPerBaseline: gate.MaxCandidatesPerBaseline,
-		MaxPerCaseSet:  gate.MaxExperimentsPerHeldOutSet,
+		MaxPerCase:     gate.MaxExperimentsPerHeldOutSet,
 	})
 	if errors.Is(err, store.ErrDuplicateMismatch) {
 		return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
@@ -134,8 +139,8 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 			baseline.Name, reservation.BaselineAttempts)
 	default:
 		return evalRunConfigErrorf(evalRunReasonHeldOutBudgetSpent,
-			"the held-out case set already ran %d experiments, the gate's maxExperimentsPerHeldOutSet; add fresh held-out cases",
-			reservation.CaseSetAttempts)
+			"a held-out case was already in %d experiments, the gate's maxExperimentsPerHeldOutSet; add fresh held-out cases",
+			reservation.CaseAttempts)
 	}
 }
 
@@ -283,10 +288,6 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 // Agent, its resolved system prompt and its model).
 func evalExperimentComparable(run *corev1alpha1.EvalRun) map[string]string {
 	snapshot := run.Status.Snapshot
-	graders := make([]string, 0, len(run.Spec.Graders))
-	for _, grader := range run.Spec.Graders {
-		graders = append(graders, string(grader))
-	}
 	return map[string]string{
 		"case set":             snapshot.CaseSetDigest,
 		"grader set":           snapshot.GraderSetDigest,
@@ -295,7 +296,8 @@ func evalExperimentComparable(run *corev1alpha1.EvalRun) map[string]string {
 		"review prompt":        snapshot.PromptTemplateDigest,
 		"runtime image":        snapshot.RuntimeImageDigest,
 		"subject":              string(run.Spec.Subject.Type) + "/" + run.Spec.Subject.RepositoryMonitorReview.MonitorRef.Name,
-		"graders":              strings.Join(graders, ","),
+		"trial timeout":        evalRunTrialTimeout(run).String(),
+		"maxConcurrentTrials":  strconv.Itoa(evalRunMaxConcurrentTrials(run)),
 		"maxInfraErrorPercent": strconv.Itoa(int(evalRunMaxInfraErrorPercent(run))),
 	}
 }

@@ -270,6 +270,7 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	last := ""
+	waitingForDecision := false
 	for {
 		progress := fmt.Sprintf("%s: %d/%d trials done (%d passed, %d failed, %d infra errors)", run.Status.Phase,
 			run.Status.Counts.Completed, run.Status.Counts.Planned, run.Status.Counts.Passed, run.Status.Counts.Failed,
@@ -279,7 +280,15 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 			last = progress
 		}
 		if evalRunFinished(run.Status.Phase) {
-			return run, nil
+			// A candidate is judged after it finishes, once its baseline
+			// has finished too; wait for that decision.
+			if experiment := run.Status.Experiment; experiment == nil || experiment.Result != corev1alpha1.EvalExperimentPending {
+				return run, nil
+			}
+			if !waitingForDecision {
+				_, _ = fmt.Fprintln(out, "Waiting for the experiment decision and its baseline")
+				waitingForDecision = true
+			}
 		}
 		select {
 		case <-ctx.Done():

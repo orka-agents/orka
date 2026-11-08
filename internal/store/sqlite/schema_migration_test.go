@@ -427,6 +427,8 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 			rows["eval_trials"] = nil
 			require.NotContains(t, rows, "eval_experiments")
 			rows["eval_experiments"] = nil
+			require.NotContains(t, rows, "eval_experiment_cases")
+			rows["eval_experiment_cases"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -627,6 +629,8 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 			rows["eval_trials"] = nil
 			require.NotContains(t, rows, "eval_experiments")
 			rows["eval_experiments"] = nil
+			require.NotContains(t, rows, "eval_experiment_cases")
+			rows["eval_experiment_cases"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -898,6 +902,8 @@ func TestSchemaVersion3StoreUpgradesInPlace(t *testing.T) {
 			rows["eval_trials"] = nil
 			require.NotContains(t, rows, "eval_experiments")
 			rows["eval_experiments"] = nil
+			require.NotContains(t, rows, "eval_experiment_cases")
+			rows["eval_experiment_cases"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -1006,6 +1012,8 @@ func TestSchemaVersion4StoreUpgradesInPlace(t *testing.T) {
 			rows := applicationRows(t, db)
 			require.NotContains(t, rows, "eval_experiments")
 			rows["eval_experiments"] = nil
+			require.NotContains(t, rows, "eval_experiment_cases")
+			rows["eval_experiment_cases"] = nil
 			require.NoError(t, db.Close())
 
 			for attempt := range 2 {
@@ -1043,7 +1051,7 @@ func TestSchemaVersion4StoreUpgradesInPlace(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { require.NoError(t, s.close()) }()
 			reservation, err := s.ReserveEvalExperiment(t.Context(), evalExperimentTestRecord("candidate", "baseline-uid"),
-				store.EvalExperimentLimits{MaxPerBaseline: 1, MaxPerCaseSet: 1})
+				store.EvalExperimentLimits{MaxPerBaseline: 1, MaxPerCase: 1})
 			require.NoError(t, err)
 			require.True(t, reservation.Granted)
 		})

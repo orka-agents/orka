@@ -12,19 +12,26 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
+// evalExperimentMaxCaseKeys bounds one reservation's held-out case keys.
+const evalExperimentMaxCaseKeys = 10000
+
 func evalExperimentSchemaStatements() []string {
 	return []string{
 		`CREATE TABLE IF NOT EXISTS eval_experiments (
 			namespace         TEXT NOT NULL,
 			candidate_run_uid TEXT NOT NULL,
 			baseline_run_uid  TEXT NOT NULL,
-			case_set_digest   TEXT NOT NULL,
 			record_json       TEXT NOT NULL,
 			reserved_at       TIMESTAMP NOT NULL,
 			PRIMARY KEY (namespace, candidate_run_uid)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_eval_experiments_baseline ON eval_experiments(baseline_run_uid)`,
-		`CREATE INDEX IF NOT EXISTS idx_eval_experiments_case_set ON eval_experiments(case_set_digest)`,
+		`CREATE TABLE IF NOT EXISTS eval_experiment_cases (
+			case_key          TEXT NOT NULL,
+			namespace         TEXT NOT NULL,
+			candidate_run_uid TEXT NOT NULL,
+			PRIMARY KEY (case_key, namespace, candidate_run_uid)
+		)`,
 	}
 }
 
@@ -44,10 +51,21 @@ func validateEvalExperimentRecord(record *store.EvalExperimentRecord, limits sto
 			return store.ValidationErrorf("eval experiment %s is required and must not have surrounding whitespace", field)
 		}
 	}
+	if len(record.CaseKeys) == 0 || len(record.CaseKeys) > evalExperimentMaxCaseKeys {
+		return store.ValidationErrorf("eval experiment caseKeys must hold 1 to %d keys", evalExperimentMaxCaseKeys)
+	}
+	for i, key := range record.CaseKeys {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(key) != key {
+			return store.ValidationErrorf("eval experiment caseKeys must not be empty or have surrounding whitespace")
+		}
+		if i > 0 && key <= record.CaseKeys[i-1] {
+			return store.ValidationErrorf("eval experiment caseKeys must be sorted and distinct")
+		}
+	}
 	if record.ReservedAt.IsZero() {
 		return store.ValidationErrorf("eval experiment reservedAt is required")
 	}
-	if limits.MaxPerBaseline < 1 || limits.MaxPerCaseSet < 1 {
+	if limits.MaxPerBaseline < 1 || limits.MaxPerCase < 1 {
 		return store.ValidationErrorf("eval experiment limits must be at least 1")
 	}
 	return nil
@@ -73,12 +91,6 @@ func (s *Store) ReserveEvalExperiment(ctx context.Context, record *store.EvalExp
 func (s *Store) reserveEvalExperimentWrite(ctx context.Context, record *store.EvalExperimentRecord, limits store.EvalExperimentLimits, encoded []byte) (store.EvalExperimentReservation, error) {
 	executor := s.taskDataExecutor(ctx)
 	var reservation store.EvalExperimentReservation
-	count := func(column, value string) (int32, error) {
-		var n int32
-		// The column is one of two fixed names, never caller input.
-		err := executor.QueryRowContext(ctx, `SELECT COUNT(*) FROM eval_experiments WHERE `+column+` = ?`, value).Scan(&n)
-		return n, err
-	}
 	var existing string
 	err := executor.QueryRowContext(ctx,
 		`SELECT record_json FROM eval_experiments WHERE namespace = ? AND candidate_run_uid = ?`,
@@ -95,28 +107,39 @@ func (s *Store) reserveEvalExperimentWrite(ctx context.Context, record *store.Ev
 	default:
 		return reservation, err
 	}
-	if reservation.BaselineAttempts, err = count("baseline_run_uid", record.BaselineRunUID); err != nil {
+	if err := executor.QueryRowContext(ctx, `SELECT COUNT(*) FROM eval_experiments WHERE baseline_run_uid = ?`,
+		record.BaselineRunUID).Scan(&reservation.BaselineAttempts); err != nil {
 		return reservation, err
 	}
-	if reservation.CaseSetAttempts, err = count("case_set_digest", record.CaseSetDigest); err != nil {
-		return reservation, err
+	for _, key := range record.CaseKeys {
+		var n int32
+		if err := executor.QueryRowContext(ctx, `SELECT COUNT(*) FROM eval_experiment_cases WHERE case_key = ?`, key).Scan(&n); err != nil {
+			return reservation, err
+		}
+		reservation.CaseAttempts = max(reservation.CaseAttempts, n)
 	}
 	if reservation.Granted {
 		return reservation, nil
 	}
-	if reservation.BaselineAttempts >= limits.MaxPerBaseline || reservation.CaseSetAttempts >= limits.MaxPerCaseSet {
+	if reservation.BaselineAttempts >= limits.MaxPerBaseline || reservation.CaseAttempts >= limits.MaxPerCase {
 		return reservation, nil
 	}
 	if _, err := executor.ExecContext(ctx,
-		`INSERT INTO eval_experiments (namespace, candidate_run_uid, baseline_run_uid, case_set_digest, record_json, reserved_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		record.Namespace, record.CandidateRunUID, record.BaselineRunUID, record.CaseSetDigest, string(encoded),
-		record.ReservedAt.UTC()); err != nil {
+		`INSERT INTO eval_experiments (namespace, candidate_run_uid, baseline_run_uid, record_json, reserved_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		record.Namespace, record.CandidateRunUID, record.BaselineRunUID, string(encoded), record.ReservedAt); err != nil {
 		return reservation, err
+	}
+	for _, key := range record.CaseKeys {
+		if _, err := executor.ExecContext(ctx,
+			`INSERT INTO eval_experiment_cases (case_key, namespace, candidate_run_uid) VALUES (?, ?, ?)`,
+			key, record.Namespace, record.CandidateRunUID); err != nil {
+			return reservation, err
+		}
 	}
 	reservation.Granted = true
 	reservation.BaselineAttempts++
-	reservation.CaseSetAttempts++
+	reservation.CaseAttempts++
 	return reservation, nil
 }
 

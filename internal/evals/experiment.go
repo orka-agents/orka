@@ -209,7 +209,9 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 	case target.BaselineTrials == 0 || target.CandidateTrials == 0:
 		failures = append(failures, "the target has no graded trials in one of the runs")
 	default:
-		if target.ImprovementPoints < float64(in.Gate.MinTargetImprovementPoints) {
+		// Compare pass counts exactly: 100*(c/ct - b/bt) >= min.
+		if 100*(int64(target.CandidatePassed)*int64(target.BaselineTrials)-int64(target.BaselinePassed)*int64(target.CandidateTrials)) <
+			int64(in.Gate.MinTargetImprovementPoints)*int64(target.BaselineTrials)*int64(target.CandidateTrials) {
 			failures = append(failures, fmt.Sprintf("the target pass@1 rose by %s points, less than the gate's %d",
 				FormatDecimal(target.ImprovementPoints), in.Gate.MinTargetImprovementPoints))
 		}
@@ -309,7 +311,9 @@ func sortedKeys(maps ...map[string]string) []string {
 	return keys
 }
 
-// FormatDecimal renders a gate number for status and reasons.
+// FormatDecimal renders a gate number for status and reasons, in the
+// shortest form that reads back exactly. Very small or large values use an
+// exponent, so every accepted gate value fits the status field.
 func FormatDecimal(value float64) string {
-	return strconv.FormatFloat(value, 'f', -1, 64)
+	return strconv.FormatFloat(value, 'g', -1, 64)
 }
