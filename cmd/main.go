@@ -1182,7 +1182,12 @@ func main() {
 	// Record whether Agent use is enforced before anything serves requests,
 	// so work created while it was off can never bind an Agent identity. A
 	// new period starts only once this controller leads.
-	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, &agentIdentityConfig); err != nil {
+	leaderLease, err := agentUseLeaderLease(enableLeaderElection, watchNamespace)
+	if err != nil {
+		setupLog.Error(err, "unable to identify the leader election Lease")
+		os.Exit(1)
+	}
+	if err := establishAgentUseEnforcementPeriod(mgr, restConfig, watchNamespace, leaderLease, &agentIdentityConfig); err != nil {
 		setupLog.Error(err, "unable to record the Agent use enforcement period")
 		os.Exit(1)
 	}
@@ -2616,7 +2621,7 @@ func agentHostCacheOptions(options cache.Options, hostNamespace string) cache.Op
 // establishAgentUseEnforcementPeriod records this run's Agent use
 // enforcement with a direct client, since the manager's cache is not running
 // yet, and stores when the current enforcement period began.
-func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, config *agentidentity.Config) error {
+func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Config, namespace string, leader *agentidentity.LeaderLease, config *agentidentity.Config) error {
 	directClient, err := crclient.New(restConfig, crclient.Options{Scheme: scheme})
 	if err != nil {
 		return err
@@ -2653,7 +2658,7 @@ func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Confi
 	// decisions wait until then.
 	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		for {
-			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace)
+			since, err := agentidentity.StartEnforcementPeriod(ctx, directClient, namespace, leader)
 			if err == nil {
 				period.Start(since)
 				setupLog.Info("Agent use enforcement period started", "since", since)
@@ -2667,6 +2672,27 @@ func establishAgentUseEnforcementPeriod(mgr ctrl.Manager, restConfig *rest.Confi
 			}
 		}
 	}))
+}
+
+// agentUseLeaderLease names the leader election Lease this controller holds
+// once it leads, as controller-runtime names it, or nil with leader election
+// off.
+func agentUseLeaderLease(leaderElection bool, watchNamespace string) (*agentidentity.LeaderLease, error) {
+	if !leaderElection {
+		return nil, nil
+	}
+	namespace := strings.TrimSpace(watchNamespace)
+	if namespace == "" {
+		namespace = currentPodNamespace()
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, err
+	}
+	return &agentidentity.LeaderLease{
+		Key:          crclient.ObjectKey{Namespace: namespace, Name: controllerLeaderElectionID},
+		HolderPrefix: hostname + "_",
+	}, nil
 }
 
 func managerCacheOptions(watchNamespace, acpRuntimeNamespace, controllerNamespace string) cache.Options {
