@@ -81,10 +81,17 @@ func ParseExperimentGate(declaration []byte) (ExperimentGate, error) {
 	return gate, nil
 }
 
-// HeldOutCaseSets returns the held-out case ConfigMaps the protected set
-// lists, keyed namespace/name. Experiments run only on these, so the cases a
-// candidate is judged by, and when they are rotated, stay operator choices.
-func HeldOutCaseSets(declaration []byte) (map[string]bool, error) {
+// Case set splits the protected set assigns.
+const (
+	SplitTrain   = "train"
+	SplitHeldOut = "heldOut"
+)
+
+// CaseSetSplits returns the split of every case ConfigMap the protected set
+// lists, keyed namespace/name. Experiments run only on held-out sets, and a
+// candidate Agent outside an experiment only on training sets, so which
+// cases judge a candidate, and when they rotate, stay operator choices.
+func CaseSetSplits(declaration []byte) (map[string]string, error) {
 	var document struct {
 		CaseSets []struct {
 			Namespace string `json:"namespace"`
@@ -99,13 +106,13 @@ func HeldOutCaseSets(declaration []byte) (map[string]bool, error) {
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return nil, fmt.Errorf("decode protected set caseSets: %w", err)
 	}
-	heldOut := map[string]bool{}
+	splits := map[string]string{}
 	for _, caseSet := range document.CaseSets {
-		if caseSet.Split == "heldOut" && caseSet.Namespace != "" && caseSet.Name != "" {
-			heldOut[caseSet.Namespace+"/"+caseSet.Name] = true
+		if (caseSet.Split == SplitTrain || caseSet.Split == SplitHeldOut) && caseSet.Namespace != "" && caseSet.Name != "" {
+			splits[caseSet.Namespace+"/"+caseSet.Name] = caseSet.Split
 		}
 	}
-	return heldOut, nil
+	return splits, nil
 }
 
 // Digest digests the gate's thresholds.

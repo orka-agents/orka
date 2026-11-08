@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,11 +37,11 @@ const (
 func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) (*corev1alpha1.EvalExperimentStatus, error) {
 	snapshot := observed.Snapshot
 	experiment := run.Spec.Experiment
-	gate, gateDigest, heldOut, err := r.loadExperimentGate(ctx)
+	gate, gateDigest, splits, err := r.loadExperimentGate(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if ref := run.Spec.Cases.ConfigMapRef; ref == nil || !heldOut[run.Namespace+"/"+ref.Name] {
+	if ref := run.Spec.Cases.ConfigMapRef; ref == nil || splits[run.Namespace+"/"+ref.Name] != evals.SplitHeldOut {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"an experiment must run on a held-out case set that the protected set's caseSets lists for namespace %s", run.Namespace)
 	}
@@ -96,61 +95,24 @@ func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 }
 
 // refuseUnpairedHeldOutCandidate fails a run that reviews with a candidate
-// Agent on held-out evidence outside an experiment: such a run would test a
-// candidate against the held-out cases without spending an attempt. Evidence
-// is matched by case key, so a copy of held-out cases in another ConfigMap
-// is refused too. With no gate configured there are no held-out sets; a
-// configured gate or a listed held-out ConfigMap that cannot be read fails
-// closed.
-func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) error {
+// Agent outside an experiment unless its cases ConfigMap is a training set
+// the protected set lists. Anything else, a held-out set or an unlisted copy
+// of one, would test a candidate against held-out evidence without spending
+// an attempt. With no gate configured there are no case sets to protect; a
+// configured gate that cannot be read fails closed.
+func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, run *corev1alpha1.EvalRun) error {
 	if r.GateConfigMap.Name == "" {
 		return nil
 	}
-	_, _, heldOut, err := r.loadExperimentGate(ctx)
+	_, _, splits, err := r.loadExperimentGate(ctx)
 	if err != nil {
 		return err
 	}
-	refused := evalRunConfigErrorf(evalRunReasonExperimentInvalid,
-		"a run that sets agentRef on held-out cases must be an experiment; add spec.experiment")
-	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && heldOut[run.Namespace+"/"+ref.Name] {
-		return refused
+	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && splits[run.Namespace+"/"+ref.Name] == evals.SplitTrain {
+		return nil
 	}
-	keys, err := evals.HeldOutCaseKeys(observed.Cases)
-	if err != nil {
-		return evalRunConfigErrorf(evalRunReasonExperimentInvalid, "%v", err)
-	}
-	runKeys := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		runKeys[key] = struct{}{}
-	}
-	for listed := range heldOut {
-		namespace, name, _ := strings.Cut(listed, "/")
-		configMap := &corev1.ConfigMap{}
-		if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, configMap); err != nil {
-			if apierrors.IsNotFound(err) {
-				return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
-					"held-out case set %s, listed in the protected set, was not found; runs with agentRef wait for it", listed)
-			}
-			return err
-		}
-		for _, data := range configMap.Data {
-			// Only values that are case files hold evidence.
-			cases, err := evals.ParseCases([]byte(data), run.Spec.Subject.Type)
-			if err != nil {
-				continue
-			}
-			heldOutKeys, err := evals.HeldOutCaseKeys(cases)
-			if err != nil {
-				continue
-			}
-			for _, key := range heldOutKeys {
-				if _, shared := runKeys[key]; shared {
-					return refused
-				}
-			}
-		}
-	}
-	return nil
+	return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+		"a run that sets agentRef outside an experiment must use a training case set the protected set's caseSets lists; add spec.experiment for held-out cases")
 }
 
 // reserveExperiment spends one of the gate's attempts on this candidate
@@ -208,9 +170,9 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 	}
 }
 
-// loadExperimentGate reads the gate and the held-out case sets of the
+// loadExperimentGate reads the gate and the case set splits of the
 // protected-set ConfigMap. Without them, experiments fail closed.
-func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, map[string]bool, error) {
+func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, map[string]string, error) {
 	if r.GateConfigMap.Name == "" {
 		return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
 			"no experiment gate is configured; set --eval-gate-configmap to the protected-set ConfigMap")
@@ -226,10 +188,10 @@ func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.Exper
 	declaration := []byte(configMap.Data[evals.ProtectedSetConfigMapKey])
 	gate, err := evals.ParseExperimentGate(declaration)
 	if err == nil {
-		var heldOut map[string]bool
-		if heldOut, err = evals.HeldOutCaseSets(declaration); err == nil {
+		var splits map[string]string
+		if splits, err = evals.CaseSetSplits(declaration); err == nil {
 			digest, digestErr := gate.Digest()
-			return gate, digest, heldOut, digestErr
+			return gate, digest, splits, digestErr
 		}
 	}
 	return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
