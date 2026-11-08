@@ -47,8 +47,8 @@ func TestRepositoryMonitorReviewRoundsFor(t *testing.T) {
 		head   string
 		want   repositoryMonitorReviewRounds
 	}{
-		{"counts heads since the last pass and ignores failed reviews", 7, "h3", repositoryMonitorReviewRounds{SincePass: 2}},
-		{"counts a re-reviewed head once", 7, "h1", repositoryMonitorReviewRounds{SincePass: 1}},
+		{"counts heads since the last pass and ignores failed reviews", 7, "h3", repositoryMonitorReviewRounds{SincePass: 2, PassedEarlier: true}},
+		{"counts a re-reviewed head once", 7, "h1", repositoryMonitorReviewRounds{SincePass: 1, PassedEarlier: true}},
 		{"counts from the first review without a pass", 8, "h2", repositoryMonitorReviewRounds{SincePass: 2}},
 		{"a first review is one round", 9, "h1", repositoryMonitorReviewRounds{SincePass: 1}},
 		{"a pass superseded on its head does not reset the count", 10, "h3", repositoryMonitorReviewRounds{SincePass: 3}},
@@ -56,6 +56,55 @@ func TestRepositoryMonitorReviewRoundsFor(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := r.repositoryMonitorReviewRoundsFor(ctx, monitor, tc.number, tc.head)
+			if err != nil || got != tc.want {
+				t.Fatalf("rounds = %+v err=%v, want %+v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryMonitorReviewRoundsSkipUnfinishedExhaustivePasses(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		added bool
+		want  repositoryMonitorReviewRounds
+	}{
+		// A first pass that added a finding was due another pass, but the
+		// author pushed h3 first, so h2 never finished passing.
+		{"an unfinished pass does not reset the count", true, repositoryMonitorReviewRounds{SincePass: 3}},
+		{"a finished pass resets the count", false, repositoryMonitorReviewRounds{SincePass: 1, PassedEarlier: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupControllerSQLiteStore(t)
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "unfinished", Namespace: "default"}}
+			monitor.Spec.Review.Exhaustive = true
+			passTask := repositoryMonitorReviewIngestTestTask("h2-pass-1-task", monitor.Name, 6, "h2")
+			r := &RepositoryMonitorReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(passTask).Build(), Scheme: scheme, Store: db}
+			firstReview := "earlier-review"
+			if tc.added {
+				firstReview = "h2-pass-1"
+			}
+			findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{{ID: "f-p2", Priority: "P2", Status: repositoryMonitorFindingStatusOpen, FirstReview: firstReview}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			created := time.Now().Add(-time.Hour)
+			for _, rec := range []store.ReviewRecord{
+				{ID: "h1-review", HeadSHA: "h1", Verdict: repositoryMonitorReviewVerdictNeedsChanges, FindingsJSON: "[]"},
+				{ID: "h2-pass-1", HeadSHA: "h2", TaskName: passTask.Name, TaskNamespace: "default", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON},
+			} {
+				created = created.Add(time.Minute)
+				rec.MonitorNamespace, rec.MonitorName, rec.Kind, rec.Number, rec.CreatedAt = "default", monitor.Name, repositoryMonitorPullRequestKind, 6, created
+				if err := db.CreateReviewRecord(ctx, &rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := r.repositoryMonitorReviewRoundsFor(ctx, monitor, 6, "h3")
 			if err != nil || got != tc.want {
 				t.Fatalf("rounds = %+v err=%v, want %+v", got, err, tc.want)
 			}
@@ -222,6 +271,13 @@ func TestRepositoryMonitorRoundsToPassRecordsEachPullRequestOnce(t *testing.T) {
 		t.Fatalf("samples = %d events = %d for a pending exhaustive pass, want none", got, firstPassEvents())
 	}
 	monitor.Spec.Review.Exhaustive = false
+
+	// A pass recorded before review_first_passed existed, which the round
+	// count ended at, means this pass is not the pull request's first.
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, &store.MonitorItem{Number: 40}, &store.ReviewRecord{ID: "after-upgrade", HeadSHA: "h9", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1, PassedEarlier: true})
+	if got := passes() - before; got != 0 {
+		t.Fatalf("samples = %d after an earlier pass, want 0", got)
+	}
 
 	passed := &store.ReviewRecord{ID: "pass-2", HeadSHA: "h2", Verdict: repositoryMonitorReviewVerdictPassed}
 	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, passed, repositoryMonitorReviewRounds{SincePass: 2})

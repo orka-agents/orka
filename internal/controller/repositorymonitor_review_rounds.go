@@ -25,6 +25,9 @@ type repositoryMonitorReviewRounds struct {
 	// SincePass counts the distinct heads reviewed since the last passed
 	// review, the new review's head included.
 	SincePass int
+	// PassedEarlier reports that the count ended at an earlier passed
+	// review, so the pull request has passed before.
+	PassedEarlier bool
 }
 
 // repositoryMonitorReviewRoundsFor counts the pull request's reviewed heads
@@ -32,7 +35,9 @@ type repositoryMonitorReviewRounds struct {
 // failed, stale, and skipped ones do not, and several reviews of one head
 // count once. A passed review ends the count only while it is its head's
 // latest review: one that a later review of the same head (an exhaustive
-// pass or a review command) superseded did not leave the head passing.
+// pass or a review command) superseded did not leave the head passing. Nor
+// does an exhaustive pass whose chain never finished because a new head was
+// pushed first.
 func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, number int64, headSHA string) (repositoryMonitorReviewRounds, error) {
 	heads := map[string]struct{}{headSHA: {}}
 	cursor := ""
@@ -52,7 +57,13 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx conte
 			head := strings.TrimSpace(records[i].HeadSHA)
 			_, superseded := heads[head]
 			if verdict == repositoryMonitorReviewVerdictPassed && !superseded {
-				return repositoryMonitorReviewRounds{SincePass: len(heads)}, nil
+				unfinished, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, &records[i])
+				if err != nil {
+					return repositoryMonitorReviewRounds{}, err
+				}
+				if !unfinished {
+					return repositoryMonitorReviewRounds{SincePass: len(heads), PassedEarlier: true}, nil
+				}
 			}
 			heads[head] = struct{}{}
 		}
@@ -108,10 +119,12 @@ func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledg
 // pull request needed before its first passed review. The pull request's
 // review_first_passed event marks it recorded, so a later pass of any head,
 // including a review command on an already passed head, is not counted
-// again. A passed exhaustive pass that another pass will extend has not
-// passed yet. Metrics never fail ingestion: a lookup error skips the sample.
+// again. An earlier passed review that the round count ended at, such as one
+// recorded before the event existed, also means this is not the first pass.
+// A passed exhaustive pass that another pass will extend has not passed
+// yet. Metrics never fail ingestion: a lookup error skips the sample.
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorRoundsToPassBestEffort(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, rounds repositoryMonitorReviewRounds) {
-	if record.Verdict != repositoryMonitorReviewVerdictPassed || rounds.SincePass <= 0 {
+	if record.Verdict != repositoryMonitorReviewVerdictPassed || rounds.SincePass <= 0 || rounds.PassedEarlier {
 		return
 	}
 	logger := log.FromContext(ctx).WithName("repositorymonitor")
