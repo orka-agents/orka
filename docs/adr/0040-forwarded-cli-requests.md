@@ -107,7 +107,11 @@ http:
   call ID from that header, the method, the path, the query, and the body's
   digest, so a retry joins the same pending approval or replays the recorded
   result instead of writing twice. A write without the header gets a fresh
-  call ID and is never joined.
+  call ID and is never joined. Azure's own answers, including `429` and
+  `5xx`, pass through unchanged, so the client retries them as it would
+  against Azure directly; with the header, such a retry replays the recorded
+  answer instead of resending, so a throttled write fails after the SDK's
+  retries and the agent runs the command again.
 - `POST` actions are forwarded too, so `az aks get-credentials` and actions
   such as start and stop work. An action that returns a secret, such as
   `listKeys` or `listClusterUserCredential`, hands it to the runtime, as the
