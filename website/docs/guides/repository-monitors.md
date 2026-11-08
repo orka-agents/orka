@@ -315,7 +315,7 @@ The controller exports three Prometheus metrics for judging whether reviews conv
 
 - `orka_repository_monitor_reviews_total{mode, verdict}` counts review records by review mode (`full`, `incremental`, or `same_head`) and recorded verdict, rejected reviews included.
 - `orka_repository_monitor_review_findings_total{priority, outcome}` counts findings when first `reported` and when a later review marks them `fixed`. A low fixed-to-reported ratio suggests findings that authors do not act on.
-- `orka_repository_monitor_review_rounds_to_pass` records, at each pull request's first passed review, how many heads were reviewed to get there. Its `le="1"` bucket divided by its count is the share of pull requests that passed on their first reviewed head; its sum divided by its count is the mean.
+- `orka_repository_monitor_review_rounds_to_pass` records, at each pull request's first passed review, how many heads were reviewed to get there. Orka also records a `review_first_passed` monitor event with the count, which keeps later passes, including a `review` command on an already passed head, from counting again; an exhaustive pass that another pass will extend does not count. Its `le="1"` bucket divided by its count is the share of pull requests that passed on their first reviewed head; its sum divided by its count is the mean.
 
 These metrics have no per-monitor labels, and like other Prometheus counters they reset when the controller restarts.
 

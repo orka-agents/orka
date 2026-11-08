@@ -8,10 +8,12 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/store"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
 	repositoryMonitorReviewEscalatedEvent   = "review_verdict_escalated"
+	repositoryMonitorReviewFirstPassedEvent = "review_first_passed"
 	repositoryMonitorReviewMaxRoundsReason  = "max_rounds"
 	repositoryMonitorFindingOutcomeReported = "reported"
 	repositoryMonitorFindingOutcomeFixed    = "fixed"
@@ -23,9 +25,6 @@ type repositoryMonitorReviewRounds struct {
 	// SincePass counts the distinct heads reviewed since the last passed
 	// review, the new review's head included.
 	SincePass int
-	// PassedBefore reports whether an earlier review of the pull request
-	// passed.
-	PassedBefore bool
 }
 
 // repositoryMonitorReviewRoundsFor counts the pull request's reviewed heads
@@ -53,7 +52,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewRoundsFor(ctx conte
 			head := strings.TrimSpace(records[i].HeadSHA)
 			_, superseded := heads[head]
 			if verdict == repositoryMonitorReviewVerdictPassed && !superseded {
-				return repositoryMonitorReviewRounds{SincePass: len(heads), PassedBefore: true}, nil
+				return repositoryMonitorReviewRounds{SincePass: len(heads)}, nil
 			}
 			heads[head] = struct{}{}
 		}
@@ -77,12 +76,10 @@ func repositoryMonitorMaxRoundsNote(spec corev1alpha1.RepositoryMonitorSpec, rou
 	return fmt.Sprintf("Verdict raised from needs_changes to needs_human: %d heads of this pull request in a row were reviewed without passing, reaching spec.review.maxRounds (%d). Before fixing more findings, consider whether the approach should change.", rounds.SincePass, *spec.Review.MaxRounds)
 }
 
-// recordRepositoryMonitorReviewMetrics records convergence metrics for a
-// newly stored review record. Callers invoke it once, right after the record
-// is created, so a retried ingestion does not count the review again. A
-// passed exhaustive pass that another pass will extend is not yet a pass of
-// the pull request, so it records no rounds to pass.
-func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledger []repositoryMonitorReviewFinding, record *store.ReviewRecord, rounds repositoryMonitorReviewRounds, passPending bool) {
+// recordRepositoryMonitorReviewMetrics counts a newly stored review record
+// and its findings. Callers invoke it once, right after the record is
+// created, so a retried ingestion does not count the review again.
+func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledger []repositoryMonitorReviewFinding, record *store.ReviewRecord) {
 	metrics.RecordRepositoryMonitorReview(repositoryMonitorReviewMetricMode(plan.Mode), record.Verdict)
 	openBefore := map[string]struct{}{}
 	for _, finding := range plan.Ledger {
@@ -105,9 +102,42 @@ func recordRepositoryMonitorReviewMetrics(plan repositoryMonitorReviewPlan, ledg
 	for k, count := range counts {
 		metrics.RecordRepositoryMonitorReviewFindings(k.priority, k.outcome, count)
 	}
-	if record.Verdict == repositoryMonitorReviewVerdictPassed && !passPending && !rounds.PassedBefore && rounds.SincePass > 0 {
-		metrics.RecordRepositoryMonitorReviewRoundsToPass(rounds.SincePass)
+}
+
+// recordRepositoryMonitorRoundsToPassBestEffort records how many heads a
+// pull request needed before its first passed review. The pull request's
+// review_first_passed event marks it recorded, so a later pass of any head,
+// including a review command on an already passed head, is not counted
+// again. A passed exhaustive pass that another pass will extend has not
+// passed yet. Metrics never fail ingestion: a lookup error skips the sample.
+func (r *RepositoryMonitorReconciler) recordRepositoryMonitorRoundsToPassBestEffort(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, rounds repositoryMonitorReviewRounds) {
+	if record.Verdict != repositoryMonitorReviewVerdictPassed || rounds.SincePass <= 0 {
+		return
 	}
+	logger := log.FromContext(ctx).WithName("repositorymonitor")
+	pending, err := r.repositoryMonitorExhaustivePassPending(ctx, monitor, record)
+	if err != nil || pending {
+		if err != nil {
+			logger.Error(err, "skipping review rounds-to-pass metric", "pullRequest", item.Number)
+		}
+		return
+	}
+	events, _, err := r.Store.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: item.Number, EventType: repositoryMonitorReviewFirstPassedEvent, Limit: 1})
+	if err != nil {
+		logger.Error(err, "skipping review rounds-to-pass metric", "pullRequest", item.Number)
+		return
+	}
+	if len(events) > 0 {
+		return
+	}
+	if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, record.HeadSHA, repositoryMonitorReviewFirstPassedEvent, fmt.Sprintf("Pull request #%d first passed review after %d reviewed heads", item.Number, rounds.SincePass), map[string]any{
+		eventReviewIDField: record.ID,
+		"rounds":           rounds.SincePass,
+	}); err != nil {
+		logger.Error(err, "skipping review rounds-to-pass metric", "pullRequest", item.Number)
+		return
+	}
+	metrics.RecordRepositoryMonitorReviewRoundsToPass(rounds.SincePass)
 }
 
 // repositoryMonitorReviewMetricMode bounds a review mode, which a rejected

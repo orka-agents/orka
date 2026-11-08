@@ -47,8 +47,8 @@ func TestRepositoryMonitorReviewRoundsFor(t *testing.T) {
 		head   string
 		want   repositoryMonitorReviewRounds
 	}{
-		{"counts heads since the last pass and ignores failed reviews", 7, "h3", repositoryMonitorReviewRounds{SincePass: 2, PassedBefore: true}},
-		{"counts a re-reviewed head once", 7, "h1", repositoryMonitorReviewRounds{SincePass: 1, PassedBefore: true}},
+		{"counts heads since the last pass and ignores failed reviews", 7, "h3", repositoryMonitorReviewRounds{SincePass: 2}},
+		{"counts a re-reviewed head once", 7, "h1", repositoryMonitorReviewRounds{SincePass: 1}},
 		{"counts from the first review without a pass", 8, "h2", repositoryMonitorReviewRounds{SincePass: 2}},
 		{"a first review is one round", 9, "h1", repositoryMonitorReviewRounds{SincePass: 1}},
 		{"a pass superseded on its head does not reset the count", 10, "h3", repositoryMonitorReviewRounds{SincePass: 3}},
@@ -137,18 +137,10 @@ func TestRecordRepositoryMonitorReviewMetrics(t *testing.T) {
 	findings := func(priority, outcome string) float64 {
 		return metrics.CounterVecValue(metrics.RepositoryMonitorReviewFindingsTotal, priority, outcome)
 	}
-	passes := func() uint64 {
-		var m dto.Metric
-		if err := metrics.RepositoryMonitorReviewRoundsToPass.Write(&m); err != nil {
-			t.Fatal(err)
-		}
-		return m.GetHistogram().GetSampleCount()
-	}
 	beforeReviews := reviews(repositoryMonitorReviewModeIncremental, repositoryMonitorReviewVerdictPassed)
 	beforeReported := findings("P2", repositoryMonitorFindingOutcomeReported)
 	beforeUnknown := findings("unknown", repositoryMonitorFindingOutcomeReported)
 	beforeFixed := findings("P1", repositoryMonitorFindingOutcomeFixed)
-	beforePasses := passes()
 
 	plan := repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeIncremental, Ledger: []repositoryMonitorReviewFinding{
 		ledgerFinding("f-fixed", "P1", "a.go", 1, "Fixed"),
@@ -164,15 +156,9 @@ func TestRecordRepositoryMonitorReviewMetrics(t *testing.T) {
 	}
 	record := &store.ReviewRecord{ID: "review-new", Verdict: repositoryMonitorReviewVerdictPassed}
 
-	// A passed exhaustive pass that another pass will extend has not passed yet.
-	recordRepositoryMonitorReviewMetrics(plan, nil, record, repositoryMonitorReviewRounds{SincePass: 3}, true)
-	if got := passes() - beforePasses; got != 0 {
-		t.Fatalf("rounds-to-pass samples delta = %d for a pending exhaustive pass, want 0", got)
-	}
-
-	recordRepositoryMonitorReviewMetrics(plan, ledger, record, repositoryMonitorReviewRounds{SincePass: 3}, false)
-	if got := reviews(repositoryMonitorReviewModeIncremental, repositoryMonitorReviewVerdictPassed) - beforeReviews; got != 2 {
-		t.Fatalf("reviews delta = %v, want 2 (a pending pass is still a review)", got)
+	recordRepositoryMonitorReviewMetrics(plan, ledger, record)
+	if got := reviews(repositoryMonitorReviewModeIncremental, repositoryMonitorReviewVerdictPassed) - beforeReviews; got != 1 {
+		t.Fatalf("reviews delta = %v, want 1", got)
 	}
 	if got := findings("P2", repositoryMonitorFindingOutcomeReported) - beforeReported; got != 1 {
 		t.Fatalf("reported P2 delta = %v, want 1", got)
@@ -183,14 +169,71 @@ func TestRecordRepositoryMonitorReviewMetrics(t *testing.T) {
 	if got := findings("P1", repositoryMonitorFindingOutcomeFixed) - beforeFixed; got != 1 {
 		t.Fatalf("fixed P1 delta = %v, want 1 (a finding fixed earlier must not count again)", got)
 	}
-	if got := passes() - beforePasses; got != 1 {
-		t.Fatalf("rounds-to-pass samples delta = %d, want 1", got)
+}
+
+func TestRepositoryMonitorRoundsToPassRecordsEachPullRequestOnce(t *testing.T) {
+	ctx := context.Background()
+	db := setupControllerSQLiteStore(t)
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "first-pass", Namespace: "default"}}
+	pendingTask := repositoryMonitorReviewIngestTestTask("pass-1-task", monitor.Name, 4, "h2")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pendingTask).Build()
+	r := &RepositoryMonitorReconciler{Client: cl, Scheme: scheme, Store: db}
+	passes := func() uint64 {
+		t.Helper()
+		var m dto.Metric
+		if err := metrics.RepositoryMonitorReviewRoundsToPass.Write(&m); err != nil {
+			t.Fatal(err)
+		}
+		return m.GetHistogram().GetSampleCount()
+	}
+	firstPassEvents := func() int {
+		t.Helper()
+		events, _, err := db.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: "default", MonitorName: monitor.Name, ItemKind: repositoryMonitorPullRequestKind, ItemNumber: 4, EventType: repositoryMonitorReviewFirstPassedEvent, Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(events)
+	}
+	item := &store.MonitorItem{Number: 4}
+	before := passes()
+
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, &store.ReviewRecord{ID: "needs-changes", HeadSHA: "h1", Verdict: repositoryMonitorReviewVerdictNeedsChanges}, repositoryMonitorReviewRounds{SincePass: 1})
+	if got := passes() - before; got != 0 {
+		t.Fatalf("samples = %d after a needs_changes review, want 0", got)
 	}
 
-	// A later pass of a pull request that already passed is not a first pass.
-	recordRepositoryMonitorReviewMetrics(plan, nil, record, repositoryMonitorReviewRounds{SincePass: 1, PassedBefore: true}, false)
-	if got := passes() - beforePasses; got != 1 {
-		t.Fatalf("rounds-to-pass samples delta = %d after a repeat pass, want 1", got)
+	// An exhaustive pass that added a finding is followed by another pass,
+	// so the pull request has not passed yet.
+	monitor.Spec.Review.Exhaustive = true
+	findingsJSON, err := repositoryMonitorReviewFindingsJSON([]repositoryMonitorReviewFinding{{ID: "f-p2", Priority: "P2", Status: repositoryMonitorFindingStatusOpen, FirstReview: "pass-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := &store.ReviewRecord{ID: "pass-1", MonitorNamespace: "default", MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 4, HeadSHA: "h2", TaskName: pendingTask.Name, TaskNamespace: "default", Verdict: repositoryMonitorReviewVerdictPassed, FindingsJSON: findingsJSON}
+	if err := db.CreateReviewRecord(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, pending, repositoryMonitorReviewRounds{SincePass: 2})
+	if got := passes() - before; got != 0 || firstPassEvents() != 0 {
+		t.Fatalf("samples = %d events = %d for a pending exhaustive pass, want none", got, firstPassEvents())
+	}
+	monitor.Spec.Review.Exhaustive = false
+
+	passed := &store.ReviewRecord{ID: "pass-2", HeadSHA: "h2", Verdict: repositoryMonitorReviewVerdictPassed}
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, passed, repositoryMonitorReviewRounds{SincePass: 2})
+	if got := passes() - before; got != 1 || firstPassEvents() != 1 {
+		t.Fatalf("samples = %d events = %d after the first pass, want 1 and 1", got, firstPassEvents())
+	}
+	// A review command that passes the same head again, or a later head,
+	// is not the pull request's first pass.
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, &store.ReviewRecord{ID: "pass-3", HeadSHA: "h2", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1})
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, &store.ReviewRecord{ID: "pass-4", HeadSHA: "h3", Verdict: repositoryMonitorReviewVerdictPassed}, repositoryMonitorReviewRounds{SincePass: 1})
+	if got := passes() - before; got != 1 || firstPassEvents() != 1 {
+		t.Fatalf("samples = %d events = %d after repeat passes, want 1 and 1", got, firstPassEvents())
 	}
 }
 
