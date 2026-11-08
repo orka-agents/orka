@@ -144,6 +144,9 @@ func followEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eval
 	if experiment := run.Status.Experiment; experiment != nil && experiment.Result != corev1alpha1.EvalExperimentPassed {
 		return fmt.Errorf("evalrun/%s experiment is %s", run.Name, experiment.Result)
 	}
+	if run.Spec.Experiment != nil && run.Status.Experiment == nil {
+		return fmt.Errorf("evalrun/%s declares an experiment but has no experiment decision", run.Name)
+	}
 	return nil
 }
 

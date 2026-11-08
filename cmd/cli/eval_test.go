@@ -434,6 +434,21 @@ func TestEvalRunWaitHoldsForTheExperimentDecision(t *testing.T) {
 	}
 }
 
+// A declared experiment that finished without a decision, as a controller
+// without experiment support leaves it, never exits successfully.
+func TestEvalGetWaitFailsWithoutAnExperimentDecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"spec":{"experiment":{"hypothesis":"h",` +
+			`"baselineRunRef":{"name":"b"},"target":{"grader":"verdict"}}},"status":{"phase":"Succeeded"}}`))
+	}))
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "get", "r", "-n", "team-a", "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "no experiment decision") {
+		t.Fatalf("Execute() = %v, want a failure for a missing decision", err)
+	}
+}
+
 func TestEvalRunWaitFailsOnNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
