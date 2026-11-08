@@ -243,11 +243,14 @@ func TestHeldOutCaseKeys(t *testing.T) {
 	if len(first) != 2 || !slices.Equal(first, relabeled) || !slices.IsSorted(first) {
 		t.Fatalf("keys = %v, relabeled = %v", first, relabeled)
 	}
-	alias := reviewCase("a", "HEAD-1", "one")
-	alias.Input.RepositoryMonitorReview.RepoURL = "https://GitHub.com/Acme/Fixtures.git/"
-	aliased, _ := HeldOutCaseKeys([]Case{alias})
-	if !slices.Contains(first, aliased[0]) {
-		t.Fatal("a repository URL alias makes a held-out case fresh")
+	for _, spelling := range []string{"https://GitHub.com/Acme/Fixtures.git/", "https://github.com:443/acme/fixtures",
+		"http://github.com/acme//fixtures.git.git", "https://github.com/%61cme/fixtures"} {
+		alias := reviewCase("a", "HEAD-1", "one")
+		alias.Input.RepositoryMonitorReview.RepoURL = spelling
+		aliased, _ := HeldOutCaseKeys([]Case{alias})
+		if !slices.Contains(first, aliased[0]) {
+			t.Errorf("repository URL alias %q makes a held-out case fresh", spelling)
+		}
 	}
 	other, _ := HeldOutCaseKeys([]Case{reviewCase("a", "head-3", "one")})
 	if slices.Contains(first, other[0]) {

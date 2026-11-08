@@ -49,8 +49,10 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if experiment.BaselineRunRef.Name == run.Name {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "an EvalRun cannot be its own baseline")
 	}
+	// The baseline is read from the API, not the cache: a stale copy must
+	// never stand in for a deleted or recreated baseline.
 	baseline := &corev1alpha1.EvalRun{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: experiment.BaselineRunRef.Name}, baseline); err != nil {
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: experiment.BaselineRunRef.Name}, baseline); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "baseline EvalRun %q was not found; create it first", experiment.BaselineRunRef.Name)
 		}
@@ -247,7 +249,7 @@ func (r *EvalRunReconciler) decideExperiment(ctx context.Context, run *corev1alp
 			Reasons: []string{fmt.Sprintf("the candidate run ended %s", run.Status.Phase)}})
 	}
 	baseline := &corev1alpha1.EvalRun{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: status.BaselineRun.Name}, baseline)
+	err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: status.BaselineRun.Name}, baseline)
 	if apierrors.IsNotFound(err) || (err == nil && baseline.UID != status.BaselineRun.UID) {
 		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
 			Reasons: []string{fmt.Sprintf("baseline EvalRun %q is gone or was recreated", status.BaselineRun.Name)}})

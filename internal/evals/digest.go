@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"sort"
 	"strings"
 
@@ -52,12 +54,21 @@ func HeldOutCaseKeys(cases []Case) ([]string, error) {
 	return keys, nil
 }
 
-// canonicalRepoURL folds the spellings of one repository URL together:
-// case, a trailing slash and a .git suffix. Folding two distinct
-// repositories only shares their budget, so it errs toward stricter limits.
+// canonicalRepoURL folds the spellings of one repository URL together: it
+// keeps only the parsed host and decoded owner/repository path, without case,
+// slashes or a .git suffix, so encodings, a scheme or a port never make the
+// same repository fresh. Folding two distinct repositories only shares their
+// budget, so it errs toward stricter limits.
 func canonicalRepoURL(repoURL string) string {
-	canonical := strings.TrimRight(strings.ToLower(strings.TrimSpace(repoURL)), "/")
-	return strings.TrimRight(strings.TrimSuffix(canonical, ".git"), "/")
+	trimmed := strings.TrimSpace(repoURL)
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Host != "" {
+		trimmed = parsed.Hostname() + path.Clean("/"+parsed.Path)
+	}
+	canonical := strings.Trim(strings.ToLower(trimmed), "/")
+	for strings.HasSuffix(canonical, ".git") {
+		canonical = strings.Trim(strings.TrimSuffix(canonical, ".git"), "/")
+	}
+	return canonical
 }
 
 // GraderSetDigest returns the digest of the named graders' names and
