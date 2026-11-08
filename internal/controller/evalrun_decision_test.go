@@ -8,12 +8,15 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -94,6 +97,26 @@ func TestCurrentEvalDecisionBindingTracksTheLiveConfiguration(t *testing.T) {
 	current, err := env.reconciler.CurrentEvalDecisionBinding(context.Background(), env.getRun("candidate"))
 	if err != nil || *current != recorded {
 		t.Fatalf("current binding = %+v, %v; recorded %+v", current, err, recorded)
+	}
+
+	// Cases moved out of the held-out split cannot back an approval.
+	gate := &corev1.ConfigMap{}
+	gateKey := types.NamespacedName{Namespace: "orka-system", Name: "protected-set"}
+	if err := env.client.Get(context.Background(), gateKey, gate); err != nil {
+		t.Fatal(err)
+	}
+	original := gate.Data[evals.ProtectedSetConfigMapKey]
+	gate.Data[evals.ProtectedSetConfigMapKey] = strings.Replace(original, "split: heldOut", "split: train", 1)
+	if err := env.client.Update(context.Background(), gate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.reconciler.CurrentEvalDecisionBinding(context.Background(), env.getRun("candidate")); err == nil ||
+		!strings.Contains(err.Error(), "no longer listed with split: heldOut") {
+		t.Fatalf("binding with training cases: %v", err)
+	}
+	gate.Data[evals.ProtectedSetConfigMapKey] = original
+	if err := env.client.Update(context.Background(), gate); err != nil {
+		t.Fatal(err)
 	}
 
 	for name, edit := range map[string]func(*corev1alpha1.Agent){

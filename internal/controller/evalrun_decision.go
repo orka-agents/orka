@@ -17,6 +17,7 @@ import (
 // CurrentEvalDecisionBinding recomputes what an approval of the candidate
 // would bind to now, from the live monitor, both reviewer Agents and their
 // resolved prompts, the cases, the graders and the gate, all read uncached.
+// It fails when the cases are no longer listed as held out.
 // An approval is current only while this equals the binding recorded with
 // the experiment's outcome.
 func (r *EvalRunReconciler) CurrentEvalDecisionBinding(ctx context.Context, candidate *corev1alpha1.EvalRun) (*store.EvalDecisionBinding, error) {
@@ -43,9 +44,15 @@ func (r *EvalRunReconciler) CurrentEvalDecisionBinding(ctx context.Context, cand
 	if err != nil {
 		return nil, err
 	}
-	_, gateDigest, _, err := r.loadExperimentGate(ctx)
+	_, gateDigest, splits, err := r.loadExperimentGate(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// The cases must still be held out: cases moved to training, or no
+	// longer listed, may have been read since the experiment ran.
+	if ref := candidate.Spec.Cases.ConfigMapRef; ref == nil || splits[candidate.Namespace+"/"+ref.Name] != evals.SplitHeldOut {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"the candidate's cases ConfigMap is no longer listed with split: heldOut in the protected set")
 	}
 	candidateSnapshot, stableSnapshot := subject.snapshot(), stable.snapshot()
 	candidateDigest, err := evalCandidateDigest(candidateSnapshot)

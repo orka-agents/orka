@@ -13,8 +13,11 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kubefake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -97,8 +100,17 @@ func setupEvalDecisionHandlers(t *testing.T, result string, promoterGroups ...st
 	}
 	binding := env.binding
 	env.verifier = &fakeEvalDecisionVerifier{binding: &binding}
+	// RBAC grants decide on evalruns in demo to everyone but carol.
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		attrs := review.Spec.ResourceAttributes
+		review.Status.Allowed = review.Spec.User != "carol" && attrs != nil && attrs.Verb == "decide" &&
+			attrs.Group == corev1alpha1.GroupVersion.Group && attrs.Resource == "evalruns" && attrs.Namespace == "demo"
+		return true, review, nil
+	})
 	handlers := NewHandlers(HandlersConfig{
-		Client: fakeClient, EvalExperimentStore: experimentStore, EvalDecisionVerifier: env.verifier,
+		Client: fakeClient, KubeClient: clientset, EvalExperimentStore: experimentStore, EvalDecisionVerifier: env.verifier,
 		EvalPromoterGroups: promoterGroups,
 	})
 	app := fiber.New()
@@ -158,6 +170,7 @@ func TestDecideEvalRunAdmitsOnlyHumanPromoters(t *testing.T) {
 		"transaction token":   {groups: []string{"promoters"}, user: "context-token", wantStatus: http.StatusForbidden, wantError: "transaction tokens"},
 		"service account":     {groups: []string{"promoters"}, user: "system:serviceaccount:demo:bot", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not a ServiceAccount"},
 		"system user":         {groups: []string{"promoters"}, user: "system:admin", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not a ServiceAccount"},
+		"no decide grant":     {groups: []string{"promoters"}, user: "carol", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not authorized"},
 		"outside every group": {groups: []string{"promoters"}, user: "alice", in: "developers", wantStatus: http.StatusForbidden, wantError: "promoter group"},
 		"promoter":            {groups: []string{"promoters"}, user: "alice", in: "developers,promoters", wantStatus: http.StatusCreated},
 	} {

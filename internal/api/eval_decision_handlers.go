@@ -98,7 +98,8 @@ func (h *Handlers) GetEvalRunDecisions(c fiber.Ctx) error {
 // DecideEvalRun appends a person's decision on a decided experiment. Only a
 // human promoter may decide: never a ServiceAccount or other system
 // identity, never a transaction-token caller, and only a member of a
-// configured promoter group, on top of the decide verb. An approval needs a
+// configured promoter group, on top of the decide verb, which RBAC checks for
+// every caller however they authenticated. An approval needs a
 // Passed outcome whose binding still matches the live configuration; a
 // rejection needs only an outcome.
 func (h *Handlers) DecideEvalRun(c fiber.Ctx) error {
@@ -119,6 +120,16 @@ func (h *Handlers) DecideEvalRun(c fiber.Ctx) error {
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" || len(reason) > store.MaxEvalDecisionReasonBytes {
 		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("reason is required and must be at most %d bytes", store.MaxEvalDecisionReasonBytes))
+	}
+	// The route check runs RBAC only for Kubernetes identities; decide is
+	// checked for every caller, including direct OIDC users.
+	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
+	if err != nil {
+		return err
+	}
+	if err := reviewKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c), namespace,
+		"decide", corev1alpha1.GroupVersion.Group, "evalruns", c.Params("name")); err != nil {
+		return err
 	}
 	run, entry, err := h.evalRunExperiment(c)
 	if err != nil {
