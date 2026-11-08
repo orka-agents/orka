@@ -58,7 +58,7 @@ func (h *InternalHandlers) submitGatewayMessage(c fiber.Ctx) (*gatewayruntime.Ta
 	}
 	var prepared *gatewayruntime.PreparedTaskMessage
 	var receipt *gatewayruntime.TaskMessageReceipt
-	err = withInternalTaskDataTransaction(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
+	err = withInternalTaskData(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
 		if err := authorizer.revalidateTaskCaller(c, authorizedTask); err != nil {
 			return err
 		}
@@ -89,7 +89,7 @@ func (h *InternalHandlers) GetGatewayMessageBudget(c fiber.Ctx) error {
 	requestID := c.Query("requestID")
 	var prepared *gatewayruntime.PreparedTaskMessageBudget
 	var budget *gatewayruntime.TaskMessageBudget
-	err = withInternalTaskDataTransaction(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
+	err = withInternalTaskData(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
 		if err := authorizer.revalidateTaskCaller(c, task); err != nil {
 			return err
 		}
@@ -125,7 +125,7 @@ func (h *InternalHandlers) GetGatewayReplyOrigin(c fiber.Ctx) error {
 	}
 	var prepared *gatewayruntime.PreparedTaskReplyOrigin
 	var origin *gatewayruntime.TaskReplyOrigin
-	err = withInternalTaskDataTransaction(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
+	err = withInternalTaskData(c, h.gatewayService.DeliveryStore, taskName, func(ctx context.Context) error {
 		if err := authorizer.revalidateTaskCaller(c, task); err != nil {
 			return err
 		}
