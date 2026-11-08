@@ -164,30 +164,41 @@ const maxAzureThrottledWrites = 256
 // azureJoinableWritePrefix starts the call ID of a write that retries join.
 const azureJoinableWritePrefix = "az-w-"
 
-// attemptCallID returns the call ID for the current attempt of a joinable
-// write: a write Azure throttled is retried as a new attempt.
-func (g *azureGateway) attemptCallID(write bool, callID string) string {
+// attemptCallID returns the call ID and number of the current attempt of a
+// joinable write: a write Azure throttled is retried as a new attempt.
+func (g *azureGateway) attemptCallID(write bool, callID string) (string, int) {
 	if !write || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
-		return callID
+		return callID, 0
 	}
 	g.throttledMu.Lock()
 	defer g.throttledMu.Unlock()
-	if attempts := g.throttled[callID]; attempts > 0 {
-		return callID + "-a" + strconv.Itoa(attempts)
+	if attempt := g.throttled[callID]; attempt > 0 {
+		return callID + "-a" + strconv.Itoa(attempt), attempt
 	}
-	return callID
+	return callID, 0
 }
 
-// noteAnswer records a throttled answer to the current attempt of a joinable
-// write: Azure did not process it, so the client's retry is sent again.
-func (g *azureGateway) noteAnswer(write bool, callID string, status int) {
+// noteAnswer records a throttled answer to a joinable write: Azure did not
+// process that attempt, so the client's retry is sent again as the next one.
+// Only the current attempt's 429 advances it; a late 429 of an earlier
+// attempt, which another request may have joined, never does, so a write
+// that later succeeded is never sent again.
+func (g *azureGateway) noteAnswer(write bool, callID string, attempt, status int) {
 	if !write || status != http.StatusTooManyRequests || !strings.HasPrefix(callID, azureJoinableWritePrefix) {
 		return
 	}
 	g.throttledMu.Lock()
 	defer g.throttledMu.Unlock()
+	if g.throttled[callID] != attempt {
+		return
+	}
 	if g.throttled == nil || len(g.throttled) >= maxAzureThrottledWrites {
 		g.throttled = map[string]int{}
+		if attempt > 0 {
+			// The map was reset; keep this write's place so it never rejoins
+			// an attempt it has already passed.
+			g.throttled[callID] = attempt
+		}
 	}
 	g.throttled[callID]++
 }
@@ -465,7 +476,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusInternalServerError, "OrkaGatewayError", "The request could not be identified.")
 		return
 	}
-	callID := g.attemptCallID(write, baseCallID)
+	callID, attempt := g.attemptCallID(write, baseCallID)
 	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
 	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
@@ -504,7 +515,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		writeAzureError(w, http.StatusBadGateway, "OrkaToolRefused", "Orka refused or could not complete the request: "+brokerErrorMessage(response.Result)+".")
 		return
 	}
-	g.noteAnswer(write, baseCallID, forwarded.Status)
+	g.noteAnswer(write, baseCallID, attempt, forwarded.Status)
 	for name, value := range forwarded.Headers {
 		if name == harnessv2.ForwardHeadContentLength {
 			continue

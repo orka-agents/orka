@@ -424,45 +424,56 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 	return masked
 }
 
-// azurePreviewFields are the Resource Manager fields whose string values an
-// approval preview shows: they size, place, or version a resource and never
-// carry a secret. Every other string is masked, whatever it is called.
-var azurePreviewFields = func() map[string]bool {
-	fields := map[string]bool{}
-	for field := range strings.FieldsSeq("location vmsize tier kind type mode kubernetesversion " +
-		"orchestratorversion ostype ossku sku skuname family capacity zones apiversion kubernetesversions") {
-		fields[field] = true
+// azurePreviewPaths are the request-body paths, anchored at the body's root,
+// whose values an approval preview shows: they size, place, or version the
+// resource being written and never carry a secret. "*" stands for any array
+// element. Every other value is masked, a number or a boolean too, so a
+// field that only looks like one of these inside an arbitrary or secure
+// object (such as a deployment parameter) stays hidden.
+var azurePreviewPaths = func() map[string]bool {
+	paths := map[string]bool{}
+	for path := range strings.FieldsSeq("location kind zones.* identity.type " +
+		"sku.name sku.tier sku.capacity sku.family sku.size " +
+		"properties.kubernetesversion properties.hardwareprofile.vmsize " +
+		"properties.agentpoolprofiles.*.name properties.agentpoolprofiles.*.count " +
+		"properties.agentpoolprofiles.*.vmsize properties.agentpoolprofiles.*.mode " +
+		"properties.agentpoolprofiles.*.ostype properties.agentpoolprofiles.*.ossku " +
+		"properties.agentpoolprofiles.*.orchestratorversion properties.agentpoolprofiles.*.enableautoscaling " +
+		"properties.agentpoolprofiles.*.mincount properties.agentpoolprofiles.*.maxcount") {
+		paths[path] = true
 	}
-	return fields
+	return paths
 }()
 
 // maxAzurePreviewString bounds a shown string value.
 const maxAzurePreviewString = 128
 
-// maskJSONValues masks a decoded JSON value for an approval preview: numbers,
-// booleans, and nulls, which carry no secret, are shown; a string is shown
-// only under one of azurePreviewFields (key names its field, or the field of
-// the array that holds it) and when short; every other string is masked.
-func maskJSONValues(value any, key string) any {
+// maskJSONValues masks a decoded JSON value for an approval preview: a value
+// at one of azurePreviewPaths (path names it from the body's root) is shown
+// when it is not a long string; every other value is masked.
+func maskJSONValues(value any, path string) any {
+	child := func(segment string) string {
+		if path == "" {
+			return segment
+		}
+		return path + "." + segment
+	}
 	switch typed := value.(type) {
 	case map[string]any:
 		for field, item := range typed {
-			typed[field] = maskJSONValues(item, field)
+			typed[field] = maskJSONValues(item, child(strings.ToLower(field)))
 		}
 		return typed
 	case []any:
 		for index, item := range typed {
-			typed[index] = maskJSONValues(item, key)
+			typed[index] = maskJSONValues(item, child("*"))
 		}
-		return typed
-	case string:
-		if azurePreviewFields[strings.ToLower(key)] && len(typed) <= maxAzurePreviewString {
-			return typed
-		}
-		return "[masked]"
-	default:
 		return typed
 	}
+	if text, isString := value.(string); azurePreviewPaths[path] && (!isString || len(text) <= maxAzurePreviewString) {
+		return value
+	}
+	return "[masked]"
 }
 
 // connectorBindingDigest combines the frozen Connection identity digest with

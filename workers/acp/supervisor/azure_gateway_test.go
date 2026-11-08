@@ -658,3 +658,28 @@ func TestAzureGatewayResendsThrottledWrites(t *testing.T) {
 		t.Fatalf("call IDs = %q, %q, %q; want a new attempt after the 429, then a join", calls[0].Call.CallID, calls[1].Call.CallID, calls[2].Call.CallID)
 	}
 }
+
+// TestAzureGatewayIgnoresStaleThrottles covers two requests that joined the
+// same attempt: the first 429 advances the write to its next attempt, and
+// the second, late 429 of that same attempt does not advance it again, so a
+// write that succeeded on the next attempt is never sent a third time.
+func TestAzureGatewayIgnoresStaleThrottles(t *testing.T) {
+	g := &azureGateway{}
+	base := azureJoinableWritePrefix + "abc"
+	callID, attempt := g.attemptCallID(true, base)
+	if callID != base || attempt != 0 {
+		t.Fatalf("first attempt = %q, %d", callID, attempt)
+	}
+	g.noteAnswer(true, base, attempt, http.StatusTooManyRequests)
+	g.noteAnswer(true, base, attempt, http.StatusTooManyRequests)
+	if callID, attempt = g.attemptCallID(true, base); callID != base+"-a1" || attempt != 1 {
+		t.Fatalf("after a throttle and its stale echo = %q, %d; want the second attempt", callID, attempt)
+	}
+	g.noteAnswer(true, base, 1, http.StatusOK)
+	if callID, _ = g.attemptCallID(true, base); callID != base+"-a1" {
+		t.Fatalf("after a processed answer = %q; want a join", callID)
+	}
+	if callID, _ = g.attemptCallID(true, "az-random"); callID != "az-random" {
+		t.Fatal("an unjoinable call ID must not change")
+	}
+}

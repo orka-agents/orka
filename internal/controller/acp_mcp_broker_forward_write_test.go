@@ -186,7 +186,8 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 			`"agentPoolProfiles":[{"count":1,"vmSize":"Standard_B2s","enableAutoScaling":false}]}}}`)))
 	for _, want := range []string{
 		`"method":"PUT"`, `/functions/f/keys/k`, `"value":"[masked]"`, `"name":"[masked]"`, `"adminPassword":"[masked]"`,
-		`"location":"westus2"`, `"tier":"Free"`, `"count":1`, `"vmSize":"Standard_B2s"`, `"enableAutoScaling":false`, `"n":[1,true]`,
+		`"location":"westus2"`, `"tier":"Free"`, `"count":1`, `"vmSize":"Standard_B2s"`, `"enableAutoScaling":false`,
+		`"n":["[masked]","[masked]"]`,
 	} {
 		if !strings.Contains(masked, want) {
 			t.Errorf("masked preview %s lacks %s", masked, want)
@@ -194,6 +195,14 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	}
 	if strings.Contains(masked, "private-") {
 		t.Fatalf("masked preview kept a secret: %s", masked)
+	}
+	// A deployment's secure parameters stay masked, a number or a field
+	// named like a sizing field included: only root-anchored paths show.
+	deployment := string(maskForwardedWriteArguments(json.RawMessage(
+		`{"method":"PUT","path":"/subscriptions/s1/resourcegroups/rg/providers/Microsoft.Resources/deployments/d","body":` +
+			`{"properties":{"mode":"Incremental","parameters":{"credentials":{"value":{"pin":482913,"location":"private-decoy","sku":{"name":"private-sku"}}}}}}}`)))
+	if strings.Contains(deployment, "482913") || strings.Contains(deployment, "private-") || !strings.Contains(deployment, `"pin":"[masked]"`) {
+		t.Fatalf("deployment preview exposed a secure parameter: %s", deployment)
 	}
 }
 
