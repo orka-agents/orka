@@ -509,12 +509,16 @@ orka eval run -f evalrun.yaml                          # create and return
 orka eval run -f evalrun.yaml --wait                   # print progress and results; fail unless Succeeded
 orka eval run -f evalrun.yaml --output-dir ./results   # also write evalrun.json, trials.jsonl, summary.md, events/
 orka eval get pr-review-x7                             # phase, counts and per-grader results
+orka eval get pr-review-x7 --output-dir ./results      # follow an existing run and save its results
 ```
 
 `--output-dir` writes the finished EvalRun, its trial records as JSONL, a
 Markdown summary with a table of failed trials, and the execution events of each
 failed trial under `events/`. Read those transcripts before trusting a score.
-`--wait` refuses a `ttlSecondsAfterFinished` below 300 seconds, which could
+While waiting, the CLI keeps polling through dropped connections, `5xx` and
+`429` answers until `--timeout`; a `4xx` such as a deleted run fails at once. If
+the CLI exits anyway, `orka eval get <name> --output-dir <dir>` picks the run up
+again. `--wait` refuses a `ttlSecondsAfterFinished` below 300 seconds, which could
 delete the run and its trial records before they are read. `--output-dir`
 refuses any TTL: the export reads records and events after the run finishes, so
 delete the run yourself afterwards. The chart's `orka-client` Role and the

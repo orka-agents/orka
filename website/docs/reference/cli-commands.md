@@ -776,7 +776,7 @@ Usage:
   orka eval [command]
 
 Available Commands:
-  get         Show an EvalRun's phase, counts and results
+  get         Show an EvalRun's phase, counts and results, or wait for it and save them
   run         Create an EvalRun, optionally wait for it, and save its results
 
 Flags:
@@ -796,13 +796,16 @@ Use "orka eval [command] --help" for more information about a command.
 ## `orka eval get`
 
 ```text
-Show an EvalRun's phase, counts and results
+Show an EvalRun's phase, counts and per-grader results. With --wait or --output-dir it follows the run like orka eval run does, so a run whose CLI exited can be picked up again.
 
 Usage:
   orka eval get <name> [flags]
 
 Flags:
-  -h, --help   help for get
+  -h, --help                help for get
+      --output-dir string   Write the run, trial records, a summary and failed-trial events here (implies --wait)
+      --timeout duration    How long --wait waits (default 2h0m0s)
+      --wait                Wait for the run to finish and print its results
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -82,21 +82,7 @@ func newEvalRunCmd() *cobra.Command {
 			if !wait && output == "" {
 				return nil
 			}
-			run, err = waitForEvalRun(ctx, c, run, timeout, out)
-			if err != nil {
-				return err
-			}
-			printEvalRunResults(out, run)
-			if output != "" {
-				if err := writeEvalRunOutput(ctx, c, run, output); err != nil {
-					return err
-				}
-				_, _ = fmt.Fprintf(out, "Results written to %s\n", output)
-			}
-			if run.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded {
-				return fmt.Errorf("evalrun/%s ended %s", run.Name, run.Status.Phase)
-			}
-			return nil
+			return followEvalRun(ctx, c, run, timeout, output, out)
 		},
 	}
 	cmd.Flags().StringVarP(&file, "filename", "f", "", "EvalRun manifest (YAML or JSON)")
@@ -107,19 +93,55 @@ func newEvalRunCmd() *cobra.Command {
 }
 
 func newEvalGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var output string
+	var wait bool
+	var timeout time.Duration
+	cmd := &cobra.Command{
 		Use:   "get <name>",
-		Short: "Show an EvalRun's phase, counts and results",
-		Args:  cobra.ExactArgs(1),
+		Short: "Show an EvalRun's phase, counts and results, or wait for it and save them",
+		Long: "Show an EvalRun's phase, counts and per-grader results. With --wait or --output-dir it follows the run " +
+			"like orka eval run does, so a run whose CLI exited can be picked up again.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			run, err := getEvalRun(cmd.Context(), newClientFromCmd(cmd), "", args[0])
+			c := newClientFromCmd(cmd)
+			run, err := getEvalRun(cmd.Context(), c, "", args[0])
 			if err != nil {
 				return err
 			}
-			printEvalRunResults(cmd.OutOrStdout(), run)
-			return nil
+			if !wait && output == "" {
+				printEvalRunResults(cmd.OutOrStdout(), run)
+				return nil
+			}
+			if output != "" && run.Spec.TTLSecondsAfterFinished != nil {
+				return errors.New("--output-dir needs the run kept until the export finishes, but it has ttlSecondsAfterFinished")
+			}
+			return followEvalRun(cmd.Context(), c, run, timeout, output, cmd.OutOrStdout())
 		},
 	}
+	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for the run to finish and print its results")
+	cmd.Flags().StringVar(&output, "output-dir", "", "Write the run, trial records, a summary and failed-trial events here (implies --wait)")
+	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Hour, "How long --wait waits")
+	return cmd
+}
+
+// followEvalRun waits for run to finish, prints its results, writes them to
+// output when set, and fails unless the run Succeeded.
+func followEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.EvalRun, timeout time.Duration, output string, out io.Writer) error {
+	run, err := waitForEvalRun(ctx, c, run, timeout, out)
+	if err != nil {
+		return err
+	}
+	printEvalRunResults(out, run)
+	if output != "" {
+		if err := writeEvalRunOutput(ctx, c, run, output); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(out, "Results written to %s\n", output)
+	}
+	if run.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded {
+		return fmt.Errorf("evalrun/%s ended %s", run.Name, run.Status.Phase)
+	}
+	return nil
 }
 
 // evalRunRequest is the create request body: the manifest's metadata and
@@ -266,10 +288,27 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 		}
 		next, err := getEvalRun(ctx, c, run.Namespace, run.Name)
 		if err != nil {
+			// A restarting API server or a dropped port-forward must not end
+			// a long wait; keep polling until the timeout. A 4xx answer, such
+			// as a deleted run or lost access, still fails at once.
+			if transientEvalRunError(err) && ctx.Err() == nil {
+				_, _ = fmt.Fprintf(out, "Retrying after: %v\n", err)
+				continue
+			}
 			return nil, err
 		}
 		run = next
 	}
+}
+
+// transientEvalRunError reports a failure worth retrying: no response at
+// all, a 5xx or a 429.
+func transientEvalRunError(err error) bool {
+	message := err.Error()
+	if strings.Contains(message, "request failed:") {
+		return true
+	}
+	return strings.Contains(message, "(HTTP 5") || strings.Contains(message, "(HTTP 429)")
 }
 
 func printEvalRunResults(out io.Writer, run *corev1alpha1.EvalRun) {

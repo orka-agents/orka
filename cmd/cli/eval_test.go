@@ -352,3 +352,76 @@ func TestEvalRunOutputFailsOnEventErrorsOtherThanNotFound(t *testing.T) {
 		})
 	}
 }
+
+// A dropped connection or a 5xx while waiting is retried; the wait finishes
+// once the API answers again. A 404 still fails at once.
+func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
+	for name, failure := range map[string]int{"server error": http.StatusServiceUnavailable, "dropped connection": 0} {
+		t.Run(name, func(t *testing.T) {
+			gets := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/evals/runs":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+				case "/api/v1/evals/runs/r":
+					gets++
+					// Go's transport retries an idempotent request once on a
+					// reused connection, so drop it twice to reach the CLI.
+					if (failure == 0 && gets <= 2) || (failure != 0 && gets == 1) {
+						if failure == 0 {
+							hijacker, _ := w.(http.Hijacker)
+							conn, _, _ := hijacker.Hijack()
+							_ = conn.Close()
+							return
+						}
+						w.WriteHeader(failure)
+						return
+					}
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded"}}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+				"--token", "tok", "--wait")
+			if err != nil || !strings.Contains(out, "Retrying after") || !strings.Contains(out, "Succeeded") {
+				t.Fatalf("Execute() = %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestEvalRunWaitFailsOnNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/evals/runs" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+// eval get --output-dir picks up an existing run and saves its results.
+func TestEvalGetFollowsAnExistingRun(t *testing.T) {
+	var created map[string]any
+	srv := evalTestServer(t, "Succeeded", &created)
+	defer srv.Close()
+	dir := filepath.Join(t.TempDir(), "out")
+	out, err := runEvalCommand(t, "eval", "get", "pr-review-x7", "--server", srv.URL, "--token", "tok", "--output-dir", dir)
+	if err != nil || !strings.Contains(out, "Results written to") {
+		t.Fatalf("Execute() = %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "trials.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+}
