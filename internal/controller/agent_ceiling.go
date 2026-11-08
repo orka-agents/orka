@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/acp"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -185,8 +187,13 @@ func ceilingAllowsTool(ceiling []string, tool string) bool {
 	if tool == "" {
 		return true
 	}
-	if parent, ok := strings.CutSuffix(tool, harnessv2.MCPForwardWriteSuffix); ok && parent != "" {
-		return ceilingAllowsTool(ceiling, parent)
+	if parent, ok := strings.CutSuffix(tool, harnessv2.MCPForwardWriteSuffix); ok {
+		// Only a Tool name has a write tool: one suffix, on a valid
+		// Kubernetes name, which carries no scope or second suffix.
+		if len(validation.IsDNS1123Subdomain(parent)) > 0 {
+			return false
+		}
+		tool = parent
 	}
 	base, scope, scoped := splitCeilingTool(tool)
 	return slices.ContainsFunc(ceiling, func(entry string) bool {

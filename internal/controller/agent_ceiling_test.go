@@ -498,7 +498,12 @@ func TestCeilingCoversForwardingWriteTools(t *testing.T) {
 		!strings.Contains(err.Error(), "ceiling does not allow tool") {
 		t.Fatalf("a ceiling without the Tool: %v", err)
 	}
-	if ceilingAllowsTool([]string{"azure-arm"}, ":write") || !ceilingAllowsTool([]string{"Azure-Arm"}, "azure-arm:write") {
+	if !ceilingAllowsTool([]string{"Azure-Arm"}, "azure-arm:write") {
 		t.Fatal("write tool coverage follows the Tool's ceiling entry")
+	}
+	for _, name := range []string{":write", "azure-arm:write:write", "Azure-Arm:write", "azure-arm(x):write"} {
+		if ceilingAllowsTool([]string{"azure-arm", "Azure-Arm", "azure-arm(x)", "azure-arm:write"}, name) {
+			t.Errorf("%q is no Tool's write tool, but the ceiling covered it", name)
+		}
 	}
 }
