@@ -143,7 +143,12 @@ func TestDecideExperimentFailures(t *testing.T) {
 				in.Candidate.Trials[i].Grades["contract"] = GradeFail
 			}
 		}, "contract regressed from 8/8 to 0/8"},
-		"infra budget":     {func(in *ExperimentInput) { in.Candidate.InfraError = 1 }, "the candidate run had 1 infra errors"},
+		"infra budget": {func(in *ExperimentInput) { in.Candidate.InfraError = 1 }, "the candidate run had 1 infra errors"},
+		"guardrail without candidate results": {func(in *ExperimentInput) {
+			for i := range in.Candidate.Trials {
+				delete(in.Candidate.Trials[i].Grades, "contract")
+			}
+		}, "contract has 8 graded baseline trials but no graded candidate trials"},
 		"no target trials": {func(in *ExperimentInput) { in.Tag = "clean" }, "no graded trials"},
 	} {
 		t.Run(name, func(t *testing.T) {

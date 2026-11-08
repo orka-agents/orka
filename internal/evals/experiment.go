@@ -224,7 +224,12 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 	for _, grader := range in.Graders {
 		bp, bt := passRate(in.Baseline.Trials, grader, "", in.CaseTags)
 		cp, ct := passRate(in.Candidate.Trials, grader, "", in.CaseTags)
-		if bt > 0 && ct > 0 && cp*bt < bp*ct {
+		switch {
+		case bt > 0 && ct == 0:
+			// A guardrail the candidate never produced a result for cannot
+			// show it did not regress.
+			failures = append(failures, fmt.Sprintf("%s has %d graded baseline trials but no graded candidate trials", grader, bt))
+		case bt > 0 && cp*bt < bp*ct:
 			failures = append(failures, fmt.Sprintf("%s regressed from %d/%d to %d/%d", grader, bp, bt, cp, ct))
 		}
 	}
