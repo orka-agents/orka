@@ -204,6 +204,12 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 	if strings.Contains(deployment, "482913") || strings.Contains(deployment, "private-") || !strings.Contains(deployment, `"pin":"[masked]"`) {
 		t.Fatalf("deployment preview exposed a secure parameter: %s", deployment)
 	}
+	// A literal key that spells a nested path is not that path.
+	dotted := string(maskForwardedWriteArguments(json.RawMessage(
+		`{"method":"PUT","path":"/subscriptions/s1/x","body":{"properties":{"hardwareProfile.vmSize":"private-dotted","*":{"vmSize":"private-star"}}}}`)))
+	if strings.Contains(dotted, "private-") {
+		t.Fatalf("a dotted or wildcard key exposed a value: %s", dotted)
+	}
 }
 
 // TestMCPApprovalForwardedWriteAnswerIsNotKept covers the default

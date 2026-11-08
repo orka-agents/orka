@@ -461,7 +461,13 @@ func maskJSONValues(value any, path string) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		for field, item := range typed {
-			typed[field] = maskJSONValues(item, child(strings.ToLower(field)))
+			segment := strings.ToLower(field)
+			if strings.ContainsAny(segment, ".*") {
+				// A key holding a separator or the wildcard could pose as a
+				// nested path, so it, and everything under it, never matches.
+				segment = "\x00"
+			}
+			typed[field] = maskJSONValues(item, child(segment))
 		}
 		return typed
 	case []any:
