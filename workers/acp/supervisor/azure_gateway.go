@@ -512,8 +512,12 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	request := harnessv2.MCPForwardRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
 	if write {
 		// az --if-match and --if-none-match guard a write; dropping them
-		// would run it unguarded. Reads keep ignoring them.
-		request.IfMatch, request.IfNoneMatch = r.Header.Get("If-Match"), r.Header.Get("If-None-Match")
+		// would run it unguarded. Reads keep ignoring them. A header sent
+		// more than once is one list (RFC 9110), so every value is kept: an
+		// If-None-Match cut to its first value would allow an overwrite the
+		// client ruled out.
+		request.IfMatch = strings.Join(r.Header.Values("If-Match"), ", ")
+		request.IfNoneMatch = strings.Join(r.Header.Values("If-None-Match"), ", ")
 	}
 	body, status, code, message := readAzureRequestBody(r, write)
 	if status != 0 {

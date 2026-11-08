@@ -551,6 +551,16 @@ func TestAzureGatewaySendsWritesToTheWriteTool(t *testing.T) {
 	if err != nil || request.IfMatch != `"etag-1"` || calls[len(calls)-1].Call.CallID == calls[0].Call.CallID {
 		t.Fatalf("guarded write = %+v, %v; want its If-Match and its own call ID", request, err)
 	}
+	// A precondition sent in several headers keeps every value.
+	repeated := header("req-2")
+	repeated["If-None-Match"] = []string{`"etag-1"`, `"etag-2"`}
+	if response, _ := fixture.send(t, http.MethodPut, path, repeated, body); response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT with a repeated If-None-Match status = %d", response.StatusCode)
+	}
+	calls = fixture.brokerCalls()
+	if request, err = harnessv2.DecodeMCPForwardRequest(calls[len(calls)-1].Call.Arguments); err != nil || request.IfNoneMatch != `"etag-1", "etag-2"` {
+		t.Fatalf("repeated precondition = %q, %v; want both values", request.IfNoneMatch, err)
+	}
 	// Reads still go to the Tool itself.
 	if response, _ := fixture.do(t, http.MethodGet, "/subscriptions", http.Header{"Authorization": {"Bearer " + token}}); response.StatusCode != http.StatusOK {
 		t.Fatalf("GET status = %d", response.StatusCode)
