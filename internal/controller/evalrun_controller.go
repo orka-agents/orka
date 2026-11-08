@@ -220,7 +220,7 @@ func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *cor
 	}
 	if run.Status.Snapshot == nil {
 		if run.Spec.Experiment == nil && evalRunAgentOverride(run) {
-			if err := r.refuseUnpairedHeldOutCandidate(ctx, run); err != nil {
+			if err := r.refuseUnpairedHeldOutCandidate(ctx, run, observed); err != nil {
 				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
 					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
 				}

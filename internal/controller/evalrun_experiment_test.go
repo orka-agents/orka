@@ -306,9 +306,14 @@ func TestEvalExperimentIncomparableWhenTheBaselineIsGone(t *testing.T) {
 func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 	for name, test := range map[string]struct {
 		gate     string
+		copied   bool
 		wantFail bool
 	}{
-		"held out":   {gate: evalTestGate, wantFail: true},
+		"held out": {gate: evalTestGate, wantFail: true},
+		// The same cases copied into an unlisted ConfigMap are still
+		// held-out evidence.
+		"copied held-out cases": {gate: strings.Replace(evalTestGate, "name: cases,", "name: protected-cases,", 1), copied: true,
+			wantFail: true},
 		"training":   {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1)},
 		"no gate":    {},
 		"unreadable": {gate: "{", wantFail: true},
@@ -317,6 +322,14 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 			baseline, candidate := experimentRuns(1, 1)
 			candidate.Spec.Experiment = nil
 			env := newExperimentEnv(t, baseline, candidate, test.gate)
+			if test.copied {
+				if err := env.client.Create(context.Background(), &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "protected-cases", Namespace: evalTestNamespace},
+					Data:       map[string]string{"cases.jsonl": experimentCases(), "README": "not cases"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if test.gate == "" {
 				env.reconciler.GateConfigMap = types.NamespacedName{}
 			}

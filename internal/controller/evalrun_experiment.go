@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -95,11 +96,13 @@ func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
 }
 
 // refuseUnpairedHeldOutCandidate fails a run that reviews with a candidate
-// Agent on a held-out case set outside an experiment: such a run would test
-// a candidate against the held-out cases without spending an attempt. With
-// no gate configured there are no held-out sets; a configured gate that
-// cannot be read fails closed.
-func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, run *corev1alpha1.EvalRun) error {
+// Agent on held-out evidence outside an experiment: such a run would test a
+// candidate against the held-out cases without spending an attempt. Evidence
+// is matched by case key, so a copy of held-out cases in another ConfigMap
+// is refused too. With no gate configured there are no held-out sets; a
+// configured gate or a listed held-out ConfigMap that cannot be read fails
+// closed.
+func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) error {
 	if r.GateConfigMap.Name == "" {
 		return nil
 	}
@@ -107,9 +110,44 @@ func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, 
 	if err != nil {
 		return err
 	}
+	refused := evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+		"a run that sets agentRef on held-out cases must be an experiment; add spec.experiment")
 	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && heldOut[run.Namespace+"/"+ref.Name] {
-		return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
-			"a run that sets agentRef on a held-out case set must be an experiment; add spec.experiment")
+		return refused
+	}
+	keys, err := evals.HeldOutCaseKeys(observed.Cases)
+	if err != nil {
+		return evalRunConfigErrorf(evalRunReasonExperimentInvalid, "%v", err)
+	}
+	runKeys := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		runKeys[key] = struct{}{}
+	}
+	for listed := range heldOut {
+		namespace, name, _ := strings.Cut(listed, "/")
+		configMap := &corev1.ConfigMap{}
+		if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, configMap); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		for _, data := range configMap.Data {
+			// Only values that are case files hold evidence.
+			cases, err := evals.ParseCases([]byte(data), run.Spec.Subject.Type)
+			if err != nil {
+				continue
+			}
+			heldOutKeys, err := evals.HeldOutCaseKeys(cases)
+			if err != nil {
+				continue
+			}
+			for _, key := range heldOutKeys {
+				if _, shared := runKeys[key]; shared {
+					return refused
+				}
+			}
+		}
 	}
 	return nil
 }
