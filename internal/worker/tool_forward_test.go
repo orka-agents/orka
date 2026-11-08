@@ -413,14 +413,14 @@ func TestForwardingToolSendsAWriteWithItsBody(t *testing.T) {
 	body := `{"location":"eastus","properties":{"dnsPrefix":"aks1"}}`
 	arguments, _ := json.Marshal(harnessv2.MCPForwardRequest{
 		Method: http.MethodPut, Path: "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.ContainerService/managedClusters/aks1",
-		Query: "api-version=2024-09-01", Body: json.RawMessage(body),
+		Query: "api-version=2024-09-01", Body: json.RawMessage(body), IfMatch: `"etag-1"`,
 	})
 	result, err := executor.Execute(context.Background(), writeForwardingTestTool(server.URL), arguments)
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if got == nil || got.Method != http.MethodPut || gotBody != body || got.Header.Get("Content-Type") != "application/json" ||
-		got.Header.Get("Authorization") != "Bearer arm-token-secret" {
+		got.Header.Get("Authorization") != "Bearer arm-token-secret" || got.Header.Get("If-Match") != `"etag-1"` {
 		t.Fatalf("upstream request = %#v, body %q", got, gotBody)
 	}
 	if resolver.request.Tool.Class != corev1alpha1.AgentRuntimeBrokeredToolClassWrite || resolver.request.Tool.Method != http.MethodPut {

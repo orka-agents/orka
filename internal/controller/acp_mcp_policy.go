@@ -651,6 +651,14 @@ func adjustInputsForForwardingWrites(
 			if mode != corev1alpha1.ConnectionModeReadWrite {
 				continue
 			}
+			// The provider must grant writes too, or every call is refused.
+			granted, err := providerGrantsForwardedWrites(ctx, reader, task.Namespace, info.Provider, name)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !granted {
+				continue
+			}
 		}
 		write := harnessv2.MCPForwardWriteToolName(name)
 		if len(write) > harnessv2.MaxMCPToolNameBytes {
@@ -678,6 +686,24 @@ func adjustInputsForForwardingWrites(
 		agent.Spec.Coordination.ApprovalRequiredTools = sortedUnique(append(agent.Spec.Coordination.ApprovalRequiredTools, approvals...))
 	}
 	return task, agent, nil
+}
+
+// providerGrantsForwardedWrites reports whether provider declares tool as a
+// forwarding tool that grants writes, as a linked account's write requires.
+func providerGrantsForwardedWrites(ctx context.Context, reader client.Reader, namespace, provider, tool string) (bool, error) {
+	declared := &corev1alpha1.ConnectorProvider{}
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: provider}, declared); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load connector provider %q: %w", provider, err)
+	}
+	for _, candidate := range declared.Spec.Tools {
+		if candidate.Name == tool && candidate.HTTP != nil && candidate.HTTP.Forward != nil {
+			return candidate.HTTP.Forward.Writes != nil, nil
+		}
+	}
+	return false, nil
 }
 
 // requesterLinkMode returns the mode of the requester's link to provider,

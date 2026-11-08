@@ -30,7 +30,7 @@ var MCPForwardInputSchema = json.RawMessage(`{"type":"object","additionalPropert
 // Tool's write tool: a write method and an optional JSON body. The body is
 // JSON in the arguments, not a string, so the structural redaction that
 // approval previews and events apply reaches its credential-named fields.
-var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":["object","array"]}}}`)
+var MCPForwardWriteInputSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["method","path"],"properties":{"method":{"type":"string","enum":["PUT","PATCH","DELETE","POST"]},"path":{"type":"string"},"query":{"type":"string"},"body":{"type":["object","array"]},"ifMatch":{"type":"string"},"ifNoneMatch":{"type":"string"}}}`)
 
 // MCPForwardWriteSuffix ends the name of a forwarding Tool's write tool. A
 // colon cannot appear in a Kubernetes name, so the derived name never meets
@@ -103,6 +103,27 @@ type MCPForwardRequest struct {
 	Query  string `json:"query,omitempty"`
 	// Body is a write's JSON object or array body.
 	Body json.RawMessage `json:"body,omitempty"`
+	// IfMatch and IfNoneMatch are a write's preconditions, such as the
+	// ETag az --if-match sends, so a guarded write never runs unguarded.
+	IfMatch     string `json:"ifMatch,omitempty"`
+	IfNoneMatch string `json:"ifNoneMatch,omitempty"`
+}
+
+// maxForwardPreconditionBytes bounds an If-Match or If-None-Match value.
+const maxForwardPreconditionBytes = 1024
+
+// validForwardPrecondition reports whether value is a header value an ETag
+// precondition can be: printable ASCII, bounded, with no line breaks.
+func validForwardPrecondition(value string) bool {
+	if len(value) > maxForwardPreconditionBytes {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // forwardBodyIsStructured reports whether body is one JSON object or array.
@@ -146,6 +167,9 @@ func (r MCPForwardRequest) Validate() error {
 	}
 	if len(r.Body) > 0 && (!write || !forwardBodyIsStructured(r.Body)) {
 		return fmt.Errorf("only a forwarded write carries a body, and it must be a JSON object or array")
+	}
+	if (r.IfMatch != "" || r.IfNoneMatch != "") && (!write || !validForwardPrecondition(r.IfMatch) || !validForwardPrecondition(r.IfNoneMatch)) {
+		return fmt.Errorf("only a forwarded write carries If-Match or If-None-Match, as printable values of at most %d bytes", maxForwardPreconditionBytes)
 	}
 	if err := validateForwardPath(r.Path); err != nil {
 		return err

@@ -84,6 +84,13 @@ func (e *ToolExecutor) prepareForwardRequest(ctx context.Context, tool *corev1al
 	if len(request.Body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// A guarded write keeps its precondition, or it would run unguarded.
+	if request.IfMatch != "" {
+		req.Header.Set("If-Match", request.IfMatch)
+	}
+	if request.IfNoneMatch != "" {
+		req.Header.Set("If-None-Match", request.IfNoneMatch)
+	}
 	prepared := preparedToolRequest{httpConfig: httpConfig, request: req, forward: true}
 	if err := e.applyOutboundAccessPolicy(ctx, tool, args, &prepared); err != nil {
 		return preparedToolRequest{}, err

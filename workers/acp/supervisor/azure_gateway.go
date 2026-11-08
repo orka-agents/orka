@@ -396,6 +396,11 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	request := harnessv2.MCPForwardRequest{Method: r.Method, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery}
+	if write {
+		// az --if-match and --if-none-match guard a write; dropping them
+		// would run it unguarded. Reads keep ignoring them.
+		request.IfMatch, request.IfNoneMatch = r.Header.Get("If-Match"), r.Header.Get("If-None-Match")
+	}
 	body, status, code, message := readAzureRequestBody(r, write)
 	if status != 0 {
 		writeAzureError(w, status, code, message)
@@ -631,6 +636,7 @@ func azureCallID(write bool, clientRequestID string, request harnessv2.MCPForwar
 	body := sha256.Sum256([]byte(request.Body))
 	digest := sha256.Sum256([]byte(strings.Join([]string{
 		"orka.azure-gateway.write.v1", clientRequestID, request.Method, request.Path, request.Query, hex.EncodeToString(body[:]),
+		request.IfMatch, request.IfNoneMatch,
 	}, "\x00")))
 	return "az-w-" + hex.EncodeToString(digest[:16]), nil
 }

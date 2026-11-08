@@ -104,7 +104,9 @@ http:
   broker's argument limit, and `Content-Type: application/json`. The body is
   JSON in the tool arguments, not a string, so the structural redaction of
   approval previews and events reaches credential-named fields in it. Client
-  headers stay dropped. A Task that disallows the Tool, or only
+  headers stay dropped, except a write's `If-Match` and `If-None-Match`
+  (`az ... --if-match`), which are carried as validated request fields and
+  bound into the write's call ID, so a guarded write never runs unguarded. A Task that disallows the Tool, or only
   `<name>:write`, gets no write tool.
 - Retries join. The Azure SDK times out a read after 300 seconds and retries,
   keeping the same `x-ms-client-request-id`. The gateway derives a write's
@@ -136,7 +138,8 @@ http:
   `forward.writes` (its `approval` is unused), which changes the provider's
   authority digest, so people consent again. A write then matches as class
   `write` and needs a `readWrite` link. Without one (a `readOnly` link or none
-  when the Task is planned) the write tool is not offered, as write-class
+  when the Task is planned), or when the provider's tool does not grant
+  writes, the write tool is not offered, as write-class
   connector Tools are hidden; the reads stay.
   Delegated writes follow the Tool's approval setting; when one needs
   approval, only the requester can approve it, as ADR 0039 requires.

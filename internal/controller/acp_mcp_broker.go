@@ -391,11 +391,13 @@ func maskForwardedWriteArguments(arguments json.RawMessage) json.RawMessage {
 		body = nil
 	}
 	masked, err := json.Marshal(struct {
-		Method string `json:"method"`
-		Path   string `json:"path"`
-		Query  string `json:"query,omitempty"`
-		Body   any    `json:"body,omitempty"`
-	}{request.Method, request.Path, request.Query, body})
+		Method      string `json:"method"`
+		Path        string `json:"path"`
+		Query       string `json:"query,omitempty"`
+		Body        any    `json:"body,omitempty"`
+		IfMatch     string `json:"ifMatch,omitempty"`
+		IfNoneMatch string `json:"ifNoneMatch,omitempty"`
+	}{request.Method, request.Path, request.Query, body, request.IfMatch, request.IfNoneMatch})
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}

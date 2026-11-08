@@ -253,18 +253,35 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 // readOnly link or none rather than left to fail after an approval.
 func TestForwardingWritesNeedAReadWriteLink(t *testing.T) {
 	_, _, linked, task := freezeFixtures(true)
-	connection := linked.(*corev1alpha1.Connection)
 	tool := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
 	classification := map[string]connectorToolInfo{"azure-arm": {PolicyName: "azure", Provider: "github", Class: corev1alpha1.AgentRuntimeBrokeredToolClassRead}}
-	readOnly := connection.DeepCopy()
-	readOnly.Spec.Mode = corev1alpha1.ConnectionModeReadOnly
+	// provider declares the forwarding tool, granting writes or not, and
+	// returns a link of mode consented to that declaration.
+	provider := func(writes bool, mode string) (*corev1alpha1.ConnectorProvider, *corev1alpha1.Connection) {
+		declared := freezeProvider()
+		forward := &corev1alpha1.HTTPForward{Protocol: corev1alpha1.HTTPForwardProtocolAzureResourceManager}
+		if writes {
+			forward.Writes = &corev1alpha1.HTTPForwardWrites{}
+		}
+		declared.Spec.Tools = append(declared.Spec.Tools, corev1alpha1.ConnectorTool{
+			Name: "azure-arm", Source: corev1alpha1.ConnectorToolSourceHTTP, Class: corev1alpha1.ConnectorToolClassRead,
+			HTTP: &corev1alpha1.ConnectorHTTPTool{URL: "https://management.azure.com", Forward: forward},
+		})
+		unconsented := linked.(*corev1alpha1.Connection).DeepCopy()
+		unconsented.Spec.Mode, unconsented.Status.Consent = mode, nil
+		return declared, consentedConnection(unconsented, declared)
+	}
+	granting, readWrite := provider(true, corev1alpha1.ConnectionModeReadWrite)
+	_, readOnly := provider(true, corev1alpha1.ConnectionModeReadOnly)
+	readsOnly, readsOnlyLink := provider(false, corev1alpha1.ConnectionModeReadWrite)
 	for name, tc := range map[string]struct {
 		objects []ctrlclient.Object
 		want    bool
 	}{
-		"readWrite link": {[]ctrlclient.Object{tool, freezeProvider(), connection}, true},
-		"readOnly link":  {[]ctrlclient.Object{tool, freezeProvider(), readOnly}, false},
-		"no link":        {[]ctrlclient.Object{tool, freezeProvider()}, false},
+		"readWrite link":            {[]ctrlclient.Object{tool, granting, readWrite}, true},
+		"readOnly link":             {[]ctrlclient.Object{tool, granting, readOnly}, false},
+		"no link":                   {[]ctrlclient.Object{tool, granting}, false},
+		"provider grants no writes": {[]ctrlclient.Object{tool, readsOnly, readsOnlyLink}, false},
 	} {
 		reader := fake.NewClientBuilder().WithScheme(connectorTestScheme(t)).WithObjects(tc.objects...).Build()
 		adjusted, agent, err := adjustInputsForForwardingWrites(context.Background(), reader, task, forwardingWriteAgent(), classification)
