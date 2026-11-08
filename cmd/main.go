@@ -2117,12 +2117,13 @@ func main() {
 			os.Exit(1)
 		}
 		if err := (&controller.EvalRunReconciler{
-			GateConfigMap: gateConfigMap,
-			Client:        mgr.GetClient(),
-			Scheme:        mgr.GetScheme(),
-			TrialStore:    appStorage,
-			ResultStore:   appStorage,
-			EventStore:    appStorage,
+			GateConfigMap:   gateConfigMap,
+			Client:          mgr.GetClient(),
+			Scheme:          mgr.GetScheme(),
+			TrialStore:      appStorage,
+			ExperimentStore: appStorage,
+			ResultStore:     appStorage,
+			EventStore:      appStorage,
 			RuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,

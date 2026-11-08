@@ -20,6 +20,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const evalTestGate = `schemaVersion: orka.protectedSet.v1
@@ -57,7 +58,7 @@ func experimentRuns(baselineTrials, candidateTrials int32) (*corev1alpha1.EvalRu
 	return baseline, candidate
 }
 
-func newExperimentEnv(t *testing.T, baseline, candidate *corev1alpha1.EvalRun, gate string, extra ...client.Object) *experimentEnv {
+func newExperimentEnv(t *testing.T, baseline, candidate *corev1alpha1.EvalRun, gate string) *experimentEnv {
 	t.Helper()
 	objects := evalTestObjects(baseline, experimentCases())
 	objects = append(objects, candidate, &corev1alpha1.Agent{
@@ -73,9 +74,39 @@ func newExperimentEnv(t *testing.T, baseline, candidate *corev1alpha1.EvalRun, g
 			Data:       map[string]string{evals.ProtectedSetConfigMapKey: gate},
 		})
 	}
-	env := newEvalRunTestEnv(t, append(objects, extra...)...)
+	env := newEvalRunTestEnv(t, objects...)
 	env.reconciler.GateConfigMap = types.NamespacedName{Namespace: "orka-system", Name: "protected-set"}
 	return &experimentEnv{env}
+}
+
+// baselineCaseSetDigest snapshots the baseline and returns its case set
+// digest, which the candidate shares.
+func (e *experimentEnv) baselineCaseSetDigest() string {
+	e.t.Helper()
+	e.reconcileRun("baseline") // finalizer
+	e.reconcileRun("baseline") // snapshot
+	snapshot := e.getRun("baseline").Status.Snapshot
+	if snapshot == nil {
+		e.t.Fatal("the baseline recorded no snapshot")
+	}
+	return snapshot.CaseSetDigest
+}
+
+// reserveEarlier records the attempt of an earlier candidate that no longer
+// exists, against the given baseline and case set.
+func (e *experimentEnv) reserveEarlier(baselineUID, caseSetDigest string) {
+	e.t.Helper()
+	if caseSetDigest == "" {
+		caseSetDigest = "sha256:other-cases"
+	}
+	granted, err := e.store.ReserveEvalExperiment(context.Background(), &store.EvalExperimentRecord{
+		SchemaVersion: store.EvalExperimentSchemaVersion, Namespace: "other-team", CandidateRun: "earlier",
+		CandidateRunUID: "earlier-uid", BaselineRun: "baseline", BaselineRunUID: baselineUID, CaseSetDigest: caseSetDigest,
+		GateDigest: "sha256:gate", Hypothesis: "earlier", ReservedAt: evalTestNow,
+	}, store.EvalExperimentLimits{MaxPerBaseline: 10, MaxPerCaseSet: 10})
+	if err != nil || !granted.Granted {
+		e.t.Fatalf("reserve the earlier attempt: %+v, %v", granted, err)
+	}
 }
 
 func (e *experimentEnv) reconcileRun(name string) ctrl.Result {
@@ -157,6 +188,11 @@ func TestEvalExperimentPassesASignificantImprovement(t *testing.T) {
 	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPassed {
 		t.Fatalf("result after another reconcile = %q", got)
 	}
+	// The candidate's attempt is held in the store, where it outlives the run.
+	reserved, err := env.store.GetEvalExperiment(context.Background(), evalTestNamespace, "candidate-uid")
+	if err != nil || reserved.BaselineRunUID != "baseline-uid" || reserved.CaseSetDigest != env.getRun("candidate").Status.Snapshot.CaseSetDigest {
+		t.Fatalf("reservation = %+v, %v", reserved, err)
+	}
 }
 
 func TestEvalExperimentFailsWithoutImprovement(t *testing.T) {
@@ -221,7 +257,7 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 	for name, test := range map[string]struct {
 		gate   string
 		mutate func(baseline, candidate *corev1alpha1.EvalRun)
-		extra  []client.Object
+		seed   func(*experimentEnv)
 		reason string
 	}{
 		"no gate":   {reason: evalRunReasonExperimentGateUnavailable},
@@ -235,22 +271,26 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 				BaselineRunRef: corev1alpha1.EvalObjectReference{Name: "other"},
 				Target:         corev1alpha1.EvalExperimentTarget{Grader: corev1alpha1.EvalGraderVerdict}}
 		}, reason: evalRunReasonExperimentInvalid},
+		"baseline sets agentRef": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
+			baseline.Spec.Subject.RepositoryMonitorReview.AgentRef = &corev1alpha1.EvalObjectReference{Name: "candidate-agent"}
+		}, reason: evalRunReasonExperimentInvalid},
+		// An earlier candidate's attempt still counts after that candidate
+		// was deleted: only its reservation remains.
 		"candidate budget spent": {gate: strings.Replace(evalTestGate, "maxCandidatesPerBaseline: 2", "maxCandidatesPerBaseline: 1", 1),
-			extra: []client.Object{&corev1alpha1.EvalRun{
-				ObjectMeta: metav1.ObjectMeta{Name: "earlier", Namespace: evalTestNamespace, UID: "earlier-uid"},
-				Spec:       evalTestRun(1, 1).Spec,
-				Status: corev1alpha1.EvalRunStatus{Experiment: &corev1alpha1.EvalExperimentStatus{
-					Result:      corev1alpha1.EvalExperimentFailed,
-					BaselineRun: &corev1alpha1.EvalObjectIdentity{Name: "baseline", UID: "baseline-uid"},
-				}},
-			}}, reason: evalRunReasonCandidateBudgetSpent},
+			seed: func(env *experimentEnv) { env.reserveEarlier("baseline-uid", "") }, reason: evalRunReasonCandidateBudgetSpent},
+		"held-out budget spent": {gate: evalTestGate,
+			seed:   func(env *experimentEnv) { env.reserveEarlier("other-baseline-uid", env.baselineCaseSetDigest()) },
+			reason: evalRunReasonHeldOutBudgetSpent},
 	} {
 		t.Run(name, func(t *testing.T) {
 			baseline, candidate := experimentRuns(1, 1)
 			if test.mutate != nil {
 				test.mutate(baseline, candidate)
 			}
-			env := newExperimentEnv(t, baseline, candidate, test.gate, test.extra...)
+			env := newExperimentEnv(t, baseline, candidate, test.gate)
+			if test.seed != nil {
+				test.seed(env)
+			}
 			env.reconcileRun("candidate")
 			env.reconcileRun("candidate")
 			run := env.getRun("candidate")

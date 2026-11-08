@@ -86,13 +86,16 @@ type EvalRunReconciler struct {
 	// APIReader reads case ConfigMaps uncached, so the controller does not
 	// cache every ConfigMap in its namespaces, and confirms trial Tasks the
 	// cache has not seen yet.
-	APIReader     client.Reader
-	TrialStore    store.EvalTrialStore
-	ResultStore   store.ResultStore
-	EventStore    store.ExecutionEventStore
-	RuntimeImages ACPRuntimeImages
-	Graders       *evals.Registry
-	Now           func() time.Time
+	APIReader  client.Reader
+	TrialStore store.EvalTrialStore
+	// ExperimentStore holds experiment attempt reservations, which outlive
+	// their EvalRuns. Nil fails every experiment closed.
+	ExperimentStore store.EvalExperimentStore
+	ResultStore     store.ResultStore
+	EventStore      store.ExecutionEventStore
+	RuntimeImages   ACPRuntimeImages
+	Graders         *evals.Registry
+	Now             func() time.Time
 	// GateConfigMap names the protected-set ConfigMap whose gate section
 	// judges experiments. Empty fails every experiment closed.
 	GateConfigMap types.NamespacedName

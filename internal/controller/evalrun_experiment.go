@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -16,16 +17,17 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 const (
 	evalRunReasonExperimentGateUnavailable = "ExperimentGateUnavailable"
 	evalRunReasonExperimentInvalid         = "ExperimentInvalid"
 	evalRunReasonCandidateBudgetSpent      = "CandidateBudgetSpent"
+	evalRunReasonHeldOutBudgetSpent        = "HeldOutBudgetSpent"
 )
 
 // prepareExperiment freezes a candidate run's experiment before its first
@@ -54,25 +56,15 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if !baseline.DeletionTimestamp.IsZero() {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "baseline EvalRun %q is being deleted", baseline.Name)
 	}
-	// Count the other candidates already paired with this baseline incarnation.
-	var runs corev1alpha1.EvalRunList
-	if err := r.List(ctx, &runs, client.InNamespace(run.Namespace)); err != nil {
-		return nil, err
-	}
-	candidates := 0
-	for i := range runs.Items {
-		other := &runs.Items[i]
-		if other.UID != run.UID && other.Status.Experiment != nil && other.Status.Experiment.BaselineRun != nil &&
-			other.Status.Experiment.BaselineRun.UID == baseline.UID {
-			candidates++
-		}
-	}
-	if candidates >= int(gate.MaxCandidatesPerBaseline) {
-		return nil, evalRunConfigErrorf(evalRunReasonCandidateBudgetSpent,
-			"baseline EvalRun %q already has %d candidates, the gate's maxCandidatesPerBaseline", baseline.Name, candidates)
+	if evalRunAgentOverride(baseline) {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"baseline EvalRun %q sets agentRef; a baseline must review with the monitor's own reviewer", baseline.Name)
 	}
 	candidateDigest, err := evalCandidateDigest(snapshot)
 	if err != nil {
+		return nil, err
+	}
+	if err := r.reserveExperiment(ctx, run, baseline, snapshot, gate, gateDigest); err != nil {
 		return nil, err
 	}
 	return &corev1alpha1.EvalExperimentStatus{
@@ -88,6 +80,63 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 			Significance:                evals.FormatDecimal(gate.Significance),
 		},
 	}, nil
+}
+
+// evalRunAgentOverride reports whether a run reviews with an Agent other than
+// its monitor's reviewer.
+func evalRunAgentOverride(run *corev1alpha1.EvalRun) bool {
+	subject := run.Spec.Subject.RepositoryMonitorReview
+	return subject != nil && subject.AgentRef != nil
+}
+
+// reserveExperiment spends one of the gate's attempts on this candidate
+// before its first trial. Attempts are durable: deleting a candidate, or its
+// TTL, never returns one, so a proposer cannot retry against the held-out
+// cases until a candidate passes by chance.
+func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline *corev1alpha1.EvalRun,
+	snapshot corev1alpha1.EvalRunSnapshot, gate evals.ExperimentGate, gateDigest string) error {
+	if r.ExperimentStore == nil {
+		return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable, "no experiment store is configured")
+	}
+	record := &store.EvalExperimentRecord{
+		SchemaVersion:   store.EvalExperimentSchemaVersion,
+		Namespace:       run.Namespace,
+		CandidateRun:    run.Name,
+		CandidateRunUID: string(run.UID),
+		BaselineRun:     baseline.Name,
+		BaselineRunUID:  string(baseline.UID),
+		CaseSetDigest:   snapshot.CaseSetDigest,
+		GateDigest:      gateDigest,
+		Hypothesis:      run.Spec.Experiment.Hypothesis,
+		// The creation time keeps a retried reservation identical.
+		ReservedAt: run.CreationTimestamp.UTC(),
+	}
+	if record.ReservedAt.IsZero() {
+		record.ReservedAt = r.now().UTC()
+	}
+	reservation, err := r.ExperimentStore.ReserveEvalExperiment(ctx, record, store.EvalExperimentLimits{
+		MaxPerBaseline: gate.MaxCandidatesPerBaseline,
+		MaxPerCaseSet:  gate.MaxExperimentsPerHeldOutSet,
+	})
+	if errors.Is(err, store.ErrDuplicateMismatch) {
+		return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"this candidate already reserved an attempt under a different gate or baseline; create a new candidate")
+	}
+	if err != nil {
+		return err
+	}
+	switch {
+	case reservation.Granted:
+		return nil
+	case reservation.BaselineAttempts >= gate.MaxCandidatesPerBaseline:
+		return evalRunConfigErrorf(evalRunReasonCandidateBudgetSpent,
+			"baseline EvalRun %q already spent %d candidate attempts, the gate's maxCandidatesPerBaseline; deleted candidates still count",
+			baseline.Name, reservation.BaselineAttempts)
+	default:
+		return evalRunConfigErrorf(evalRunReasonHeldOutBudgetSpent,
+			"the held-out case set already ran %d experiments, the gate's maxExperimentsPerHeldOutSet; add fresh held-out cases",
+			reservation.CaseSetAttempts)
+	}
 }
 
 // loadExperimentGate reads the gate section of the protected-set ConfigMap.
@@ -144,6 +193,10 @@ func (r *EvalRunReconciler) decideExperiment(ctx context.Context, run *corev1alp
 	}
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if evalRunAgentOverride(baseline) {
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+			Reasons: []string{fmt.Sprintf("baseline EvalRun %q sets agentRef", baseline.Name)}})
 	}
 	if !evalRunFinished(baseline.Status.Phase) {
 		return ctrl.Result{RequeueAfter: evalRunRequeueInterval}, nil

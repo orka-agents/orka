@@ -955,6 +955,19 @@ func (p *stateProvider) GetDatasetBinding(ctx context.Context, a1 string) (stora
 	return r0, err
 }
 
+func (p *stateProvider) GetEvalExperiment(ctx context.Context, a1 string, a2 string) (*storagev1.EvalExperimentRecord, error) {
+	var r0 *storagev1.EvalExperimentRecord
+	injected, err := p.injector.call(ctx, p.contract, "GetEvalExperiment", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetEvalExperiment(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.EvalExperimentRecord
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetFinding(ctx context.Context, a1 string, a2 string) (*storagev1.Finding, error) {
 	var r0 *storagev1.Finding
 	injected, err := p.injector.call(ctx, p.contract, "GetFinding", func(ctx context.Context) (err error) {
@@ -2512,6 +2525,22 @@ func (p *stateProvider) RequestScanRunCancellation(ctx context.Context, a1 *stor
 		return p.inner.RequestScanRunCancellation(ctx, a1, a2)
 	})
 	return err
+}
+
+func (p *stateProvider) ReserveEvalExperiment(ctx context.Context, a1 *storagev1.EvalExperimentRecord, a2 storagev1.EvalExperimentLimits) (storagev1.EvalExperimentReservation, error) {
+	var r0 storagev1.EvalExperimentReservation
+	injected, err := p.injector.call(ctx, p.contract, "ReserveEvalExperiment", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.ReserveEvalExperiment(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 storagev1.EvalExperimentReservation
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ResolveFindingIfCurrent(ctx context.Context, a1 string, a2 string, a3 string, a4 int) (bool, error) {

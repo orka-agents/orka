@@ -123,6 +123,9 @@ spec:
 ```
 
 The controller must run with `--eval-gate-configmap` naming the protected-set
-ConfigMap. Its `gate` holds the thresholds. When both runs finish,
+ConfigMap. Its `gate` holds the thresholds. The baseline must not set
+`agentRef`. Each candidate spends one attempt before its first trial, against
+both `maxCandidatesPerBaseline` and `maxExperimentsPerHeldOutSet`; deleting a
+candidate does not return its attempt. When both runs finish,
 `orka eval get <candidate>` prints the verdict, the paired target comparison
 and the reasons.
