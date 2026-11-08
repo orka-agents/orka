@@ -14,8 +14,11 @@
     "@docusaurus/core": "3.10.1",
     "@docusaurus/preset-classic": "3.10.1",
     "@docusaurus/theme-mermaid": "3.10.1",
+    "@fontsource-variable/geist": "5.3.0",
+    "@fontsource-variable/geist-mono": "5.3.0",
     "@mdx-js/react": "3.1.1",
     "clsx": "^2.1.1",
+    "lucide-react": "0.563.0",
     "prism-react-renderer": "^2.4.1",
     "react": "19.2.6",
     "react-dom": "19.2.6"

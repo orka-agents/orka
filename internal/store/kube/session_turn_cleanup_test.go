@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -78,10 +79,11 @@ func TestSessionTurnCleanupReceiptAllowsTaskReclamationAfterSessionDeletion(t *t
 			}
 			t.Cleanup(func() { _ = reopened.Close() })
 			persistence = sqlitestore.NewStore(reopened, databasePath)
-			kubeStore, err = NewComposite(kubeClient, testControlNamespace, persistence)
+			kubeStore, err = NewComposite(kubeClient, testControlNamespace, storageclienttest.Client(t, persistence))
 			if err != nil {
 				t.Fatal(err)
 			}
+			syncTestEpochMirror(t, kubeStore, persistence)
 			if err := kubeStore.ReclaimSession(ctx, deleteRequest); err != nil {
 				t.Fatalf("repeat Session deletion after restart: %v", err)
 			}

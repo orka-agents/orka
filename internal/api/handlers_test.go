@@ -40,6 +40,7 @@ import (
 	"github.com/orka-agents/orka/internal/connectors"
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/storageclient"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
@@ -210,7 +211,7 @@ func setupTestHandlers() (*Handlers, *fiber.App) {
 		},
 	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -228,7 +229,7 @@ func setupTestHandlersWithAuthzStore(
 	ctxTokenConfig ContextTokenConfig,
 	mode string,
 	objs ...runtime.Object,
-) (*fiber.App, *sqlite.Store) {
+) (*fiber.App, *storageclient.Client) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
@@ -237,7 +238,7 @@ func setupTestHandlersWithAuthzStore(
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{
 		Mode: mode,
 	})
@@ -301,7 +302,7 @@ func setupTestCreateTaskHandlerWithAuthzReaders(
 	t.Helper()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: mode})
 	require.NoError(t, err)
 	handlers := NewHandlers(HandlersConfig{
@@ -326,7 +327,7 @@ func setupTestHandlersWithObjects(objs ...runtime.Object) (*Handlers, *fiber.App
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -1368,7 +1369,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 	tests := []struct {
 		name    string
 		path    string
-		prepare func(t *testing.T, ss *sqlite.Store)
+		prepare func(t *testing.T, ss *storageclient.Client)
 	}{
 		{
 			name: "get task",
@@ -1377,7 +1378,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 		{
 			name: "get task logs",
 			path: "/tasks/" + taskName + "/logs",
-			prepare: func(t *testing.T, ss *sqlite.Store) {
+			prepare: func(t *testing.T, ss *storageclient.Client) {
 				t.Helper()
 				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("logs")))
 			},
@@ -1385,7 +1386,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 		{
 			name: "get task result",
 			path: "/tasks/" + taskName + "/result",
-			prepare: func(t *testing.T, ss *sqlite.Store) {
+			prepare: func(t *testing.T, ss *storageclient.Client) {
 				t.Helper()
 				require.NoError(t, ss.SaveResult(context.Background(), "default", taskName, []byte("result")))
 			},
@@ -1393,7 +1394,7 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 		{
 			name: "get task plan",
 			path: "/tasks/" + taskName + "/plan",
-			prepare: func(t *testing.T, ss *sqlite.Store) {
+			prepare: func(t *testing.T, ss *storageclient.Client) {
 				t.Helper()
 				require.NoError(t, ss.SavePlan(context.Background(), "default", taskName, &store.PlanState{
 					TaskName:    taskName,
@@ -1414,9 +1415,9 @@ func TestHandlers_TaskReadActions_ContextTokenAuthorizationEnforcesTaskNameConte
 		{
 			name: "download task artifact",
 			path: "/tasks/" + taskName + "/artifacts/report.txt",
-			prepare: func(t *testing.T, ss *sqlite.Store) {
+			prepare: func(t *testing.T, ss *storageclient.Client) {
 				t.Helper()
-				require.NoError(t, ss.SaveArtifact(context.Background(), "default", taskName, "report.txt", "text/plain", []byte("artifact")))
+				require.NoError(t, ss.SaveArtifact(context.Background(), store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: taskName}, Filename: "report.txt", ContentType: "text/plain", Data: []byte("artifact")}))
 			},
 		},
 	}
@@ -2947,7 +2948,7 @@ func (s *sessionAccessRecordingStore) DeleteSession(ctx context.Context, namespa
 	return s.SessionStore.DeleteSession(ctx, namespace, name)
 }
 
-func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store) {
+func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *storageclient.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -2963,7 +2964,7 @@ func setupTestHandlersWithSessionManager() (*Handlers, *fiber.App, *sqlite.Store
 		},
 	}).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -3160,7 +3161,7 @@ func TestHandlers_ListSessions_WatchNamespace(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -3211,7 +3212,7 @@ func TestHandlers_SessionEndpointsRequireKubernetesRBACForTokenReviewUser(t *tes
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 			db, err := sqlite.NewDB(":memory:")
 			require.NoError(t, err)
-			ss := sqlite.NewStore(db, ":memory:")
+			ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
 			require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
 				Namespace: "default", Name: protectedSessionName, SessionType: "task",
@@ -3338,7 +3339,7 @@ func TestHandlers_GetSessionProjectsSafeExecutionControl(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(control).Build()
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	require.NoError(t, ss.CreateSession(context.Background(), &store.SessionRecord{
 		Namespace: "default", Name: sessionName, SessionType: "task",
@@ -3421,7 +3422,7 @@ func TestHandlers_GetSession_WatchNamespace(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
@@ -3510,7 +3511,7 @@ func TestHandlers_DeleteSession_WatchNamespace(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	ctx := context.Background()
@@ -3694,7 +3695,7 @@ func TestHandlers_GetTaskResult_WatchNamespace(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	ss.SaveResult(context.Background(), "watched-ns", "test-task", []byte("task result content")) //nolint:errcheck
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
@@ -3942,7 +3943,7 @@ func TestGetTaskPlan(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, PlanStore: ss})
 
 	app := fiber.New()
@@ -3988,7 +3989,7 @@ func TestGetTaskPlan(t *testing.T) {
 		_ = corev1.AddToScheme(scheme2)
 		fakeClient2 := fake.NewClientBuilder().WithScheme(scheme2).WithRuntimeObjects(taskNoPlan).Build()
 		db2, _ := sqlite.NewDB(":memory:")
-		ss2 := sqlite.NewStore(db2, ":memory:")
+		ss2 := testStorageClient(sqlite.NewStore(db2, ":memory:"))
 		handlers2 := NewHandlers(HandlersConfig{Client: fakeClient2, SessionStore: ss2, ResultStore: ss2, PlanStore: ss2})
 
 		app2 := fiber.New()
@@ -4008,7 +4009,7 @@ func TestResolveNamespace_IsolationEnforced(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -4038,7 +4039,7 @@ func TestResolveNamespace_IsolationRejectsNamespaceLessAuthenticatedUser(t *test
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -4064,7 +4065,7 @@ func TestResolveNamespace_IsolationAllowsSameNamespace(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, EnforceNamespaceIsolation: true, SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -4093,7 +4094,7 @@ func TestResolveNamespace_WatchNamespaceMismatch(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	// Set watchNamespace to "production"
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "production", SessionStore: ss, ResultStore: ss})
 
@@ -4475,7 +4476,7 @@ func TestHandlers_UpdateAgent_PatchesSpecWithoutFullObjectUpdate(t *testing.T) {
 		Build()
 
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 	app := fiber.New()
 	app.Put("/agents/:name", handlers.UpdateAgent)
@@ -4540,7 +4541,7 @@ func TestHandlers_UpdateAgent_RetriesConflict(t *testing.T) {
 		Build()
 
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss})
 	app := fiber.New()
 	app.Put("/agents/:name", handlers.UpdateAgent)
@@ -4947,7 +4948,7 @@ func TestHandlers_DeleteSession_NamespaceForbidden(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, WatchNamespace: "watched-ns", SessionStore: ss, ResultStore: ss})
 
 	app := fiber.New()
@@ -5019,7 +5020,7 @@ func TestHandlers_GetTask_WithPlanEnrichment(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(task).WithStatusSubresource(task).Build()
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	handlers := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, PlanStore: ss})
 
 	require.NoError(t, ss.SavePlan(context.Background(), "default", "enriched-task", &store.PlanState{
@@ -5217,7 +5218,7 @@ func TestHandlers_GetTaskLogs_WithClientsetNoPods(t *testing.T) {
 
 	fakeCS := kubefake.NewSimpleClientset() //nolint:staticcheck // no pods
 	db, _ := sqlite.NewDB(":memory:")
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewHandlers(HandlersConfig{Client: fakeClient, SessionStore: ss, ResultStore: ss, KubeClient: fakeCS})
 
 	app := fiber.New()
@@ -5362,6 +5363,14 @@ func (conflictApplyMemoryProposalStore) ApplyMemoryProposal(context.Context, sto
 	return nil, fmt.Errorf("%w: changed", store.ErrConflict)
 }
 
+func (conflictApplyMemoryProposalStore) ResolveMemoryProposalApplication(context.Context, string, string) (store.MemoryProposalApplyTarget, error) {
+	return store.MemoryProposalApplyTarget{}, fmt.Errorf("%w: changed", store.ErrConflict)
+}
+
+func (conflictApplyMemoryProposalStore) CommitMemoryProposalApplication(context.Context, store.MemoryProposalApplication) (*store.Memory, error) {
+	return nil, fmt.Errorf("%w: changed", store.ErrConflict)
+}
+
 func (conflictApplyMemoryProposalStore) ArchiveMemoryProposal(context.Context, string, string) error {
 	return nil
 }
@@ -5410,7 +5419,7 @@ func TestHandlers_ApplyMemoryProposal_ContextTokenAuthorization(t *testing.T) {
 func TestHandlers_ApplyMemoryProposal(t *testing.T) {
 	db, err := sqlite.NewDB(":memory:")
 	require.NoError(t, err)
-	ss := sqlite.NewStore(db, ":memory:")
+	ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 	h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 	app := fiber.New()
@@ -5480,11 +5489,11 @@ func TestHandlers_ApplyMemoryProposalConflict(t *testing.T) {
 func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 	tests := []struct {
 		name    string
-		prepare func(context.Context, *sqlite.Store, *store.MemoryProposal)
+		prepare func(context.Context, *storageclient.Client, *store.MemoryProposal)
 	}{
 		{
 			name: "rejected",
-			prepare: func(ctx context.Context, ss *sqlite.Store, proposal *store.MemoryProposal) {
+			prepare: func(ctx context.Context, ss *storageclient.Client, proposal *store.MemoryProposal) {
 				require.NoError(t, ss.ReviewMemoryProposal(ctx, store.MemoryProposalReview{
 					Namespace: proposal.Namespace,
 					ID:        proposal.ID,
@@ -5495,7 +5504,7 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 		},
 		{
 			name: "archived",
-			prepare: func(ctx context.Context, ss *sqlite.Store, proposal *store.MemoryProposal) {
+			prepare: func(ctx context.Context, ss *storageclient.Client, proposal *store.MemoryProposal) {
 				require.NoError(t, ss.ArchiveMemoryProposal(ctx, proposal.Namespace, proposal.ID))
 			},
 		},
@@ -5505,7 +5514,7 @@ func TestHandlers_ApplyMemoryProposalRejectedOrArchived(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			db, err := sqlite.NewDB(":memory:")
 			require.NoError(t, err)
-			ss := sqlite.NewStore(db, ":memory:")
+			ss := testStorageClient(sqlite.NewStore(db, ":memory:"))
 			h := NewHandlers(HandlersConfig{MemoryStore: ss, MemoryProposalStore: ss})
 
 			app := fiber.New()
