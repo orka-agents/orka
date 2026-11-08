@@ -119,7 +119,14 @@ http:
 - `POST` actions are forwarded too, so `az aks get-credentials` and actions
   such as start and stop work. An action that returns a secret, such as
   `listKeys` or `listClusterUserCredential`, hands it to the runtime, as the
-  same command would on a developer's machine. Reviewers approving a
+  same command would on a developer's machine. The effect record, an
+  ExternalEffect status any reader of that resource sees, never keeps a
+  `POST`'s answer: it keeps a note with the status, and a retry that joins a
+  recorded action gets `409 OrkaResultNotKept` and runs the command again.
+  `PUT`, `PATCH`, and `DELETE` answers describe the resource, which Resource
+  Manager returns without its secrets, and are kept. A Tool with writes has
+  a name of at most 247 characters, so its write tool fits the tool name
+  limit. Reviewers approving a
   `POST` see its path; Tools that must not return secrets need
   `approval: Required` or no writes.
 - Writes follow each credential mode's own write rules: the Agent's identity

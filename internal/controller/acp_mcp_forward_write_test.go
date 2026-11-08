@@ -91,6 +91,16 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 		slices.ContainsFunc(effectiveACPAllowedTools(task, agent), func(name string) bool { return strings.HasSuffix(name, ":write") }) {
 		t.Fatalf("a native tool name brought a write tool: %v", err)
 	}
+	// A write tool name must fit the tool name limit.
+	long := writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)
+	long.Name = strings.Repeat("a", harnessv2.MaxMCPToolNameBytes-2)
+	longAgent := forwardingWriteAgent()
+	longAgent.Spec.Runtime.DefaultAllowedTools = []string{long.Name}
+	longReader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(long).Build()
+	if _, _, err := adjustInputsForForwardingWrites(context.Background(), longReader, forwardingWriteTask(), longAgent, nil); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("an overlong write tool name: %v", err)
+	}
 	named := forwardingWriteAgent()
 	named.Spec.Runtime.DefaultAllowedTools = []string{write}
 	reader := fake.NewClientBuilder().WithScheme(newTestScheme()).Build()

@@ -339,6 +339,45 @@ func connectorPolicyPin(ctx context.Context, reader client.Reader, registry *too
 	return info.PolicyName, &outboundaccess.PolicyIdentity{UID: info.PolicyUID, Generation: info.PolicyGeneration}, nil
 }
 
+// forwardedWriteKeptResult returns the form of a forwarded write's result
+// that its effect record keeps. The record is an ExternalEffect status that
+// anyone who can read the resource sees, and an Azure action (POST), such as
+// listKeys or listClusterUserCredential, can answer with keys or a
+// kubeconfig, so a POST's answer is not kept: the record keeps a note with
+// its status instead, and a redelivery that joins it gets that note. PUT,
+// PATCH, and DELETE answers describe the resource, which Resource Manager
+// returns without its secrets, and are kept so a joined retry gets them.
+func forwardedWriteKeptResult(descriptor harnessv2.MCPToolDescriptor, request harnessv2.MCPBrokerCallRequest, result json.RawMessage) json.RawMessage {
+	if descriptor.Forward == nil || !descriptor.Forward.Write || mcpToolResultIsError(result) {
+		return result
+	}
+	if forwarded, err := harnessv2.DecodeMCPForwardRequest(request.Call.Arguments); err == nil && forwarded.Method != http.MethodPost {
+		return result
+	}
+	status := "an unreadable status"
+	if response, err := harnessv2.DecodeMCPForwardResponse(result); err == nil {
+		status = "status " + strconv.Itoa(response.Status)
+	}
+	type azureError struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	body, _ := json.Marshal(struct {
+		Error azureError `json:"error"`
+	}{azureError{
+		Code: "OrkaResultNotKept",
+		Message: "The action already ran, with " + status + ". Orka does not keep the answers to Azure actions, " +
+			"which can carry secrets; run the command again to read the result.",
+	}})
+	kept, err := harnessv2.CanonicalValue(harnessv2.MCPForwardResponse{
+		Status: http.StatusConflict, Headers: map[string]string{"Content-Type": "application/json"}, Body: string(body),
+	})
+	if err != nil {
+		return json.RawMessage(`{"isError":true,"code":"tool_outcome_unknown","error":"The tool may have run. Do not repeat it automatically."}`)
+	}
+	return kept
+}
+
 // connectorBindingDigest combines the frozen Connection identity digest with
 // the dispatch digest of the Tool and its policy.
 func connectorBindingDigest(connectionDigest, specDigest string) string {
@@ -904,12 +943,25 @@ func (b *ACPMCPBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				effectRequest["connection"] = digest
 			}
 		}
-		run := runExternalEffectWithReplay[json.RawMessage]
+		run, execute := runExternalEffectWithReplay[json.RawMessage], call
+		var live json.RawMessage
 		if descriptor.Forward != nil && descriptor.Forward.Write {
 			// A forwarded POST or PATCH need not be idempotent.
 			run = runExternalEffectOnceWithReplay[json.RawMessage]
+			// The caller gets the answer; the record keeps what it may.
+			execute = func(ctx context.Context) (json.RawMessage, error) {
+				answer, callErr := call(ctx)
+				if callErr != nil {
+					return nil, callErr
+				}
+				live = answer
+				return forwardedWriteKeptResult(descriptor, request, answer), nil
+			}
 		}
-		result, replayed, err = run(promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, call)
+		result, replayed, err = run(promptCtx, b.Effects, credentials.ControllerFence, identity, effectRequest, execute)
+		if err == nil && !replayed && live != nil {
+			result = live
+		}
 		if errors.Is(err, errExternalEffectAlreadyStarted) {
 			// Another delivery claimed it and may have sent it. Leave its
 			// record to that delivery or to reconciliation.

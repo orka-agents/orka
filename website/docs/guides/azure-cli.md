@@ -208,7 +208,9 @@ Add `writes` to let `az` change resources:
 - `POST` actions can return secrets: `az aks get-credentials` returns a
   kubeconfig and `az storage account keys list` returns keys, and the agent
   can read them. Keep `approval: Required` on a Tool whose identity can reach
-  such actions, or grant that identity a role that cannot.
+  such actions, or grant that identity a role that cannot. Orka does not
+  record these answers: if `az` resends an action after a slow approval, it
+  gets `OrkaResultNotKept` and you run the command again.
 - For a linked account, the provider's tool needs `writes` too (its
   `approval` is not used), and each person links with
   `orka connect azure -n team-a --mode readWrite`. Adding `writes` to a
@@ -254,6 +256,7 @@ runs `az group list` as usual.
 | --- | --- |
 | `(OrkaReadOnly)` | The command writes or acts on a resource, and this Task has no write tool: the Tool has no `forward.writes`, the Task disallows it, or the requester's link was not `readWrite` when the Task started. |
 | `(OrkaApprovalNotGranted)` | A reviewer declined the write, or nobody approved it within 10 minutes. Nothing was sent to Azure. |
+| `(OrkaResultNotKept)` | `az` resent an Azure action (`POST`) that already ran, for example after a slow approval. Orka does not keep action answers, which can carry secrets; run the command again. |
 | `(OrkaOutcomeUnknown)` | The write may have reached Azure. Check the resource before running the command again. |
 | `(OrkaResourceNotForwarded)` | The command needs a service other than Resource Manager. |
 | `(OrkaNotAuthorized)` | No prompt is running, or the Task does not allow the forwarding Tool. |

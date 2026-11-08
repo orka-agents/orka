@@ -342,6 +342,9 @@ type ToolActorStatus struct {
 // resolve that name to its own tool and never create the forwarding gateway.
 // TestForwardingToolNamesCoverTheBrokeredBuiltIns keeps the list complete.
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !(self.metadata.name in ['bash','edit','glob','grep','read','webfetch','websearch','write','check_messages','check_pull_request_ci','comment_on_issue','create_pull_request','delegate_task','get_issue','list_connections','list_issues','list_pull_requests','post_review_comment','propose_memory','recall_memory','remember','reply_in_conversation','review_pull_request','run_validation','search_transcript','send_message','wait_for_tasks','web_fetch','web_search'])",message="a forwarding tool must not share a name with a built-in tool"
+// A write tool is named after its Tool with the ":write" suffix, and tool
+// names are limited to 253 bytes.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.http) || !has(self.spec.http.forward) || !has(self.spec.http.forward.writes) || size(self.metadata.name) <= 247",message="a forwarding tool that allows writes must have a name of at most 247 characters"
 type Tool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -653,6 +653,10 @@ func adjustInputsForForwardingWrites(
 			}
 		}
 		write := harnessv2.MCPForwardWriteToolName(name)
+		if len(write) > harnessv2.MaxMCPToolNameBytes {
+			return nil, nil, permanentACPAgentConfiguration(fmt.Errorf(
+				"forwarding tool %q allows writes, but its write tool name exceeds %d bytes; use a shorter Tool name", name, harnessv2.MaxMCPToolNameBytes))
+		}
 		writes = append(writes, write)
 		if tool.Spec.HTTP.Forward.Writes.WriteApprovalRequired() {
 			approvals = append(approvals, write)

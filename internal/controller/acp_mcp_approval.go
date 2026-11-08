@@ -841,12 +841,15 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	if executeErr == nil {
 		result, executeErr = canonicalMCPApprovalResult(result)
 	}
+	// The caller gets the answer; the record and its event keep what they may.
+	kept := result
 	if executeErr == nil {
+		kept = forwardedWriteKeptResult(call.Descriptor, call.Request, result)
 		_, executeErr = b.Effects.TransitionExternalEffect(callCtx, store.ExternalEffectTransition{
 			ID: claimed.ID, Fence: credentials.ControllerFence, ExpectedVersion: claimed.Version,
 			ExpectedState: store.ExternalEffectInFlight, NewState: store.ExternalEffectSucceeded,
 			RequestDigest: call.RequestDigest, ExpectedLeaseOwner: leaseOwner,
-			Response: result, ResponseDigest: store.CanonicalBytesDigest(result), UpdatedAt: time.Now().UTC(),
+			Response: kept, ResponseDigest: store.CanonicalBytesDigest(kept), UpdatedAt: time.Now().UTC(),
 		})
 	}
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
@@ -865,7 +868,7 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	}
 	// The result commit was acknowledged. A failed event projection must not
 	// replace that receipt with a transport error; recovery repairs the event.
-	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", result)
+	_ = b.approvalOutcome(settleCtx, call, outcome, "Recorded tool result", kept)
 	return result, false, nil
 }
 

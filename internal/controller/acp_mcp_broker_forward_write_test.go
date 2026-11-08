@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 )
 
@@ -83,5 +84,86 @@ func TestACPMCPBrokerForwardedWriteRefusedBeforeSendingIsADefiniteFailure(t *tes
 	}
 	if executions.Load() != 1 {
 		t.Fatalf("executions = %d, want one", executions.Load())
+	}
+}
+
+// TestACPMCPBrokerForwardedActionAnswerIsNotKept covers an ungated Azure
+// action (POST) whose answer carries a secret: the caller gets the answer,
+// the effect record keeps only a note, and a redelivery gets that note.
+func TestACPMCPBrokerForwardedActionAnswerIsNotKept(t *testing.T) {
+	effects, fence := newMCPBrokerControlStore(t)
+	request, profile := testMCPBrokerForwardWriteRequest(t)
+	request.Call.Arguments = json.RawMessage(`{"method":"POST","path":"/subscriptions/s1/resourcegroups/rg1/providers/Microsoft.Storage/storageAccounts/a/listKeys"}`)
+	var err error
+	request.Metadata.RequestDigest = ""
+	if request.Metadata.RequestDigest, err = harnessv2.CanonicalRequestDigest(request); err != nil {
+		t.Fatal(err)
+	}
+	bearer := strings.Repeat("b", 32)
+	capability := []byte(strings.Repeat("c", 32))
+	answer := json.RawMessage(`{"status":200,"headers":{"Content-Type":"application/json"},"body":"{\"keys\":[{\"value\":\"private-storage-key\"}]}"}`)
+	var executions atomic.Int32
+	broker := &ACPMCPBroker{
+		Credentials: ACPMCPBrokerCredentialResolverFunc(func(_ context.Context, got harnessv2.MCPBrokerCallRequest) (ACPMCPBrokerCredentials, error) {
+			return ACPMCPBrokerCredentials{
+				ControllerBearerToken: bearer, CapabilitySecret: capability,
+				ExpectedFence: got.Metadata.Fence, RuntimeProfile: profile, ControllerFence: fence,
+			}, nil
+		}),
+		Prompts: ACPMCPPromptAuthorizerFunc(func(context.Context, harnessv2.MCPBrokerCallRequest) error { return nil }),
+		Executor: ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
+			executions.Add(1)
+			return answer, nil
+		}),
+		Effects: effects,
+	}
+	results := make([]string, 0, 2)
+	for range 2 {
+		recorder := performMCPBrokerCall(t, broker, request, bearer, capability)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response harnessv2.MCPBrokerCallResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, string(response.Result))
+	}
+	if !strings.Contains(results[0], "private-storage-key") {
+		t.Fatalf("the caller did not get the answer: %s", results[0])
+	}
+	if strings.Contains(results[1], "private-storage-key") || !strings.Contains(results[1], "OrkaResultNotKept") || executions.Load() != 1 {
+		t.Fatalf("redelivery = %s after %d executions; want the kept note and one execution", results[1], executions.Load())
+	}
+	id, err := (store.ExternalEffectIdentity{
+		Kind: acpMCPToolEffectKind, Namespace: request.Namespace,
+		AggregateID: string(request.Authorization.RuntimeSessionUID), OperationID: string(request.Metadata.OperationID),
+	}).CanonicalID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect, err := effects.GetExternalEffect(context.Background(), id)
+	if err != nil || strings.Contains(string(effect.Response), "private-storage-key") {
+		t.Fatalf("effect record = %s, %v; want no secret", effect.Response, err)
+	}
+}
+
+// TestForwardedWriteKeptResultKeepsResourceAnswers covers which answers an
+// effect record keeps: a PUT's resource and any error are kept as they are.
+func TestForwardedWriteKeptResultKeepsResourceAnswers(t *testing.T) {
+	request, _ := testMCPBrokerForwardWriteRequest(t)
+	descriptor := request.Authorization.ToolPolicy.Tools[0]
+	put := json.RawMessage(`{"status":201,"body":"{\"name\":\"rg1\"}"}`)
+	if got := forwardedWriteKeptResult(descriptor, request, put); string(got) != string(put) {
+		t.Fatalf("PUT answer kept as %s", got)
+	}
+	request.Call.Arguments = json.RawMessage(`{"method":"POST","path":"/subscriptions/s1/x/listKeys"}`)
+	failure := json.RawMessage(`{"isError":true,"code":"tool_execution_failed","error":"MCP tool execution failed"}`)
+	if got := forwardedWriteKeptResult(descriptor, request, failure); string(got) != string(failure) {
+		t.Fatalf("error kept as %s", got)
+	}
+	note, err := harnessv2.DecodeMCPForwardResponse(forwardedWriteKeptResult(descriptor, request, json.RawMessage(`{"status":200,"body":"secret"}`)))
+	if err != nil || note.Status != http.StatusConflict || !strings.Contains(note.Body, "status 200") || strings.Contains(note.Body, "secret\"") {
+		t.Fatalf("POST note = %#v, %v", note, err)
 	}
 }
