@@ -9,6 +9,7 @@ RUN go mod download
 
 COPY api/ api/
 COPY internal/ internal/
+COPY pkg/ pkg/
 COPY cmd/orka-tool-e2e-client/ cmd/orka-tool-e2e-client/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} \

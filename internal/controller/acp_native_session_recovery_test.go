@@ -18,7 +18,6 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -63,7 +62,7 @@ type nativeRecoveryRuntimeObservations struct {
 
 func newNativeRecoveryDispatcher(t *testing.T, fixture *taskScopedCreateConflictFixture, controls store.DurableControlStore) *ACPDispatcher {
 	t.Helper()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	continuity, err := NewACPSessionContinuity(ACPSessionContinuityConfig{
 		SessionControls: controls, Transcripts: persistence, Publications: persistence, BranchClaims: persistence,
 		NewSessionUID: func() (string, error) { return "native-recovery-owner", nil },
@@ -86,7 +85,7 @@ func newNativeRecoveryFixture(
 ) (*taskScopedCreateConflictFixture, *nativeRecoveryRuntimeObservations) {
 	t.Helper()
 	observed := &nativeRecoveryRuntimeObservations{}
-	var persistence *sqlite.Store
+	var persistence *sealedTestStore
 	fixture := newTaskScopedCreateConflictFixture(t, ctx, name, "77777777-7777-7777-7777-777777777777",
 		func(profile harnessv2.RuntimeProfile, digest harnessv2.ProfileDigest, _ *client.Client) *httptest.Server {
 			server := newDispatcherRuntimeServerWithOptions(t, profile, digest, dispatcherRuntimeServerOptions{
@@ -137,12 +136,12 @@ func newNativeRecoveryFixture(
 		}, func(task *corev1alpha1.Task) {
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name, Create: true, Append: true}
 		})
-	persistence = fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence = fixture.dispatcher.ResultStore.(*sealedTestStore)
 	fixture.dispatcher = newNativeRecoveryDispatcher(t, fixture, persistence)
 	return fixture, observed
 }
 
-func nativeRecoveryTurn(t *testing.T, ctx context.Context, persistence *sqlite.Store, attemptID string) *store.SessionTurn {
+func nativeRecoveryTurn(t *testing.T, ctx context.Context, persistence *sealedTestStore, attemptID string) *store.SessionTurn {
 	t.Helper()
 	attempt, err := persistence.GetPromptAttempt(ctx, attemptID)
 	require.NoError(t, err)
@@ -156,7 +155,7 @@ func nativeRecoveryTurn(t *testing.T, ctx context.Context, persistence *sqlite.S
 	return turn
 }
 
-func nativeRecoveryCheckpoint(t *testing.T, ctx context.Context, persistence *sqlite.Store, name string, count int) *store.NativeSessionRecord {
+func nativeRecoveryCheckpoint(t *testing.T, ctx context.Context, persistence *sealedTestStore, name string, count int) *store.NativeSessionRecord {
 	t.Helper()
 	control, err := persistence.GetSessionControl(ctx, "default", name)
 	require.NoError(t, err)
@@ -182,7 +181,7 @@ func nativeRecoveryRuntimeStatus(t *testing.T, ctx context.Context, dispatcher *
 	return status
 }
 
-func requireNativeRecoveryNoFallback(t *testing.T, ctx context.Context, persistence *sqlite.Store, task *corev1alpha1.Task) {
+func requireNativeRecoveryNoFallback(t *testing.T, ctx context.Context, persistence *sealedTestStore, task *corev1alpha1.Task) {
 	t.Helper()
 	journal, err := persistence.ListExecutionEvents(ctx, store.ExecutionEventFilter{
 		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name, Limit: 100,
@@ -205,7 +204,7 @@ func newNativeRecoveryContinuation(t *testing.T, ctx context.Context, fixture *t
 		RequestDigest: testControlDigestForDispatcher(name),
 	}}
 	require.NoError(t, fixture.kubeClient.Create(ctx, continued))
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	agent := &corev1alpha1.Agent{}
 	require.NoError(t, fixture.kubeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "agent"}, agent))
 	continued = prepareBoundACPDispatcherTaskForTest(t, ctx, fixture.kubeClient, fixture.kubeClient.Scheme(), persistence, continued, agent,
@@ -284,7 +283,7 @@ func TestACPDispatcherNativeRecoveryLostCaptureResponse(t *testing.T) {
 			})
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	reserved, target, err := fixture.dispatcher.reserveTask(ctx, fixture.task)
 	require.NoError(t, err)
 	require.NotNil(t, reserved)
@@ -362,7 +361,7 @@ func TestACPDispatcherNativeRecoveryCommittedCheckpointBeforeDelete(t *testing.T
 	snapshot := storetest.NativeSessionSnapshot(t, "checkpoint committed before dispatcher receives its receipt")
 	fixture, observed := newNativeRecoveryFixture(t, ctx, "native-committed-before-delete", snapshot, nil, nil)
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	lost := &nativeRecoveryCommitResponseLossStore{DurableControlStore: persistence}
 	lost.loseResponse.Store(true)
 	fixture.dispatcher = newNativeRecoveryDispatcher(t, fixture, lost)
@@ -425,7 +424,7 @@ func TestACPDispatcherNativeRecoveryCancellationResumesOriginalCheckpoint(t *tes
 	fixture, observed := newNativeRecoveryFixture(t, ctx, "native-cancel-then-resume", snapshot,
 		map[harnessv2.PromptID]harnessv2.EventType{"prompt-native-cancelled": harnessv2.EventCancelled}, nil)
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	dispatchQueuedTask(ctx, t, fixture.dispatcher, fixture.task)
 	original := nativeRecoveryCheckpoint(t, ctx, persistence, fixture.task.Spec.SessionRef.Name, 2)
 	require.Equal(t, snapshot.Data, original.Snapshot.Data)

@@ -2563,6 +2563,10 @@ func (d *ACPDispatcher) patchRecoveredTerminalExecution(ctx context.Context, tas
 		case store.PromptDeliveryNotRequested, store.PromptDeliveryReadValidated, store.PromptDeliveryNoChange,
 			store.PromptDeliveryVerifiedExact, store.PromptDeliveryDeliveredSuperseded:
 			return d.completeSuccessWithDelivery(ctx, task, *status, "ACP task settled from the durable attempt record after the live settlement was interrupted")
+		case store.PromptDeliveryCancelledBeforePublish:
+			// Match the live settlement and restoredTaskPhase: a publication
+			// cancelled before push settles the Task as Cancelled, not Failed.
+			return d.cancelTaskAfterExecution(ctx, task, *status, "publication cancelled before push during recovery")
 		default:
 			// The authoritative attempt settles the Task; it may reach this
 			// path after a controller restart or when the live settlement

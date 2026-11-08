@@ -13,7 +13,6 @@ import (
 	"github.com/orka-agents/orka/internal/events"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/store/storetest"
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/util/retry"
@@ -135,7 +134,7 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 			})
 		})
 	defer fixture.stop()
-	persistence := fixture.dispatcher.ResultStore.(*sqlite.Store)
+	persistence := fixture.dispatcher.ResultStore.(*sealedTestStore)
 	dispatchQueuedTask(ctx, t, fixture.dispatcher, fixture.task)
 	first := fixture.currentTask(t, ctx)
 	require.Equal(t, corev1alpha1.TaskPhaseSucceeded, first.Status.Phase)
@@ -293,7 +292,7 @@ func testNativeSessionInterruptionResumesCheckpoint(t *testing.T, userCancellati
 func cancelNativeTaskAfterPromptRunning(
 	ctx context.Context,
 	fixture *taskScopedCreateConflictFixture,
-	persistence *sqlite.Store,
+	persistence *sealedTestStore,
 	timedOut *corev1alpha1.Task,
 	attemptID string,
 	accepted <-chan struct{},
