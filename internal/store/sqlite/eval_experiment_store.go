@@ -84,7 +84,16 @@ func (s *Store) ReserveEvalExperiment(ctx context.Context, record *store.EvalExp
 		return store.EvalExperimentReservation{}, fmt.Errorf("encode eval experiment record: %w", err)
 	}
 	return writeOperation(ctx, s, "ReserveEvalExperiment", nil, func(ctx context.Context) (store.EvalExperimentReservation, error) {
-		return s.reserveEvalExperimentWrite(ctx, record, limits, encoded)
+		// Count and insert under the writer lock, also without an envelope,
+		// so concurrent reservations never overgrant and a failed case insert
+		// leaves no partial record.
+		var reservation store.EvalExperimentReservation
+		err := s.inWriteTransaction(ctx, func(ctx context.Context, _ *sql.Tx) error {
+			var err error
+			reservation, err = s.reserveEvalExperimentWrite(ctx, record, limits, encoded)
+			return err
+		})
+		return reservation, err
 	})
 }
 

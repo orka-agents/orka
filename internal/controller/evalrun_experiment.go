@@ -14,6 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -305,6 +306,8 @@ func evalExperimentComparable(run *corev1alpha1.EvalRun) map[string]string {
 func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run *corev1alpha1.EvalRun, verdict evals.ExperimentVerdict) error {
 	status := run.Status.Experiment
 	status.Result = corev1alpha1.EvalExperimentResult(verdict.Result)
+	decidedAt := metav1.NewTime(r.now())
+	status.DecidedAt = &decidedAt
 	status.Reasons = verdict.Reasons
 	if len(status.Reasons) > evalExperimentMaxReasons {
 		status.Reasons = append(status.Reasons[:evalExperimentMaxReasons-1], "more reasons omitted")

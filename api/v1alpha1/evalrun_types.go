@@ -220,7 +220,8 @@ type EvalRunSpec struct {
 	MaxInfraErrorPercent *int32 `json:"maxInfraErrorPercent,omitempty"`
 
 	// TTLSecondsAfterFinished deletes the EvalRun and its trial records this
-	// long after it finishes. Unset keeps them.
+	// long after it finishes, or, for an experiment candidate, after its
+	// experiment is decided. Unset keeps them.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
@@ -393,7 +394,7 @@ type EvalRunStatus struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the run finished; ttlSecondsAfterFinished counts
-	// from it.
+	// from it, or from status.experiment.decidedAt for a candidate.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
@@ -484,6 +485,10 @@ type EvalExperimentStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	// +optional
 	GateDigest string `json:"gateDigest,omitempty"`
+
+	// DecidedAt is when the experiment left Pending.
+	// +optional
+	DecidedAt *metav1.Time `json:"decidedAt,omitempty"`
 
 	// Gate is the gate the experiment was judged by.
 	// +optional

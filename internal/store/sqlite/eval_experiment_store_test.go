@@ -1,6 +1,8 @@
 package sqlite
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,30 @@ func TestReserveEvalExperimentLimits(t *testing.T) {
 	got, err = s.ReserveEvalExperiment(ctx, fresh, limits)
 	require.NoError(t, err)
 	require.Equal(t, store.EvalExperimentReservation{Granted: true, BaselineAttempts: 1, CaseAttempts: 3}, got)
+}
+
+// Concurrent reservations for one remaining attempt grant exactly one.
+func TestReserveEvalExperimentConcurrentGrantsOnce(t *testing.T) {
+	s := newEvalTrialTestStore(t)
+	limits := store.EvalExperimentLimits{MaxPerBaseline: 1, MaxPerCase: 10}
+	const n = 8
+	results := make(chan bool, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			got, err := s.ReserveEvalExperiment(t.Context(), evalExperimentTestRecord(fmt.Sprintf("candidate-%d", i), "baseline-a"), limits)
+			results <- err == nil && got.Granted
+		})
+	}
+	wg.Wait()
+	close(results)
+	granted := 0
+	for ok := range results {
+		if ok {
+			granted++
+		}
+	}
+	require.Equal(t, 1, granted)
 }
 
 func TestReserveEvalExperimentValidation(t *testing.T) {

@@ -2163,6 +2163,10 @@ func (in *EvalExperimentStatus) DeepCopyInto(out *EvalExperimentStatus) {
 		*out = new(EvalObjectIdentity)
 		**out = **in
 	}
+	if in.DecidedAt != nil {
+		in, out := &in.DecidedAt, &out.DecidedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Gate != nil {
 		in, out := &in.Gate, &out.Gate
 		*out = new(EvalExperimentGate)

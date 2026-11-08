@@ -256,7 +256,8 @@ spec:
               ttlSecondsAfterFinished:
                 description: |-
                   TTLSecondsAfterFinished deletes the EvalRun and its trial records this
-                  long after it finishes. Unset keeps them.
+                  long after it finishes, or, for an experiment candidate, after its
+                  experiment is decided. Unset keeps them.
                 format: int32
                 minimum: 0
                 type: integer
@@ -295,7 +296,7 @@ spec:
               completionTime:
                 description: |-
                   CompletionTime is when the run finished; ttlSecondsAfterFinished counts
-                  from it.
+                  from it, or from status.experiment.decidedAt for a candidate.
                 format: date-time
                 type: string
               conditions:
@@ -410,6 +411,10 @@ spec:
                       reviewer Agent's identity, resolved system prompt, model and runtime
                       image.
                     maxLength: 128
+                    type: string
+                  decidedAt:
+                    description: DecidedAt is when the experiment left Pending.
+                    format: date-time
                     type: string
                   gate:
                     description: Gate is the gate the experiment was judged by.

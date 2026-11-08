@@ -233,6 +233,12 @@ func TestHeldOutCaseKeys(t *testing.T) {
 	if len(first) != 2 || !slices.Equal(first, relabeled) || !slices.IsSorted(first) {
 		t.Fatalf("keys = %v, relabeled = %v", first, relabeled)
 	}
+	alias := reviewCase("a", "HEAD-1", "one")
+	alias.Input.RepositoryMonitorReview.RepoURL = "https://GitHub.com/Acme/Fixtures.git/"
+	aliased, _ := HeldOutCaseKeys([]Case{alias})
+	if !slices.Contains(first, aliased[0]) {
+		t.Fatal("a repository URL alias makes a held-out case fresh")
+	}
 	other, _ := HeldOutCaseKeys([]Case{reviewCase("a", "head-3", "one")})
 	if slices.Contains(first, other[0]) {
 		t.Fatal("a different commit shares a held-out key")

@@ -184,7 +184,13 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
 		return ctrl.Result{}, nil
 	}
-	expiry := run.Status.CompletionTime.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second)
+	// A candidate keeps its whole retention window after the decision, however
+	// long it waited for its baseline.
+	finished := run.Status.CompletionTime.Time
+	if experiment := run.Status.Experiment; experiment != nil && experiment.DecidedAt != nil && experiment.DecidedAt.After(finished) {
+		finished = experiment.DecidedAt.Time
+	}
+	expiry := finished.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second)
 	if remaining := expiry.Sub(r.now()); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -38,7 +39,7 @@ func HeldOutCaseKeys(cases []Case) ([]string, error) {
 			RepoURL string `json:"repoURL"`
 			BaseSHA string `json:"baseSHA"`
 			HeadSHA string `json:"headSHA"`
-		}{input.RepoURL, input.BaseSHA, input.HeadSHA})
+		}{canonicalRepoURL(input.RepoURL), strings.ToLower(input.BaseSHA), strings.ToLower(input.HeadSHA)})
 		if err != nil {
 			return nil, err
 		}
@@ -49,6 +50,14 @@ func HeldOutCaseKeys(cases []Case) ([]string, error) {
 	}
 	sort.Strings(keys)
 	return keys, nil
+}
+
+// canonicalRepoURL folds the spellings of one repository URL together:
+// case, a trailing slash and a .git suffix. Folding two distinct
+// repositories only shares their budget, so it errs toward stricter limits.
+func canonicalRepoURL(repoURL string) string {
+	canonical := strings.TrimRight(strings.ToLower(strings.TrimSpace(repoURL)), "/")
+	return strings.TrimRight(strings.TrimSuffix(canonical, ".git"), "/")
 }
 
 // GraderSetDigest returns the digest of the named graders' names and
