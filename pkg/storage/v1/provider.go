@@ -126,8 +126,9 @@ const (
 	// [ControllerEpochAdvancer] on both provider contracts. Revision 3 added
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
-	// Revision 5 adds [AHPStore] to [StateProvider].
-	ContractRevision = 5
+	// Revision 5 adds [AHPStore] to [StateProvider]. Revision 6 adds
+	// [UsageStore.ListUsageTasksInSessions] and the requester a [UsageTask] keeps.
+	ContractRevision = 6
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.

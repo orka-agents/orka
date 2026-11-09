@@ -1,6 +1,8 @@
 package storagetest
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -999,6 +1001,41 @@ func runUsage(t *testing.T, newProvider StateFactory) {
 			require.NoError(t, err, tc.name)
 			require.Len(t, data.Works, tc.want, tc.name)
 		}
+	})
+
+	t.Run("tasks in sessions keep their requester and are found by trimmed name", func(t *testing.T) {
+		p, ctx := newProvider(t), t.Context()
+		at := workflowAt(0)
+		alice := &storagev1.UsageRequester{Issuer: "https://issuer.example", Subject: "alice"}
+		for uid, session := range map[string]string{
+			"plain": "ahp-one", "padded": " ahp-one\t", "unicode-padded": "\u0085ahp-one\u3000", "longer": "ahp-one-2",
+			"other": "ahp-two", "prefixed": "x-ahp-one", "team": " team-session ",
+		} {
+			require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-1",
+				TaskUID: uid, TaskName: uid, SessionName: session, Phase: "Succeeded", StartedAt: at, Requester: alice, AHPTurn: true}))
+		}
+		require.NoError(t, p.RegisterUsageTask(ctx, storagev1.UsageTask{Namespace: workflowNamespace, NamespaceUID: "uid-0",
+			TaskUID: "earlier-namespace", TaskName: "earlier-namespace", SessionName: "ahp-one", Phase: "Succeeded", StartedAt: at}))
+
+		tasks, err := p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one", "ahp-absent"}, 100)
+		require.NoError(t, err)
+		found := map[string]storagev1.UsageTask{}
+		for _, task := range tasks {
+			found[task.TaskUID] = task
+		}
+		require.ElementsMatch(t, []string{"plain", "padded", "unicode-padded"}, slices.Collect(maps.Keys(found)),
+			"names match without surrounding space, and only whole names")
+		require.Equal(t, alice, found["plain"].Requester)
+		require.True(t, found["plain"].AHPTurn)
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "", []string{"ahp-one"}, 100)
+		require.NoError(t, err)
+		require.Len(t, tasks, 4, "without a namespace UID, every namespace of the name counts")
+		tasks, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"team-session"}, 100)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1, "any session name is looked up, not only an AHP one")
+		require.Equal(t, "team", tasks[0].TaskUID)
+		_, err = p.ListUsageTasksInSessions(ctx, workflowNamespace, "uid-1", []string{"ahp-one"}, 2)
+		require.ErrorIs(t, err, storagev1.ErrUsageSelectionTooLarge)
 	})
 
 	t.Run("retention prunes whole inactive cohorts", func(t *testing.T) {

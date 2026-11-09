@@ -171,6 +171,7 @@ type (
 	UsageWorkRequest                          = storagev1.UsageWorkRequest
 	UsageTask                                 = storagev1.UsageTask
 	UsageGatewayOwner                         = storagev1.UsageGatewayOwner
+	UsageRequester                            = storagev1.UsageRequester
 	UsageTaskPhase                            = storagev1.UsageTaskPhase
 	UsageObservation                          = storagev1.UsageObservation
 	UsagePRLink                               = storagev1.UsagePRLink

@@ -45,6 +45,17 @@ type UsageTask struct {
 	PhaseObservedAt time.Time          `json:"-"`
 	PhaseAttempt    int32              `json:"-"`
 	GatewayOwner    *UsageGatewayOwner `json:"gatewayOwner,omitempty"`
+	// Requester and AHPTurn are retained for access checks only; reports
+	// omit them. AHPTurn marks a Task that was private as an AHP turn.
+	Requester *UsageRequester `json:"requester,omitempty"`
+	AHPTurn   bool            `json:"ahpTurn,omitempty"`
+}
+
+// UsageRequester retains who requested a Task, so access that depends on
+// the requester survives Task cleanup.
+type UsageRequester struct {
+	Issuer  string `json:"issuer"`
+	Subject string `json:"subject"`
 }
 
 // UsageGatewayOwner retains the immutable access boundary after Task cleanup.
@@ -160,6 +171,12 @@ type UsageStore interface {
 	RecordUsagePullRequest(context.Context, UsagePullRequest) error
 	LoadUsage(context.Context, UsageFilter) (UsageData, error)
 	ListUsagePullRequestLinks(context.Context, string, string, time.Time, int) ([]UsagePRLink, error)
+	// ListUsageTasksInSessions returns, up to limit, the retained rows of a
+	// namespace's Tasks that continued any of the named sessions, by name
+	// without surrounding space, whatever their period. A namespace UID, when
+	// given, keeps out the rows of an earlier namespace of the same name.
+	// Past the limit it returns ErrUsageSelectionTooLarge.
+	ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]UsageTask, error)
 	PruneUsage(context.Context, time.Time) error
 }
 

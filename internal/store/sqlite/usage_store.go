@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/usage"
@@ -198,6 +199,11 @@ func mergeUsageTaskSnapshot(task *store.UsageTask, existing store.UsageTask) err
 	if existing.GatewayOwner != nil {
 		task.GatewayOwner = existing.GatewayOwner
 	}
+	if existing.Requester != nil {
+		task.Requester = existing.Requester
+	}
+	// A Task once private stays so, whatever later happens to its labels.
+	task.AHPTurn = task.AHPTurn || existing.AHPTurn
 	task.StartedAt = existing.StartedAt
 	if task.WorkID == "" {
 		task.WorkID = existing.WorkID
@@ -448,6 +454,76 @@ func loadUsage(ctx context.Context, db taskDataExecutor, filter store.UsageFilte
 		result.RetainedSince = &at
 	}
 	return result, nil
+}
+
+// usageSpace holds every character unicode.IsSpace reports, for SQL's TRIM to
+// remove what strings.TrimSpace does.
+var usageSpace = func() string {
+	var space strings.Builder
+	write := func(lo, hi, stride uint32) {
+		for r := lo; r <= hi; r += stride {
+			if unicode.IsSpace(rune(r)) {
+				space.WriteRune(rune(r))
+			}
+		}
+	}
+	// unicode.IsSpace is the Latin-1 spaces and the White_Space property.
+	write(0, unicode.MaxLatin1, 1)
+	for _, r := range unicode.White_Space.R16 {
+		write(uint32(r.Lo), uint32(r.Hi), uint32(r.Stride))
+	}
+	for _, r := range unicode.White_Space.R32 {
+		write(r.Lo, r.Hi, r.Stride)
+	}
+	return space.String()
+}()
+
+func (s *Store) ListUsageTasksInSessions(ctx context.Context, namespace, namespaceUID string, sessions []string, limit int) ([]store.UsageTask, error) {
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+	// Names compare as the controller reads them, without surrounding space
+	// of any kind: SQL trims every character strings.TrimSpace does, so only
+	// rows of a wanted session are read, and the comparison is made again
+	// here. A name that merely holds a wanted one is never decoded. The names
+	// travel as one JSON array, so the query keeps its shape however many
+	// there are.
+	wanted := map[string]bool{}
+	for _, session := range sessions {
+		wanted[session] = true
+	}
+	names, err := json.Marshal(sessions)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.taskDataExecutor(ctx).QueryContext(ctx,
+		`SELECT data FROM usage_tasks
+		 WHERE namespace = ? AND (? = '' OR COALESCE(json_extract(data, '$.namespaceUID'), '') = ?)
+		   AND TRIM(COALESCE(json_extract(data, '$.sessionName'), ''), ?) IN (SELECT value FROM json_each(?))`,
+		namespace, namespaceUID, namespaceUID, usageSpace, string(names))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var tasks []store.UsageTask
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var task store.UsageTask
+		if err := json.Unmarshal([]byte(data), &task); err != nil {
+			return nil, err
+		}
+		if !wanted[strings.TrimSpace(task.SessionName)] {
+			continue
+		}
+		if len(tasks) == limit {
+			return nil, store.ErrUsageSelectionTooLarge
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 
 func readUsageJSON(ctx context.Context, db taskDataExecutor, target any, query string, args ...any) error {
