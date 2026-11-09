@@ -408,7 +408,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	if !isTerminalTaskPhase(task.Status.Phase) {
+	if !task.Status.Phase.IsTerminal() {
 		intent, err := r.loadDeferredTaskFinalization(ctx, task)
 		if err != nil {
 			return ctrl.Result{}, err

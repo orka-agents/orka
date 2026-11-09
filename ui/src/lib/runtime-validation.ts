@@ -1,7 +1,8 @@
-import type { Task, TaskPhase } from '@/schemas/task'
+import type { Task } from '@/schemas/task'
 import type { TaskTrace, Approval } from '@/schemas/execution-event'
 import type { ArtifactMetadata } from '@/schemas/artifact'
 import { podWaitingMessage } from '@/components/tasks/task-state'
+import { isTaskTerminal } from '@/lib/task-phase'
 
 /**
  * Derived runtime health checks — NOT a formal evaluation. These summarize
@@ -18,12 +19,6 @@ export interface RuntimeCheck {
   label: string
   status: CheckStatus
   reason: string
-}
-
-const TERMINAL: TaskPhase[] = ['Succeeded', 'Failed', 'Cancelled']
-
-export function isTerminal(phase?: TaskPhase | string): boolean {
-  return TERMINAL.includes(phase as TaskPhase)
 }
 
 export interface ValidationInput {
@@ -49,10 +44,10 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
   checks.push({
     id: 'terminal',
     label: 'Reached terminal state',
-    status: isTerminal(phase) ? 'pass' : podWaiting ? 'warn' : phase ? 'info' : 'unknown',
+    status: isTaskTerminal(phase) ? 'pass' : podWaiting ? 'warn' : phase ? 'info' : 'unknown',
     reason: !phase
       ? 'No phase yet'
-      : isTerminal(phase)
+      : isTaskTerminal(phase)
         ? `Phase ${phase}`
         : podWaiting
           ? `Phase ${phase}; ${podWaiting}`
@@ -61,7 +56,7 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
   // The authoritative phase drives the outcome: Failed/Cancelled must
   // fail/warn regardless of trace contents, so a terminal failure can't read
   // as "pass" just because the trace is empty or stale.
-  if (isTerminal(phase)) {
+  if (isTaskTerminal(phase)) {
     checks.push({
       id: 'outcome',
       label: 'Task succeeded',

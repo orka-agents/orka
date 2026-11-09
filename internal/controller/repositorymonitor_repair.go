@@ -1435,7 +1435,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 			}
 			return ingested, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		if cancelled, cancelErr := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorRepairWorkflowActionKind(job.Intent)); cancelErr != nil {

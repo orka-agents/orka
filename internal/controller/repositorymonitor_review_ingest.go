@@ -159,7 +159,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 			}
 			return ingested, needsRequeue, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorReviewTask(ctx, monitor, &item, &task)
@@ -181,15 +181,6 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		}
 	}
 	return ingested, needsRequeue, nil
-}
-
-func repositoryMonitorReviewTaskTerminal(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
 }
 
 //nolint:gocyclo // Result validation, verdict downgrades, and durable review recording remain ordered.
@@ -479,7 +470,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorReviewValidation(ctx cont
 		result.Evidence = "The immutable validation command Secret does not match its stored binding."
 		return result, false, nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+	if !validationTask.Status.Phase.IsTerminal() {
 		return result, true, nil
 	}
 
@@ -543,7 +534,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 		}
 		return true, nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(validationTask.Status.Phase) {
+	if !validationTask.Status.Phase.IsTerminal() {
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			current := &corev1alpha1.Task{}
 			if err := r.Get(ctx, key, current); err != nil {
@@ -552,7 +543,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorValidationTask(ctx
 				}
 				return err
 			}
-			if !current.DeletionTimestamp.IsZero() || repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+			if !current.DeletionTimestamp.IsZero() || current.Status.Phase.IsTerminal() {
 				return nil
 			}
 			if err := validateRepositoryMonitorValidationCleanupIdentity(monitor, reviewTask, current); err != nil {

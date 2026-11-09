@@ -310,7 +310,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 				}
 				return err
 			}
-			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+			if current.Status.Phase.IsTerminal() {
 				return nil
 			}
 			if err := r.cancelRepositoryMonitorTask(ctx, &current, reason); apierrors.IsNotFound(err) {

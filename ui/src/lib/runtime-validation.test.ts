@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { deriveRuntimeChecks, rollupStatus, isTerminal } from './runtime-validation'
+import { deriveRuntimeChecks, rollupStatus } from './runtime-validation'
 import type { Task } from '@/schemas/task'
 import type { TaskTrace } from '@/schemas/execution-event'
 
@@ -12,11 +12,6 @@ const trace = (o: Partial<TaskTrace> = {}): TaskTrace => ({
 })
 
 describe('runtime-validation', () => {
-  it('isTerminal', () => {
-    expect(isTerminal('Succeeded')).toBe(true)
-    expect(isTerminal('Running')).toBe(false)
-  })
-
   it('marks trace checks unknown when no trace', () => {
     const checks = deriveRuntimeChecks({ task: { ...base, status: { phase: 'Pending' } } })
     expect(checks.find((c) => c.id === 'errors')?.status).toBe('unknown')

@@ -35,6 +35,7 @@ import { formatShellCommand } from '@/lib/task-command'
 import { actionErrorMessage } from './action-error'
 import { isTaskDeleting, isWaitingForApproval } from './task-state'
 import { TaskStateBadges } from './task-state-badges'
+import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 function latestEventPlan(events: ExecutionEvent[]): PlanState | undefined {
   let latest: ExecutionEvent | undefined
@@ -219,9 +220,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   // pay for trace/approvals/artifacts. Each hook is namespace+uid scoped.
   const overviewActive = activeTab === 'overview' && !taskUnavailable
   const resultActive = activeTab === 'result' && !taskUnavailable
-  const taskRunning = task?.status?.phase === 'Running'
-  const taskTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task?.status?.phase ?? '')
-  const traceRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
+  const taskInFlight = isTaskInFlight(task?.status?.phase)
+  const taskTerminal = isTaskTerminal(task?.status?.phase)
+  const traceRefetchInterval = overviewActive && taskInFlight && following ? 5000 : false
   const terminalTraceRefetchKey = useRef<string | null>(null)
   const terminalArtifactRefetchKey = useRef<string | null>(null)
   const { data: trace, refetch: refetchTrace } = useTaskTrace(
@@ -239,14 +240,14 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     taskId,
     overviewActive || waitingForApproval,
     approvalRefetchInterval,
-    taskRunning,
+    taskInFlight,
     taskTerminal,
     task?.metadata.uid,
   )
   // Terminal tasks reject decisions, so their leftovers are not "pending".
   const pendingApprovals = taskTerminal ? 0 : (approvalsResp?.approvals ?? []).filter((a) => a.status === 'pending').length
-  const artifactRefetchInterval = overviewActive && taskRunning && following ? 5000 : false
-  const resultArtifactRefetchInterval = resultActive && taskRunning && following ? 5000 : false
+  const artifactRefetchInterval = overviewActive && taskInFlight && following ? 5000 : false
+  const resultArtifactRefetchInterval = resultActive && taskInFlight && following ? 5000 : false
   const { data: artifactsResp, refetch: refetchArtifacts } = useTaskArtifacts(
     taskId,
     overviewActive,
@@ -381,7 +382,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               variant="destructive"
               size="sm"
               onClick={() => setConfirmDelete(deleteIdentity)}
-              title={['Succeeded', 'Failed', 'Cancelled'].includes(task.status?.phase ?? '') ? 'Delete task' : 'Delete (cancels a running task)'}
+              title={isTaskTerminal(task.status?.phase) ? 'Delete task' : 'Delete (cancels a running task)'}
             >
               <Trash2 className="mr-2 h-4 w-4" /> Delete
             </Button>

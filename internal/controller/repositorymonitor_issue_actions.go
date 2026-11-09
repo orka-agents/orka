@@ -690,7 +690,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTasks
 			}
 			return ingested, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, &item, &task)
@@ -803,7 +803,7 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 		item.LastVerdict = repositoryMonitorReviewVerdictFailed
 		return nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+	if !task.Status.Phase.IsTerminal() {
 		return nil
 	}
 	// Apply the retained result before a new command can restart its workflow.
@@ -975,7 +975,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 		var task corev1alpha1.Task
 		err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task)
 		if err == nil {
-			if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+			if !task.Status.Phase.IsTerminal() {
 				continue
 			}
 			if _, awaiting := awaitingTasks[taskName]; awaiting {
