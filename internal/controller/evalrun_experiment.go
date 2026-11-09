@@ -322,8 +322,7 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 		if err != nil {
 			// A missing or changed ConfigMap is final; an API error is
 			// retried, so it doesn't spend the held-out attempt.
-			var configErr *evalRunConfigError
-			if !errors.As(err, &configErr) {
+			if _, ok := errors.AsType[*evalRunConfigError](err); !ok {
 				return in, "", fmt.Errorf("reload the cases to find tagged cases: %w", err)
 			}
 			return in, "the cases ConfigMap can no longer be read to find tagged cases", nil
