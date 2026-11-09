@@ -288,3 +288,48 @@ func TestEvalDecisionsAppendAndStayQueryable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
+
+// A decision reads the candidate run from the API server: when the run was
+// deleted and recreated, a stale cached copy cannot attach the decision to
+// the earlier incarnation's outcome.
+func TestDecideEvalRunReadsTheLiveIncarnation(t *testing.T) {
+	env := setupEvalDecisionHandlers(t, store.EvalExperimentResultPassed, "promoters")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1alpha1.AddToScheme(scheme))
+	recreated := &corev1alpha1.EvalRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "candidate", Namespace: "demo", UID: "recreated-uid"},
+		Spec: corev1alpha1.EvalRunSpec{Experiment: &corev1alpha1.EvalExperiment{
+			Hypothesis: "stricter prompt", BaselineRunRef: corev1alpha1.EvalObjectReference{Name: "baseline"},
+		}},
+	}
+	live := fake.NewClientBuilder().WithScheme(scheme).WithObjects(recreated).Build()
+	clientset := kubefake.NewClientset()
+	clientset.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authorizationv1.SubjectAccessReview)
+		review.Status.Allowed = true
+		return true, review, nil
+	})
+	handlers := NewHandlers(HandlersConfig{
+		Client: env.client, APIReader: live, KubeClient: clientset, EvalExperimentStore: env.store,
+		EvalDecisionVerifier: env.verifier, EvalPromoterGroups: []string{"promoters"},
+	})
+	app := fiber.New()
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", Groups: []string{"promoters"}, AuthType: AuthTypeOIDC})
+		return c.Next()
+	})
+	app.Post("/evals/runs/:name/decisions", handlers.DecideEvalRun)
+	req := httptest.NewRequest(http.MethodPost, "/evals/runs/candidate/decisions?namespace=demo",
+		strings.NewReader(`{"decision":"rejected","reason":"stale"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, resp.StatusCode, string(body))
+	require.Contains(t, string(body), "never started")
+	page, err := env.store.ListEvalExperiments(t.Context(), "demo", store.EvalExperimentListOptions{CandidateRunUID: "candidate-uid"})
+	require.NoError(t, err)
+	require.Empty(t, page.Items[0].Decisions)
+}

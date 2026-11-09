@@ -224,7 +224,9 @@ func (h *Handlers) evalRunExperiment(c fiber.Ctx) (*corev1alpha1.EvalRun, *store
 	if h.evalExperimentStore == nil {
 		return nil, nil, fiber.NewError(fiber.StatusNotImplemented, "eval experiment store not configured")
 	}
-	run, err := h.getEvalRun(c)
+	// Uncached, so a decision never attaches to a deleted incarnation's
+	// outcome when the run was recreated under the same name.
+	run, err := h.getEvalRunUncached(c)
 	if err != nil {
 		return nil, nil, err
 	}
