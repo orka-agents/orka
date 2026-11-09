@@ -383,6 +383,8 @@ func classifyPublisherError(err error) error {
 	case errors.Is(err, publisher.ErrInvalidRequest), errors.Is(err, publisher.ErrInvalidRepository),
 		errors.Is(err, publisher.ErrInvalidRef), errors.Is(err, publisher.ErrInvalidObjectID):
 		return apiError(ErrInvalidRequest, "invalid_request", "publisher request is invalid", 400, false, err)
+	case errors.Is(err, publisher.ErrDeniedPath):
+		return apiError(ErrInvalidRequest, ErrorCodeDeniedPath, "workspace delta contains a denied path", 422, false, err)
 	case errors.Is(err, publisher.ErrUnsafeDelta), errors.Is(err, publisher.ErrUnsupportedDelta):
 		return apiError(ErrInvalidRequest, "unsafe_delta", "workspace delta is unsafe or unsupported", 422, false, err)
 	case errors.Is(err, publisher.ErrSourceMoved):

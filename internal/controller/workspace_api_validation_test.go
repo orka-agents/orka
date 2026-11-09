@@ -215,6 +215,12 @@ var _ = Describe("workspace.orka.ai schema validation", func() {
 				},
 			},
 			{
+				name: "denied-paths",
+				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
+					workspace.DeniedPaths = []string{"internal/evals/**"}
+				},
+			},
+			{
 				name: "reject-binary-files",
 				mutate: func(workspace *corev1alpha1.WorkspaceConfig) {
 					workspace.RejectBinaryFiles = true

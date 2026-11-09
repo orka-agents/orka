@@ -1101,6 +1101,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRepairTask(ctx cont
 		ExpectedRemoteSHA:            pr.HeadSHA,
 		CommitMessage:                commitMessage,
 	}
+	repositoryMonitorApplyPatchPathLimits(monitor, workspace)
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      taskName,
@@ -1480,6 +1481,11 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorRepairTask
 		} else {
 			job.Phase = repositoryMonitorRepairPhaseFailed
 			job.LastError = fmt.Sprintf("task ended in phase %s", task.Status.Phase)
+		}
+		if reason := repositoryMonitorWorkspacePathRejectionReason(&task); reason != "" {
+			// The runtime rejected the repair's paths before publishing it.
+			job.Phase = repositoryMonitorRepairPhaseFailed
+			job.LastError = reason
 		}
 		commandID := task.Annotations[repositoryMonitorIssueAnnotationCommandID]
 		pushMutationID := "ghmut-" + repositoryMonitorShortHash(job.ID+"-push")

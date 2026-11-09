@@ -1723,6 +1723,19 @@ spec:
                       Branch push remains the minimum durable delivery when false. It is supported only
                       for agent Tasks using the trusted ACP publisher boundary.
                     type: boolean
+                  deniedPaths:
+                    description: |-
+                      DeniedPaths rejects publishable workspace changes to these repository
+                      path globs or directory prefixes ending in /**, using the AllowedPaths
+                      syntax, before publication even when AllowedPaths matches. Both the
+                      runtime and the publisher check it. It requires write workspace intent
+                      and is not supported for container Tasks.
+                    items:
+                      maxLength: 1024
+                      type: string
+                    maxItems: 256
+                    type: array
+                    x-kubernetes-list-type: set
                   denyRepositoryControlPaths:
                     description: |-
                       DenyRepositoryControlPaths rejects workflow, RBAC, and chart-secret paths
@@ -2024,7 +2037,8 @@ spec:
               rule: self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles)
                 && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size()
                 == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths)
-                && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles)
+                && (!has(self.workspace.deniedPaths) || self.workspace.deniedPaths.size()
+                == 0) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles)
                 && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))
             - message: custom-image container Tasks do not support workspace.pushBranch
                 publication
