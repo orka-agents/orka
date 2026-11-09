@@ -25,6 +25,7 @@ const (
 	schema168 = "b7af032523fa2f524c19ceb897fc1807e6850a8c43fa6e0779d059f11fe2c133" // dataset identity
 	schema169 = "4756d67c9c3850bd87286c81f4398f245163f5edb038cba38e0269d347dd09e2" // schema version 2: operation receipts and epoch advance
 	schema170 = "7d46e41ac2bf6265fa94eeaed0c70f221d407213580bec9a267bd45ee5419bf7" // schema version 3: dataset installation binding
+	schema171 = "b8b8203b8bc017b8e7e76c18a7e00825313d3df720ec2de75b85728da81e97e4" // schema version 4: Agent Host Protocol store
 
 	// #700's tables were subsequently changed by #701. Adding empty tables
 	// alone cannot upgrade this layout, even when its custody tables are empty.
@@ -52,6 +53,9 @@ var migration168To169 string
 //go:embed migrations/169-to-170.sql
 var migration169To170 string
 
+//go:embed migrations/170-to-171.sql
+var migration170To171 string
+
 type schemaMigration struct {
 	from, to string
 	sql      string
@@ -68,6 +72,7 @@ func schemaMigrations() []schemaMigration {
 		{schema167, schema168, migration167To168, nil},
 		{schema168, schema169, migration168To169, nil},
 		{schema169, schema170, migration169To170, nil},
+		{schema170, schema171, migration170To171, nil},
 	}
 }
 
@@ -86,6 +91,7 @@ func versionUpgrades() []versionUpgrade {
 	return []versionUpgrade{
 		{from: 1, to: 2, fromLayout: schema168, sql: migration168To169, toLayout: schema169},
 		{from: 2, to: 3, fromLayout: schema169, sql: migration169To170, toLayout: schema170},
+		{from: 3, to: 4, fromLayout: schema170, sql: migration170To171, toLayout: schema171},
 	}
 }
 

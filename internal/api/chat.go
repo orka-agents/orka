@@ -337,6 +337,10 @@ func (ch *ChatHandler) HandleChat(c fiber.Ctx) error {
 				return err
 			}
 		}
+		// Another person's AHP conversation cannot be continued, and so read.
+		if err := ch.ahpSessionVisible(ctx, userInfo, namespace, sessionID); err != nil {
+			return err
+		}
 	}
 	reservation, err := ch.reserveActiveChat(namespace, sessionID)
 	if err != nil {
@@ -1428,6 +1432,21 @@ func (ch *ChatHandler) HandleChatConfig(c fiber.Ctx) error {
 }
 
 // HandleCancelChat handles DELETE /api/v1/chat/{sessionId}.
+// ahpSessionVisible refuses, as not found, another person's AHP session.
+func (ch *ChatHandler) ahpSessionVisible(ctx context.Context, ui *UserInfo, namespace, sessionID string) error {
+	if ch.client == nil {
+		return nil
+	}
+	hidden, err := ahpSessionHiddenIn(ctx, ch.client, ui, namespace, sessionID)
+	if err != nil {
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to look up the session's owner: %v", err))
+	}
+	if hidden {
+		return fiber.NewError(fiber.StatusNotFound, "chat session not found")
+	}
+	return nil
+}
+
 func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	if sessionID == "" {
@@ -1443,6 +1462,10 @@ func (ch *ChatHandler) HandleCancelChat(c fiber.Ctx) error {
 	}
 
 	ctx := c.Context()
+	// Another person's AHP session cannot be cancelled or removed.
+	if err := ch.ahpSessionVisible(ctx, GetUserInfo(c), namespace, sessionID); err != nil {
+		return err
+	}
 	activeCancelled, err := ch.cancelAndWaitForActiveChat(ctx, namespace, sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotReady) {

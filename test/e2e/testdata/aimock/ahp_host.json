@@ -1,0 +1,6 @@
+{
+  "fixtures": [
+    {"match": {"userMessage": "[e2e:ahp-cancel]"}, "latency": 120000, "response": {"content": "The held AHP turn finished."}},
+    {"match": {"userMessage": "[e2e:ahp-turn]"}, "response": {"content": "ORKA_AHP_TURN_OK"}}
+  ]
+}

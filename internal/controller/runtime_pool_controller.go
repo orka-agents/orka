@@ -333,6 +333,9 @@ type RuntimePoolReconciler struct {
 	// NativeSessionMaxBytes bounds encoded native session bundles in every built-in runtime.
 	// Zero selects the default 8 MiB policy.
 	NativeSessionMaxBytes int
+	// PermissionTimeout is how long every built-in runtime waits for the answer
+	// to a permission request. Zero keeps the runtime default.
+	PermissionTimeout time.Duration
 	// ProviderProxy is the authenticated, NetworkPolicy-confined provider boundary.
 	ProviderProxy RuntimePoolProviderProxyConfig
 	// ControllerEpoch is a test/static override. Production uses Epochs.

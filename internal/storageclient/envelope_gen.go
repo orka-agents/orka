@@ -46,6 +46,12 @@ func (p envelopedState) AdmitGatewayEvent(ctx context.Context, a1 storagev1.Gate
 	return r0, r1, err
 }
 
+func (p envelopedState) AppendAHPJournal(ctx context.Context, a1 string, a2 int64, a3 []storagev1.AHPJournalEntry, a4 []storagev1.AHPChannelState, a5 storagev1.AHPJournalLimits) error {
+	return p.ops.run(ctx, writeCall{method: "AppendAHPJournal", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+		return p.StateProvider.AppendAHPJournal(ctx, a1, a2, a3, a4, a5)
+	})
+}
+
 func (p envelopedState) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	err := p.ops.run(ctx, writeCall{method: "AppendExecutionEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -252,6 +258,12 @@ func (p envelopedState) ConsumeSealedConnectorConsent(ctx context.Context, a1 st
 	return r0, err
 }
 
+func (p envelopedState) CreateAHPToken(ctx context.Context, a1 storagev1.AHPToken) error {
+	return p.ops.run(ctx, writeCall{method: "CreateAHPToken", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateAHPToken(ctx, a1)
+	})
+}
+
 func (p envelopedState) CreateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
 	return p.ops.run(ctx, writeCall{method: "CreateActionRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CreateActionRecord(ctx, a1)
@@ -390,6 +402,30 @@ func (p envelopedState) CreateWorkAction(ctx context.Context, a1 *storagev1.Work
 func (p envelopedState) DeferGatewayEventProjection(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
 	return p.ops.run(ctx, writeCall{method: "DeferGatewayEventProjection", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
 		return p.StateProvider.DeferGatewayEventProjection(ctx, a1, a2, a3)
+	})
+}
+
+func (p envelopedState) DeleteAHPChannelStates(ctx context.Context, a1 string, a2 []string) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteAHPChannelStates", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteAHPChannelStates(ctx, a1, a2)
+	})
+}
+
+func (p envelopedState) DeleteAHPRecord(ctx context.Context, a1 string, a2 string, a3 string) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteAHPRecord", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteAHPRecord(ctx, a1, a2, a3)
+	})
+}
+
+func (p envelopedState) DeleteAHPRecords(ctx context.Context, a1 string, a2 string, a3 string) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteAHPRecords", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteAHPRecords(ctx, a1, a2, a3)
+	})
+}
+
+func (p envelopedState) DeleteAHPSession(ctx context.Context, a1 string, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "DeleteAHPSession", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.DeleteAHPSession(ctx, a1, a2)
 	})
 }
 
@@ -640,6 +676,24 @@ func (p envelopedState) PruneUsage(ctx context.Context, a1 time.Time) error {
 	})
 }
 
+func (p envelopedState) PutAHPClient(ctx context.Context, a1 storagev1.AHPClient) error {
+	return p.ops.run(ctx, writeCall{method: "PutAHPClient", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.PutAHPClient(ctx, a1)
+	})
+}
+
+func (p envelopedState) PutAHPRecord(ctx context.Context, a1 storagev1.AHPRecord) error {
+	return p.ops.run(ctx, writeCall{method: "PutAHPRecord", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.PutAHPRecord(ctx, a1)
+	})
+}
+
+func (p envelopedState) PutAHPSession(ctx context.Context, a1 storagev1.AHPSession) error {
+	return p.ops.run(ctx, writeCall{method: "PutAHPSession", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.PutAHPSession(ctx, a1)
+	})
+}
+
 func (p envelopedState) PutSealedConnectorCredential(ctx context.Context, a1 storagev1.PutSealedConnectorCredentialRequest) (*storagev1.SealedConnectorCredential, error) {
 	var r0 *storagev1.SealedConnectorCredential
 	err := p.ops.run(ctx, writeCall{method: "PutSealedConnectorCredential", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -770,6 +824,12 @@ func (p envelopedState) RetryGatewayEvent(ctx context.Context, a1 string, a2 str
 func (p envelopedState) ReviewMemoryProposal(ctx context.Context, a1 storagev1.MemoryProposalReview) error {
 	return p.ops.run(ctx, writeCall{method: "ReviewMemoryProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.ReviewMemoryProposal(ctx, a1)
+	})
+}
+
+func (p envelopedState) RevokeAHPToken(ctx context.Context, a1 string, a2 string, a3 time.Time) error {
+	return p.ops.run(ctx, writeCall{method: "RevokeAHPToken", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.RevokeAHPToken(ctx, a1, a2, a3)
 	})
 }
 

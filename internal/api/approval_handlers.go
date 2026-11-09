@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -120,64 +121,160 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
 	}
 	decision := strings.ToLower(strings.TrimSpace(req.Decision))
-	var eventType string
 	switch decision {
 	case approvalDecisionApprove, "approved":
 		decision = approvalDecisionApprove
-		eventType = events.ExecutionEventTypeApprovalApproved
 	case approvalDecisionDecline, "declined":
 		decision = approvalDecisionDecline
-		eventType = events.ExecutionEventTypeApprovalDeclined
 	default:
 		return fiber.NewError(fiber.StatusBadRequest, "decision must be approve or decline")
 	}
-
-	listed, err := h.listTaskApprovalEvents(c.Context(), namespace, taskName)
+	decided, err := h.decideApproval(c.Context(), GetUserInfo(c), task, approvalID, decision, req.Reason, false)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
+		return err
+	}
+	return c.JSON(decided)
+}
+
+// DecideTaskApprovalAs decides, for a person signed in with OIDC or a context
+// token, a permission request an agent runtime is holding for them as the
+// requester of the Task. It is the in-process form of the decision route for
+// callers inside the API server and applies the same checks for those
+// identities; it decides no other kind of approval.
+func (h *Handlers) DecideTaskApprovalAs(ctx context.Context, ui *UserInfo, namespace, taskName, approvalID string, approve bool) error {
+	if ui == nil || (ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
+		return fiber.NewError(fiber.StatusForbidden, "a verified OIDC or context-token identity is required")
+	}
+	approvalID = strings.TrimSpace(approvalID)
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(taskName) == "" || approvalID == "" {
+		return fiber.NewError(fiber.StatusBadRequest, "namespace, task and approval are required")
+	}
+	if h.watchNamespace != "" && namespace != h.watchNamespace {
+		return fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
+	}
+	if h.enforceNamespaceIsolation && (ui.Namespace == "" || namespace != ui.Namespace) {
+		return fiber.NewError(fiber.StatusForbidden, "namespace not allowed")
+	}
+	if h.executionEventStore == nil {
+		return fiber.NewError(fiber.StatusNotImplemented, "execution event storage not enabled")
+	}
+	token := contextTokenFromUserInfo(ui)
+	contextTokenChecks := h.contextTokenAuthorization.Enabled() && token != nil
+	if contextTokenChecks {
+		var failures []string
+		if !hasAnyScope(token.Scopes, h.contextTokenAuthorization.TaskUpdateScopes) {
+			failures = append(failures, fmt.Sprintf("missing one of required scopes %q",
+				strings.Join(h.contextTokenAuthorization.TaskUpdateScopes, ",")))
+		}
+		if want, ok := contextString(token.TransactionContext, "namespace"); ok && want != namespace {
+			failures = append(failures, fmt.Sprintf("namespace %q does not match token context %q", namespace, want))
+		}
+		if len(failures) > 0 {
+			if err := h.handleContextTokenAuthorizationFailures(token, "decideTaskApproval", failures); err != nil {
+				return err
+			}
+		}
+	}
+	task := &corev1alpha1.Task{}
+	if err := h.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: taskName}, task); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fiber.NewError(fiber.StatusNotFound, "task not found")
+		}
+		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get task: %v", err))
+	}
+	if contextTokenChecks {
+		failures, err := h.contextTokenLoadedTaskContextFailures(ctx, token, task, true)
+		if err != nil {
+			return err
+		}
+		if len(failures) > 0 {
+			if err := h.handleContextTokenAuthorizationFailures(token, "decideTaskApproval", failures); err != nil {
+				return err
+			}
+		}
+	}
+	// A gateway's Task is operated through the gateway's own authorization,
+	// which needs a request; nothing here holds permissions for it.
+	if _, gatewayOwned, err := gatewayTaskIdentity(ctx, h.gatewayEventStore, task); err != nil {
+		return err
+	} else if gatewayOwned {
+		return fiber.NewError(fiber.StatusForbidden, "gateway tasks are decided through the decision route")
+	}
+	decision := approvalDecisionDecline
+	if approve {
+		decision = approvalDecisionApprove
+	}
+	_, err := h.decideApproval(ctx, ui, task, approvalID, decision, "", true)
+	return err
+}
+
+// decideApproval records a decision on one of the Task's approvals for an
+// authorized caller and returns the approval as stored. A permission request
+// held for the Task's requester may be decided only by that requester.
+func (h *Handlers) decideApproval(
+	ctx context.Context,
+	ui *UserInfo,
+	task *corev1alpha1.Task,
+	approvalID, decision, reason string,
+	permissionsOnly bool,
+) (approvals.Approval, error) {
+	namespace, taskName := task.Namespace, task.Name
+	eventType := events.ExecutionEventTypeApprovalDeclined
+	if decision == approvalDecisionApprove {
+		eventType = events.ExecutionEventTypeApprovalApproved
+	}
+	listed, err := h.listTaskApprovalEvents(ctx, namespace, taskName)
+	if err != nil {
+		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", err))
 	}
 	listed = filterTaskApprovalEvents(listed, task)
 	current, found := findApproval(deriveTaskApprovalState(listed), approvalID)
 	if !found {
-		return fiber.NewError(fiber.StatusNotFound, "approval not found")
+		return approvals.Approval{}, fiber.NewError(fiber.StatusNotFound, "approval not found")
+	}
+	if current.Kind == approvals.KindPermission {
+		if !requestedByCaller(task, ui) {
+			return approvals.Approval{}, fiber.NewError(fiber.StatusForbidden, "only the task's requester may decide this permission request")
+		}
+	} else if permissionsOnly {
+		return approvals.Approval{}, fiber.NewError(fiber.StatusForbidden, "only permission requests can be decided here")
 	}
 	if current.Binding != nil {
 		if err := validateV2ApprovalTask(current, task); err != nil {
-			return err
+			return approvals.Approval{}, err
 		}
 	}
 	if current.Status != approvals.StatusPending {
-		if (current.Status == approvals.StatusApproved && decision == approvalDecisionApprove) || (current.Status == approvals.StatusDeclined && decision == approvalDecisionDecline) {
-			if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, current); err != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
+		if approvalStatusMatchesDecision(current.Status, decision) {
+			if err := h.patchTaskApprovalDecisionAnnotation(ctx, namespace, taskName, current); err != nil {
+				return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
 			}
-			return c.JSON(current)
+			return current, nil
 		}
-		return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
+		return approvals.Approval{}, fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
 	}
 	if !task.DeletionTimestamp.IsZero() {
-		return fiber.NewError(fiber.StatusGone, "task is deleting")
+		return approvals.Approval{}, fiber.NewError(fiber.StatusGone, "task is deleting")
 	}
 	if isTerminalInternalTaskPhase(task.Status.Phase) {
-		return fiber.NewError(fiber.StatusConflict, "task is complete")
+		return approvals.Approval{}, fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 
-	sessionName, err := h.existingSessionNameForTask(c.Context(), namespace, task)
+	sessionName, err := h.existingSessionNameForTask(ctx, namespace, task)
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
+		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to get session: %v", err))
 	}
-	actor := approvalDecisionActor(GetUserInfo(c))
 	content, err := json.Marshal(map[string]string{
 		"approvalID": approvalID,
 		"decision":   decision,
-		"reason":     strings.TrimSpace(req.Reason),
-		"actor":      actor,
+		"reason":     strings.TrimSpace(reason),
+		"actor":      approvalDecisionActor(ui),
 		"taskUID":    string(task.UID),
 	})
 	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode approval decision: %v", err))
+		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to encode approval decision: %v", err))
 	}
-	appended, err := h.executionEventStore.AppendExecutionEvent(c.Context(), &store.ExecutionEvent{
+	appended, err := h.executionEventStore.AppendExecutionEvent(ctx, &store.ExecutionEvent{
 		Namespace:   namespace,
 		StreamType:  events.ExecutionEventStreamTypeTask,
 		StreamID:    taskName,
@@ -196,30 +293,42 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			refreshed, listErr := h.listTaskApprovalEvents(c.Context(), namespace, taskName)
+			refreshed, listErr := h.listTaskApprovalEvents(ctx, namespace, taskName)
 			if listErr != nil {
-				return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", listErr))
+				return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list execution events: %v", listErr))
 			}
 			refreshed = filterTaskApprovalEvents(refreshed, task)
 			if current, found := findApproval(deriveTaskApprovalState(refreshed), approvalID); found {
 				if approvalStatusMatchesDecision(current.Status, decision) {
-					if patchErr := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, current); patchErr != nil {
-						return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", patchErr))
+					if patchErr := h.patchTaskApprovalDecisionAnnotation(ctx, namespace, taskName, current); patchErr != nil {
+						return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", patchErr))
 					}
-					return c.JSON(current)
+					return current, nil
 				}
-				return fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
+				return approvals.Approval{}, fiber.NewError(fiber.StatusConflict, fmt.Sprintf("approval is already %s", current.Status))
 			}
 		}
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
+		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to append approval decision: %v", err))
 	}
 	approvals.RecordDecision(current, appended)
 	listed = append(listed, *appended)
 	updated, _ := findApproval(deriveTaskApprovalState(listed), approvalID)
-	if err := h.patchTaskApprovalDecisionAnnotation(c.Context(), namespace, taskName, updated); err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
+	if err := h.patchTaskApprovalDecisionAnnotation(ctx, namespace, taskName, updated); err != nil {
+		return approvals.Approval{}, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to nudge task after approval decision: %v", err))
 	}
-	return c.JSON(updated)
+	return updated, nil
+}
+
+// requestedByCaller reports whether ui is the Task's verified requester.
+func requestedByCaller(task *corev1alpha1.Task, ui *UserInfo) bool {
+	if task == nil || ui == nil || task.Spec.RequestedBy == nil ||
+		task.Annotations[labels.AnnotationRequestedBySource] != labels.RequestedBySourceAPI ||
+		(ui.AuthType != AuthTypeOIDC && ui.AuthType != AuthTypeContextToken) {
+		return false
+	}
+	requester := task.Spec.RequestedBy
+	return strings.TrimSpace(requester.Issuer) != "" && strings.TrimSpace(requester.Subject) != "" &&
+		requester.Issuer == ui.Issuer && requester.Subject == ui.Subject
 }
 
 func filterTaskApprovalEvents(input []store.ExecutionEvent, task *corev1alpha1.Task) []store.ExecutionEvent {
