@@ -416,6 +416,50 @@ func TestConnectorConsentExpiringDuringConsumptionIsRefused(t *testing.T) {
 	require.Empty(t, got.CodeVerifier)
 }
 
+// disconnectingStore tombstones a Connection's custody right after a custody
+// read, as a disconnect that commits between two reads would.
+type disconnectingStore struct {
+	*sqlite.Store
+	armed       bool
+	sealedReads int
+}
+
+func (s *disconnectingStore) ReadConnectorCustody(ctx context.Context, uid string) (*storagev1.ConnectorCustody, error) {
+	custody, err := s.Store.ReadConnectorCustody(ctx, uid)
+	if err == nil && s.armed && !custody.Tombstoned {
+		if tombstoneErr := s.Store.TombstoneConnectorCustody(ctx, uid); tombstoneErr != nil {
+			return nil, tombstoneErr
+		}
+	}
+	return custody, err
+}
+
+func (s *disconnectingStore) GetSealedConnectorCredential(ctx context.Context, uid string) (*storagev1.SealedConnectorCredential, error) {
+	s.sealedReads++
+	return s.Store.GetSealedConnectorCredential(ctx, uid)
+}
+
+// TestConnectorCredentialGrantUsesOneCustodyRead covers a disconnect that
+// commits while the grant is read: the grant comes from the same custody read
+// that passed the tombstone check, never from a second read, and the next
+// read reports the disconnect.
+func TestConnectorCredentialGrantUsesOneCustodyRead(t *testing.T) {
+	ctx := t.Context()
+	backend := &disconnectingStore{Store: openSQLite(t)}
+	client := activatedClient(t, backend, sealedTestKey)
+	ref := connectorRef("uid-grant")
+	require.NoError(t, client.PutConnectorCredential(ctx, ref, store.ConnectorCredential{AccessToken: "access-grant", Scopes: []string{"read"}}))
+	backend.armed, backend.sealedReads = true, 0
+
+	grant, err := client.GetConnectorCredentialGrant(ctx, ref)
+	require.NoError(t, err)
+	require.Equal(t, []string{"read"}, grant.Scopes)
+	require.Zero(t, backend.sealedReads, "the grant must not come from a second read")
+
+	_, err = client.GetConnectorCredentialGrant(ctx, ref)
+	require.ErrorIs(t, err, store.ErrConnectorCustodyTombstoned)
+}
+
 // TestClientRejectsModifiedConnectorRecords covers records a provider altered
 // or returned for another Connection: the client refuses them without
 // panicking and without echoing token material.
