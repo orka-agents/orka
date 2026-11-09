@@ -805,6 +805,54 @@ namespaces, and the orka-host-agent sidecar image must be immutable.
 {{- $image -}}
 {{- end }}
 
+{{/* Whether to install the AI worker identity policy. Absent (for example under
+--reuse-values from an older release) means enabled. */}}
+{{- define "orka.aiWorkerIdentityProtection" -}}
+{{- $value := dig "ai" "identityProtection" true .Values.workers -}}
+{{- if not (kindIs "bool" $value) -}}
+{{- fail "workers.ai.identityProtection must be true or false" -}}
+{{- end -}}
+{{- if $value }}true{{ end -}}
+{{- end }}
+
+{{/* Secret holding the Ed25519 keys that sign Task webhook deliveries. */}}
+{{- define "orka.taskWebhookSigningSecretName" -}}
+{{- default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (toString (dig "taskWebhooks" "signingSecretName" "" .Values.controller))) -}}
+{{- end }}
+
+{{/*
+Namespace holding only the Task webhook signing Secret. Task and Agent
+secretRefs mount any Secret in the Task namespace and worker roles are bound
+there, so the key must live where no Task, runtime or agent host runs. The
+default is derived from the release namespace so that each release owns its
+own signing namespace.
+*/}}
+{{- define "orka.taskWebhookSigningNamespace" -}}
+{{- $namespace := trim (toString (dig "taskWebhooks" "signingNamespace" "" .Values.controller)) -}}
+{{- if not $namespace -}}
+{{- $namespace = printf "%s-task-webhook-signing" .Release.Namespace -}}
+{{- if gt (len $namespace) 63 -}}
+{{- $namespace = printf "%s-%s-task-webhook-signing" (.Release.Namespace | trunc 30 | trimSuffix "-") (sha256sum .Release.Namespace | trunc 8) -}}
+{{- end -}}
+{{- end -}}
+{{- $namespace -}}
+{{- end }}
+
+{{- define "orka.validateTaskWebhooks" -}}
+{{- $secret := include "orka.taskWebhookSigningSecretName" . -}}
+{{- if or (gt (len $secret) 253) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$` $secret)) -}}
+{{- fail (printf "controller.taskWebhooks.signingSecretName %q must be a Secret name" $secret) -}}
+{{- end -}}
+{{- $namespace := include "orka.taskWebhookSigningNamespace" . -}}
+{{- if or (gt (len $namespace) 63) (not (regexMatch `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` $namespace)) -}}
+{{- fail (printf "controller.taskWebhooks.signingNamespace %q must be a DNS-1123 label, as a namespace name is" $namespace) -}}
+{{- end -}}
+{{- $reserved := list .Release.Namespace (include "orka.watchNamespace" .) (include "orka.clientNamespace" .) .Values.controller.acpRuntime.namespace (include "orka.agentHostNamespace" .) -}}
+{{- if has $namespace $reserved -}}
+{{- fail (printf "controller.taskWebhooks.signingNamespace %q must differ from the Helm release, client, ACP runtime and agent-host namespaces: Tasks there can mount its Secrets" $namespace) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "orka.validateAgentHosts" -}}
 {{- if include "orka.agentHostsEnabled" . -}}
 {{- $namespace := include "orka.agentHostNamespace" . -}}
