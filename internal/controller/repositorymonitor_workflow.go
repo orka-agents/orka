@@ -30,6 +30,9 @@ const (
 	repositoryMonitorWorkActionStatusFailed    = store.RepositoryMonitorWorkActionStatusFailed
 	repositoryMonitorWorkActionStatusBlocked   = store.RepositoryMonitorWorkActionStatusBlocked
 	repositoryMonitorWorkActionStatusCancelled = store.RepositoryMonitorWorkActionStatusCancelled
+	// Command intake writes completed only for an action it coalesced into an
+	// identical active action; the controller never writes it.
+	repositoryMonitorWorkActionStatusCompleted = store.RepositoryMonitorWorkActionStatusCompleted
 )
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string) error {
@@ -62,6 +65,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	}
 	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
+		if existing.Status == repositoryMonitorWorkActionStatusCompleted {
+			// A coalesced action is final; its outcome is the action it joined.
+			return nil
+		}
 		if status == repositoryMonitorWorkActionStatusQueued {
 			// Queue recovery only fills missing actions; it must not rewind state.
 			return nil

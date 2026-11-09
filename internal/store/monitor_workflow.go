@@ -53,6 +53,13 @@ func IsRepositoryMonitorWorkActionActive(status string) bool {
 	}
 }
 
+// RepositoryMonitorCoalescedCommandError is the outcome recorded on a command
+// whose work action was coalesced (status completed) into the active action
+// activeActionID.
+func RepositoryMonitorCoalescedCommandError(activeActionID string) string {
+	return "coalesced with active workflow action " + activeActionID
+}
+
 // RepositoryMonitorDesiredActionForIntent maps public command intents to durable workflow action names.
 func RepositoryMonitorDesiredActionForIntent(intent string) string {
 	intent = strings.TrimSpace(intent)

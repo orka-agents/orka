@@ -6893,6 +6893,54 @@ func TestRepositoryMonitorPermanentCommandRunTerminalizesWorkAction(t *testing.T
 	}
 }
 
+// Command intake can coalesce a command after the controller lists it as
+// accepted. Recovery then finds the coalesced action and must settle the
+// command as intake does, without queuing a run or rewriting the action.
+func TestRepositoryMonitorCommandRecoveryKeepsCoalescedAction(t *testing.T) {
+	ctx := context.Background()
+	monitorStore := setupControllerSQLiteStore(t)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "coalesced-command", Namespace: defaultNS}}
+	command := store.CommandEvent{ID: "cmd-coalesced", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 9, Intent: "review", HeadSHA: "head-9", Status: "accepted", CreatedAt: time.Now()}
+	if err := monitorStore.CreateCommandEvent(ctx, &command); err != nil {
+		t.Fatalf("CreateCommandEvent() error = %v", err)
+	}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, "review")
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "review", DependsOnActionID: "wa-active", Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", CreatedAt: completedAt, CompletedAt: &completedAt}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+	runID := repositoryMonitorCommandRunIDFromCommand(command.ID)
+
+	handled, reset, err := reconciler.ensureNoExistingCommandRunBlocksQueue(ctx, monitor, command, runID)
+	if err != nil || !handled || reset {
+		t.Fatalf("ensureNoExistingCommandRunBlocksQueue() = handled=%v reset=%v err=%v, want the coalesced command handled", handled, reset, err)
+	}
+	if _, err := monitorStore.GetMonitorRun(ctx, defaultNS, runID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetMonitorRun() error = %v, want no run queued for a coalesced command", err)
+	}
+	persisted, err := monitorStore.GetCommandEvent(ctx, defaultNS, command.ID)
+	if err != nil {
+		t.Fatalf("GetCommandEvent() error = %v", err)
+	}
+	if persisted.Status != repositoryMonitorCommandCompleted || persisted.Error != store.RepositoryMonitorCoalescedCommandError("wa-active") {
+		t.Fatalf("command status=%q error=%q, want the coalesced outcome", persisted.Status, persisted.Error)
+	}
+
+	// A run that started before the coalesced action was created still
+	// cannot rewrite it.
+	if err := reconciler.recordRepositoryMonitorWorkActionState(ctx, monitor, &store.MonitorRun{ID: runID}, &command, repositoryMonitorPullRequestKind, 9, "head-9", "", "review", repositoryMonitorWorkActionStatusBlocked, "blocked", "", "issue_closed"); err != nil {
+		t.Fatalf("recordRepositoryMonitorWorkActionState() error = %v", err)
+	}
+	action, err := monitorStore.GetWorkAction(ctx, defaultNS, actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusCompleted || action.Phase != "coalesced" || action.DependsOnActionID != "wa-active" || action.BlockedReason != "" {
+		t.Fatalf("action = %#v, want the coalesced action unchanged", action)
+	}
+}
+
 func TestRepositoryMonitorTransientCommandRunStopsAfterRetryBudget(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)

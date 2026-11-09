@@ -658,7 +658,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 	if existing, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
 		if existing.Status == store.RepositoryMonitorWorkActionStatusCompleted && existing.Phase == "coalesced" {
 			command.Status = githubCommandStatusCompleted
-			command.Error = "coalesced with active workflow action " + existing.DependsOnActionID
+			command.Error = store.RepositoryMonitorCoalescedCommandError(existing.DependsOnActionID)
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
 		if existing.Status == store.RepositoryMonitorWorkActionStatusCancelled && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
@@ -764,7 +764,7 @@ func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Conte
 	}
 	metrics.RecordRepositoryMonitorWorkAction(desiredAction, store.RepositoryMonitorWorkActionStatusCompleted)
 	command.Status = githubCommandStatusCompleted
-	command.Error = "coalesced with active workflow action " + candidate.ID
+	command.Error = store.RepositoryMonitorCoalescedCommandError(candidate.ID)
 	return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 }
 

@@ -22,6 +22,7 @@ const (
 	repositoryMonitorCommandRetryDelay             = 30 * time.Second
 	repositoryMonitorCommandMaxRetries             = 3
 	repositoryMonitorCommandProcessed              = "processed"
+	repositoryMonitorCommandCompleted              = "completed"
 	repositoryMonitorRetiredAutomergeIntent        = "automerge"
 	repositoryMonitorRetiredApprovePlanIntent      = "approve_plan"
 	repositoryMonitorAutomergeCommandRetiredReason = "automerge_command_retired"
@@ -271,6 +272,15 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandWorkActionTerminal
 		command.Status = repositoryMonitorCommandProcessed
 		command.ProcessedAt = &now
 		command.Error = firstNonEmptyWorkflow(action.Error, action.BlockedReason)
+		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
+			return false, err
+		}
+		return true, nil
+	case repositoryMonitorWorkActionStatusCompleted:
+		// Command intake coalesced this command into an identical active
+		// action after the command was listed; record the outcome intake does.
+		command.Status = repositoryMonitorCommandCompleted
+		command.Error = store.RepositoryMonitorCoalescedCommandError(action.DependsOnActionID)
 		if err := r.Store.UpdateCommandEvent(ctx, &command); err != nil {
 			return false, err
 		}
