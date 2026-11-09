@@ -959,8 +959,11 @@ receipt is missing or conflicts (P5 in "Kubernetes control protocols"
 below): the Task gets `StorageRecoveryRequired=True` with reason
 `MissingRecord` or `ConflictingRecord`, and the message names the record,
 its key, the digest Kubernetes recorded and a hold ID derived from them.
-While held, the prompt is not run again, the attempt stays `Settling`, the
-outcome is not guessed, success is not reported and nothing is deleted.
+Recovery writes the condition under its controller epoch, and only while the
+PromptAttempt is as recovery read it, so a replaced controller cannot hold a
+Task its successor settled. While held, the prompt is not run again, the
+attempt stays `Settling`, the outcome is not guessed, success is not
+reported and nothing is deleted.
 When the record is found again, after a restore, the condition becomes
 `False` with reason `RecordFound` and recovery settles the Task from it. An
 operator who cannot restore it sets the Task's

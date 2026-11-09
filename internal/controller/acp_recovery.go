@@ -1021,7 +1021,7 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 	}
 	journaled := evidence != nil
 	if evidence == nil {
-		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity, fence)
 		if err != nil || evidence == nil {
 			return attempt, err
 		}
@@ -1030,7 +1030,7 @@ func (d *ACPDispatcher) reconcileRestoredJournaledPromptTerminal(
 	case harnessv2.EventCompleted:
 		if journaled {
 			// A journaled completion does not replace the settling receipt.
-			receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt)
+			receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
 			if err != nil {
 				return nil, err
 			}
@@ -1120,7 +1120,7 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	}
 	journaled := evidence != nil
 	if evidence == nil {
-		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity)
+		evidence, err = d.recoverSettlingResultTerminal(ctx, task, attempt, identity, fence)
 		if err != nil || evidence == nil {
 			return false, err
 		}
@@ -1136,7 +1136,7 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 	}
 	if journaled {
 		// A journaled completion does not replace the settling receipt.
-		receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt)
+		receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
 		if err != nil || receiptState == settlingReceiptLossAcknowledged {
 			return false, err
 		}
@@ -1215,6 +1215,7 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 	ctx context.Context,
 	task *corev1alpha1.Task,
 	attempt *store.PromptAttempt,
+	fence store.ControllerEpochFence,
 ) (settlingReceiptState, error) {
 	if attempt.ExecutionState != store.PromptExecutionSettling || attempt.Version < 2 {
 		return settlingWithoutReceipt, nil
@@ -1234,6 +1235,7 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 	if !ok {
 		return settlingWithoutReceipt, fmt.Errorf("ACP settling recovery requires a result store with prompt result receipts")
 	}
+	observed := taskStorageRecordObservation{fence: fence, attempt: *attempt}
 	hold := taskStorageRecordHold{record: promptResultReceiptRecord, key: attempt.ID}
 	if settledLast {
 		hold.expected = attempt.LastOperationDigest
@@ -1246,7 +1248,7 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 			parsed, parsedOK := acpSettlingOperationVersion(receipt.OperationID)
 			if !parsedOK || parsed >= attempt.Version {
 				hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
-				return d.settleSettlingReceiptHold(ctx, task, hold)
+				return d.settleSettlingReceiptHold(ctx, task, observed, hold)
 			}
 			version = parsed
 		}
@@ -1258,7 +1260,7 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 			receipt.OperationID != acpSettlingOperationID(version) || receipt.OperationDigest != digest ||
 			(settledLast && attempt.LastOperationDigest != digest) {
 			hold.reason = corev1alpha1.StorageRecoveryConflictingRecordReason
-			return d.settleSettlingReceiptHold(ctx, task, hold)
+			return d.settleSettlingReceiptHold(ctx, task, observed, hold)
 		}
 		if err := d.persistTaskResult(ctx, task, receipt.Data); err != nil {
 			return settlingWithoutReceipt, err
@@ -1282,12 +1284,12 @@ func (d *ACPDispatcher) verifySettlingResultReceipt(
 			// The result the receipt protected cannot stand in for it; once
 			// the attempt records a later operation, nothing can check it.
 			hold.reason = corev1alpha1.StorageRecoveryMissingRecordReason
-			return d.settleSettlingReceiptHold(ctx, task, hold)
+			return d.settleSettlingReceiptHold(ctx, task, observed, hold)
 		}
 	default:
 		return settlingWithoutReceipt, receiptErr
 	}
-	if err := d.clearTaskStorageRecordHold(ctx, task); err != nil {
+	if err := d.clearTaskStorageRecordHold(ctx, task, observed); err != nil {
 		return settlingWithoutReceipt, err
 	}
 	return settlingReceiptVerified, nil
@@ -1314,9 +1316,9 @@ func acpSettlingOperationVersion(operationID string) (int64, bool) {
 }
 
 func (d *ACPDispatcher) settleSettlingReceiptHold(
-	ctx context.Context, task *corev1alpha1.Task, hold taskStorageRecordHold,
+	ctx context.Context, task *corev1alpha1.Task, observed taskStorageRecordObservation, hold taskStorageRecordHold,
 ) (settlingReceiptState, error) {
-	if err := d.settleTaskStorageRecordHold(ctx, task, hold); err != nil {
+	if err := d.settleTaskStorageRecordHold(ctx, task, observed, hold); err != nil {
 		return settlingWithoutReceipt, err
 	}
 	return settlingReceiptLossAcknowledged, nil
@@ -1327,8 +1329,9 @@ func (d *ACPDispatcher) recoverSettlingResultTerminal(
 	task *corev1alpha1.Task,
 	attempt *store.PromptAttempt,
 	identity v2eventjournal.MappedUpdateIdentity,
+	fence store.ControllerEpochFence,
 ) (*v2eventjournal.PromptTerminalEvidence, error) {
-	receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt)
+	receiptState, err := d.verifySettlingResultReceipt(ctx, task, attempt, fence)
 	if err != nil || receiptState != settlingReceiptVerified {
 		return nil, err
 	}
