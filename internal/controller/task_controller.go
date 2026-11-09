@@ -2666,18 +2666,17 @@ func (r *TaskReconciler) handleCompleted(ctx context.Context, task *corev1alpha1
 	}
 
 	// Send optional webhooks only after durable ACP artifact identities have
-	// retired. Failed delivery may retry indefinitely without delaying artifact
-	// reclamation; retirement itself retains the capability safety grace period.
-	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered {
-		if err := r.WebhookNotifier.Notify(ctx, task); err != nil {
-			log.Error(err, "failed to send webhook")
-			// Don't fail the task, just retry webhook later
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		task.Status.WebhookDelivered = true
-		if err := r.Status().Update(ctx, task); err != nil {
-			log.Error(err, "failed to update webhook status")
+	// retired. Delivery state is durable in Task status and bounded; failed
+	// delivery never delays artifact reclamation, and retirement itself retains
+	// the capability safety grace period.
+	if task.Spec.WebhookURL != "" && !task.Status.WebhookDelivered && r.WebhookNotifier != nil {
+		requeueAfter, err := r.WebhookNotifier.reconcileDelivery(ctx, r.Status(), task)
+		if err != nil {
+			log.Error(err, "failed to advance webhook delivery")
 			return ctrl.Result{}, err
+		}
+		if requeueAfter > 0 {
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 	}
 

@@ -1,3 +1,4 @@
+{{- $aiWorkerRBACProfile := include "orka.aiWorkerRBACProfile" . -}}
 {{- include "orka.validateControllerMode" . }}
 {{- include "orka.validateProviderProxyConfig" . }}
 {{- include "orka.validateSQLiteController" . }}
@@ -109,6 +110,7 @@ spec:
             - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
             - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
             {{- end }}
+            - {{ printf "--task-webhook-signing-secret=%s" (default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (default "" ((.Values.controller.taskWebhooks | default dict).signingSecretName)))) | quote }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
 
@@ -217,6 +219,9 @@ spec:
             - {{ printf "--oidc-namespace=%s" .namespace | quote }}
             {{- end }}
             {{- end }}
+            {{- if eq $aiWorkerRBACProfile "restricted" }}
+            - "--context-token-authz-mode=enforce"
+            {{- end }}
             {{- with .Values.controller.contextToken }}
             {{- if .profile }}
             - {{ printf "--context-token-profile=%s" .profile | quote }}
@@ -233,7 +238,7 @@ spec:
             {{- if .headers }}
             - {{ printf "--context-token-headers=%s" .headers | quote }}
             {{- end }}
-            {{- if .authzMode }}
+            {{- if and .authzMode (ne $aiWorkerRBACProfile "restricted") }}
             - {{ printf "--context-token-authz-mode=%s" .authzMode | quote }}
             {{- end }}
             {{- with .scopes }}
