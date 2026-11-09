@@ -313,6 +313,24 @@ func (r *EvalRunReconciler) graders() *evals.Registry {
 // loadEvalCases reads, parses and selects the run's cases, and checks the
 // cases × trials cap that admission cannot check without spec.cases.ids.
 func (r *EvalRunReconciler) loadEvalCases(ctx context.Context, run *corev1alpha1.EvalRun) ([]evals.Case, error) {
+	parsed, err := r.loadEvalCaseSet(ctx, run)
+	if err != nil {
+		return nil, err
+	}
+	cases, err := evals.SelectCases(parsed, run.Spec.Cases.IDs)
+	if err != nil {
+		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
+	}
+	if total := int64(len(cases)) * int64(run.Spec.Trials); run.Spec.Trials < 1 || total > corev1alpha1.EvalRunMaxCaseTrials {
+		return nil, evalRunConfigErrorf(evalRunReasonCaseTrialCapExceeded,
+			"%d cases × %d trials exceeds the limit of %d trials per run", len(cases), run.Spec.Trials, corev1alpha1.EvalRunMaxCaseTrials)
+	}
+	return cases, nil
+}
+
+// loadEvalCaseSet reads and parses every case in the run's cases ConfigMap,
+// before spec.cases.ids selects any.
+func (r *EvalRunReconciler) loadEvalCaseSet(ctx context.Context, run *corev1alpha1.EvalRun) ([]evals.Case, error) {
 	ref := run.Spec.Cases.ConfigMapRef
 	if ref == nil {
 		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "spec.cases.configMapRef is required")
@@ -332,15 +350,7 @@ func (r *EvalRunReconciler) loadEvalCases(ctx context.Context, run *corev1alpha1
 	if err != nil {
 		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "case ConfigMap %q key %q: %v", ref.Name, ref.Key, err)
 	}
-	cases, err := evals.SelectCases(parsed, run.Spec.Cases.IDs)
-	if err != nil {
-		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
-	}
-	if total := int64(len(cases)) * int64(run.Spec.Trials); run.Spec.Trials < 1 || total > corev1alpha1.EvalRunMaxCaseTrials {
-		return nil, evalRunConfigErrorf(evalRunReasonCaseTrialCapExceeded,
-			"%d cases × %d trials exceeds the limit of %d trials per run", len(cases), run.Spec.Trials, corev1alpha1.EvalRunMaxCaseTrials)
-	}
-	return cases, nil
+	return parsed, nil
 }
 
 func (r *EvalRunReconciler) startEvalRun(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) error {

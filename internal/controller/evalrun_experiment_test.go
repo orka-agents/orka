@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -446,6 +447,51 @@ func TestEvalTrainingRunWithAnAgentNeedsNoMonitorReviewer(t *testing.T) {
 		if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "candidate-agent" {
 			t.Fatalf("trial Agent = %+v", task.Spec.AgentRef)
 		}
+	}
+}
+
+// A candidate that selects some held-out cases still spends its attempt on
+// every case in the set, so disjoint subsets cannot multiply the attempts the
+// significance correction allows.
+func TestEvalExperimentSpendsTheWholeHeldOutSet(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	cases, err := evals.ParseCases([]byte(experimentCases()), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil || len(cases) < 2 {
+		t.Fatalf("experiment cases: %d, %v", len(cases), err)
+	}
+	baseline.Spec.Cases.IDs = []string{cases[0].ID}
+	candidate.Spec.Cases.IDs = []string{cases[0].ID}
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	// Give the unselected cases evidence of their own, so the set holds
+	// more than one held-out key.
+	lines := strings.SplitAfter(experimentCases(), "\n")
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Replace(lines[i], evalTestHeadSHA, fmt.Sprintf("%040d", i), 1)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := env.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: "cases"}, configMap); err != nil {
+		t.Fatal(err)
+	}
+	configMap.Data["cases.jsonl"] = strings.Join(lines, "")
+	if err := env.client.Update(context.Background(), configMap); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	env.reconcileRun("candidate")
+	reserved, err := env.store.GetEvalExperiment(context.Background(), evalTestNamespace, "candidate-uid")
+	if err != nil {
+		t.Fatalf("reservation: %v (status %+v)", err, env.getRun("candidate").Status)
+	}
+	all, err := evals.ParseCases([]byte(configMap.Data["cases.jsonl"]), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := evals.HeldOutCaseKeys(all)
+	if err != nil || len(want) != len(all) {
+		t.Fatalf("held-out keys = %v, %v", want, err)
+	}
+	if !slices.Equal(reserved.CaseKeys, want) {
+		t.Fatalf("reserved case keys = %v, want every held-out key %v", reserved.CaseKeys, want)
 	}
 }
 

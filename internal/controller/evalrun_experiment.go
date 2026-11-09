@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
@@ -162,7 +163,15 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 	if r.ExperimentStore == nil {
 		return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable, "no experiment store is configured")
 	}
-	caseKeys, err := evals.HeldOutCaseKeys(observed.Cases)
+	// The attempt is spent on every case in the held-out set, not only the
+	// ones spec.cases.ids selects: the significance correction assumes the
+	// set allows maxExperimentsPerHeldOutSet experiments in all, and disjoint
+	// subsets would otherwise each get that many.
+	all, err := r.loadEvalCaseSet(ctx, run)
+	if err != nil {
+		return err
+	}
+	caseKeys, err := evals.HeldOutCaseKeys(append(slices.Clone(observed.Cases), all...))
 	if err != nil {
 		return evalRunConfigErrorf(evalRunReasonExperimentInvalid, "%v", err)
 	}

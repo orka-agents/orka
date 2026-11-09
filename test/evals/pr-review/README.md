@@ -129,9 +129,11 @@ candidate's cases ConfigMap with `split: heldOut`; rotate the held-out set by
 listing a new ConfigMap of fresh commits. Outside an experiment, a run with
 `agentRef` needs cases listed with `split: train`. The baseline must not set
 `agentRef`. Each candidate spends one attempt before its first trial, against
-`maxCandidatesPerBaseline` and, for each case's reviewed commits,
-`maxExperimentsPerHeldOutSet`. Deleting a candidate does not return its
+`maxCandidatesPerBaseline` and, for the reviewed commits of every case in its
+cases ConfigMap, `maxExperimentsPerHeldOutSet`; `spec.cases.ids` selecting a
+few cases still spends the whole set. Deleting a candidate does not return its
 attempt, and reordering, renaming or subsetting cases does not make them
-fresh. When both runs finish,
+fresh. Raising `maxExperimentsPerHeldOutSet` or `significance` later loosens
+the correction for cases already spent; rotate in fresh cases instead. When both runs finish,
 `orka eval get <candidate>` prints the verdict, the paired target comparison
 and the reasons. With `--wait` it exits non-zero unless the experiment passed.
