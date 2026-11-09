@@ -83,6 +83,7 @@ The steps call Microsoft Graph with `curl`. Keep these values in your shell:
 TENANT=<tenant ID>
 ISSUER=<cluster OIDC issuer URL>
 ORKA_SA=system:serviceaccount:team-a:orka   # the controller ServiceAccount
+SPONSOR=$(az ad signed-in-user show --query id -o tsv)   # the person responsible for the identities
 TOKEN=$(az account get-access-token --tenant "$TENANT" \
   --scope https://graph.microsoft.com/.default --query accessToken -o tsv)
 graph() { curl -s -X "$1" -H "Authorization: Bearer $TOKEN" \
@@ -94,7 +95,7 @@ graph() { curl -s -X "$1" -H "Authorization: Bearer $TOKEN" \
 
 Create the blueprint and its service principal, then let it trust the
 controller's ServiceAccount. `SPONSOR` is the object ID of the person
-responsible for it.
+responsible for it: you, as set above, or another user's object ID.
 
 ```bash
 graph POST v1.0/applications '{
@@ -197,9 +198,31 @@ rules:
 ```
 
 Bind it to whoever edits the Agent (`bind`) and whoever starts its Tasks
-(`use`). A person signed in through Entra is checked as the `User`
-`<issuer>#<sub>` from their sign-in token, not their email address:
-`orka auth whoami -o json` shows their `issuer` and `subject`.
+(`use`). A cluster administrator already holds both. Everyone else needs a
+binding, including the ServiceAccount whose token `orka` uses:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: team-a
+  name: inventory-agent
+subjects:
+- kind: ServiceAccount            # a ServiceAccount that starts Tasks
+  namespace: team-a
+  name: orka-client
+- kind: User                      # a person signed in through Entra (step 9)
+  apiGroup: rbac.authorization.k8s.io
+  name: "https://login.microsoftonline.com/<tenant ID>/v2.0#<subject>"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: inventory-agent
+```
+
+A person signed in through Entra is checked as the `User` `<issuer>#<sub>`
+from their sign-in token, not their email address: `orka auth whoami -o json`
+shows their `issuer` and `subject`.
 
 ## 5. Bind the identity to an Agent
 
@@ -283,10 +306,23 @@ spec:
       name: graph-as-agent
 ```
 
-Run a Task on the Agent that calls `graph-users`. The controller requests a
-token for `<resource>/.default` as the agent identity and injects it as
-`Authorization: Bearer`. The Tool URL must be HTTPS, without template
-placeholders.
+Run a Task on the Agent that calls `graph-users`. With the API reachable and
+`orka` configured as in [Connect to the API](../getting-started.md#connect-to-the-api):
+
+```bash
+orka task create "Call graph-users and tell me the display name it returns." \
+  --agent inventory-agent --name graph-self -n team-a
+orka task wait graph-self -n team-a
+orka task get graph-self -n team-a
+```
+
+The controller requests a token for `<resource>/.default` as the agent
+identity and injects it as `Authorization: Bearer`. The Tool URL must be
+HTTPS, without template placeholders.
+
+The token goes wherever the Tool's URL points. Whoever may edit a Tool that
+the Agent's ceiling lists therefore decides where that Agent's token is sent,
+so treat edit access to those Tools as you treat the identity itself.
 
 Each call writes one audit record to the controller log under the
 `agent-identity-audit` logger:
@@ -398,6 +434,19 @@ controller:
 
 People sign in with a token for `api://<front-end appId>/orka.access`. The
 Task's requester is then their verified Entra identity.
+
+Entra gives each person a different subject for each app, so a person's
+subject for this app is not known until they sign in to it. Have them sign in
+(step 10 shows how) and run `orka -t "$ORKA_TOKEN" auth whoami`. Until they
+are on the list, Orka answers `403` and names the subject to add:
+
+```text
+your sign-in is valid, but its subject "<subject>" is not allowed to use this Orka installation
+```
+
+Add it to `allowedSubjects` and upgrade the release. A pattern with `*`
+matches any run of characters, so `"*"` admits every account the front-end
+app accepts; list subjects one by one unless that is what you want.
 
 :::caution Signed-in users are equal within their namespace
 
@@ -549,6 +598,7 @@ For each call, the controller:
 | `IdentityVerified=False` with `AADSTS700016` or `AADSTS70021` | The blueprint ID is wrong, or its federated credential does not match the cluster issuer and controller ServiceAccount |
 | Task creation fails: `not authorized to use agent …` or `caller is not authorized to use the Task's Agent` | The caller lacks `use` on the Agent |
 | Task fails: `codex ACP runtime cannot exactly enforce provider-native tool restrictions` | A codex Agent must list either all eight built-in tools or, for a Task with workspace intent `read`, exactly `Read`, `Glob`, and `Grep`, in both `defaultAllowedTools` and the ceiling |
+| `orka` answers `403`: `your sign-in is valid, but its subject "…" is not allowed` | Add that subject to `oidc.allowedSubjects` (step 9) |
 | Linking fails with `scopes_denied` | Remove `offline_access` from the provider's scopes |
 | Linking fails with `consent_expired` | The consent link expires within minutes; run `orka connect` again and finish promptly |
 | Audit reason `policy` | The policy changed since the Tool checked it, its target is not HTTPS, or it sets `authSecretRef` |

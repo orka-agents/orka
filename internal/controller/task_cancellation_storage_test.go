@@ -293,3 +293,57 @@ func TestCancelledParentsJobStopsBeforeItsChildren(t *testing.T) {
 	_, _ = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
 	require.Equal(t, []string{"job deleted", "child cancelled"}, order)
 }
+
+// TestCancelRequestStopsTheJobBeforeItsChildren covers the reconcile that
+// applies a cancel request to a running native Task: its Job is deleted in
+// that reconcile, before any child is asked to cancel, not on a later one.
+func TestCancelRequestStopsTheJobBeforeItsChildren(t *testing.T) {
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "running-task", Namespace: "default", UID: "running-uid",
+			Finalizers:  []string{labels.TaskFinalizer},
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by a caller"},
+		},
+		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseRunning, JobName: "running-job", JobUID: "running-job-uid",
+		},
+	}
+	controller := true
+	owner := []metav1.OwnerReference{{
+		APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: task.Name, UID: task.UID, Controller: &controller,
+	}}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: task.Status.JobName, Namespace: task.Namespace, UID: "running-job-uid", OwnerReferences: owner},
+		Status:     batchv1.JobStatus{Active: 1},
+	}
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "delegated", Namespace: task.Namespace, OwnerReferences: owner,
+			Labels: map[string]string{labels.LabelParentTask: task.Name},
+		},
+		Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: task.Namespace, UID: "namespace-uid"}}
+	r := newUnitReconciler(newTestScheme(), task, job, namespace, child)
+	watched, ok := r.Client.(client.WithWatch)
+	require.True(t, ok)
+	var order []string
+	r.Client = interceptor.NewClient(watched, interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isJob := obj.(*batchv1.Job); isJob {
+				order = append(order, "job deleted")
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if obj.GetName() == child.Name {
+				order = append(order, "child cancelled")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	_, _ = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(task)})
+	require.Equal(t, []string{"job deleted", "child cancelled"}, order)
+}
