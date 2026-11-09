@@ -342,6 +342,13 @@ type KubernetesResolver struct {
 	// controller's authority, and the Entra agent identity blueprint trusts
 	// it, to whatever endpoint the policy names.
 	ReservedServiceAccount ReservedServiceAccount
+	// IdentityEnforcementStart reports when the current period of Agent use
+	// enforcement began, or started=false while that is not known yet. A
+	// Task created before it may have been created while the check was off,
+	// so it gets no Agent identity credential even when the Agent's claim
+	// has not been granted again yet. Nil judges a Task by the claim's grant
+	// time alone.
+	IdentityEnforcementStart func() (since time.Time, started bool)
 
 	exchangeOnce     sync.Once
 	defaultExchanger tokenexchange.Exchanger
@@ -814,8 +821,21 @@ func (r *KubernetesResolver) requireLiveIdentityAgent(ctx context.Context, bindi
 	// older Task's creation was never checked for this grant. Both times
 	// have one-second precision, so a Task from the grant's own second may
 	// predate it and is refused too.
-	if grantedAt := live.Status.IdentityClaim.GrantedAt; grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
+	grantedAt := live.Status.IdentityClaim.GrantedAt
+	if grantedAt == nil || !binding.TaskCreated.After(grantedAt.Time) {
 		return errors.New("the Task was created before the Agent's current identity grant")
+	}
+	// The claim is granted again only when the Agent next reconciles, so a
+	// grant from before the current enforcement period counts from that
+	// period's start here too, as it does when a Task is bound.
+	if r.IdentityEnforcementStart != nil {
+		since, started := r.IdentityEnforcementStart()
+		if !started {
+			return errors.New("the Agent use enforcement period has not started yet")
+		}
+		if !since.IsZero() && !binding.TaskCreated.After(since) {
+			return errors.New("the Task was created before the current period of Agent use enforcement")
+		}
 	}
 	if err := issuerRefusedIdentity(live); err != nil {
 		return err

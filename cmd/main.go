@@ -1365,6 +1365,7 @@ func main() {
 	if agentIdentitySource != nil {
 		outboundAccessResolver.AgentIdentities = agentIdentitySource
 		outboundAccessResolver.MaxDelegationAge = agentIdentityMaxDelegationAge
+		outboundAccessResolver.IdentityEnforcementStart = agentIdentityConfig.EnforcementStart
 	}
 	var brokeredTransactionExchange *worker.TransactionExchangeConfig
 	var brokeredTTSExchanger contexttoken.Exchanger

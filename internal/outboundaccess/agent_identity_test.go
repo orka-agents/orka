@@ -227,6 +227,38 @@ func TestKubernetesResolverAgentIdentityMode(t *testing.T) {
 		})
 	}
 
+	// The claim is granted again only when the Agent reconciles. Until then a
+	// Task from before the current enforcement period, which may have been
+	// created while the check was off, is still refused.
+	taskCreated := agentIdentityRequest().AgentIdentity.TaskCreated
+	for name, tc := range map[string]struct {
+		since   time.Time
+		started bool
+		wantErr string
+	}{
+		"period began after the Task":       {since: taskCreated.Add(time.Minute), started: true, wantErr: "current period of Agent use enforcement"},
+		"period began in the Task's second": {since: taskCreated, started: true, wantErr: "current period of Agent use enforcement"},
+		"period not started yet":            {started: false, wantErr: "has not started yet"},
+		"period began before the Task":      {since: taskCreated.Add(-time.Second), started: true},
+		"check off, so no period":           {started: true},
+	} {
+		t.Run("enforcement "+name, func(t *testing.T) {
+			resolver := reader()
+			resolver.AgentIdentities = &fakeAgentIdentitySource{token: "t"}
+			resolver.IdentityEnforcementStart = func() (time.Time, bool) { return tc.since, tc.started }
+			_, err := resolver.Resolve(context.Background(), agentIdentityRequest())
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Resolve() error = %v, want the call allowed", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Resolve() error = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+
 	// The issuer's own answer decides calls while it is unreachable or the
 	// identity is not verified yet.
 	for name, agent := range map[string]*corev1alpha1.Agent{
