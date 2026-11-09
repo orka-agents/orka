@@ -1905,7 +1905,7 @@ func isWorkerReachableOTLPEndpoint(value string) bool {
 	if host == "" {
 		return false
 	}
-	if host == "localhost" {
+	if host == localhostHost {
 		return false
 	}
 	hostWithoutZone, _, _ := strings.Cut(host, "%")
