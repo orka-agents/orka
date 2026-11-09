@@ -58,6 +58,15 @@ controller:
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
 
+  # Ed25519 keys that sign Task webhook deliveries (spec.webhookURL). The
+  # controller reads Secret <fullname>-task-webhook-signing (or
+  # signingSecretName) in the release namespace, creating it and minting the
+  # "current" key on first use. Rotate by moving "current" to "previous" and
+  # writing a new PEM PKCS#8 Ed25519 key to "current". Receivers verify against
+  # GET /.well-known/orka/task-webhook-jwks.json on the API service.
+  taskWebhooks:
+    signingSecretName: ""
+
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
     existingSecret: ""
@@ -376,6 +385,17 @@ publisher:
     apiBaseURL: https://api.github.com
     requestTimeout: 15s
     maxResponseBytes: 4194304
+  # Per-checkout source workspace limits. 0 keeps the publisher default:
+  # 100000 entries, 64 MiB per file, 96 MiB expanded, 100 MiB archive. The
+  # controller reads the archive limit at startup, so restart it after a change.
+  workspaceLimits:
+    maxEntries: 0
+    maxFileBytes: 0
+    maxBytes: 0
+    maxArtifactBytes: 0
+  # Scratch volume for fetched Git objects and the archive being built; keep it
+  # well above maxArtifactBytes, and the ephemeral-storage limit above it.
+  scratchSizeLimit: 1Gi
   auth:
     existingSecret: ""
     controllerTokenKey: controller-token

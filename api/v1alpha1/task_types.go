@@ -522,6 +522,13 @@ type TaskStatus struct {
 	// +optional
 	WebhookDelivered bool `json:"webhookDelivered,omitempty"`
 
+	// WebhookDelivery records the durable state of the signed terminal webhook
+	// notice for spec.webhookURL. Only one notice is pending per Task; a newer
+	// terminal state supersedes it before delivery. No URL, token, or signature
+	// material is recorded.
+	// +optional
+	WebhookDelivery *TaskWebhookDelivery `json:"webhookDelivery,omitempty"`
+
 	// Message provides additional status information
 	// +optional
 	Message string `json:"message,omitempty"`
@@ -577,6 +584,78 @@ type TaskSoulBinding struct {
 	// +kubebuilder:validation:MaxLength=71
 	// +optional
 	InputsDigest string `json:"inputsDigest,omitempty"`
+}
+
+// TaskWebhookDeliveryState is the lifecycle state of a Task webhook notice.
+// +kubebuilder:validation:Enum=Pending;Delivered;Failed
+type TaskWebhookDeliveryState string
+
+const (
+	// TaskWebhookDeliveryPending means the notice still has attempts left.
+	TaskWebhookDeliveryPending TaskWebhookDeliveryState = "Pending"
+	// TaskWebhookDeliveryDelivered means the receiver acknowledged the notice
+	// with a 2xx response.
+	TaskWebhookDeliveryDelivered TaskWebhookDeliveryState = "Delivered"
+	// TaskWebhookDeliveryFailed means the notice was rejected by policy or
+	// exhausted its bounded attempts. It is never retried.
+	TaskWebhookDeliveryFailed TaskWebhookDeliveryState = "Failed"
+)
+
+// TaskWebhookDelivery is the durable, provider-neutral record of one signed
+// webhook notice. The record doubles as the delivery lease: an attempt is
+// claimed by persisting it with optimistic concurrency before any request is
+// sent, so a restarted or replacement controller never sends concurrently and
+// never exceeds the attempt bound.
+type TaskWebhookDelivery struct {
+	// DeliveryID is the stable idempotency key sent with every attempt of this
+	// notice. Receivers should deduplicate on it.
+	// +kubebuilder:validation:MaxLength=64
+	DeliveryID string `json:"deliveryID"`
+
+	// EventType is the notice event, such as task.succeeded.
+	// +kubebuilder:validation:MaxLength=64
+	EventType string `json:"eventType"`
+
+	// OccurredAt is the notice creation time carried in the payload.
+	OccurredAt metav1.Time `json:"occurredAt"`
+
+	// PayloadSHA256 is the lowercase hex SHA-256 digest of the exact request
+	// body. A different digest for the same Task means newer state superseded
+	// the pending notice.
+	// +kubebuilder:validation:MaxLength=64
+	PayloadSHA256 string `json:"payloadSHA256"`
+
+	// State is the notice lifecycle state.
+	State TaskWebhookDeliveryState `json:"state"`
+
+	// Attempts counts claimed delivery attempts, including any attempt
+	// interrupted by a controller restart.
+	// +kubebuilder:validation:Minimum=0
+	Attempts int32 `json:"attempts"`
+
+	// Superseded counts earlier pending notices for this Task that newer state
+	// replaced before they were delivered.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Superseded int32 `json:"superseded,omitempty"`
+
+	// LastAttemptTime is when the latest attempt was claimed.
+	// +optional
+	LastAttemptTime *metav1.Time `json:"lastAttemptTime,omitempty"`
+
+	// NextAttemptTime is the earliest time another attempt may be claimed.
+	// While an attempt is in flight it is the lease expiry.
+	// +optional
+	NextAttemptTime *metav1.Time `json:"nextAttemptTime,omitempty"`
+
+	// LastStatusCode is the HTTP status of the latest completed attempt.
+	// +optional
+	LastStatusCode int32 `json:"lastStatusCode,omitempty"`
+
+	// LastError is a bounded, credential-free description of the latest failure.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	LastError string `json:"lastError,omitempty"`
 }
 
 // TaskWorkloadExecutionOutcome records the immutable result of non-ACP workload
