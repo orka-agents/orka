@@ -284,6 +284,19 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 func compareTarget(in ExperimentInput) TargetComparison {
 	var target TargetComparison
 	baseline, candidate := armGrades(in, in.Grader, in.Tag)
+	// Only pairs graded in both arms count, for the rise as for the sign
+	// test: an infra error in one arm drops its pair, so it cannot raise
+	// that arm's rate by removing a trial the other arm still counts.
+	for key := range baseline {
+		if _, paired := candidate[key]; !paired {
+			delete(baseline, key)
+		}
+	}
+	for key := range candidate {
+		if _, paired := baseline[key]; !paired {
+			delete(candidate, key)
+		}
+	}
 	target.BaselinePassed, target.BaselineTrials = passRate(baseline)
 	target.CandidatePassed, target.CandidateTrials = passRate(candidate)
 	if target.BaselineTrials > 0 && target.CandidateTrials > 0 {

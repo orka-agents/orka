@@ -481,7 +481,7 @@ An EvalRun with `spec.experiment` is the candidate arm of an improvement experim
 - **Incomparable** means the runs differ in anything but the reviewer: case set, grader set, trial plan, monitor UID and generation, review prompt template, runtime image, subject, effective `trialTimeout` and `maxConcurrentTrials`, or `maxInfraErrorPercent`. Grader order does not matter. It also covers a run that did not succeed, or a baseline that was deleted or recreated.
 - **Passed** needs every check:
   - neither run spent more than the gate's infra error budget;
-  - the target pass@1 rose by at least `minTargetImprovementPoints`;
+  - the target pass@1, over the same paired trials as the sign test, rose by at least `minTargetImprovementPoints`;
   - a one-sided exact sign test over paired trials (same case and trial, graded in both runs) is at or below `significance / maxExperimentsPerHeldOutSet`;
   - no grader's overall pass@1 fell.
 
