@@ -555,6 +555,25 @@ func newSucceededSecurityTask(name, scanID, stage string, completed metav1.Time)
 	}
 }
 
+// markScanStageTasksIngested records stage Tasks as ingested, as the
+// reconciler's ingestion pass would, so progression tests can seed the stage
+// output directly in the store.
+func markScanStageTasksIngested(ctx context.Context, t *testing.T, cl client.Client, securityStore storepkg.SecurityStore, scan *corev1alpha1.RepositoryScan, tasks ...*corev1alpha1.Task) {
+	t.Helper()
+	for _, seeded := range tasks {
+		task := &corev1alpha1.Task{}
+		if err := cl.Get(ctx, client.ObjectKeyFromObject(seeded), task); err != nil {
+			t.Fatalf("Get(Task %s) error = %v", seeded.Name, err)
+		}
+		ingestion := &storepkg.ScanTaskIngestion{ScanTaskIdentity: scanTaskIngestionIdentity(scan, task), Completed: true}
+		if _, err := securityStore.ApplyScanTaskIngestion(ctx, ingestion, nil, func(storepkg.SecurityStore, *storepkg.ScanRun) error {
+			return nil
+		}); err != nil {
+			t.Fatalf("ApplyScanTaskIngestion(%s) error = %v", task.Name, err)
+		}
+	}
+}
+
 func testReviewContext(t *testing.T, sliceID string, paths ...string) (security.ReviewContextManifest, string, string) {
 	t.Helper()
 	prompt := "Trusted mapper review context for " + sliceID + "\n"
@@ -1960,6 +1979,7 @@ func TestProgressLatestScanRunStartsReviewTasksForPendingSlices(t *testing.T) {
 		t.Fatalf("UpsertReviewSlice() error = %v", err)
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, threatTask, mapperTask)
 	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
 	if err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
@@ -2040,6 +2060,7 @@ func TestProgressLatestScanRunFailsMapperArtifactValidationProblem(t *testing.T)
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, threatTask, mapperTask)
 	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
 	if err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
@@ -2161,6 +2182,7 @@ func TestProgressLatestScanRunRetriesPendingSlicesWithoutTasks(t *testing.T) {
 		}
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, threatTask, mapperTask)
 	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
 	if err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
@@ -2315,6 +2337,7 @@ func TestProgressLatestScanRunCompletesNoopIncrementalWhenNoSlicesMatch(t *testi
 		}
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, threatTask, mapperTask)
 	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
 	if err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
@@ -3517,6 +3540,7 @@ func TestProgressLatestScanRunUsesNewestOwnedScanWhenStatusIsStale(t *testing.T)
 		t.Fatalf("CreateScanRun() error = %v", err)
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, newTask, mapperTask)
 	progressed, err := reconciler.progressLatestScanRun(ctx, scan)
 	if err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
@@ -7232,6 +7256,7 @@ func TestReviewTasksStayBoundedAndRefillWhileReviewsRun(t *testing.T) {
 		return tasks.Items
 	}
 
+	markScanStageTasksIngested(ctx, t, cl, store, scan, threatTask, mapperTask)
 	if _, err := reconciler.progressLatestScanRun(ctx, scan); err != nil {
 		t.Fatalf("progressLatestScanRun() error = %v", err)
 	}
