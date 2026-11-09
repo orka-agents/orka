@@ -129,6 +129,14 @@ repositories:
       - internal/api/context_token*.go                 # transaction and context tokens
       - Makefile                                       # the test and lint targets CI runs
       - .golangci.yml
+      - go.mod                                         # dependency selection, including replace directives
+      - go.sum
+      - "**/Dockerfile*"                               # image recipes for the controller, workers and runtimes
+      - .dockerignore
+      - workers/acp/images/**                          # runtime image build inputs
+      - internal/api/oidc*.go                          # sign-in
+      - internal/api/jwt*.go
+      - internal/providerproxy/**                      # provider credentials
       - internal/api/server.go                         # route registration
       - internal/api/eval*.go                          # proposal and decision handlers
       - internal/api/agent_rollout*.go                 # rollout handler
@@ -172,13 +180,15 @@ caseSets:                      # case ConfigMaps by split
 gate:                          # improvement thresholds, see #994
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 3
-  maxExperimentsPerHeldOutSet: 10   # then the held-out case set must be rotated
+  maxExperimentsPerHeldOutSet: 10   # per held-out case; then the case must be replaced
   minTargetImprovementPoints: 5      # target pass@1 must rise by at least this many points
   significance: 0.05                 # one-sided paired test, divided by maxExperimentsPerHeldOutSet
 ```
 
 Every file that implements an enforcement point in the table above belongs in the
-protected set for the Orka repository. #992 adds a test that fails when an enforcement
+protected set for the Orka repository, and so does every input that decides how those
+files are built: dependency manifests and image recipes. Otherwise a proposer could change
+what protected code does without editing it. #992 adds a test that fails when an enforcement
 point's file is missing from the shipped example, so the two lists cannot drift apart. The
 test reads the file paths straight from the table's "Enforcement point" column, so adding a
 row without protecting its file fails the build.
@@ -213,7 +223,11 @@ artifact, so it cannot do this check before creating the Publication.) A rejecti
   gets no push branch and no publication credential, and its workspace changes are
   never published;
 - no Session continuation and no fork of another Task, so no earlier transcript reaches
-  the proposer.
+  the proposer;
+- the built-in RuntimePool backend, with no `runtimeRef` and no execution workspace class.
+  External endpoints and provider-built workspace runtimes do not get the RuntimePool Pod
+  template or NetworkPolicies (`queueACPRuntimeTask` creates no RuntimePool for an
+  external binding), so they cannot carry the credential and network rules above.
 
 At dispatch, a Task with the role annotation that lacks any of these that apply to its
 intent (read-only or write), or whose
@@ -237,8 +251,9 @@ intent (read-only or write), or whose
 reads the branch rules for the default branch with its existing forge read credential
 and refuses unless a pull request with review is required **and** stale approvals are
 dismissed when new commits are pushed. Independently of that setting, the controller
-treats a code candidate as approved only when an approving review's commit equals the
-current pull request head, so an approval never carries over to a later push. Bypass
+treats a code candidate as approved only when an approving review's commit and the
+candidate commit of its linked evidence both equal the current pull request head, so
+neither an approval nor evidence carries over to a later push. Bypass
 lists cannot be read that way; people audit them when enabling the flow.
 
 ### Evidence records (#993)
@@ -267,6 +282,8 @@ spec:
     criteria:                                   # frozen copy of the thresholds or approved criteria
       source: protectedSet | issue
       digest: sha256:...                        # protectedSet: its `gate`; issue: the normalized criteria block
+      issueRef: {repository: github.com/orka-agents/orka, number: 1234}   # issue only
+      actionRecordID: ...                       # issue only: the implement command's action record
       # new capabilities only, frozen by the maintainer who writes the criteria cases:
       caseSetRef: {name: issue-1234-criteria}   # held-out ConfigMap with the cases and thresholds
       caseSetDigest: sha256:...                 # digest over that ConfigMap's cases and thresholds
@@ -303,8 +320,9 @@ status:
   gated against the baseline as below; the criteria cases are gated against the absolute
   `criteria.thresholds`. The maintainer who writes the criteria cases also writes these
   thresholds, per grader and tag, into the same held-out ConfigMap, and the controller
-  validates them against a schema when the candidate run starts. The protected set's
-  `gate` applies only to improvement experiments. `target` is unset.
+  validates them against a schema when the candidate run starts. Of the protected set's
+  `gate`, only `maxInfraErrorPercent` and the held-out budget apply, as they do to every
+  experiment; the improvement thresholds do not. `target` is unset.
 - **The bound tuple.** Everything an approval depends on, recorded at decision time and
   recomputed every time the approval is used:
   - the candidate Agent's UID, generation and promotable-field digest;
@@ -328,12 +346,13 @@ status:
   experiments stay queryable. Later proposers see only each earlier experiment's
   hypothesis, its training-split results and whether it was approved or rejected. They
   never see held-out trial rows or held-out aggregate numbers, which would otherwise let
-  repeated experiments tune candidates to the held-out set. For the same reason a
-  held-out case set has a usage budget, `gate.maxExperimentsPerHeldOutSet`, counted
-  across all baselines; once spent, the controller refuses new experiments on that set
-  until an operator rotates in a new one. The budget is keyed by a **case-content digest**
-  over the canonical cases alone, never thresholds or other metadata, so editing
-  thresholds or renaming the ConfigMap does not reset it; rotation means new case content.
+  repeated experiments tune candidates to the held-out set. For the same reason each
+  held-out case has a usage budget, `gate.maxExperimentsPerHeldOutSet`, counted across
+  all baselines and namespaces: the controller refuses an experiment if any of its cases
+  has already been in that many experiments. A case is keyed by what it evaluates (for a
+  review case, the repository and its base and head commits), never its wording, tags,
+  thresholds or ConfigMap name, so a rotated set that keeps a spent case stays refused;
+  rotation means replacing every spent case.
 - **Who writes.** Only the EvalRun controller writes trial records and `status`. A
   decision is written through `POST /api/v1/evals/runs/:name/decisions`, authorized by a
   SubjectAccessReview for the verb `decide` on `evalruns`. Every promoter route
@@ -352,7 +371,7 @@ status:
   change to an element of the bound tuple: a new generation of either Agent, different
   promotable fields or resolved configuration on either arm, a different runtime image,
   case set, grader set, criteria or protected set. For code candidates, a new commit on
-  the pull request head, enforced by the exact-head check above.
+  the pull request head, enforced by the exact-head checks on the review and the evidence.
 
 ### Proposer flow (#994)
 
@@ -361,7 +380,8 @@ Piloted on the PR reviewer's Agent configuration only.
 1. A person runs a baseline EvalRun on the training split.
 2. A promoter calls `POST /api/v1/evals/runs/:name/proposals` (SubjectAccessReview verb
    `propose` on `evalruns`; like every promoter route, it refuses
-   `system:serviceaccount:` usernames even if the role is bound to one). The controller creates one read-only proposer Task in the
+   `system:serviceaccount:` usernames even if the role is bound to one). It refuses a run
+   whose case set is not listed with `split: train`. The controller creates one read-only proposer Task in the
    proposer namespace. Its prompt holds the failed training trials' case summaries and
    grader reasons, earlier experiment summaries (training-split results and decisions
    only), and the current promotable fields. It
@@ -380,14 +400,17 @@ Piloted on the PR reviewer's Agent configuration only.
    or pass^k is below the baseline; if the target does not improve with enough evidence
    (improvement experiments: target pass@1 must rise by at least
    `gate.minTargetImprovementPoints`, and a one-sided paired sign test over the target
-   cases, comparing each case's candidate and baseline pass counts, must be significant
-   at `gate.significance / gate.maxExperimentsPerHeldOutSet`. Every experiment on a
-   held-out case set, across all baselines, spends from that one budget, and proposers
-   see earlier decisions, so the correction covers the held-out set's whole lifetime
-   rather than one baseline's candidates; a lucky candidate does not become more likely
+   trials, pairing each case and trial index across the two arms, must be significant
+   at `gate.significance / gate.maxExperimentsPerHeldOutSet`. The rise and the test use
+   only pairs with no infrastructure error in either arm, so an error in one arm cannot
+   manufacture an improvement; a candidate trial that ran but got no grade counts as a
+   failure. Every experiment, across all baselines, spends from the budget of each
+   held-out case it uses, and proposers see earlier decisions, so the correction covers
+   each case's whole lifetime rather than one baseline's candidates; a lucky candidate does not become more likely
    to pass by trying again. Too few cases to
    reach significance fails with `insufficient_evidence`) or any criteria tag misses its threshold (new
-   capabilities); or if infrastructure errors exceed the threshold. A person then records a decision either way.
+   capabilities); or if either run's infrastructure errors exceed
+   `gate.maxInfraErrorPercent` of its planned trials. A person then records a decision either way.
 
 Cost: one proposer Task per call with the controller's timeout and turn limit, the
 per-baseline candidate cap, and #976's 500-trial cap per run. Orka has no per-Task
@@ -396,7 +419,9 @@ token cap today; spend is recorded from `/api/v1/usage/work/:id`, not enforced.
 Code candidates, such as changes to the review prompt built in
 `buildRepositoryMonitorReviewPrompt`, are not promoted in-cluster. They go through #997
 and a normal pull request. Their evidence is an EvalRun run by #976's workflow against
-the pull request head, linked from the pull request.
+the pull request head, linked from the pull request. The run records the repository and
+the base and candidate commit SHAs it built; after a new push the candidate is not
+approved until a run on the new head passes (the exact-head check above).
 
 ### Promotion with canary and rollback (#995)
 
@@ -433,7 +458,11 @@ and drain-then-replace. Three pieces are missing, all added without a new resour
   the candidate's UID. If any check fails, binding sends the Task to the stable Agent,
   sets a `RolloutInvalid` condition, and keeps doing so until a promoter aborts or
   starts a new canary. A protected-set or criteria change, or a later rejection,
-  therefore stops a canary even though no Agent changed.
+  therefore stops a canary even though no Agent changed. The runtime image is chosen
+  later, at delivery: `acpRuntimeDeliveryPlanForTaskAttempt` takes the controller's
+  current image for a Task with no runtime allocation yet. Delivery therefore checks a
+  candidate-arm Task's selected image against the tuple too; on a mismatch the Task fails
+  instead of running on an untested image, and the Agent gets `RolloutInvalid`.
 - **Promotion log** in the store. Every rollout action (`canary`, `promote`, `abort`,
   `rollback`) is a record that moves through `pending → applying → complete`, or ends
   `failed` or `canceled`; every transition is a compare-and-swap on the record's state.
@@ -526,9 +555,10 @@ the issue snapshot digest, and any later edit to the issue blocks it with
 - a maintainer, never the builder, writes cases and per-grader thresholds for the
   criteria into a held-out ConfigMap; creating that ConfigMap is the moment they are
   frozen. The candidate EvalRun sets `criteria.source: issue` with the criteria text
-  digest, `caseSetRef` and `caseSetDigest`, and also
-  runs the existing regression case sets. If the issue's current block no longer
-  matches the recorded digest, the result is `Incomparable`. This needs an EvalRun
+  digest, the `issueRef` and the `actionRecordID` of the approving command, `caseSetRef`
+  and `caseSetDigest`, and also runs the existing regression case sets. If the current
+  block of that issue no longer matches the digest in that action record, the result is
+  `Incomparable`. This needs an EvalRun
   Subject that fits the capability; #976 lists monitor-fix and generic Task Subjects
   as follow-ups, and #996 builds the first one it needs;
 - proposals of kind `direction` are never built.
