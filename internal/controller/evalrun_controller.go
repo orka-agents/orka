@@ -181,16 +181,10 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 	if experiment := run.Status.Experiment; experiment != nil && experiment.Result == corev1alpha1.EvalExperimentPending {
 		return r.decideExperiment(ctx, run)
 	}
-	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
+	expiry, ok := evalRunExpiry(run)
+	if !ok {
 		return ctrl.Result{}, nil
 	}
-	// A candidate keeps its whole retention window after the decision, however
-	// long it waited for its baseline.
-	finished := run.Status.CompletionTime.Time
-	if experiment := run.Status.Experiment; experiment != nil && experiment.DecidedAt != nil && experiment.DecidedAt.After(finished) {
-		finished = experiment.DecidedAt.Time
-	}
-	expiry := finished.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second)
 	if remaining := expiry.Sub(r.now()); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
@@ -207,6 +201,20 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// evalRunExpiry is when ttlSecondsAfterFinished lets a finished run be
+// deleted. A candidate keeps its whole retention window after the decision,
+// however long it waited for its baseline.
+func evalRunExpiry(run *corev1alpha1.EvalRun) (time.Time, bool) {
+	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
+		return time.Time{}, false
+	}
+	finished := run.Status.CompletionTime.Time
+	if experiment := run.Status.Experiment; experiment != nil && experiment.DecidedAt != nil && experiment.DecidedAt.After(finished) {
+		finished = experiment.DecidedAt.Time
+	}
+	return finished.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second), true
 }
 
 func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *corev1alpha1.EvalRun) (ctrl.Result, error) {

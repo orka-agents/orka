@@ -64,6 +64,13 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if !baseline.DeletionTimestamp.IsZero() {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "baseline EvalRun %q is being deleted", baseline.Name)
 	}
+	// A baseline past its TTL is deleted once no candidate waits on it, and
+	// its check may already have run without seeing this one. Refuse it
+	// before reserving, so no attempt is spent on a baseline about to go.
+	if expiry, ok := evalRunExpiry(baseline); ok && !r.now().Before(expiry) {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"baseline EvalRun %q is past its ttlSecondsAfterFinished; run a new baseline", baseline.Name)
+	}
 	if evalRunAgentOverride(baseline) {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"baseline EvalRun %q sets agentRef; a baseline must review with the monitor's own reviewer", baseline.Name)

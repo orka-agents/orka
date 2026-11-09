@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -469,6 +470,13 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 		}, reason: evalRunReasonExperimentInvalid},
 		"cases not held out": {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1),
 			reason: evalRunReasonExperimentInvalid},
+		// Its TTL check may have run already without seeing this candidate.
+		"baseline past its TTL": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
+			completed := metav1.NewTime(evalTestNow.Add(-time.Hour))
+			baseline.Spec.TTLSecondsAfterFinished = ptr.To[int32](60)
+			baseline.Status.Phase = corev1alpha1.EvalRunPhaseSucceeded
+			baseline.Status.CompletionTime = &completed
+		}, reason: evalRunReasonExperimentInvalid},
 		"baseline sets agentRef": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
 			baseline.Spec.Subject.RepositoryMonitorReview.AgentRef = &corev1alpha1.EvalObjectReference{Name: "candidate-agent"}
 		}, reason: evalRunReasonExperimentInvalid},
