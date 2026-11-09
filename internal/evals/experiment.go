@@ -109,7 +109,14 @@ func CaseSetSplits(declaration []byte) (map[string]string, error) {
 	splits := map[string]string{}
 	for _, caseSet := range document.CaseSets {
 		if (caseSet.Split == SplitTrain || caseSet.Split == SplitHeldOut) && caseSet.Namespace != "" && caseSet.Name != "" {
-			splits[caseSet.Namespace+"/"+caseSet.Name] = caseSet.Split
+			key := caseSet.Namespace + "/" + caseSet.Name
+			// A set listed twice must not take whichever split comes last:
+			// a held-out set also listed as train would admit unpaired
+			// candidates.
+			if split, listed := splits[key]; listed && split != caseSet.Split {
+				return nil, fmt.Errorf("protected set lists case set %s as both %s and %s", key, split, caseSet.Split)
+			}
+			splits[key] = caseSet.Split
 		}
 	}
 	return splits, nil
