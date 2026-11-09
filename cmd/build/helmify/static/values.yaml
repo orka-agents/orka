@@ -378,6 +378,17 @@ publisher:
     apiBaseURL: https://api.github.com
     requestTimeout: 15s
     maxResponseBytes: 4194304
+  # Per-checkout source workspace limits. 0 keeps the publisher default:
+  # 100000 entries, 64 MiB per file, 96 MiB expanded, 100 MiB archive. The
+  # controller reads the archive limit at startup, so restart it after a change.
+  workspaceLimits:
+    maxEntries: 0
+    maxFileBytes: 0
+    maxBytes: 0
+    maxArtifactBytes: 0
+  # Scratch volume for fetched Git objects and the archive being built; keep it
+  # well above maxArtifactBytes, and the ephemeral-storage limit above it.
+  scratchSizeLimit: 1Gi
   auth:
     existingSecret: ""
     controllerTokenKey: controller-token
