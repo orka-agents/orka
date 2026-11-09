@@ -230,13 +230,11 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 		return false, fmt.Errorf("get repository monitor review task result %s/%s: %w", task.Namespace, task.Name, err)
 	}
 
-	review, err := parseRepositoryMonitorReviewResult(rawResult)
-	if err != nil {
-		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonMalformed, err.Error())
+	outcome := repositoryMonitorReviewOutcomeFromResult(rawResult, repositoryMonitorReviewExpectationForTask(item, task), task.Spec.Prompt)
+	if outcome.Rejection != "" {
+		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonMalformed, outcome.Rejection)
 	}
-	if err := validateRepositoryMonitorReviewResult(review, item, task); err != nil {
-		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictFailed, repositoryMonitorReviewSkipReasonMalformed, err.Error())
-	}
+	review := outcome.Review
 	if currentHead := strings.TrimSpace(item.HeadSHA); currentHead != "" && currentHead != expectedRepositoryMonitorReviewHeadSHA(item, task) {
 		summary := fmt.Sprintf("review result applies to stale head %s; current head is %s", expectedRepositoryMonitorReviewHeadSHA(item, task), currentHead)
 		return r.createRepositoryMonitorRejectedReviewRecord(ctx, monitor, item, task, recordID, repositoryMonitorReviewVerdictStale, repositoryMonitorReviewSkipReasonStaleHead, summary)
@@ -880,17 +878,69 @@ func firstJSONObject(raw string) (string, bool) {
 	return "", false
 }
 
-func validateRepositoryMonitorReviewResult(result *repositoryMonitorReviewResult, item *store.MonitorItem, task *corev1alpha1.Task) error {
+// repositoryMonitorReviewExpectation is the subject a review result must
+// bind to exactly.
+type repositoryMonitorReviewExpectation struct {
+	// Repository is owner/repo, compared case-insensitively; empty skips the
+	// repository check.
+	Repository string
+	PRNumber   int64
+	HeadSHA    string
+}
+
+func repositoryMonitorReviewExpectationForTask(item *store.MonitorItem, task *corev1alpha1.Task) repositoryMonitorReviewExpectation {
+	return repositoryMonitorReviewExpectation{
+		Repository: strings.TrimSpace(task.Annotations[labels.AnnotationGitHubRepository]),
+		PRNumber:   item.Number,
+		HeadSHA:    expectedRepositoryMonitorReviewHeadSHA(item, task),
+	}
+}
+
+// repositoryMonitorReviewOutcome is the parse-and-gate result for one
+// completed review Task's output.
+type repositoryMonitorReviewOutcome struct {
+	// Review is the parsed result; nil when Rejection is set.
+	Review *repositoryMonitorReviewResult
+	// Rejection explains why the output is not a valid orka.prReview.v1
+	// result for the expected subject.
+	Rejection string
+	// GateReason is set when the reviewer's verdict is passed but the
+	// prompt did not show it the complete change set, so the verdict must
+	// be downgraded to needs_human. The RepositoryMonitor re-applies the
+	// same gate to its derived verdict, which may differ from the
+	// reviewer's.
+	GateReason string
+}
+
+// repositoryMonitorReviewOutcomeFromResult parses a review Task's raw
+// output, checks it against the orka.prReview.v1 schema and the expected
+// subject (including an exact headSHA match), and applies the controller's
+// verdict gate for the Task's prompt. It reads and writes no state.
+func repositoryMonitorReviewOutcomeFromResult(raw []byte, expected repositoryMonitorReviewExpectation, prompt string) repositoryMonitorReviewOutcome {
+	review, err := parseRepositoryMonitorReviewResult(raw)
+	if err == nil {
+		err = validateRepositoryMonitorReviewResult(review, expected)
+	}
+	if err != nil {
+		return repositoryMonitorReviewOutcome{Rejection: err.Error()}
+	}
+	return repositoryMonitorReviewOutcome{
+		Review:     review,
+		GateReason: repositoryMonitorReviewVerdictGateReason(prompt, review.Verdict),
+	}
+}
+
+func validateRepositoryMonitorReviewResult(result *repositoryMonitorReviewResult, expected repositoryMonitorReviewExpectation) error {
 	if strings.TrimSpace(result.SchemaVersion) != repositoryMonitorReviewSchemaVersion {
 		return fmt.Errorf("schemaVersion must be %q", repositoryMonitorReviewSchemaVersion)
 	}
-	if expectedRepo := strings.TrimSpace(task.Annotations[labels.AnnotationGitHubRepository]); expectedRepo != "" && !strings.EqualFold(strings.TrimSpace(result.Repo), expectedRepo) {
+	if expectedRepo := strings.TrimSpace(expected.Repository); expectedRepo != "" && !strings.EqualFold(strings.TrimSpace(result.Repo), expectedRepo) {
 		return fmt.Errorf("repo %q does not match expected repository %q", result.Repo, expectedRepo)
 	}
-	if result.PRNumber != item.Number {
-		return fmt.Errorf("prNumber %d does not match expected PR number %d", result.PRNumber, item.Number)
+	if result.PRNumber != expected.PRNumber {
+		return fmt.Errorf("prNumber %d does not match expected PR number %d", result.PRNumber, expected.PRNumber)
 	}
-	if expectedHead := expectedRepositoryMonitorReviewHeadSHA(item, task); strings.TrimSpace(result.HeadSHA) != expectedHead {
+	if expectedHead := strings.TrimSpace(expected.HeadSHA); strings.TrimSpace(result.HeadSHA) != expectedHead {
 		return fmt.Errorf("headSHA %q does not match expected head %q", result.HeadSHA, expectedHead)
 	}
 	if !repositoryMonitorReviewVerdictAllowed(result.Verdict) {
