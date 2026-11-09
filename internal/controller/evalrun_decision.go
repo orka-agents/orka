@@ -54,7 +54,14 @@ func (r *EvalRunReconciler) CurrentEvalDecisionBinding(ctx context.Context, cand
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"the candidate's cases ConfigMap is no longer listed with split: heldOut in the protected set")
 	}
-	candidateSnapshot, stableSnapshot := subject.snapshot(), stable.snapshot()
+	candidateSnapshot, err := subject.snapshot(cases)
+	if err != nil {
+		return nil, err
+	}
+	stableSnapshot, err := stable.snapshot(cases)
+	if err != nil {
+		return nil, err
+	}
 	candidateDigest, err := evalCandidateDigest(candidateSnapshot)
 	if err != nil {
 		return nil, err

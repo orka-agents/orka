@@ -356,7 +356,8 @@ func TestGitIgnoresCallerConfiguration(t *testing.T) {
 			t.Fatalf("%s survived: %v", dropped, env)
 		}
 	}
-	kept := []string{"PATH=/bin", "HOME=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1"}
+	kept := []string{"PATH=/bin", "HOME=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1",
+		"GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1"}
 	for _, kept := range kept {
 		if !strings.Contains(joined, kept) {
 			t.Fatalf("%s missing: %v", kept, env)
@@ -580,6 +581,53 @@ func TestGenerateIgnoresLocalAttributes(t *testing.T) {
 	}
 	if f := cases[0].Input.RepositoryMonitorReview.Files[0]; f.Additions != 2 || f.Patch == "" {
 		t.Fatalf("file = %+v, want the text diff", f)
+	}
+}
+
+func TestGenerateReadsAttributesFromTheCaseHead(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	// The case commits its own attributes; the mirror's HEAD, main, has none.
+	r.commitCase("case/x", func() {
+		r.write(".gitattributes", "*.go -diff\n")
+		r.write("a.go", "package a\n\nvar A = 1\n")
+	})
+	out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range cases[0].Input.RepositoryMonitorReview.Files {
+		if f.Filename == "a.go" && (f.Additions != 0 || f.Patch != "") {
+			t.Fatalf("file = %+v, want the binary entry the case's attributes give", f)
+		}
+	}
+}
+
+func TestGenerateIgnoresReplacementObjects(t *testing.T) {
+	r := newTestRepo(t)
+	r.write("a.go", "package a\n")
+	r.run("add", "-A")
+	r.run("commit", "-q", "-m", "base")
+	head := r.commitCase("case/x", func() { r.write("a.go", "package a\n\nvar A = 1\n") })
+	fake := r.commitCase("fake", func() { r.write("other.txt", "replaced\n") })
+	r.run("replace", head, fake)
+	out, err := Generate(sourceFor("case/x", cleanReference), r.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, err := evals.ParseCases(out, corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := cases[0].Input.RepositoryMonitorReview
+	if input.HeadSHA != head || len(input.Files) != 1 || input.Files[0].Filename != "a.go" {
+		t.Fatalf("case = %+v, want the committed change to a.go at %s", input, head)
 	}
 }
 

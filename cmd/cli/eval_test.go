@@ -499,3 +499,120 @@ func TestEvalGetPrintsTheExperiment(t *testing.T) {
 		}
 	}
 }
+
+// evalUIDServer creates run r as uid-a and serves each later read of it with
+// the next of uids, the last repeating, and records as its trial records.
+func evalUIDServer(t *testing.T, ttl string, phases []string, uids []string, records string) *httptest.Server {
+	t.Helper()
+	reads := 0
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/evals/runs":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a","uid":"uid-a"}}`))
+		case "/api/v1/evals/runs/r":
+			i := min(reads, len(uids)-1)
+			phase := phases[min(reads, len(phases)-1)]
+			reads++
+			_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a","uid":"` + uids[i] + `"},"spec":{` + ttl +
+				`},"status":{"phase":"` + phase + `"}}`))
+		case "/api/v1/evals/runs/r/trials":
+			_, _ = w.Write([]byte(records))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestEvalRunWaitFailsWhenTheRunIsRecreated(t *testing.T) {
+	srv := evalUIDServer(t, "", []string{"Succeeded"}, []string{"uid-b"}, "")
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+		"--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "deleted and recreated while waiting") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+// A run recreated between the final poll and the trial download must not
+// combine the original's status with the replacement's records.
+func TestEvalOutputFailsWhenTheRunIsRecreatedBeforeTheTrialDownload(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		uids    []string
+		records string
+	}{
+		{"replacement records", []string{"uid-a"}, `{"evalRunUID":"uid-b","caseID":"c","trial":1,"taskName":"eval-c","outcome":"pass"}` + "\n"},
+		{"replacement without records", []string{"uid-a", "uid-b"}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			srv := evalUIDServer(t, "", []string{"Succeeded"}, test.uids, test.records)
+			defer srv.Close()
+			dir := filepath.Join(t.TempDir(), "out")
+			_, err := runEvalCommand(t, "eval", "get", "r", "--server", srv.URL, "--token", "tok", "--output-dir", dir)
+			if err == nil || !strings.Contains(err.Error(), "recreated before its trial records were read") {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if _, err := os.Stat(dir); err == nil {
+				t.Fatal("wrote an export for a recreated run")
+			}
+		})
+	}
+}
+
+func TestEvalGetWaitRefusesAShortTTLForAnUnfinishedRun(t *testing.T) {
+	ttl := `"ttlSecondsAfterFinished":0`
+	srv := evalUIDServer(t, ttl, []string{"Running", "Succeeded"}, []string{"uid-a"}, "")
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "get", "r", "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "ttlSecondsAfterFinished 0") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	// A finished run is printed from the first read, so its TTL is moot.
+	finished := evalUIDServer(t, ttl, []string{"Succeeded"}, []string{"uid-a"}, "")
+	defer finished.Close()
+	out, err := runEvalCommand(t, "eval", "get", "r", "--server", finished.URL, "--token", "tok", "--wait")
+	if err != nil || !strings.Contains(out, "EvalRun team-a/r: Succeeded") {
+		t.Fatalf("Execute() = %v\n%s", err, out)
+	}
+}
+
+func TestEvalOutputIsPrivateToItsOwner(t *testing.T) {
+	var created map[string]any
+	srv := evalTestServer(t, "Succeeded", &created)
+	defer srv.Close()
+	// An earlier export left world-readable files behind.
+	dir := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "events"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"evalrun.json", "trials.jsonl", "summary.md", "events/eval-b.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := runEvalCommand(t, "eval", "get", "pr-review-x7", "--server", srv.URL, "--token", "tok", "--output-dir", dir); err != nil {
+		t.Fatalf("Execute() = %v\n%s", err, out)
+	}
+	for name, want := range map[string]os.FileMode{
+		"": 0o700, "events": 0o700, "evalrun.json": 0o600, "trials.jsonl": 0o600, "summary.md": 0o600, "events/eval-b.json": 0o600,
+	} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%q mode = %o, want %o", name, got, want)
+		}
+	}
+}

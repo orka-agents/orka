@@ -278,7 +278,10 @@ func (r *EvalRunReconciler) observeEvalRun(ctx context.Context, run *corev1alpha
 	if err != nil {
 		return nil, err
 	}
-	snapshot := subject.snapshot()
+	snapshot, err := subject.snapshot(cases)
+	if err != nil {
+		return nil, err
+	}
 	snapshot.CaseSetDigest = caseSetDigest
 	snapshot.GraderSetDigest = graderSetDigest
 	snapshot.TrialPlanDigest = planDigest
