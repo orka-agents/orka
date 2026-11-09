@@ -234,7 +234,7 @@ func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Contex
 			// allows. Reporting NotFound would read as a missing Actor: Delete
 			// would call a live Actor already deleted and Claim would try to
 			// create it. Leave the identity unknown instead. A placed Actor
-			// with no template UID fails every identity comparison, and Delete,
+			// with no template UID fails every comparison against a pinned template UID, and Delete,
 			// which is fenced by the Actor UID, can still remove it.
 			return nil
 		}
