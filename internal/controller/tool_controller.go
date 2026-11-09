@@ -616,11 +616,19 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	// failure leaves the actor suspended.
 	if err := r.applySubstrateMCPActorEgress(ctx, tool, actorID); err != nil {
 		message := "actor egress policy was not applied; actor not resumed: " + err.Error()
+		suspendErr := suspendSubstrateMCPActorWithUnverifiedEgress(ctx, executor, claim, timeout)
+		if suspendErr != nil {
+			message += "; the actor could not be suspended and may still run under its previous egress policy: " + suspendErr.Error()
+		}
 		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
 			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyFailed",
 			Message: message, ObservedGeneration: tool.Generation,
 		})
 		result, updateErr := r.updateStatus(ctx, tool, false, message)
+		if updateErr == nil && suspendErr != nil {
+			// Retry with backoff until the actor is confirmed suspended.
+			return ctrl.Result{}, true, suspendErr
+		}
 		return result, true, updateErr
 	}
 	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
@@ -647,6 +655,32 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 		}
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// suspendSubstrateMCPActorWithUnverifiedEgress stops an actor whose egress
+// policy could not be installed and verified. A reattached actor may already be
+// running under the policy an earlier reconcile installed, which can be broader
+// than the one that just failed to apply, so it must not keep running. An actor
+// this claim created has never been resumed, and one observed suspended has
+// nothing running; neither needs a call.
+func suspendSubstrateMCPActorWithUnverifiedEgress(
+	ctx context.Context,
+	executor workspace.WorkspaceExecutor,
+	claim *workspace.ClaimResult,
+	timeout time.Duration,
+) error {
+	if claim.Created || claim.Phase == workspace.PhaseRetained {
+		return nil
+	}
+	// MCP actors run no workspace daemon, so there is nothing to scrub.
+	_, err := executor.Release(ctx, workspace.ReleaseRequest{
+		Ref:       claim.Ref,
+		Retain:    true,
+		Reason:    "egress policy was not applied",
+		Timeout:   timeout,
+		SkipScrub: true,
+	})
+	return err
 }
 
 func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, requested bool, created bool) bool {

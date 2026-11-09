@@ -812,6 +812,9 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_repository_monitor_reviews_total` | Counter | `mode`, `verdict` | Repository monitor pull request review records by review mode (`full`, `incremental`, `same_head`) and recorded verdict |
+| `orka_repository_monitor_review_findings_total` | Counter | `priority`, `outcome` | Review findings by priority (`P0`–`P3`) and outcome: `reported` when first recorded, `fixed` when a later review resolves one |
+| `orka_repository_monitor_review_rounds_to_pass` | Histogram | — | Pull request heads reviewed up to and including each pull request's first passed review; see [Repository monitors](../guides/repository-monitors.md#review-metrics) |
 | `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.

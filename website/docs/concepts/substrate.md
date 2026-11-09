@@ -251,6 +251,12 @@ status, injects the Tool's configured credentials, and never forwards the caller
 Orka credentials. OIDC callers and `outboundAccessPolicyRef` are not supported for
 these Tools.
 
+Before the proxy injects a Tool's `http.authSecretRef` credential, it checks that
+the caller may use it. A Kubernetes caller, including the AI worker's
+ServiceAccount, needs `get` on that Secret in the Tool's namespace; a
+transaction-token caller needs the credential-read scope. Other callers receive
+`403`. The restricted worker profile needs [a grant](#mcp-tool-credential-grant).
+
 MCP Actors get no egress unless `spec.mcp.substrateActor.egress` allows it, using
 `http`, `https` (gateway-intercepted), or `tls` (passthrough) rules with a
 lowercase FQDN or leftmost `*.` wildcard and ports. The controller applies the
@@ -267,6 +273,50 @@ golden snapshots when Tools request `boot: true`.
 `SubstrateActorPool.spec.templateRef` is immutable and belongs to native MCP Tool
 placement. It does not select a Task's ACP workspace.
 
+### Grant restricted AI workers the Tool credential {#mcp-tool-credential-grant}
+
+Workers used to read a Substrate MCP Tool's `http.authSecretRef` themselves, from
+a Secret mounted into the worker or from the Kubernetes API. The proxy now reads
+it, and only for a caller allowed to `get` that Secret. A copy mounted into the
+worker is no longer used for these Tools.
+
+The default AI worker role can read Secrets, so nothing changes there. With
+`workers.ai.rbacProfile: restricted` the worker has no Secret access, and a
+Substrate MCP Tool with `authSecretRef` fails with
+`403 not authorized to use the tool credential` after the upgrade. Grant the
+worker ServiceAccount `get` on that one Secret, in the namespace that holds the
+Tool. Do not grant Secret access more broadly: the grant also lets the worker read
+that Secret directly.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-tool-credential
+  namespace: orka-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["my-mcp-tool-token"] # the Tool's http.authSecretRef.name
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-tool-credential
+  namespace: orka-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mcp-tool-credential
+subjects:
+  - kind: ServiceAccount
+    name: orka-ai-worker # <release fullname>-ai-worker
+    namespace: orka-system
+```
+
+Tools without `authSecretRef` need no grant.
+
 ## Upgrades and proof limits
 
 Agent Substrate cannot upgrade a pre-1.0 installation in place. Before moving to
@@ -276,6 +326,10 @@ from v0.1.0 fail closed with `LegacySubstrateV0State` rather than being adopted.
 The `--substrate-actor-dns-suffix` and `--substrate-session-identity-*` settings
 were removed and fail startup if set; core now issues each Actor's workspace
 credential itself through the sealed bootstrap.
+
+Installations that run AI workers with `workers.ai.rbacProfile: restricted` and
+use Substrate MCP Tools with `http.authSecretRef` must
+[grant the worker that Secret](#mcp-tool-credential-grant) before upgrading.
 
 Drain all old in-tree ACP allocations and retained records through the original
 owner before applying the pruned RuntimePool CRD or starting new core. The startup

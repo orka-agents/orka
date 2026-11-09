@@ -13,7 +13,9 @@ import (
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -227,6 +229,15 @@ func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Contex
 	}
 	template, err := c.client.GetActorTemplate(ctx, &ateapipb.GetActorTemplateRequest{ActorTemplate: actor.GetActorTemplate()})
 	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			// The Actor exists; only its template is gone, which upstream
+			// allows. Reporting NotFound would read as a missing Actor: Delete
+			// would call a live Actor already deleted and Claim would try to
+			// create it. Leave the identity unknown instead. A placed Actor
+			// with no template UID fails every comparison against a pinned template UID, and Delete,
+			// which is fenced by the Actor UID, can still remove it.
+			return nil
+		}
 		return substrateControlError("get actor template", err)
 	}
 	converted.TemplateUID = template.GetMetadata().GetUid()

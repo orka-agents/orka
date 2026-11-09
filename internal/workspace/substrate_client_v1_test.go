@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // stubSubstrateControl answers only the RPCs a test configures; any other call
@@ -16,9 +19,11 @@ type stubSubstrateControl struct {
 	ateapipb.ControlClient
 	actor    *ateapipb.Actor
 	template *ateapipb.ActorTemplate
-	resumes  int
-	deletes  []*ateapipb.DeleteActorRequest
-	suspends []*ateapipb.SuspendActorRequest
+	// templateErr, when set, fails every ActorTemplate lookup.
+	templateErr error
+	resumes     int
+	deletes     []*ateapipb.DeleteActorRequest
+	suspends    []*ateapipb.SuspendActorRequest
 }
 
 func (s *stubSubstrateControl) GetActor(context.Context, *ateapipb.GetActorRequest, ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -26,6 +31,9 @@ func (s *stubSubstrateControl) GetActor(context.Context, *ateapipb.GetActorReque
 }
 
 func (s *stubSubstrateControl) GetActorTemplate(context.Context, *ateapipb.GetActorTemplateRequest, ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
+	if s.templateErr != nil {
+		return nil, s.templateErr
+	}
 	return s.template, nil
 }
 
@@ -191,4 +199,37 @@ func TestSubstrateWorkerRunsGVisor(t *testing.T) {
 	require.True(t, substrateWorkerRunsGVisor([]*ateapipb.WorkerSandboxClass{gvisor}))
 	require.False(t, substrateWorkerRunsGVisor(nil), "an unregistered worker reports no sandbox runtime")
 	require.False(t, substrateWorkerRunsGVisor([]*ateapipb.WorkerSandboxClass{gvisor, {SandboxClass: "microvm"}}))
+}
+
+// An Actor placed on a worker but never snapshotted takes its template identity
+// from a template lookup, and upstream lets a template be deleted while Actors
+// still name it. A missing template must not read as a missing Actor: Delete
+// would report a live Actor already deleted and Claim would try to create it.
+func TestSubstrateMissingTemplateIsNotAMissingActor(t *testing.T) {
+	placed := freshActor()
+	placed.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
+	placed.Status.WorkerAssignment = &ateapipb.WorkerAssignment{}
+	stub := &stubSubstrateControl{actor: placed, templateErr: status.Error(codes.NotFound, "ActorTemplate team-a/mcp not found")}
+	client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
+	executor := &SubstrateWorkspaceExecutor{control: client, now: time.Now}
+	ref := WorkspaceRef{ID: "actor-1"}
+
+	actor, err := client.GetActor(t.Context(), "actor-1")
+	require.NoError(t, err)
+	require.Empty(t, actor.TemplateUID, "a missing template leaves the Actor's identity unknown")
+	require.Equal(t, substrateStatusRunning, actor.Status)
+
+	// The identity is unknown, so a caller that pins a template UID is refused
+	// rather than reattached or handed a new Actor.
+	_, err = executor.Claim(t.Context(), ClaimRequest{
+		ClaimName: "actor-1", CreateIfMissing: true,
+		Template: TemplateRef{Namespace: "team-a", Name: "mcp", UID: "template-uid"},
+	})
+	require.True(t, IsKind(err, ErrorKindFailedPrecondition), "error = %v", err)
+
+	// Delete is fenced by the Actor UID and must still remove the Actor.
+	result, err := executor.Delete(t.Context(), DeleteRequest{Ref: ref, SkipScrub: true})
+	require.NoError(t, err)
+	require.True(t, result.Deleted)
+	require.Len(t, stub.deletes, 1)
 }
