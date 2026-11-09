@@ -257,6 +257,36 @@ func TestControllerServiceAccountProtectionAdmitsOnlyTheKubeletTokenRequests(t *
 	}
 }
 
+// TestControllerServiceAccountProtectionDeniesExecInControllerPods covers a
+// command run in a controller Pod, which could read the token mounted there:
+// it is refused for everyone, while exec in other Pods of the namespace and
+// in another namespace's Pods is untouched.
+func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing.T) {
+	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, protectedControllerSA)
+	kind := schema.GroupVersionKind{Version: "v1", Kind: "PodExecOptions"}
+	pods := controllerSAResources["Pod"]
+	options := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "PodExecOptions", "command": []any{"cat", "/var/run/secrets/orka.ai/agent-identity/token"},
+	}}
+	admin := &user.DefaultInfo{Name: "cluster-admin", Groups: []string{"system:masters", "system:authenticated"}}
+	worker := &user.DefaultInfo{Name: aiWorkerUsername, Groups: []string{"system:serviceaccounts", "system:authenticated"}}
+	for name, tc := range map[string]struct {
+		requester user.Info
+		pod       string
+		allowed   bool
+	}{
+		"worker in a controller Pod":         {requester: worker, pod: protectedControllerDeployment + "-7d947dfbff-nqbs8"},
+		"administrator in a controller Pod":  {requester: admin, pod: protectedControllerDeployment + "-7d947dfbff-nqbs8"},
+		"worker in another Pod":              {requester: worker, pod: "orka-workspace-publisher-74ff658dd5-tswmm", allowed: true},
+		"a Pod whose name only resembles it": {requester: worker, pod: protectedControllerDeployment + "x-abc", allowed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.allowed, policy.admitsAs(t, kind, pods, tc.pod, apiserveradmission.Connect,
+				tc.requester, "exec", options, nil))
+		})
+	}
+}
+
 func TestControllerServiceAccountProtectionTreatsDefaultAsAnAccount(t *testing.T) {
 	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, "default")
 	job := controllerSAWorkload("Job", "j", "", "")
