@@ -228,6 +228,11 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	parentRecreated.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
 	parentOtherInstance := boundTask("parent-other-instance", agent, corev1alpha1.TaskPhaseRunning)
 	parentOtherInstance.Status.AgentExecutionBinding.Agent.Identity.Instance = "entra:99999999-9999-9999-9999-999999999999/22222222-2222-2222-2222-222222222222"
+	// A parent bound under an earlier grant of the same identity: it no
+	// longer gets the identity itself, so a child cannot borrow it.
+	parentEarlierGrant := boundTask("parent-earlier-grant", agent, corev1alpha1.TaskPhaseRunning)
+	parentEarlierGrant.Status.AgentExecutionBinding.Agent.Identity.Instance = instance
+	parentEarlierGrant.CreationTimestamp = testClaimGrantedAt
 	parentUnbound := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{Name: "parent-unbound", Namespace: testNS},
 		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: "reviewer"}},
@@ -257,7 +262,8 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	}
 	ownedSchedule := delegatedSchedule("nightly-owned", "parent-own")
 	borrowedSchedule := delegatedSchedule("nightly-borrowed", "parent-unbound")
-	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule}
+	staleSchedule := delegatedSchedule("nightly-stale", "parent-earlier-grant")
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentEarlierGrant, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule, staleSchedule}
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
 	for _, parent := range parents {
 		parent.UID = types.UID(parent.Name + "-uid")
@@ -313,6 +319,8 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		{"child of a recreated Agent's Task", task("parent-recreated"), "parent's own bound Agent"},
 		{"child of an unbound parent", task("parent-unbound"), "parent's own bound Agent"},
 		{"child of a parent frozen under another instance", task("parent-other-instance"), "parent's own bound Agent"},
+		{"child of a parent bound under an earlier grant", task("parent-earlier-grant"), "re-create the parent Task"},
+		{"run of a schedule a parent from an earlier grant delegated", task("nightly-stale"), "re-create the parent Task"},
 		{"run of a scheduled Task created before the grant", task("nightly-unchecked"), "re-create the scheduled Task"},
 		{"scheduled run naming another Agent", otherAgentRun, "scheduled Task names it"},
 		{"run of a schedule an unbound parent delegated", task("nightly-borrowed"), "parent's own bound Agent"},
