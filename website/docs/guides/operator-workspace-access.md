@@ -149,7 +149,8 @@ component, and a path the session moves out of the workspace during a copy is
 refused. Copies require Linux 5.6 or later on the runtime node. Copies transfer
 exactly one regular file. Copying in replaces the
 destination atomically, and only after the complete upload arrives. The parent
-directory must already exist.
+directory must already exist. Copying out over an existing local file keeps
+that file's permissions; a new local file is readable and writable only by you.
 
 `-t` allocates a terminal. Because `-t` means `--tty` on `orka task exec`, use
 `--token` there for a bearer token. Without a terminal, the first Ctrl-C is
@@ -178,7 +179,7 @@ use these exit codes:
 | --- | --- |
 | `124` | Timeout |
 | `125` | Output or stdin buffer limit |
-| `126` | Refused or failed to start |
+| `126` | Refused, failed to start, lost its connection, or could not write its output locally |
 | `130` | Interrupted locally |
 
 ## The session taint

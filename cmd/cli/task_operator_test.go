@@ -6,8 +6,11 @@ import (
 	"errors"
 	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,5 +185,88 @@ func TestTaskExecRejectsAnInvalidTimeoutBeforeConnecting(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "--timeout") {
 			t.Fatalf("--timeout %s = %v, want a timeout validation error", timeout, err)
 		}
+	}
+}
+
+// Exit statuses below 124 belong to the remote command. A refusal that arrives
+// before the stream opens (operator access disabled, a missing permission, a
+// class without the opt-in) ran nothing, so it must not exit 1.
+func TestTaskExecRefusalBeforeTheStreamExitsWith126(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"message":"operator workspace access is disabled"}}`)
+	}))
+	defer api.Close()
+	root := newRootCmd()
+	root.SetArgs([]string{"task", "exec", "--quiet", "--server", api.URL, "my-task", "--", "false"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	var exitErr *operatorExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 126 {
+		t.Fatalf("refused exec = %v, want exit 126", err)
+	}
+	if !strings.Contains(exitErr.Error(), "HTTP 403") || !strings.Contains(exitErr.Error(), "disabled") {
+		t.Fatalf("refusal message = %q, want the API's reason", exitErr.Error())
+	}
+}
+
+func TestOperatorExecFailureExitCodes(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code int
+	}{
+		{context.Canceled, 130},
+		{errors.New("operator exec stream closed before the command finished"), 126},
+		{errors.New("write command stdout: no space left on device"), 126},
+	} {
+		var exitErr *operatorExitError
+		if err := operatorExecFailure(tc.err); !errors.As(err, &exitErr) || exitErr.ExitCode() != tc.code {
+			t.Fatalf("operatorExecFailure(%v) = %v, want exit %d", tc.err, err, tc.code)
+		}
+	}
+}
+
+// The copy lands in a temporary file that is renamed over the destination, and
+// the temporary file is created 0600. Replacing a local script must not make it
+// non-executable, or a shared file unreadable to its group.
+func TestCopyOutKeepsAnExistingFilesPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no Unix permission bits")
+	}
+	dir := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.SetErr(io.Discard)
+	fresh := func(_ context.Context, _, _ string, _ int64, w io.Writer) (int64, error) {
+		n, err := w.Write([]byte("#!/bin/sh\necho new\n"))
+		return int64(n), err
+	}
+	for name, mode := range map[string]os.FileMode{"run.sh": 0o755, "shared.txt": 0o640} {
+		local := filepath.Join(dir, name)
+		if err := os.WriteFile(local, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(local, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := copyOutOfWorkspace(context.Background(), cmd, fresh, "t", name, local, 0); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(local); !strings.Contains(string(data), "echo new") || info.Mode().Perm() != mode {
+			t.Fatalf("%s after copy: mode %o content %q, want mode %o and the new content", name, info.Mode().Perm(), data, mode)
+		}
+	}
+	created := filepath.Join(dir, "created.txt")
+	if err := copyOutOfWorkspace(context.Background(), cmd, fresh, "t", "created.txt", created, 0); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(created); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("a new local file must stay private: %v %v", info, err)
 	}
 }

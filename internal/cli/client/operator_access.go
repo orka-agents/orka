@@ -138,14 +138,17 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 		if kind != websocket.MessageBinary || len(payload) == 0 {
 			continue
 		}
+		// Output that cannot be written locally is lost, so the exec is not a
+		// success whatever the remote command goes on to return. Returning
+		// closes the stream, which stops the command.
 		switch payload[0] {
 		case operatoraccess.ChannelStdout:
-			if streams.Stdout != nil {
-				_, _ = streams.Stdout.Write(payload[1:])
+			if err := writeOperatorOutput(streams.Stdout, payload[1:]); err != nil {
+				return operatoraccess.Status{}, fmt.Errorf("write command stdout: %w", err)
 			}
 		case operatoraccess.ChannelStderr:
-			if streams.Stderr != nil {
-				_, _ = streams.Stderr.Write(payload[1:])
+			if err := writeOperatorOutput(streams.Stderr, payload[1:]); err != nil {
+				return operatoraccess.Status{}, fmt.Errorf("write command stderr: %w", err)
 			}
 		case operatoraccess.ChannelStatus:
 			var status operatoraccess.Status
@@ -156,6 +159,14 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 			return status, nil
 		}
 	}
+}
+
+func writeOperatorOutput(w io.Writer, data []byte) error {
+	if w == nil {
+		return nil
+	}
+	_, err := w.Write(data)
+	return err
 }
 
 func pumpOperatorStdin(stdin io.Reader, tty bool, write func([]byte) error) {

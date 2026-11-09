@@ -82,7 +82,12 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			if !quiet {
 				fmt.Fprint(os.Stderr, operatorTaintNotice)
 			}
-			c := newClientFromCmd(cmd)
+			// Without a terminal the first Ctrl-C is forwarded to the remote
+			// command, so it must not also end a port-forward this command
+			// started: the stream would drop under a command that handles
+			// SIGINT and carries on. Abandoning the stream ends it instead.
+			// With a terminal Ctrl-C is a byte on the stream, never a signal.
+			c, closeTunnel := newClientWithTunnel(cmd, "", !tty)
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
 			controls := make(chan operatoraccess.Control, 8)
@@ -103,25 +108,7 @@ checkpointed for forks, or continued. Every exec is audited.`,
 				interrupts := make(chan os.Signal, 2)
 				signal.Notify(interrupts, os.Interrupt)
 				defer signal.Stop(interrupts)
-				go func() {
-					forwarded := false
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-interrupts:
-							if forwarded {
-								cancel()
-								return
-							}
-							forwarded = true
-							select {
-							case controls <- operatoraccess.Control{Type: operatoraccess.ControlSignal, Signal: "INT"}:
-							default:
-							}
-						}
-					}
-				}()
+				go forwardOperatorInterrupts(ctx, interrupts, controls, cancel)
 			}
 			var input io.Reader
 			if stdin {
@@ -133,9 +120,9 @@ checkpointed for forks, or continued. Every exec is audited.`,
 			}
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
-					return &operatorExitError{code: 130, message: "interrupted"}
+					closeTunnel()
 				}
-				return err
+				return operatorExecFailure(err)
 			}
 			return operatorStatusError(status)
 		},
@@ -150,6 +137,39 @@ checkpointed for forks, or continued. Every exec is audited.`,
 	cmd.Flags().DurationVar(&timeout, "timeout", operatoraccess.DefaultExecTimeout,
 		fmt.Sprintf("Maximum command duration (at most %s)", operatoraccess.MaxExecTimeout))
 	return cmd
+}
+
+// forwardOperatorInterrupts forwards the first interrupt to the remote process
+// group as SIGINT and abandons the stream on the second.
+func forwardOperatorInterrupts(ctx context.Context, interrupts <-chan os.Signal, controls chan<- operatoraccess.Control, abandon func()) {
+	forwarded := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-interrupts:
+			if forwarded {
+				abandon()
+				return
+			}
+			forwarded = true
+			select {
+			case controls <- operatoraccess.Control{Type: operatoraccess.ControlSignal, Signal: "INT"}:
+			default:
+			}
+		}
+	}
+}
+
+// operatorExecFailure maps an exec that produced no remote status to an exit
+// code. Statuses below 124 belong to the remote command, so a refusal before
+// the stream opens, a lost stream, or output that could not be written locally
+// must not exit 1: that would read as the command having run and returned 1.
+func operatorExecFailure(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return &operatorExitError{code: 130, message: "interrupted"}
+	}
+	return &operatorExitError{code: 126, message: err.Error()}
 }
 
 // operatorExecTimeoutSeconds converts --timeout to the whole seconds the API
@@ -289,6 +309,14 @@ func copyOutOfWorkspace(ctx context.Context, cmd *cobra.Command, copyFrom copyFr
 	}
 	if closeErr != nil {
 		return fmt.Errorf("write local file: %w", closeErr)
+	}
+	// The rename replaces the destination with the temporary file, whose mode
+	// is 0600. A file that already exists keeps its permissions, so an
+	// executable stays executable; a new file keeps the restrictive default.
+	if existing, err := os.Stat(local); err == nil && existing.Mode().IsRegular() {
+		if err := os.Chmod(temporary.Name(), existing.Mode().Perm()); err != nil {
+			return fmt.Errorf("write local file: %w", err)
+		}
 	}
 	if err := os.Rename(temporary.Name(), local); err != nil {
 		return fmt.Errorf("write local file: %w", err)
