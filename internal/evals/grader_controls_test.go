@@ -235,6 +235,9 @@ func TestRemovedLines(t *testing.T) {
 		{"body shorter than header", "@@ -1,3 +1,3 @@\n-a\n+b", nil},
 		{"body longer than header", "@@ -1,1 +1,1 @@\n-a\n-b\n+c", nil},
 		{"bad header", "@@ -x +1 @@\n-a", nil},
+		{"header without closing delimiter", "@@ -40,2 +10,1\n-deleted\n kept", nil},
+		{"header with text for a closing delimiter", "@@ -40,2 +10,1 garbage\n-deleted\n kept", nil},
+		{"section text after the header", "@@ -5 +5 @@ func A() {\n-a\n+b", map[int64]int64{5: 5}},
 		// Counts balance, but the second line has no context prefix.
 		{"unprefixed body line", "@@ -40,2 +10,1 @@\n-deleted\nnot a context line", nil},
 		{"empty body line", "@@ -1,2 +1,2 @@\n-a\n\n+b", nil},
