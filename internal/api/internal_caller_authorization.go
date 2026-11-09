@@ -424,7 +424,20 @@ func coordinationRootTask(
 		seen[current.UID] = struct{}{}
 		parentName, parentUID, hasParent, valid := coordinationParentIdentity(current)
 		if !valid {
-			return nil, false
+			// A continuation of a delegated child inherits the parent labels
+			// but is owned, not controlled, by the Task it resumes. It shares
+			// that Task's tree when the link is proven from the predecessor's
+			// controller-written wait, as verifiedCoordinationParentIdentity
+			// requires; lineage annotations alone never place a Task in a tree.
+			previous := tasksByName[strings.TrimSpace(current.Annotations[labels.AnnotationContinuationOfName])]
+			if previous == nil || !previous.DeletionTimestamp.IsZero() || !taskwait.Continues(previous, current) {
+				return nil, false
+			}
+			if previousName, _, previousHasParent, _ := coordinationParentIdentity(previous); !previousHasParent || previousName != parentName {
+				return nil, false
+			}
+			current = previous
+			continue
 		}
 		if !hasParent {
 			return current, true

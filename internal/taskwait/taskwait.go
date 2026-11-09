@@ -120,12 +120,24 @@ func Predecessor(ctx context.Context, reader client.Reader, task *corev1alpha1.T
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: task.Namespace, Name: name}, previous); err != nil {
 		return nil, false, client.IgnoreNotFound(err)
 	}
-	wait := previous.Status.Wait
-	if string(previous.UID) != uid || wait == nil || wait.State != corev1alpha1.TaskWaitStateResumed ||
-		wait.ContinuationTaskName != task.Name || wait.ContinuationTaskUID != string(task.UID) {
+	if !Continues(previous, task) {
 		return nil, false, nil
 	}
 	return previous, true, nil
+}
+
+// Continues reports whether task is the continuation the controller created
+// for previous: previous is the exact incarnation task names, and its resumed
+// wait, which only the controller writes, names exactly this Task incarnation.
+func Continues(previous, task *corev1alpha1.Task) bool {
+	if previous == nil || task == nil || previous.UID == "" || task.UID == "" || previous.Namespace != task.Namespace {
+		return false
+	}
+	wait := previous.Status.Wait
+	return previous.Name == strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfName]) &&
+		string(previous.UID) == strings.TrimSpace(task.Annotations[labels.AnnotationContinuationOfUID]) &&
+		wait != nil && wait.State == corev1alpha1.TaskWaitStateResumed &&
+		wait.ContinuationTaskName == task.Name && wait.ContinuationTaskUID == string(task.UID)
 }
 
 // ResolveTail follows resumed waits from task to the newest Task of its chain.

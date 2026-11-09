@@ -129,3 +129,103 @@ func TestContinuationCoordinationParentFailsClosed(t *testing.T) {
 	_, err = authorizer.verifiedCoordinationParent(ctx, continuation, "coordinator-a")
 	requireFiberStatus(t, err, http.StatusForbidden)
 }
+
+// transcriptSessionNames returns the Session names caller may search.
+func transcriptSessionNames(t *testing.T, objects []client.Object, caller *corev1alpha1.Task) []string {
+	t.Helper()
+	k8sClient := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
+		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(objects...).Build()
+	authorizer := internalCallerAuthorizer{k8sReader: k8sClient, taskProvenanceProtected: true}
+	allowed, err := authorizer.coordinationTreeSessionReferences(context.Background(), caller)
+	require.NoError(t, err)
+	names := make([]string, 0, len(allowed))
+	for name := range allowed {
+		names = append(names, name)
+	}
+	return names
+}
+
+// transcriptTree returns a coordinator with a parked child, its continuation
+// and a sibling, plus an unrelated coordinator and its child. Each Task has a
+// Session of its own; a continuation appends to its predecessor's.
+func transcriptTree() (continuation, sibling *corev1alpha1.Task, objects []client.Object) {
+	session := func(task *corev1alpha1.Task, name string) *corev1alpha1.Task {
+		task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: name}
+		return task
+	}
+	child, continuation := parkedDelegatedChild("worker")
+	session(child, "worker-session")
+	continuation.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "worker-session", Append: true}
+	sibling = session(internalCallerAuthTaskObject("peer", "peer-uid", "", "coordinator-a", ""), "peer-session")
+	return continuation, sibling, []client.Object{
+		session(internalCallerAuthTaskObject("coordinator-a", "coordinator-a-uid", "", "", ""), "coordinator-session"),
+		child, continuation, sibling,
+		session(internalCallerAuthTaskObject("coordinator-b", "coordinator-b-uid", "", "", ""), "other-coordinator-session"),
+		session(internalCallerAuthTaskObject("stranger", "stranger-uid", "", "coordinator-b", ""), "stranger-session"),
+	}
+}
+
+func TestResumedDelegatedChildKeepsItsTranscriptTree(t *testing.T) {
+	continuation, sibling, objects := transcriptTree()
+
+	// search_transcript from the continuation still reaches its coordinator
+	// and siblings, and nothing of another coordinator's tree.
+	require.ElementsMatch(t, []string{"coordinator-session", "worker-session", "peer-session"},
+		transcriptSessionNames(t, objects, continuation))
+	// The tree still reaches the continuation's Session reference.
+	k8sClient := fake.NewClientBuilder().WithScheme(internalCallerAuthScheme(t)).
+		WithStatusSubresource(&corev1alpha1.Task{}).WithObjects(objects...).Build()
+	authorizer := internalCallerAuthorizer{k8sReader: k8sClient, taskProvenanceProtected: true}
+	allowed, err := authorizer.coordinationTreeSessionReferences(context.Background(), sibling)
+	require.NoError(t, err)
+	require.Contains(t, allowed["worker-session"], *continuation.Spec.SessionRef)
+	require.NotContains(t, allowed, "stranger-session")
+}
+
+func TestTranscriptTreeIgnoresUnprovenContinuationLineage(t *testing.T) {
+	find := func(objects []client.Object, name string) *corev1alpha1.Task {
+		for _, object := range objects {
+			if object.GetName() == name {
+				return object.(*corev1alpha1.Task)
+			}
+		}
+		t.Fatalf("no Task %q", name)
+		return nil
+	}
+	for name, breakLink := range map[string]func(objects []client.Object){
+		// The predecessor's controller-written wait names another Task, so
+		// the lineage annotations are only a claim.
+		"wait names another Task": func(objects []client.Object) {
+			find(objects, "worker").Status.Wait.ContinuationTaskUID = "someone-else"
+		},
+		"predecessor never resumed": func(objects []client.Object) {
+			find(objects, "worker").Status.Wait.State = corev1alpha1.TaskWaitStateWaiting
+		},
+		"annotation names another incarnation": func(objects []client.Object) {
+			find(objects, "worker-resume").Annotations[labels.AnnotationContinuationOfUID] = "earlier-worker-uid"
+		},
+		// The proven predecessor belongs to another coordinator's tree.
+		"predecessor has another coordinator": func(objects []client.Object) {
+			worker := find(objects, "worker")
+			worker.Annotations[labels.AnnotationParentTaskName] = "coordinator-b"
+			worker.Labels[labels.LabelParentTask] = labels.SelectorValue("coordinator-b")
+			worker.OwnerReferences[0].Name, worker.OwnerReferences[0].UID = "coordinator-b", "coordinator-b-uid"
+		},
+		"predecessor is being deleted": func(objects []client.Object) {
+			worker := find(objects, "worker")
+			now := metav1.Now()
+			worker.DeletionTimestamp, worker.Finalizers = &now, []string{"orka.ai/test"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			continuation, sibling, objects := transcriptTree()
+			continuation.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "claimed-session"}
+			breakLink(objects)
+
+			// The claimant reaches only its own Session, and no tree reaches it.
+			require.Equal(t, []string{"claimed-session"}, transcriptSessionNames(t, objects, continuation))
+			require.NotContains(t, transcriptSessionNames(t, objects, sibling), "claimed-session")
+			require.NotContains(t, transcriptSessionNames(t, objects, find(objects, "stranger")), "claimed-session")
+		})
+	}
+}
