@@ -237,6 +237,18 @@ ServiceAccount, needs `get` on that Secret in the Tool's namespace; a
 transaction-token caller needs the credential-read scope. Other callers receive
 `403`. The restricted worker profile needs [a grant](#mcp-tool-credential-grant).
 
+A Tool stands for the one MCP callable that carries its name, so permission to use
+a Tool is permission to call only that. The proxy accepts a single JSON-RPC
+message per request: `initialize`, `notifications/initialized`, or a `tools/call`
+whose `params.name` is the Tool's name. It answers `403` for any other method or
+callable and `400` for a batch or a malformed message, and it forwards the
+message it checked rather than the caller's bytes.
+
+The caller never sees the values the proxy injects. If the Actor echoes the Tool
+credential, a sensitive configured header value or the forwarded transaction
+token, the proxy replaces it with `[REDACTED]` in the response body and headers,
+also when the value is written with JSON string escapes.
+
 MCP Actors get no egress unless `spec.mcp.substrateActor.egress` allows it, using
 `http`, `https` (gateway-intercepted), or `tls` (passthrough) rules with a
 lowercase FQDN or leftmost `*.` wildcard and ports. The controller applies the
