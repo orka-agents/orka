@@ -115,6 +115,13 @@ func newEvalGetCmd() *cobra.Command {
 			if output != "" && run.Spec.TTLSecondsAfterFinished != nil {
 				return errors.New("--output-dir needs the run kept until the export finishes, but it has ttlSecondsAfterFinished")
 			}
+			// A finished run is printed from this read; an unfinished one is
+			// polled, and a short TTL could delete it between polls.
+			if !evalRunFinished(run.Status.Phase) {
+				if err := checkEvalRunTTL(run.Spec.TTLSecondsAfterFinished, false); err != nil {
+					return err
+				}
+			}
 			return followEvalRun(cmd.Context(), c, run, timeout, output, cmd.OutOrStdout())
 		},
 	}
@@ -197,7 +204,11 @@ func checkEvalRunTTLForWait(body []byte, export bool) error {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return err
 	}
-	ttl := request.Spec.TTLSecondsAfterFinished
+	return checkEvalRunTTL(request.Spec.TTLSecondsAfterFinished, export)
+}
+
+// checkEvalRunTTL applies checkEvalRunTTLForWait's rule to a run's TTL.
+func checkEvalRunTTL(ttl *int32, export bool) error {
 	switch {
 	case ttl == nil:
 		return nil
@@ -287,6 +298,11 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 		case <-time.After(evalRunPollInterval):
 		}
 		next, err := getEvalRun(ctx, c, run.Namespace, run.Name)
+		if err == nil && next.UID != run.UID {
+			// The name now belongs to another run: its status says nothing
+			// about the run this command follows.
+			return nil, fmt.Errorf("evalrun/%s was deleted and recreated while waiting", run.Name)
+		}
 		if err != nil {
 			// A restarting API server or a dropped port-forward must not end
 			// a long wait; keep polling until the timeout. A 4xx answer, such
@@ -347,18 +363,9 @@ func evalRunCompletedCondition(run *corev1alpha1.EvalRun) *metav1.Condition {
 }
 
 // writeEvalRunOutput writes the finished run, its trial records, a Markdown
-// summary and the events of every failed trial into dir.
+// summary and the events of every failed trial into dir. Event transcripts
+// can hold prompts and source, so the export is readable only by its owner.
 func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1.EvalRun, dir string) error {
-	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o755); err != nil {
-		return err
-	}
-	encoded, err := json.MarshalIndent(run, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "evalrun.json"), append(encoded, '\n'), 0o644); err != nil {
-		return err
-	}
 	query := namespaceQuery(run.Namespace)
 	if query == nil {
 		query = map[string]string{}
@@ -368,11 +375,36 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 	if err != nil {
 		return fmt.Errorf("read trial records: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "trials.jsonl"), trialsJSONL, 0o644); err != nil {
-		return err
-	}
 	trials, err := parseEvalTrials(trialsJSONL)
 	if err != nil {
+		return err
+	}
+	// The listing is by name, so a run recreated since the last poll would
+	// serve its own records. Every record must belong to this run, and the
+	// name must still be this run after the listing.
+	for _, trial := range trials {
+		if trial.EvalRunUID != string(run.UID) {
+			return fmt.Errorf("evalrun/%s was deleted and recreated before its trial records were read", run.Name)
+		}
+	}
+	current, err := getEvalRun(ctx, c, run.Namespace, run.Name)
+	if err != nil {
+		return fmt.Errorf("re-read evalrun/%s: %w", run.Name, err)
+	}
+	if current.UID != run.UID {
+		return fmt.Errorf("evalrun/%s was deleted and recreated before its trial records were read", run.Name)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "evalrun.json"), append(encoded, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "trials.jsonl"), trialsJSONL, 0o600); err != nil {
 		return err
 	}
 	for _, trial := range trials {
@@ -394,11 +426,11 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 			// Any other failure leaves the export incomplete, so it fails.
 			return fmt.Errorf("read events of failed trial Task %s: %w", trial.TaskName, err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "events", trial.TaskName+".json"), events, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "events", trial.TaskName+".json"), events, 0o600); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(filepath.Join(dir, "summary.md"), []byte(evalRunSummaryMarkdown(run, trials)), 0o644)
+	return os.WriteFile(filepath.Join(dir, "summary.md"), []byte(evalRunSummaryMarkdown(run, trials)), 0o600)
 }
 
 // evalEventPageSize and evalEventMaxPages bound one trial's event download.
