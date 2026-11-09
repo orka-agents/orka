@@ -13,6 +13,7 @@ resources:
   - ../policy
   - runtime_namespace.yaml
   - runtime_rbac.yaml
+  - task_webhook_signing.yaml
   - v2_controller_cluster_role.yaml
   - metrics_service.yaml
   - api_service.yaml
@@ -118,6 +119,16 @@ replacements:
       group: admissionregistration.k8s.io
       version: v1
       kind: ValidatingAdmissionPolicy
+      name: ai-worker-identity-protection
+    fieldPaths:
+    - spec.matchConditions.[name=ai-worker].expression
+    options:
+      delimiter: "'"
+      index: 3
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
       name: acp-workspace-lease-protection
     fieldPaths:
     - spec.variables.[name=controllerNamespace].expression
@@ -185,6 +196,16 @@ replacements:
     options:
       delimiter: "'"
       index: 1
+  - select:
+      group: admissionregistration.k8s.io
+      version: v1
+      kind: ValidatingAdmissionPolicy
+      name: ai-worker-identity-protection
+    fieldPaths:
+    - spec.matchConditions.[name=ai-worker].expression
+    options:
+      delimiter: "'"
+      index: 7
 - source:
     group: ""
     version: v1
