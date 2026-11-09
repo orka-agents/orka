@@ -1,5 +1,3 @@
-//go:build !linux
-
 package supervisor
 
 import (
@@ -8,8 +6,11 @@ import (
 	"path/filepath"
 )
 
-// syncMaterializedTree fsyncs every staged regular file and directory where
-// syncfs(2) is unavailable.
+// syncMaterializedTree fsyncs every staged regular file and directory once
+// extraction has written them all. Syncing each file right after writing it
+// defeats journal batching and costs minutes for tens of thousands of files on
+// network-attached node disks; syncfs(2) would also flush, and report errors
+// from, unrelated writes on a shared node filesystem.
 func syncMaterializedTree(root string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

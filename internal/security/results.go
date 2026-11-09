@@ -162,6 +162,7 @@ func BuildReviewContexts(
 			// the contexts do not fit.
 			return MarshalReviewContexts(manifests, budget)
 		}
+		// bare > budget > 0 here: any total within budget returned above.
 		next := int(int64(maxBytes) * int64(budget/2) / int64(bare))
 		maxBytes = max(minScaledReviewContextBytes, min(next, maxBytes*3/4))
 	}

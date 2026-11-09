@@ -346,8 +346,10 @@ func runSecurityMapper(ctx context.Context) error {
 	contextSlices := make([]store.ReviewSlice, len(slices))
 	for i := range slices {
 		contextSlices[i] = slices[i]
-		contextSlices[i].ChangedFiles = append([]string(nil), changedFiles...)
-		contextSlices[i].ChangedLineRanges = append([]security.ChangedLineRange(nil), changedLineRanges...)
+		// BuildReviewContext only reads these; sharing keeps memory flat
+		// when many slices see a large diff.
+		contextSlices[i].ChangedFiles = changedFiles
+		contextSlices[i].ChangedLineRanges = changedLineRanges
 	}
 	artifact := security.ReviewSlicesArtifact{
 		SchemaVersion:        security.SchemaVersionReviewSlices,
