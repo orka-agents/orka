@@ -636,32 +636,32 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 	blockedReason := ""
 	switch command.Status {
 	case githubCommandStatusRejected:
-		status = repositoryMonitorRunPhaseFailed
+		status = store.RepositoryMonitorWorkActionStatusFailed
 		phase = "rejected"
 		blockedReason = command.Error
 	case githubCommandStatusBlocked:
-		status = githubCommandStatusBlocked
+		status = store.RepositoryMonitorWorkActionStatusBlocked
 		phase = githubCommandStatusBlocked
 		blockedReason = command.Error
 	case githubCommandStatusAccepted, "":
-		status = repositoryMonitorRunPhaseQueued
+		status = store.RepositoryMonitorWorkActionStatusQueued
 	default:
 		status = command.Status
 	}
 	var completedAt *time.Time
 	switch status {
-	case repositoryMonitorRunPhaseFailed, githubCommandStatusBlocked, githubCommandStatusCompleted:
+	case store.RepositoryMonitorWorkActionStatusFailed, store.RepositoryMonitorWorkActionStatusBlocked, store.RepositoryMonitorWorkActionStatusCompleted:
 		now := time.Now()
 		completedAt = &now
 	}
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	if existing, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
-		if existing.Status == githubCommandStatusCompleted && existing.Phase == "coalesced" {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusCompleted && existing.Phase == "coalesced" {
 			command.Status = githubCommandStatusCompleted
 			command.Error = "coalesced with active workflow action " + existing.DependsOnActionID
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
 		}
-		if existing.Status == "cancelled" && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusCancelled && desiredAction != commandIntentStop && desiredAction != commandIntentResume {
 			command.Status = githubCommandStatusCompleted
 			command.Error = "workflow action was cancelled"
 			return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
@@ -669,14 +669,14 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 		if runID != "" && existing.RunID == "" {
 			existing.RunID = runID
 		}
-		if status == repositoryMonitorRunPhaseQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
-			existing.Status = repositoryMonitorRunPhaseQueued
+		if status == store.RepositoryMonitorWorkActionStatusQueued && existing.Status == store.RepositoryMonitorWorkActionStatusRetryPending && existing.BlockedReason == store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed {
+			existing.Status = store.RepositoryMonitorWorkActionStatusQueued
 			existing.Phase = phase
 			existing.BlockedReason = ""
 			existing.Error = ""
 			existing.CompletedAt = nil
 		}
-		if existing.Status == "queued" && status != "queued" {
+		if existing.Status == store.RepositoryMonitorWorkActionStatusQueued && status != store.RepositoryMonitorWorkActionStatusQueued {
 			existing.Status = status
 			existing.Phase = phase
 			existing.BlockedReason = blockedReason
@@ -739,7 +739,7 @@ func (h *Handlers) upsertRepositoryMonitorCommandWorkAction(ctx context.Context,
 }
 
 func (h *Handlers) repositoryMonitorActiveWorkActionByDedupe(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, dedupe string) (*store.WorkAction, error) {
-	for _, status := range []string{repositoryMonitorRunPhaseQueued, "leased", repositoryMonitorRunPhaseRunning, store.RepositoryMonitorWorkActionStatusRetryPending} {
+	for _, status := range store.RepositoryMonitorWorkActionActiveStatuses() {
 		actions, _, err := h.repositoryMonitorStore.ListWorkActions(ctx, store.WorkActionFilter{Namespace: monitor.Namespace, MonitorName: monitor.Name, DedupeKey: dedupe, Status: status, Limit: 1})
 		if err != nil {
 			return nil, err
@@ -755,14 +755,14 @@ func (h *Handlers) persistRepositoryMonitorCoalescedWorkAction(ctx context.Conte
 	id := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
 	now := time.Now()
 	metadata, _ := json.Marshal(map[string]any{"source": command.Source, apiFieldLabel: command.Label, "deliveryID": command.DeliveryID, "coalescedWith": candidate.ID})
-	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: githubCommandStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
+	action := &store.WorkAction{ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name, CommandEventID: command.ID, MonitorGeneration: monitor.Generation, TargetKind: command.Kind, TargetNumber: command.Number, TargetSHA: command.HeadSHA, TargetSnapshotDigest: command.IssueSnapshotDigest, Intent: command.Intent, DesiredAction: desiredAction, DependsOnActionID: candidate.ID, DedupeKey: dedupe, IdempotencyKey: command.IdempotencyKey, Status: store.RepositoryMonitorWorkActionStatusCompleted, Phase: "coalesced", MetadataJSON: string(metadata), CreatedAt: command.CreatedAt, CompletedAt: &now}
 	if err := h.repositoryMonitorStore.CreateWorkAction(ctx, action); err != nil {
 		existing, getErr := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, id)
-		if getErr != nil || existing.DependsOnActionID != candidate.ID || existing.Status != githubCommandStatusCompleted {
+		if getErr != nil || existing.DependsOnActionID != candidate.ID || existing.Status != store.RepositoryMonitorWorkActionStatusCompleted {
 			return err
 		}
 	}
-	metrics.RecordRepositoryMonitorWorkAction(desiredAction, githubCommandStatusCompleted)
+	metrics.RecordRepositoryMonitorWorkAction(desiredAction, store.RepositoryMonitorWorkActionStatusCompleted)
 	command.Status = githubCommandStatusCompleted
 	command.Error = "coalesced with active workflow action " + candidate.ID
 	return h.repositoryMonitorStore.UpdateCommandEvent(ctx, command)
@@ -782,6 +782,10 @@ func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx contex
 			return nil
 		}
 		return err
+	}
+	// A finished action is final; reopening it would run its work again.
+	if store.IsRepositoryMonitorWorkActionTerminal(action.Status) {
+		return nil
 	}
 	action.Status = store.RepositoryMonitorWorkActionStatusRetryPending
 	action.Phase = store.RepositoryMonitorWorkActionStatusRetryPending

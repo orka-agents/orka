@@ -24,12 +24,12 @@ import (
 )
 
 const (
-	repositoryMonitorWorkActionStatusQueued    = "queued"
-	repositoryMonitorWorkActionStatusRunning   = "running"
-	repositoryMonitorWorkActionStatusSucceeded = "succeeded"
-	repositoryMonitorWorkActionStatusFailed    = "failed"
-	repositoryMonitorWorkActionStatusBlocked   = "blocked"
-	repositoryMonitorWorkActionStatusCancelled = "cancelled"
+	repositoryMonitorWorkActionStatusQueued    = store.RepositoryMonitorWorkActionStatusQueued
+	repositoryMonitorWorkActionStatusRunning   = store.RepositoryMonitorWorkActionStatusRunning
+	repositoryMonitorWorkActionStatusSucceeded = store.RepositoryMonitorWorkActionStatusSucceeded
+	repositoryMonitorWorkActionStatusFailed    = store.RepositoryMonitorWorkActionStatusFailed
+	repositoryMonitorWorkActionStatusBlocked   = store.RepositoryMonitorWorkActionStatusBlocked
+	repositoryMonitorWorkActionStatusCancelled = store.RepositoryMonitorWorkActionStatusCancelled
 )
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string) error {
@@ -96,8 +96,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			return err
 		}
 		for _, candidate := range active {
-			switch candidate.Status {
-			case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning, store.RepositoryMonitorWorkActionStatusRetryPending:
+			if store.IsRepositoryMonitorWorkActionActive(candidate.Status) {
 				return nil
 			}
 		}

@@ -11,7 +11,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -472,5 +474,32 @@ func TestCreateRepositoryMonitorCommandEventRunCreateFailureMarksWorkActionRetry
 	}
 	if action.Status != store.RepositoryMonitorWorkActionStatusRetryPending || action.BlockedReason != store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed || action.CompletedAt != nil {
 		t.Fatalf("action = %#v, want nonterminal retryable run creation failure", action)
+	}
+}
+
+func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsFinishedAction(t *testing.T) {
+	_, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo"}}
+	command := &store.CommandEvent{ID: "cmd-finished", Intent: commandIntentPlan}
+	completedAt := time.Now().UTC().Truncate(time.Second)
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	if err := handlers.repositoryMonitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID: actionID, MonitorNamespace: "demo", MonitorName: "repo-monitor", CommandEventID: command.ID,
+		TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 43, Intent: commandIntentPlan, DesiredAction: commandIntentPlan,
+		Status: store.RepositoryMonitorWorkActionStatusSucceeded, Phase: "plan_succeeded", CreatedAt: completedAt, CompletedAt: &completedAt,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+
+	if err := handlers.markRepositoryMonitorCommandWorkActionRetryPending(t.Context(), monitor, command, "run-late", errors.New("signal failed")); err != nil {
+		t.Fatalf("markRepositoryMonitorCommandWorkActionRetryPending() error = %v", err)
+	}
+
+	action, err := handlers.repositoryMonitorStore.GetWorkAction(t.Context(), "demo", actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusSucceeded || action.CompletedAt == nil || action.BlockedReason != "" || action.RunID != "" {
+		t.Fatalf("action = %#v, want the finished action left unchanged", action)
 	}
 }
