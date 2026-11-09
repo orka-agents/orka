@@ -969,14 +969,20 @@ dataset that happened while no controller ran needs the incarnation recorded
 with the acknowledgement.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
-Failovers})` checks, for every write in the write catalog, that after a
+Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
 restart and after each declared failover the change, its receipt, the
 dataset's identity, controller epoch, installation and watermark survive, and
-a replay changes nothing. Each failover must change the incarnation, and
-watermark writes that run during a failover either survive or settle as
-aborted through `ResolveOperation`. A `local-fsync` or `local-buffered`
-provider declares no failover, and a `synchronous-replicated` one declares at
-least one. SQLite supplies `Restart` by closing and reopening its file.
+a replay changes nothing. Each failover must change the incarnation. Before
+each failover, `HoldWrites` keeps watermark writes waiting inside the
+database, and the suite checks that they were in flight when the switch
+began; each then returns nil and survives, or is refused or ends with an
+unknown outcome (`ErrUnavailable`, `ErrNotReady` or `ErrOutcomeUnknown`)
+and settles through `ResolveOperation` as committed or aborted, never in any
+other state. A `local-fsync` or `local-buffered` provider declares no
+failover, and a `synchronous-replicated` one declares at least one. An
+`async-replicated` provider declares none either: its switch may lose
+acknowledged writes, which these cases do not allow, and Orka holds the
+installation after one. SQLite supplies `Restart` by closing and reopening its file.
 
 ### Writer exclusivity and schema migration for adapters
 
