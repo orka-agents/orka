@@ -81,6 +81,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 
 	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -311,6 +312,7 @@ func main() {
 	var usageRetention time.Duration
 	var agentExecutionSnapshotKeyFile string
 	var agentExecutionSnapshotSecret, agentExecutionSnapshotSecretKey string
+	var taskWebhookSigningSecret string
 	var agentExecutionSnapshotRetention time.Duration
 	var agentExecutionSnapshotRetentionInterval time.Duration
 	var controllerURL string
@@ -546,6 +548,10 @@ func main() {
 			"then the kubelet's projection of that Secret. Empty means the operator supplies the mounted key file.")
 	flag.StringVar(&agentExecutionSnapshotSecretKey, "agent-execution-snapshot-secret-key", "key",
 		"Item inside --agent-execution-snapshot-secret that holds the key.")
+	flag.StringVar(&taskWebhookSigningSecret, "task-webhook-signing-secret", "orka-task-webhook-signing",
+		"Name of the Secret in the controller Pod namespace that holds the Ed25519 keys signing Task webhook "+
+			"deliveries (items \"current\" and optional \"previous\", PEM PKCS#8). The controller creates it and "+
+			"mints \"current\" when missing. Empty disables delivery: webhooks are never sent unsigned.")
 	flag.DurationVar(&agentExecutionSnapshotRetention, "agent-execution-snapshot-retention",
 		envDurationDefault("ORKA_AGENT_EXECUTION_SNAPSHOT_RETENTION", controller.DefaultAgentExecutionSnapshotRetention),
 		"Minimum audit/backup retention period for encrypted execution snapshots after all references disappear.")
@@ -1612,6 +1618,18 @@ func main() {
 	}
 	webhookNotifier := controller.NewWebhookNotifier()
 	webhookNotifier.SetKubeClient(mgr.GetClient())
+	var taskWebhookKeys taskwebhook.KeySource
+	if name := strings.TrimSpace(taskWebhookSigningSecret); name != "" {
+		taskWebhookKeys = &taskwebhook.SecretKeySource{
+			Reader:    mgr.GetAPIReader(),
+			Writer:    mgr.GetClient(),
+			Namespace: currentPodNamespace(),
+			Name:      name,
+		}
+		webhookNotifier.SetKeySource(taskWebhookKeys)
+	} else {
+		setupLog.Info("Task webhook signing is disabled; Task webhooks will not be delivered")
+	}
 	jobBuilder := controller.NewJobBuilder(mgr.GetClient())
 	jobBuilder.ControllerMode = mode
 	jobBuilder.AIWorkerImage = aiWorkerImage
@@ -2209,6 +2227,7 @@ func main() {
 			ControllerEpochs:                 publisherControllerEpochs,
 		},
 		DashboardEnabled: dashboardEnabled,
+		TaskWebhookKeys:  taskWebhookKeys,
 		Chat: api.ChatConfig{
 			LinkedAccounts:         chatLinkedAccounts,
 			ConnectorsEnabled:      connectorsEnabled,
