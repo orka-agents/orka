@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/agentcontext"
@@ -171,10 +173,11 @@ func evalTrialTaskName(run *corev1alpha1.EvalRun, caseID string, trial int32) st
 	return fmt.Sprintf("%s-%d-%s", prefix, trial, hex.EncodeToString(sum[:])[:12])
 }
 
-// evalReviewPromptTemplateDigest digests the production prompt each case
-// renders, in case order. It covers every rendering branch the run's trials
-// use, so a controller change to any of them changes the digest, as does a
-// monitor setting rendered into the prompt.
+// evalReviewPromptTemplateDigest digests the production review Task each
+// case renders, its prompt, annotations and the rest of its spec such as the
+// allowed tools, in case order. It covers every rendering branch the run's
+// trials use, so a controller change to any of them changes the digest, as
+// does a monitor setting rendered into the Task.
 func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cases []evals.Case) (string, error) {
 	hash := sha256.New()
 	for _, c := range cases {
@@ -182,9 +185,22 @@ func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cas
 		if err != nil {
 			return "", evalRunConfigErrorf(evalRunReasonSubjectInvalid, "render the prompt of case %q: %v", c.ID, err)
 		}
-		_, _ = fmt.Fprintf(hash, "%d:%s%d:%s", len(c.ID), c.ID, len(task.Spec.Prompt), task.Spec.Prompt)
+		rendered, err := evalReviewTaskDigestInput(task)
+		if err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(hash, "%d:%s%d:%s", len(c.ID), c.ID, len(rendered), rendered)
 	}
 	return evals.DigestPrefix + hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// evalReviewTaskDigestInput is what the prompt digest covers of one rendered
+// review Task: its annotations and its whole spec, prompt included.
+func evalReviewTaskDigestInput(task *corev1alpha1.Task) ([]byte, error) {
+	return json.Marshal(struct {
+		Annotations map[string]string     `json:"annotations"`
+		Spec        corev1alpha1.TaskSpec `json:"spec"`
+	}{task.Annotations, task.Spec})
 }
 
 // evalReviewOutcomeFromResult runs a completed trial's raw output through the
@@ -248,7 +264,7 @@ type evalReviewSubject struct {
 func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *corev1alpha1.EvalRun) (*evalReviewSubject, error) {
 	ref := run.Spec.Subject.RepositoryMonitorReview.MonitorRef
 	monitor := &corev1alpha1.RepositoryMonitor{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
+	if err := r.getEvalDependency(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "RepositoryMonitor %q was not found", ref.Name)
 		}
@@ -269,7 +285,7 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 			"RepositoryMonitor %q runs a validation image; evals do not support validation yet", monitor.Name)
 	}
 	reviewer := &corev1alpha1.Agent{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
+	if err := r.getEvalDependency(ctx, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "reviewer agent %q was not found", reviewerRef.Name)
 		}
@@ -304,6 +320,17 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		RuntimeImageDigest: image[strings.LastIndex(image, "@")+1:],
 		SystemPromptDigest: systemPromptDigest,
 	}, nil
+}
+
+// getEvalDependency reads an object the run depends on from the cache, and
+// confirms a miss against the API server: an object created just before the
+// run may not be cached yet, and a miss fails the run for good.
+func (r *EvalRunReconciler) getEvalDependency(ctx context.Context, key types.NamespacedName, obj client.Object) error {
+	err := r.Get(ctx, key, obj)
+	if apierrors.IsNotFound(err) {
+		return r.uncachedReader().Get(ctx, key, obj)
+	}
+	return err
 }
 
 // evalReviewerSystemPromptDigest resolves the reviewer's system prompt the
