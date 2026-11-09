@@ -309,6 +309,9 @@ func (s *Server) retainUnresolvedCreate(state *sessionState, request harnessv2.C
 }
 
 func (s *Server) removeSessionPrivateFiles(state *sessionState) error {
+	// Callers have proven the session child stopped, so nothing can recreate
+	// the workspace under its recorded identity any more.
+	state.paths.ReleaseWorkspaceIdentity()
 	if err := os.RemoveAll(state.paths.Root); err != nil {
 		return err
 	}

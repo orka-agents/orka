@@ -139,7 +139,10 @@ func parseOperatorWorkspaceIdentity(raw string) (operatorWorkspaceIdentity, bool
 // openOperatorWorkspaceRoot opens the workspace root without following a
 // symbolic link and proves it is the recorded directory. The child owns its
 // session root, so it could rename the workspace aside and put its private
-// home, or any directory it can read, in its place.
+// home, or any directory it can read, in its place. The comparison is sound
+// only because the supervisor holds the recorded directory open for the
+// session's lifetime (acp.RecordWorkspaceIdentity): otherwise the child could
+// delete the workspace and be given its inode number for a new directory.
 func openOperatorWorkspaceRoot(root string, identity operatorWorkspaceIdentity) (int, *operatorFileStatus) {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {

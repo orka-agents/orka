@@ -1006,6 +1006,7 @@ func (s *Server) createSession(
 		if !cleanup {
 			return
 		}
+		paths.ReleaseWorkspaceIdentity()
 		if nativeJournalDir == "" {
 			_ = os.RemoveAll(paths.Root)
 			return
@@ -1279,7 +1280,9 @@ func (s *Server) createSession(
 		resumeSessionID = snapshot.ProviderSessionID
 	}
 	// Operator file copies reopen the workspace by path once the child, which
-	// may own the session root, is running, so its identity is pinned here.
+	// may own the session root, is running, so its identity is pinned here and
+	// the directory is held open until the session ends: a deleted workspace's
+	// inode number could otherwise be given to a directory the child creates.
 	// It must precede the ownership handoff: afterwards the 0700 child-owned
 	// session root is no longer traversable by a supervisor that runs without
 	// CAP_DAC_OVERRIDE, as managed runtime Pods do. Ownership changes do not

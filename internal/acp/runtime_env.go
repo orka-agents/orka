@@ -53,26 +53,76 @@ type SessionPaths struct {
 	// that reopens Workspace by path later verifies this identity.
 	WorkspaceDevice uint64
 	WorkspaceInode  uint64
+	// workspacePin holds the recorded directory open. A device and inode pair
+	// names a directory only while that inode stays allocated: once the child
+	// deletes its workspace, a directory it creates next can be given the same
+	// inode number. The open descriptor keeps the inode allocated, so no other
+	// directory can carry the recorded identity until the pin is released.
+	// Copies of SessionPaths share the pin.
+	workspacePin *os.File
 }
 
-// RecordWorkspaceIdentity records the workspace directory's device and inode.
-// Call it only while the supervisor still exclusively controls the tree, that
-// is before the session child starts. Platforms without Unix inode identity
-// return an error, which callers must treat as a refusal.
+// RecordWorkspaceIdentity records the workspace directory's device and inode
+// and holds the directory open so that identity cannot be reused. Call it only
+// while the supervisor still exclusively controls the tree, that is before the
+// session child starts, and release it with ReleaseWorkspaceIdentity when the
+// session ends. Platforms without Unix inode identity return an error, which
+// callers must treat as a refusal.
 func RecordWorkspaceIdentity(paths *SessionPaths) error {
-	info, err := os.Lstat(paths.Workspace)
+	pin, err := openWorkspaceDirectory(paths.Workspace)
 	if err != nil {
 		return fmt.Errorf("inspect session workspace: %w", err)
 	}
+	// The identity comes from the held descriptor, not from a second lookup
+	// of the path.
+	info, err := pin.Stat()
+	if err != nil {
+		_ = pin.Close()
+		return fmt.Errorf("inspect session workspace: %w", err)
+	}
 	if !info.IsDir() {
+		_ = pin.Close()
 		return fmt.Errorf("session workspace is not a directory")
 	}
 	dev, ino, err := directoryIdentity(info)
 	if err != nil {
+		_ = pin.Close()
 		return err
 	}
-	paths.WorkspaceDevice, paths.WorkspaceInode = dev, ino
+	paths.ReleaseWorkspaceIdentity()
+	paths.WorkspaceDevice, paths.WorkspaceInode, paths.workspacePin = dev, ino, pin
 	return nil
+}
+
+// PinnedWorkspaceIdentity returns the recorded workspace identity while the
+// directory is still held open. Without a live pin the recorded numbers prove
+// nothing, so a session that was never pinned, or whose pin was released,
+// gets an error that callers must treat as a refusal.
+func (p SessionPaths) PinnedWorkspaceIdentity() (uint64, uint64, error) {
+	if p.workspacePin == nil || p.WorkspaceInode == 0 {
+		return 0, 0, errors.New("session workspace identity is not pinned")
+	}
+	info, err := p.workspacePin.Stat()
+	if err != nil {
+		return 0, 0, fmt.Errorf("session workspace identity is no longer pinned: %w", err)
+	}
+	dev, ino, err := directoryIdentity(info)
+	if err != nil {
+		return 0, 0, err
+	}
+	if dev != p.WorkspaceDevice || ino != p.WorkspaceInode {
+		return 0, 0, errors.New("session workspace identity does not match its pin")
+	}
+	return dev, ino, nil
+}
+
+// ReleaseWorkspaceIdentity closes the descriptor that holds the workspace
+// directory. Call it only once the session child is proven stopped; every
+// copy of these paths then refuses PinnedWorkspaceIdentity.
+func (p SessionPaths) ReleaseWorkspaceIdentity() {
+	if p.workspacePin != nil {
+		_ = p.workspacePin.Close()
+	}
 }
 
 func PrepareSessionPaths(baseDir, sessionID string) (SessionPaths, error) {

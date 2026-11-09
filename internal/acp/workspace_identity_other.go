@@ -15,3 +15,7 @@ var errWorkspaceIdentityUnsupported = errors.New("session workspace identity pin
 func directoryIdentity(os.FileInfo) (uint64, uint64, error) {
 	return 0, 0, errWorkspaceIdentityUnsupported
 }
+
+func openWorkspaceDirectory(string) (*os.File, error) {
+	return nil, errWorkspaceIdentityUnsupported
+}

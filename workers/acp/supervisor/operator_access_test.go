@@ -752,6 +752,21 @@ func TestOperatorFilesPassThePinnedWorkspaceIdentity(t *testing.T) {
 	if len(launch.Argv) != 7 || launch.Argv[3] != state.paths.Workspace || launch.Argv[4] != want {
 		t.Fatalf("helper argv = %q, want the workspace %s with identity %s", launch.Argv, state.paths.Workspace, want)
 	}
+
+	// The recorded numbers name the workspace only while its directory is
+	// held open. Once the hold is gone they may name any directory, so the
+	// session is refused again.
+	state.paths.ReleaseWorkspaceIdentity()
+	request, _ = http.NewRequest(http.MethodGet, filesURL(), nil)
+	request.Header = signedOperatorFileHeaders(t, "operator-copy-out-3")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusConflict || len(launches) != 0 {
+		t.Fatalf("a session whose workspace is no longer held = %d (launches %d), want 409 and no helper", response.StatusCode, len(launches))
+	}
 }
 
 // A client that disconnects mid-exec gets the whole operation killed, and the

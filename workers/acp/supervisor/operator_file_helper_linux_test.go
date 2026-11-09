@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/orka-agents/orka/internal/acp"
 )
 
 // workspaceIdentityArg is the identity the supervisor would have recorded for
@@ -313,5 +316,92 @@ func TestOperatorFileHelperRefusesAReplacedWorkspaceRoot(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, "planted")); !os.IsNotExist(err) {
 		t.Fatalf("write landed in the replacement directory: %v", err)
+	}
+}
+
+// recreateDirectoryWithInode creates directories under parent until one is
+// given the wanted inode number, as a session child that has deleted its
+// workspace would, and reports whether one was.
+func recreateDirectoryWithInode(t *testing.T, parent, prefix string, want uint64) (string, bool) {
+	t.Helper()
+	for attempt := range 64 {
+		dir := filepath.Join(parent, fmt.Sprintf("%s-%d", prefix, attempt))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		var stat unix.Stat_t
+		if err := unix.Lstat(dir, &stat); err != nil {
+			t.Fatal(err)
+		}
+		if stat.Ino == want {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+// Renaming the workspace aside keeps its inode allocated, so the replacement
+// has a different one. Deleting it does not: the filesystem can hand the same
+// inode number to the next directory the child creates, which then carries
+// the recorded device and inode. The supervisor holds the recorded directory
+// open for the session's lifetime so that cannot happen.
+func TestOperatorFileHelperRefusesADeletedAndRecreatedWorkspaceRoot(t *testing.T) {
+	session := t.TempDir()
+	probe := filepath.Join(session, "probe")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var probeStat unix.Stat_t
+	if err := unix.Lstat(probe, &probeStat); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, reused := recreateDirectoryWithInode(t, session, "probe", probeStat.Ino); !reused {
+		t.Skip("this filesystem does not hand a deleted directory's inode number to the next one")
+	}
+
+	paths := acp.SessionPaths{Workspace: filepath.Join(session, "workspace")}
+	if err := os.Mkdir(paths.Workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := acp.RecordWorkspaceIdentity(&paths); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(paths.ReleaseWorkspaceIdentity)
+	device, inode, err := paths.PinnedWorkspaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := operatorWorkspaceIdentity{dev: device, ino: inode}.String()
+
+	// The child deletes its workspace and creates directories until one is
+	// given the recorded inode number, then moves it into place. With the
+	// directory held, none is; the last attempt stands in for the best the
+	// child can do.
+	if err := os.Remove(paths.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	replacement, reused := recreateDirectoryWithInode(t, session, "replacement", inode)
+	if !reused {
+		replacement = filepath.Join(session, "replacement-0")
+	}
+	if err := os.WriteFile(filepath.Join(replacement, "credentials"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, paths.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	status, content := runFileHelper(t, []string{OperatorFileHelperRead, paths.Workspace, identity, "credentials", "1024"}, nil)
+	if status.OK || strings.Contains(string(content), "secret") || status.Code != operatorFileCodeDenied {
+		t.Fatalf("a deleted and recreated workspace root was used (inode reused: %v): %+v %q", reused, status, content)
+	}
+	status, _ = runFileHelper(t, []string{OperatorFileHelperWrite, paths.Workspace, identity, "planted", "1"}, strings.NewReader("x"))
+	if status.OK {
+		t.Fatal("a write into a deleted and recreated workspace root must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(paths.Workspace, "planted")); !os.IsNotExist(err) {
+		t.Fatalf("write landed in the recreated directory: %v", err)
 	}
 }

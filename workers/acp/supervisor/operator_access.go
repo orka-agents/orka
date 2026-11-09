@@ -780,11 +780,14 @@ func (s *Server) handleOperatorFiles(w http.ResponseWriter, r *http.Request) {
 	if request.Write {
 		mode = OperatorFileHelperWrite
 	}
-	if target.paths.WorkspaceInode == 0 {
+	// The recorded numbers name the workspace only while the supervisor still
+	// holds that directory open; see acp.SessionPaths.
+	workspaceDevice, workspaceInode, err := target.paths.PinnedWorkspaceIdentity()
+	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "runtime session workspace identity is unavailable")
 		return
 	}
-	identity := strconv.FormatUint(target.paths.WorkspaceDevice, 10) + ":" + strconv.FormatUint(target.paths.WorkspaceInode, 10)
+	identity := strconv.FormatUint(workspaceDevice, 10) + ":" + strconv.FormatUint(workspaceInode, 10)
 	env, err := acp.BuildChildEnvironment(target.paths, acp.EnvironmentConfig{PATH: target.childPath})
 	if err != nil {
 		writeOperatorError(w, http.StatusConflict, "operator environment is unavailable")
