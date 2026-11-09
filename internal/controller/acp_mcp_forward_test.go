@@ -132,3 +132,47 @@ func TestForwardingToolsNeedACredentialInjectingPolicy(t *testing.T) {
 		t.Fatalf("an ordinary Tool keeps its Gateway policy: %v", err)
 	}
 }
+
+// TestForwardingToolsNeedTheBearerOutput covers a policy that would send the
+// credential in another header or without "Bearer ": Azure Resource Manager
+// would refuse every request, so the Tool is refused before the agent starts.
+func TestForwardingToolsNeedTheBearerOutput(t *testing.T) {
+	tool := forwardingDescriptorTool()
+	none, raw, bearer := "", "Token ", "Bearer "
+	for name, tc := range map[string]struct {
+		output  *corev1alpha1.OutboundCredentialOutput
+		refused bool
+	}{
+		"no output":                    {},
+		"defaults written out":         {output: &corev1alpha1.OutboundCredentialOutput{Header: "Authorization", Prefix: &bearer}},
+		"header in another case":       {output: &corev1alpha1.OutboundCredentialOutput{Header: "authorization"}},
+		"another header":               {output: &corev1alpha1.OutboundCredentialOutput{Header: "X-Api-Key"}, refused: true},
+		"no prefix":                    {output: &corev1alpha1.OutboundCredentialOutput{Prefix: &none}, refused: true},
+		"another prefix":               {output: &corev1alpha1.OutboundCredentialOutput{Prefix: &raw}, refused: true},
+		"another header and no prefix": {output: &corev1alpha1.OutboundCredentialOutput{Header: "X-Api-Key", Prefix: &none}, refused: true},
+	} {
+		for adapter, spec := range map[string]corev1alpha1.OutboundAccessPolicySpec{
+			"direct":         {Direct: &corev1alpha1.DirectOutboundAccess{Output: tc.output}},
+			"connection":     {Connection: &corev1alpha1.ConnectionOutboundAccess{Output: tc.output}},
+			"agent identity": {AgentIdentity: &corev1alpha1.AgentIdentityOutboundAccess{Output: tc.output}},
+		} {
+			policy := &corev1alpha1.OutboundAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: "azure"}, Spec: spec}
+			err := forwardingPolicySupported(tool, policy)
+			if tc.refused && (err == nil || !strings.Contains(err.Error(), "Authorization: Bearer")) {
+				t.Errorf("%s, %s: err = %v, want a refusal", name, adapter, err)
+			}
+			if !tc.refused && err != nil {
+				t.Errorf("%s, %s: %v", name, adapter, err)
+			}
+		}
+	}
+	plain := forwardingDescriptorTool()
+	plain.Spec.HTTP.Forward = nil
+	custom := &corev1alpha1.OutboundAccessPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "other"},
+		Spec:       corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{Output: &corev1alpha1.OutboundCredentialOutput{Header: "X-Api-Key"}}},
+	}
+	if err := forwardingPolicySupported(plain, custom); err != nil {
+		t.Fatalf("an ordinary Tool keeps its policy's output: %v", err)
+	}
+}

@@ -67,7 +67,13 @@ Enable toolboxes and allow your registry as described in
 
 The Agent reads Azure as its own Entra agent identity. Set the identity up
 first ([Agent identities](agent-identities.md), steps 1 to 5), then give that
-identity an Azure role, for example **Reader** on one resource group.
+identity an Azure role, for example **Reader** on one resource group:
+
+```bash
+az role assignment create --role Reader \
+  --assignee-object-id "<agent identity appId>" --assignee-principal-type ServicePrincipal \
+  --scope "$(az group show -n <resource group> --query id -o tsv)"
+```
 
 ```yaml
 apiVersion: core.orka.ai/v1alpha1
@@ -169,7 +175,9 @@ before each Task:
 - `brokeredToolClass` is `read`.
 - It sets no `parameters`, `headers`, `authSecretRef`, or MCP backend.
 - Its credential comes from an `outboundAccessPolicyRef` that injects one
-  (`agentIdentity`, `connection`, or `direct`), not a gateway.
+  (`agentIdentity`, `connection`, or `direct`), not a gateway, and sends it
+  as `Authorization: Bearer`, the default. A policy with another `output`
+  header or prefix is refused, because Azure would refuse every request.
 - When the policy draws on a ConnectorProvider, the provider declares a tool
   of the same name with the same `url` and `forward`.
 
@@ -199,12 +207,24 @@ spec:
       allowedTools: [Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, azurearm]
 ```
 
+- An agent identity belongs to one Agent. If the Agent from the
+  [Agent identities](agent-identities.md) guide already holds it, add the
+  `toolboxes` entry and `azurearm` to that Agent instead of creating this
+  one, or create another agent identity for this Agent. A second Agent that
+  names a held identity reports `Ready=False`.
 - The agent needs `Bash` to run `az`, and the Task must allow `azurearm`.
 - Allow at most one Azure forwarding Tool per Agent. A session that would
   have two fails to start, so which identity `az` uses is never ambiguous.
 
 Run a Task such as "List my resource groups and their locations." The agent
-runs `az group list` as usual.
+runs `az group list` as usual:
+
+```bash
+orka task create "List my resource groups and their locations." \
+  --agent azure-reader --name az-groups -n team-a
+orka task wait az-groups -n team-a
+orka task get az-groups -n team-a
+```
 
 ## Troubleshooting
 
