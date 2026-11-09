@@ -8,6 +8,7 @@
 {{- include "orka.validatePublisherAuth" . }}
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- include "orka.validateAgentHosts" . }}
+{{- include "orka.validateTaskWebhooks" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -110,7 +111,8 @@ spec:
             - {{ printf "--agent-execution-snapshot-secret=%s" (include "orka.agentExecutionSnapshotSecretName" .) | quote }}
             - {{ printf "--agent-execution-snapshot-secret-key=%s" (include "orka.agentExecutionSnapshotSecretKey" .) | quote }}
             {{- end }}
-            - {{ printf "--task-webhook-signing-secret=%s" (default (printf "%s-task-webhook-signing" (include "orka.fullname" .)) (trim (default "" ((.Values.controller.taskWebhooks | default dict).signingSecretName)))) | quote }}
+            - {{ printf "--task-webhook-signing-secret=%s" (include "orka.taskWebhookSigningSecretName" .) | quote }}
+            - {{ printf "--task-webhook-signing-namespace=%s" (include "orka.taskWebhookSigningNamespace" .) | quote }}
             - --agent-execution-snapshot-retention={{ .Values.controller.agentExecutionSnapshot.retention }}
             - --agent-execution-snapshot-retention-interval={{ .Values.controller.agentExecutionSnapshot.retentionInterval }}
 
