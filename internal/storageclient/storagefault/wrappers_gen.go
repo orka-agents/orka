@@ -2224,6 +2224,19 @@ func (p *stateProvider) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	return err
 }
 
+func (p *stateProvider) MarkWorkActionRetryPending(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) (bool, error) {
+	var r0 bool
+	injected, err := p.injector.call(ctx, p.contract, "MarkWorkActionRetryPending", func(ctx context.Context) (err error) {
+		r0, err = p.inner.MarkWorkActionRetryPending(ctx, a1, a2, a3, a4, a5)
+		return err
+	})
+	if injected {
+		var z0 bool
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) PrepareSessionCleanup(ctx context.Context, a1 storagev1.SessionCleanupIntent) (*storagev1.SessionCleanupIntent, error) {
 	var r0 *storagev1.SessionCleanupIntent
 	injected, err := p.injector.call(ctx, p.contract, "PrepareSessionCleanup", func(ctx context.Context) (err error) {

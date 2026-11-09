@@ -776,24 +776,16 @@ func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx contex
 	if desiredAction == "" {
 		return nil
 	}
-	action, err := h.repositoryMonitorStore.GetWorkAction(ctx, monitor.Namespace, store.RepositoryMonitorWorkActionID(command.ID, desiredAction))
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	// A finished action is final; reopening it would run its work again.
-	if store.IsRepositoryMonitorWorkActionTerminal(action.Status) {
+	// The store checks the status and writes in one step: a finished action is
+	// final, and reopening it, even one the controller completes concurrently,
+	// would run its work again.
+	_, err := h.repositoryMonitorStore.MarkWorkActionRetryPending(ctx, monitor.Namespace,
+		store.RepositoryMonitorWorkActionID(command.ID, desiredAction), runID,
+		store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, cause.Error())
+	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
-	action.Status = store.RepositoryMonitorWorkActionStatusRetryPending
-	action.Phase = store.RepositoryMonitorWorkActionStatusRetryPending
-	action.RunID = runID
-	action.Error = cause.Error()
-	action.BlockedReason = store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed
-	action.CompletedAt = nil
-	return h.repositoryMonitorStore.UpdateWorkAction(ctx, action)
+	return err
 }
 
 func (h *Handlers) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {

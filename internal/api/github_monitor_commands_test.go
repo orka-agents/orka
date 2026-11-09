@@ -503,3 +503,62 @@ func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsFinishedAction(t
 		t.Fatalf("action = %#v, want the finished action left unchanged", action)
 	}
 }
+
+// completingWriteStore completes the action just before a caller's write of
+// it reaches the store, as the controller can between that caller's read and
+// its write.
+type completingWriteStore struct {
+	store.RepositoryMonitorStore
+}
+
+func (s completingWriteStore) complete(ctx context.Context, namespace, id string) error {
+	action, err := s.GetWorkAction(ctx, namespace, id)
+	if err != nil {
+		return err
+	}
+	completedAt := time.Now().UTC()
+	action.Status, action.CompletedAt = store.RepositoryMonitorWorkActionStatusSucceeded, &completedAt
+	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func (s completingWriteStore) UpdateWorkAction(ctx context.Context, action *store.WorkAction) error {
+	if err := s.complete(ctx, action.MonitorNamespace, action.ID); err != nil {
+		return err
+	}
+	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
+}
+
+func (s completingWriteStore) MarkWorkActionRetryPending(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
+	if err := s.complete(ctx, namespace, id); err != nil {
+		return false, err
+	}
+	return s.RepositoryMonitorStore.MarkWorkActionRetryPending(ctx, namespace, id, runID, reason, cause)
+}
+
+func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsConcurrentCompletion(t *testing.T) {
+	_, handlers := setupRepositoryMonitorHandlers(t, ContextTokenConfig{}, ContextTokenAuthorizationModeOff)
+	monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "repo-monitor", Namespace: "demo"}}
+	command := &store.CommandEvent{ID: "cmd-racing", Intent: commandIntentPlan}
+	actionID := store.RepositoryMonitorWorkActionID(command.ID, commandIntentPlan)
+	if err := handlers.repositoryMonitorStore.CreateWorkAction(t.Context(), &store.WorkAction{
+		ID: actionID, MonitorNamespace: "demo", MonitorName: "repo-monitor", CommandEventID: command.ID,
+		TargetKind: repositoryMonitorTargetKindIssue, TargetNumber: 44, Intent: commandIntentPlan, DesiredAction: commandIntentPlan,
+		Status: store.RepositoryMonitorWorkActionStatusRunning,
+	}); err != nil {
+		t.Fatalf("CreateWorkAction() error = %v", err)
+	}
+	inner := handlers.repositoryMonitorStore
+	handlers.repositoryMonitorStore = completingWriteStore{inner}
+
+	if err := handlers.markRepositoryMonitorCommandWorkActionRetryPending(t.Context(), monitor, command, "run-late", errors.New("signal failed")); err != nil {
+		t.Fatalf("markRepositoryMonitorCommandWorkActionRetryPending() error = %v", err)
+	}
+
+	action, err := inner.GetWorkAction(t.Context(), "demo", actionID)
+	if err != nil {
+		t.Fatalf("GetWorkAction() error = %v", err)
+	}
+	if action.Status != store.RepositoryMonitorWorkActionStatusSucceeded || action.CompletedAt == nil || action.RunID != "" {
+		t.Fatalf("action = %#v, want the completion that landed before the write kept", action)
+	}
+}

@@ -53,18 +53,6 @@ func IsRepositoryMonitorWorkActionActive(status string) bool {
 	}
 }
 
-// IsRepositoryMonitorWorkActionTerminal reports whether status is final.
-func IsRepositoryMonitorWorkActionTerminal(status string) bool {
-	switch status {
-	case RepositoryMonitorWorkActionStatusSucceeded, RepositoryMonitorWorkActionStatusFailed,
-		RepositoryMonitorWorkActionStatusBlocked, RepositoryMonitorWorkActionStatusCancelled,
-		RepositoryMonitorWorkActionStatusCompleted:
-		return true
-	default:
-		return false
-	}
-}
-
 // RepositoryMonitorDesiredActionForIntent maps public command intents to durable workflow action names.
 func RepositoryMonitorDesiredActionForIntent(intent string) string {
 	intent = strings.TrimSpace(intent)

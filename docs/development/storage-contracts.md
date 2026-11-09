@@ -288,8 +288,10 @@ the observable parts.
   provider contracts. Revision 3 added dataset binding (see "Installation
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
-  writes without one during the transition. The revision Orka requires for
-  each part belongs to Orka, not to the contract.
+  writes without one during the transition. Revision 5 adds
+  `MarkWorkActionRetryPending`, which parks an active work action for retry
+  and leaves a finished one unchanged in one step. The revision Orka requires
+  for each part belongs to Orka, not to the contract.
   Orka never interprets a provider's `SchemaVersion` beyond equality: a
   provider gives its own verdict on its schema. One that can still read the
   identity of a dataset it cannot serve reports the state `incompatible`;

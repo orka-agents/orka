@@ -1177,6 +1177,37 @@ func (s *Store) cancelWorkActionsWrite(ctx context.Context, namespace, monitorNa
 	return int(rows), nil
 }
 
+// MarkWorkActionRetryPending parks an active work action for a retry and
+// leaves a finished one unchanged.
+func (s *Store) MarkWorkActionRetryPending(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
+	return writeOperation(ctx, s, "MarkWorkActionRetryPending", nil, func(ctx context.Context) (bool, error) {
+		return s.markWorkActionRetryPendingWrite(ctx, namespace, id, runID, reason, cause)
+	})
+}
+
+func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
+	exec := s.taskDataExecutor(ctx)
+	result, err := exec.ExecContext(ctx,
+		`UPDATE work_actions SET status = 'retry_pending', phase = 'retry_pending', run_id = ?, blocked_reason = ?,
+		 error = ?, completed_at = NULL, updated_at = ?
+		 WHERE monitor_namespace = ? AND id = ? AND status IN ('queued', 'leased', 'running', 'retry_pending')`,
+		runID, reason, cause, time.Now().UTC(), namespace, id)
+	if err != nil {
+		return false, err
+	}
+	if rows, err := result.RowsAffected(); err != nil {
+		return false, err
+	} else if rows > 0 {
+		return true, nil
+	}
+	var found int
+	err = exec.QueryRowContext(ctx, `SELECT 1 FROM work_actions WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, store.ErrNotFound
+	}
+	return false, err
+}
+
 // CreateImplementationJob inserts an implementation job.
 func (s *Store) CreateImplementationJob(ctx context.Context, job *store.ImplementationJob) error {
 	_, err := writeOperationInto(ctx, s, "CreateImplementationJob", nil, job, func(ctx context.Context) (noResult, error) {

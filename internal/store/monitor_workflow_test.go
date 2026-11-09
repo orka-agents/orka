@@ -26,24 +26,21 @@ func TestRepositoryMonitorDesiredActionForIntentNormalizesBeforeMapping(t *testi
 }
 
 func TestRepositoryMonitorWorkActionStatusClassification(t *testing.T) {
-	for status, want := range map[string][2]bool{ // {active, terminal}
-		RepositoryMonitorWorkActionStatusQueued:       {true, false},
-		RepositoryMonitorWorkActionStatusLeased:       {true, false},
-		RepositoryMonitorWorkActionStatusRunning:      {true, false},
-		RepositoryMonitorWorkActionStatusRetryPending: {true, false},
-		RepositoryMonitorWorkActionStatusSucceeded:    {false, true},
-		RepositoryMonitorWorkActionStatusFailed:       {false, true},
-		RepositoryMonitorWorkActionStatusBlocked:      {false, true},
-		RepositoryMonitorWorkActionStatusCancelled:    {false, true},
-		RepositoryMonitorWorkActionStatusCompleted:    {false, true},
-		"":          {false, false},
-		"processed": {false, false},
+	for status, want := range map[string]bool{
+		RepositoryMonitorWorkActionStatusQueued:       true,
+		RepositoryMonitorWorkActionStatusLeased:       true,
+		RepositoryMonitorWorkActionStatusRunning:      true,
+		RepositoryMonitorWorkActionStatusRetryPending: true,
+		RepositoryMonitorWorkActionStatusSucceeded:    false,
+		RepositoryMonitorWorkActionStatusFailed:       false,
+		RepositoryMonitorWorkActionStatusBlocked:      false,
+		RepositoryMonitorWorkActionStatusCancelled:    false,
+		RepositoryMonitorWorkActionStatusCompleted:    false,
+		"":          false,
+		"processed": false,
 	} {
-		if got := IsRepositoryMonitorWorkActionActive(status); got != want[0] {
-			t.Errorf("IsRepositoryMonitorWorkActionActive(%q) = %v, want %v", status, got, want[0])
-		}
-		if got := IsRepositoryMonitorWorkActionTerminal(status); got != want[1] {
-			t.Errorf("IsRepositoryMonitorWorkActionTerminal(%q) = %v, want %v", status, got, want[1])
+		if got := IsRepositoryMonitorWorkActionActive(status); got != want {
+			t.Errorf("IsRepositoryMonitorWorkActionActive(%q) = %v, want %v", status, got, want)
 		}
 	}
 	for _, status := range RepositoryMonitorWorkActionActiveStatuses() {
