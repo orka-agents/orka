@@ -11,7 +11,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
-	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/protectedset"
 	"github.com/orka-agents/orka/internal/store"
@@ -36,9 +35,9 @@ const (
 func (r *TaskReconciler) checkProposerConstraints(
 	ctx context.Context,
 	task *corev1alpha1.Task,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	bound *verifiedAgentExecution,
 ) (string, error) {
-	return verifyProposerConstraints(ctx, r.ProtectedSet, r.Recorder, task, mcpConfiguration)
+	return verifyProposerConstraints(ctx, r.ProtectedSet, r.Recorder, task, bound)
 }
 
 // verifyProposerConstraints loads the current protected set from source and
@@ -49,10 +48,13 @@ func verifyProposerConstraints(
 	source protectedset.Source,
 	recorder record.EventRecorder,
 	task *corev1alpha1.Task,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	bound *verifiedAgentExecution,
 ) (string, error) {
 	if task == nil || taskImprovementRole(task.Annotations) == "" {
 		return "", nil
+	}
+	if bound == nil {
+		return "a proposer requires a verified execution binding", nil
 	}
 	set, err := source.Load(ctx)
 	if err != nil {
@@ -61,7 +63,8 @@ func verifyProposerConstraints(
 		}
 		return "", err
 	}
-	if violation := proposerConstraintViolation(task, mcpConfiguration.ToolPolicy.AllowedToolNames, set); violation != "" {
+	externalEndpoint := bound.binding != nil && bound.binding.Backend == corev1alpha1.AgentExecutionBackendExternalEndpoint
+	if violation := proposerConstraintViolation(task, bound.mcpConfiguration.ToolPolicy.AllowedToolNames, externalEndpoint, set); violation != "" {
 		return violation, nil
 	}
 	logf.FromContext(ctx).Info("proposer Task constraints verified",
@@ -81,11 +84,11 @@ func verifyProposerConstraints(
 func (d *ACPDispatcher) rejectProposerBeforeExecution(
 	ctx context.Context,
 	task *corev1alpha1.Task,
-	mcpConfiguration harnessv2.MCPPolicyConfiguration,
+	bound *verifiedAgentExecution,
 	attemptID string,
 	fence store.ControllerEpochFence,
 ) (bool, error) {
-	violation, err := verifyProposerConstraints(ctx, d.ProtectedSet, nil, task, mcpConfiguration)
+	violation, err := verifyProposerConstraints(ctx, d.ProtectedSet, nil, task, bound)
 	if err != nil {
 		return true, d.requeueReservedTask(ctx, task, acpReservedRetryProposerConstraints, err)
 	}
@@ -106,10 +109,11 @@ func (d *ACPDispatcher) rejectProposerBeforeExecution(
 
 // proposerConstraintViolation checks a marked Task against every proposer
 // constraint. effectiveTools is the exact tool allowlist frozen into the
-// Task's runtime profile.
+// Task's runtime profile, and externalEndpoint reports whether its execution
+// binding dispatches to an external runtime endpoint.
 //
 //nolint:gocyclo // Every proposer constraint is listed together so none is skipped.
-func proposerConstraintViolation(task *corev1alpha1.Task, effectiveTools []string, set *protectedset.Set) string {
+func proposerConstraintViolation(task *corev1alpha1.Task, effectiveTools []string, externalEndpoint bool, set *protectedset.Set) string {
 	role := taskImprovementRole(task.Annotations)
 	if role != labels.ImprovementRoleProposer {
 		return fmt.Sprintf("improvement role %q is not supported", role)
@@ -119,6 +123,15 @@ func proposerConstraintViolation(task *corev1alpha1.Task, effectiveTools []strin
 	}
 	if task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		return "a proposer must be an agent Task"
+	}
+	// The token mount, network isolation and startup attestation a proposer
+	// relies on come from a controller-created RuntimePool. An external
+	// endpoint or an execution workspace class runs outside that pool.
+	if externalEndpoint {
+		return "a proposer must run on the built-in RuntimePool backend, not an external runtime endpoint"
+	}
+	if taskRequestsWorkspaceClass(task) {
+		return "a proposer cannot use an execution workspace class"
 	}
 	// Held-out cases and evaluation transcripts are namespace-scoped, so a
 	// proposer never runs where a case set lives.

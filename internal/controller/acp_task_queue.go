@@ -111,7 +111,7 @@ func (r *TaskReconciler) queueACPRuntimeTask(ctx context.Context, task *corev1al
 	}
 	// A Task marked as an improvement proposer runs only while every proposer
 	// constraint still holds against the current protected set.
-	if violation, err := r.checkProposerConstraints(ctx, frozenTask, bound.mcpConfiguration); err != nil {
+	if violation, err := r.checkProposerConstraints(ctx, frozenTask, bound); err != nil {
 		return ctrl.Result{}, err
 	} else if violation != "" {
 		return r.failACPPlanningTask(ctx, task, proposerConstraintViolationReason, violation)

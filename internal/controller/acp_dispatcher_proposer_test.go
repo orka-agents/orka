@@ -90,9 +90,16 @@ func TestProposerConstraintViolation(t *testing.T) {
 		mutate    func(*corev1alpha1.Task)
 		set       *protectedset.Set
 		effective []string
+		external  bool
 		want      string
 	}{
 		{name: "constrained write proposer runs"},
+		{name: "external runtime endpoint", external: true, want: "built-in RuntimePool backend"},
+		{name: "execution workspace class", mutate: func(task *corev1alpha1.Task) {
+			task.Spec.Execution = &corev1alpha1.ExecutionSpec{Workspace: &corev1alpha1.ExecutionWorkspaceSpec{
+				ClassRef: &corev1alpha1.WorkspaceClassReference{Name: "sandbox"},
+			}}
+		}, want: "execution workspace class"},
 		{name: "read proposer needs no path limits", mutate: func(task *corev1alpha1.Task) {
 			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: proposerTestRepository}
 		}},
@@ -180,7 +187,7 @@ func TestProposerConstraintViolation(t *testing.T) {
 			if tt.effective != nil {
 				tools = tt.effective
 			}
-			got := proposerConstraintViolation(task, tools, useSet)
+			got := proposerConstraintViolation(task, tools, tt.external, useSet)
 			if tt.want == "" && got != "" || tt.want != "" && !strings.Contains(got, tt.want) {
 				t.Fatalf("proposerConstraintViolation() = %q, want %q", got, tt.want)
 			}
@@ -199,7 +206,10 @@ func TestCheckProposerConstraintsLoadsTheCurrentProtectedSet(t *testing.T) {
 	configured := &TaskReconciler{ProtectedSet: protectedset.Source{Reader: reader, Namespace: proposerTestNamespace, Name: proposerTestConfigMap}}
 	unconfigured := &TaskReconciler{}
 	missing := &TaskReconciler{ProtectedSet: protectedset.Source{Reader: reader, Namespace: proposerTestNamespace, Name: "absent"}}
-	effective := harnessv2.MCPPolicyConfiguration{ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{"Read", "propose_memory"}}}
+	effective := &verifiedAgentExecution{
+		binding:          &corev1alpha1.AgentExecutionBinding{Backend: corev1alpha1.AgentExecutionBackendRuntimePool},
+		mcpConfiguration: harnessv2.MCPPolicyConfiguration{ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: []string{"Read", "propose_memory"}}},
+	}
 
 	unmarked := proposerTestTask(set)
 	delete(unmarked.Annotations, labels.AnnotationImprovementRole)
