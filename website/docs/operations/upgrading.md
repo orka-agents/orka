@@ -74,12 +74,52 @@ upgrading:
   `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
   against `/.well-known/orka/task-webhook-jwks.json`. See
   [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
-- The controller creates the signing Secret in its namespace on first use. It needs the
-  Secret `create` and `update` access the controller role already grants. Under the
-  default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
-  use `workers.ai.rbacProfile: restricted` if receivers rely on signatures, and do not let
-  untrusted users create Tasks or Agents there, since a `secretRef` can mount it. See
+- The signing key lives in a new namespace that holds only that Secret and binds only
+  the controller: `<release namespace>-task-webhook-signing` for Helm (value
+  `controller.taskWebhooks.signingNamespace`), `orka-task-webhook-signing` for kustomize
+  (flag `--task-webhook-signing-namespace`). The chart and the kustomize
+  install create the namespace and a controller Role in it; the controller creates the
+  Secret and mints the key on first use. Installs that grant RBAC some other way must
+  grant the controller `get` and `update` on that Secret and `create` on Secrets there.
+  The controller refuses to start if the signing namespace is its own, the watch, ACP
+  runtime or agent-host namespace. See
   [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- Builds of `main` from before this change kept the key in the controller namespace,
+  where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+  new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
+  or `orka-task-webhook-signing` in the controller namespace) after upgrading.
+- A new ValidatingAdmissionPolicy, `<fullname>-ai-worker-identity-protection`
+  (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
+  ServiceAccount may create. Before, the default AI worker role could create a
+  ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
+  act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+  RoleBindings. Now it may write only Opaque Secrets, create or delete only `code_exec`'s
+  own `orka-code-exec-*` ServiceAccounts, and create only
+  `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
+  the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
+  labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
+  subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+  ephemeral containers, and non-root, unprivileged containers with
+  `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
+  `RuntimeDefault` or `Localhost` seccomp profile.
+  Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
+  ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+  and cannot move it to its own ServiceAccount, set `workers.ai.identityProtection: false`
+  (Helm) or drop `orka-ai-worker-identity-protection` and its binding from your kustomize
+  build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+  controller again, including reading the webhook signing key.
+- Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
+  and on worker accounts the controller creates. An OutboundAccessPolicy whose
+  `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
+  controller is configured with (labeled or not, for example an externally managed
+  controller account), now reports `ReferenceDenied`, and the controller revokes any
+  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
+  token for itself gives it nothing new. Point other such policies at a dedicated
+  ServiceAccount.
+- Check the release namespace for ServiceAccount-token Secrets
+  (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
+  The default AI worker profile can read them; delete any you do not need, and treat a
+  token for a privileged account as exposed.
 - With signing enabled but no usable key (the Secret cannot be read or holds a malformed
   key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
   key is available.
