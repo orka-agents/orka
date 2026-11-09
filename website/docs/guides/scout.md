@@ -79,8 +79,8 @@ issue filer, must run it through `internal/scout` and use only the verified dige
   doesn't restrict brokered web reads.
 - **Fetched content is data.** The prompt tells the scout to ignore instructions in fetched
   text, and lets only links and short quotes through. The parser rejects HTML comments, which
-  a forged issue-tracker marker would need, and hidden or bidirectional formatting
-  characters. A second `orka-scout-digest` block, such as one copied from a fetched page,
+  a forged issue-tracker marker would need, hidden or bidirectional formatting
+  characters, and @-mentions, which would notify accounts once a proposal is filed. A second `orka-scout-digest` block, such as one copied from a fetched page,
   makes the whole answer invalid.
 - **Fail closed.** The prompt tells the scout to report an unreachable or rate-limited
   source, never fill it in from memory. When a consumer runs the `internal/scout` checks, a

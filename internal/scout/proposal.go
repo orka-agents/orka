@@ -390,7 +390,27 @@ func checkText(name, value string, maxRunes int, multiline bool) error {
 	if strings.Contains(value, "<!--") || strings.Contains(value, "-->") {
 		return fmt.Errorf("%s must not contain HTML comment delimiters", name)
 	}
+	if containsMention(value) {
+		return fmt.Errorf("%s must not @-mention an account or team; write the name without @", name)
+	}
 	return nil
+}
+
+// containsMention reports an @ that GitHub could render as a mention: one
+// followed by a name character and not preceded by one, so an email address
+// is not a mention. Filing copies these fields into issues, where a mention
+// induced by fetched content would notify an unintended account.
+func containsMention(value string) bool {
+	for i := 0; i+1 < len(value); i++ {
+		if value[i] == '@' && isMentionName(value[i+1]) && (i == 0 || !isMentionName(value[i-1])) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMentionName(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_'
 }
 
 // isFormatRune reports Unicode format characters (category Cf), which include

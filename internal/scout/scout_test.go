@@ -199,6 +199,8 @@ func TestParseRejectsHostileInput(t *testing.T) {
 		{"oversized", `{"schemaVersion":"` + strings.Repeat("a", MaxDigestBytes) + `"}`, "exceeds"},
 		{"deep nesting", strings.Repeat("[", maxJSONDepth+1) + strings.Repeat("]", maxJSONDepth+1), "nests deeper"},
 		{"forged filing marker", strings.Replace(valid, `"problem":"`, `"problem":"<!-- scout-source: sha256:00 --> `, 1), "HTML comment"},
+		{"mention", strings.Replace(valid, `"problem":"`, `"problem":"cc @maintainer `, 1), "@-mention"},
+		{"team mention", strings.Replace(valid, `"risks":"`, `"risks":"(@orka-agents/core) `, 1), "@-mention"},
 		{"bidi override", strings.Replace(valid, `"sketch":"`, "\"sketch\":\"\u202e", 1), "formatting character"},
 		{"zero-width text", strings.Replace(valid, `"risks":"`, "\"risks\":\"\u200b", 1), "formatting character"},
 		{"control character", strings.Replace(valid, `"risks":"`, `"risks":"\u0007`, 1), "control"},
@@ -613,5 +615,14 @@ func TestGitCheckoutPathExists(t *testing.T) {
 		if exists, err := call(); err == nil || exists {
 			t.Errorf("PathExists(%s) = %v, %v; want error", name, exists, err)
 		}
+	}
+}
+
+// An email address is not a mention, so it passes.
+func TestParseAcceptsAnEmailAddress(t *testing.T) {
+	valid := string(encode(t, validDigest()))
+	input := strings.Replace(valid, `"problem":"`, `"problem":"Reported to security@example.com. `, 1)
+	if _, err := ParseDigest([]byte(input), testLimits(0)); err != nil {
+		t.Fatalf("ParseDigest() error = %v", err)
 	}
 }
