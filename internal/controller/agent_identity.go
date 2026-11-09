@@ -652,6 +652,15 @@ func requireParentOwnsIdentityAgent(
 		return permanentACPAgentConfiguration(fmt.Errorf(
 			"a delegated child Task may use identity-bound Agent %q only when it is the parent's own bound Agent", agent.Name))
 	}
+	// A child borrows its parent's authority, so the parent must hold it
+	// now. A parent bound under an earlier grant, or before the current
+	// period of Agent use enforcement, no longer gets the identity itself
+	// and cannot hand it to a child created since.
+	if !identityClaimCoversTask(claim, parent) {
+		return permanentACPAgentConfiguration(fmt.Errorf(
+			"parent Task %q was created before Agent %q was granted identity %s/%s, so its delegated Tasks cannot use it; re-create the parent Task",
+			parent.Name, agent.Name, ref.Issuer, ref.ID))
+	}
 	return nil
 }
 
