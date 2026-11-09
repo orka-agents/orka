@@ -508,7 +508,25 @@ func TestEvalOutputIsPrivateToItsOwner(t *testing.T) {
 	var created map[string]any
 	srv := evalTestServer(t, "Succeeded", &created)
 	defer srv.Close()
+	// An earlier export left world-readable files behind.
 	dir := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "events"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"evalrun.json", "trials.jsonl", "summary.md", "events/eval-b.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(dir, name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if out, err := runEvalCommand(t, "eval", "get", "pr-review-x7", "--server", srv.URL, "--token", "tok", "--output-dir", dir); err != nil {
 		t.Fatalf("Execute() = %v\n%s", err, out)
 	}
