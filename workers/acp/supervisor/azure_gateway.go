@@ -160,23 +160,13 @@ type azureGateway struct {
 	// it. Its retries share that ID, but the broker scopes a call to its
 	// prompt, so a resend during a later prompt would be a second write.
 	writePromptsMu sync.Mutex
-	writePrompts   map[string]azureWritePrompt
+	writePrompts   map[string]harnessv2.PromptID
 }
 
-// azureWritePrompt is the prompt a write was first sent under, and when it
-// was last seen.
-type azureWritePrompt struct {
-	prompt harnessv2.PromptID
-	seen   time.Time
-}
-
-const (
-	// azureWritePromptMemory is how long a session remembers a write's
-	// prompt after its last request: far longer than any client retry.
-	azureWritePromptMemory = time.Hour
-	// maxAzureWritePrompts bounds that memory per session.
-	maxAzureWritePrompts = 4096
-)
+// maxAzureWritePrompts bounds the writes one session remembers. A session
+// forgets none, since a forgotten write could be sent again by a resend in
+// a later prompt; past the bound it refuses new writes instead.
+const maxAzureWritePrompts = 16384
 
 // errAzureWriteFromEarlierPrompt refuses a write first sent during an
 // earlier prompt; errAzureTooManyWrites refuses a write the session cannot
@@ -186,45 +176,27 @@ var (
 	errAzureTooManyWrites          = errors.New("the session sent too many writes to remember another")
 )
 
-// touchWrite keeps a remembered write remembered for another span, under its
-// first prompt, without admitting it.
-func (g *azureGateway) touchWrite(callID string, now time.Time) {
-	g.writePromptsMu.Lock()
-	defer g.writePromptsMu.Unlock()
-	if known, ok := g.writePrompts[callID]; ok && now.Sub(known.seen) < azureWritePromptMemory {
-		g.writePrompts[callID] = azureWritePrompt{prompt: known.prompt, seen: now}
-	}
-}
-
 // admitWrite records the prompt a joinable write is sent under, and refuses
 // it when an earlier prompt already sent it: a later prompt is a different
-// call to the broker, which would send the write again.
-func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID, now time.Time) error {
+// call to the broker, which would send the write again. The session
+// remembers every write for its whole life, which is as long as any az
+// process that could resend one runs.
+func (g *azureGateway) admitWrite(callID string, prompt harnessv2.PromptID) error {
 	g.writePromptsMu.Lock()
 	defer g.writePromptsMu.Unlock()
-	if known, ok := g.writePrompts[callID]; ok && now.Sub(known.seen) < azureWritePromptMemory {
-		// Every request, refused or not, keeps the write remembered under
-		// its first prompt for another span.
-		g.writePrompts[callID] = azureWritePrompt{prompt: known.prompt, seen: now}
-		if known.prompt != prompt {
+	if first, ok := g.writePrompts[callID]; ok {
+		if first != prompt {
 			return errAzureWriteFromEarlierPrompt
 		}
 		return nil
 	}
-	if g.writePrompts == nil {
-		g.writePrompts = map[string]azureWritePrompt{}
-	}
 	if len(g.writePrompts) >= maxAzureWritePrompts {
-		for id, known := range g.writePrompts {
-			if now.Sub(known.seen) >= azureWritePromptMemory {
-				delete(g.writePrompts, id)
-			}
-		}
-		if len(g.writePrompts) >= maxAzureWritePrompts {
-			return errAzureTooManyWrites
-		}
+		return errAzureTooManyWrites
 	}
-	g.writePrompts[callID] = azureWritePrompt{prompt: prompt, seen: now}
+	if g.writePrompts == nil {
+		g.writePrompts = map[string]harnessv2.PromptID{}
+	}
+	g.writePrompts[callID] = prompt
 	return nil
 }
 
@@ -558,10 +530,6 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	callID, attempt := g.attemptCallID(write, baseCallID)
 	joinable := write && strings.HasPrefix(baseCallID, azureJoinableWritePrefix)
-	if joinable {
-		// A request turned away as busy below still counts as seen.
-		g.touchWrite(baseCallID, time.Now())
-	}
 	// Forwarded calls share the runtime-wide MCP limit with tool calls, so
 	// a larger pool keeps the same backpressure on the broker.
 	if g.session.proxy != nil {
@@ -574,7 +542,7 @@ func (g *azureGateway) serveResourceManager(w http.ResponseWriter, r *http.Reque
 	}
 	var admit func(harnessv2.PromptID) error
 	if joinable {
-		admit = func(prompt harnessv2.PromptID) error { return g.admitWrite(baseCallID, prompt, time.Now()) }
+		admit = func(prompt harnessv2.PromptID) error { return g.admitWrite(baseCallID, prompt) }
 	}
 	response, err := g.session.callBrokeredTool(r.Context(), callID, toolName, arguments, true, admit)
 	if err != nil {
@@ -628,7 +596,7 @@ func writeAzureCallError(w http.ResponseWriter, err error, write bool, toolName 
 			"Orka received this request during an earlier turn and did not send it again. Check the resource before running the command again.")
 	case errors.Is(err, errAzureTooManyWrites):
 		writeAzureError(w, http.StatusConflict, "OrkaResendRefused",
-			"This session sent too many writes in the last hour for Orka to tell a retry from a new request; it did not send this one.")
+			"This session sent too many writes for Orka to tell a retry from a new request; it did not send this one. Start a new session to write again.")
 	case errors.Is(err, errMCPSessionAtCapacity):
 		w.Header().Set("Retry-After", "1")
 		writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This session already has requests in flight; retry shortly.")

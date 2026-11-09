@@ -725,45 +725,35 @@ func TestAzureGatewayRefusesResendsFromAnEarlierPrompt(t *testing.T) {
 }
 
 // TestAzureGatewayWritePromptMemoryIsBounded covers the memory of write
-// prompts: a write seen within the hour keeps its prompt, an older one is
-// forgotten, and a full memory forgets expired writes before it refuses one.
+// prompts: a write keeps its first prompt for the session's whole life, so
+// a resend in any later prompt is refused however late it comes, and a full
+// memory refuses new writes rather than forget one.
 func TestAzureGatewayWritePromptMemoryIsBounded(t *testing.T) {
 	g := &azureGateway{}
-	now := time.Now()
-	if err := g.admitWrite("w", "p1", now); err != nil {
+	if err := g.admitWrite("w", "p1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.admitWrite("w", "p1", now.Add(time.Minute)); err != nil {
+	if err := g.admitWrite("w", "p1"); err != nil {
 		t.Fatalf("a retry in the same prompt: %v", err)
 	}
-	if err := g.admitWrite("w", "p2", now.Add(2*time.Minute)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
-		t.Fatalf("a resend in a later prompt: %v", err)
-	}
-	// A refused resend keeps the write remembered under its first prompt.
-	if err := g.admitWrite("w", "p2", now.Add(time.Minute+azureWritePromptMemory)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
-		t.Fatalf("a resend within the span of the last refused one: %v", err)
-	}
-	// A request turned away before admission, such as one refused as busy,
-	// keeps it remembered too.
-	busy := now.Add(time.Minute + azureWritePromptMemory + azureWritePromptMemory*5/6)
-	g.touchWrite("w", busy)
-	if err := g.admitWrite("w", "p3", busy.Add(azureWritePromptMemory/2)); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
-		t.Fatalf("a resend after a busy refusal: %v", err)
-	}
-	if err := g.admitWrite("w", "p2", busy.Add(2*azureWritePromptMemory)); err != nil {
-		t.Fatalf("a write unseen for the memory's span: %v", err)
+	for _, prompt := range []harnessv2.PromptID{"p2", "p3"} {
+		if err := g.admitWrite("w", prompt); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
+			t.Fatalf("a resend in prompt %s: %v", prompt, err)
+		}
 	}
 	for index := len(g.writePrompts); index < maxAzureWritePrompts; index++ {
-		if err := g.admitWrite("w"+strconv.Itoa(index), "p2", now); err != nil {
+		if err := g.admitWrite("w"+strconv.Itoa(index), "p2"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	later := now.Add(azureWritePromptMemory / 2)
-	if err := g.admitWrite("full", "p2", later); !errors.Is(err, errAzureTooManyWrites) {
+	if err := g.admitWrite("full", "p2"); !errors.Is(err, errAzureTooManyWrites) {
 		t.Fatalf("a full memory: %v", err)
 	}
-	if err := g.admitWrite("full", "p2", now.Add(azureWritePromptMemory)); err != nil {
-		t.Fatalf("a full memory of expired writes: %v", err)
+	if err := g.admitWrite("w", "p3"); !errors.Is(err, errAzureWriteFromEarlierPrompt) {
+		t.Fatalf("a full memory must still refuse a resend: %v", err)
+	}
+	if err := g.admitWrite("w1", "p2"); err != nil {
+		t.Fatalf("a full memory must still admit a retry of a remembered write: %v", err)
 	}
 }
 
