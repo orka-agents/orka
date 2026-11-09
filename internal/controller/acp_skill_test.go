@@ -464,13 +464,12 @@ func TestRuntimePoolPodTemplateSkillImageVolumeMode(t *testing.T) {
 	assertRuntimeContainerProtections(t, template)
 }
 
-// TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck covers the
-// supervisor's skill check, which reads image-volume skills before it serves
-// and after any toolbox check. The startup probe must allow each check on top
-// of the normal allowance, or kubelet restarts the container before the check
-// reports a classified failure. Copy mode reads the images in init containers
-// and keeps the default.
-func TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck(t *testing.T) {
+// TestRuntimePoolSkillStartupProbeOutlastsSkillCheck covers the supervisor's
+// bounded skill check, which runs before it serves and after any toolbox
+// check, with either mount method. The startup probe must allow each check on
+// top of the normal allowance, or kubelet restarts the container before the
+// check reports a classified failure.
+func TestRuntimePoolSkillStartupProbeOutlastsSkillCheck(t *testing.T) {
 	startupBudget := func(template corev1.PodTemplateSpec) time.Duration {
 		probe := template.Spec.Containers[0].StartupProbe
 		return time.Duration(probe.FailureThreshold*probe.PeriodSeconds) * time.Second
@@ -483,8 +482,8 @@ func TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck(t *testing.T)
 	_, imageTemplate := renderToolboxTemplate(t, skillsOnly, imagePolicy)
 	_, plainTemplate := renderToolboxTemplate(t, runtimePoolTestObject(1), ACPToolboxPolicy{})
 	base := startupBudget(plainTemplate)
-	if got := startupBudget(copyTemplate); got != base {
-		t.Fatalf("copy mode startup probe allows %s, want the default %s", got, base)
+	if got, want := startupBudget(copyTemplate), base+acpskill.StartupCheckTimeout; got < want {
+		t.Fatalf("copied skills without toolboxes: startup probe allows %s, want at least %s", got, want)
 	}
 	if got, want := startupBudget(imageTemplate), base+acpskill.StartupCheckTimeout; got < want {
 		t.Fatalf("image volume skills without toolboxes: startup probe allows %s, want at least %s", got, want)
@@ -506,9 +505,17 @@ func TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck(t *testing.T)
 	if got, want := startupBudget(bothTemplate), base+toolbox.ImageVolumeCheckTimeout+acpskill.StartupCheckTimeout; got < want {
 		t.Fatalf("image volume skills with toolboxes: startup probe allows %s, want at least %s", got, want)
 	}
-	plain, image := plainTemplate.Spec.Containers[0].StartupProbe, imageTemplate.Spec.Containers[0].StartupProbe
-	if image.PeriodSeconds != plain.PeriodSeconds || image.TimeoutSeconds != plain.TimeoutSeconds {
-		t.Fatalf("image volume startup probe changed more than its failure threshold: %#v", image)
+	// Copy mode has no supervisor-side toolbox check to allow for.
+	_, bothCopyTemplate := renderToolboxTemplate(t, withToolboxes, acpTestSkillPolicy())
+	if got, want := startupBudget(bothCopyTemplate), base+acpskill.StartupCheckTimeout; got != want {
+		t.Fatalf("copied skills with toolboxes: startup probe allows %s, want %s", got, want)
+	}
+	plain := plainTemplate.Spec.Containers[0].StartupProbe
+	for _, template := range []corev1.PodTemplateSpec{copyTemplate, imageTemplate} {
+		probe := template.Spec.Containers[0].StartupProbe
+		if probe.PeriodSeconds != plain.PeriodSeconds || probe.TimeoutSeconds != plain.TimeoutSeconds {
+			t.Fatalf("skill startup probe changed more than its failure threshold: %#v", probe)
+		}
 	}
 }
 

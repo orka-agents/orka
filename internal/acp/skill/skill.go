@@ -40,9 +40,9 @@ const (
 )
 
 // StartupCheckTimeout bounds the supervisor's skill check, which runs before
-// the supervisor serves. With image volumes that check reads the skill images
-// themselves, so the runtime startup probe is extended by this much and a slow
-// check reports its FAIL line before kubelet restarts the container.
+// the supervisor serves with either mount method. The runtime startup probe is
+// extended by this much so a slow check reports its FAIL line before kubelet
+// restarts the container.
 const StartupCheckTimeout = time.Minute
 
 // Limits bounds one skill folder.

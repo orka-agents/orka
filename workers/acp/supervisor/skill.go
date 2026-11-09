@@ -82,23 +82,26 @@ func VerifySkills(cfg Config) error {
 	if _, err := nativeSkillsDir(cfg.Provider.Kind, acp.SessionPaths{Home: "/", Config: "/"}); err != nil {
 		return &toolbox.Failure{Reason: skill.ReasonUnsupported, Message: err.Error()}
 	}
+	// The goroutine can outlive this call after a timeout, so it must not
+	// read the replaceable package variables.
+	load, mountRoot, timeout := loadSkill, skillMountRoot, skillCheckTimeout
 	done := make(chan error, 1)
 	go func() {
 		for i := range cfg.Skills {
-			if _, err := loadSkill(filepath.Join(skillMountRoot, cfg.Skills[i].Name), cfg.Skills[i].Name, skill.DefaultLimits()); err != nil {
+			if _, err := load(filepath.Join(mountRoot, cfg.Skills[i].Name), cfg.Skills[i].Name, skill.DefaultLimits()); err != nil {
 				done <- err
 				return
 			}
 		}
 		done <- nil
 	}()
-	timer := time.NewTimer(skillCheckTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case err := <-done:
 		return err
 	case <-timer.C:
-		return &toolbox.Failure{Reason: skill.ReasonReadFailed, Message: fmt.Sprintf("skill check did not complete within %s", skillCheckTimeout)}
+		return &toolbox.Failure{Reason: skill.ReasonReadFailed, Message: fmt.Sprintf("skill check did not complete within %s", timeout)}
 	}
 }
 

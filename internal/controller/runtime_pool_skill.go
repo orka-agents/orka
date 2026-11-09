@@ -117,13 +117,13 @@ func applyRuntimePoolSkillTemplate(template *corev1.PodTemplateSpec, skills []ha
 				SubPath: strings.TrimPrefix(skills[i].Path, "/"), ReadOnly: true,
 			})
 		}
-		// The supervisor reads every skill from its image volume before it
-		// serves, after any toolbox check, so the startup probe must outlast
-		// that read too. Copy mode reads the images in init containers, which
-		// the startup probe does not time; the supervisor then only re-reads
-		// the bounded node-local copy.
-		extendRuntimePoolStartupProbe(runtime, skill.StartupCheckTimeout)
 	}
+	// The supervisor reads every skill before it serves, after any toolbox
+	// check: from the image volume, or from the copy the init containers
+	// left. That read is bounded, and the startup probe must outlast the
+	// bound with either mount method, or kubelet restarts the container
+	// before a stalled read reports its classified failure.
+	extendRuntimePoolStartupProbe(runtime, skill.StartupCheckTimeout)
 	if !toolboxesApplied {
 		applyRuntimePoolImagePullPolicy(template, policy)
 	}
