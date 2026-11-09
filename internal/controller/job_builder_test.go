@@ -3820,3 +3820,27 @@ func TestJobBuilder_buildEnvVars_ConnectorDispatchUsesTheFreezeAndNativeRegistry
 		t.Fatalf("policy left connection mode: err = %v, want ErrConnectorToolResolution", err)
 	}
 }
+
+// The AI worker resolves its own ServiceAccount from the Downward API; task
+// env cannot replace it.
+func TestJobBuilder_buildEnvVars_ServiceAccountNameFromDownwardAPI(t *testing.T) {
+	builder := setupJobBuilder()
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: testTask, Namespace: defaultNS},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAI,
+			AI:   &corev1alpha1.AISpec{Provider: "anthropic", Model: "m", Prompt: "Hello"},
+			Env:  []corev1.EnvVar{{Name: workerenv.ServiceAccountName, Value: "orka"}},
+		},
+	}
+	var found []corev1.EnvVar
+	for _, env := range builder.buildEnvVars(context.Background(), task, nil, nil) {
+		if env.Name == workerenv.ServiceAccountName {
+			found = append(found, env)
+		}
+	}
+	if len(found) != 1 || found[0].Value != "" || found[0].ValueFrom == nil || found[0].ValueFrom.FieldRef == nil ||
+		found[0].ValueFrom.FieldRef.FieldPath != "spec.serviceAccountName" {
+		t.Fatalf("%s env = %#v, want one Downward API spec.serviceAccountName reference", workerenv.ServiceAccountName, found)
+	}
+}

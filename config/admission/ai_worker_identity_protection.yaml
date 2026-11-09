@@ -1,0 +1,122 @@
+# The default AI worker role can create Secrets and Jobs in its namespace, for
+# code_exec and child-Task credentials. Kubernetes fills a ServiceAccount-token
+# Secret with a token for whichever ServiceAccount it names, and a Job's Pods run
+# as whichever ServiceAccount it names, with that account's token. Either lets
+# the worker act as the controller or any other ServiceAccount in the namespace.
+# A Job's Pod labels can also put it behind the controller's Services (the API
+# that serves the webhook JWKS, the admission webhook) or inside NetworkPolicy
+# allowances meant for Orka components, and replacing a platform ServiceAccount
+# with one of the same name would inherit its RoleBindings. This policy holds
+# the AI worker to what it actually creates: Opaque Secrets, code_exec's own
+# per-run ServiceAccounts, and code_exec Jobs that run as them with no token,
+# carry only code_exec labels, and get no host access, privilege, capabilities
+# or unconfined syscalls. Patch ORKA_NAMESPACE and AI_WORKER_SA to the
+# installation namespace and AI worker ServiceAccount, exactly as for
+# gateway_task_protection.yaml.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ai-worker-identity-protection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["secrets"]
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE", "DELETE"]
+      resources: ["serviceaccounts"]
+    - apiGroups: ["batch"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["jobs"]
+  matchConditions:
+  # This installation's AI worker ServiceAccount. Kustomize replaces the
+  # fourth and eighth quote-delimited segments with the namespace and the
+  # ServiceAccount name.
+  - name: ai-worker
+    expression: "request.userInfo.username == 'system:serviceaccount:' + 'ORKA_NAMESPACE' + ':' + 'AI_WORKER_SA'"
+  variables:
+  - name: pod
+    expression: "object.spec.template.spec"
+  - name: podSecurity
+    expression: "variables.pod.?securityContext.orValue({})"
+  - name: podLabels
+    expression: "object.spec.template.?metadata.?labels.orValue({})"
+  - name: platformIdentity
+    expression: "'orka.ai/platform-identity'"
+  validations:
+  - expression: "request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'"
+    message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret would hand it another identity
+  - expression: >-
+      request.resource.resource != 'serviceaccounts' || (
+        request.name.startsWith('orka-code-exec-') &&
+        (request.operation == 'CREATE' ||
+          oldObject.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true') &&
+        (request.operation == 'DELETE' ||
+          object.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true'))
+    message: >-
+      the AI worker may only create or delete code_exec ServiceAccounts
+      (orka-code-exec-*) and never an Orka platform ServiceAccount; replacing
+      another ServiceAccount would inherit its RoleBindings
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        object.metadata.name.startsWith('orka-code-exec-') &&
+        variables.pod.?serviceAccountName.orValue('') == object.metadata.name &&
+        variables.pod.?automountServiceAccountToken.orValue(true) == false &&
+        variables.pod.?volumes.orValue([]).all(v, has(v.emptyDir) || has(v.secret)))
+    message: >-
+      AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as the
+      ServiceAccount of the same name with automountServiceAccountToken false,
+      and use only emptyDir and Secret volumes
+  # Only code_exec's own labels and the ones the Job controller adds, so the
+  # Pod matches no Service or NetworkPolicy selector but its own.
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        variables.podLabels.all(k, k in [
+          'app.kubernetes.io/name', 'orka.ai/tool', 'orka.ai/code-exec-job',
+          'batch.kubernetes.io/job-name', 'job-name',
+          'batch.kubernetes.io/controller-uid', 'controller-uid']) &&
+        variables.podLabels[?'app.kubernetes.io/name'].orValue('orka') == 'orka' &&
+        variables.podLabels[?'orka.ai/tool'].orValue('code_exec') == 'code_exec' &&
+        ['orka.ai/code-exec-job', 'batch.kubernetes.io/job-name', 'job-name'].all(k,
+          variables.podLabels[?k].orValue(object.metadata.name) == object.metadata.name) &&
+        !has(variables.pod.subdomain))
+    message: >-
+      AI worker Job Pods may carry only code_exec labels (app.kubernetes.io/name=orka,
+      orka.ai/tool=code_exec, and the Job name) and no subdomain, so they cannot
+      join another component's Service or NetworkPolicy allowance
+  - expression: >-
+      request.resource.resource != 'jobs' || (
+        !variables.pod.?hostNetwork.orValue(false) &&
+        !variables.pod.?hostPID.orValue(false) &&
+        !variables.pod.?hostIPC.orValue(false) &&
+        !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.pod.?initContainers.orValue([]).size() == 0 &&
+        variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
+        variables.pod.containers.all(c,
+          !c.?securityContext.privileged.orValue(false) &&
+          c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
+          c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          'ALL' in c.?securityContext.capabilities.drop.orValue([]) &&
+          c.?securityContext.seccompProfile.type.orValue(
+            variables.podSecurity.?seccompProfile.type.orValue('')) in ['RuntimeDefault', 'Localhost'] &&
+          !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
+          c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
+          c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
+    message: >-
+      AI worker Jobs get no host access or privilege: no host namespaces or
+      ports, no init or ephemeral containers, and every container non-root,
+      unprivileged, with allowPrivilegeEscalation false, all capabilities
+      dropped and none added, and a RuntimeDefault or Localhost seccomp profile
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ai-worker-identity-protection
+spec:
+  policyName: ai-worker-identity-protection
+  validationActions: [Deny]

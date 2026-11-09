@@ -742,6 +742,34 @@ func TestLoadAgentExecutionSnapshotKeyAcceptsDeploymentKeyFormats(t *testing.T) 
 	}
 }
 
+func TestValidateTaskWebhookSigningNamespace(t *testing.T) {
+	reserved := []string{"orka-system", "orka-controller", "orka-runtimes", "orka-agent-hosts"}
+	if err := validateTaskWebhookSigningNamespace("", "", reserved...); err != nil {
+		t.Fatalf("disabled signing rejected: %v", err)
+	}
+	if err := validateTaskWebhookSigningNamespace(
+		"orka-task-webhook-signing", defaultTaskWebhookSigningNamespace, reserved...); err != nil {
+		t.Fatalf("dedicated namespace rejected: %v", err)
+	}
+	for _, secret := range []string{"a..b", "a-.b", "Bad_Name", strings.Repeat("a.", 127)} {
+		if err := validateTaskWebhookSigningNamespace(secret, defaultTaskWebhookSigningNamespace, reserved...); err == nil {
+			t.Errorf("Secret name %q accepted", secret)
+		}
+	}
+	for name, namespace := range map[string]string{
+		"no namespace":         "",
+		"invalid namespace":    "signing_ns",
+		"watch namespace":      "orka-system",
+		"controller namespace": "orka-controller",
+		"runtime namespace":    "orka-runtimes",
+		"agent-host namespace": " orka-agent-hosts ",
+	} {
+		if err := validateTaskWebhookSigningNamespace("orka-task-webhook-signing", namespace, reserved...); err == nil {
+			t.Errorf("%s: namespace %q accepted", name, namespace)
+		}
+	}
+}
+
 func TestValidateAgentHostConfig(t *testing.T) {
 	image := "registry.example/orka@sha256:" + strings.Repeat("a", 64)
 	reserved := []string{"orka-system", "orka-runtimes", "orka-controller"}

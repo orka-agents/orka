@@ -123,6 +123,51 @@ func MarshalReviewContexts(manifests []ReviewContextManifest, budget int) ([][]b
 	return encoded, nil
 }
 
+// minScaledReviewContextBytes is the smallest per-slice excerpt budget
+// BuildReviewContexts scales down to before it gives up.
+const minScaledReviewContextBytes = 2 << 10
+
+// BuildReviewContexts builds and encodes the review contexts of one mapper
+// run within budget bytes in total. When the default-sized contexts exceed
+// the budget even without reference files, as in a repository with thousands
+// of slices, the per-slice excerpt budget is scaled down until they fit in half
+// of it, leaving the rest for reference listings; reviewers read the rest of
+// each file from their workspace. Otherwise contexts keep the default size.
+func BuildReviewContexts(
+	root string,
+	slices []store.ReviewSlice,
+	references map[string][]ReviewContextReferenceFile,
+	budget int,
+) ([][]byte, error) {
+	maxBytes := defaultMaxReviewContextBytes
+	for {
+		manifests := make([]ReviewContextManifest, 0, len(slices))
+		bare := 0
+		for i := range slices {
+			_, manifest, err := BuildReviewContext(root, slices[i], ReviewContextOptions{MaxBytes: maxBytes})
+			if err != nil {
+				return nil, fmt.Errorf("build security review context for %s: %w", slices[i].ID, err)
+			}
+			data, err := MarshalReviewContext(manifest)
+			if err != nil {
+				return nil, err
+			}
+			bare += len(data)
+			manifest.ReferenceFiles = references[slices[i].ID]
+			manifests = append(manifests, manifest)
+		}
+		scaled := maxBytes < defaultMaxReviewContextBytes
+		if !scaled && bare <= budget || scaled && bare <= budget/2 || maxBytes == minScaledReviewContextBytes {
+			// At the floor, MarshalReviewContexts still fails closed when
+			// the contexts do not fit.
+			return MarshalReviewContexts(manifests, budget)
+		}
+		// bare > budget > 0 here: any total within budget returned above.
+		next := int(int64(maxBytes) * int64(budget/2) / int64(bare))
+		maxBytes = max(minScaledReviewContextBytes, min(next, maxBytes*3/4))
+	}
+}
+
 // ParseTrustedReviewContextManifest validates the mapper-owned context used as
 // an evidence boundary for a review Task.
 func ParseTrustedReviewContextManifest(data []byte) (*ReviewContextManifest, string, error) {
