@@ -404,10 +404,11 @@ func checkReference(reference evals.CaseReference, files []evals.ReviewCaseFile)
 // gitDiff runs one git diff from base to head, limited to paths. External
 // diff drivers and textconv filters stay off and the diff settings are
 // pinned, so the output is the committed change whatever the clone's config.
+// Attributes come from the head commit, not the mirror's HEAD branch.
 func gitDiff(repo, base, head string, paths []string, formats ...string) (string, error) {
 	// Pin every setting a clone's local config could change: the algorithm,
 	// the indent heuristic, inter-hunk context, relative paths and file order.
-	args := append([]string{"diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
+	args := append([]string{"--attr-source=" + head, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M",
 		"--diff-algorithm=myers", "--indent-heuristic", "--inter-hunk-context=0", "--no-relative",
 		"-O" + os.DevNull}, formats...)
 	args = append(args, base, head, "--")
@@ -462,9 +463,11 @@ func git(dir string, args ...string) (string, error) {
 // gitEnv drops every inherited GIT_* variable and points Git's global and
 // system configuration at nothing. HOME points at nothing too, so the HTTPS
 // transport can't read the caller's ~/.netrc: a clone that needs credentials
-// fails here as it would in a credential-free trial.
+// fails here as it would in a credential-free trial. System-wide attributes
+// and replacement objects, which a mirror clone copies with refs/replace, are
+// off, so diffs read the pinned commits as committed.
 func gitEnv(environ []string) []string {
-	env := make([]string, 0, len(environ)+5)
+	env := make([]string, 0, len(environ)+7)
 	for _, kv := range environ {
 		name, _, _ := strings.Cut(kv, "=")
 		if strings.HasPrefix(name, "GIT_") || name == "HOME" || name == "CURL_HOME" || name == "XDG_CONFIG_HOME" {
@@ -473,7 +476,8 @@ func gitEnv(environ []string) []string {
 		env = append(env, kv)
 	}
 	return append(env, "HOME="+os.DevNull,
-		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
+		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_ATTR_NOSYSTEM=1", "GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=")
 }
 
 func gitSubcommand(args []string) string {
