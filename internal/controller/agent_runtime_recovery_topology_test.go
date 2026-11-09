@@ -39,8 +39,13 @@ func TestAgentRuntimeRecoveryTopologyAcceptsExactLocalAndFoundryPods(t *testing.
 		t.Fatalf("actual deployed local capability set was rejected: %v", err)
 	}
 	foundry := foundryRecoveryPodSpec(local)
-	if err := validateAgentRuntimeRecoveryPodSpec(foundry, "supervisor", "foundry"); err != nil {
-		t.Fatalf("explicit broker-only identity and ledger were rejected: %v", err)
+	for _, provider := range []string{"foundry", "kagent"} {
+		if err := validateAgentRuntimeRecoveryPodSpec(foundry, "supervisor", provider); err != nil {
+			t.Fatalf("explicit %s broker-only identity and ledger were rejected: %v", provider, err)
+		}
+	}
+	if err := validateAgentRuntimeRecoveryPodSpec(local, "supervisor", "kagent"); err == nil {
+		t.Fatal("a kagent runtime was admitted without its lifecycle broker")
 	}
 	for _, test := range []struct {
 		name, provider string
@@ -85,10 +90,10 @@ func TestAgentRuntimeRecoveryRejectsSupervisorServiceAccountToken(t *testing.T) 
 		}}},
 	}}}
 	spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "azure-identity", MountPath: "/identity", ReadOnly: true}}
-	for _, provider := range []string{"codex", "claude", "copilot", "opencode", "agentkit", "foundry"} {
+	for _, provider := range []string{"codex", "claude", "copilot", "opencode", "agentkit", "foundry", "kagent"} {
 		t.Run(provider, func(t *testing.T) {
 			candidate := spec
-			if provider == agentRuntimeFoundryProvider {
+			if agentRuntimeUsesLifecycleBroker(provider) {
 				candidate = foundryRecoveryPodSpec(candidate)
 			}
 			if err := validateAgentRuntimeRecoveryPodSpec(candidate, "supervisor", provider); err == nil {

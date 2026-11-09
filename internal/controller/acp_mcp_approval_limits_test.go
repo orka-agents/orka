@@ -81,7 +81,7 @@ func TestMCPApprovalExpiresDuringSecretReload(t *testing.T) {
 }
 
 func TestBuildAgentRuntimeMCPConfigurationBoundsApprovalReadTimeout(t *testing.T) {
-	for _, provider := range []string{"agentkit", "foundry"} {
+	for _, provider := range []string{"agentkit", "foundry", "kagent"} {
 		for _, test := range []struct {
 			name     string
 			timeout  *metav1.Duration

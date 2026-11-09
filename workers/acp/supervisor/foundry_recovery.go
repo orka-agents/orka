@@ -20,7 +20,7 @@ type foundryRecoveryOperation struct {
 }
 
 func (p *providerProxy) foundryRecoveryJSON(ctx context.Context, method, path string, body []byte, into any) error {
-	if p == nil || p.providerKind != providerKindFoundry {
+	if p == nil || !usesLifecycleBroker(p.providerKind) {
 		return errFoundryCleanupUnproven
 	}
 	target := *p.upstreamBase
@@ -66,7 +66,7 @@ func (p *providerProxy) foundryBrokerIdentity(ctx context.Context) (*harnessv2.F
 }
 
 func (s *Server) foundryStatusIdentity(ctx context.Context) (*harnessv2.FoundryBrokerIdentity, error) {
-	if !s.cfg.Capabilities.SupportsFoundryRecovery || s.cfg.Provider.Kind != providerKindFoundry {
+	if !s.cfg.Capabilities.SupportsFoundryRecovery || !usesLifecycleBroker(s.cfg.Provider.Kind) {
 		return nil, nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -126,7 +126,7 @@ func (s *Server) handleRetireFoundryBoot(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	if !s.cfg.Capabilities.SupportsFoundryRecovery || s.cfg.Provider.Kind != providerKindFoundry {
+	if !s.cfg.Capabilities.SupportsFoundryRecovery || !usesLifecycleBroker(s.cfg.Provider.Kind) {
 		writeError(w, http.StatusBadRequest, harnessv2.ErrorCodeInvalidRequest, "runtime does not support Foundry recovery", nil, false)
 		return
 	}

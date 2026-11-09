@@ -191,7 +191,7 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	providerCaps := providerCapabilities(providerKind, model)
 	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvBrokeredToolApprovalProfileDigest)); qualifiedDigest != "" {
-		if providerKind != providerKindAgentKit && providerKind != providerKindFoundry {
+		if providerKind != providerKindAgentKit && !usesLifecycleBroker(providerKind) {
 			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvBrokeredToolApprovalProfileDigest, providerKind)
 		}
 		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
@@ -204,7 +204,7 @@ func LoadConfigFromEnv() (Config, error) {
 	}
 	foundryRecovery := false
 	if qualifiedDigest := strings.TrimSpace(os.Getenv(EnvFoundryRecoveryProfileDigest)); qualifiedDigest != "" {
-		if providerKind != providerKindFoundry {
+		if !usesLifecycleBroker(providerKind) {
 			return Config{}, fmt.Errorf("%s is unsupported for provider %q", EnvFoundryRecoveryProfileDigest, providerKind)
 		}
 		if err := harnessv2.ValidateProfileDigest(harnessv2.ProfileDigest(qualifiedDigest)); err != nil {
@@ -362,8 +362,8 @@ func LoadConfigFromEnv() (Config, error) {
 		ToolboxMountMethod:            strings.TrimSpace(os.Getenv(EnvToolboxMountMethod)),
 	}
 	cfg.ProviderProxy.ModelOutputLimit = modelOutputLimit
-	if providerKind == providerKindFoundry {
-		// Remote Hosted Agent stop/delete must complete before settlement.
+	if usesLifecycleBroker(providerKind) {
+		// Remote stop/delete must complete before settlement.
 		cfg.CancelGrace = foundryCleanupTimeout
 	}
 	if err := cfg.Validate(); err != nil {
@@ -847,7 +847,12 @@ func providerProfile(
 			},
 			PrepareSession: prepareOpenCodeConfig,
 		}, nil
-	case providerKindAgentKit, providerKindFoundry:
+	case providerKindAgentKit, providerKindFoundry, providerKindKagent:
+		if kind == providerKindKagent && modelLimits != nil {
+			// The broker forwards only the prompt; kagent's own model
+			// configuration bounds each turn, so Orka cannot enforce a limit.
+			return ProviderProfile{}, fmt.Errorf("kagent runtimes cannot enforce model token limits; leave %s and %s unset", EnvModelContextLimit, EnvModelOutputLimit)
+		}
 		adapter, _ := externalACPAdapterFor(kind)
 		return adapter.profile(model)
 	default:
@@ -1099,7 +1104,7 @@ func defaultProxyBaseURL() string {
 
 func providerUpstreamBaseURL(provider, base string) string {
 	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
-	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || provider == providerKindFoundry {
+	if provider == providerKindCodex || provider == providerKindCopilot || provider == providerKindOpencode || provider == providerKindAgentKit || usesLifecycleBroker(provider) {
 		return openAIProxyURL(base)
 	}
 	return base

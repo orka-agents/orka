@@ -270,6 +270,67 @@ func TestFoundryDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
 	}
 }
 
+func TestKagentDockerfileRequiresFrozenRuntimeImage(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("kagent", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := string(data)
+	for _, required := range []string{
+		"ARG KAGENT_RUNTIME_IMAGE\n",
+		"ARG KAGENT_ADAPTER_DIGEST\n",
+		"FROM --platform=$TARGETPLATFORM ${KAGENT_RUNTIME_IMAGE} AS kagent",
+		"case \"$KAGENT_RUNTIME_IMAGE\" in *@sha256:*",
+		"test \"${#digest}\" -eq 64",
+		"case \"$digest\" in *[!0-9a-f]*)",
+		"test \"$KAGENT_ADAPTER_DIGEST\" = \"sha256:$digest\"",
+		"COPY --from=kagent /orka-runtime-kagent /out/orka-runtime-kagent",
+		"COPY --from=kagent /agent/kagent.json /out/agent/kagent.json",
+		"test -x /out/orka-runtime-kagent",
+		"test -s /out/agent/kagent.json",
+		"test \"$TARGETOS\" = linux",
+		"case \"$TARGETARCH\" in amd64|arm64)",
+		"chmod 0711 /out/sessions",
+		"chmod 0555 /out/agent /out/orka-runtime-kagent",
+		"chmod 0444 /out/agent/kagent.json",
+	} {
+		if !strings.Contains(contents, required) {
+			t.Errorf("kagent Dockerfile is missing %q", required)
+		}
+	}
+	forbidden := append([]string{
+		"KAGENT_RUNTIME_IMAGE=", "KAGENT_ADAPTER_DIGEST=sha256:",
+	}, universalForbiddenSubstrings...)
+	for _, value := range forbidden {
+		if strings.Contains(contents, value) {
+			t.Errorf("kagent Dockerfile contains forbidden mutable or credential default %q", value)
+		}
+	}
+	lastFrom := strings.LastIndex(contents, "FROM ")
+	finalBase := "FROM --platform=$TARGETPLATFORM ${KAGENT_RUNTIME_IMAGE}\n"
+	if lastFrom < 0 || !strings.HasPrefix(contents[lastFrom:], finalBase) {
+		t.Fatal("kagent runtime image is not the final base stage")
+	}
+	for _, required := range []string{
+		"ORKA_ACP_PROVIDER=kagent",
+		"ORKA_ACP_KAGENT_ADAPTER_DIGEST=${KAGENT_ADAPTER_DIGEST}",
+		"ai.orka.acp.adapter.name=\"kagent-serve-acp\"",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-runtime /usr/local/bin/orka-acp-runtime",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-acp-exec-helper /usr/local/bin/orka-acp-exec-helper",
+		"COPY --from=supervisor-builder --chown=0:0 /out/orka-runtime-kagent /orka-runtime-kagent",
+		"COPY --from=supervisor-builder --chown=0:0 /out/agent /agent",
+		"COPY --from=supervisor-builder --chown=0:0 /out/sessions /sessions",
+		"USER 0:0\n",
+		"CMD []",
+		"ENTRYPOINT [\"/usr/local/bin/orka-acp-runtime\"]",
+	} {
+		if !strings.Contains(contents[lastFrom:], required) {
+			t.Errorf("kagent final stage is missing %q", required)
+		}
+	}
+}
+
 func TestCopilotPinIsNewerThanCredentiallessBYOKACPFixBoundary(t *testing.T) {
 	t.Parallel()
 	got := parseVersionCore(t, acp.CopilotCLIVersion)
