@@ -11,6 +11,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/redact"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
@@ -300,6 +301,24 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 			return false, err
 		}
 	}
+	var rounds repositoryMonitorReviewRounds
+	if verdict == repositoryMonitorReviewVerdictPassed || (verdict == repositoryMonitorReviewVerdictNeedsChanges && monitor.Spec.Review.MaxRounds != nil) {
+		if rounds, err = r.repositoryMonitorReviewRoundsFor(ctx, monitor, item.Number, reviewedHead); err != nil {
+			return false, err
+		}
+	}
+	if verdict == repositoryMonitorReviewVerdictNeedsChanges && repositoryMonitorMaxRoundsReached(monitor.Spec, rounds) {
+		// The findings stay open and published; needs_human stops automatic
+		// repair of them so a person can rethink the change.
+		verdict = repositoryMonitorReviewVerdictNeedsHuman
+		summary = strings.TrimSpace(repositoryMonitorMaxRoundsNote(monitor.Spec, rounds) + " " + summary)
+		if err := r.createMonitorEvent(ctx, monitor, "", repositoryMonitorPullRequestKind, item.Number, reviewedHead, repositoryMonitorReviewEscalatedEvent, fmt.Sprintf("Pull request #%d review verdict raised to needs_human after %d reviewed heads without a passed review", item.Number, rounds.SincePass), map[string]any{
+			eventTaskNameField: task.Name,
+			eventReasonField:   repositoryMonitorReviewMaxRoundsReason,
+		}); err != nil {
+			return false, err
+		}
+	}
 	record := &store.ReviewRecord{
 		ID:                      recordID,
 		MonitorNamespace:        monitor.Namespace,
@@ -325,6 +344,8 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
+	recordRepositoryMonitorReviewMetrics(plan, ledger, record)
+	r.recordRepositoryMonitorRoundsToPassBestEffort(ctx, monitor, item, record, rounds)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
@@ -961,6 +982,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 	if err := r.Store.CreateReviewRecord(ctx, record); err != nil {
 		return false, err
 	}
+	metrics.RecordRepositoryMonitorReview(repositoryMonitorReviewMetricMode(task.Annotations[repositoryMonitorAnnotationReviewMode]), record.Verdict)
 	settled, err := r.cleanupRepositoryMonitorValidationTask(ctx, monitor, task, record)
 	if err != nil || !settled {
 		return false, err
