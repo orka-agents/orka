@@ -2037,7 +2037,8 @@ spec:
               rule: self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles)
                 && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size()
                 == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths)
-                && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles)
+                && (!has(self.workspace.deniedPaths) || self.workspace.deniedPaths.size()
+                == 0) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles)
                 && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))
             - message: custom-image container Tasks do not support workspace.pushBranch
                 publication
