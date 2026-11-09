@@ -2,6 +2,7 @@ package kube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -132,7 +133,10 @@ func (s *Store) RecordStorageWatermark(
 	})
 }
 
-// HoldStorage implements store.StorageRecordStore.
+// HoldStorage implements store.StorageRecordStore. It records the hold under
+// the controller epoch mutation interlock, waiting while another
+// control-store change holds it, so every change either finishes before the
+// hold is recorded or sees the hold and is refused.
 func (s *Store) HoldStorage(ctx context.Context, fence store.ControllerEpochFence, hold store.StorageRecoveryHold) (store.StorageRecoveryHold, error) {
 	if err := store.ValidateControlIdentifier("storage recovery hold ID", hold.ID); err != nil {
 		return store.StorageRecoveryHold{}, err
@@ -140,8 +144,16 @@ func (s *Store) HoldStorage(ctx context.Context, fence store.ControllerEpochFenc
 	if hold.Reason == "" || hold.RaisedAt.IsZero() {
 		return store.StorageRecoveryHold{}, store.ValidationErrorf("a storage recovery hold needs a reason and a time")
 	}
+	if err := s.requireClient(); err != nil {
+		return store.StorageRecoveryHold{}, err
+	}
+	snapshot, err := s.waitForControllerEpochMutation(ctx, fence)
+	if err != nil {
+		return store.StorageRecoveryHold{}, err
+	}
+	defer s.releaseControllerEpochMutation(snapshot)
 	var recorded store.StorageRecoveryHold
-	err := s.updateStorageRecord(ctx, fence, func(status *corev1alpha1.ControllerEpochStatus) (bool, error) {
+	err = s.updateStorageRecord(ctx, fence, func(status *corev1alpha1.ControllerEpochStatus) (bool, error) {
 		if existing := status.StorageRecovery; existing != nil {
 			recorded = *storageRecordFromObject(&corev1alpha1.ControllerEpoch{Status: *status}).Hold
 			return false, nil
@@ -167,6 +179,60 @@ func (s *Store) HoldStorage(ctx context.Context, fence store.ControllerEpochFenc
 	}
 	return recorded, nil
 }
+
+// waitForControllerEpochMutation takes the controller epoch mutation
+// interlock for fence, also while a hold is recorded, and keeps trying while
+// another change holds it until ctx ends. A fence the object no longer holds
+// is refused with ErrFenced, as every storage record write is.
+func (s *Store) waitForControllerEpochMutation(ctx context.Context, fence store.ControllerEpochFence) (epochSnapshot, error) {
+	for {
+		_, snapshot, err := s.lockControllerEpochMutation(ctx, fence, true)
+		if err == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(err, store.ErrControllerEpochMutationContention) {
+			return epochSnapshot{}, s.storageRecordFenceError(ctx, fence, err)
+		}
+		select {
+		case <-ctx.Done():
+			// Only the end of ctx is returned, never the contention, which
+			// matches ErrConflict and would read as a definite refusal.
+			return epochSnapshot{}, fmt.Errorf("wait for the controller epoch mutation interlock: %w", ctx.Err())
+		case <-time.After(controllerEpochMutationRetryDelay):
+		}
+	}
+}
+
+// storageRecordFenceError returns ErrFenced when the object no longer holds
+// fence's epoch, and err otherwise.
+func (s *Store) storageRecordFenceError(ctx context.Context, fence store.ControllerEpochFence, err error) error {
+	normalized, normalizeErr := store.NormalizeEpochFence(fence)
+	if normalizeErr != nil {
+		return err
+	}
+	object, getErr := s.getControllerEpochObject(ctx, normalized.Name)
+	if getErr != nil {
+		return err
+	}
+	if fenced := storageRecordFenced(object, normalized); fenced != nil {
+		return fenced
+	}
+	return err
+}
+
+// storageRecordFenced refuses a storage record write under a fence other
+// than the epoch the object holds.
+func storageRecordFenced(object *corev1alpha1.ControllerEpoch, fence store.ControllerEpochFence) error {
+	if object.Status.Epoch != fence.Epoch || object.Status.HolderID != fence.HolderID {
+		return store.FencedErrorf("controller epoch %q is at %d held by %q, not %d held by %q",
+			fence.Name, object.Status.Epoch, object.Status.HolderID, fence.Epoch, fence.HolderID)
+	}
+	return nil
+}
+
+// controllerEpochMutationRetryDelay is how long HoldStorage waits before it
+// tries the interlock again.
+const controllerEpochMutationRetryDelay = 100 * time.Millisecond
 
 // ReleaseStorageHold implements store.StorageRecordStore.
 func (s *Store) ReleaseStorageHold(
@@ -228,9 +294,8 @@ func (s *Store) updateStorageRecordObject(
 		if err != nil {
 			return err
 		}
-		if object.Status.Epoch != normalized.Epoch || object.Status.HolderID != normalized.HolderID {
-			return store.FencedErrorf("controller epoch %q is at %d held by %q, not %d held by %q",
-				normalized.Name, object.Status.Epoch, object.Status.HolderID, normalized.Epoch, normalized.HolderID)
+		if err := storageRecordFenced(object, normalized); err != nil {
+			return err
 		}
 		changed, err := change(object)
 		if err != nil || !changed {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,6 +112,86 @@ func TestClockCheckGatesWrites(t *testing.T) {
 	if err := client.SaveResult(ctx, "tenant", "task", []byte("second")); err != nil {
 		t.Fatalf("writes resume: %v", err)
 	}
+}
+
+// unansweredDescriber is a provider that answers Describe only when the call's
+// context ends, as an unreachable backend does.
+type unansweredDescriber struct {
+	storagev1.StateProvider
+	calls chan struct{}
+}
+
+func (p *unansweredDescriber) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	p.calls <- struct{}{}
+	<-ctx.Done()
+	return storagev1.ProviderInfo{}, ctx.Err()
+}
+
+// A state provider that does not answer keeps neither the artifact
+// provider's clock check nor the lifting of its refusal waiting: with
+// separate providers, each is checked on its own and its result applies as
+// soon as it answers.
+func TestClockCheckOfOneProviderDoesNotWaitForTheOther(t *testing.T) {
+	client, artifacts := newSkewedClockClient(t)
+	info, err := artifacts.Describe(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The artifact dataset was refused at an earlier check; its clock is back
+	// within bounds now.
+	client.ops.setClockSkew(info.DatasetID, &clockSkew{offset: time.Hour})
+	artifacts.set(time.Second, true, nil)
+	unanswered := &unansweredDescriber{StateProvider: artifacts, calls: make(chan struct{}, 1)}
+	client.state = unanswered
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.CheckClocks(ctx) }()
+	<-unanswered.calls
+	deadline := time.Now().Add(5 * time.Second)
+	for client.ops.requireClockAgreement(info.DatasetID) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("the artifact refusal is still waiting for the state provider to answer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("CheckClocks returned before the state provider answered: %v", err)
+	default:
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("CheckClocks = %v, want the unanswered state check's error", err)
+	}
+	if err := client.ops.requireClockAgreement(info.DatasetID); err != nil {
+		t.Fatalf("the artifact dataset is refused again: %v", err)
+	}
+}
+
+// A provider that serves both contracts is described once per check.
+func TestClockCheckDescribesASharedProviderOnce(t *testing.T) {
+	client, skewed := newSkewedClockClient(t)
+	counting := &countingDescriber{skewedClockStore: skewed}
+	client.state, client.artifacts = counting, counting
+	if err := client.CheckClocks(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := counting.calls.Load(); got != 1 {
+		t.Fatalf("Describe calls = %d, want 1", got)
+	}
+}
+
+// countingDescriber counts Describe calls to the store it wraps.
+type countingDescriber struct {
+	*skewedClockStore
+	calls atomic.Int64
+}
+
+func (p *countingDescriber) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	p.calls.Add(1)
+	return p.skewedClockStore.Describe(ctx)
 }
 
 // The offset is estimated against the midpoint of the round trip, and only a

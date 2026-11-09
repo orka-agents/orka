@@ -929,7 +929,14 @@ condition. While it is recorded, every contract's write fence and
 `CurrentFence` refuse with an error that matches `ErrNotReady` (and
 `store.ErrStorageRecoveryRequired`), so the storage client refuses every
 write, control-store changes stop, no Task Job is created and no Task reports
-success; reads continue. Task Jobs also
+success; reads continue. The storage client checks the fence again before
+each retry, so a write whose first attempt came before the hold is not
+retried into the held dataset: it is refused, or resolved when its outcome
+is unknown. The hold is recorded under the controller epoch mutation
+interlock that control-store changes take, and that interlock refuses every
+change while a hold is recorded, so a change in progress finishes before the
+hold and none commits after it, also under a fence obtained before the hold.
+Task Jobs also
 wait while any contract's fence is closed, so a restarted controller starts no
 work before every dataset passed its takeover checks, and `CurrentFence` waits
 whenever the state fence is closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
@@ -988,14 +995,20 @@ that happened while no controller ran needs the incarnation recorded with the
 acknowledgement.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
-Failovers})` checks, for every write in the write catalog, that after a
+Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
 restart and after each declared failover the change, its receipt, the
 dataset's identity, controller epoch, installation and watermark survive, and
-a replay changes nothing. Each failover must change the incarnation, and
-watermark writes that run during a failover either survive or settle as
-aborted through `ResolveOperation`. A `local-fsync` or `local-buffered`
-provider declares no failover, and a `synchronous-replicated` one declares at
-least one. SQLite supplies `Restart` by closing and reopening its file.
+a replay changes nothing. Each failover must change the incarnation. Before
+each failover, `HoldWrites` keeps watermark writes waiting inside the
+database, and the suite checks that they were in flight when the switch
+began; each then returns nil and survives, or is refused or ends with an
+unknown outcome (`ErrUnavailable`, `ErrNotReady` or `ErrOutcomeUnknown`)
+and settles through `ResolveOperation` as committed or aborted, never in any
+other state. A `local-fsync` or `local-buffered` provider declares no
+failover, and a `synchronous-replicated` one declares at least one. An
+`async-replicated` provider declares none either: its switch may lose
+acknowledged writes, which these cases do not allow, and Orka holds the
+installation after one. SQLite supplies `Restart` by closing and reopening its file.
 
 ### Kubernetes control protocols
 
@@ -1146,27 +1159,37 @@ execution event, through `AppendExecutionEventWithPlanIfAbsent`.
 | --- | --- | --- |
 | One active writer | Process file lock, leader election and one replica | Leader election and the epoch compare-and-swap pick the controller; the store refuses writes under any other fence, and a dataset bound to one installation refuses another installation's advance. |
 | A second controller opening the dataset | Cannot take the file lock | May read (`Describe`, validation); cannot write until it wins the compare-and-swap and advances the store. |
-| Schema migration | At open, under the file lock and `BEGIN IMMEDIATE` | Adapter-owned, under a dataset-wide lock, with the dataset `migrating` so writes are refused. |
+| Schema migration | At open, under the file lock and `BEGIN IMMEDIATE` | Adapter-owned, by one migrator that holds a dataset-wide lock for the whole migration, with the dataset `migrating` so writes are refused. |
 
 A network adapter migrates its schema in three steps: it enters `migrating`
 in a transaction that takes the same lock as an epoch advance, so writes in
 progress finish first and later new writes return `ErrNotReady`; applies the
-change and records the new schema version; and returns to `ready`. A crash
-leaves the dataset `migrating`, refusing writes, until the migration runs
-again. Concurrent migrators serialize, and the second finds the target
-version and does nothing. For PostgreSQL:
+change and records the new schema version; and returns to `ready`. One
+migrator owns the whole migration, from before it reads the schema version
+until the dataset is `ready` again, so concurrent migrators serialize, and
+the second finds the target version and does nothing. A crash leaves the
+dataset `migrating`, refusing writes, until the migration runs again. For
+PostgreSQL:
 
-- Run migrations on a direct connection (port 5432 on Azure), never through a
-  transaction-pooling PgBouncer (port 6432), and never with session-level
-  advisory locks.
-- Serialize adapter replicas with `SELECT pg_advisory_xact_lock(<constant>)`
-  inside the migration transaction, then check the schema version again.
+- Run the migration on one direct connection (port 5432 on Azure), never
+  through a transaction-pooling PgBouncer (port 6432), which does not keep a
+  session for one client.
+- Make that session the owner. Take `SELECT pg_advisory_lock(<constant>)` on
+  it before reading the schema version, run every step on the same
+  connection, including steps outside a transaction, and release the lock
+  with `pg_advisory_unlock` only once the dataset is `ready` again. A
+  transaction-level lock (`pg_advisory_xact_lock`) is not enough: it ends
+  when the transaction that enters `migrating` commits, before steps such as
+  `CREATE INDEX CONCURRENTLY` run. The lock belongs to the session that runs
+  the steps, so it is held while any of them runs, and PostgreSQL releases
+  it when that session ends, also after the migrator crashes.
 - Enter `migrating` in one transaction that locks the controller epoch row
   (`SELECT ... FROM orka_controller_epoch FOR UPDATE`) and then sets
   `orka_dataset.state` to `migrating`.
 - Use transactional DDL where possible. Steps that cannot run in a
   transaction, such as `CREATE INDEX CONCURRENTLY`, run only while the state
-  is `migrating`.
+  is `migrating`, and can run again: a concurrent index build that failed
+  leaves an invalid index, which the next owner drops and builds again.
 - Set `lock_timeout` on DDL, so a migration cannot stall behind a long reader.
 
 Orka treats `migrating` as a temporary storage outage: writes answer 503 and

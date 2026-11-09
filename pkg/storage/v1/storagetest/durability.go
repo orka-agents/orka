@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
@@ -26,8 +27,20 @@ type DurabilityHarness struct {
 	// declares, such as promoting a synchronous standby, and returns the
 	// provider that serves the dataset afterwards. A provider whose
 	// durability class is local-fsync or local-buffered declares none; one
-	// that declares synchronous-replicated supplies at least one.
+	// that declares synchronous-replicated supplies at least one. An
+	// async-replicated provider declares none either: its switch may lose
+	// acknowledged writes, which these cases do not allow, and Orka holds the
+	// installation after one instead.
 	Failovers map[string]func(t *testing.T, provider storagev1.ProviderDescriber) storagev1.ProviderDescriber
+	// HoldWrites makes the provider's next writes to the dataset wait inside
+	// the database that serves it, as writes wait behind a row lock another
+	// session holds, and returns a function that returns once n of them are
+	// waiting there. A provider that declares failovers supplies it, so the
+	// suite starts each failover while writes are in flight. The failover
+	// ends the wait, for example by stopping the database that holds the
+	// lock; the writes it holds must have returned by the time the failover
+	// returns.
+	HoldWrites func(t *testing.T, provider storagev1.ProviderDescriber) (waiting func(n int))
 }
 
 // WithDurability enables the durability cases: after a restart, and after
@@ -35,23 +48,29 @@ type DurabilityHarness struct {
 // with its operation receipt, a replay returns its original outcome without
 // a second change, and the dataset keeps its identity, controller epoch,
 // installation and write watermark. Each failover also changes the reported
-// incarnation, and the writes that run while it happens either survive or
-// settle as aborted through ResolveOperation.
+// incarnation, and the writes HoldWrites keeps in flight while it happens
+// either survive or settle as aborted through ResolveOperation.
 func WithDurability(harness DurabilityHarness) Option {
 	return func(options *suiteOptions) { options.durability = &harness }
 }
 
-// failoverWriters is how many watermark writes run while a failover happens.
+// failoverWriters is how many watermark writes are in flight while a
+// failover happens.
 const failoverWriters = 8
 
 func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T) P, cases []writeCase[P], harness DurabilityHarness) {
 	require.NotNil(t, harness.Restart, "a durability harness needs Restart")
+	require.True(t, len(harness.Failovers) == 0 || harness.HoldWrites != nil,
+		"a durability harness that declares failovers needs HoldWrites")
 	t.Run("declared failovers match the durability class", func(t *testing.T) {
 		info, err := newProvider(t).Describe(t.Context())
 		require.NoError(t, err)
 		switch info.Durability {
 		case storagev1.DurabilityLocalFsync, storagev1.DurabilityLocalBuffered:
 			require.Empty(t, harness.Failovers, "a %s provider has no automatic database switch", info.Durability)
+		case storagev1.DurabilityAsyncReplicated:
+			require.Empty(t, harness.Failovers,
+				"an async-replicated switch may lose acknowledged writes, which the failover cases do not allow")
 		case storagev1.DurabilitySynchronousReplicated:
 			require.NotEmpty(t, harness.Failovers, "a synchronous-replicated provider must exercise its automatic switch")
 		}
@@ -76,6 +95,10 @@ func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T)
 			require.Truef(t, ok, "%s returned a provider of another kind", name)
 			return reopened
 		}
+		holdWrites := func(t *testing.T, provider P) func(int) {
+			t.Helper()
+			return harness.HoldWrites(t, harnessProvider(provider))
+		}
 		failover := name != "restart"
 		t.Run(name, func(t *testing.T) {
 			for _, c := range cases {
@@ -85,7 +108,7 @@ func runDurability[P suiteProvider](t *testing.T, newProvider func(t *testing.T)
 			}
 			if failover {
 				t.Run("writes during the switch", func(t *testing.T) {
-					runWritesDuringFailover(t, newProvider(t), reopen)
+					runWritesDuringFailover(t, newProvider(t), reopen, holdWrites)
 				})
 			}
 		})
@@ -150,11 +173,14 @@ func runDurableWrite[P suiteProvider](t *testing.T, provider P, c writeCase[P], 
 	requireFenced(t, callWrite(ctx, t, provider, c, stale, suiteFence).err)
 }
 
-// runWritesDuringFailover runs watermark writes while the provider fails
-// over. Every write that returned nil survives with its receipt; every write
-// whose outcome is unknown settles through ResolveOperation as committed and
-// present, or as aborted, absent and refused if it arrives late.
-func runWritesDuringFailover[P suiteProvider](t *testing.T, provider P, reopen func(*testing.T, P) P) {
+// runWritesDuringFailover holds watermark writes in the database and fails
+// the provider over while they are in flight. Every write that returned nil
+// survives with its receipt; every write that was refused or whose outcome
+// is unknown settles through ResolveOperation as committed and present, or
+// as aborted, absent and refused if it arrives late.
+func runWritesDuringFailover[P suiteProvider](
+	t *testing.T, provider P, reopen func(*testing.T, P) P, holdWrites func(*testing.T, P) func(int),
+) {
 	ctx := t.Context()
 	advanceEpoch(t, provider, suiteFence)
 	dataset := datasetID(t, provider)
@@ -162,37 +188,52 @@ func runWritesDuringFailover[P suiteProvider](t *testing.T, provider P, reopen f
 	for i := range envelopes {
 		envelopes[i] = NewWriteEnvelope(t, dataset, suiteFence, "AdvanceWriteWatermark")
 	}
+	waiting := holdWrites(t, provider)
 	errs := make([]error, failoverWriters)
+	// late marks a write that began after the failover began, and early one
+	// that returned before it; neither was in flight across the switch.
+	late := make([]bool, failoverWriters)
+	early := make([]bool, failoverWriters)
+	var switching atomic.Bool
 	var wg sync.WaitGroup
 	for i := range failoverWriters {
 		wg.Go(func() {
+			late[i] = switching.Load()
 			_, errs[i] = provider.AdvanceWriteWatermark(storagev1.WithWriteEnvelope(ctx, envelopes[i]))
+			early[i] = !switching.Load()
 		})
 	}
+	waiting(failoverWriters)
+	switching.Store(true)
 	reopened := reopen(t, provider)
 	wg.Wait()
 
 	committed := int64(0)
 	var aborted []storagev1.WriteEnvelope
 	for i, err := range errs {
+		require.Falsef(t, late[i] || early[i],
+			"write %d was not in flight when the failover began (began after it: %t, returned before it: %t, error: %v); "+
+				"HoldWrites must keep it waiting in the database", i, late[i], early[i], err)
 		switch {
 		case err == nil:
-		case errors.Is(err, storagev1.ErrOutcomeUnknown), errors.Is(err, storagev1.ErrUnavailable):
+		case errors.Is(err, storagev1.ErrOutcomeUnknown), errors.Is(err, storagev1.ErrUnavailable),
+			errors.Is(err, storagev1.ErrNotReady):
 		default:
-			require.NoErrorf(t, err, "a write during a failover either commits or has an unknown outcome")
+			require.NoErrorf(t, err, "a write during a failover commits, has an unknown outcome, or is refused as unavailable or not ready")
 		}
 		outcome, err := reopened.ResolveOperation(ctx, storagev1.ResolveOperationRequest{
 			DatasetID: dataset, OperationID: envelopes[i].OperationID, Method: "AdvanceWriteWatermark",
 			RequestDigest: envelopes[i].RequestDigest, IssuedAt: envelopes[i].IssuedAt,
 		})
 		require.NoError(t, err)
+		require.Containsf(t, []storagev1.OperationState{storagev1.OperationCommitted, storagev1.OperationAborted}, outcome.State,
+			"a write during a failover settles as committed or aborted, not %q", outcome.State)
 		if errs[i] == nil {
 			require.Equal(t, storagev1.OperationCommitted, outcome.State, "a write that returned nil survives the failover")
 		}
-		switch outcome.State {
-		case storagev1.OperationCommitted:
+		if outcome.State == storagev1.OperationCommitted {
 			committed++
-		case storagev1.OperationAborted:
+		} else {
 			aborted = append(aborted, envelopes[i])
 		}
 	}
