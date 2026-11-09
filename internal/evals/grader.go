@@ -366,7 +366,8 @@ type hunkHeader struct {
 // 11.
 func parseHunkHeader(text string) (hunkHeader, bool) {
 	fields := strings.Fields(text)
-	if len(fields) < 3 || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
+	// The ranges sit between "@@" delimiters; section text may follow.
+	if len(fields) < 4 || fields[3] != "@@" || !strings.HasPrefix(fields[1], "-") || !strings.HasPrefix(fields[2], "+") {
 		return hunkHeader{}, false
 	}
 	parse := func(field string) (start, count int64, ok bool) {
