@@ -334,11 +334,15 @@ func removedLines(patch string) map[int64]int64 {
 			head++
 			headLeft--
 		case strings.HasPrefix(text, `\`):
-		default:
+		case strings.HasPrefix(text, " "):
 			base++
 			head++
 			baseLeft--
 			headLeft--
+		default:
+			// Only a space marks a context line; anything else is not a
+			// unified diff body.
+			return nil
 		}
 		if baseLeft < 0 || headLeft < 0 {
 			return nil
