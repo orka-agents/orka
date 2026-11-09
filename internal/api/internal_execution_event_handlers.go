@@ -17,8 +17,12 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/capabilitygap"
 	"github.com/orka-agents/orka/internal/events"
+	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/store"
+	"github.com/orka-agents/orka/internal/usage"
 )
 
 const maxSubmitExecutionEventRequestBytes = 256 << 10 // 256 KiB
@@ -139,12 +143,75 @@ func (h *InternalHandlers) SubmitExecutionEvent(c fiber.Ctx) error {
 	}); err != nil {
 		return err
 	}
+	// Only a managed AI worker reports its own tool rejections; a container
+	// Task's command could submit the same event shape.
+	if reason, ok := toolCallCapabilityGapReason(event, eventContent); ok && capabilitygap.Default() != nil &&
+		authorizer.verifyUsageWriter(c.Context(), GetUserInfo(c), writerTask) == nil {
+		signal := capabilitygap.Signal{
+			Category:  capabilitygap.CategoryMissingTool,
+			Reason:    reason,
+			Runtime:   capabilitygap.RuntimeNative,
+			Tool:      event.ToolName,
+			Namespace: event.Namespace,
+			Task:      event.StreamID,
+		}
+		if writerTask != nil && writerTask.Name == event.StreamID {
+			signal.TaskUID = string(writerTask.UID)
+		}
+		// Without a verified namespace UID or Gateway owner the signal still
+		// counts in Prometheus but stays out of the summary.
+		owner, ownerErr := capabilityGapGatewayOwner(c.Context(), h.gatewayEventStore, writerTask)
+		signal.Gateway = owner
+		if uid, err := usage.NamespaceUIDForObject(c.Context(), uncachedReaderOr(h.apiReader, h.k8sClient), writerTask); err == nil && ownerErr == nil {
+			signal.NamespaceUID = uid
+		}
+		capabilitygap.Record(signal)
+	}
 
 	return c.Status(fiber.StatusCreated).JSON(SubmitExecutionEventResponse{
 		ID:        appended.ID,
 		Seq:       appended.Seq,
 		CreatedAt: appended.CreatedAt,
 	})
+}
+
+// toolCallCapabilityGapReason classifies a built-in AI worker tool call that
+// was rejected before it ran. It reads only the closed errorType value; the
+// summary, content text and arguments are never read.
+func toolCallCapabilityGapReason(event *store.ExecutionEvent, content map[string]json.RawMessage) (capabilitygap.Reason, bool) {
+	if event == nil || event.Type != events.ExecutionEventTypeToolCallFailed ||
+		event.StreamType != events.ExecutionEventStreamTypeTask {
+		return "", false
+	}
+	var errorType string
+	if json.Unmarshal(content[events.ToolCallErrorTypeContentKey], &errorType) != nil {
+		return "", false
+	}
+	switch errorType {
+	case events.ToolCallErrorTypeNotEnabled:
+		return capabilitygap.ReasonToolNotEnabled, true
+	case events.ToolCallErrorTypeNotFound:
+		return capabilitygap.ReasonToolNotRegistered, true
+	default:
+		return "", false
+	}
+}
+
+// capabilityGapGatewayOwner names the Gateway that owns task, if any,
+// including ownership recorded only in its retained GatewayEvent. An error
+// means ownership could not be verified, including a Gateway claim that names
+// no Gateway: the zero GatewayOwner would read as not Gateway-owned.
+func capabilityGapGatewayOwner(ctx context.Context, gatewayEvents store.GatewayEventStore, task *corev1alpha1.Task) (capabilitygap.GatewayOwner, error) {
+	owner, ok, err := gatewayruntime.ResolveTaskOwner(ctx, gatewayEvents, task)
+	if err != nil || !ok {
+		return capabilitygap.GatewayOwner{}, err
+	}
+	if owner == (gatewayruntime.TaskOwnerIdentity{}) {
+		return capabilitygap.GatewayOwner{}, errors.New("gateway task ownership names no gateway")
+	}
+	return capabilitygap.GatewayOwner{
+		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
+	}, nil
 }
 
 func readExecutionEventRequestBody(c fiber.Ctx) ([]byte, error) {

@@ -3056,7 +3056,7 @@ func TestSuspendQuotaReadFailureIsTransient(t *testing.T) {
 	}
 
 	// The plan consumer requeues a transient plan instead of failing the Task.
-	result, planErr := r.rejectPlannedAgentExecution(ctx, task,
+	result, planErr := r.rejectPlannedAgentExecution(ctx, task, nil,
 		agentExecutionPlan{path: agentExecutionPathRejected, transientError: err})
 	if planErr == nil || result.RequeueAfter != 0 {
 		t.Fatalf("transient plan must return the error for backoff requeue, got (%v, %v)", result, planErr)

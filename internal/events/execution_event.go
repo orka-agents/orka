@@ -11,6 +11,16 @@ type (
 	ExecutionEventTruncation = storagev1.ExecutionEventTruncation
 )
 
+// ToolCallFailed events may carry one of these values under the
+// ToolCallErrorTypeContentKey content field when the built-in AI worker
+// rejected the call before running it. The controller counts them as
+// capability-gap signals.
+const (
+	ToolCallErrorTypeContentKey = "errorType"
+	ToolCallErrorTypeNotEnabled = "tool_not_enabled"
+	ToolCallErrorTypeNotFound   = "tool_not_found"
+)
+
 const (
 	ExecutionEventTypeTaskCreated                   = storagev1.ExecutionEventTypeTaskCreated
 	ExecutionEventTypeTaskPhaseChanged              = storagev1.ExecutionEventTypeTaskPhaseChanged

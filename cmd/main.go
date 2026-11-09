@@ -328,6 +328,7 @@ func main() {
 	var acpProviderProxyTokenFile string
 	var acpE2EPromptWriteAmbiguityMarker string
 	var acpToolboxesEnabled bool
+	var capabilityGapSignalsEnabled bool
 	var acpToolboxAllowedRegistries string
 	var acpToolboxImagePullSecrets string
 	var acpToolboxNodeSelector string
@@ -800,6 +801,9 @@ func main() {
 		"Enable OpenTelemetry tracing and metrics. Configure endpoint via OTEL_EXPORTER_OTLP_ENDPOINT env var.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false,
 		"Alias for --enable-telemetry; enables OpenTelemetry traces and metrics.")
+	flag.BoolVar(&capabilityGapSignalsEnabled, "capability-gap-signals-enabled", envBool("ORKA_CAPABILITY_GAP_SIGNALS_ENABLED"),
+		"Record content-free capability-gap signals (unsupported requests, missing or denied tools) as Prometheus counters "+
+			"and a 7-day summary at GET /api/v1/capability-gaps. Off by default.")
 	flag.StringVar(&contextTokenConnectorReadScopes, "context-token-connector-read-scopes",
 		os.Getenv("ORKA_CONTEXT_TOKEN_CONNECTOR_READ_SCOPES"),
 		"Comma-separated context-token scopes that authorize reading a person's own connector Connections. "+
@@ -2209,6 +2213,7 @@ func main() {
 	// coordinator to call a tool name that comes back as "not available in this
 	// request" and aborting the chat-to-PR workflow after all the real work is done.
 	tools.RegisterProxyPRTools(mgr.GetClient())
+	enableCapabilityGapSignals(capabilityGapSignalsEnabled, tools.DefaultRegistry, acpMCPRegistry)
 
 	// Start REST API server
 	var publisherControllerEpochs api.ControllerEpochFenceSource
