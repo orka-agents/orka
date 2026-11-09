@@ -171,7 +171,7 @@ func TestDecideEvalRunAdmitsOnlyHumanPromoters(t *testing.T) {
 		"transaction token":   {groups: []string{"promoters"}, user: "context-token", wantStatus: http.StatusForbidden, wantError: "transaction tokens"},
 		"service account":     {groups: []string{"promoters"}, user: "system:serviceaccount:demo:bot", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not a ServiceAccount"},
 		"system user":         {groups: []string{"promoters"}, user: "system:admin", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not a ServiceAccount"},
-		"no decide grant":     {groups: []string{"promoters"}, user: "carol", in: "promoters", wantStatus: http.StatusForbidden, wantError: "not authorized"},
+		"no decide grant":     {groups: []string{"promoters"}, user: "carol", in: "promoters", wantStatus: http.StatusForbidden, wantError: "need the decide verb on evalruns"},
 		"outside every group": {groups: []string{"promoters"}, user: "alice", in: "developers", wantStatus: http.StatusForbidden, wantError: "promoter group"},
 		"promoter":            {groups: []string{"promoters"}, user: "alice", in: "developers,promoters", wantStatus: http.StatusCreated},
 	} {
