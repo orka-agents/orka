@@ -162,3 +162,33 @@ func TestParseSinceAcceptsDurationAndTimestamp(t *testing.T) {
 		t.Fatalf("parseSince(empty) = %v, %v", got, err)
 	}
 }
+
+// TestTaskDescribeShowsAPendingApproval covers a Task held on an approval:
+// its phase is Running, so the WaitingForApproval condition is shown with the
+// command that lists the request. A cleared condition shows nothing.
+func TestTaskDescribeShowsAPendingApproval(t *testing.T) {
+	task := func(status string) map[string]any {
+		return map[string]any{
+			"metadata": map[string]any{"name": "az-write"},
+			"status": map[string]any{
+				"phase":      "Running",
+				"conditions": []any{map[string]any{"type": "WaitingForApproval", "status": status}},
+			},
+		}
+	}
+	if got, want := taskWaitingOn(task("True")), "approval; see 'orka task approvals az-write'"; got != want {
+		t.Fatalf("taskWaitingOn = %q, want %q", got, want)
+	}
+	shown := false
+	for _, row := range taskDescribeRows(task("True")) {
+		shown = shown || (row.Label == labelWaitingOn && strings.Contains(row.Value, "orka task approvals az-write"))
+	}
+	if !shown {
+		t.Fatal("task get must show a pending approval")
+	}
+	for _, quiet := range []map[string]any{task("False"), {"metadata": map[string]any{"name": "plain"}, "status": map[string]any{"phase": "Running"}}} {
+		if got := taskWaitingOn(quiet); got != "" {
+			t.Fatalf("taskWaitingOn = %q, want nothing", got)
+		}
+	}
+}

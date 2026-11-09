@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -100,6 +101,17 @@ func TestForwardingWritesJoinThePlanningInputs(t *testing.T) {
 	if _, _, err := adjustInputsForForwardingWrites(context.Background(), longReader, forwardingWriteTask(), longAgent, nil); err == nil ||
 		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("an overlong write tool name: %v", err)
+	}
+	// The write tool counts toward the tool limit: a Task already at it
+	// fails for good instead of retrying a policy that can never be built.
+	full := forwardingWriteAgent()
+	for i := 0; len(full.Spec.Runtime.DefaultAllowedTools) < harnessv2.MaxMCPTools; i++ {
+		full.Spec.Runtime.DefaultAllowedTools = append(full.Spec.Runtime.DefaultAllowedTools, fmt.Sprintf("filler%03d", i))
+	}
+	fullReader := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(writeForwardingTool(corev1alpha1.HTTPForwardWriteApprovalRequired)).Build()
+	if _, _, err := adjustInputsForForwardingWrites(context.Background(), fullReader, forwardingWriteTask(), full, nil); err == nil ||
+		!isPermanentACPAgentConfigurationError(err) || !strings.Contains(err.Error(), "over the limit") {
+		t.Fatalf("a Task at the tool limit: err = %v, want a permanent refusal", err)
 	}
 	named := forwardingWriteAgent()
 	named.Spec.Runtime.DefaultAllowedTools = []string{write}
@@ -232,6 +244,35 @@ func TestForwardingWritesPlanOnABuiltInRuntime(t *testing.T) {
 	}
 	if _, _, _, err := freezeRequesterConnectionsClassified(context.Background(), reader, nil, task, configuration); err != nil {
 		t.Fatalf("freeze: %v", err)
+	}
+	// A Task that denies only the write tool plans on codex, which enforces
+	// its built-in tools all or nothing: the deny names no built-in tool. It
+	// keeps the Tool's reads and gets no write tool.
+	readOnly := forwardingWriteTask()
+	readOnly.UID = "read-only-uid"
+	readOnly.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{DisallowedTools: []string{"azure-arm:write"}}
+	readOnlyAgent := forwardingWriteAgent()
+	readOnlyAgent.UID, readOnlyAgent.Generation = "agent-uid", 1
+	readOnlyAgent.Spec.Model = &corev1alpha1.ModelConfig{Name: "model"}
+	readOnlyAgent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV2)
+	readOnlyAgent.Spec.Runtime.DefaultAllowedTools = append(acp.BuiltInRuntimeNativeToolNames("codex"), "azure-arm")
+	readOnly, readOnlyAgent, err = adjustInputsForForwardingWrites(context.Background(), reader, readOnly, readOnlyAgent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPlan, err := PlanACPRuntime(readOnly, readOnlyAgent, ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("c", 64)})
+	if err != nil {
+		t.Fatalf("a Task that denies only the write tool must plan on codex: %v", err)
+	}
+	readConfiguration, err := buildRuntimeSessionMCPConfigurationWithRegistry(context.Background(), reader, readOnly, readOnlyAgent, readPlan.Profile, tools.NewRegistry())
+	if err != nil {
+		t.Fatalf("policy for a Task that denies the write tool: %v", err)
+	}
+	if _, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm:write"); offered {
+		t.Fatal("a denied write tool must not be offered")
+	}
+	if read, offered := readConfiguration.ToolPolicy.Descriptor("azure-arm"); !offered || read.Forward == nil {
+		t.Fatalf("the Tool's reads must stay: %#v", read)
 	}
 	// A policy that drops the write tool's approval, as a registered
 	// external runtime's could, is refused while the Tool requires it.

@@ -217,6 +217,19 @@ func TestMaskForwardedWriteArgumentsKeepsOnlyTheShape(t *testing.T) {
 			t.Errorf("preview exposed a value: %s", preview)
 		}
 	}
+	// A sizing field shows only sizing-value text: a value shaped like a
+	// credential, or longer than any size name, is masked.
+	shaped := string(maskForwardedWriteArguments(json.RawMessage(
+		`{"method":"PUT","path":"` + aks + `","body":{"location":"West US 2","sku":{"name":"private+key/==","tier":"` +
+			strings.Repeat("p", 65) + `"},"properties":{"kubernetesVersion":"1.30.3","agentPoolProfiles":[{"vmSize":"Standard_D2s_v3","mode":"private:colon"}]}}}`)))
+	for _, shown := range []string{`"West US 2"`, `"1.30.3"`, `"Standard_D2s_v3"`} {
+		if !strings.Contains(shaped, shown) {
+			t.Errorf("preview hid the sizing value %s: %s", shown, shaped)
+		}
+	}
+	if strings.Contains(shaped, "private") || strings.Contains(shaped, "ppppp") {
+		t.Errorf("preview showed a value that is not sizing text: %s", shaped)
+	}
 	// Query values are masked, except the API version.
 	signed := string(maskForwardedWriteArguments(json.RawMessage(
 		`{"method":"POST","path":"/subscriptions/s1/resourceGroups/rg/providers/Microsoft.Web/sites/s/restart","query":"sig=private-sig&api-version=2024-04-01&se=private-expiry&flag"}`)))

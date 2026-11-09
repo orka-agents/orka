@@ -208,3 +208,22 @@ func TestOnlyForwardingWritesSkipRuntimeApprovals(t *testing.T) {
 		}
 	}
 }
+
+// TestMCPToolPolicyDeniesAWriteToolWithItsTool covers a policy that allows a
+// forwarding Tool's write tool by name, as a registered external runtime
+// does, and denies the Tool: the write tool is denied with it.
+func TestMCPToolPolicyDeniesAWriteToolWithItsTool(t *testing.T) {
+	write := MCPForwardWriteToolName("azurearm")
+	policy := MCPToolPolicy{AllowedToolNames: []string{"azurearm", write, "other"}, AllowBash: true}
+	if !policy.Allows("azurearm") || !policy.Allows(write) {
+		t.Fatal("an allowed forwarding Tool and its write tool must both be allowed")
+	}
+	policy.DisallowedToolNames = []string{write}
+	if !policy.Allows("azurearm") || policy.Allows(write) {
+		t.Fatal("denying the write tool keeps the Tool's reads")
+	}
+	policy.DisallowedToolNames = []string{"azurearm"}
+	if policy.Allows("azurearm") || policy.Allows(write) || !policy.Allows("other") {
+		t.Fatal("denying the Tool denies its write tool and nothing else")
+	}
+}

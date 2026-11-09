@@ -197,12 +197,22 @@ Add `writes` to let `az` change resources:
   for `orka task approve`) showing its method, path, and body. When it
   creates or updates a resource group, AKS cluster or agent pool, or virtual
   machine, sizing values such as `location`, `sku`, `kubernetesVersion`, and
-  each agent pool's `count` and `vmSize` are shown; every other value is
-  masked because any of them can be a secret. Meanwhile `az`
+  each agent pool's `count` and `vmSize` are shown when they look like
+  sizing values (up to 64 letters, digits, spaces, `.`, `_`, or `-`); every
+  other value is masked because any of them can be a secret. Meanwhile `az`
   waits for the answer. A decision is final: `az` gets Azure's response, or
   `OrkaApprovalNotGranted` if it was declined or expired after 10 minutes.
   When the Agent acts for the requester (`agentIdentity.mode: Delegated`), only
   the requester can approve.
+- While a write waits, the Task stays `Running`. `orka task get <task>` shows
+  `Waiting on: approval`, `orka task approvals <task>` shows the request, and
+  `orka task approve <task> <id>` or `orka task decline <task> <id>` answers
+  it. The **Approvals** tab needs the dashboard, which is off by default: set
+  `controller.dashboard.enabled: true` and open it with `orka dashboard`.
+- A request lasts only while the agent keeps waiting for `az`. If the agent
+  stops the command or ends its turn first, the request is cancelled and
+  nothing is sent to Azure, even though it showed time left. Ask for the
+  write again, and tell the agent in the prompt to wait for approval.
 - `az` resends a request that has had no answer for 5 minutes. The resent
   request joins the pending approval, so a write is never sent twice. Orka
   keeps no write's answer, which can carry a secret, so a resent request

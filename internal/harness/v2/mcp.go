@@ -200,6 +200,11 @@ func (p MCPToolPolicy) Allows(name string) bool {
 	if strings.TrimSpace(name) == "" || !slices.Contains(p.AllowedToolNames, name) || slices.Contains(p.DisallowedToolNames, name) {
 		return false
 	}
+	// Denying a forwarding Tool denies the write tool derived from it,
+	// whichever path built the lists.
+	if base := MCPForwardToolResource(name); base != name && slices.Contains(p.DisallowedToolNames, base) {
+		return false
+	}
 	return p.AllowBash || !strings.EqualFold(name, "bash")
 }
 

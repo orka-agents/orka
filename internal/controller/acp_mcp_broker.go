@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -527,7 +528,13 @@ func azureResourceType(path string) string {
 }
 
 // maxAzurePreviewString bounds a shown string value.
-const maxAzurePreviewString = 128
+const maxAzurePreviewString = 64
+
+// azurePreviewText is what a shown string value may contain: the letters,
+// digits, and separators of Azure locations, SKU and size names, and
+// versions, such as "westus2", "Standard_D2s_v3", or "1.30.3". Anything else
+// in a shown field is masked like an unknown field.
+var azurePreviewText = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 
 // maskJSONValues masks a decoded JSON value for an approval preview: a value
 // at one of shown (path names it from the body's root) is shown when it has
@@ -565,11 +572,12 @@ func maskJSONValues(value any, path string, shown map[string]azurePreviewKind) a
 }
 
 // azurePreviewShows reports whether a preview may show value as kind: a
-// short string as a string, a number as a number, a boolean as a boolean.
+// short string of sizing-value text as a string, a number as a number, a
+// boolean as a boolean.
 func azurePreviewShows(kind azurePreviewKind, value any) bool {
 	switch typed := value.(type) {
 	case string:
-		return kind == azurePreviewString && len(typed) <= maxAzurePreviewString
+		return kind == azurePreviewString && len(typed) <= maxAzurePreviewString && azurePreviewText.MatchString(typed)
 	case json.Number:
 		return kind == azurePreviewNumber
 	case bool:

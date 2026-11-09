@@ -413,7 +413,7 @@ session generation, verified remote commit) for tracing a problem.`,
 				return printTaskRuntimeStatusTable(cmd, status)
 			}
 			writeIntent := strings.EqualFold(nestedString(*detail, "spec", "workspace", "intent"), string(corev1alpha1.WorkspaceIntentWrite))
-			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), writeIntent)
+			return printTaskRuntimeStatusSummary(cmd, status, taskFailureReason(status, *detail), taskWaitingOn(*detail), writeIntent)
 		},
 	}
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show execution and runtime-pool details as well")
@@ -425,7 +425,7 @@ session generation, verified remote commit) for tracing a problem.`,
 // creating a Task: whether it finished, and where the change went. Delivery
 // rows appear only for write-intent workspaces (or once delivery status
 // exists), and a failed or unknown outcome shows its reason.
-func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason string, writeIntent bool) error {
+func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, reason, waitingOn string, writeIntent bool) error {
 	execution := nestedMap(status, "execution")
 	delivery := nestedMap(status, "delivery")
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
@@ -433,6 +433,9 @@ func printTaskRuntimeStatusSummary(cmd *cobra.Command, status map[string]any, re
 	rows := [][2]string{
 		{labelTask, anyString(status[cliTaskCommand])},
 		{labelPhase, anyString(status["phase"])},
+	}
+	if waitingOn != "" {
+		rows = append(rows, [2]string{labelWaitingOn, waitingOn})
 	}
 	if writeIntent || len(delivery) > 0 {
 		rows = append(rows,

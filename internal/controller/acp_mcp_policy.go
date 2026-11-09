@@ -673,6 +673,13 @@ func adjustInputsForForwardingWrites(
 	if len(writes) == 0 {
 		return task, agent, nil
 	}
+	// Each write tool counts toward the policy's limit. Past it the policy
+	// could never be built, so the Task fails now, not on every retry.
+	if total := len(sortedUnique(append(append([]string(nil), allowed...), writes...))); total > harnessv2.MaxMCPTools {
+		return nil, nil, permanentACPAgentConfiguration(fmt.Errorf(
+			"the Task allows %d tools once forwarding write tools are added, over the limit of %d; allow fewer tools or deny a write tool with disallowedTools",
+			total, harnessv2.MaxMCPTools))
+	}
 	task = task.DeepCopy()
 	if task.Spec.AgentRuntime == nil {
 		task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{}
