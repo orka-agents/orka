@@ -52,8 +52,13 @@ type kagentWrappedAgent struct {
 	// Version is kagentVersionV0 for a kagent v0 Agent and empty for v1.
 	Version     string
 	RuntimeName string
-	Manifest    map[string]any
-	Mode        kagentMode
+	// RuntimeUID is the UID of the AgentRuntime a bundle was deployed as.
+	RuntimeUID string
+	Manifest   map[string]any
+	Mode       kagentMode
+	// RequireReadyRuntime refuses to point the Agent at its runtime before
+	// Orka reports that runtime Ready, as a bundle re-pin requires.
+	RequireReadyRuntime bool
 }
 
 func newAgentImportCmd() *cobra.Command {
@@ -70,7 +75,9 @@ func newAgentImportKagentCmd() *cobra.Command {
 	var dryRun bool
 	var wrapper kagentWrapperOptions
 	var relayURL, egressFile, sourcesFile string
-	var acceptedEgress, toolMappings []string
+	var acceptedEgress, toolMappings, unreachable, acceptedCommits, approvalTools, allowedTools []string
+	var maxOutputTokens int64
+	var runtimeRevision int
 	var translate bool
 	var translateOptions kagentTranslateOptions
 	cmd := &cobra.Command{
@@ -84,6 +91,8 @@ existing Agent is an error.
 
 Accepts kagent v1 (api.kagent.dev/v1alpha3) and kagent v0 (kagent.dev/v1alpha2)
 Agents, including lists from "kubectl get -o yaml". Other objects are skipped.
+kagent v1 support is experimental, and pinned to the kagent build it was
+verified against until kagent v1.0.0.
 
 Each Agent is reported as governed or observed. A governed Agent has every
 model and tool endpoint pointing at the relay named by --relay-url, so Orka
@@ -126,15 +135,23 @@ so --revision-egress and --revision-sources do not apply. Dispatch control
 requires the agents' Services to admit only kagent's controller, and the
 controller to admit only the wrapper brokers and the wrapped Agents.
 
-See the orka-runtime-kagent README for both install requirements. Include the
-Agents' related objects in the input so the import can check them: Harness,
-AgentTemplate, ModelConfig, and RemoteMCPServer for v1; the Agent's
-Deployment, and to govern it its config Secret and ModelConfig, for v0.
-Translating a v0 Agent reads its ModelConfig.
+See docs/kagent-install.md in orka-runtime-kagent for both install
+requirements. Include the Agents' related objects in the input so the import
+can check them: Harness, AgentTemplate, ModelConfig, and RemoteMCPServer for
+v1; the Agent's Deployment and pod, and to govern it its config Secret and
+ModelConfig, for v0. Translating a v0 Agent reads its ModelConfig.
 
 With --wrapper-config-dir, also writes each Agent's wrapper configuration,
 <name>.kagent.json, pinned to the Agent's latest successful revision (v1) or
-its Deployment's config hash (v0).
+its pod's config hash and image digest (v0).
+
+With --bundle-dir, writes each Agent's deployment bundle instead,
+<agent>/kagent.json and runtime.json, and names its AgentRuntime after the
+pinned configuration, <agent>-kagent-<digest>. A re-pin, after kagent
+recompiles the Agent or is upgraded, so gets a new runtime beside the old one.
+Run with --dry-run to write the bundle; deploy and register its runtime with
+Orka's scripts/kagent-runtime.sh; then run again without --dry-run to point
+the Orka Agent at it, which requires the AgentRuntime to be Ready.
 
 With --translate, converts each kagent Agent into a native Orka Agent that Orka
 runs itself, with no kagent at run time. Translation maps only these fields
@@ -153,7 +170,7 @@ and refuses everything else, listing every problem:
 			var wrapped []kagentWrappedAgent
 			var skipped string
 			if translate {
-				if wrapper.Dir != "" || relayURL != "" {
+				if wrapper.Dir != "" || wrapper.BundleDir != "" || relayURL != "" {
 					return fmt.Errorf("--translate creates native Orka Agents; it takes no wrapper or relay flags")
 				}
 				if translateOptions.Tools, err = parseKagentToolMappings(toolMappings); err != nil {
@@ -178,7 +195,15 @@ and refuses everything else, listing every problem:
 			if err != nil {
 				return err
 			}
+			wrapper.Unreachable, wrapper.AcceptedCommits, wrapper.MaxOutputTokens = unreachable, acceptedCommits, maxOutputTokens
+			wrapper.ApprovalRequiredTools, wrapper.AllowedTools, wrapper.RuntimeRevision = approvalTools, allowedTools, runtimeRevision
+			if translate && wrapper.BundleDir != "" {
+				return fmt.Errorf("--translate creates native Orka Agents; it takes no --bundle-dir")
+			}
 			if err := wrapper.validate(wrapped); err != nil {
+				return err
+			}
+			if wrapped, err = pinKagentBundleRuntimes(wrapper, wrapped); err != nil {
 				return err
 			}
 			if skipped != "" {
@@ -191,14 +216,25 @@ and refuses everything else, listing every problem:
 			for _, path := range written {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Wrapper configuration written: %s\n", path) //nolint:errcheck
 			}
-			if dryRun {
-				for _, agent := range wrapped {
-					fmt.Fprintf(cmd.ErrOrStderr(), "kagent Agent %s: %s\n", agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
+			// A dry run writes the bundles; activation requires the deployed ones.
+			if !dryRun {
+				if err := verifyKagentBundles(wrapper, wrapped); err != nil {
+					return err
 				}
-				namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
-				return printKagentWrappedAgents(cmd.OutOrStdout(), wrapped, strings.TrimSpace(namespace))
+				return reconcileKagentWrappedAgents(cmd, wrapped)
 			}
-			return reconcileKagentWrappedAgents(cmd, wrapped)
+			bundles, err := writeKagentBundles(wrapper, wrapped)
+			if err != nil {
+				return fmt.Errorf("writing deployment bundle: %w", err)
+			}
+			for _, path := range bundles {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Deployment bundle written: %s\n", path) //nolint:errcheck
+			}
+			for _, agent := range wrapped {
+				fmt.Fprintf(cmd.ErrOrStderr(), "kagent Agent %s: %s\n", agent.Source, describeKagentMode(agent.Mode)) //nolint:errcheck
+			}
+			namespace, _ := cmd.Flags().GetString(cliNamespaceQuery)
+			return printKagentWrappedAgents(cmd.OutOrStdout(), wrapped, strings.TrimSpace(namespace))
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", "", "Path to kagent Agent YAML/JSON (use - for stdin)")
@@ -215,6 +251,13 @@ and refuses everything else, listing every problem:
 	cmd.Flags().StringVar(&wrapper.UserIDPrefix, "user-id-prefix", "orka", "Prefix of the per-session kagent user identity (with --wrapper-config-dir)")
 	cmd.Flags().StringVar(&wrapper.UpstreamURL, "model-upstream-url", "", "OpenAI-compatible base URL the relay serves governed Agents from")
 	cmd.Flags().StringVar(&wrapper.UpstreamModel, "model-upstream-model", "", "Model the relay calls for governed Agents")
+	cmd.Flags().Int64Var(&maxOutputTokens, "max-output-tokens", 0, "Bound every model call of a governed Agent at this many output tokens (0: no bound)")
+	cmd.Flags().StringArrayVar(&unreachable, "unreachable", nil, "host:port the wrapper broker must fail to connect to, such as Substrate's router or kagent's database (repeatable)")
+	cmd.Flags().StringArrayVar(&acceptedCommits, "accept-kagent-commit", nil, "kagent controller git commit, verified with the release gate, that the wrapper accepts besides the builds it was verified against (repeatable)")
+	cmd.Flags().StringVar(&wrapper.BundleDir, "bundle-dir", "", "Write each Agent's deployment bundle (<agent>/kagent.json and runtime.json) to this directory, and name its runtime after the pinned configuration; without --dry-run, activate the bundles there, which must be deployed (<agent>/registration.uid)")
+	cmd.Flags().StringArrayVar(&allowedTools, "allowed-tool", nil, "With --bundle-dir, an Orka tool every governed Agent may call through the relay, besides the tools its bindings name (repeatable; required when a binding names no tools)")
+	cmd.Flags().StringArrayVar(&approvalTools, "approval-required-tool", nil, "With --bundle-dir, an allowed Orka tool that needs an Orka approval (repeatable)")
+	cmd.Flags().IntVar(&runtimeRevision, "runtime-revision", 0, "With --bundle-dir, a number that names new runtimes for unchanged configurations, to deploy them from new images")
 	return cmd
 }
 
@@ -636,6 +679,15 @@ func reconcileKagentWrappedAgents(cmd *cobra.Command, wrapped []kagentWrappedAge
 	out := cmd.OutOrStdout()
 	ctx := context.Background()
 	query := map[string]string{cliNamespaceQuery: c.Namespace}
+	// Activating bundles is all or nothing: no Agent moves to its runtime
+	// unless every runtime is Ready.
+	for _, agent := range wrapped {
+		if agent.RequireReadyRuntime {
+			if err := requireReadyKagentRuntime(ctx, c, c.Namespace, agent.RuntimeName, agent.RuntimeUID); err != nil {
+				return fmt.Errorf("kagent Agent %s: %w", agent.Source, err)
+			}
+		}
+	}
 	for _, agent := range wrapped {
 		ensureManifestNamespace(agent.Manifest, c.Namespace)
 		name := metadataName(agent.Manifest)
