@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -56,41 +57,71 @@ func (s clockSkew) beyond(limit time.Duration) bool {
 // A provider that does not report ObservedAt is not checked. A Describe
 // failure leaves that dataset's state as it was. The error names each
 // dataset that is out of bounds or could not be checked.
+//
+// Each provider is described on its own, at the same time, and its result is
+// applied as soon as it answers, so a provider that does not answer within
+// ctx keeps neither the other provider's check nor the lifting of its
+// refusal waiting. A provider that serves both contracts is described once.
 func (c *Client) CheckClocks(ctx context.Context) error {
-	var errs []error
-	checked := map[string]bool{}
-	for _, binding := range []struct {
+	bindings := []struct {
 		contract string
 		provider storagev1.ProviderDescriber
 	}{
 		{storagev1.StateContract, c.state},
 		{storagev1.ArtifactsContract, c.artifacts},
-	} {
-		sent := c.ops.now()
-		info, err := binding.provider.Describe(ctx)
-		received := c.ops.now()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("check the %s clock: %w", binding.contract, err))
-			continue
-		}
-		if checked[info.DatasetID] {
-			continue
-		}
-		checked[info.DatasetID] = true
-		if info.ObservedAt.IsZero() {
-			c.ops.setClockSkew(info.DatasetID, nil)
-			continue
-		}
-		skew := estimateClockSkew(sent, received, info.ObservedAt)
-		if !skew.beyond(storagev1.MaxClockSkew) {
-			c.ops.setClockSkew(info.DatasetID, nil)
-			continue
-		}
-		c.ops.setClockSkew(info.DatasetID, &skew)
-		errs = append(errs, fmt.Errorf("%w: the clock of dataset %s is %s away from Orka's, more than %s",
-			storagev1.ErrNotReady, info.DatasetID, skew, storagev1.MaxClockSkew))
 	}
+	if sameStore(c.state, c.artifacts) {
+		bindings = bindings[:1]
+	}
+	var (
+		mu      sync.Mutex
+		errs    []error
+		checked = map[string]bool{}
+		wg      sync.WaitGroup
+	)
+	for _, binding := range bindings {
+		wg.Go(func() {
+			if err := c.checkClock(ctx, binding.contract, binding.provider, func(datasetID string) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				first := !checked[datasetID]
+				checked[datasetID] = true
+				return first
+			}); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// checkClock describes one provider and applies the clock check to its
+// dataset, unless first reports that another binding already checked it.
+func (c *Client) checkClock(ctx context.Context, contract string, provider storagev1.ProviderDescriber, first func(string) bool) error {
+	sent := c.ops.now()
+	info, err := provider.Describe(ctx)
+	received := c.ops.now()
+	if err != nil {
+		return fmt.Errorf("check the %s clock: %w", contract, err)
+	}
+	if !first(info.DatasetID) {
+		return nil
+	}
+	if info.ObservedAt.IsZero() {
+		c.ops.setClockSkew(info.DatasetID, nil)
+		return nil
+	}
+	skew := estimateClockSkew(sent, received, info.ObservedAt)
+	if !skew.beyond(storagev1.MaxClockSkew) {
+		c.ops.setClockSkew(info.DatasetID, nil)
+		return nil
+	}
+	c.ops.setClockSkew(info.DatasetID, &skew)
+	return fmt.Errorf("%w: the clock of dataset %s is %s away from Orka's, more than %s",
+		storagev1.ErrNotReady, info.DatasetID, skew, storagev1.MaxClockSkew)
 }
 
 // setClockSkew records that a dataset's clock is out of bounds by skew, or
