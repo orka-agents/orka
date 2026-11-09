@@ -51,6 +51,42 @@ func TestNewSubstrateExecutorDefaultHTTPClientHasNoTimeout(t *testing.T) {
 	}
 }
 
+type idleCountingTransport struct{ closed int }
+
+func (*idleCountingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+
+func (t *idleCountingTransport) CloseIdleConnections() { t.closed++ }
+
+// Each executor built without a client makes its own router transport, so Close
+// must drop that transport's idle connections. A caller-supplied client is
+// shared and must be left alone.
+func TestSubstrateExecutorCloseReleasesOnlyItsOwnRouterConnections(t *testing.T) {
+	cfg, _, _, _ := substrateTransportFixture(t)
+	cfg.RouterURL = "https://router.test"
+	cfg.ControlClient = &recordingSubstrateControlClient{}
+	owned, err := NewSubstrateExecutor(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateExecutor() error = %v", err)
+	}
+	ownedTransport := &idleCountingTransport{}
+	owned.httpClient.Transport = ownedTransport
+	if err := owned.Close(); err != nil || ownedTransport.closed != 1 {
+		t.Fatalf("Close() = %v, idle closes = %d, want the executor's own connections released once", err, ownedTransport.closed)
+	}
+
+	sharedTransport := &idleCountingTransport{}
+	cfg.HTTPClient = &http.Client{Transport: sharedTransport}
+	shared, err := NewSubstrateExecutor(cfg)
+	if err != nil {
+		t.Fatalf("NewSubstrateExecutor() error = %v", err)
+	}
+	if err := shared.Close(); err != nil || sharedTransport.closed != 0 {
+		t.Fatalf("Close() = %v, idle closes = %d, want a caller-supplied client left alone", err, sharedTransport.closed)
+	}
+}
+
 func TestNewSubstrateExecutorDefaultRouterClientFailsClosed(t *testing.T) {
 	cfg, _, _, _ := substrateTransportFixture(t)
 	cfg.ControlClient = &recordingSubstrateControlClient{}

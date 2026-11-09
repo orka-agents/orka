@@ -1248,6 +1248,9 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	if !state.hasSucceededThreatModel {
 		return false, nil
 	}
+	if err := r.ingestTerminalStageTasks(ctx, scan, tasks.Items, scanID); err != nil {
+		return false, err
+	}
 
 	run, err := r.SecurityStore.GetScanRun(ctx, scan.Namespace, scanID)
 	if err != nil {
@@ -1280,6 +1283,36 @@ func (r *RepositoryScanReconciler) progressLatestScanRun(ctx context.Context, sc
 	}
 
 	return r.progressScanRunAfterMapper(ctx, scan, run)
+}
+
+// ingestTerminalStageTasks ingests the run's terminal threat-model and mapper
+// Tasks from the same Task list that progression reads. The cache can show a
+// stage Task as terminal here even though ingestOwnedTasks saw it still
+// running earlier in the reconcile. Without this, the next stage would start
+// from output nobody validated, and a later ingestion of a malformed result
+// would be ignored because the run had already moved on. Ingestion is
+// idempotent, so stage Tasks that were already recorded cost one store read.
+func (r *RepositoryScanReconciler) ingestTerminalStageTasks(ctx context.Context, scan *corev1alpha1.RepositoryScan, tasks []corev1alpha1.Task, scanID string) error {
+	stageTasks := make([]*corev1alpha1.Task, 0, 2)
+	for i := range tasks {
+		task := &tasks[i]
+		if scanTaskRunID(task) != scanID || !isTerminalScanTaskPhase(task.Status.Phase) {
+			continue
+		}
+		switch taskSecurityStage(task) {
+		case security.StageThreatModel, security.StageMapper:
+			stageTasks = append(stageTasks, task)
+		}
+	}
+	slices.SortFunc(stageTasks, func(a, b *corev1alpha1.Task) int {
+		return compareScanTasksForIngestion(*a, *b)
+	})
+	for _, task := range stageTasks {
+		if err := r.ingestScanTask(ctx, scan, task); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *RepositoryScanReconciler) retryMissingReviewSliceTasks(

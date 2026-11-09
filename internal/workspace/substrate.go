@@ -69,7 +69,8 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 	if strings.TrimSpace(cfg.RouterURL) == "" {
 		return nil, NewError("configure substrate", ErrorKindInvalidArgument, "router URL is required", false, nil)
 	}
-	if cfg.HTTPClient == nil {
+	ownsHTTPClient := cfg.HTTPClient == nil
+	if ownsHTTPClient {
 		client, err := NewSubstrateRouterHTTPClient(cfg)
 		if err != nil {
 			return nil, err
@@ -94,6 +95,7 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 	return &SubstrateWorkspaceExecutor{
 		control:         cfg.ControlClient,
 		httpClient:      cfg.HTTPClient,
+		ownsHTTPClient:  ownsHTTPClient,
 		routerURL:       strings.TrimRight(cfg.RouterURL, "/"),
 		atespace:        strings.TrimSpace(cfg.Atespace),
 		handoffToken:    cfg.HandoffToken,
@@ -106,7 +108,11 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 type SubstrateWorkspaceExecutor struct {
 	control    substrateControlClient
 	httpClient *http.Client
-	routerURL  string
+	// ownsHTTPClient is true when the executor built httpClient itself. Close
+	// then drops its idle router connections; a caller-supplied client is
+	// shared and left alone.
+	ownsHTTPClient bool
+	routerURL      string
 	// atespace qualifies unqualified Actor IDs for router targets, matching
 	// the control client\'s default scope.
 	atespace        string
@@ -290,6 +296,9 @@ func validateSubstrateActorTemplateForOp(op string, actor *substrateActor, templ
 // Close releases network resources owned by this executor.
 func (e *SubstrateWorkspaceExecutor) Close() error {
 	e.forgetActorHandoff("")
+	if e.ownsHTTPClient && e.httpClient != nil {
+		e.httpClient.CloseIdleConnections()
+	}
 	var closeErr error
 	if closer, ok := e.control.(interface{ Close() error }); ok {
 		closeErr = errors.Join(closeErr, closer.Close())

@@ -132,6 +132,9 @@ func (m *remoteWorkspaceMaterializer) Materialize(ctx context.Context, request h
 			return err
 		}
 	}
+	if err := syncMaterializedTree(installRoot); err != nil {
+		return fmt.Errorf("sync materialized workspace: %w", err)
+	}
 	if err := os.Remove(destination); err != nil {
 		return fmt.Errorf("replace empty workspace destination: %w", err)
 	}
@@ -349,12 +352,10 @@ func writeMaterializedFile(root, target string, size int64, executable bool, rea
 	if err != nil {
 		return fmt.Errorf("create materialized workspace file: %w", err)
 	}
+	// Durability comes from one syncMaterializedTree before installation.
 	written, copyErr := io.CopyN(file, reader, size)
 	if copyErr == nil && written != size {
 		copyErr = io.ErrUnexpectedEOF
-	}
-	if copyErr == nil {
-		copyErr = file.Sync()
 	}
 	closeErr := file.Close()
 	if copyErr == nil {
