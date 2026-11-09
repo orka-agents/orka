@@ -39,7 +39,9 @@ revision (`server/discover` and per-request `_meta`).
 Mirrored headers are validated against the JSON-RPC body and never used for
 authorization. A `2026-07-28` request must send `MCP-Protocol-Version` (equal to its
 `_meta` version), `Mcp-Method`, and, for `tools/call`, `Mcp-Name` (plain or
-`=?base64?…?=`); a missing or mismatched header is `400` with error `-32020`. An
+`=?base64?…?=`); a missing or mismatched header is `400` with error `-32020`. A
+client that declares the Tasks extension must also send `Mcp-Name` equal to
+`params.taskId` on `tasks/get`, `tasks/update`, and `tasks/cancel`. An
 unsupported version is `400` with `-32022` and the supported list, and a method the
 server does not implement is `404` for a `2026-07-28` request. Any `Mcp-Session-Id`
 is ignored. The in-process REST replay forwards only your credential headers
@@ -137,7 +139,7 @@ and `--enforce-namespace-isolation` behave exactly as for the REST route.
 | --- | --- | --- |
 | `list_agents` | List Agents (name, runtime, model, tools, readiness) | `GET /api/v1/agents` |
 | `get_agent` | Describe one Agent | `GET /api/v1/agents/:name` |
-| `create_task` | Run a prompt on an Agent, with an optional `workspace` and `session` | `POST /api/v1/tasks`; `GET /api/v1/agents/:name` only when `taskType` is omitted |
+| `create_task` | Run a prompt on an Agent, with an optional `workspace` and `session` | `POST /api/v1/tasks`; `GET /api/v1/agents/:name` only when `taskType` is omitted; `GET /api/v1/tasks/:id` only when it returns an MCP task |
 | `get_task` | Status, pending approvals, plan progress, delivery and pull request | `GET /api/v1/tasks/:id`; `GET /api/v1/tasks/:id/approvals` while running |
 | `list_tasks` | List Tasks, optionally by label selector | `GET /api/v1/tasks` |
 | `wait_for_task` | Wait up to 50 seconds for a Task to finish or need a decision | `GET /api/v1/tasks/:id`, `GET /api/v1/tasks/:id/approvals` |
@@ -190,7 +192,15 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
   `params.task` returns `{ "task": { ... } }`. `tasks/get` returns the task,
   `tasks/result` waits up to 50 seconds for the result and otherwise asks you to
   poll again, and `tasks/cancel` deletes the Task. Answer approvals with
-  `decide_approval`; the server sends no elicitation requests on this path.
+  `decide_approval`; the server sends no elicitation requests on this path. Only
+  `create_task` supports task augmentation: `params.task` on any other tool is
+  refused with `-32601` before the tool runs.
+
+In both shapes the task ID is returned only once `tasks/get` resolves it, so you can
+poll at once. The server checks by reading the new Task under your identity; a
+caller who may create Tasks but not read them still gets the ID. If the new Task
+cannot be read within five seconds, the call returns an error result that names the
+Task instead of an ID: read it with `get_task` rather than creating it again.
 
 | Orka Task | MCP task status |
 | --- | --- |

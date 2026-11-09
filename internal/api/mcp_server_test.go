@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -24,12 +25,14 @@ import (
 	"github.com/valyala/fasthttp"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/approvals"
 	"github.com/orka-agents/orka/internal/events"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -116,7 +119,8 @@ func mcpBody(t *testing.T, method string, params any) string {
 
 // mcpRPC sends a request with the Streamable HTTP headers a conforming
 // client mirrors from the body: Mcp-Method always, MCP-Protocol-Version for a
-// _meta protocol version, and Mcp-Name for a tools/call name.
+// _meta protocol version, and Mcp-Name for a tools/call name or, on
+// tasks/get, tasks/update, and tasks/cancel, the task ID.
 func (f *externalAuthorizationFixture) mcpRPC(t *testing.T, method string, params any) mcpTestResponse {
 	t.Helper()
 	return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), mcpMirroredHeaders(method, params))
@@ -132,6 +136,9 @@ func mcpMirroredHeaders(method string, params any) map[string]string {
 	}
 	if name, ok := values["name"].(string); ok && method == "tools/call" {
 		headers[mcpNameHeader] = name
+	}
+	if taskID, ok := values["taskId"].(string); ok && slices.Contains(mcpTaskNamedMethods, method) {
+		headers[mcpNameHeader] = taskID
 	}
 	return headers
 }
@@ -1488,4 +1495,304 @@ func TestMCPTerminalResultsAreNeverSilentlyDropped(t *testing.T) {
 	require.NoError(t, json.Unmarshal(lost.Result, &task))
 	requireExtensionDetailedTask(t, task)
 	require.Equal(t, mcpStatusCompleted, task["status"])
+}
+
+// The Tasks extension has a client mirror params.taskId in Mcp-Name on
+// tasks/get, tasks/update, and tasks/cancel. A conforming request is served,
+// and a missing or different header is refused like any other mirror.
+func TestMCPTaskMethodsMirrorTheTaskIDInMcpName(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "routed", corev1alpha1.TaskPhaseRunning)
+	appendMCPTestApproval(t, f, "routed", "approval-1")
+	taskID := encodeMCPTaskID("default", "routed", "uid-routed")
+	sessionless := map[string]any{
+		mcpMetaProtocolVersion:    mcpProtocolVersionSessionless,
+		mcpMetaClientCapabilities: extensionMeta()[mcpMetaClientCapabilities],
+	}
+	send := func(method string, meta map[string]any, edit func(map[string]string)) mcpTestResponse {
+		params := map[string]any{"taskId": taskID}
+		if meta != nil {
+			params["_meta"] = meta
+		}
+		if method == "tasks/update" {
+			params["inputResponses"] = map[string]any{"approval-1": map[string]any{"action": "cancel"}}
+		}
+		headers := mcpMirroredHeaders(method, params)
+		require.Equal(t, taskID, headers[mcpNameHeader], "the helper mirrors the task ID")
+		if edit != nil {
+			edit(headers)
+		}
+		return f.mcpRaw(t, http.MethodPost, mcpBody(t, method, params), headers)
+	}
+	drop := func(h map[string]string) { delete(h, mcpNameHeader) }
+	differ := func(h map[string]string) { h[mcpNameHeader] = encodeMCPTaskID("default", "other", "uid-other") }
+	encode := func(h map[string]string) {
+		h[mcpNameHeader] = "=?base64?" + base64.StdEncoding.EncodeToString([]byte(taskID)) + "?="
+	}
+
+	// tasks/cancel last: it deletes the Task the others read.
+	for _, method := range []string{"tasks/get", "tasks/update", "tasks/cancel"} {
+		t.Run(method, func(t *testing.T) {
+			for name, edit := range map[string]func(map[string]string){"missing": drop, "different": differ} {
+				response := send(method, sessionless, edit)
+				require.Equal(t, http.StatusBadRequest, response.status, "%s: %s", name, response.body)
+				require.Equal(t, mcpCodeHeaderMismatch, response.Error.Code, "%s: %s", name, response.body)
+			}
+			legacy := send(method, extensionMeta(), differ)
+			require.Equal(t, http.StatusBadRequest, legacy.status, legacy.body)
+			require.Equal(t, mcpCodeHeaderMismatch, legacy.Error.Code, legacy.body)
+
+			for name, tc := range map[string]struct {
+				meta map[string]any
+				edit func(map[string]string)
+			}{
+				"sessionless":                       {sessionless, nil},
+				"sessionless Base64":                {sessionless, encode},
+				"earlier revision":                  {extensionMeta(), nil},
+				"earlier revision, no header":       {extensionMeta(), drop},
+				"extension not declared":            {nil, nil},
+				"sessionless without the extension": {map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}, drop},
+			} {
+				if method == "tasks/cancel" && name != "sessionless" {
+					continue
+				}
+				response := send(method, tc.meta, tc.edit)
+				if response.Error != nil {
+					// tasks/update without the extension is refused for the
+					// capability, not for its headers.
+					require.Equal(t, mcpCodeMissingCapabilities, response.Error.Code, "%s: %s", name, response.body)
+					require.Equal(t, "tasks/update", method, name)
+					continue
+				}
+				require.Equal(t, http.StatusOK, response.status, "%s: %s", name, response.body)
+			}
+		})
+	}
+	err := f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "routed"}, &corev1alpha1.Task{})
+	require.Error(t, err, "the conforming tasks/cancel reached the Task")
+}
+
+// Deciding an approval moves the task from input_required to working, so
+// lastUpdatedAt follows the decision, not the request it answered.
+func TestMCPTaskLastUpdatedFollowsApprovalDecisions(t *testing.T) {
+	created := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	requested, decided := created.Add(time.Minute), created.Add(5*time.Minute)
+	state := mcpTaskState{approvals: []approvals.Approval{
+		{ID: "approval-1", Status: approvals.StatusPending, CreatedAt: requested},
+	}}
+	state.response.CreationTimestamp = metav1.NewTime(created)
+	state.response.Status.Phase = corev1alpha1.TaskPhaseRunning
+	require.Equal(t, mcpTimeValue(requested), state.lastUpdated())
+
+	state.approvals[0].Status = approvals.StatusApproved
+	state.approvals[0].DecisionTime = &decided
+	require.Equal(t, mcpTimeValue(decided), state.lastUpdated())
+	require.Equal(t, mcpTimeValue(decided), state.extensionTaskFields("complete")["lastUpdatedAt"])
+	require.Equal(t, mcpTimeValue(decided), state.coreTaskFields()["lastUpdatedAt"])
+}
+
+// laggingMCPFixture reads Tasks through a client that, like the manager's
+// cache, does not see a Task for its first lag reads after the create.
+func laggingMCPFixture(t *testing.T, lag int64) (*externalAuthorizationFixture, *atomic.Int64) {
+	t.Helper()
+	f := newMCPFixture(t)
+	f.allowAll()
+	var hidden atomic.Int64
+	f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			err := c.Create(ctx, obj, opts...)
+			if _, task := obj.(*corev1alpha1.Task); task && err == nil {
+				hidden.Store(lag)
+			}
+			return err
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, task := obj.(*corev1alpha1.Task); task && hidden.Add(-1) >= 0 {
+				return apierrors.NewNotFound(corev1alpha1.GroupVersion.WithResource("tasks").GroupResource(), key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.config.APIReader = f.kube
+	f.server = NewServer(f.kube, nil, f.config)
+	return f, &hidden
+}
+
+// A task handle is returned only once tasks/get would resolve it: the read
+// trails the create, and a client may poll the handle at once.
+func TestMCPCreateTaskReturnsOnlyAResolvableHandle(t *testing.T) {
+	arguments := func(name string) map[string]any {
+		return map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": name}
+	}
+	for name, tc := range map[string]struct {
+		params func(string) map[string]any
+		taskID func(*testing.T, json.RawMessage) string
+		meta   map[string]any
+	}{
+		"tasks extension": {
+			params: func(name string) map[string]any {
+				return map[string]any{"name": mcpToolCreateTask, "_meta": extensionMeta(), "arguments": arguments(name)}
+			},
+			taskID: func(t *testing.T, raw json.RawMessage) string {
+				var task map[string]any
+				require.NoError(t, json.Unmarshal(raw, &task))
+				require.Equal(t, "task", task["resultType"], string(raw))
+				return task["taskId"].(string)
+			},
+			meta: extensionMeta(),
+		},
+		"2025-11-25 task augmentation": {
+			params: func(name string) map[string]any {
+				return map[string]any{"name": mcpToolCreateTask, "task": map[string]any{}, "arguments": arguments(name)}
+			},
+			taskID: func(t *testing.T, raw json.RawMessage) string {
+				var result struct {
+					Task map[string]any `json:"task"`
+				}
+				require.NoError(t, json.Unmarshal(raw, &result))
+				require.NotNil(t, result.Task, string(raw))
+				return result.Task["taskId"].(string)
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, hidden := laggingMCPFixture(t, 3)
+			created := f.mcpRPC(t, "tools/call", tc.params("lagging"))
+			require.Nil(t, created.Error, created.body)
+			taskID := tc.taskID(t, created.Result)
+			require.Negative(t, hidden.Load(), "the handle waited for the read to catch up")
+
+			params := map[string]any{"taskId": taskID}
+			if tc.meta != nil {
+				params["_meta"] = tc.meta
+			}
+			polled := f.mcpRPC(t, "tasks/get", params)
+			require.Nil(t, polled.Error, "a returned handle resolves at once: %s", polled.body)
+
+			// Still unreadable at the bound: no handle, and an error that
+			// names the Task so the caller does not create another.
+			f, _ = laggingMCPFixture(t, 1<<30)
+			f.server.mcpServer.createdTaskWait = 200 * time.Millisecond
+			unreadable := f.mcpRPC(t, "tools/call", tc.params("stuck"))
+			require.Nil(t, unreadable.Error, unreadable.body)
+			var result mcpTestToolResult
+			require.NoError(t, json.Unmarshal(unreadable.Result, &result))
+			require.Equal(t, float64(http.StatusServiceUnavailable), mcpErrorStatus(t, result))
+			require.Contains(t, result.Content[0].Text, "task stuck in namespace default was created")
+			require.NotContains(t, unreadable.body, "taskId")
+		})
+	}
+}
+
+// The wait is for the read to catch up, nothing else: a caller who may create
+// Tasks but not read them gets the handle without delay, since waiting would
+// not change the answer tasks/get gives them.
+func TestMCPCreateTaskHandleDoesNotWaitOnARefusedRead(t *testing.T) {
+	f, _ := laggingMCPFixture(t, 0)
+	f.review = func(review *authorizationv1.SubjectAccessReview) error {
+		attributes := review.Spec.ResourceAttributes
+		review.Status.Allowed = attributes == nil || attributes.Resource != "tasks" || attributes.Verb != "get"
+		return nil
+	}
+	f.server.mcpServer.createdTaskWait = time.Minute
+	began := time.Now()
+	created := f.mcpRPC(t, "tools/call", map[string]any{
+		"name": mcpToolCreateTask, "_meta": extensionMeta(),
+		"arguments": map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": "write-only"},
+	})
+	require.Nil(t, created.Error, created.body)
+	require.Less(t, time.Since(began), 30*time.Second)
+	var task map[string]any
+	require.NoError(t, json.Unmarshal(created.Result, &task))
+	require.Equal(t, "task", task["resultType"], created.body)
+	polled := f.mcpRPC(t, "tasks/get", map[string]any{"taskId": task["taskId"], "_meta": extensionMeta()})
+	require.Equal(t, mcpCodeForbidden, polled.Error.Code, polled.body)
+}
+
+// 2025-11-25 task augmentation is offered by create_task alone. Another tool
+// asked to run as a task is refused before it has any effect, rather than run
+// as an ordinary call whose result a task-aware client would not accept.
+func TestMCPTaskAugmentationIsRefusedForOtherTools(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "kept", corev1alpha1.TaskPhaseRunning)
+	exists := func() bool {
+		return f.kube.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "kept"}, &corev1alpha1.Task{}) == nil
+	}
+
+	for _, tool := range mcpToolDefinitions() {
+		if tool.Name == mcpToolCreateTask {
+			require.Equal(t, "optional", tool.Execution["taskSupport"])
+			continue
+		}
+		require.Nil(t, tool.Execution, "%s declares no task support", tool.Name)
+		response := f.mcpRPC(t, "tools/call", map[string]any{
+			"name": tool.Name, "task": map[string]any{"ttl": 60000}, "arguments": map[string]any{"name": "kept"},
+		})
+		require.Equal(t, http.StatusOK, response.status, response.body)
+		require.NotNil(t, response.Error, "%s: %s", tool.Name, response.body)
+		require.Equal(t, mcpCodeMethodNotFound, response.Error.Code, "%s: %s", tool.Name, response.body)
+	}
+	require.True(t, exists(), "cancel_task was refused before it deleted the Task")
+
+	// The sessionless revisions define no params.task: it is an unknown
+	// field, ignored like any other, and the call runs.
+	meta := map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: map[string]any{}}
+	response := f.mcpRPC(t, "tools/call", map[string]any{
+		"name": mcpToolCancelTask, "task": map[string]any{}, "arguments": map[string]any{"name": "kept"}, "_meta": meta,
+	})
+	require.Equal(t, http.StatusOK, response.status, response.body)
+	require.Nil(t, response.Error, response.body)
+	require.False(t, exists())
+}
+
+// A bounded wait ends at its deadline even when a read it started is slow:
+// the deadline reaches the REST replay, so the wait permit is not held past
+// the advertised timeout by a stalled authorization or storage call.
+func TestMCPWaitDeadlineBoundsItsRESTReads(t *testing.T) {
+	const stall = 12 * time.Second
+	stalledFixture := func(t *testing.T, stallAfter time.Duration) (*externalAuthorizationFixture, func()) {
+		f := newMCPFixture(t)
+		f.allowAll()
+		var from atomic.Pointer[time.Time]
+		f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if start := from.Load(); start != nil && time.Since(*start) >= stallAfter {
+					if _, task := obj.(*corev1alpha1.Task); task {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(stall):
+						}
+					}
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		f.config.APIReader = f.kube
+		f.server = NewServer(f.kube, nil, f.config)
+		createMCPTestTask(t, f, "stalled", corev1alpha1.TaskPhaseRunning)
+		return f, func() { now := time.Now(); from.Store(&now) }
+	}
+
+	t.Run("the first read", func(t *testing.T) {
+		f, start := stalledFixture(t, 0)
+		start()
+		began := time.Now()
+		result := f.mcpTool(t, mcpToolWaitForTask, map[string]any{"name": "stalled", "timeoutSeconds": 1})
+		require.Less(t, time.Since(began), stall/2)
+		require.Equal(t, float64(http.StatusGatewayTimeout), mcpErrorStatus(t, result))
+		require.Empty(t, f.server.mcpServer.waitSlots, "the wait permit is released")
+	})
+	t.Run("a later read", func(t *testing.T) {
+		f, start := stalledFixture(t, time.Second)
+		start()
+		began := time.Now()
+		result := f.mcpTool(t, mcpToolWaitForTask, map[string]any{"name": "stalled", "timeoutSeconds": 3})
+		require.Less(t, time.Since(began), stall/2)
+		require.False(t, result.IsError, result.Content)
+		require.Equal(t, true, result.StructuredContent["timedOut"], "the last state read is reported")
+		require.Equal(t, "stalled", result.StructuredContent["task"].(map[string]any)["name"])
+	})
 }

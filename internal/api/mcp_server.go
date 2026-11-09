@@ -120,6 +120,9 @@ type mcpServer struct {
 	replayHeaders []string
 	// resultWait bounds how long tasks/result waits for a Task to finish.
 	resultWait time.Duration
+	// createdTaskWait bounds how long a task handle is withheld while the
+	// Task it names is not yet readable.
+	createdTaskWait time.Duration
 }
 
 type mcpRequest struct {
@@ -203,12 +206,13 @@ func newMCPServer(handler fasthttp.RequestHandler, cfg MCPServerConfig) *mcpServ
 		maxConcurrent = DefaultMCPMaxConcurrent
 	}
 	return &mcpServer{
-		handler:        handler,
-		slots:          make(chan struct{}, maxConcurrent),
-		waitSlots:      make(chan struct{}, max(1, maxConcurrent/2)),
-		allowedOrigins: mcpAllowedOrigins(os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")),
-		replayHeaders:  mcpReplayHeaders(ContextTokenConfig{}),
-		resultWait:     mcpMaxWaitSeconds * time.Second,
+		handler:         handler,
+		slots:           make(chan struct{}, maxConcurrent),
+		waitSlots:       make(chan struct{}, max(1, maxConcurrent/2)),
+		allowedOrigins:  mcpAllowedOrigins(os.Getenv("ORKA_CORS_ALLOWED_ORIGINS")),
+		replayHeaders:   mcpReplayHeaders(ContextTokenConfig{}),
+		resultWait:      mcpMaxWaitSeconds * time.Second,
+		createdTaskWait: mcpCreatedTaskWait,
 	}
 }
 
@@ -429,6 +433,11 @@ func (call *mcpCall) errorStatus(rpcErr *mcpError) int {
 // params.uri.
 var mcpNamedMethods = []string{"tools/call", "resources/read", "prompts/get"}
 
+// mcpTaskNamedMethods are the io.modelcontextprotocol/tasks methods whose
+// Mcp-Name header mirrors params.taskId, so an intermediary can route every
+// request for one task to the same place.
+var mcpTaskNamedMethods = []string{"tasks/get", "tasks/update", "tasks/cancel"}
+
 // validateHeaders enforces the Streamable HTTP request metadata rules: every
 // mirrored header must match the JSON-RPC body, and a sessionless request
 // must carry MCP-Protocol-Version, Mcp-Method, and, where it applies,
@@ -474,19 +483,9 @@ func (call *mcpCall) validateHeaders() *mcpError {
 	if err != nil {
 		return err
 	}
-	var params struct {
-		Name *string `json:"name"`
-		URI  *string `json:"uri"`
-	}
-	if len(call.params) > 0 {
-		_ = json.Unmarshal(call.params, &params)
-	}
-	bodyName := params.Name
-	if bodyName == nil {
-		bodyName = params.URI
-	}
+	bodyName, required := call.mirroredName()
 	if !hasName {
-		if call.sessionless && bodyName != nil && slices.Contains(mcpNamedMethods, call.method) {
+		if call.sessionless && bodyName != nil && required {
 			return mcpHeaderMismatch(mcpNameHeader + " header is required")
 		}
 		return nil
@@ -499,6 +498,29 @@ func (call *mcpCall) validateHeaders() *mcpError {
 		return mcpHeaderMismatch(mcpNameHeader + " header does not match the request body")
 	}
 	return nil
+}
+
+// mirroredName is the body value the Mcp-Name header mirrors, nil when the
+// body carries none, and whether the method requires the header.
+func (call *mcpCall) mirroredName() (*string, bool) {
+	var params struct {
+		Name   *string `json:"name"`
+		URI    *string `json:"uri"`
+		TaskID *string `json:"taskId"`
+	}
+	if len(call.params) > 0 {
+		_ = json.Unmarshal(call.params, &params)
+	}
+	if slices.Contains(mcpTaskNamedMethods, call.method) {
+		// The Tasks extension is what requires the header on these methods;
+		// a request that does not declare it is answered as before.
+		return params.TaskID, call.tasksExtension
+	}
+	bodyName := params.Name
+	if bodyName == nil {
+		bodyName = params.URI
+	}
+	return bodyName, slices.Contains(mcpNamedMethods, call.method)
 }
 
 // decodeMCPHeaderValue decodes the "=?base64?...?=" sentinel encoding of a

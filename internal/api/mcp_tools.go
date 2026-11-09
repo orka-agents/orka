@@ -361,6 +361,15 @@ func (m *mcpServer) callTool(call *mcpCall) (any, error) {
 	if tool.Name == mcpToolCreateTask && (params.Task != nil || call.tasksExtension) {
 		return m.createTaskAsMCPTask(call, params)
 	}
+	if params.Task != nil && !call.sessionless {
+		// 2025-11-25 task augmentation of a tool that does not declare
+		// execution.taskSupport. Running it as an ordinary call would apply
+		// its effect and then answer in a shape the client did not ask for,
+		// which a task-aware client can take for a failure and retry. The
+		// sessionless revisions define no params.task, so there it is an
+		// unknown field and ignored like any other.
+		return nil, newMCPError(mcpCodeMethodNotFound, "tool "+tool.Name+" does not support task-augmented execution")
+	}
 	value, err := tool.run(m, call, params.Arguments)
 	if err != nil {
 		return mcpToolErrorResult(err)
@@ -949,10 +958,24 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 	}
 	c := call.c
 	deadline := time.Now().Add(timeout)
+	// Every read of the wait ends by its deadline: a slow authorization or
+	// storage call must not hold the wait permit past the advertised bound.
+	c.Locals(mcpReplayDeadlineKey{}, deadline)
+	defer c.Locals(mcpReplayDeadlineKey{}, nil)
+	var last mcpTaskState
+	read := false
 	for {
 		state, err := m.loadTaskState(c, namespace, name)
 		if err != nil {
-			return state, false, err
+			if time.Until(deadline) > 0 {
+				return state, false, err
+			}
+			// The deadline cut this read short, whatever the route made of
+			// it. Report the wait as over with the last state read.
+			if !read {
+				return state, false, &mcpRESTError{Status: fiber.StatusGatewayTimeout, Message: "the wait ended before the task could be read"}
+			}
+			return last, true, nil
 		}
 		if uid != "" && string(state.response.UID) != uid {
 			return state, false, &mcpRESTError{Status: fiber.StatusNotFound, Message: "task not found"}
@@ -960,6 +983,7 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 		if done(state) {
 			return state, false, nil
 		}
+		last, read = state, true
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return state, true, nil
@@ -969,6 +993,10 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 		case <-timer.C:
 		case <-c.RequestCtx().Done():
 			timer.Stop()
+			return state, true, nil
+		}
+		if time.Until(deadline) <= 0 {
+			// No time is left for another read.
 			return state, true, nil
 		}
 	}

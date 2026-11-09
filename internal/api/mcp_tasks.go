@@ -141,6 +141,10 @@ func (s mcpTaskState) lastUpdated() string {
 		if approval.CreatedAt.After(latest) {
 			latest = approval.CreatedAt
 		}
+		// A decision moves the task from input_required back to working.
+		if approval.DecisionTime != nil && approval.DecisionTime.After(latest) {
+			latest = *approval.DecisionTime
+		}
 	}
 	return mcpTimeValue(latest)
 }
@@ -277,10 +281,58 @@ func (m *mcpServer) createTaskAsMCPTask(call *mcpCall, params mcpToolCallParams)
 	if err != nil {
 		return mcpToolErrorResult(err)
 	}
+	if err := m.awaitCreatedTask(call.c, state); err != nil {
+		return mcpToolErrorResult(err)
+	}
 	if params.Task != nil {
 		return map[string]any{"task": state.coreTaskFields()}, nil
 	}
 	return state.extensionTaskFields("task"), nil
+}
+
+// mcpCreatedTaskWait bounds awaitCreatedTask. The read lags the write by the
+// time an informer takes to deliver one event, normally milliseconds.
+const mcpCreatedTaskWait = 5 * time.Second
+
+// awaitCreatedTask withholds a task handle until the Task it names resolves
+// through the read tasks/get uses. That read is served from a cache that can
+// trail the create. The Tasks extension forbids returning a handle before
+// tasks/get would resolve it, and a 2025-11-25 client may poll at once too.
+// Only a missing Task, or an earlier one still cached under the name, counts
+// as not yet readable: any other answer is what tasks/get would give and
+// waiting would not change it.
+//
+// A Task still unreadable at the bound is reported as an error that names it,
+// rather than as a handle that does not resolve: the Task exists, and the
+// caller should read it instead of creating another.
+func (m *mcpServer) awaitCreatedTask(c fiber.Ctx, created mcpTaskState) error {
+	task := &created.response.Task
+	unreadable := &mcpRESTError{Status: fiber.StatusServiceUnavailable, Message: mcpSafeText(
+		"task "+task.Name+" in namespace "+task.Namespace+" was created but cannot be read yet; read it with get_task instead of creating it again", 512)}
+	deadline := time.Now().Add(m.createdTaskWait)
+	for backoff := 25 * time.Millisecond; ; backoff = min(2*backoff, 500*time.Millisecond) {
+		var read mcpTaskState
+		err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(task.Name), mcpNamespaceQuery(task.Namespace), nil, &read.response)
+		var restErr *mcpRESTError
+		switch {
+		case err == nil && read.response.UID == task.UID:
+			return nil
+		case err == nil, errors.As(err, &restErr) && restErr.Status == fiber.StatusNotFound:
+		default:
+			return nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return unreadable
+		}
+		timer := time.NewTimer(min(backoff, remaining))
+		select {
+		case <-timer.C:
+		case <-c.RequestCtx().Done():
+			timer.Stop()
+			return unreadable
+		}
+	}
 }
 
 func (m *mcpServer) getTask(call *mcpCall) (any, error) {

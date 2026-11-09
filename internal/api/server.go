@@ -278,6 +278,12 @@ func (s *Server) setupMiddleware() {
 	// Recovery middleware
 	s.app.Use(recover.New())
 
+	// Before anything reads the request context: an MCP wait's REST replays
+	// end with the wait.
+	if s.config.MCP.Enabled {
+		s.app.Use(adoptMCPReplayDeadline)
+	}
+
 	// Request ID middleware
 	s.app.Use(requestid.New())
 

@@ -7,12 +7,14 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
@@ -63,6 +65,25 @@ func (e *mcpRESTError) Error() string {
 	return fmt.Sprintf("Orka API returned %d: %s", e.Status, e.Message)
 }
 
+// mcpReplayDeadlineKey marks, on an MCP request, the time by which its REST
+// replays must finish, and carries that time to each replay. It is a request
+// user value, which only code in this process can set.
+type mcpReplayDeadlineKey struct{}
+
+// adoptMCPReplayDeadline gives a replayed REST request the deadline of the
+// bounded MCP wait it serves, so a slow authorization or storage call ends
+// with the wait instead of outlasting it. Other requests pass through.
+func adoptMCPReplayDeadline(c fiber.Ctx) error {
+	deadline, ok := c.RequestCtx().UserValue(mcpReplayDeadlineKey{}).(time.Time)
+	if !ok {
+		return c.Next()
+	}
+	ctx, cancel := context.WithDeadline(c.Context(), deadline)
+	defer cancel()
+	c.SetContext(ctx)
+	return c.Next()
+}
+
 // rest replays one public REST request in process with the MCP caller's
 // credentials. The full middleware chain and route authorization run again,
 // so a tool can never do more than the caller could do through REST.
@@ -96,6 +117,9 @@ func (m *mcpServer) rest(c fiber.Ctx, method, path string, query url.Values, bod
 
 	var replay fasthttp.RequestCtx
 	replay.Init(request, c.RequestCtx().RemoteAddr(), nil)
+	if deadline, ok := c.Locals(mcpReplayDeadlineKey{}).(time.Time); ok {
+		replay.SetUserValue(mcpReplayDeadlineKey{}, deadline)
+	}
 	m.handler(&replay)
 	response := &replay.Response
 	var data []byte
