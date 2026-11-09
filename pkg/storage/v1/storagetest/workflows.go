@@ -602,6 +602,9 @@ func runRepositoryMonitors(t *testing.T, newProvider StateFactory) {
 		}
 		require.ErrorIs(t, p.CreateWorkAction(ctx, action("duplicate", "queued", "review-12", 12)),
 			storagev1.ErrConflict, "an active dedupe key admits one action")
+		require.NoError(t, p.CreateWorkAction(ctx, action("parked", "retry_pending", "review-14", 14)))
+		require.ErrorIs(t, p.CreateWorkAction(ctx, action("parked-duplicate", "queued", "review-14", 14)),
+			storagev1.ErrConflict, "a retry_pending action keeps its dedupe key")
 		cancelled, err := p.CancelWorkActions(ctx, workflowNamespace, workflowMonitor, "pull_request", 12, "superseded", "control")
 		require.NoError(t, err)
 		require.Equal(t, 1, cancelled, "terminal actions and the excepted action are kept")
