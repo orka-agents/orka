@@ -414,6 +414,40 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 	}
 }
 
+// A training run that names its own Agent needs no reviewer on the monitor:
+// the snapshot and the trials both review with that Agent.
+func TestEvalTrainingRunWithAnAgentNeedsNoMonitorReviewer(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	candidate.Spec.Experiment = nil
+	env := newExperimentEnv(t, baseline, candidate, strings.Replace(evalTestGate, "split: heldOut", "split: train", 1))
+	monitors := &corev1alpha1.RepositoryMonitorList{}
+	if err := env.client.List(context.Background(), monitors, client.InNamespace(evalTestNamespace)); err != nil || len(monitors.Items) == 0 {
+		t.Fatalf("list monitors: %d, %v", len(monitors.Items), err)
+	}
+	for i := range monitors.Items {
+		monitors.Items[i].Spec.Agents.Reviewer = nil
+		if err := env.client.Update(context.Background(), &monitors.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env.reconcileRun("candidate") // finalizer
+	env.reconcileRun("candidate") // snapshot
+	env.reconcileRun("candidate") // trials
+	run := env.getRun("candidate")
+	if run.Status.Phase == corev1alpha1.EvalRunPhaseFailed {
+		t.Fatalf("phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+	}
+	tasks := env.tasksOf("candidate")
+	if len(tasks) == 0 {
+		t.Fatalf("no trial started: phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+	}
+	for _, task := range tasks {
+		if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "candidate-agent" {
+			t.Fatalf("trial Agent = %+v", task.Spec.AgentRef)
+		}
+	}
+}
+
 // A candidate that cannot be paired fails before any trial starts.
 func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 	for name, test := range map[string]struct {

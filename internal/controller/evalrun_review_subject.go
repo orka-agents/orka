@@ -122,7 +122,7 @@ func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.R
 	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
 		// The trial reviews with the candidate Agent, the same one the
 		// snapshot froze, instead of the monitor's reviewer. The prompt
-		// does not name the reviewer, so the prompt digest is unaffected.
+		// digest leaves the reviewer out, so it is unaffected.
 		monitor = monitor.DeepCopy()
 		monitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: agentRef.Name}
 	}
@@ -186,6 +186,11 @@ func evalTrialTaskName(run *corev1alpha1.EvalRun, caseID string, trial int32) st
 // trials use, so a controller change to any of them changes the digest, as
 // does a monitor setting rendered into the Task.
 func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cases []evals.Case) (string, error) {
+	// Which Agent reviews is left out: the snapshot's reviewerAgent records
+	// it, a candidate differs from its baseline there by design, and a
+	// candidate needs no reviewer on the monitor at all.
+	monitor = monitor.DeepCopy()
+	monitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: evalPromptDigestReviewer}
 	hash := sha256.New()
 	for _, c := range cases {
 		task, err := buildEvalReviewTask(monitor, c)
@@ -200,6 +205,10 @@ func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cas
 	}
 	return evals.DigestPrefix + hex.EncodeToString(hash.Sum(nil)), nil
 }
+
+// evalPromptDigestReviewer stands in for the reviewer Agent when the prompt
+// template is digested.
+const evalPromptDigestReviewer = "reviewer"
 
 // evalReviewTaskDigestInput is what the prompt digest covers of one rendered
 // review Task: its annotations and its whole spec, prompt included.
