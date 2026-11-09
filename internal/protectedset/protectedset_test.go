@@ -91,6 +91,16 @@ func TestSampleProtectsEveryCategory(t *testing.T) {
 		"canary routing":            "internal/controller/agent_execution_binding.go",
 		"evaluator":                 "internal/controller/evalrun_controller.go",
 		"token and network":         "internal/controller/runtime_pool_controller.go",
+		"RuntimePool environment":   "internal/controller/runtime_pool_resources.go",
+		"RuntimePool workspaces":    "internal/controller/runtime_pool_external_workspace.go",
+		"capability authentication": "internal/harness/v2/capability.go",
+		"credential bootstrap":      "internal/harness/v2/credential_bootstrap.go",
+		"runtime deniedPaths":       "internal/harness/v2/workspace.go",
+		"secret detection":          "internal/security/policy.go",
+		"secret scanning":           "internal/security/secretscan.go",
+		"controller image":          "Dockerfile",
+		"ACP runtime images":        "workers/acp/images/claude/Dockerfile",
+		"publisher image":           "workers/publisher/Dockerfile",
 		"implementation limits":     "internal/controller/repositorymonitor_issue_actions.go",
 		"repair limits":             "internal/controller/repositorymonitor_repair.go",
 		"publication boundary":      "internal/publisher/prepare.go",
@@ -111,8 +121,10 @@ func TestSampleProtectsEveryCategory(t *testing.T) {
 			t.Errorf("%s: %q is not protected", category, path)
 		}
 	}
-	if workspacedelta.PathDenied(denied, "website/docs/intro.md") {
-		t.Error("an unprotected documentation path is denied")
+	for _, path := range []string{"website/docs/intro.md", "internal/security/prompts.go"} {
+		if workspacedelta.PathDenied(denied, path) {
+			t.Errorf("unprotected path %q is denied", path)
+		}
 	}
 	other := set.DeniedPathsFor("github.com/example/service")
 	if !workspacedelta.PathDenied(other, ".github/workflows/ci.yml") || workspacedelta.PathDenied(other, "internal/admission/x.go") {
