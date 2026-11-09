@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Operator tag groups. Each operator operation runs with exactly one
@@ -63,6 +64,50 @@ func NewOperatorCommand(cfg OperatorCommandConfig) (*exec.Cmd, error) {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = cfg.TTY, cfg.TTY, cfg.TTY
 	}
 	return cmd, nil
+}
+
+// operatorLeaders are the PIDs of started operator commands whose owner has
+// not reaped them yet. An operator leader runs under the RuntimeSession's UID
+// and is a direct child of the supervisor, so the session-wide reaper that
+// proves adapter cleanup would otherwise reap it. The owner would then lose
+// the exit status, and the leader's PID, which is also its process group ID,
+// could be given to an unrelated process while the owner still signals that
+// group.
+//
+// Each entry carries the registration that made it. A leader's PID can be
+// given to a later operator command between its owner's reap and its release,
+// and that release must not withdraw the later command's entry.
+var operatorLeaders = struct {
+	mu   sync.Mutex
+	pids map[int]*operatorLeaderRegistration
+}{pids: map[int]*operatorLeaderRegistration{}}
+
+type operatorLeaderRegistration struct{ pid int }
+
+// StartOperatorCommand starts cmd and withholds its leader from the
+// session-wide reaper until release is called. The owner must reap the leader
+// itself and call release only afterwards: until then the PID stays allocated,
+// alive or as a zombie, and names nothing but this command. A zombie leader
+// counts against the session's cleanup proof until the owner reaps it.
+func StartOperatorCommand(cmd *exec.Cmd) (release func(), err error) {
+	// Held across the start so the reaper never sees the leader before it
+	// is registered.
+	operatorLeaders.mu.Lock()
+	defer operatorLeaders.mu.Unlock()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	registration := &operatorLeaderRegistration{pid: cmd.Process.Pid}
+	operatorLeaders.pids[registration.pid] = registration
+	return func() { releaseOperatorLeader(registration) }, nil
+}
+
+func releaseOperatorLeader(registration *operatorLeaderRegistration) {
+	operatorLeaders.mu.Lock()
+	defer operatorLeaders.mu.Unlock()
+	if operatorLeaders.pids[registration.pid] == registration {
+		delete(operatorLeaders.pids, registration.pid)
+	}
 }
 
 // SignalOperatorCommand signals the command's process group. It never kills

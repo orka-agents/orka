@@ -317,8 +317,16 @@ func reapExitedProcessesForUIDExcept(uid, excludedPID int) {
 	if !supported {
 		return
 	}
+	// Operator leaders are reaped only by their owners; see operatorLeaders.
+	// The lock is held for the whole pass so a command cannot start, exit,
+	// and be reaped here before it is registered.
+	operatorLeaders.mu.Lock()
+	defer operatorLeaders.mu.Unlock()
 	for _, process := range processes {
 		if process.pid == excludedPID || process.state != 'Z' {
+			continue
+		}
+		if _, held := operatorLeaders.pids[process.pid]; held {
 			continue
 		}
 		var status unix.WaitStatus

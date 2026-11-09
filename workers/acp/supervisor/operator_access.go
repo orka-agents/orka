@@ -970,9 +970,12 @@ type realOperatorProcess struct {
 	// reapMu fences process-group signals against reaping the leader: the
 	// group ID is the leader's PID, which stays allocated (alive or zombie)
 	// until it is reaped, so a signal sent under reapMu before reaped is set
-	// can only reach this operation's group.
-	reapMu sync.Mutex
-	reaped bool
+	// can only reach this operation's group. That holds only if nothing else
+	// reaps the leader, so it is withheld from the session-wide reaper until
+	// releaseLeader is called, after wait has reaped it.
+	reapMu        sync.Mutex
+	reaped        bool
+	releaseLeader func()
 	// killMu serializes kills; once retired, the tag group may be reused by
 	// a later operation, so later Kill calls must not scan for it.
 	killMu  sync.Mutex
@@ -1038,7 +1041,8 @@ func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
 			closeAfterStart = append(closeAfterStart, stdinRead)
 		}
 	}
-	if err := cmd.Start(); err != nil {
+	releaseLeader, err := startOperatorCommand(cmd)
+	if err != nil {
 		closeAll()
 		for _, file := range []io.Closer{process.stdin, process.stdout, process.stderr} {
 			if file != nil {
@@ -1048,7 +1052,7 @@ func startOperatorProcess(launch operatorLaunch) (operatorProcess, error) {
 		return nil, err
 	}
 	closeAll()
-	process.cmd = cmd
+	process.cmd, process.releaseLeader = cmd, releaseLeader
 	return process, nil
 }
 
@@ -1075,6 +1079,7 @@ func (p *realOperatorProcess) Resize(rows, cols uint16) error {
 
 // Replaceable in tests.
 var (
+	startOperatorCommand     = acp.StartOperatorCommand
 	signalOperatorGroup      = acp.SignalOperatorCommand
 	killOperatorTagProcesses = acp.KillOperatorTag
 )
@@ -1114,6 +1119,11 @@ func (p *realOperatorProcess) wait() (int, bool, error) {
 	p.reaped = true
 	err := p.cmd.Wait()
 	p.reapMu.Unlock()
+	// Only now may the session-wide reaper see this PID again: it is reaped,
+	// and no signal can be sent to its group any more.
+	if p.releaseLeader != nil {
+		p.releaseLeader()
+	}
 	state := p.cmd.ProcessState
 	if state == nil {
 		return -1, false, err
