@@ -27,7 +27,8 @@ import (
 // broken stream.
 
 const (
-	// maxPromptGenAITools bounds per-prompt tool span state.
+	// maxPromptGenAITools bounds per-prompt tool span state: calls still open
+	// plus markers for calls already recorded. Calls past it are not observed.
 	maxPromptGenAITools = harnessv2.MaxRuntimeSessionTombstoneOperations
 
 	genAIErrorTypeTool       = "tool_error"
@@ -113,6 +114,9 @@ type promptGenAITool struct {
 	name  string
 	kind  string
 	start time.Time
+	// recorded marks a call whose span is written. The marker stays so that a
+	// repeated or late update for the same ID does not record the call again.
+	recorded bool
 }
 
 // startInvokeAgent opens the prompt's invoke_agent span under the
@@ -166,6 +170,9 @@ func (p *promptGenAI) observeTool(update *harnessv2.ToolCallUpdate, name string,
 		return
 	}
 	tool := p.tools[update.ToolCallID]
+	if tool != nil && tool.recorded {
+		return
+	}
 	if tool == nil {
 		if len(p.tools) >= maxPromptGenAITools {
 			return
@@ -191,7 +198,7 @@ func (p *promptGenAI) observeTool(update *harnessv2.ToolCallUpdate, name string,
 }
 
 func (p *promptGenAI) recordToolLocked(id string, tool *promptGenAITool, end time.Time, errorType string) {
-	delete(p.tools, id)
+	tool.recorded = true
 	name := genAIToolName(tool.name, tool.kind)
 	toolType := genai.ToolTypeFunction
 	if end.Before(tool.start) {
@@ -303,8 +310,11 @@ func (p *promptGenAI) end(at time.Time, errorType, finishReason string, cancelle
 		open = genAIErrorTypeCancelled
 	}
 	for id, tool := range p.tools {
-		p.recordToolLocked(id, tool, at, open)
+		if !tool.recorded {
+			p.recordToolLocked(id, tool, at, open)
+		}
 	}
+	p.tools = nil
 	p.ended = true
 	modelAttributes := p.g.modelAttributes()
 	if p.span != nil {

@@ -325,9 +325,55 @@ func TestPromptGenAIDisabledAndAbandoned(t *testing.T) {
 		t.Fatalf("invoke spans = %d", len(invoke))
 	}
 	attrs := genAISpanAttributes(invoke[0])
-	if attrs[genai.AttrErrorType].AsString() != genAIErrorTypeAbandoned || attrs[genai.AttrProviderName].AsString() != genai.ProviderAnthropic ||
+	// OpenCode speaks OpenAI chat completions whatever provider prefix it pins.
+	if attrs[genai.AttrErrorType].AsString() != genAIErrorTypeAbandoned || attrs[genai.AttrProviderName].AsString() != genai.ProviderOpenAI ||
 		attrs[genai.AttrRequestModel].AsString() != "claude-sonnet-4" {
 		t.Fatalf("abandoned opencode invoke attributes = %v", attrs)
+	}
+}
+
+func TestPromptGenAIRecordsEachToolCallOnce(t *testing.T) {
+	start := time.Now().UTC()
+	update := func(status harnessv2.ToolCallStatus) *harnessv2.ToolCallUpdate {
+		return &harnessv2.ToolCallUpdate{ToolCallID: "call-1", Kind: "read", Status: status}
+	}
+	for _, test := range []struct {
+		name string
+		late []*harnessv2.ToolCallUpdate
+	}{
+		{"repeated terminal updates", []*harnessv2.ToolCallUpdate{update(harnessv2.ToolCallStatusCompleted), update(harnessv2.ToolCallStatusFailed)}},
+		{"content-only update", []*harnessv2.ToolCallUpdate{update("")}},
+		{"progress update", []*harnessv2.ToolCallUpdate{update(harnessv2.ToolCallStatusInProgress)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h := newGenAITestHarness(t, providerKindCodex, "gpt-5")
+			prompt := h.server.startInvokeAgent(context.Background(), &sessionState{id: "session-1"}, testGenAIPromptRequest(), start)
+			prompt.observeTool(update(harnessv2.ToolCallStatusPending), "", start)
+			prompt.observeTool(update(harnessv2.ToolCallStatusCompleted), "", start.Add(time.Second))
+			for i, late := range test.late {
+				prompt.observeTool(late, "", start.Add(time.Duration(i+2)*time.Second))
+			}
+			prompt.finish(acp.PromptResult{Outcome: acp.PromptOutcomeCompleted, StopReason: acp.StopReasonEndTurn}, start.Add(time.Minute))
+
+			spans := h.spans("execute_tool read")
+			if len(spans) != 1 {
+				t.Fatalf("execute_tool spans = %d, want 1", len(spans))
+			}
+			if attrs := genAISpanAttributes(spans[0]); attrs[genai.AttrErrorType].AsString() != "" || spans[0].EndTime().Sub(spans[0].StartTime()) != time.Second {
+				t.Fatalf("tool span attributes = %v duration = %v", attrs, spans[0].EndTime().Sub(spans[0].StartTime()))
+			}
+			durations, ok := h.metrics(t)[genai.MetricExecuteToolDuration].(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatal("missing tool duration histogram")
+			}
+			var samples uint64
+			for _, point := range durations.DataPoints {
+				samples += point.Count
+			}
+			if samples != 1 {
+				t.Fatalf("tool duration samples = %d, want 1", samples)
+			}
+		})
 	}
 }
 

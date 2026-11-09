@@ -103,6 +103,8 @@ func (t *substrateTracingTransport) RoundTrip(request *http.Request) (*http.Resp
 	if span.SpanContext().IsValid() {
 		// A RoundTripper must not modify the caller's request.
 		traced = request.Clone(ctx)
+		// Clone copies the caller's headers; only trace context crosses.
+		traced.Header.Del("Baggage")
 		substrateTracePropagator.Inject(ctx, propagation.HeaderCarrier(traced.Header))
 	}
 	response, err := t.base.RoundTrip(traced)

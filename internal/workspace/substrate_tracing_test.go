@@ -48,8 +48,11 @@ func TestSubstrateRouterTransportPropagatesTraceWithoutRecordingRequestDetails(t
 	_ = response.Body.Close()
 	parent.End()
 
-	if request.Header.Get("traceparent") != "" {
+	if request.Header.Get("traceparent") != "" || request.Header.Get("Baggage") == "" {
 		t.Fatal("transport mutated the caller's request headers")
+	}
+	if received.Get("Baggage") != "" {
+		t.Fatal("router received the caller's baggage")
 	}
 	extracted := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(received)))
 	if !extracted.IsValid() || extracted.TraceID() != parent.SpanContext().TraceID() {

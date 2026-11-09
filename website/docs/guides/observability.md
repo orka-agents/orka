@@ -347,9 +347,11 @@ endpoint (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` or the generic endpoint).
 its children, so model calls and tool calls appear as siblings, as they do for
 native workers. Spans are written when their outcome is known, with the observed
 start time. `gen_ai.provider.name` names the model API the runtime speaks through
-the proxy: `anthropic` for Claude, `openai` for Codex and Copilot, and the pinned
-provider prefix for OpenCode (`provider/model`). With a gateway such as Vekil in
-front, that is the wire API, not the gateway's upstream.
+the proxy: `anthropic` for Claude and `openai` for Codex, Copilot and OpenCode.
+OpenCode pins `provider/model` but always speaks OpenAI chat completions, so its
+prefix does not change the label and `gen_ai.request.model` is the model part.
+With a gateway such as Vekil in front, that is the wire API, not the gateway's
+upstream.
 
 Tool names come only from the adapter's structured tool identity when it is a
 plain identifier (letters, digits, `_ . : / -`, up to 128 characters); otherwise
