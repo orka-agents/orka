@@ -22,7 +22,6 @@ import { TaskArtifactsPanel } from './task-artifacts-panel'
 import { TaskStatusDetails } from './task-status-details'
 import { TaskYaml } from './task-yaml'
 import { ViewSwitch } from './view-switch'
-import { TaskExecutionRouteLedger } from '@/components/execution/execution-route-ledger'
 import { useStickyQueryError } from '@/hooks/use-sticky-query-error'
 import { useTask, useDeleteTask, useTaskEvents } from '@/hooks/use-tasks'
 import { useTaskTrace, useTaskApprovals } from '@/hooks/use-execution-events'
@@ -389,7 +388,6 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         </div>
       </div>
 
-      <TaskExecutionRouteLedger task={task} />
       <TaskSchedulePanel task={task} />
 
       <Tabs value={activeTab} onValueChange={setTab}>
