@@ -76,6 +76,12 @@ func NewSubstrateExecutor(cfg SubstrateConfig) (*SubstrateWorkspaceExecutor, err
 			return nil, err
 		}
 		cfg.HTTPClient = client
+	} else {
+		// A caller-supplied client keeps its transport and connections but
+		// must not follow an Actor's redirect either.
+		client := *cfg.HTTPClient
+		client.CheckRedirect = refuseSubstrateRouterRedirect
+		cfg.HTTPClient = &client
 	}
 	if cfg.HandoffToken == "" {
 		cfg.HandoffToken = strings.TrimSpace(os.Getenv(substrateDefaultHandoffTokenEnv))

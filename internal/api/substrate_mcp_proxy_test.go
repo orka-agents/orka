@@ -7,17 +7,26 @@ MIT License - see LICENSE file for details.
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -44,7 +53,12 @@ type substrateMCPProxyFixture struct {
 	deny     func(authorizationv1.ResourceAttributes) bool
 	upstream []*http.Request
 	bodies   []string
+	// respond replaces the Actor's default response when set.
+	respond http.HandlerFunc
 }
+
+// substrateMCPProxyToolCall is the tools/call the fixture Tool admits.
+const substrateMCPProxyToolCall = `{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"lookup","arguments":{"q":"x"}}}`
 
 func substrateMCPProxyTool() *corev1alpha1.Tool {
 	return &corev1alpha1.Tool{
@@ -81,7 +95,12 @@ func newSubstrateMCPProxyFixture(t *testing.T, objects ...client.Object) *substr
 		f.mu.Lock()
 		f.upstream = append(f.upstream, r.Clone(context.Background()))
 		f.bodies = append(f.bodies, string(body))
+		respond := f.respond
 		f.mu.Unlock()
+		if respond != nil {
+			respond(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Mcp-Session-Id", "session-1")
 		w.Header().Set("Set-Cookie", "actor=secret")
@@ -169,7 +188,7 @@ func TestSubstrateMCPProxyForwardsOnlySafeHeadersToStatusTarget(t *testing.T) {
 	header.Set("ate-target-actor", "victims/other-actor")
 	header.Set("X-Static", "caller-override")
 	header.Set(workerexecutor.SubstrateMCPToolTxnTokenHeader, "task-txn-token")
-	response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, `{"jsonrpc":"2.0","id":"1","method":"tools/call"}`)
+	response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, substrateMCPProxyToolCall)
 	body, _ := io.ReadAll(response.Body)
 	require.Equal(t, http.StatusOK, response.StatusCode, string(body))
 	require.JSONEq(t, `{"jsonrpc":"2.0","id":"1","result":{}}`, string(body))
@@ -191,7 +210,7 @@ func TestSubstrateMCPProxyForwardsOnlySafeHeadersToStatusTarget(t *testing.T) {
 	for _, dropped := range []string{"Cookie", "X-Forwarded-For", workerexecutor.SubstrateMCPToolTxnTokenHeader} {
 		require.Empty(t, upstream.Header.Get(dropped), dropped)
 	}
-	require.Equal(t, `{"jsonrpc":"2.0","id":"1","method":"tools/call"}`, f.bodies[0])
+	require.JSONEq(t, substrateMCPProxyToolCall, f.bodies[0])
 	require.ElementsMatch(t, []authorizationv1.ResourceAttributes{
 		{Namespace: "default", Verb: "get", Group: corev1alpha1.GroupVersion.Group, Resource: "tools", Name: "lookup"},
 		{Namespace: "default", Verb: "get", Resource: "secrets", Name: "mcp-auth"},
@@ -319,7 +338,7 @@ func TestSubstrateMCPProxyIdentityAndContextTokenScopes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSubstrateMCPProxyFixture(t)
 			app := contextTokenProxyApp(f, tc.cfg, tc.ui)
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(`{}`))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(substrateMCPProxyToolCall))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer caller-token")
 			workerexecutor.SetSubstrateMCPToolBinding(request.Header, substrateMCPProxyTool())
@@ -363,4 +382,378 @@ func TestSubstrateMCPProxyRefusesToolChangedSinceCallerValidated(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSubstrateMCPProxyAdmitsOnlyTheToolsOwnCall(t *testing.T) {
+	call := func(params string) string {
+		return `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":` + params + `}`
+	}
+	for _, tc := range []struct {
+		name      string
+		body      string
+		status    int
+		forwarded string
+	}{
+		{name: "own callable", body: call(`{"name":"lookup","arguments":{"n":12345678901234567890}}`), status: http.StatusOK,
+			forwarded: call(`{"arguments":{"n":12345678901234567890},"name":"lookup"}`)},
+		{name: "initialize", body: `{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-06-18"}}`, status: http.StatusOK,
+			forwarded: `{"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{"protocolVersion":"2025-06-18"}}`},
+		{name: "initialized notification", body: `{"jsonrpc":"2.0","method":"notifications/initialized"}`, status: http.StatusOK,
+			forwarded: `{"jsonrpc":"2.0","method":"notifications/initialized"}`},
+		// The Actor may read the first duplicate; only the checked one is sent.
+		{name: "duplicate name keeps the checked one", body: call(`{"name":"admin","name":"lookup"}`), status: http.StatusOK,
+			forwarded: call(`{"name":"lookup"}`)},
+		{name: "another callable on the same actor", body: call(`{"name":"admin","arguments":{}}`), status: http.StatusForbidden},
+		{name: "duplicate name ending on another callable", body: call(`{"name":"lookup","name":"admin"}`), status: http.StatusForbidden},
+		{name: "differently cased name", body: call(`{"name":"lookup","Name":"admin"}`), status: http.StatusBadRequest},
+		{name: "missing name", body: call(`{"arguments":{}}`), status: http.StatusForbidden},
+		{name: "missing params", body: `{"jsonrpc":"2.0","id":7,"method":"tools/call"}`, status: http.StatusForbidden},
+		{name: "non-object params", body: call(`["lookup"]`), status: http.StatusBadRequest},
+		{name: "tools list", body: `{"jsonrpc":"2.0","id":7,"method":"tools/list"}`, status: http.StatusForbidden},
+		{name: "resource read", body: `{"jsonrpc":"2.0","id":7,"method":"resources/read","params":{"uri":"file:///etc/passwd"}}`, status: http.StatusForbidden},
+		{name: "batch", body: `[` + call(`{"name":"lookup"}`) + `,` + call(`{"name":"admin"}`) + `]`, status: http.StatusBadRequest},
+		{name: "differently cased method", body: `{"jsonrpc":"2.0","id":7,"method":"initialize","Method":"tools/call","params":{"name":"admin"}}`, status: http.StatusBadRequest},
+		{name: "duplicate method ending on a refused one", body: `{"jsonrpc":"2.0","id":7,"method":"initialize","method":"tools/list"}`, status: http.StatusForbidden},
+		{name: "client response", body: `{"jsonrpc":"2.0","id":7,"result":{}}`, status: http.StatusBadRequest},
+		{name: "wrong protocol", body: `{"jsonrpc":"1.0","id":7,"method":"initialize"}`, status: http.StatusBadRequest},
+		{name: "structured id", body: `{"jsonrpc":"2.0","id":{"a":1},"method":"initialize"}`, status: http.StatusBadRequest},
+		{name: "trailing message", body: call(`{"name":"lookup"}`) + call(`{"name":"admin"}`), status: http.StatusBadRequest},
+		{name: "empty object", body: `{}`, status: http.StatusBadRequest},
+		{name: "null", body: `null`, status: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSubstrateMCPProxyFixture(t)
+			header := http.Header{}
+			header.Set("Content-Type", "application/json")
+			response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, tc.body)
+			body, _ := io.ReadAll(response.Body)
+			require.Equal(t, tc.status, response.StatusCode, string(body))
+			if tc.status != http.StatusOK {
+				require.Zero(t, f.upstreamCalls(), "a refused message reached the actor")
+				return
+			}
+			require.Equal(t, 1, f.upstreamCalls())
+			require.Equal(t, tc.forwarded, f.bodies[0], "the actor must receive the checked message, not the caller's bytes")
+		})
+	}
+}
+
+// A transaction token limited to one Tool must not reach another callable that
+// the same Actor happens to serve.
+func TestSubstrateMCPProxyTokenLimitedToAToolCannotCallAnotherCallable(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	app := contextTokenProxyApp(f, ContextTokenAuthorizationConfig{
+		Mode: ContextTokenAuthorizationModeEnforce, ToolUseScopes: []string{"tools:use"},
+		SecretCredentialReadScopeList: []string{"secrets:credentials"},
+	}, &UserInfo{AuthType: AuthTypeContextToken, Namespace: "default", ContextToken: &ContextToken{
+		Scopes:             []string{"tools:use", "secrets:credentials"},
+		TransactionContext: map[string]any{"allowedTools": []any{"lookup"}, "secret": "mcp-auth"},
+	}})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default",
+		strings.NewReader(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"admin","arguments":{}}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer caller-token")
+	workerexecutor.SetSubstrateMCPToolBinding(request.Header, substrateMCPProxyTool())
+	response, err := app.Test(request, fiber.TestConfig{Timeout: 10 * time.Second, FailOnTimeout: true})
+	require.NoError(t, err)
+	defer response.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusForbidden, response.StatusCode)
+	require.Zero(t, f.upstreamCalls(), "the Tool's credential was used for a callable the token does not name")
+}
+
+func TestSubstrateMCPProxyRedactsInjectedValuesTheActorEchoes(t *testing.T) {
+	tool := substrateMCPProxyTool()
+	tool.Spec.HTTP.Headers = map[string]string{"X-Static": "tool-static", "X-Api-Token": "Bearer header-secret"}
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		status      int
+		chunks      []string
+		want        string
+	}{
+		{
+			name: "json result", contentType: "application/json", status: http.StatusOK,
+			chunks: []string{`{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"auth=Bearer actor-credential key=header-secret txn=task-txn-token ok=tool-static"}]}}`},
+			want:   `{"jsonrpc":"2.0","id":"1","result":{"content":[{"type":"text","text":"auth=Bearer [REDACTED] key=[REDACTED] txn=[REDACTED] ok=tool-static"}]}}`,
+		},
+		{
+			name: "error body", contentType: "text/plain", status: http.StatusInternalServerError,
+			chunks: []string{"upstream rejected Authorization: Bearer actor-credential"},
+			want:   "upstream rejected Authorization: Bearer [REDACTED]",
+		},
+		{
+			name: "event stream split inside the value", contentType: "text/event-stream", status: http.StatusOK,
+			chunks: []string{
+				"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
+				"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"echo\":\"actor-cre",
+				"dential and Bearer header-sec",
+				"ret\"}}\n\n",
+			},
+			want: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n" +
+				"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"echo\":\"[REDACTED] and [REDACTED]\"}}\n\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSubstrateMCPProxyFixture(t, tool)
+			f.respond = func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.Header().Set("Mcp-Session-Id", "session-actor-credential")
+				w.WriteHeader(tc.status)
+				for _, chunk := range tc.chunks {
+					_, _ = io.WriteString(w, chunk)
+					w.(http.Flusher).Flush()
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+			header := http.Header{}
+			header.Set("Content-Type", "application/json")
+			header.Set(workerexecutor.SubstrateMCPToolTxnTokenHeader, "task-txn-token")
+			response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, substrateMCPProxyToolCall)
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			require.Equal(t, tc.status, response.StatusCode)
+			require.Equal(t, tc.want, string(body))
+			require.Equal(t, "session-[REDACTED]", response.Header.Get("Mcp-Session-Id"))
+			require.Equal(t, "Bearer actor-credential", f.upstream[0].Header.Get("Authorization"), "the actor still receives the credential")
+		})
+	}
+}
+
+// substrateMCPProxyTestStream builds a stream over the secrets the production
+// path would collect: the first as the Tool credential, the rest as sensitive
+// Tool headers.
+func substrateMCPProxyTestStream(body io.Reader, secrets ...string) *substrateMCPProxyStream {
+	headers := map[string]string{}
+	for i, secret := range secrets[1:] {
+		headers[fmt.Sprintf("X-Token-%d", i)] = secret
+	}
+	tool := &corev1alpha1.Tool{Spec: corev1alpha1.ToolSpec{HTTP: &corev1alpha1.HTTPExecution{Headers: headers}}}
+	return newSubstrateMCPProxyStream(io.NopCloser(body), func() {}, substrateMCPProxyInjectedSecrets(tool, secrets[0], ""))
+}
+
+func TestSubstrateMCPProxyStreamRedactsValuesSplitAtEveryByte(t *testing.T) {
+	const body = "x abcdefgh y bcd z abcdefgh\nabcdefg abcdefgh"
+	const want = "x [REDACTED] y [REDACTED] z [REDACTED]\n[REDACTED]defg [REDACTED]"
+	for name, reader := range map[string]io.Reader{
+		"one byte per read": iotest.OneByteReader(strings.NewReader(body)),
+		"half reads":        iotest.HalfReader(strings.NewReader(body)),
+		"data with EOF":     iotest.DataErrReader(strings.NewReader(body)),
+		"whole body":        strings.NewReader(body),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// "abc" begins "abcdefgh" and "bcd" sits inside it: the longer
+			// value must win, even while only its beginning has arrived.
+			got, err := io.ReadAll(substrateMCPProxyTestStream(reader, "abc", "abcdefgh", "bcd"))
+			require.NoError(t, err)
+			require.Equal(t, want, string(got))
+		})
+	}
+}
+
+// A JSON serializer may write any character of a string as an escape, and the
+// caller decodes it back, so an escaped credential is still the credential.
+func TestSubstrateMCPProxyStreamRedactsJSONEscapedValues(t *testing.T) {
+	const secret = "pre/fix+p\"a\\ss<w>ord=\u00e9\U0001F511"
+	goEncoded, err := json.Marshal(secret)
+	require.NoError(t, err)
+	var plain bytes.Buffer
+	encoder := json.NewEncoder(&plain)
+	encoder.SetEscapeHTML(false)
+	require.NoError(t, encoder.Encode(secret))
+	everyUnit := ""
+	for _, unit := range utf16.Encode([]rune(secret)) {
+		everyUnit += fmt.Sprintf(`\u%04X`, unit)
+	}
+	for name, encoded := range map[string]string{
+		"go default":      strings.Trim(string(goEncoded), `"`),
+		"go plain":        strings.Trim(strings.TrimSpace(plain.String()), `"`),
+		"escaped solidus": `pre\/fix+p\"a\\ss<w>ord=\u00e9\ud83d\udd11`,
+		"escaped plus":    `pre/fix\u002Bp\"a\\ss\u003cw\u003eord\u003d\u00E9\uD83D\uDD11`,
+		"every character": everyUnit,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"echo":"` + encoded + `","tail":"\u00e9 \/ kept"}`
+			var decoded map[string]string
+			require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+			require.Equal(t, secret, decoded["echo"], "the case must spell the secret once decoded")
+			for readers, reader := range map[string]io.Reader{
+				"whole": strings.NewReader(body), "one byte per read": iotest.OneByteReader(strings.NewReader(body)),
+			} {
+				got, err := io.ReadAll(substrateMCPProxyTestStream(reader, secret))
+				require.NoError(t, err, readers)
+				require.Equal(t, `{"echo":"[REDACTED]","tail":"\u00e9 \/ kept"}`, string(got), readers)
+			}
+		})
+	}
+	// Outside JSON the value appears as it is, backslash included.
+	got, err := io.ReadAll(substrateMCPProxyTestStream(iotest.OneByteReader(strings.NewReader("auth "+secret+" end\\")), secret))
+	require.NoError(t, err)
+	require.Equal(t, "auth [REDACTED] end\\", string(got))
+}
+
+// Text that only begins like a secret, or like an escape, passes through whole.
+func TestSubstrateMCPProxyStreamKeepsTextThatOnlyResemblesAValue(t *testing.T) {
+	for _, body := range []string{
+		`actor-credentia`, `actor-cred\`, `actor-cred\u00`, `actor-cred\u0065x`, `\ud83d`, `\ud83d\u0041`, `a\qb actor-credentiaL`, `actor-\u0063redentiaX`,
+	} {
+		for readers, reader := range map[string]io.Reader{
+			"whole": strings.NewReader(body), "one byte per read": iotest.OneByteReader(strings.NewReader(body)),
+		} {
+			got, err := io.ReadAll(substrateMCPProxyTestStream(reader, "actor-credential"))
+			require.NoError(t, err, body+" "+readers)
+			require.Equal(t, body, string(got), readers)
+		}
+	}
+}
+
+// A backslash in a secret can be read two ways at every backslash the Actor
+// sends. Matching must not retry the same position along each combination.
+func TestSubstrateMCPProxyStreamMatchesBackslashRunsInBoundedTime(t *testing.T) {
+	secret := strings.Repeat(`\`, 64) + "x"
+	body := strings.Repeat(`\`, 512) + "y " + strings.Repeat(`\\`, 64) + "x " + secret
+	done := make(chan string, 1)
+	go func() {
+		got, _ := io.ReadAll(substrateMCPProxyTestStream(strings.NewReader(body), secret))
+		done <- string(got)
+	}()
+	select {
+	case got := <-done:
+		require.Equal(t, strings.Repeat(`\`, 512)+"y [REDACTED] [REDACTED]", got)
+	case <-time.After(20 * time.Second):
+		t.Fatal("matching a run of backslashes did not finish")
+	}
+}
+
+// An SSE event must reach the caller when the Actor sends it, even when it ends
+// in bytes that could begin a secret.
+func TestSubstrateMCPProxyStreamReleasesCompleteLinesWithoutWaiting(t *testing.T) {
+	reader, writer := io.Pipe()
+	t.Cleanup(func() { _ = writer.Close() })
+	stream := substrateMCPProxyTestStream(reader, strings.Repeat("s", 64))
+	const event = "event: message\ndata: {\"progress\":\"sss\"}\n\ndata: sss\n\n"
+	go func() { _, _ = io.WriteString(writer, event) }()
+	got := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, 0, len(event))
+		chunk := make([]byte, 256)
+		for len(buffer) < len(event) {
+			n, err := stream.Read(chunk)
+			buffer = append(buffer, chunk[:n]...)
+			if err != nil {
+				break
+			}
+		}
+		got <- string(buffer)
+	}()
+	select {
+	case value := <-got:
+		require.Equal(t, event, value)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the event was held back until the Actor sent more data")
+	}
+}
+
+func TestSubstrateMCPProxyStreamStillFailsPastItsBound(t *testing.T) {
+	for name, secrets := range map[string][]string{"redacting": {"secret-value"}, "plain": {""}} {
+		t.Run(name, func(t *testing.T) {
+			stream := substrateMCPProxyTestStream(strings.NewReader("0123456789"), secrets...)
+			stream.remaining = 4
+			got, err := io.ReadAll(stream)
+			require.ErrorContains(t, err, "exceeds the proxy limit")
+			require.Equal(t, "0123", string(got))
+		})
+	}
+}
+
+// A response that reached the bound is complete only if the Actor's body then
+// ends cleanly. A failed read must reach the caller, not pass for the end.
+func TestSubstrateMCPProxyStreamReportsReadFailureAtItsBound(t *testing.T) {
+	failure := errors.New("connection reset by peer")
+	for name, secrets := range map[string][]string{"redacting": {"secret-value"}, "plain": {""}} {
+		t.Run(name, func(t *testing.T) {
+			failed := substrateMCPProxyTestStream(io.MultiReader(strings.NewReader("0123"), iotest.ErrReader(failure)), secrets...)
+			failed.remaining = 4
+			got, err := io.ReadAll(failed)
+			require.ErrorIs(t, err, failure)
+			require.Equal(t, "0123", string(got))
+
+			complete := substrateMCPProxyTestStream(strings.NewReader("0123"), secrets...)
+			complete.remaining = 4
+			got, err = io.ReadAll(complete)
+			require.NoError(t, err)
+			require.Equal(t, "0123", string(got))
+		})
+	}
+}
+
+func TestSubstrateMCPProxyRoutesHaveAWriteDeadline(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	for _, tc := range []struct {
+		method, target string
+		bounded        bool
+	}{
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp?namespace=default", bounded: true},
+		{method: http.MethodDelete, target: "/api/v1/tools/lookup/mcp?namespace=default", bounded: true},
+		// Fiber routes these to the proxy as well.
+		{method: http.MethodPost, target: "/API/v1/Tools/lookup/MCP/", bounded: true},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp#fragment", bounded: true},
+		{method: http.MethodGet, target: "/api/v1/tools/lookup/mcp"},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup"},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp/extra"},
+		{method: http.MethodPost, target: "/api/v1/tasks/lookup/mcp"},
+	} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(tc.method)
+		header.SetRequestURI(tc.target)
+		header.SetHost("orka.test")
+		want := time.Duration(0)
+		if tc.bounded {
+			want = substrateMCPProxyMaxTimeout + time.Second
+		}
+		require.Equal(t, want, f.server.requestConfig(&header).WriteTimeout, tc.method+" "+tc.target)
+	}
+}
+
+// A caller that stops reading must not hold the proxied stream and its Actor
+// connection for as long as it likes: the upstream timeout cannot interrupt a
+// blocked write.
+func TestSubstrateMCPProxyReleasesTheActorWhenTheCallerStopsReading(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	stopped := make(chan struct{})
+	f.respond = func(w http.ResponseWriter, _ *http.Request) {
+		defer close(stopped)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := []byte("data: " + strings.Repeat("x", 64<<10) + "\n\n")
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}
+	f.server.substrateMCPProxyWriteTimeout = 300 * time.Millisecond
+	address := strings.TrimPrefix(listenResponsesApp(t, f.server.app), "http://")
+	conn, err := net.DialTimeout("tcp", address, time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.(*net.TCPConn).SetReadBuffer(1024))
+	header := http.Header{}
+	header.Set("Host", "localhost")
+	header.Set("Authorization", "Bearer worker-sa-token")
+	header.Set("Content-Type", "application/json")
+	header.Set("Content-Length", strconv.Itoa(len(substrateMCPProxyToolCall)))
+	workerexecutor.SetSubstrateMCPToolBinding(header, substrateMCPProxyTool())
+	var request bytes.Buffer
+	request.WriteString("POST /api/v1/tools/lookup/mcp?namespace=default HTTP/1.1\r\n")
+	require.NoError(t, header.Write(&request))
+	request.WriteString("\r\n" + substrateMCPProxyToolCall)
+	_, err = conn.Write(request.Bytes())
+	require.NoError(t, err)
+	// The Tool sets no timeout, so without a write deadline the Actor request
+	// would last the proxy's default 30 seconds.
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a caller that stopped reading kept the Actor stream open")
+	}
+	require.Equal(t, 1, f.upstreamCalls())
 }

@@ -59,6 +59,19 @@ func SubstrateMCPProxyPath(namespace, name string) string {
 	return "/api/v1/tools/" + neturl.PathEscape(name) + "/mcp?" + query.Encode()
 }
 
+// SubstrateMCPSensitiveHeaderValues returns the configured Tool header values
+// a caller must keep out of tool results: the values this executor redacts when
+// it sends those headers to an Actor itself.
+func SubstrateMCPSensitiveHeaderValues(headers map[string]string) []string {
+	values := []string{}
+	for name, value := range headers {
+		if sensitiveToolHeader(name) {
+			values = append(values, sensitiveHeaderValues(value)...)
+		}
+	}
+	return values
+}
+
 // IsSubstrateMCPActorTool reports whether a Tool is backed by a Substrate MCP actor.
 func IsSubstrateMCPActorTool(tool *corev1alpha1.Tool) bool {
 	return isMCPSubstrateActorTool(tool)
