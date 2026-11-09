@@ -259,6 +259,15 @@ golden snapshots when Tools request `boot: true`.
 `SubstrateActorPool.spec.templateRef` is immutable and belongs to native MCP Tool
 placement. It does not select a Task's ACP workspace.
 
+The controller stops an Actor rather than leave it running under a policy it has
+not verified for the Tool's current `spec`. If the policy cannot be applied, or an edit is
+rejected before that step (for example an invalid egress rule or a missing auth
+Secret), the Tool reports `EgressPolicyReady=False` and the controller stops the
+Actor it owns, retrying until it has. It suspends the Actor when the template
+keeps data, and the next successful reconcile resumes it. A template that
+snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
+Substrate, so its Actor is deleted and created again later.
+
 ### Grant restricted AI workers the Tool credential {#mcp-tool-credential-grant}
 
 Workers used to read a Substrate MCP Tool's `http.authSecretRef` themselves, from
