@@ -6974,6 +6974,58 @@ func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
 	}
 }
 
+// A halted issue command must not block the shared issue or emit an event
+// for it, whether the phase is disabled or the transition is not allowed: the
+// issue is driven by the action that still owns the work.
+func TestRepositoryMonitorHaltedIssueCommandLeavesSharedIssue(t *testing.T) {
+	disabled := false
+	cases := map[string]func(*corev1alpha1.RepositoryMonitor) string{
+		"phase disabled": func(monitor *corev1alpha1.RepositoryMonitor) string {
+			monitor.Spec.IssueWorkflow.Research.Enabled = &disabled
+			return repositoryMonitorIssuePhaseDiscovered
+		},
+		"transition not allowed": func(*corev1alpha1.RepositoryMonitor) string {
+			return repositoryMonitorIssuePhaseTriageQueued
+		},
+	}
+	for name, setup := range cases {
+		for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				ctx := context.Background()
+				monitorStore := setupControllerSQLiteStore(t)
+				monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-issue", Namespace: defaultNS}}
+				phase := setup(monitor)
+				item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, ItemKey: "46", Number: 46, SnapshotDigest: "sha256:halted", WorkflowPhase: phase}
+				command := &store.CommandEvent{ID: "cmd-research-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorIssueKind, Number: item.Number, Intent: "research", Status: "accepted", CreatedAt: time.Now()}
+				if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+					t.Fatalf("CreateCommandEvent() error = %v", err)
+				}
+				actionID := store.RepositoryMonitorWorkActionID(command.ID, "research")
+				if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: "research", Status: status, CreatedAt: time.Now()}); err != nil {
+					t.Fatalf("CreateWorkAction() error = %v", err)
+				}
+				reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+				run := &store.MonitorRun{ID: "run-halted-issue", CommandEventID: command.ID, TargetKind: repositoryMonitorIssueKind, TargetNumber: item.Number}
+
+				created, err := reconciler.processIssueCommandRun(ctx, monitor, run, item, "orka-agents", "orka")
+				if err != nil || created != 0 {
+					t.Fatalf("processIssueCommandRun() created=%d err=%v", created, err)
+				}
+				if item.WorkflowPhase != phase || item.SkipReason != "" {
+					t.Fatalf("item phase=%q skipReason=%q, want %q and no skip reason", item.WorkflowPhase, item.SkipReason, phase)
+				}
+				if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorIssueKind, "46"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+				}
+				events, _, err := monitorStore.ListMonitorEvents(ctx, store.MonitorEventFilter{Namespace: defaultNS, MonitorName: monitor.Name, Limit: 10})
+				if err != nil || len(events) != 0 {
+					t.Fatalf("events = %#v err=%v, want none for a halted command", events, err)
+				}
+			})
+		}
+	}
+}
+
 // A halted fix command (cancelled, or coalesced into another action) must not
 // mark the shared PR item failed when the PR carries a blocked label: the item
 // belongs to the action that is still doing the work.

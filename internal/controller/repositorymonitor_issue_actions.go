@@ -196,6 +196,17 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
+	// A halted command (cancelled, or coalesced into another action) must not
+	// block or emit events for the shared issue, which the action that still
+	// owns the work is driving.
+	if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || halted {
+		return 0, err
+	}
+	if actionKind != command.Intent {
+		if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || halted {
+			return 0, err
+		}
+	}
 	if !repositoryMonitorIssuePhaseTransitionAllowed(item.WorkflowPhase, phase) {
 		reason := fmt.Sprintf("phase_transition_not_allowed:%s_to_%s", item.WorkflowPhase, phase)
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
@@ -216,14 +227,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 			return 0, err
 		}
 		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
-	}
-	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
-		return 0, err
-	}
-	if actionKind != command.Intent {
-		if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-			return 0, err
-		}
 	}
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		planID := ""
