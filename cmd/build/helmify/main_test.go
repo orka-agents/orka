@@ -1483,6 +1483,39 @@ func TestStaticChartUsesRegisteredContextTokenTTSEndpointFlag(t *testing.T) {
 	}
 }
 
+func TestStaticChartRendersPublisherWorkspaceLimits(t *testing.T) {
+	defaults := requireHelmRender(t, "--show-only", "templates/publisher-deployment.yaml")
+	if strings.Contains(defaults, "ORKA_PUBLISHER_WORKSPACE_") {
+		t.Fatalf("default publisher deployment overrides built-in workspace limits:\n%s", defaults)
+	}
+	if !strings.Contains(defaults, `emptyDir: {sizeLimit: "1Gi"}`) {
+		t.Fatalf("default publisher scratch volume changed:\n%s", defaults)
+	}
+
+	tuned := requireHelmRender(t,
+		"--show-only", "templates/publisher-deployment.yaml",
+		"--set", "publisher.workspaceLimits.maxEntries=150000",
+		"--set", "publisher.workspaceLimits.maxFileBytes=67108864",
+		"--set", "publisher.workspaceLimits.maxBytes=536870912",
+		"--set", "publisher.workspaceLimits.maxArtifactBytes=536870912",
+		"--set-string", "publisher.scratchSizeLimit=4Gi",
+	)
+	for _, want := range []string{
+		`{name: ORKA_PUBLISHER_WORKSPACE_MAX_ENTRIES, value: "150000"}`,
+		`{name: ORKA_PUBLISHER_WORKSPACE_MAX_FILE_BYTES, value: "67108864"}`,
+		`{name: ORKA_PUBLISHER_WORKSPACE_MAX_BYTES, value: "536870912"}`,
+		`{name: ORKA_PUBLISHER_WORKSPACE_MAX_ARTIFACT_BYTES, value: "536870912"}`,
+		`emptyDir: {sizeLimit: "4Gi"}`,
+	} {
+		if !strings.Contains(tuned, want) {
+			t.Fatalf("publisher deployment is missing %q:\n%s", want, tuned)
+		}
+	}
+	if strings.Contains(tuned, "e+") {
+		t.Fatalf("publisher workspace limits used scientific notation:\n%s", tuned)
+	}
+}
+
 func TestStaticChartRendersByteLimitsAsDecimalIntegers(t *testing.T) {
 	publisher := requireHelmRender(t, "--show-only", "templates/publisher-deployment.yaml")
 	scmProxy := requireHelmRender(t, "--show-only", "templates/scm-egress-proxy-deployment.yaml")

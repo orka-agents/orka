@@ -2168,6 +2168,9 @@ func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
 	}
+	if got.Labels[labels.LabelPlatformIdentity] != "true" {
+		t.Fatalf("expected the platform identity label to be reconciled, got labels %#v", got.Labels)
+	}
 	if got.Labels["custom"] != "keep" {
 		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
 	}
