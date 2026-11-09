@@ -28,13 +28,6 @@ const (
 	// evalTrialTaskPriority runs trials behind interactive and monitor work.
 	evalTrialTaskPriority int32 = 100
 	evalTrialCreatedBy          = "evalrun-controller"
-
-	// evalPromptTemplateRepoURL is the fixed repository the prompt template
-	// digest renders against, so the digest tracks only the template and the
-	// monitor settings it embeds.
-	evalPromptTemplateRepoURL = "https://github.com/orka-eval/template"
-	evalPromptTemplateBaseSHA = "0000000000000000000000000000000000000000"
-	evalPromptTemplateHeadSHA = "1111111111111111111111111111111111111111"
 )
 
 // evalReviewFixture splits an anonymous https://github.com/<owner>/<repo>
@@ -92,10 +85,9 @@ func evalReviewFiles(input *evals.ReviewCaseInput) []repositoryMonitorPullReques
 	return files
 }
 
-// buildEvalReviewTrialTask renders one trial through the production review
-// Task builder. The trial clones the fixture anonymously and read-only: it
-// gets no read, publication or forge credential.
-func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.RepositoryMonitor, c evals.Case, trial int32, timeout metav1.Duration) (*corev1alpha1.Task, error) {
+// buildEvalReviewTask renders the production review Task for a case,
+// before the run's name, labels and timeout are set.
+func buildEvalReviewTask(monitor *corev1alpha1.RepositoryMonitor, c evals.Case) (*corev1alpha1.Task, error) {
 	input := c.Input.RepositoryMonitorReview
 	if input == nil {
 		return nil, fmt.Errorf("case %q has no repositoryMonitorReview input", c.ID)
@@ -105,16 +97,11 @@ func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.R
 		return nil, err
 	}
 	fixtureMonitor := evalReviewMonitorForFixture(monitor, input.RepoURL, owner, repository)
-	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
-		// The trial reviews with the candidate Agent, the same one the
-		// snapshot froze, instead of the monitor's reviewer.
-		fixtureMonitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: agentRef.Name}
-	}
 	pr := evalReviewPullRequest(input, owner, repository)
 	files := evalReviewFiles(input)
 	reviewContext := repositoryMonitorReviewContextBindChangedFileCount(
 		repositoryMonitorReviewContextFromFiles(owner, repository, pr, files), len(files), len(files))
-	task, err := buildRepositoryMonitorReviewTask(repositoryMonitorReviewTaskInput{
+	return buildRepositoryMonitorReviewTask(repositoryMonitorReviewTaskInput{
 		Monitor:       fixtureMonitor,
 		Owner:         owner,
 		Repository:    repository,
@@ -124,6 +111,20 @@ func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.R
 		Priority:      evalTrialTaskPriority,
 		WorkspaceRepo: input.RepoURL,
 	})
+}
+
+// buildEvalReviewTrialTask renders one trial through the production review
+// Task builder. The trial clones the fixture anonymously and read-only: it
+// gets no read, publication or forge credential.
+func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.RepositoryMonitor, c evals.Case, trial int32, timeout metav1.Duration) (*corev1alpha1.Task, error) {
+	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
+		// The trial reviews with the candidate Agent, the same one the
+		// snapshot froze, instead of the monitor's reviewer. The prompt
+		// does not name the reviewer, so the prompt digest is unaffected.
+		monitor = monitor.DeepCopy()
+		monitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: agentRef.Name}
+	}
+	task, err := buildEvalReviewTask(monitor, c)
 	if err != nil {
 		return nil, err
 	}
@@ -177,26 +178,20 @@ func evalTrialTaskName(run *corev1alpha1.EvalRun, caseID string, trial int32) st
 	return fmt.Sprintf("%s-%d-%s", prefix, trial, hex.EncodeToString(sum[:])[:12])
 }
 
-// evalReviewPromptTemplateDigest renders the production prompt for a fixed
-// synthetic pull request. It changes when the template code or a monitor
-// setting rendered into the prompt changes, and never with case data.
-func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor) string {
-	owner, repository, _ := evalReviewFixture(evalPromptTemplateRepoURL)
-	input := &evals.ReviewCaseInput{
-		RepoURL: evalPromptTemplateRepoURL,
-		BaseSHA: evalPromptTemplateBaseSHA,
-		HeadSHA: evalPromptTemplateHeadSHA,
-		Title:   "template",
-		Files:   []evals.ReviewCaseFile{{Filename: "a.txt", Status: "modified", Patch: "@@ -1 +1 @@\n-a\n+b", Additions: 1, Deletions: 1}},
+// evalReviewPromptTemplateDigest digests the production prompt each case
+// renders, in case order. It covers every rendering branch the run's trials
+// use, so a controller change to any of them changes the digest, as does a
+// monitor setting rendered into the prompt.
+func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cases []evals.Case) (string, error) {
+	hash := sha256.New()
+	for _, c := range cases {
+		task, err := buildEvalReviewTask(monitor, c)
+		if err != nil {
+			return "", evalRunConfigErrorf(evalRunReasonSubjectInvalid, "render the prompt of case %q: %v", c.ID, err)
+		}
+		_, _ = fmt.Fprintf(hash, "%d:%s%d:%s", len(c.ID), c.ID, len(task.Spec.Prompt), task.Spec.Prompt)
 	}
-	pr := evalReviewPullRequest(input, owner, repository)
-	files := evalReviewFiles(input)
-	reviewContext := repositoryMonitorReviewContextBindChangedFileCount(
-		repositoryMonitorReviewContextFromFiles(owner, repository, pr, files), len(files), len(files))
-	prompt := buildRepositoryMonitorReviewPrompt(evalReviewMonitorForFixture(monitor, input.RepoURL, owner, repository),
-		owner, repository, pr, reviewContext, repositoryMonitorReviewPlan{Mode: repositoryMonitorReviewModeFull})
-	sum := sha256.Sum256([]byte(prompt))
-	return evals.DigestPrefix + hex.EncodeToString(sum[:])
+	return evals.DigestPrefix + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // evalReviewOutcomeFromResult runs a completed trial's raw output through the
@@ -349,8 +344,13 @@ func (r *EvalRunReconciler) evalReviewerSystemPromptDigest(ctx context.Context, 
 	return evals.DigestPrefix + hex.EncodeToString(sum[:]), nil
 }
 
-// snapshot returns the subject's part of the run snapshot.
-func (s *evalReviewSubject) snapshot() corev1alpha1.EvalRunSnapshot {
+// snapshot returns the subject's part of the run snapshot for the run's
+// cases.
+func (s *evalReviewSubject) snapshot(cases []evals.Case) (corev1alpha1.EvalRunSnapshot, error) {
+	promptDigest, err := evalReviewPromptTemplateDigest(s.Monitor, cases)
+	if err != nil {
+		return corev1alpha1.EvalRunSnapshot{}, err
+	}
 	return corev1alpha1.EvalRunSnapshot{
 		MonitorUID:        s.Monitor.UID,
 		MonitorGeneration: s.Monitor.Generation,
@@ -361,9 +361,9 @@ func (s *evalReviewSubject) snapshot() corev1alpha1.EvalRunSnapshot {
 		},
 		RuntimeImageDigest:         s.RuntimeImageDigest,
 		Model:                      evalReviewerModel(s.Reviewer),
-		PromptTemplateDigest:       evalReviewPromptTemplateDigest(s.Monitor),
+		PromptTemplateDigest:       promptDigest,
 		ReviewerSystemPromptDigest: s.SystemPromptDigest,
-	}
+	}, nil
 }
 
 // evalSnapshotMaxModelLength matches the snapshot model field limit.

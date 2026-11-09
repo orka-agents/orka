@@ -1190,3 +1190,38 @@ func TestEvalReviewOutcomeKeepsFindingPathsVerbatim(t *testing.T) {
 		t.Fatalf("localization = %+v, want a fail for a padded path", grade)
 	}
 }
+
+func TestEvalReviewPromptDigestCoversEveryCasePrompt(t *testing.T) {
+	run := evalTestRun(1, 1)
+	monitor := evalTestObjects(run, "")[2].(*corev1alpha1.RepositoryMonitor)
+	parse := func(lines string) []evals.Case {
+		t.Helper()
+		cases, err := evals.ParseCases([]byte(lines), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cases
+	}
+	cases := parse(evalTestCases())
+	digest, err := evalReviewPromptTemplateDigest(monitor, cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second case whose file renders through another branch of the
+	// prompt builder (a new file) must change the digest even though the
+	// first case's prompt is the same.
+	added := strings.Replace(evalTestCaseLine("clean-1", evals.ReferenceVerdictPassed, "clean"),
+		`"status":"modified"`, `"status":"added"`, 1)
+	changed, err := evalReviewPromptTemplateDigest(monitor,
+		parse(evalTestCaseLine("defect-1", evals.ReferenceVerdictNotPassed, "defect")+"\n"+added+"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == digest {
+		t.Fatal("the prompt digest ignored a case that renders a different prompt")
+	}
+	again, err := evalReviewPromptTemplateDigest(monitor, cases)
+	if err != nil || again != digest {
+		t.Fatalf("the prompt digest is not deterministic: %q, %q, %v", digest, again, err)
+	}
+}
