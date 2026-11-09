@@ -60,12 +60,19 @@ controller:
 
   # Ed25519 keys that sign Task webhook deliveries (spec.webhookURL). The
   # controller reads Secret <fullname>-task-webhook-signing (or
-  # signingSecretName) in the release namespace, creating it and minting the
+  # signingSecretName) in signingNamespace, creating it and minting the
   # "current" key on first use. Rotate by moving "current" to "previous" and
   # writing a new PEM PKCS#8 Ed25519 key to "current". Receivers verify against
   # GET /.well-known/orka/task-webhook-jwks.json on the API service.
   taskWebhooks:
     signingSecretName: ""
+    # Chart-created namespace that holds only the signing Secret, so Task and
+    # Agent secretRefs and worker roles in the release namespace cannot reach
+    # the key. Empty means <release namespace>-task-webhook-signing, so each
+    # release owns its own. Must differ from the release, client, ACP runtime
+    # and agent-host namespaces. Kept on helm uninstall so the key survives a
+    # reinstall.
+    signingNamespace: ""
 
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
@@ -512,6 +519,13 @@ workers:
     # existing off/audit callers must satisfy their issuer grants. It does not
     # narrow those grants or OIDC authority. See the chart README.
     rbacProfile: default
+    # ValidatingAdmissionPolicy that holds the AI worker ServiceAccount to the
+    # Secrets, ServiceAccounts and code_exec Jobs Orka itself creates, so it
+    # cannot take on the controller's or another account's identity. Turn it
+    # off only if you run other code as the AI worker ServiceAccount that must
+    # make other writes; that reopens the path to the controller's identity
+    # (and the Task webhook signing key) under the default rbacProfile.
+    identityProtection: true
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"

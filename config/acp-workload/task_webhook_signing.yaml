@@ -1,0 +1,58 @@
+# The Task webhook signing Secret lives alone in this namespace, where no Task,
+# runtime or agent host runs: Task and Agent secretRefs mount Secrets from the
+# Task namespace and worker roles are bound there, so neither reaches the key.
+# Only the controller is bound here; it creates the Secret and mints the key.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orka-task-webhook-signing
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/component: task-webhook-signing
+    app.kubernetes.io/managed-by: kustomize
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: task-webhook-signing-controller-role
+  namespace: orka-task-webhook-signing
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-task-webhook-signing
+  resources:
+  - secrets
+  verbs:
+  - get
+  - update
+# create cannot be name-scoped.
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    app.kubernetes.io/managed-by: kustomize
+  name: task-webhook-signing-controller-rolebinding
+  namespace: orka-task-webhook-signing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: task-webhook-signing-controller-role
+subjects:
+- kind: ServiceAccount
+  name: controller-manager
+  namespace: system
