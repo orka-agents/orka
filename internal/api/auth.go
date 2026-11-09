@@ -190,8 +190,7 @@ func NewAuthMiddleware(c client.Client, configs ...AuthConfig) fiber.Handler {
 			}
 			// The sign-in itself is good, so say what is missing: an
 			// administrator needs this subject to allow the person.
-			var notAllowed *oidcSubjectNotAllowedError
-			if errors.As(err, &notAllowed) {
+			if notAllowed, ok := errors.AsType[*oidcSubjectNotAllowedError](err); ok {
 				return fiber.NewError(fiber.StatusForbidden, fmt.Sprintf(
 					"your sign-in is valid, but its subject %q is not allowed to use this Orka installation; ask an administrator to add it to the allowed OIDC subjects",
 					notAllowed.Subject))
