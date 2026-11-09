@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	acpskill "github.com/orka-agents/orka/internal/acp/skill"
 	"github.com/orka-agents/orka/internal/acp/toolbox"
 	"github.com/orka-agents/orka/internal/executionmode"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
@@ -460,6 +462,54 @@ func TestRuntimePoolPodTemplateSkillImageVolumeMode(t *testing.T) {
 		}
 	}
 	assertRuntimeContainerProtections(t, template)
+}
+
+// TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck covers the
+// supervisor's skill check, which reads image-volume skills before it serves
+// and after any toolbox check. The startup probe must allow each check on top
+// of the normal allowance, or kubelet restarts the container before the check
+// reports a classified failure. Copy mode reads the images in init containers
+// and keeps the default.
+func TestRuntimePoolSkillImageVolumeStartupProbeOutlastsSkillCheck(t *testing.T) {
+	startupBudget := func(template corev1.PodTemplateSpec) time.Duration {
+		probe := template.Spec.Containers[0].StartupProbe
+		return time.Duration(probe.FailureThreshold*probe.PeriodSeconds) * time.Second
+	}
+	imagePolicy := acpTestSkillPolicy()
+	imagePolicy.MountMethod = ACPToolboxMountImageVolume
+
+	skillsOnly := runtimePoolSkillTestObject(t, runtimePoolTestSkills()...)
+	_, copyTemplate := renderToolboxTemplate(t, skillsOnly, acpTestSkillPolicy())
+	_, imageTemplate := renderToolboxTemplate(t, skillsOnly, imagePolicy)
+	_, plainTemplate := renderToolboxTemplate(t, runtimePoolTestObject(1), ACPToolboxPolicy{})
+	base := startupBudget(plainTemplate)
+	if got := startupBudget(copyTemplate); got != base {
+		t.Fatalf("copy mode startup probe allows %s, want the default %s", got, base)
+	}
+	if got, want := startupBudget(imageTemplate), base+acpskill.StartupCheckTimeout; got < want {
+		t.Fatalf("image volume skills without toolboxes: startup probe allows %s, want at least %s", got, want)
+	}
+
+	withToolboxes := runtimePoolSkillTestObject(t, runtimePoolTestSkills()...)
+	profile, err := runtimePoolHarnessProfile(withToolboxes.Spec.Runtime.Profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.Toolboxes = runtimePoolTestToolboxes()
+	digest, err := harnessv2.CanonicalProfileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withToolboxes.Spec.Runtime.Profile.Digest = string(digest)
+	withToolboxes.Spec.Runtime.Profile.Toolboxes = runtimePoolToolboxesFromProfile(profile.Toolboxes)
+	_, bothTemplate := renderToolboxTemplate(t, withToolboxes, imagePolicy)
+	if got, want := startupBudget(bothTemplate), base+toolbox.ImageVolumeCheckTimeout+acpskill.StartupCheckTimeout; got < want {
+		t.Fatalf("image volume skills with toolboxes: startup probe allows %s, want at least %s", got, want)
+	}
+	plain, image := plainTemplate.Spec.Containers[0].StartupProbe, imageTemplate.Spec.Containers[0].StartupProbe
+	if image.PeriodSeconds != plain.PeriodSeconds || image.TimeoutSeconds != plain.TimeoutSeconds {
+		t.Fatalf("image volume startup probe changed more than its failure threshold: %#v", image)
+	}
 }
 
 func TestRuntimePoolSkillAdmissionFailsClosed(t *testing.T) {

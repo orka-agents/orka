@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/acp/skill"
@@ -62,9 +63,18 @@ func nativeSkillsDir(provider string, paths acp.SessionPaths) (string, error) {
 	}
 }
 
+// skillCheckTimeout and loadSkill are replaced in tests.
+var (
+	skillCheckTimeout = skill.StartupCheckTimeout
+	loadSkill         = skill.Load
+)
+
 // VerifySkills validates every bound skill before the supervisor serves, so a
 // skill that can never be projected fails the Pod with a stable reason
-// instead of failing each session.
+// instead of failing each session. The check is bounded: the controller sizes
+// the startup probe to outlast it, so a read that stalls is reported with a
+// stable reason instead of ending in an unexplained kubelet restart. A stalled
+// read cannot be interrupted, and the caller exits on any failure.
 func VerifySkills(cfg Config) error {
 	if len(cfg.Skills) == 0 {
 		return nil
@@ -72,12 +82,24 @@ func VerifySkills(cfg Config) error {
 	if _, err := nativeSkillsDir(cfg.Provider.Kind, acp.SessionPaths{Home: "/", Config: "/"}); err != nil {
 		return &toolbox.Failure{Reason: skill.ReasonUnsupported, Message: err.Error()}
 	}
-	for i := range cfg.Skills {
-		if _, err := skill.Load(filepath.Join(skillMountRoot, cfg.Skills[i].Name), cfg.Skills[i].Name, skill.DefaultLimits()); err != nil {
-			return err
+	done := make(chan error, 1)
+	go func() {
+		for i := range cfg.Skills {
+			if _, err := loadSkill(filepath.Join(skillMountRoot, cfg.Skills[i].Name), cfg.Skills[i].Name, skill.DefaultLimits()); err != nil {
+				done <- err
+				return
+			}
 		}
+		done <- nil
+	}()
+	timer := time.NewTimer(skillCheckTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return &toolbox.Failure{Reason: skill.ReasonReadFailed, Message: fmt.Sprintf("skill check did not complete within %s", skillCheckTimeout)}
 	}
-	return nil
 }
 
 // materializeSessionSkills copies each validated skill into the session's

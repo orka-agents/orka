@@ -1000,6 +1000,16 @@ func openCodeSessionConfig(
 			externalDirectory[filepath.Join(dir, name, "*")] = openCodePermissionAllow
 		}
 		permissions["external_directory"] = externalDirectory
+		// external_directory does not tell a read from a write, so that
+		// allowance would also let the edit, write, and apply_patch tools
+		// rewrite a projected skill. Keep them inside the workspace.
+		if mutationAction == openCodePermissionAllow {
+			editRules, err := openCodeSkillEditRules(paths.Workspace, dir, skills)
+			if err != nil {
+				return nil, err
+			}
+			permissions[openCodeToolEdit] = editRules
+		}
 	}
 	if intent == harnessv2.WorkspaceIntentRead {
 		permissions[openCodeToolApplyPatch] = openCodePermissionDeny
@@ -1076,6 +1086,36 @@ func openCodeBrokeredPermissions(policy harnessv2.MCPToolPolicy) (map[string]boo
 		permissions[name] = openCodeToolPolicyAllows(policy, descriptor.Name)
 	}
 	return permissions, nil
+}
+
+// openCodeSkillEditRules allows edits everywhere except the projected skill
+// folders. OpenCode (1.19.0) asks one "edit" permission for its edit, write,
+// and apply_patch tools, with the file path relative to the project worktree:
+// the workspace when it is a Git repository, "/" otherwise. Both spellings of
+// each skill folder are denied, so a workspace file is caught only if its
+// path repeats the session's own absolute path. The rules stop those
+// path-taking tools only; a session that may run shell commands still owns its
+// private copy.
+func openCodeSkillEditRules(workspace, skillsDir string, skills []string) (map[string]string, error) {
+	rules := map[string]string{"*": openCodePermissionAllow}
+	for _, name := range skills {
+		folder := filepath.Join(skillsDir, name)
+		fromWorkspace, err := filepath.Rel(workspace, folder)
+		if err != nil {
+			return nil, fmt.Errorf("locate OpenCode skill %q from the workspace: %w", name, err)
+		}
+		for _, relative := range []string{fromWorkspace, strings.TrimPrefix(folder, string(filepath.Separator))} {
+			pattern := filepath.ToSlash(filepath.Join(relative, "*"))
+			// OpenCode takes the last matching rule in key order and expands a
+			// leading "~" or "$HOME". JSON keys are sorted, so a deny must sort
+			// after "*" and must not be rewritten, or the allow would win.
+			if pattern <= "*" || strings.HasPrefix(pattern, "~") {
+				return nil, fmt.Errorf("OpenCode skill %q cannot be protected from edits at %q", name, folder)
+			}
+			rules[pattern] = openCodePermissionDeny
+		}
+	}
+	return rules, nil
 }
 
 // openCodeMutationPolicyAllows consumes the controller-normalized mutation

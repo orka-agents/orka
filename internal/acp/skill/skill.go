@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"sigs.k8s.io/yaml"
@@ -37,6 +38,12 @@ const (
 	ReasonWriteFailed         = "SKILL_WRITE_FAILED"
 	ReasonUnsupported         = "SKILL_UNSUPPORTED_PLATFORM"
 )
+
+// StartupCheckTimeout bounds the supervisor's skill check, which runs before
+// the supervisor serves. With image volumes that check reads the skill images
+// themselves, so the runtime startup probe is extended by this much and a slow
+// check reports its FAIL line before kubelet restarts the container.
+const StartupCheckTimeout = time.Minute
 
 // Limits bounds one skill folder.
 type Limits struct {

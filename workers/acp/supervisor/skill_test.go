@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/orka-agents/orka/internal/acp"
 	"github.com/orka-agents/orka/internal/acp/skill"
@@ -574,5 +575,116 @@ func TestOpenCodeExternalDirectoryAllowsOnlyProjectedSkillFolders(t *testing.T) 
 	}
 	if got := openCodeConfigRules(t, data, "read"); openCodeEvaluate(got, skillsDir+"/code-review/references/guide.md") != openCodePermissionAllow {
 		t.Fatalf("read permission must allow the skill's supporting files: %v", got)
+	}
+}
+
+// TestOpenCodeMutationToolsCannotRewriteProjectedSkills follows OpenCode's
+// edit, write, and apply_patch tools: after external_directory they ask the
+// "edit" permission with the file path relative to the project worktree, which
+// is the workspace for a Git repository and "/" otherwise. The skill folders
+// are readable through external_directory, so the edit rules are what keep
+// those tools from rewriting a projected skill.
+func TestOpenCodeMutationToolsCannotRewriteProjectedSkills(t *testing.T) {
+	paths := acp.SessionPaths{Workspace: "/sessions/private/workspace", Config: "/sessions/private/xdg/config"}
+	proxy := ProviderProxyBinding{BaseURL: "http://127.0.0.1:43210/_orka/provider/session", Credential: "placeholder"}
+	config := func(t *testing.T, intent harnessv2.WorkspaceIntent, tools []string, skills []harnessv2.RuntimeSkill) []byte {
+		t.Helper()
+		request := harnessv2.CreateRuntimeSessionRequest{MCPConfiguration: harnessv2.MCPPolicyConfiguration{
+			ToolPolicy: harnessv2.MCPToolPolicy{AllowedToolNames: tools},
+		}}
+		request.Profile.Skills = skills
+		data, err := openCodeSessionConfig("openai/gpt-test", testOpenCodeModelLimits(), intent, request, paths, proxy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	mutating := []string{"Read", "Edit", "Write"}
+	data := config(t, harnessv2.WorkspaceIntentWrite, mutating, supervisorTestSkills())
+	rules := openCodeConfigRules(t, data, openCodeToolEdit)
+	skillsDir := "/sessions/private/xdg/config/opencode/skills"
+	for _, worktree := range []string{paths.Workspace, "/"} {
+		relative := func(file string) string {
+			value, err := filepath.Rel(worktree, file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		for _, file := range []string{
+			skillsDir + "/code-review/SKILL.md",
+			skillsDir + "/code-review/references/guide.md",
+			skillsDir + "/release-notes/scripts/deep/check.sh",
+			skillsDir + "/release-notes/new-file.md",
+		} {
+			// The tools reach this check: the skill folder passes external_directory.
+			if got := openCodeEvaluate(openCodeConfigRules(t, data, "external_directory"), filepath.Join(filepath.Dir(file), "*")); got != openCodePermissionAllow {
+				t.Fatalf("external_directory for %s = %s, want allow", file, got)
+			}
+			if got := openCodeEvaluate(rules, relative(file)); got != openCodePermissionDeny {
+				t.Errorf("editing %s from worktree %s = %s, want deny (rules %v)", file, worktree, got, rules)
+			}
+		}
+		for _, file := range []string{
+			paths.Workspace + "/main.go",
+			paths.Workspace + "/code-review/SKILL.md",
+			paths.Workspace + "/.config/opencode/skills/code-review/SKILL.md",
+			paths.Workspace + "/xdg/config/opencode/skills/code-review/SKILL.md",
+		} {
+			if got := openCodeEvaluate(rules, relative(file)); got != openCodePermissionAllow {
+				t.Errorf("editing workspace file %s from worktree %s = %s, want allow (rules %v)", file, worktree, got, rules)
+			}
+		}
+	}
+	// OpenCode hides a tool whose last rule is a blanket deny; the edit tools
+	// must stay available for the workspace.
+	if last := rules[len(rules)-1]; rules[0] != [2]string{"*", openCodePermissionAllow} || last[0] == "*" {
+		t.Fatalf("edit rules must open with the blanket allow and end on a skill folder: %v", rules)
+	}
+
+	plain := func(action string) [][2]string { return [][2]string{{"*", action}} }
+	for name, tc := range map[string]struct {
+		data []byte
+		want string
+	}{
+		"no skills":       {config(t, harnessv2.WorkspaceIntentWrite, mutating, nil), openCodePermissionAllow},
+		"read intent":     {config(t, harnessv2.WorkspaceIntentRead, mutating, supervisorTestSkills()), openCodePermissionDeny},
+		"mutation denied": {config(t, harnessv2.WorkspaceIntentWrite, []string{"Read"}, supervisorTestSkills()), openCodePermissionDeny},
+	} {
+		if got := openCodeConfigRules(t, tc.data, openCodeToolEdit); !slices.Equal(got, plain(tc.want)) {
+			t.Errorf("%s: edit rules = %v, want a plain %s", name, got, tc.want)
+		}
+	}
+}
+
+// TestOpenCodeSkillEditRulesFailClosed covers a skill folder whose deny rule
+// OpenCode would order before the blanket allow or rewrite.
+func TestOpenCodeSkillEditRulesFailClosed(t *testing.T) {
+	for _, skillsDir := range []string{"/!sessions/config/opencode/skills", "/~/config/opencode/skills"} {
+		if rules, err := openCodeSkillEditRules("/workspace", skillsDir, []string{"code-review"}); err == nil {
+			t.Errorf("skills folder %s produced rules %v, want an error", skillsDir, rules)
+		}
+	}
+}
+
+// TestVerifySkillsBoundsAStalledRead keeps a read that never returns from
+// holding the supervisor past the startup probe without a stable reason.
+func TestVerifySkillsBoundsAStalledRead(t *testing.T) {
+	originalTimeout, originalLoad := skillCheckTimeout, loadSkill
+	t.Cleanup(func() { skillCheckTimeout, loadSkill = originalTimeout, originalLoad })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	skillCheckTimeout = 20 * time.Millisecond
+	loadSkill = func(string, string, skill.Limits) (*skill.Tree, error) {
+		select {
+		case <-release:
+		case <-time.After(10 * time.Second):
+		}
+		return nil, nil
+	}
+	err := VerifySkills(Config{Provider: ProviderProfile{Kind: providerKindCodex}, Skills: supervisorTestSkills()})
+	var failure *toolbox.Failure
+	if !errors.As(err, &failure) || failure.Reason != skill.ReasonReadFailed || !strings.Contains(failure.Message, "did not complete within 20ms") {
+		t.Fatalf("stalled skill check = %v, want %s", err, skill.ReasonReadFailed)
 	}
 }

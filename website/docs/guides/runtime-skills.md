@@ -41,7 +41,8 @@ resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-
   allowed. Nothing is fetched over the network inside the runtime Pod.
 - **Each session gets its own copy.** The read-only source is never writable by a
   session; the copy belongs to the session's unique UID and GID and is deleted with the
-  session.
+  session. OpenCode's file-editing tools are denied in the skill folders. A session that
+  may run shell commands can still change its own copy, which no other session sees.
 - **The feature is off by default.** A skill that can't be set up fails the Task with a
   stable reason; an agent never starts without the skills it was promised.
 
@@ -163,6 +164,7 @@ with the same reason. The message names the skill and carries one stable code.
 | --- | --- | --- |
 | `TOOLBOX_IMAGE_PULL`, `TOOLBOX_SOURCE_OPEN`, `TOOLBOX_MOUNT_FAILED`, … on a `skill-copy-<n>` container or `skill-<n>` volume | The skill image could not be pulled, or `path` does not exist as a real folder in it. | Check the digest, registry access, `imagePullSecrets`, and the image layout. |
 | `SKILL_MISSING_MOUNT` | The supervisor did not find the skill folder in the runtime Pod. | Check the node runtime and the RuntimePool events. |
+| `SKILL_READ_FAILED` | The skill folder could not be read, or the supervisor's startup check did not finish within one minute. | Check the node's image storage and the RuntimePool events. |
 | `SKILL_MISSING_SKILL_MD` | `SKILL.md` is not directly in the skill folder. | Fix `path` or the image layout. |
 | `SKILL_INVALID_FRONTMATTER` | The frontmatter is missing, malformed, has a `name` that does not match, has no `description`, or uses a key that is not allowed. | Keep only `name`, `description`, `license`, `compatibility`, and `metadata`. |
 | `SKILL_UNSAFE_CONTENT` | `SKILL.md` is not UTF-8 text, contains `` !` ``, or appears to contain a secret; or the skill has a nested `SKILL.md` or `agents/openai.yaml`. | Remove the construct, credential, or file. |

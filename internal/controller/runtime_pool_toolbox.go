@@ -317,9 +317,15 @@ func applyRuntimePoolToolboxImageVolumeTemplate(template *corev1.PodTemplateSpec
 	// The supervisor runs the unprivileged toolbox check before it serves, so
 	// the startup probe must outlast the check or kubelet restarts the
 	// container before the check can report a classified failure.
+	extendRuntimePoolStartupProbe(runtime, toolbox.ImageVolumeCheckTimeout)
+}
+
+// extendRuntimePoolStartupProbe adds budget for a check the supervisor runs
+// before it serves, keeping the probe's period and timeout.
+func extendRuntimePoolStartupProbe(runtime *corev1.Container, budget time.Duration) {
 	if probe := runtime.StartupProbe; probe != nil && probe.PeriodSeconds > 0 {
 		period := time.Duration(probe.PeriodSeconds) * time.Second
-		probe.FailureThreshold += int32((toolbox.ImageVolumeCheckTimeout + period - 1) / period)
+		probe.FailureThreshold += int32((budget + period - 1) / period)
 	}
 }
 
