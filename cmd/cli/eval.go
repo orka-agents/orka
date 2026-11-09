@@ -451,24 +451,30 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 	if current.UID != run.UID {
 		return fmt.Errorf("evalrun/%s was deleted and recreated before its trial records were read", run.Name)
 	}
+	// The steps below change, empty and write into events/, so it must be a
+	// real directory: through a symlink they would act on its target.
+	eventsDir := filepath.Join(dir, "events")
+	if info, err := os.Lstat(eventsDir); err == nil && !info.IsDir() {
+		return fmt.Errorf("%s exists and is not a directory", eventsDir)
+	}
 	// An existing events directory from an earlier export keeps its mode
 	// otherwise. The output directory itself is the caller's; every file in
 	// it is private.
-	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
+	if err := os.MkdirAll(eventsDir, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(filepath.Join(dir, "events"), 0o700); err != nil {
+	if err := os.Chmod(eventsDir, 0o700); err != nil {
 		return err
 	}
 	// Events of an earlier export into this directory would sit beside this
 	// run's records; only this run's failed trials are written below.
-	entries, err := os.ReadDir(filepath.Join(dir, "events"))
+	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
 		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
-			if err := os.Remove(filepath.Join(dir, "events", entry.Name())); err != nil {
+			if err := os.Remove(filepath.Join(eventsDir, entry.Name())); err != nil {
 				return err
 			}
 		}
@@ -502,7 +508,7 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 			// Any other failure leaves the export incomplete, so it fails.
 			return fmt.Errorf("read events of failed trial Task %s: %w", trial.TaskName, err)
 		}
-		if err := writePrivateFile(filepath.Join(dir, "events", trial.TaskName+".json"), events); err != nil {
+		if err := writePrivateFile(filepath.Join(eventsDir, trial.TaskName+".json"), events); err != nil {
 			return err
 		}
 	}
