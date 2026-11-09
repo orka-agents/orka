@@ -978,9 +978,14 @@ holds are placed and released once the installation hold clears.
 
 **Not yet covered.** Record holds for a finalized turn without its store
 record and for reclamation without the turn cleanup receipt come with the
-Session turn protocols (P2 and P6). Detecting a restart or switch of an
-`async-replicated` dataset that happened while no controller ran needs the
-incarnation recorded with the acknowledgement.
+Session turn protocols (P2 and P6). Once workspace validation records a
+delivery transition, the PromptAttempt no longer carries the settling
+digest, so a receipt is checked only against its own settling operation: a
+receipt replaced with another result and a matching digest is not detected.
+That needs the settling digest kept on the PromptAttempt across delivery
+transitions. Detecting a restart or switch of an `async-replicated` dataset
+that happened while no controller ran needs the incarnation recorded with the
+acknowledgement.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers})` checks, for every write in the write catalog, that after a
