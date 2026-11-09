@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/valyala/fasthttp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -40,8 +41,13 @@ const (
 	substrateMCPProxyMaxResponseBytes = 16 << 20
 	substrateMCPProxyDefaultTimeout   = 30 * time.Second
 	substrateMCPProxyMaxTimeout       = 5 * time.Minute
-	substrateMCPProxyMaxTokenBytes    = 16 << 10
-	substrateMCPProxyAction           = "callSubstrateMCPTool"
+	// substrateMCPProxyWriteTimeout bounds writing one proxied response to the
+	// caller. The upstream timeout cannot interrupt a write blocked by a
+	// caller that stopped reading. It exceeds the longest upstream timeout, so
+	// it never cuts short a response the Actor is still allowed to send.
+	substrateMCPProxyWriteTimeout  = substrateMCPProxyMaxTimeout + time.Second
+	substrateMCPProxyMaxTokenBytes = 16 << 10
+	substrateMCPProxyAction        = "callSubstrateMCPTool"
 	// substrateMCPProxyCallNameMember is the tools/call member naming the callable.
 	substrateMCPProxyCallNameMember = apiFieldName
 )
@@ -198,6 +204,24 @@ func (h *Handlers) ProxySubstrateMCPTool(c fiber.Ctx) error {
 		return err
 	}
 	return nil
+}
+
+// isSubstrateMCPProxyRoute reports whether a request targets the MCP proxy
+// routes, POST and DELETE /api/v1/tools/:name/mcp, matching the path the way
+// Fiber routes it: on the original path, without regard to case or a trailing
+// slash.
+func isSubstrateMCPProxyRoute(header *fasthttp.RequestHeader) bool {
+	if !header.IsPost() && !header.IsDelete() {
+		return false
+	}
+	var uri fasthttp.URI
+	if uri.Parse(header.Host(), header.RequestURI()) != nil {
+		return false
+	}
+	parts := bytes.Split(bytes.Trim(uri.PathOriginal(), "/"), []byte("/"))
+	return len(parts) == 5 && len(parts[3]) > 0 &&
+		bytes.EqualFold(parts[0], []byte("api")) && bytes.EqualFold(parts[1], []byte("v1")) &&
+		bytes.EqualFold(parts[2], []byte("tools")) && bytes.EqualFold(parts[4], []byte("mcp"))
 }
 
 func (h *Handlers) substrateMCPProxyTool(ctx context.Context, namespace, name string) (*corev1alpha1.Tool, error) {
@@ -621,11 +645,18 @@ func (s *substrateMCPProxyStream) Read(p []byte) (int, error) {
 
 func (s *substrateMCPProxyStream) readBounded(p []byte) (int, error) {
 	if s.remaining <= 0 {
+		// Only a clean end of the upstream body completes a response that
+		// reached the bound; a failed read must not pass for one.
 		var probe [1]byte
-		if n, _ := s.body.Read(probe[:]); n > 0 {
-			return 0, errors.New("MCP actor response exceeds the proxy limit")
+		for {
+			n, err := s.body.Read(probe[:])
+			if n > 0 {
+				return 0, errors.New("MCP actor response exceeds the proxy limit")
+			}
+			if err != nil {
+				return 0, err
+			}
 		}
-		return 0, io.EOF
 	}
 	if int64(len(p)) > s.remaining {
 		p = p[:s.remaining]

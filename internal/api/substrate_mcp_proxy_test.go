@@ -10,10 +10,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/fasthttp"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -659,4 +663,97 @@ func TestSubstrateMCPProxyStreamStillFailsPastItsBound(t *testing.T) {
 			require.Equal(t, "0123", string(got))
 		})
 	}
+}
+
+// A response that reached the bound is complete only if the Actor's body then
+// ends cleanly. A failed read must reach the caller, not pass for the end.
+func TestSubstrateMCPProxyStreamReportsReadFailureAtItsBound(t *testing.T) {
+	failure := errors.New("connection reset by peer")
+	for name, secrets := range map[string][]string{"redacting": {"secret-value"}, "plain": {""}} {
+		t.Run(name, func(t *testing.T) {
+			failed := substrateMCPProxyTestStream(io.MultiReader(strings.NewReader("0123"), iotest.ErrReader(failure)), secrets...)
+			failed.remaining = 4
+			got, err := io.ReadAll(failed)
+			require.ErrorIs(t, err, failure)
+			require.Equal(t, "0123", string(got))
+
+			complete := substrateMCPProxyTestStream(strings.NewReader("0123"), secrets...)
+			complete.remaining = 4
+			got, err = io.ReadAll(complete)
+			require.NoError(t, err)
+			require.Equal(t, "0123", string(got))
+		})
+	}
+}
+
+func TestSubstrateMCPProxyRoutesHaveAWriteDeadline(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	for _, tc := range []struct {
+		method, target string
+		bounded        bool
+	}{
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp?namespace=default", bounded: true},
+		{method: http.MethodDelete, target: "/api/v1/tools/lookup/mcp?namespace=default", bounded: true},
+		// Fiber routes these to the proxy as well.
+		{method: http.MethodPost, target: "/API/v1/Tools/lookup/MCP/", bounded: true},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp#fragment", bounded: true},
+		{method: http.MethodGet, target: "/api/v1/tools/lookup/mcp"},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup"},
+		{method: http.MethodPost, target: "/api/v1/tools/lookup/mcp/extra"},
+		{method: http.MethodPost, target: "/api/v1/tasks/lookup/mcp"},
+	} {
+		var header fasthttp.RequestHeader
+		header.SetMethod(tc.method)
+		header.SetRequestURI(tc.target)
+		header.SetHost("orka.test")
+		want := time.Duration(0)
+		if tc.bounded {
+			want = substrateMCPProxyMaxTimeout + time.Second
+		}
+		require.Equal(t, want, f.server.requestConfig(&header).WriteTimeout, tc.method+" "+tc.target)
+	}
+}
+
+// A caller that stops reading must not hold the proxied stream and its Actor
+// connection for as long as it likes: the upstream timeout cannot interrupt a
+// blocked write.
+func TestSubstrateMCPProxyReleasesTheActorWhenTheCallerStopsReading(t *testing.T) {
+	f := newSubstrateMCPProxyFixture(t)
+	stopped := make(chan struct{})
+	f.respond = func(w http.ResponseWriter, _ *http.Request) {
+		defer close(stopped)
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := []byte("data: " + strings.Repeat("x", 64<<10) + "\n\n")
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}
+	f.server.substrateMCPProxyWriteTimeout = 300 * time.Millisecond
+	address := strings.TrimPrefix(listenResponsesApp(t, f.server.app), "http://")
+	conn, err := net.DialTimeout("tcp", address, time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.(*net.TCPConn).SetReadBuffer(1024))
+	header := http.Header{}
+	header.Set("Host", "localhost")
+	header.Set("Authorization", "Bearer worker-sa-token")
+	header.Set("Content-Type", "application/json")
+	header.Set("Content-Length", strconv.Itoa(len(substrateMCPProxyToolCall)))
+	workerexecutor.SetSubstrateMCPToolBinding(header, substrateMCPProxyTool())
+	var request bytes.Buffer
+	request.WriteString("POST /api/v1/tools/lookup/mcp?namespace=default HTTP/1.1\r\n")
+	require.NoError(t, header.Write(&request))
+	request.WriteString("\r\n" + substrateMCPProxyToolCall)
+	_, err = conn.Write(request.Bytes())
+	require.NoError(t, err)
+	// The Tool sets no timeout, so without a write deadline the Actor request
+	// would last the proxy's default 30 seconds.
+	select {
+	case <-stopped:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a caller that stopped reading kept the Actor stream open")
+	}
+	require.Equal(t, 1, f.upstreamCalls())
 }

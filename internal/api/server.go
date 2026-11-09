@@ -133,6 +133,9 @@ type Server struct {
 	MemoryProposalStore store.MemoryProposalStore
 	ExecutionEventStore store.ExecutionEventStore
 	GatewayEventStore   store.GatewayEventStore
+
+	// substrateMCPProxyWriteTimeout bounds each MCP proxy response write.
+	substrateMCPProxyWriteTimeout time.Duration
 }
 
 // NewServer creates a new API server
@@ -196,6 +199,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 	server.openaiHandler = NewOpenAICompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.openaiHandler.contextTokenAuthorization = config.ContextTokenAuthorization
 	server.openaiHandler.gatewayEventStore = config.GatewayEventStore
+	server.substrateMCPProxyWriteTimeout = substrateMCPProxyWriteTimeout
 	app.Server().HeaderReceived = server.requestConfig
 	server.anthropicHandler = NewAnthropicCompatHandler(c, config.APIReader, config.WatchNamespace, config.EnforceNamespaceIsolation, config.Chat, resolver, config.ResultStore, config.Clientset)
 	server.anthropicHandler.contextTokenAuthorization = config.ContextTokenAuthorization
@@ -240,7 +244,8 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	return fasthttp.RequestConfig{}
 }
 
-// requestConfig bounds writes on the Responses route as well as provider work.
+// requestConfig bounds writes on the Responses and MCP proxy routes as well as
+// provider and Actor work.
 // A context deadline cannot interrupt a socket blocked by a client that stops
 // reading. fasthttp applies and clears this deadline for each keep-alive request.
 func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestConfig {
@@ -252,6 +257,9 @@ func (s *Server) requestConfig(header *fasthttp.RequestHeader) fasthttp.RequestC
 		bytes.EqualFold(bytes.TrimRight(uri.PathOriginal(), "/"), []byte("/openai/v1/responses")) {
 		// Allow a bounded grace period to deliver the terminal timeout event.
 		config.WriteTimeout = s.openaiHandler.config.MaxDuration + time.Second
+	}
+	if isSubstrateMCPProxyRoute(header) {
+		config.WriteTimeout = s.substrateMCPProxyWriteTimeout
 	}
 	return config
 }
