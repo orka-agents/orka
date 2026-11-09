@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -53,6 +54,7 @@ import (
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -5954,14 +5956,24 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.WebhookNotifier = NewWebhookNotifier()
+	notifier := newWebhookNotifier(&taskwebhook.Dialer{
+		Policy: taskwebhook.PublicAddressPolicy,
+		Resolver: webhookTestResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}),
+	})
+	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
+	r.WebhookNotifier = notifier
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should requeue for webhook retry
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s requeue for webhook retry, got %v", result.RequeueAfter)
+	// Should requeue for webhook retry after the first backoff step.
+	if result.RequeueAfter != defaultWebhookInitialBackoff {
+		t.Errorf("expected %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
+	}
+	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
+		t.Errorf("unexpected webhook delivery state %#v", delivery)
 	}
 }
 
@@ -6421,9 +6433,7 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
-	r.WebhookNotifier = notifier
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

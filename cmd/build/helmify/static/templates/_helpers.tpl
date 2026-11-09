@@ -1,4 +1,30 @@
 {{/*
+Select AI worker grants and keep delegated context-token calls scope-enforced.
+*/}}
+{{- define "orka.aiWorkerRBACProfile" -}}
+{{- $profile := "default" -}}
+{{- if hasKey .Values.workers.ai "rbacProfile" -}}
+{{- $profile = .Values.workers.ai.rbacProfile -}}
+{{- end -}}
+{{- if not (kindIs "string" $profile) -}}
+{{- fail "workers.ai.rbacProfile must be default or restricted" -}}
+{{- end -}}
+{{- if not (has $profile (list "default" "restricted")) -}}
+{{- fail "workers.ai.rbacProfile must be default or restricted" -}}
+{{- end -}}
+{{- if eq $profile "restricted" -}}
+{{- if not .Values.rbac.create -}}
+{{- fail "workers.ai.rbacProfile=restricted requires rbac.create=true" -}}
+{{- end -}}
+{{- $context := .Values.controller.contextToken | default dict -}}
+{{- if and $context.authzMode (ne $context.authzMode "enforce") -}}
+{{- fail "restricted AI workers require controller-wide context-token enforcement; controller.contextToken.authzMode cannot be off or audit" -}}
+{{- end -}}
+{{- end -}}
+{{- $profile -}}
+{{- end -}}
+
+{{/*
 Expand the name of the chart.
 */}}
 {{- define "orka.name" -}}
