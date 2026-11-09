@@ -274,9 +274,15 @@ func (m *mcpServer) Handle(c fiber.Ctx) error {
 	permit := &mcpPermit{server: m}
 	defer permit.release()
 
-	body := c.Body()
-	if len(body) > mcpMaxRequestBytes {
-		return m.writeError(c, fiber.StatusRequestEntityTooLarge, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
+	body, refused := decodeMCPBody(c)
+	switch refused {
+	case 0:
+	case fiber.StatusRequestEntityTooLarge:
+		return m.writeError(c, refused, nil, newMCPError(mcpCodeInvalidRequest, "MCP request is too large"))
+	case fiber.StatusUnsupportedMediaType:
+		return m.writeError(c, refused, nil, newMCPError(mcpCodeInvalidRequest, "unsupported Content-Encoding"))
+	default:
+		return m.writeError(c, refused, nil, newMCPError(mcpCodeParseError, "request body does not match its Content-Encoding"))
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) > 0 && trimmed[0] == '[' {
@@ -333,6 +339,55 @@ func readMCPRawBody(c fiber.Ctx) bool {
 	// Replace the consumed stream, so decoding reads the buffered bytes.
 	request.SetBodyRaw(data)
 	return true
+}
+
+// mcpMaxContentCodings bounds how many codings one request body may stack.
+const mcpMaxContentCodings = 3
+
+// decodeMCPBody returns the buffered request body with its Content-Encoding
+// removed, or the HTTP status to refuse the request with. Each coding is
+// decoded through a limit of mcpMaxRequestBytes, so a small compressed body
+// cannot expand past the size a plain one is held to. Fiber's Body() bounds
+// the expansion only by the API-wide body limit, which is far larger.
+func decodeMCPBody(c fiber.Ctx) ([]byte, int) {
+	request := c.Request()
+	body := request.Body()
+	var codings []string
+	for _, line := range request.Header.PeekAll(fiber.HeaderContentEncoding) {
+		for coding := range strings.SplitSeq(string(line), ",") {
+			if coding = strings.ToLower(strings.TrimSpace(coding)); coding != "" && coding != fiber.StrIdentity {
+				codings = append(codings, coding)
+			}
+		}
+	}
+	if len(codings) > mcpMaxContentCodings {
+		return nil, fiber.StatusUnsupportedMediaType
+	}
+	// Codings are listed in the order they were applied.
+	for _, coding := range slices.Backward(codings) {
+		var encoded fasthttp.Request
+		encoded.SetBodyRaw(body)
+		var err error
+		switch coding {
+		case fiber.StrGzip, "x-gzip":
+			body, err = encoded.BodyGunzipWithLimit(mcpMaxRequestBytes)
+		case fiber.StrBr, fiber.StrBrotli:
+			body, err = encoded.BodyUnbrotliWithLimit(mcpMaxRequestBytes)
+		case fiber.StrDeflate:
+			body, err = encoded.BodyInflateWithLimit(mcpMaxRequestBytes)
+		case fiber.StrZstd:
+			body, err = encoded.BodyUnzstdWithLimit(mcpMaxRequestBytes)
+		default:
+			return nil, fiber.StatusUnsupportedMediaType
+		}
+		switch {
+		case errors.Is(err, fasthttp.ErrBodyTooLarge):
+			return nil, fiber.StatusRequestEntityTooLarge
+		case err != nil:
+			return nil, fiber.StatusBadRequest
+		}
+	}
+	return body, 0
 }
 
 func decodeMCPRequest(body []byte) (mcpRequest, *mcpError) {

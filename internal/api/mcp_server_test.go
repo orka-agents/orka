@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -795,6 +796,7 @@ func TestMCPCreateTaskInfersTypeAndMapsArguments(t *testing.T) {
 	require.Equal(t, "https://github.com/orka-agents/orka", task.Spec.Workspace.GitRepo)
 	require.Equal(t, "continued", task.Spec.SessionRef.Name)
 	require.True(t, task.Spec.SessionRef.Create)
+	require.True(t, task.Spec.SessionRef.Append, "a continued Session records the Task's turns")
 
 	generated := f.mcpTool(t, mcpToolCreateTask, map[string]any{"agent": "coder", "prompt": "fix"})
 	require.False(t, generated.IsError, generated.Content)
@@ -1675,12 +1677,18 @@ func TestMCPCreateTaskReturnsOnlyAResolvableHandle(t *testing.T) {
 			f, _ = laggingMCPFixture(t, 1<<30)
 			f.server.mcpServer.createdTaskWait = 200 * time.Millisecond
 			unreadable := f.mcpRPC(t, "tools/call", tc.params("stuck"))
+			require.Contains(t, unreadable.body, "task stuck in namespace default was created")
+			require.NotContains(t, unreadable.body, "taskId")
+			if tc.meta == nil {
+				// 2025-11-25: a JSON-RPC error, never a tool result.
+				require.NotNil(t, unreadable.Error, unreadable.body)
+				require.Equal(t, mcpCodeInternalError, unreadable.Error.Code)
+				return
+			}
 			require.Nil(t, unreadable.Error, unreadable.body)
 			var result mcpTestToolResult
 			require.NoError(t, json.Unmarshal(unreadable.Result, &result))
 			require.Equal(t, float64(http.StatusServiceUnavailable), mcpErrorStatus(t, result))
-			require.Contains(t, result.Content[0].Text, "task stuck in namespace default was created")
-			require.NotContains(t, unreadable.body, "taskId")
 		})
 	}
 }
@@ -1795,4 +1803,254 @@ func TestMCPWaitDeadlineBoundsItsRESTReads(t *testing.T) {
 		require.Equal(t, true, result.StructuredContent["timedOut"], "the last state read is reported")
 		require.Equal(t, "stalled", result.StructuredContent["task"].(map[string]any)["name"])
 	})
+}
+
+// A compressed request is decoded through the same 1 MiB limit a plain one is
+// held to: a small body that expands far past it is refused without being
+// expanded, so it cannot be used to exhaust the replica's memory.
+func TestMCPCompressedBodiesAreDecodedWithinTheRequestLimit(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	gzipped := func(data []byte) string {
+		var compressed bytes.Buffer
+		writer := gzip.NewWriter(&compressed)
+		_, err := writer.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		return compressed.String()
+	}
+	ping := mcpBody(t, "ping", nil)
+
+	// Twelve times the limit, yet under the API-wide body limit that Fiber's
+	// own decoding stops at.
+	const expanded = 12 * mcpMaxRequestBytes
+	require.Less(t, expanded, defaultAPIRequestBodyLimit)
+	bomb := gzipped(append([]byte(ping), bytes.Repeat([]byte(" "), expanded)...))
+	require.Less(t, len(bomb), mcpMaxRequestBytes/8)
+	allocated := uint64(1 << 62)
+	for range 3 {
+		var before, after goruntime.MemStats
+		goruntime.ReadMemStats(&before)
+		response := f.mcpRaw(t, http.MethodPost, bomb, map[string]string{"Content-Encoding": "gzip"})
+		goruntime.ReadMemStats(&after)
+		require.Equal(t, http.StatusRequestEntityTooLarge, response.status, response.body)
+		allocated = min(allocated, after.TotalAlloc-before.TotalAlloc)
+	}
+	require.Less(t, allocated, uint64(expanded/2), "the body was refused without being expanded")
+
+	for name, tc := range map[string]struct {
+		body     string
+		encoding string
+		status   int
+	}{
+		"gzip":                 {gzipped([]byte(ping)), "gzip", http.StatusOK},
+		"stacked codings":      {gzipped([]byte(gzipped([]byte(ping)))), "gzip, identity, GZIP", http.StatusOK},
+		"identity":             {ping, "identity", http.StatusOK},
+		"at the limit":         {gzipped(append([]byte(ping), bytes.Repeat([]byte(" "), mcpMaxRequestBytes-len(ping))...)), "gzip", http.StatusOK},
+		"one past the limit":   {gzipped(append([]byte(ping), bytes.Repeat([]byte(" "), mcpMaxRequestBytes-len(ping)+1)...)), "gzip", http.StatusRequestEntityTooLarge},
+		"inner coding expands": {gzipped([]byte(bomb)), "gzip, gzip", http.StatusRequestEntityTooLarge},
+		"unknown coding":       {ping, "lzma", http.StatusUnsupportedMediaType},
+		"too many codings":     {ping, "gzip, gzip, gzip, gzip", http.StatusUnsupportedMediaType},
+		"not the named coding": {ping, "gzip", http.StatusBadRequest},
+	} {
+		response := f.mcpRaw(t, http.MethodPost, tc.body, map[string]string{"Content-Encoding": tc.encoding})
+		require.Equal(t, tc.status, response.status, "%s: %s", name, response.body)
+		require.Equal(t, tc.status != http.StatusOK, response.Error != nil, "%s: %s", name, response.body)
+	}
+}
+
+// stallingMCPFixture reads Tasks through a client whose reads, while stall
+// reports true, block until their context ends, or for far longer than any
+// bound under test when it never does.
+const mcpTestStall = 12 * time.Second
+
+func stallingMCPFixture(t *testing.T, stall func(client.Object) bool) *externalAuthorizationFixture {
+	t.Helper()
+	f := newMCPFixture(t)
+	f.allowAll()
+	f.kube = interceptor.NewClient(f.kube.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, task := obj.(*corev1alpha1.Task); task && stall(obj) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(mcpTestStall):
+				}
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	f.config.APIReader = f.kube
+	f.server = NewServer(f.kube, nil, f.config)
+	return f
+}
+
+// The read that checks a new Task is visible ends with its bound: a slow one
+// cannot hold the request permit past it, and the caller is told the Task
+// exists.
+func TestMCPCreatedTaskWaitBoundsItsRead(t *testing.T) {
+	f := stallingMCPFixture(t, func(client.Object) bool { return true })
+	f.server.mcpServer.createdTaskWait = 300 * time.Millisecond
+	began := time.Now()
+	created := f.mcpRPC(t, "tools/call", map[string]any{
+		"name": mcpToolCreateTask, "_meta": extensionMeta(),
+		"arguments": map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": "slow-read"},
+	})
+	require.Less(t, time.Since(began), mcpTestStall/2)
+	require.Nil(t, created.Error, created.body)
+	var result mcpTestToolResult
+	require.NoError(t, json.Unmarshal(created.Result, &result))
+	require.Equal(t, float64(http.StatusServiceUnavailable), mcpErrorStatus(t, result))
+	require.Contains(t, result.Content[0].Text, "task slow-read in namespace default was created")
+	require.Empty(t, f.server.mcpServer.slots, "the request permit is released")
+}
+
+// tasks/result holds its wait permit while it reads the result, so the wait's
+// deadline bounds that read as well as the polling before it.
+func TestMCPTaskResultReadIsBoundedByTheWait(t *testing.T) {
+	var readingResult atomic.Bool
+	f := stallingMCPFixture(t, func(client.Object) bool { return readingResult.Load() })
+	createMCPTestTask(t, f, "finished", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "finished", []byte("done")))
+	mcp := f.server.mcpServer
+	mcp.resultWait = time.Second
+	next := mcp.handler
+	mcp.handler = func(ctx *fasthttp.RequestCtx) {
+		if strings.HasSuffix(string(ctx.Path()), "/result") {
+			readingResult.Store(true)
+			defer readingResult.Store(false)
+		}
+		next(ctx)
+	}
+
+	began := time.Now()
+	response := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "finished", "uid-finished")})
+	require.Less(t, time.Since(began), mcpTestStall/2)
+	require.NotNil(t, response.Error, response.body)
+	require.Equal(t, mcpCodeServerBusy, response.Error.Code, response.body)
+	require.Contains(t, response.Error.Message, "request the result again")
+	require.Empty(t, mcp.waitSlots, "the wait permit is released")
+
+	// Asked again with the read no longer slow, the result is returned.
+	mcp.handler = next
+	response = f.mcpRPC(t, "tasks/result", map[string]any{"taskId": encodeMCPTaskID("default", "finished", "uid-finished")})
+	require.Nil(t, response.Error, response.body)
+	require.Contains(t, response.body, "done")
+}
+
+// The sessionless revisions define no params.task, so it selects nothing
+// there: create_task answers as it would without the field.
+func TestMCPSessionlessCreateTaskIgnoresTaskAugmentation(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	call := func(name string, capabilities any) map[string]any {
+		response := f.mcpRPC(t, "tools/call", map[string]any{
+			"name": mcpToolCreateTask, "task": map[string]any{"ttl": 60000},
+			"arguments": map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": name},
+			"_meta":     map[string]any{mcpMetaProtocolVersion: mcpProtocolVersionSessionless, mcpMetaClientCapabilities: capabilities},
+		})
+		require.Equal(t, http.StatusOK, response.status, response.body)
+		require.Nil(t, response.Error, response.body)
+		var result map[string]any
+		require.NoError(t, json.Unmarshal(response.Result, &result))
+		return result
+	}
+
+	plain := call("plain", map[string]any{})
+	require.Equal(t, "complete", plain["resultType"], "an ordinary tool result")
+	require.NotContains(t, plain, "task", "not the 2025-11-25 CreateTaskResult")
+	require.Equal(t, "plain", plain["structuredContent"].(map[string]any)["task"].(map[string]any)["name"])
+
+	extension := call("extension", extensionMeta()[mcpMetaClientCapabilities])
+	require.Equal(t, "task", extension["resultType"], "the extension's task")
+	require.NotContains(t, extension, "task", "not the 2025-11-25 CreateTaskResult")
+	require.Contains(t, extension, "taskId")
+	require.Contains(t, extension, "pollIntervalMs")
+}
+
+// A 2025-11-25 task-augmented create_task that creates no task answers with a
+// JSON-RPC error: its client reads the result as a CreateTaskResult. The
+// extension's clients handle an ordinary result, so they keep the tool error.
+func TestMCPFailedTaskAugmentedCreateIsAJSONRPCError(t *testing.T) {
+	f := newMCPFixture(t)
+	createMCPTestTask(t, f, "taken", corev1alpha1.TaskPhaseRunning)
+	allowed := true
+	f.review = func(review *authorizationv1.SubjectAccessReview) error {
+		review.Status.Allowed = allowed
+		return nil
+	}
+	arguments := func(name string) map[string]any {
+		return map[string]any{"agent": "protected", "prompt": "do the thing", "taskType": "agent", "name": name}
+	}
+	for name, tc := range map[string]struct {
+		arguments map[string]any
+		denied    bool
+		code      int
+		status    float64
+	}{
+		"invalid arguments": {map[string]any{"agent": "protected"}, false, mcpCodeInvalidParams, 0},
+		"name conflict":     {arguments("taken"), false, mcpCodeInvalidParams, http.StatusConflict},
+		"denied":            {arguments("refused"), true, mcpCodeForbidden, http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			allowed = !tc.denied
+			defer func() { allowed = true }()
+			core := f.mcpRPC(t, "tools/call", map[string]any{"name": mcpToolCreateTask, "task": map[string]any{}, "arguments": tc.arguments})
+			require.Equal(t, http.StatusOK, core.status, core.body)
+			require.NotNil(t, core.Error, core.body)
+			require.Equal(t, tc.code, core.Error.Code, core.body)
+			require.NotEmpty(t, core.Error.Message)
+			require.Empty(t, core.Result, core.body)
+
+			extension := f.mcpRPC(t, "tools/call", map[string]any{"name": mcpToolCreateTask, "_meta": extensionMeta(), "arguments": tc.arguments})
+			require.Nil(t, extension.Error, extension.body)
+			var result mcpTestToolResult
+			require.NoError(t, json.Unmarshal(extension.Result, &result))
+			require.Equal(t, tc.status, mcpErrorStatus(t, result))
+		})
+	}
+}
+
+// A result too large for the MCP layer to read does not make a finished Task
+// unreadable: tasks/result and tasks/get report the Task and where to read
+// its result, instead of an error no retry can clear.
+func TestMCPOversizedResultStillCompletesTheTask(t *testing.T) {
+	f := newMCPFixture(t)
+	f.allowAll()
+	createMCPTestTask(t, f, "large", corev1alpha1.TaskPhaseSucceeded, func(task *corev1alpha1.Task) {
+		task.Status.ResultRef = &corev1alpha1.ResultReference{Available: true}
+	})
+	// Accepted by result submission, and larger than a replayed response.
+	size := mcpRESTResponseLimit + 1024
+	require.Less(t, size, maxResultSize)
+	require.NoError(t, f.store.SaveResult(t.Context(), "default", "large", bytes.Repeat([]byte("x"), size)))
+	taskID := encodeMCPTaskID("default", "large", "uid-large")
+	requireReported := func(result map[string]any) {
+		t.Helper()
+		require.NotContains(t, result, "isError")
+		structured := result["structuredContent"].(map[string]any)
+		require.Equal(t, "large", structured["task"].(map[string]any)["name"])
+		require.NotContains(t, structured, "result")
+		require.Equal(t, "the result is too large to read through MCP; read it with GET /api/v1/tasks/large/result?namespace=default",
+			structured["resultUnavailable"])
+	}
+
+	response := f.mcpRPC(t, "tasks/result", map[string]any{"taskId": taskID})
+	require.Nil(t, response.Error, response.body)
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(response.Result, &result))
+	requireReported(result)
+
+	response = f.mcpRPC(t, "tasks/get", map[string]any{"taskId": taskID, "_meta": extensionMeta()})
+	require.Nil(t, response.Error, response.body)
+	var task map[string]any
+	require.NoError(t, json.Unmarshal(response.Result, &task))
+	require.Equal(t, mcpStatusCompleted, task["status"])
+	requireReported(task["result"].(map[string]any))
+
+	// The paging tool cannot carry it either, and says so.
+	direct := f.mcpTool(t, mcpToolGetTaskResult, map[string]any{"name": "large"})
+	require.Equal(t, float64(http.StatusInsufficientStorage), mcpErrorStatus(t, direct))
 }

@@ -30,6 +30,10 @@ use a separate pool of half as many wait slots (at least one), so waits never bl
 approvals, cancellations, or other requests. Excess requests and waits receive HTTP 429
 with `Retry-After`, or a busy error for a wait.
 
+A request body may be at most 1 MiB, measured after any `Content-Encoding` (`gzip`,
+`deflate`, `br`, or `zstd`) is removed; a compressed body that expands past the limit
+is refused with HTTP 413 without being expanded.
+
 The endpoint is a stateless [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
 server. It answers every request with one JSON body, issues no `Mcp-Session-Id`, and
 opens no server-sent event stream; `GET /mcp` returns 405. It supports protocol
@@ -152,8 +156,8 @@ and `--enforce-namespace-isolation` behave exactly as for the REST route.
 
 `create_task` builds the same request as `POST /api/v1/tasks` with `type`,
 `prompt`, `agentRef`, and the optional `timeout`, `workspace` (Task
-`spec.workspace`), and `session` (`spec.sessionRef`, which continues an existing
-Orka Session). Give `taskType` (`agent` for Agents with a CLI runtime, `ai` for
+`spec.workspace`), and `session` (`spec.sessionRef` with `append: true`, which
+continues an existing Orka Session and records the Task's turns in it). Give `taskType` (`agent` for Agents with a CLI runtime, `ai` for
 native Agents) to skip the Agent lookup; otherwise the caller also needs `get` on the
 Agent. Omit `name` to generate one starting with `mcp-`.
 
@@ -194,13 +198,21 @@ use MCP Tasks if your client supports them. The server advertises both shapes:
   poll again, and `tasks/cancel` deletes the Task. Answer approvals with
   `decide_approval`; the server sends no elicitation requests on this path. Only
   `create_task` supports task augmentation: `params.task` on any other tool is
-  refused with `-32601` before the tool runs.
+  refused with `-32601` before the tool runs. A task-augmented `create_task` that
+  creates no task answers with a JSON-RPC error, not a tool result. `params.task`
+  is part of the 2025-11-25 revision only; a `2026-07-28` request that carries it is
+  answered as if it did not.
 
 In both shapes the task ID is returned only once `tasks/get` resolves it, so you can
 poll at once. The server checks by reading the new Task under your identity; a
 caller who may create Tasks but not read them still gets the ID. If the new Task
-cannot be read within five seconds, the call returns an error result that names the
-Task instead of an ID: read it with `get_task` rather than creating it again.
+cannot be read within five seconds, the call returns an error that names the Task
+instead of an ID (an error result under the extension, a JSON-RPC error for a
+2025-11-25 call): read it with `get_task` rather than creating it again.
+
+A result whose REST response is larger than 8 MiB cannot be read through MCP. A
+finished task still reports the Task, with `resultUnavailable` naming the REST route
+to read the result from, and `get_task_result` returns an error saying the same.
 
 | Orka Task | MCP task status |
 | --- | --- |

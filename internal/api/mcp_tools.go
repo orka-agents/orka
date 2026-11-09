@@ -358,16 +358,19 @@ func (m *mcpServer) callTool(call *mcpCall) (any, error) {
 	if !ok {
 		return nil, newMCPError(mcpCodeInvalidParams, "unknown tool")
 	}
+	if call.sessionless {
+		// The sessionless revisions define no params.task: there it is an
+		// unknown field, ignored like any other, and selects nothing.
+		params.Task = nil
+	}
 	if tool.Name == mcpToolCreateTask && (params.Task != nil || call.tasksExtension) {
 		return m.createTaskAsMCPTask(call, params)
 	}
-	if params.Task != nil && !call.sessionless {
+	if params.Task != nil {
 		// 2025-11-25 task augmentation of a tool that does not declare
 		// execution.taskSupport. Running it as an ordinary call would apply
 		// its effect and then answer in a shape the client did not ask for,
-		// which a task-aware client can take for a failure and retry. The
-		// sessionless revisions define no params.task, so there it is an
-		// unknown field and ignored like any other.
+		// which a task-aware client can take for a failure and retry.
 		return nil, newMCPError(mcpCodeMethodNotFound, "tool "+tool.Name+" does not support task-augmented execution")
 	}
 	value, err := tool.run(m, call, params.Arguments)
@@ -876,7 +879,9 @@ func (m *mcpServer) createTask(call *mcpCall, raw json.RawMessage) (mcpTaskState
 		if err := validateMCPObjectName("session.name", args.Session.Name); err != nil {
 			return mcpTaskState{}, err
 		}
-		body["sessionRef"] = map[string]any{"name": args.Session.Name, "create": args.Session.Create.value}
+		// append is sent explicitly: the REST route stores an omitted value as
+		// false, and a Session that records no turns cannot be continued.
+		body["sessionRef"] = map[string]any{"name": args.Session.Name, "create": args.Session.Create.value, "append": true}
 	}
 	var state mcpTaskState
 	if err := m.restJSON(call.c, fiber.MethodPost, "/api/v1/tasks", nil, body, &state.response.Task); err != nil {
@@ -958,10 +963,11 @@ func (m *mcpServer) pollTask(call *mcpCall, namespace, name, uid string, timeout
 	}
 	c := call.c
 	deadline := time.Now().Add(timeout)
-	// Every read of the wait ends by its deadline: a slow authorization or
-	// storage call must not hold the wait permit past the advertised bound.
+	// Every read made under the wait permit ends by the wait's deadline: a
+	// slow authorization or storage call must not hold the permit past the
+	// advertised bound. The permit is held for the rest of the request, so
+	// the deadline stays too, and bounds a result read that follows the wait.
 	c.Locals(mcpReplayDeadlineKey{}, deadline)
-	defer c.Locals(mcpReplayDeadlineKey{}, nil)
 	var last mcpTaskState
 	read := false
 	for {

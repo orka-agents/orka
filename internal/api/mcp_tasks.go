@@ -218,6 +218,11 @@ func (m *mcpServer) terminalToolResult(c fiber.Ctx, state mcpTaskState) (mcpTool
 		switch {
 		case err == nil:
 			value["result"] = mcpOutputChunk(response.Result, 0, mcpDefaultOutputBytes)
+		case errors.Is(err, errMCPResponseTooLarge):
+			// The result exists and no retry will make it fit; the finished
+			// Task is still reported, with where to read the result.
+			value["resultUnavailable"] = "the result is too large to read through MCP; read it with GET " +
+				mcpTaskPath(state.response.Name, "result") + "?namespace=" + state.response.Namespace
 		case errors.As(err, &restErr) && restErr.Status == fiber.StatusNotFound && restErr.Message != "task not found":
 			// The Task is current but its result is gone; report it without.
 		default:
@@ -278,16 +283,46 @@ func (s mcpTaskState) inputRequests() map[string]any {
 
 func (m *mcpServer) createTaskAsMCPTask(call *mcpCall, params mcpToolCallParams) (any, error) {
 	state, err := m.createTask(call, params.Arguments)
-	if err != nil {
-		return mcpToolErrorResult(err)
+	if err == nil {
+		err = m.awaitCreatedTask(call.c, state)
 	}
-	if err := m.awaitCreatedTask(call.c, state); err != nil {
+	if err != nil {
+		if params.Task != nil {
+			// A 2025-11-25 task-augmented request answers with a
+			// CreateTaskResult or a JSON-RPC error, never a tool result.
+			return nil, mcpCreateTaskRPCError(err)
+		}
+		// The extension lets the server answer any request with the
+		// ordinary result instead of a task, and its clients handle both.
 		return mcpToolErrorResult(err)
 	}
 	if params.Task != nil {
 		return map[string]any{"task": state.coreTaskFields()}, nil
 	}
 	return state.extensionTaskFields("task"), nil
+}
+
+// mcpCreateTaskRPCError converts a failed create_task into the JSON-RPC error
+// of a 2025-11-25 task-augmented call.
+func mcpCreateTaskRPCError(err error) error {
+	var argErr mcpArgumentError
+	var restErr *mcpRESTError
+	switch {
+	case errors.As(err, &argErr):
+		return newMCPError(mcpCodeInvalidParams, mcpSafeText(argErr.Error(), 512))
+	case !errors.As(err, &restErr):
+		return err
+	}
+	switch restErr.Status {
+	case fiber.StatusUnauthorized, fiber.StatusForbidden:
+		return newMCPError(mcpCodeForbidden, restErr.Message)
+	case fiber.StatusBadRequest, fiber.StatusNotFound, fiber.StatusConflict, fiber.StatusUnprocessableEntity:
+		return newMCPError(mcpCodeInvalidParams, restErr.Message)
+	case fiber.StatusTooManyRequests:
+		return newMCPError(mcpCodeServerBusy, restErr.Message)
+	default:
+		return newMCPError(mcpCodeInternalError, restErr.Message)
+	}
 }
 
 // mcpCreatedTaskWait bounds awaitCreatedTask. The read lags the write by the
@@ -310,20 +345,24 @@ func (m *mcpServer) awaitCreatedTask(c fiber.Ctx, created mcpTaskState) error {
 	unreadable := &mcpRESTError{Status: fiber.StatusServiceUnavailable, Message: mcpSafeText(
 		"task "+task.Name+" in namespace "+task.Namespace+" was created but cannot be read yet; read it with get_task instead of creating it again", 512)}
 	deadline := time.Now().Add(m.createdTaskWait)
+	// The reads end with the bound too, so a slow one cannot hold the
+	// request permit past it.
+	c.Locals(mcpReplayDeadlineKey{}, deadline)
+	defer c.Locals(mcpReplayDeadlineKey{}, nil)
 	for backoff := 25 * time.Millisecond; ; backoff = min(2*backoff, 500*time.Millisecond) {
 		var read mcpTaskState
 		err := m.restJSON(c, fiber.MethodGet, mcpTaskPath(task.Name), mcpNamespaceQuery(task.Namespace), nil, &read.response)
 		var restErr *mcpRESTError
+		remaining := time.Until(deadline)
 		switch {
 		case err == nil && read.response.UID == task.UID:
 			return nil
+		case remaining <= 0:
+			// Out of time, or the read was cut short by the bound.
+			return unreadable
 		case err == nil, errors.As(err, &restErr) && restErr.Status == fiber.StatusNotFound:
 		default:
 			return nil
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return unreadable
 		}
 		timer := time.NewTimer(min(backoff, remaining))
 		select {
@@ -379,6 +418,10 @@ func (m *mcpServer) taskResult(call *mcpCall) (any, error) {
 	}
 	result, err := m.terminalToolResult(call.c, state)
 	if err != nil {
+		if mcpReplayDeadlinePassed(call.c) {
+			// The wait's deadline, which still bounds this read, cut it short.
+			return nil, newMCPError(mcpCodeServerBusy, "task has finished but its result was not read before the wait ended; request the result again")
+		}
 		return nil, err
 	}
 	result.Meta = map[string]any{mcpMetaRelatedTask: map[string]any{"taskId": encodeMCPTaskID(ref.Namespace, ref.Name, ref.UID)}}

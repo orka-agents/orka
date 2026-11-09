@@ -65,6 +65,10 @@ func (e *mcpRESTError) Error() string {
 	return fmt.Sprintf("Orka API returned %d: %s", e.Status, e.Message)
 }
 
+// errMCPResponseTooLarge is the refusal of a replayed REST response larger than
+// mcpRESTResponseLimit. The response was valid; it is only too large to carry.
+var errMCPResponseTooLarge = &mcpRESTError{Status: fiber.StatusInsufficientStorage, Message: "response is too large for MCP; use the REST API"}
+
 // mcpReplayDeadlineKey marks, on an MCP request, the time by which its REST
 // replays must finish, and carries that time to each replay. It is a request
 // user value, which only code in this process can set.
@@ -82,6 +86,13 @@ func adoptMCPReplayDeadline(c fiber.Ctx) error {
 	defer cancel()
 	c.SetContext(ctx)
 	return c.Next()
+}
+
+// mcpReplayDeadlinePassed reports whether the request has a replay deadline
+// and it has passed, so a failed replay was cut short rather than refused.
+func mcpReplayDeadlinePassed(c fiber.Ctx) bool {
+	deadline, ok := c.Locals(mcpReplayDeadlineKey{}).(time.Time)
+	return ok && !time.Now().Before(deadline)
 }
 
 // rest replays one public REST request in process with the MCP caller's
@@ -136,7 +147,7 @@ func (m *mcpServer) rest(c fiber.Ctx, method, path string, query url.Values, bod
 		data = response.Body()
 	}
 	if len(data) > mcpRESTResponseLimit {
-		return mcpRESTResponse{}, &mcpRESTError{Status: fiber.StatusInsufficientStorage, Message: "response is too large for MCP; use the REST API"}
+		return mcpRESTResponse{}, errMCPResponseTooLarge
 	}
 	result := mcpRESTResponse{status: response.StatusCode(), body: append([]byte(nil), data...)}
 	if result.status < 200 || result.status > 299 {
