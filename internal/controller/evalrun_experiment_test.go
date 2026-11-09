@@ -8,14 +8,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -211,6 +214,43 @@ func TestEvalExperimentFailsWithoutImprovement(t *testing.T) {
 	}
 }
 
+// failingCasesReader fails reads of the cases ConfigMap while fail is set,
+// as an API server timeout would.
+type failingCasesReader struct {
+	client.Reader
+	fail bool
+}
+
+func (r *failingCasesReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok && r.fail && key.Name == "cases" {
+		return apierrors.NewServiceUnavailable("the API server is restarting")
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// An API error while rereading the tagged cases is retried; it neither
+// decides the experiment nor spends its held-out attempt.
+func TestEvalExperimentRetriesATransientCaseReadError(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	reader := &failingCasesReader{Reader: env.reconciler.uncachedReader(), fail: true}
+	env.reconciler.APIReader = reader
+	_, err := env.reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: evalTestNamespace, Name: "candidate"}})
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("Reconcile() error = %v, want the API error back for a retry", err)
+	}
+	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPending {
+		t.Fatalf("result after the API error = %q, want Pending", got)
+	}
+	reader.fail = false
+	env.reconcileRun("candidate")
+	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPassed {
+		t.Fatalf("result after the retry = %q, want Passed", got)
+	}
+}
+
 func TestEvalExperimentWaitsForTheBaseline(t *testing.T) {
 	baseline, candidate := experimentRuns(1, 1)
 	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
@@ -376,6 +416,85 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 	}
 }
 
+// A training run that names its own Agent needs no reviewer on the monitor:
+// the snapshot and the trials both review with that Agent.
+func TestEvalTrainingRunWithAnAgentNeedsNoMonitorReviewer(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	candidate.Spec.Experiment = nil
+	env := newExperimentEnv(t, baseline, candidate, strings.Replace(evalTestGate, "split: heldOut", "split: train", 1))
+	monitors := &corev1alpha1.RepositoryMonitorList{}
+	if err := env.client.List(context.Background(), monitors, client.InNamespace(evalTestNamespace)); err != nil || len(monitors.Items) == 0 {
+		t.Fatalf("list monitors: %d, %v", len(monitors.Items), err)
+	}
+	for i := range monitors.Items {
+		monitors.Items[i].Spec.Agents.Reviewer = nil
+		if err := env.client.Update(context.Background(), &monitors.Items[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env.reconcileRun("candidate") // finalizer
+	env.reconcileRun("candidate") // snapshot
+	env.reconcileRun("candidate") // trials
+	run := env.getRun("candidate")
+	if run.Status.Phase == corev1alpha1.EvalRunPhaseFailed {
+		t.Fatalf("phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+	}
+	tasks := env.tasksOf("candidate")
+	if len(tasks) == 0 {
+		t.Fatalf("no trial started: phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+	}
+	for _, task := range tasks {
+		if task.Spec.AgentRef == nil || task.Spec.AgentRef.Name != "candidate-agent" {
+			t.Fatalf("trial Agent = %+v", task.Spec.AgentRef)
+		}
+	}
+}
+
+// A candidate that selects some held-out cases still spends its attempt on
+// every case in the set, so disjoint subsets cannot multiply the attempts the
+// significance correction allows.
+func TestEvalExperimentSpendsTheWholeHeldOutSet(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	cases, err := evals.ParseCases([]byte(experimentCases()), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil || len(cases) < 2 {
+		t.Fatalf("experiment cases: %d, %v", len(cases), err)
+	}
+	baseline.Spec.Cases.IDs = []string{cases[0].ID}
+	candidate.Spec.Cases.IDs = []string{cases[0].ID}
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	// Give the unselected cases evidence of their own, so the set holds
+	// more than one held-out key.
+	lines := strings.SplitAfter(experimentCases(), "\n")
+	for i := 1; i < len(lines); i++ {
+		lines[i] = strings.Replace(lines[i], evalTestHeadSHA, fmt.Sprintf("%040d", i), 1)
+	}
+	configMap := &corev1.ConfigMap{}
+	if err := env.client.Get(context.Background(), types.NamespacedName{Namespace: evalTestNamespace, Name: "cases"}, configMap); err != nil {
+		t.Fatal(err)
+	}
+	configMap.Data["cases.jsonl"] = strings.Join(lines, "")
+	if err := env.client.Update(context.Background(), configMap); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	env.reconcileRun("candidate")
+	reserved, err := env.store.GetEvalExperiment(context.Background(), evalTestNamespace, "candidate-uid")
+	if err != nil {
+		t.Fatalf("reservation: %v (status %+v)", err, env.getRun("candidate").Status)
+	}
+	all, err := evals.ParseCases([]byte(configMap.Data["cases.jsonl"]), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := evals.HeldOutCaseKeys(all)
+	if err != nil || len(want) != len(all) {
+		t.Fatalf("held-out keys = %v, %v", want, err)
+	}
+	if !slices.Equal(reserved.CaseKeys, want) {
+		t.Fatalf("reserved case keys = %v, want every held-out key %v", reserved.CaseKeys, want)
+	}
+}
+
 // A candidate that cannot be paired fails before any trial starts.
 func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 	for name, test := range map[string]struct {
@@ -397,6 +516,13 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 		}, reason: evalRunReasonExperimentInvalid},
 		"cases not held out": {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1),
 			reason: evalRunReasonExperimentInvalid},
+		// Its TTL check may have run already without seeing this candidate.
+		"baseline past its TTL": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
+			completed := metav1.NewTime(evalTestNow.Add(-time.Hour))
+			baseline.Spec.TTLSecondsAfterFinished = ptr.To[int32](60)
+			baseline.Status.Phase = corev1alpha1.EvalRunPhaseSucceeded
+			baseline.Status.CompletionTime = &completed
+		}, reason: evalRunReasonExperimentInvalid},
 		"baseline sets agentRef": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {
 			baseline.Spec.Subject.RepositoryMonitorReview.AgentRef = &corev1alpha1.EvalObjectReference{Name: "candidate-agent"}
 		}, reason: evalRunReasonExperimentInvalid},

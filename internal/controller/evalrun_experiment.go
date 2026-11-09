@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -64,6 +65,13 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	}
 	if !baseline.DeletionTimestamp.IsZero() {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid, "baseline EvalRun %q is being deleted", baseline.Name)
+	}
+	// A baseline past its TTL is deleted once no candidate waits on it, and
+	// its check may already have run without seeing this one. Refuse it
+	// before reserving, so no attempt is spent on a baseline about to go.
+	if expiry, ok := evalRunExpiry(baseline); ok && !r.now().Before(expiry) {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"baseline EvalRun %q is past its ttlSecondsAfterFinished; run a new baseline", baseline.Name)
 	}
 	if evalRunAgentOverride(baseline) {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
@@ -156,7 +164,15 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 	if r.ExperimentStore == nil {
 		return evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable, "no experiment store is configured")
 	}
-	caseKeys, err := evals.HeldOutCaseKeys(observed.Cases)
+	// The attempt is spent on every case in the held-out set, not only the
+	// ones spec.cases.ids selects: the significance correction assumes the
+	// set allows maxExperimentsPerHeldOutSet experiments in all, and disjoint
+	// subsets would otherwise each get that many.
+	all, err := r.loadEvalCaseSet(ctx, run)
+	if err != nil {
+		return err
+	}
+	caseKeys, err := evals.HeldOutCaseKeys(append(slices.Clone(observed.Cases), all...))
 	if err != nil {
 		return evalRunConfigErrorf(evalRunReasonExperimentInvalid, "%v", err)
 	}
@@ -314,6 +330,11 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 		// still be the ones both runs used.
 		cases, err := r.loadEvalCases(ctx, candidate)
 		if err != nil {
+			// A missing or changed ConfigMap is final; an API error is
+			// retried, so it doesn't spend the held-out attempt.
+			if _, ok := errors.AsType[*evalRunConfigError](err); !ok {
+				return in, nil, "", fmt.Errorf("reload the cases to find tagged cases: %w", err)
+			}
 			return in, nil, "the cases ConfigMap can no longer be read to find tagged cases", nil
 		}
 		digest, err := evals.CaseSetDigest(cases)

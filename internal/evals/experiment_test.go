@@ -224,6 +224,27 @@ func TestDecideExperimentPairsOnlyGradedTrials(t *testing.T) {
 	}
 }
 
+// An infra error in one arm drops that pair from the pass@1 rise too, so it
+// cannot raise the other arm's rate on its own.
+func TestDecideExperimentRiseCountsOnlyPairs(t *testing.T) {
+	ids := cases(2)
+	// Both arms pass case-a and fail case-b, so there is no real change.
+	in := experimentInput(ids, map[string]bool{"case-a": true}, map[string]bool{"case-a": true})
+	for i := range in.Candidate.Trials {
+		if in.Candidate.Trials[i].CaseID == "case-b" {
+			in.Candidate.Trials[i].Infra = true
+		}
+	}
+	in.Gate.MaxInfraErrorPercent = 100
+	verdict := DecideExperiment(in)
+	if verdict.Target.BaselineTrials != 2 || verdict.Target.CandidateTrials != 2 || verdict.Target.ImprovementPoints != 0 {
+		t.Fatalf("target = %+v, want only the two case-a pairs", verdict.Target)
+	}
+	if verdict.Result != ExperimentFailed {
+		t.Fatalf("verdict = %+v, want no rise", verdict)
+	}
+}
+
 // Held-out keys follow the reviewed commits only: reordering, renaming,
 // retagging or rewording cases keeps them, and a different commit does not.
 func TestHeldOutCaseKeys(t *testing.T) {
@@ -258,5 +279,18 @@ func TestHeldOutCaseKeys(t *testing.T) {
 	}
 	if _, err := HeldOutCaseKeys([]Case{{ID: "empty"}}); err == nil {
 		t.Fatal("a case without input has a held-out key")
+	}
+}
+
+// A case set listed under two splits is refused rather than taking the last.
+func TestCaseSetSplitsRejectsConflictingSplits(t *testing.T) {
+	conflicting := "caseSets:\n- {namespace: team-a, name: cases, split: heldOut}\n- {namespace: team-a, name: cases, split: train}\n"
+	if _, err := CaseSetSplits([]byte(conflicting)); err == nil || !strings.Contains(err.Error(), "both heldOut and train") {
+		t.Fatalf("CaseSetSplits() error = %v, want a conflict", err)
+	}
+	repeated := "caseSets:\n- {namespace: team-a, name: cases, split: heldOut}\n- {namespace: team-a, name: cases, split: heldOut}\n"
+	splits, err := CaseSetSplits([]byte(repeated))
+	if err != nil || splits["team-a/cases"] != SplitHeldOut {
+		t.Fatalf("CaseSetSplits() = %v, %v", splits, err)
 	}
 }

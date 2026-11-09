@@ -109,7 +109,14 @@ func CaseSetSplits(declaration []byte) (map[string]string, error) {
 	splits := map[string]string{}
 	for _, caseSet := range document.CaseSets {
 		if (caseSet.Split == SplitTrain || caseSet.Split == SplitHeldOut) && caseSet.Namespace != "" && caseSet.Name != "" {
-			splits[caseSet.Namespace+"/"+caseSet.Name] = caseSet.Split
+			key := caseSet.Namespace + "/" + caseSet.Name
+			// A set listed twice must not take whichever split comes last:
+			// a held-out set also listed as train would admit unpaired
+			// candidates.
+			if split, listed := splits[key]; listed && split != caseSet.Split {
+				return nil, fmt.Errorf("protected set lists case set %s as both %s and %s", key, split, caseSet.Split)
+			}
+			splits[key] = caseSet.Split
 		}
 	}
 	return splits, nil
@@ -277,6 +284,19 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 func compareTarget(in ExperimentInput) TargetComparison {
 	var target TargetComparison
 	baseline, candidate := armGrades(in, in.Grader, in.Tag)
+	// Only pairs graded in both arms count, for the rise as for the sign
+	// test: an infra error in one arm drops its pair, so it cannot raise
+	// that arm's rate by removing a trial the other arm still counts.
+	for key := range baseline {
+		if _, paired := candidate[key]; !paired {
+			delete(baseline, key)
+		}
+	}
+	for key := range candidate {
+		if _, paired := baseline[key]; !paired {
+			delete(candidate, key)
+		}
+	}
 	target.BaselinePassed, target.BaselineTrials = passRate(baseline)
 	target.CandidatePassed, target.CandidateTrials = passRate(candidate)
 	if target.BaselineTrials > 0 && target.CandidateTrials > 0 {
