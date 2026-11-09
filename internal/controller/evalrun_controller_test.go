@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1224,4 +1225,55 @@ func TestEvalReviewPromptDigestCoversEveryCasePrompt(t *testing.T) {
 	if err != nil || again != digest {
 		t.Fatalf("the prompt digest is not deterministic: %q, %q, %v", digest, again, err)
 	}
+}
+
+func TestEvalReviewTaskDigestInputCoversTheRenderedTask(t *testing.T) {
+	run := evalTestRun(1, 1)
+	monitor := evalTestObjects(run, "")[2].(*corev1alpha1.RepositoryMonitor)
+	cases, err := evals.ParseCases([]byte(evalTestCases()), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := buildEvalReviewTask(monitor, cases[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := evalReviewTaskDigestInput(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*corev1alpha1.Task){
+		"allowed tools": func(t *corev1alpha1.Task) {
+			t.Spec.AgentRuntime.AllowedTools = append(t.Spec.AgentRuntime.AllowedTools, "web_fetch")
+		},
+		"annotation": func(t *corev1alpha1.Task) { t.Annotations[labels.AnnotationAgentReadOnly] = "false" },
+		"prompt":     func(t *corev1alpha1.Task) { t.Spec.Prompt += "x" },
+	} {
+		changed := task.DeepCopy()
+		mutate(changed)
+		got, err := evalReviewTaskDigestInput(changed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Equal(got, base) {
+			t.Fatalf("the prompt digest ignores a change to the rendered Task's %s", name)
+		}
+	}
+}
+
+// A RepositoryMonitor created just before the run may be missing from the
+// cache; the run confirms the miss before failing.
+func TestEvalRunConfirmsDependencyCacheMisses(t *testing.T) {
+	run := evalTestRun(1, 1)
+	env := newEvalRunTestEnv(t, evalTestObjects(run, evalTestCases())...)
+	env.reconciler.Client = interceptor.NewClient(env.client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch obj.(type) {
+			case *corev1alpha1.RepositoryMonitor, *corev1alpha1.Agent:
+				return apierrors.NewNotFound(schema.GroupResource{}, key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	env.start()
 }
