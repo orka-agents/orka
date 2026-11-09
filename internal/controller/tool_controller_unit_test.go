@@ -7,6 +7,7 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
@@ -2578,6 +2579,9 @@ type recordingToolWorkspaceExecutor struct {
 	claimTemplate                  workspace.TemplateRef
 	claimCreated                   bool
 	claimCreateds                  []bool
+	claimPhase                     workspace.Phase
+	releaseReqs                    []workspace.ReleaseRequest
+	releaseErr                     error
 	waitReadyCalled                bool
 	waitReadyBoot                  bool
 	waitReadyBoots                 []bool
@@ -2606,7 +2610,7 @@ func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspac
 		},
 		Template: req.Template,
 		Created:  created,
-		Phase:    workspace.PhasePending,
+		Phase:    cmp.Or(e.claimPhase, workspace.PhasePending),
 	}, nil
 }
 
@@ -2639,6 +2643,10 @@ func (e *recordingToolWorkspaceExecutor) Download(ctx context.Context, req works
 }
 
 func (e *recordingToolWorkspaceExecutor) Release(ctx context.Context, req workspace.ReleaseRequest) (*workspace.ReleaseResult, error) {
+	e.releaseReqs = append(e.releaseReqs, req)
+	if e.releaseErr != nil {
+		return nil, e.releaseErr
+	}
 	return &workspace.ReleaseResult{Ref: req.Ref}, nil
 }
 
