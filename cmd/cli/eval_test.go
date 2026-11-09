@@ -654,3 +654,18 @@ func TestEvalOutputDropsEventsOfAnEarlierExport(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A finished candidate whose experiment is still Pending is polled until the
+// decision, so a short TTL could delete it first; get --wait refuses it.
+func TestEvalGetWaitRefusesAShortTTLForAPendingDecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a","uid":"uid-a"},"spec":{"ttlSecondsAfterFinished":0},` +
+			`"status":{"phase":"Succeeded","experiment":{"result":"Pending"}}}`))
+	}))
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "get", "r", "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "ttlSecondsAfterFinished 0") {
+		t.Fatalf("Execute() error = %v, want the short-TTL refusal", err)
+	}
+}

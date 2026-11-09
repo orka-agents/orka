@@ -115,9 +115,11 @@ func newEvalGetCmd() *cobra.Command {
 			if output != "" && run.Spec.TTLSecondsAfterFinished != nil {
 				return errors.New("--output-dir needs the run kept until the export finishes, but it has ttlSecondsAfterFinished")
 			}
-			// A finished run is printed from this read; an unfinished one is
-			// polled, and a short TTL could delete it between polls.
-			if !evalRunFinished(run.Status.Phase) {
+			// A settled run is printed from this read; any other is polled,
+			// including a finished candidate still waiting for its
+			// experiment decision, and a short TTL could delete it between
+			// polls.
+			if !evalRunSettled(run) {
 				if err := checkEvalRunTTL(run.Spec.TTLSecondsAfterFinished, false); err != nil {
 					return err
 				}
@@ -281,6 +283,16 @@ func evalRunFinished(phase corev1alpha1.EvalRunPhase) bool {
 	return false
 }
 
+// evalRunSettled reports whether run has finished and, for a candidate,
+// whether its experiment has been decided, so polling can stop.
+func evalRunSettled(run *corev1alpha1.EvalRun) bool {
+	if !evalRunFinished(run.Status.Phase) {
+		return false
+	}
+	experiment := run.Status.Experiment
+	return experiment == nil || experiment.Result != corev1alpha1.EvalExperimentPending
+}
+
 // waitForEvalRun polls the run until it finishes, printing a line whenever
 // its phase or counts change.
 func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.EvalRun, timeout time.Duration, out io.Writer) (*corev1alpha1.EvalRun, error) {
@@ -299,7 +311,7 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 		if evalRunFinished(run.Status.Phase) {
 			// A candidate is judged after it finishes, once its baseline
 			// has finished too; wait for that decision.
-			if experiment := run.Status.Experiment; experiment == nil || experiment.Result != corev1alpha1.EvalExperimentPending {
+			if evalRunSettled(run) {
 				return run, nil
 			}
 			if !waitingForDecision {
