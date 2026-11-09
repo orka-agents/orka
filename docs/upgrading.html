@@ -5,7 +5,7 @@
 <meta name="generator" content="Docusaurus v3.10.1">
 <title data-rh="true">Upgrading | Orka</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:url" content="https://orka-agents.github.io/orka/docs/upgrading"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="Upgrading | Orka"><meta data-rh="true" name="description" content="Back up Orka, update its Kubernetes resource definitions, and check the result."><meta data-rh="true" property="og:description" content="Back up Orka, update its Kubernetes resource definitions, and check the result."><link data-rh="true" rel="canonical" href="https://orka-agents.github.io/orka/docs/upgrading"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="en"><link data-rh="true" rel="alternate" href="https://orka-agents.github.io/orka/docs/upgrading" hreflang="x-default"><script data-rh="true" type="application/ld+json">{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Upgrading","item":"https://orka-agents.github.io/orka/docs/upgrading"}]}</script><link rel="icon" type="image/png" sizes="32x32" href="/orka/img/favicon.png">
 <link rel="icon" type="image/svg+xml" href="/orka/img/favicon.svg"><link rel="stylesheet" href="/orka/assets/css/styles.f2159d37.css">
-<script src="/orka/assets/js/runtime~main.2e2e5166.js" defer="defer"></script>
+<script src="/orka/assets/js/runtime~main.fecec956.js" defer="defer"></script>
 <script src="/orka/assets/js/main.f98b05fb.js" defer="defer"></script>
 </head>
 <body>
@@ -66,12 +66,52 @@ upgrading:</p>
 <code>X-Orka-Delivery-ID</code>. Unverified receivers keep working, but should start verifying
 against <code>/.well-known/orka/task-webhook-jwks.json</code>. See
 <a class="" href="/orka/docs/guides/task-webhooks#verifying-a-notice">Task webhooks</a>.</li>
-<li class="">The controller creates the signing Secret in its namespace on first use. It needs the
-Secret <code>create</code> and <code>update</code> access the controller role already grants. Under the
-default AI worker RBAC profile, the AI worker can also read Secrets in that namespace;
-use <code>workers.ai.rbacProfile: restricted</code> if receivers rely on signatures, and do not let
-untrusted users create Tasks or Agents there, since a <code>secretRef</code> can mount it. See
+<li class="">The signing key lives in a new namespace that holds only that Secret and binds only
+the controller: <code>&lt;release namespace&gt;-task-webhook-signing</code> for Helm (value
+<code>controller.taskWebhooks.signingNamespace</code>), <code>orka-task-webhook-signing</code> for kustomize
+(flag <code>--task-webhook-signing-namespace</code>). The chart and the kustomize
+install create the namespace and a controller Role in it; the controller creates the
+Secret and mints the key on first use. Installs that grant RBAC some other way must
+grant the controller <code>get</code> and <code>update</code> on that Secret and <code>create</code> on Secrets there.
+The controller refuses to start if the signing namespace is its own, the watch, ACP
+runtime or agent-host namespace. See
 <a class="" href="/orka/docs/guides/task-webhooks#who-can-read-the-signing-key">Who can read the signing key</a>.</li>
+<li class="">Builds of <code>main</code> from before this change kept the key in the controller namespace,
+where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+new <code>kid</code> and refetch the JWKS. Delete the old Secret (<code>&lt;fullname&gt;-task-webhook-signing</code>
+or <code>orka-task-webhook-signing</code> in the controller namespace) after upgrading.</li>
+<li class="">A new ValidatingAdmissionPolicy, <code>&lt;fullname&gt;-ai-worker-identity-protection</code>
+(<code>orka-ai-worker-identity-protection</code> for kustomize), limits what the AI worker
+ServiceAccount may create. Before, the default AI worker role could create a
+ServiceAccount-token Secret or a Job that named the controller&#x27;s ServiceAccount and
+act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+RoleBindings. Now it may write only Opaque Secrets, create or delete only <code>code_exec</code>&#x27;s
+own <code>orka-code-exec-*</code> ServiceAccounts, and create only
+<code>code_exec</code>-shaped Jobs: named <code>orka-code-exec-*</code>, running as the ServiceAccount of
+the same name with <code>automountServiceAccountToken: false</code>, with only <code>code_exec</code> Pod
+labels (so the Pod joins no other component&#x27;s Service or NetworkPolicy allowance), no
+subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+ephemeral containers, and non-root, unprivileged containers with
+<code>allowPrivilegeEscalation: false</code>, all capabilities dropped and none added, and a
+<code>RuntimeDefault</code> or <code>Localhost</code> seccomp profile.
+Orka&#x27;s own worker already works this way. Anything else that writes Secrets, Jobs or
+ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+and cannot move it to its own ServiceAccount, set <code>workers.ai.identityProtection: false</code>
+(Helm) or drop <code>orka-ai-worker-identity-protection</code> and its binding from your kustomize
+build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+controller again, including reading the webhook signing key.</li>
+<li class="">Orka&#x27;s ServiceAccounts now carry <code>orka.ai/platform-identity: &quot;true&quot;</code>, in both installs
+and on worker accounts the controller creates. An OutboundAccessPolicy whose
+<code>serviceAccountRef</code> names one, or names the controller or a worker ServiceAccount the
+controller is configured with (labeled or not, for example an externally managed
+controller account), now reports <code>ReferenceDenied</code>, and the controller revokes any
+TokenRequest grant it held. The AI worker&#x27;s own ServiceAccount is the one exception: a
+token for itself gives it nothing new. Point other such policies at a dedicated
+ServiceAccount.</li>
+<li class="">Check the release namespace for ServiceAccount-token Secrets
+(<code>kubectl -n &lt;namespace&gt; get secrets --field-selector type=kubernetes.io/service-account-token</code>).
+The default AI worker profile can read them; delete any you do not need, and treat a
+token for a privileged account as exposed.</li>
 <li class="">With signing enabled but no usable key (the Secret cannot be read or holds a malformed
 key), nothing is sent and no attempt is consumed: the delivery stays <code>Pending</code> until a
 key is available.</li>
