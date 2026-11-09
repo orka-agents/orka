@@ -126,10 +126,11 @@ func (failingGatewayOwnerStore) GetGatewayEventForTask(context.Context, string, 
 }
 
 func TestSubmitExecutionEventUsesRetainedGatewayOwnership(t *testing.T) {
-	submit := func(t *testing.T, gatewayEvents store.GatewayEventStore) {
+	submit := func(t *testing.T, gatewayEvents store.GatewayEventStore, requestedBy *corev1alpha1.RequestedBy) {
 		t.Helper()
 		task, job, pod := testInternalExecutionEventOwnedWorkerObjects("task-1")
 		task.Spec.Type = corev1alpha1.TaskTypeAI
+		task.Spec.RequestedBy = requestedBy
 		pod.Spec.Containers = []corev1.Container{{Name: "worker", Command: []string{"/worker"}, Args: []string{"--mode=ai"}}}
 		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: task.Namespace, UID: "default-namespace-uid"}}
 		h := NewInternalHandlers(nil, nil, nil, nil, nil, InternalHandlersConfig{
@@ -151,7 +152,7 @@ func TestSubmitExecutionEventUsesRetainedGatewayOwnership(t *testing.T) {
 	submit(t, &externalToolGatewayStore{event: &store.GatewayEvent{
 		Namespace: "default", NamespaceUID: "default-namespace-uid", GatewayName: "front-desk", GatewayUID: "gateway-uid",
 		TaskName: "task-1", TaskUID: "task-1-uid",
-	}})
+	}}, nil)
 	require.Equal(t, []capabilitygap.GatewayOwner{{
 		Namespace: "default", NamespaceUID: "default-namespace-uid", Name: "front-desk", UID: "gateway-uid",
 	}}, recorder.GatewayOwners("default", "default-namespace-uid"))
@@ -159,10 +160,18 @@ func TestSubmitExecutionEventUsesRetainedGatewayOwnership(t *testing.T) {
 		"a Task owned only through its retained GatewayEvent stays hidden without Gateway access")
 
 	recorder = installAPICapabilityGapRecorder(t, "web_fetch")
-	submit(t, failingGatewayOwnerStore{})
+	submit(t, failingGatewayOwnerStore{}, nil)
 	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_enabled", "native", "web_fetch"))
 	require.Empty(t, recorder.Summary("default", "default-namespace-uid", showAll).Signals,
 		"a signal with unverified Gateway ownership stays out of the summary")
+
+	// A Gateway issuer that names no Gateway, with no retained event, is
+	// unverified ownership, not the absence of a Gateway.
+	recorder = installAPICapabilityGapRecorder(t, "web_fetch")
+	submit(t, nil, &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/unparseable"})
+	require.Equal(t, 1.0, metrics.CounterVecValue(metrics.CapabilityGapSignalsTotal, "missing_tool", "not_enabled", "native", "web_fetch"))
+	require.Empty(t, recorder.Summary("default", "default-namespace-uid", showAll).Signals,
+		"a Gateway claim without an identity stays out of the summary")
 }
 
 func TestSubmitExecutionEventIgnoresToolRejectionsFromOtherWorkers(t *testing.T) {

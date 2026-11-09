@@ -199,11 +199,15 @@ func toolCallCapabilityGapReason(event *store.ExecutionEvent, content map[string
 
 // capabilityGapGatewayOwner names the Gateway that owns task, if any,
 // including ownership recorded only in its retained GatewayEvent. An error
-// means ownership could not be verified.
+// means ownership could not be verified, including a Gateway claim that names
+// no Gateway: the zero GatewayOwner would read as not Gateway-owned.
 func capabilityGapGatewayOwner(ctx context.Context, gatewayEvents store.GatewayEventStore, task *corev1alpha1.Task) (capabilitygap.GatewayOwner, error) {
 	owner, ok, err := gatewayruntime.ResolveTaskOwner(ctx, gatewayEvents, task)
 	if err != nil || !ok {
 		return capabilitygap.GatewayOwner{}, err
+	}
+	if owner == (gatewayruntime.TaskOwnerIdentity{}) {
+		return capabilitygap.GatewayOwner{}, errors.New("gateway task ownership names no gateway")
 	}
 	return capabilitygap.GatewayOwner{
 		Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,

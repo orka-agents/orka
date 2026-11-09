@@ -404,6 +404,19 @@ func TestRecordTaskCapabilityGapUsesRetainedGatewayOwnership(t *testing.T) {
 	if got := len(recorder.Summary(task.Namespace, string(namespace.UID), func(capabilitygap.GatewayOwner) bool { return true }).Signals); got != 0 {
 		t.Fatalf("a signal with unverified Gateway ownership must stay out of the summary, got %d rows", got)
 	}
+
+	// A Gateway issuer that names no Gateway, with no retained event, is
+	// unverified ownership, not the absence of a Gateway.
+	recorder = installCapabilityGapRecorder(t)
+	claimed := task.DeepCopy()
+	claimed.Spec.RequestedBy = &corev1alpha1.RequestedBy{Issuer: "gateway.orka.ai/unparseable"}
+	r = newUnitReconciler(newTestScheme(), claimed.DeepCopy(), namespace.DeepCopy())
+	if _, err := r.rejectPlannedAgentExecution(context.Background(), claimed.DeepCopy(), validPlannerAgent(), plan); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if got := len(recorder.Summary(task.Namespace, string(namespace.UID), func(capabilitygap.GatewayOwner) bool { return true }).Signals); got != 0 {
+		t.Fatalf("a Gateway claim without an identity must stay out of the summary, got %d rows", got)
+	}
 }
 
 func TestHandlePendingRecordsExternalRuntimePriorTaskRefRejection(t *testing.T) {
@@ -441,5 +454,41 @@ func TestHandlePendingRecordsExternalRuntimePriorTaskRefRejection(t *testing.T) 
 	summary := recorder.Summary(defaultNS, string(namespace.UID), nil)
 	if len(summary.Signals) != 1 || strings.Join(summary.Signals[0].Tasks, ",") != task.Name {
 		t.Fatalf("summary = %+v, want one signal referencing %q", summary.Signals, task.Name)
+	}
+}
+
+// An Agent stored before its runtime type left the CRD enum fails
+// compatibility validation before planning; that rejection still records the
+// runtime signal.
+func TestHandlePendingRecordsUnsupportedRuntimeTypeRejection(t *testing.T) {
+	recorder := installCapabilityGapRecorder(t)
+	agent := &corev1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "retired-agent", Namespace: defaultNS},
+		Spec:       corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{Type: "retired"}},
+	}
+	task := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "retired-runtime", Namespace: defaultNS, UID: "retired-runtime-uid"},
+		Spec: corev1alpha1.TaskSpec{
+			Type: corev1alpha1.TaskTypeAgent, Prompt: "work", AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+	}
+	namespace := capabilityGapNamespace(defaultNS)
+	r := newUnitReconciler(newTestScheme(), task.DeepCopy(), agent, namespace)
+
+	if _, err := r.handlePending(context.Background(), task.DeepCopy()); err != nil {
+		t.Fatalf("handlePending: %v", err)
+	}
+	current := &corev1alpha1.Task{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != corev1alpha1.TaskPhaseFailed || !strings.Contains(current.Status.Message, "ACP runtime profile") {
+		t.Fatalf("task status = %q %q, want failed on the runtime type", current.Status.Phase, current.Status.Message)
+	}
+	summary := recorder.Summary(defaultNS, string(namespace.UID), nil)
+	if len(summary.Signals) != 1 || summary.Signals[0].Category != string(capabilitygap.CategoryUnsupportedRequest) ||
+		summary.Signals[0].Reason != string(capabilitygap.ReasonRuntime) || strings.Join(summary.Signals[0].Tasks, ",") != task.Name {
+		t.Fatalf("summary = %+v, want one runtime signal referencing %q", summary.Signals, task.Name)
 	}
 }

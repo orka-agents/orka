@@ -3580,11 +3580,18 @@ func validateBuiltInRuntimeTaskCompatibility(task *corev1alpha1.Task, agent *cor
 	return validateReadOnlyBuiltInAgentRuntime(task, agent.Spec.Runtime.Type)
 }
 
+// validateBuiltInAgentRuntime rejects a runtime type with no ACP profile. The
+// CRD enum keeps new Agents to supported types, but an Agent stored before its
+// type was dropped still reaches this check, so the rejection is also an
+// unsupported-request signal.
 func validateBuiltInAgentRuntime(runtimeType corev1alpha1.AgentRuntimeType) error {
 	if isBuiltInACPProviderRuntime(runtimeType) {
 		return nil
 	}
-	return fmt.Errorf("agent runtime %q does not have an ACP runtime profile configured", runtimeType)
+	return unsupportedTaskRequestError{
+		err:    fmt.Errorf("agent runtime %q does not have an ACP runtime profile configured", runtimeType),
+		reason: capabilitygap.ReasonRuntime,
+	}
 }
 
 func validateReadOnlyBuiltInAgentRuntime(task *corev1alpha1.Task, runtimeType corev1alpha1.AgentRuntimeType) error {

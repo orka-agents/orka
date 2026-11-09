@@ -1506,11 +1506,7 @@ func executeAgentLoopWithEvents(
 			customToolForCall := customTools[toolName]
 			if _, ok := allowedToolCalls[toolName]; !ok {
 				execErr = fmt.Errorf("tool %q was not enabled for this task", tc.Name)
-				rejectedErrorType = events.ToolCallErrorTypeNotEnabled
-				// A name no registry knows is a missing tool, not a disabled one.
-				if _, registered := tools.DefaultRegistry.Get(toolName); !registered && customToolForCall == nil {
-					rejectedErrorType = events.ToolCallErrorTypeNotFound
-				}
+				rejectedErrorType = notEnabledToolCallErrorType(toolName, customToolForCall)
 				tools.RecordRejectedToolCall(stepCtx, toolName, tc.ID, "tool_not_enabled", execErr.Error())
 			} else {
 				execArgs, approvalKey, alreadyFired, execErr = approvalGate.prepareApprovedCall(
@@ -1582,21 +1578,7 @@ func executeAgentLoopWithEvents(
 			}
 
 			if execErr != nil {
-				failedOptions := []common.EventOption{
-					common.WithEventSeverity(events.ExecutionEventSeverityError),
-					common.WithEventToolName(toolName),
-					common.WithEventToolCallID(tc.ID),
-					common.WithEventSummary(execErr.Error()),
-				}
-				if rejectedErrorType != "" {
-					failedOptions = append(failedOptions, common.WithEventContent(eventContent(map[string]any{
-						logFieldToolName:                   toolName,
-						logFieldToolCallID:                 tc.ID,
-						events.ToolCallErrorTypeContentKey: rejectedErrorType,
-					})))
-				}
-				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout,
-					failedOptions...)
+				recordToolCallFailed(eventRecorder, toolName, tc.ID, execErr, rejectedErrorType)
 				result = fmt.Sprintf("Error executing tool: %v", execErr)
 			} else {
 				common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeToolCallCompleted, modelLoopEventTimeout,
@@ -2012,4 +1994,33 @@ var sealHTTPClient = func() *http.Client {
 		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+// notEnabledToolCallErrorType classifies a call to a tool the Task did not
+// enable. A name no registry knows is a missing tool, not a disabled one.
+func notEnabledToolCallErrorType(toolName string, customTool *corev1alpha1.Tool) string {
+	if _, registered := tools.DefaultRegistry.Get(toolName); !registered && customTool == nil {
+		return events.ToolCallErrorTypeNotFound
+	}
+	return events.ToolCallErrorTypeNotEnabled
+}
+
+// recordToolCallFailed records a ToolCallFailed event. A non-empty errorType
+// is a closed value the controller counts as a capability-gap signal; it never
+// carries tool or model text.
+func recordToolCallFailed(recorder common.EventRecorder, toolName, toolCallID string, err error, errorType string) {
+	options := []common.EventOption{
+		common.WithEventSeverity(events.ExecutionEventSeverityError),
+		common.WithEventToolName(toolName),
+		common.WithEventToolCallID(toolCallID),
+		common.WithEventSummary(err.Error()),
+	}
+	if errorType != "" {
+		options = append(options, common.WithEventContent(eventContent(map[string]any{
+			logFieldToolName:                   toolName,
+			logFieldToolCallID:                 toolCallID,
+			events.ToolCallErrorTypeContentKey: errorType,
+		})))
+	}
+	common.RecordEventWithTimeout(recorder, events.ExecutionEventTypeToolCallFailed, modelLoopEventTimeout, options...)
 }

@@ -330,12 +330,15 @@ func recordTaskCapabilityGap(
 	}
 	signal.Namespace, signal.Task, signal.TaskUID = task.Namespace, task.Name, string(task.UID)
 	owner, ok, ownerErr := gatewayruntime.ResolveTaskOwner(ctx, events, task)
-	if ownerErr == nil && ok {
+	// A Gateway claim that names no Gateway is unverified: the zero
+	// GatewayOwner would read as not Gateway-owned.
+	verified := ownerErr == nil && (!ok || owner != (gatewayruntime.TaskOwnerIdentity{}))
+	if verified && ok {
 		signal.Gateway = capabilitygap.GatewayOwner{
 			Namespace: owner.GatewayNamespace, NamespaceUID: owner.NamespaceUID, Name: owner.GatewayName, UID: owner.GatewayUID,
 		}
 	}
-	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil && ownerErr == nil {
+	if uid, err := usage.NamespaceUIDForObject(ctx, reader, task); err == nil && verified {
 		signal.NamespaceUID = uid
 	}
 	capabilitygap.Record(signal)
