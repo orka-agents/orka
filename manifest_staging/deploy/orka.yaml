@@ -24,6 +24,18 @@ metadata:
   name: orka-system
 ---
 apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/component: task-webhook-signing
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+  name: orka-task-webhook-signing
+---
+apiVersion: v1
 automountServiceAccountToken: true
 kind: ServiceAccount
 metadata:
@@ -31,18 +43,27 @@ metadata:
     app.kubernetes.io/component: admission
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-admission
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-ai-worker
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-container-worker
   namespace: orka-system
 ---
@@ -52,6 +73,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-controller-manager
   namespace: orka-system
 ---
@@ -62,6 +84,7 @@ metadata:
   labels:
     app.kubernetes.io/component: provider-auth-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-provider-auth-proxy
   namespace: orka-system
 ---
@@ -72,12 +95,17 @@ metadata:
   labels:
     app.kubernetes.io/component: scm-egress-proxy
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-scm-egress-proxy
   namespace: orka-system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-vendor-worker
   namespace: orka-system
 ---
@@ -88,6 +116,7 @@ metadata:
   labels:
     app.kubernetes.io/component: workspace-publisher
     app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
   name: orka-workspace-publisher
   namespace: orka-system
 ---
@@ -200,6 +229,31 @@ rules:
   verbs:
   - create
   - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-webhook-signing-controller-role
+  namespace: orka-task-webhook-signing
+rules:
+- apiGroups:
+  - ""
+  resourceNames:
+  - orka-task-webhook-signing
+  resources:
+  - secrets
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -2277,6 +2331,23 @@ subjects:
   namespace: orka-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+  name: orka-task-webhook-signing-controller-rolebinding
+  namespace: orka-task-webhook-signing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orka-task-webhook-signing-controller-role
+subjects:
+- kind: ServiceAccount
+  name: orka-controller-manager
+  namespace: orka-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
@@ -3258,6 +3329,119 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  failurePolicy: Fail
+  matchConditions:
+  - expression: request.userInfo.username == 'system:serviceaccount:' + 'orka-system'
+      + ':' + 'orka-ai-worker'
+    name: ai-worker
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - secrets
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      - DELETE
+      resources:
+      - serviceaccounts
+    - apiGroups:
+      - batch
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - jobs
+  validations:
+  - expression: request.resource.resource != 'secrets' || dyn(object).type == 'Opaque'
+    message: the AI worker may only write Opaque Secrets; a ServiceAccount token Secret
+      would hand it another identity
+  - expression: |-
+      request.resource.resource != 'serviceaccounts' || (
+
+        request.name.startsWith('orka-code-exec-') &&
+        (request.operation == 'CREATE' ||
+          oldObject.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true') &&
+        (request.operation == 'DELETE' ||
+          object.metadata.?labels.orValue({})[?variables.platformIdentity].orValue('') != 'true'))
+    message: the AI worker may only create or delete code_exec ServiceAccounts (orka-code-exec-*)
+      and never an Orka platform ServiceAccount; replacing another ServiceAccount
+      would inherit its RoleBindings
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        object.metadata.name.startsWith('orka-code-exec-') &&
+        variables.pod.?serviceAccountName.orValue('') == object.metadata.name &&
+        variables.pod.?automountServiceAccountToken.orValue(true) == false &&
+        variables.pod.?volumes.orValue([]).all(v, has(v.emptyDir) || has(v.secret)))
+    message: 'AI worker Jobs must be code_exec Jobs: named orka-code-exec-*, run as
+      the ServiceAccount of the same name with automountServiceAccountToken false,
+      and use only emptyDir and Secret volumes'
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        variables.podLabels.all(k, k in [
+          'app.kubernetes.io/name', 'orka.ai/tool', 'orka.ai/code-exec-job',
+          'batch.kubernetes.io/job-name', 'job-name',
+          'batch.kubernetes.io/controller-uid', 'controller-uid']) &&
+        variables.podLabels[?'app.kubernetes.io/name'].orValue('orka') == 'orka' &&
+        variables.podLabels[?'orka.ai/tool'].orValue('code_exec') == 'code_exec' &&
+        ['orka.ai/code-exec-job', 'batch.kubernetes.io/job-name', 'job-name'].all(k,
+          variables.podLabels[?k].orValue(object.metadata.name) == object.metadata.name) &&
+        !has(variables.pod.subdomain))
+    message: AI worker Job Pods may carry only code_exec labels (app.kubernetes.io/name=orka,
+      orka.ai/tool=code_exec, and the Job name) and no subdomain, so they cannot join
+      another component's Service or NetworkPolicy allowance
+  - expression: |-
+      request.resource.resource != 'jobs' || (
+
+        !variables.pod.?hostNetwork.orValue(false) &&
+        !variables.pod.?hostPID.orValue(false) &&
+        !variables.pod.?hostIPC.orValue(false) &&
+        !variables.podSecurity.?windowsOptions.hostProcess.orValue(false) &&
+        variables.pod.?initContainers.orValue([]).size() == 0 &&
+        variables.pod.?ephemeralContainers.orValue([]).size() == 0 &&
+        variables.pod.containers.all(c,
+          !c.?securityContext.privileged.orValue(false) &&
+          c.?securityContext.allowPrivilegeEscalation.orValue(true) == false &&
+          c.?securityContext.capabilities.add.orValue([]).size() == 0 &&
+          'ALL' in c.?securityContext.capabilities.drop.orValue([]) &&
+          c.?securityContext.seccompProfile.type.orValue(
+            variables.podSecurity.?seccompProfile.type.orValue('')) in ['RuntimeDefault', 'Localhost'] &&
+          !c.?securityContext.windowsOptions.hostProcess.orValue(false) &&
+          c.?securityContext.runAsNonRoot.orValue(variables.podSecurity.?runAsNonRoot.orValue(false)) &&
+          c.?ports.orValue([]).all(p, p.?hostPort.orValue(0) == 0)))
+    message: 'AI worker Jobs get no host access or privilege: no host namespaces or
+      ports, no init or ephemeral containers, and every container non-root, unprivileged,
+      with allowPrivilegeEscalation false, all capabilities dropped and none added,
+      and a RuntimeDefault or Localhost seccomp profile'
+  variables:
+  - expression: object.spec.template.spec
+    name: pod
+  - expression: variables.pod.?securityContext.orValue({})
+    name: podSecurity
+  - expression: object.spec.template.?metadata.?labels.orValue({})
+    name: podLabels
+  - expression: '''orka.ai/platform-identity'''
+    name: platformIdentity
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
   name: orka-checkpoint-source-use.orka.ai
 spec:
   failurePolicy: Fail
@@ -3622,6 +3806,15 @@ metadata:
   name: orka-agenthost-template-use.orka.ai
 spec:
   policyName: orka-agenthost-template-use.orka.ai
+  validationActions:
+  - Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: orka-ai-worker-identity-protection
+spec:
+  policyName: orka-ai-worker-identity-protection
   validationActions:
   - Deny
 ---
