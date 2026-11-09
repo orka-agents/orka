@@ -217,11 +217,11 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 		}
 		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
 	}
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
 		return 0, err
 	}
 	if actionKind != command.Intent {
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
+		if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
 			return 0, err
 		}
 	}
@@ -1222,7 +1222,7 @@ func repositoryMonitorImplementationResultBody(envelope map[string]any, sr *comm
 
 //nolint:gocyclo // Result ingestion intentionally keeps each durable workflow transition explicit.
 func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
 		return false, err
 	}
 	if item.LastActionID == record.ID && !repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {

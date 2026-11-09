@@ -142,7 +142,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	return nil
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
+// repositoryMonitorWorkActionHalted reports whether a command's work must not
+// run or advance: its action was cancelled, or command intake coalesced it
+// into an identical active action (completed), even after its run was queued.
+func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionHalted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
 	if r.Store == nil || monitor == nil || strings.TrimSpace(commandID) == "" {
 		return false, nil
 	}
@@ -160,7 +163,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx c
 		}
 		return false, err
 	}
-	return action.Status == repositoryMonitorWorkActionStatusCancelled, nil
+	return action.Status == repositoryMonitorWorkActionStatusCancelled || action.Status == repositoryMonitorWorkActionStatusCompleted, nil
 }
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {

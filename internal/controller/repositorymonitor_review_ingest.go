@@ -186,7 +186,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask
 //nolint:gocyclo // Result validation, verdict downgrades, and durable review recording remain ordered.
 func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorReviewTask(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task) (bool, error) {
 	recordID := repositoryMonitorReviewRecordID(task)
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	if err := validateRepositoryMonitorReviewTaskItemBinding(task, monitor, repositoryMonitorPullRequestKind, item.Number); err != nil {
@@ -948,7 +948,7 @@ func repositoryMonitorReviewFindingsJSON(findings []repositoryMonitorReviewFindi
 }
 
 func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, task *corev1alpha1.Task, recordID, verdict, reason, summary string) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	summary = strings.TrimSpace(summary)
@@ -1002,7 +1002,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorRejectedReviewRecor
 }
 
 func (r *RepositoryMonitorReconciler) applyRepositoryMonitorReviewRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ReviewRecord, task *corev1alpha1.Task) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, task.Annotations[repositoryMonitorIssueAnnotationCommandID], repositoryMonitorCommandIntentReview); err != nil || cancelled {
 		return false, err
 	}
 	if item.LastReviewID != task.Name || item.LastVerdict != repositoryMonitorRunPhaseQueued {
