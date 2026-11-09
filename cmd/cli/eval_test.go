@@ -353,10 +353,14 @@ func TestEvalRunOutputFailsOnEventErrorsOtherThanNotFound(t *testing.T) {
 	}
 }
 
-// A dropped connection or a 5xx while waiting is retried; the wait finishes
-// once the API answers again. A 404 still fails at once.
+// A dropped connection, a response cut off mid-body or a 5xx while waiting
+// is retried; the wait finishes once the API answers again. A 404 still
+// fails at once.
 func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
-	for name, failure := range map[string]int{"server error": http.StatusServiceUnavailable, "dropped connection": 0} {
+	const truncated = -1
+	for name, failure := range map[string]int{
+		"server error": http.StatusServiceUnavailable, "dropped connection": 0, "truncated response": truncated,
+	} {
 		t.Run(name, func(t *testing.T) {
 			gets := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -370,6 +374,16 @@ func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
 					// Go's transport retries an idempotent request once on a
 					// reused connection, so drop it twice to reach the CLI.
 					if (failure == 0 && gets <= 2) || (failure != 0 && gets == 1) {
+						if failure == truncated {
+							// Headers arrive, then the connection closes
+							// partway through the body.
+							hijacker, _ := w.(http.Hijacker)
+							conn, buf, _ := hijacker.Hijack()
+							_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"metadata\"")
+							_ = buf.Flush()
+							_ = conn.Close()
+							return
+						}
 						if failure == 0 {
 							hijacker, _ := w.(http.Hijacker)
 							conn, _, _ := hijacker.Hijack()
@@ -540,5 +554,29 @@ func TestEvalOutputIsPrivateToItsOwner(t *testing.T) {
 		if got := info.Mode().Perm(); got != want {
 			t.Fatalf("%q mode = %o, want %o", name, got, want)
 		}
+	}
+}
+
+// Reusing an export directory for another run drops the earlier run's
+// events, which would otherwise sit beside this run's records.
+func TestEvalOutputDropsEventsOfAnEarlierExport(t *testing.T) {
+	var created map[string]any
+	srv := evalTestServer(t, "Succeeded", &created)
+	defer srv.Close()
+	dir := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(filepath.Join(dir, "events"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events", "eval-old.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runEvalCommand(t, "eval", "get", "pr-review-x7", "--server", srv.URL, "--token", "tok", "--output-dir", dir); err != nil {
+		t.Fatalf("Execute() = %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "eval-old.json")); !os.IsNotExist(err) {
+		t.Fatalf("an earlier export's events survived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events", "eval-b.json")); err != nil {
+		t.Fatal(err)
 	}
 }

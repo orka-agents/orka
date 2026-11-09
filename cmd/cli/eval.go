@@ -318,10 +318,11 @@ func waitForEvalRun(ctx context.Context, c *client.Client, run *corev1alpha1.Eva
 }
 
 // transientEvalRunError reports a failure worth retrying: no response at
-// all, a 5xx or a 429.
+// all, a response cut off mid-body, a 5xx or a 429.
 func transientEvalRunError(err error) bool {
 	message := err.Error()
-	if strings.Contains(message, "request failed:") {
+	// No response, or a response whose body was cut off.
+	if strings.Contains(message, "request failed:") || strings.Contains(message, "failed to read response:") {
 		return true
 	}
 	return strings.Contains(message, "(HTTP 5") || strings.Contains(message, "(HTTP 429)")
@@ -402,6 +403,19 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 	}
 	if err := os.Chmod(filepath.Join(dir, "events"), 0o700); err != nil {
 		return err
+	}
+	// Events of an earlier export into this directory would sit beside this
+	// run's records; only this run's failed trials are written below.
+	entries, err := os.ReadDir(filepath.Join(dir, "events"))
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
+			if err := os.Remove(filepath.Join(dir, "events", entry.Name())); err != nil {
+				return err
+			}
+		}
 	}
 	encoded, err := json.MarshalIndent(run, "", "  ")
 	if err != nil {
