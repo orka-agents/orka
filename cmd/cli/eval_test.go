@@ -580,3 +580,43 @@ func TestEvalOutputDropsEventsOfAnEarlierExport(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An events entry that is a symlink would send the mode change, the cleanup
+// and the transcripts to its target, so the export refuses it.
+func TestEvalOutputRefusesASymlinkedEventsDirectory(t *testing.T) {
+	var created map[string]any
+	srv := evalTestServer(t, "Succeeded", &created)
+	defer srv.Close()
+	root := t.TempDir()
+	outside := filepath.Join(root, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "keep.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "out")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "events")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runEvalCommand(t, "eval", "get", "pr-review-x7", "--server", srv.URL, "--token", "tok", "--output-dir", dir)
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("Execute() = %v, want a refusal\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep.json")); err != nil {
+		t.Fatalf("the symlink target lost its file: %v", err)
+	}
+	info, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("the symlink target's mode = %o, want 755", got)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "eval-b.json")); !os.IsNotExist(err) {
+		t.Fatalf("a transcript was written through the symlink: %v", err)
+	}
+}
