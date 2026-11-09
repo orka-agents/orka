@@ -1666,6 +1666,11 @@ func TestWorkspaceDeltaPathDeniedAppliesWorkspaceRelativeRoot(t *testing.T) {
 	if workspaceDeltaPathDenied("website", "docs/intro.md", denied) {
 		t.Fatal("a path outside every denied pattern was denied")
 	}
+	// The pattern names the repository's docs/, not the subpath's: the
+	// change is website/docs/intro.md there, which the publisher allows.
+	if workspaceDeltaPathDenied("website", "docs/intro.md", []string{"docs/**"}) {
+		t.Fatal("a subpath change was matched at its workspace path instead of its repository path")
+	}
 	if workspaceDeltaPathDenied("internal", "admission.go", nil) {
 		t.Fatal("an empty denied list denied a path")
 	}

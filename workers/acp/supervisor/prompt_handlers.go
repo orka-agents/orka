@@ -1573,14 +1573,14 @@ func workspaceDeltaPathAllowed(changedPath string, patterns []string) bool {
 }
 
 // workspaceDeltaPathDenied reports whether a changed path matches a Task
-// deniedPaths pattern. Denied patterns name repository paths, so the path is
-// checked both as the agent sees it and rooted at the workspace subpath.
+// deniedPaths pattern. Denied patterns name repository paths, so a change in a
+// workspace subpath is checked at its repository path, as the publisher checks
+// it.
 func workspaceDeltaPathDenied(workspaceRelativeRoot, changedPath string, patterns []string) bool {
-	if workspacedelta.PathDenied(patterns, changedPath) {
-		return true
+	if root := strings.TrimSpace(workspaceRelativeRoot); root != "" && root != "." {
+		changedPath = path.Join(root, changedPath)
 	}
-	root := strings.TrimSpace(workspaceRelativeRoot)
-	return root != "" && root != "." && workspacedelta.PathDenied(patterns, path.Join(root, changedPath))
+	return workspacedelta.PathDenied(patterns, changedPath)
 }
 
 // workspaceDeltaPathViolation returns the rejection message for one changed
