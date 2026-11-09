@@ -1149,6 +1149,9 @@ func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
 	if err := h.source.RequireLiveConnection(context.Background(), relinked); err == nil {
 		t.Fatal("a link re-consented since dispatch must be refused")
 	}
+	if custody.reads == 0 {
+		t.Fatal("a live link is checked against the grant custody holds")
+	}
 	live := h.reload()
 	live.Finalizers = append(live.Finalizers, "orka.ai/test-hold")
 	if err := h.client.Update(context.Background(), live); err != nil {
@@ -1157,11 +1160,12 @@ func TestRequireLiveConnectionRechecksTheFrozenLink(t *testing.T) {
 	if err := h.client.Delete(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}
+	before := custody.reads
 	if err := h.source.RequireLiveConnection(context.Background(), request); err == nil || !strings.Contains(err.Error(), "being deleted") {
 		t.Fatalf("unlinked: err = %v, want refusal", err)
 	}
-	if custody.reads != 0 {
-		t.Fatalf("custody reads = %d, want none", custody.reads)
+	if custody.reads != before {
+		t.Fatalf("custody reads for a link being deleted = %d, want none", custody.reads-before)
 	}
 }
 
@@ -1214,6 +1218,11 @@ type countingCustody struct {
 func (c *countingCustody) GetConnectorCredential(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorCredential, error) {
 	c.reads++
 	return c.Client.GetConnectorCredential(ctx, ref)
+}
+
+func (c *countingCustody) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	c.reads++
+	return c.Client.GetConnectorCredentialGrant(ctx, ref)
 }
 
 // TestResolveRefusesWritesOnReadOnlyLinksBeforeCustody covers a write tool

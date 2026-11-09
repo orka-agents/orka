@@ -741,8 +741,25 @@ func forwardingPolicySupported(tool *corev1alpha1.Tool, policy *corev1alpha1.Out
 	if tool.Spec.HTTP == nil || tool.Spec.HTTP.Forward == nil {
 		return nil
 	}
-	if policy.Spec.Direct == nil && policy.Spec.Connection == nil && policy.Spec.AgentIdentity == nil {
+	var output *corev1alpha1.OutboundCredentialOutput
+	switch {
+	case policy.Spec.Direct != nil:
+		output = policy.Spec.Direct.Output
+	case policy.Spec.Connection != nil:
+		output = policy.Spec.Connection.Output
+	case policy.Spec.AgentIdentity != nil:
+		output = policy.Spec.AgentIdentity.Output
+	default:
 		return fmt.Errorf("forwarding tool %q needs a Direct, Connection, or AgentIdentity outbound access policy; %q is none", tool.Name, policy.Name)
+	}
+	// Azure Resource Manager reads the credential only as
+	// "Authorization: Bearer <token>", so any other output would expose a
+	// Tool whose every request Azure refuses.
+	if output != nil {
+		header := strings.TrimSpace(output.Header)
+		if (header != "" && !strings.EqualFold(header, "Authorization")) || (output.Prefix != nil && *output.Prefix != "Bearer ") {
+			return fmt.Errorf("forwarding tool %q needs outbound access policy %q to send the credential as \"Authorization: Bearer\"; remove its output header and prefix", tool.Name, policy.Name)
+		}
 	}
 	return nil
 }
