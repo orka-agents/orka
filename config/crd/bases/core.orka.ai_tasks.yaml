@@ -3223,6 +3223,84 @@ spec:
                 description: WebhookDelivered indicates whether the webhook was successfully
                   called
                 type: boolean
+              webhookDelivery:
+                description: |-
+                  WebhookDelivery records the durable state of the signed terminal webhook
+                  notice for spec.webhookURL. Only one notice is pending per Task; a newer
+                  terminal state supersedes it before delivery. No URL, token, or signature
+                  material is recorded.
+                properties:
+                  attempts:
+                    description: |-
+                      Attempts counts claimed delivery attempts, including any attempt
+                      interrupted by a controller restart.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  deliveryID:
+                    description: |-
+                      DeliveryID is the stable idempotency key sent with every attempt of this
+                      notice. Receivers should deduplicate on it.
+                    maxLength: 64
+                    type: string
+                  eventType:
+                    description: EventType is the notice event, such as task.succeeded.
+                    maxLength: 64
+                    type: string
+                  lastAttemptTime:
+                    description: LastAttemptTime is when the latest attempt was claimed.
+                    format: date-time
+                    type: string
+                  lastError:
+                    description: LastError is a bounded, credential-free description
+                      of the latest failure.
+                    maxLength: 256
+                    type: string
+                  lastStatusCode:
+                    description: LastStatusCode is the HTTP status of the latest completed
+                      attempt.
+                    format: int32
+                    type: integer
+                  nextAttemptTime:
+                    description: |-
+                      NextAttemptTime is the earliest time another attempt may be claimed.
+                      While an attempt is in flight it is the lease expiry.
+                    format: date-time
+                    type: string
+                  occurredAt:
+                    description: OccurredAt is the notice creation time carried in
+                      the payload.
+                    format: date-time
+                    type: string
+                  payloadSHA256:
+                    description: |-
+                      PayloadSHA256 is the lowercase hex SHA-256 digest of the exact request
+                      body. A different digest for the same Task means newer state superseded
+                      the pending notice.
+                    maxLength: 64
+                    type: string
+                  state:
+                    description: State is the notice lifecycle state.
+                    enum:
+                    - Pending
+                    - Delivered
+                    - Failed
+                    type: string
+                  superseded:
+                    description: |-
+                      Superseded counts earlier pending notices for this Task that newer state
+                      replaced before they were delivered.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                required:
+                - attempts
+                - deliveryID
+                - eventType
+                - occurredAt
+                - payloadSHA256
+                - state
+                type: object
             type: object
             x-kubernetes-preserve-unknown-fields: true
             x-kubernetes-validations:

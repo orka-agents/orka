@@ -85,7 +85,7 @@ spec:
 | `timeout` | all | Maximum wall-clock duration. Coding-agent Tasks default to `30m`, measured from Task creation, including queueing and runtime admission. |
 | `priority` | all | Queue priority from 0 to 1000, default `500`. Higher runs first. |
 | `retryPolicy` | all | `maxRetries` (default `0`), `backoffMultiplier` (default `2`), and `initialDelay`. |
-| `webhookURL` | all | URL called when the Task completes. |
+| `webhookURL` | all | Public `http(s)` URL, or a Service in the Task's namespace, that receives a signed notice when the Task reaches a terminal phase. Delivery state is in `status.webhookDelivery`. See [Task webhooks](../guides/task-webhooks.md). |
 | `resources` | `ai`, `container` | CPU and memory requests and limits for the worker Pod. Coding-agent Tasks reject custom resources; their pool profile sets them. |
 | `execution` | `ai`, `container`; `workspace` only for `agent` | Runtime class and placement. See [Execution](#execution). |
 | `secretRef` | `ai`, `container` | A Secret for the Task. Container Tasks do not receive it by default; see [Container tasks](../guides/container-tasks.md#other-fields). |
@@ -917,6 +917,7 @@ spec:
 | `review.trigger` | string | No | `push` (default) reviews every new head, with a follow-up review of the new changes and open findings when the head builds on the last reviewed one. `open` reviews each pull request once; later heads need a `review` command, except pull requests automatic repair may fix. |
 | `review.blockingPriority` | string | No | Lowest open finding priority (`P0`–`P3`) that makes the verdict `needs_changes`. Defaults to `P1`. Findings outside a follow-up review's changes block only at `P1` or above. |
 | `review.exhaustive` | bool | No | Repeat a full review on the same head until a pass finds nothing new, at most three passes; only the last pass is published. Follow-up reviews run once. |
+| `review.maxRounds` | int | No | Number of pull request heads in a row that may be reviewed without a passed review. A `needs_changes` review of the head that reaches it becomes `needs_human` with a note asking the author to reconsider the approach, which stops automatic repair of review findings. Reviews of the same head count once. Minimum `1`; unset means no limit. |
 | `review.event` | string | No | Legacy/default review event value included in review task input. It does not publish to GitHub; use `review.publish.event`. Defaults to `COMMENT`. |
 | `review.publish.enabled` | bool | No | Enables controller-owned GitHub pull request review publishing. Defaults to `false`. |
 | `review.publish.mode` | string | No | `summary_only` or `summary_with_inline_findings`. Inline comments are only attempted for changed RIGHT-side diff lines. |
