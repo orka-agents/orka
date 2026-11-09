@@ -62,9 +62,14 @@ data:
           - internal/security/secretscan.go
           - internal/store/**                              # trial, decision and promotion records
           - workers/acp/supervisor/**                      # deniedPaths check
-          - Dockerfile                                     # controller and admission images
+          - go.mod                                         # dependency selection, including replace directives
+          - go.sum
+          - "**/Dockerfile*"                               # image recipes for the controller, workers, publisher and runtimes
+          - .dockerignore
           - workers/acp/images/**                          # ACP runtime images (supervisor)
-          - workers/publisher/Dockerfile                   # publisher image
+          - internal/api/oidc*.go                          # sign-in
+          - internal/api/jwt*.go
+          - internal/providerproxy/**                      # provider credentials
           - api/v1alpha1/**                                # the fields that carry these rules
           - cmd/**                                         # flag wiring and Helm chart sources (cmd/build/helmify/static)
           - config/**                                      # deployment inputs: admission webhooks and policies, manager, network policies
