@@ -243,7 +243,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     taskId,
     overviewActive || waitingForApproval || parkedApprovalId !== undefined,
     approvalRefetchInterval,
-    taskRunning,
+    // An empty or failed read shows no pending approval, so the parked
+    // sign-off itself keeps the poll going.
+    taskRunning || parkedApprovalId !== undefined,
     taskTerminal && !parkedApprovalId,
     task?.metadata.uid,
   )

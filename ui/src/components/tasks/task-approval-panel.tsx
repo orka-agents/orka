@@ -242,12 +242,13 @@ export function TaskApprovalPanel({
   const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
   // Terminal tasks reject decisions, but recovery can still update their approvals.
   const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
-  // A parked sign-off keeps polling until it is decided.
+  // A parked sign-off keeps polling until it is decided, including across an
+  // empty first response or a failed read, which carry no pending approval.
   const { data, isLoading, error, refetch } = useTaskApprovals(
     taskId,
     true,
     5000,
-    taskRunning,
+    taskRunning || parkedApprovalId !== undefined,
     taskTerminal && !parkedApprovalId,
     taskUid,
   )

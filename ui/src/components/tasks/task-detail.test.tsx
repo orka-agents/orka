@@ -672,6 +672,40 @@ describe('TaskDetail', () => {
     expect(approvalRequests).toBeGreaterThan(0)
   })
 
+  it('keeps polling for a parked sign-off the first approvals read did not return', async () => {
+    let approvalRequests = 0
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'parked', namespace: 'default', uid: 'uid-parked' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Succeeded', wait: { kind: 'Approval', state: 'Waiting', references: ['ap-parked'] } },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/approvals', () => {
+        approvalRequests++
+        return HttpResponse.json({
+          namespace: 'default',
+          taskName: 'parked',
+          approvals: approvalRequests === 1
+            ? []
+            : [{ id: 'ap-parked', action: 'Agent sign-off (parked turn)', status: 'pending', createdAt: '2026-01-01T00:00:00Z' }],
+        })
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render(<TaskDetail taskId="parked" />)
+      await waitFor(() => expect(approvalRequests).toBe(1))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_500)
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(await screen.findByRole('tab', { name: 'Approvals 1 pending' })).toBeInTheDocument()
+  })
+
   it('shows a Deleting state instead of an active Delete for a task being deleted', async () => {
     server.use(
       http.get('/api/v1/tasks/:id', () =>
