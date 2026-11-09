@@ -223,6 +223,19 @@ controller:
   dashboard:
     enabled: false
 
+  # Capability evals (EvalRun) and experiments that compare a candidate Agent
+  # with the current one. Off by default.
+  evals:
+    enabled: false
+    # The protected-set ConfigMap, as namespace/name or a name in the release
+    # namespace, whose gate judges experiments and whose caseSets mark case
+    # ConfigMaps as heldOut or train. Empty fails every experiment before its
+    # first trial; plain EvalRuns still run.
+    gateConfigMap: ""
+    # Groups whose members may approve or reject experiments, besides the
+    # decide verb on evalruns (the eval-promoter ClusterRole). Empty refuses
+    # every decision.
+    promoterGroups: []
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:
