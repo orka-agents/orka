@@ -96,6 +96,9 @@ func TestBuiltInRuntimeNativePolicyUnrestrictedCountsOnlyNativeDenies(t *testing
 			"implicit grant, Tool denied":  {disallowed: []string{"azurearm"}, allowBash: true, want: true},
 			"a native tool denied":         {allowed: all, disallowed: []string{"WebSearch"}, allowBash: true},
 			"a native tool denied by case": {allowed: all, disallowed: []string{" bash "}, allowBash: true},
+			"a scoped native deny":         {allowed: all, disallowed: []string{"Read(/workspace/private/**)"}, allowBash: true},
+			"a scoped native deny by case": {allowed: all, disallowed: []string{" bash (git push:*)"}, allowBash: true},
+			"a scoped deny of a Tool":      {allowed: all, disallowed: []string{"azurearm(/subscriptions/**)"}, allowBash: true, want: true},
 			"Bash gated off":               {allowed: all, disallowed: []string{"azurearm:write"}},
 			"a native tool not allowed":    {allowed: []string{"Read", "azurearm"}, disallowed: []string{"azurearm:write"}, allowBash: true},
 		} {

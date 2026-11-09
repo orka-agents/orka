@@ -60,10 +60,11 @@ func IsBuiltInRuntimeNativeTool(provider, name string) bool {
 
 // BuiltInRuntimeNativePolicyUnrestricted compares only provider-native grants.
 // A full native grant remains unrestricted when brokered tools are added; an
-// explicit empty allowlist remains deny-all. Denying a provider-native tool
-// narrows the policy. Denying any other tool, such as a brokered Tool or a
-// forwarding Tool's write tool, does not: the MCP policy enforces that deny,
-// and the provider's own tools are untouched.
+// explicit empty allowlist remains deny-all. Denying a provider-native tool,
+// whole or scoped as in "Read(/workspace/private/**)", narrows the policy.
+// Denying any other tool, such as a brokered Tool or a forwarding Tool's
+// write tool, does not: the MCP policy enforces that deny, and the provider's
+// own tools are untouched.
 func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed []string, allowBash bool) bool {
 	if !allowBash {
 		return false
@@ -73,7 +74,7 @@ func BuiltInRuntimeNativePolicyUnrestricted(provider string, allowed, disallowed
 		return false
 	}
 	for _, denied := range disallowed {
-		denied = strings.TrimSpace(denied)
+		denied = builtInRuntimeToolBaseName(denied)
 		if slices.ContainsFunc(native, func(name string) bool { return strings.EqualFold(name, denied) }) {
 			return false
 		}
