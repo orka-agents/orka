@@ -337,7 +337,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           />
           <TaskStatusBadge phase={task.status?.phase} />
           <TaskStateBadges task={task} />
-          <PRStatusBadge annotations={task.metadata.annotations} />
+          <PRStatusBadge receipt={task.status?.delivery?.prReceipt} />
           {relatedTaskName && (
             <p className="w-full text-sm text-muted-foreground">
               {forkSourceName ? 'Forked from' : 'Child of'}{' '}
