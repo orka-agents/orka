@@ -440,7 +440,16 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 	if message, ok := requestedTaskCancellation(task); ok {
-		return stopThenCascade(r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message))
+		result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+		// Recording the stop does not end a native Task's Job. It is deleted
+		// here, before the walk, so a large tree never keeps the cancelled
+		// container running; the next reconcile repeats a cleanup that fails.
+		if err == nil && task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			if _, cleanupErr := r.cleanupTerminalTaskJob(ctx, task); cleanupErr != nil {
+				log.Error(cleanupErr, "failed to clean up cancelled task Job")
+			}
+		}
+		return stopThenCascade(result, err)
 	}
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
