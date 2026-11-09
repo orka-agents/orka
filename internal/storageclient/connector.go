@@ -442,6 +442,10 @@ func (c *Client) GetConnectorCredential(ctx context.Context, ref store.Connector
 // scopes come from the sealed record, which is opened, checked against the
 // column, and then dropped.
 func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.ConnectorCredentialRef) (store.ConnectorGrant, error) {
+	keys, err := c.activeCustody()
+	if err != nil {
+		return store.ConnectorGrant{}, err
+	}
 	if err := ref.Validate(); err != nil {
 		return store.ConnectorGrant{}, err
 	}
@@ -455,7 +459,10 @@ func (c *Client) GetConnectorCredentialGrant(ctx context.Context, ref store.Conn
 	if custody.Credential == nil {
 		return store.ConnectorGrant{}, store.ErrNotFound
 	}
-	credential, err := c.GetConnectorCredential(ctx, ref)
+	// The grant comes from the record this read returned: a second read
+	// could return material from before a disconnect that committed after
+	// the tombstone check.
+	credential, err := openStoredConnectorCredential(keys, ref, custody.Credential)
 	if err != nil {
 		return store.ConnectorGrant{}, err
 	}
