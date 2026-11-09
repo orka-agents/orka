@@ -61,6 +61,19 @@ type oidcDiscoveryDocument struct {
 
 var errOIDCAuthorization = errors.New("OIDC authorization failed")
 
+// oidcSubjectNotAllowedError marks a token that passed verification but whose
+// subject is not on the allow-list. The caller proved it holds that subject,
+// so the API may name it back to them.
+type oidcSubjectNotAllowedError struct {
+	Subject string
+}
+
+func (e *oidcSubjectNotAllowedError) Error() string {
+	return fmt.Sprintf("%v: subject %q is not authorized", errOIDCAuthorization, e.Subject)
+}
+
+func (e *oidcSubjectNotAllowedError) Unwrap() error { return errOIDCAuthorization }
+
 func validateParsedOIDCToken(ctx context.Context, parsed *parsedJWT, cfg OIDCConfig) (*UserInfo, error) {
 	jwksURL := cfg.JWKSURL
 	if jwksURL == "" {
@@ -132,7 +145,7 @@ func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
 		}
 	}
 
-	return fmt.Errorf("%w: subject %q is not authorized", errOIDCAuthorization, claims.Subject)
+	return &oidcSubjectNotAllowedError{Subject: claims.Subject}
 }
 
 func wildcardMatch(pattern, value string) (bool, error) {
