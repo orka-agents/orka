@@ -57,13 +57,20 @@ func ParseProposal(data []byte) (*Proposal, error) {
 // DigestFenceInfo in a scout's final answer. Zero or several such blocks are
 // errors: a fetched page that smuggles in its own block must not be able to
 // replace or shadow the scout's digest. Any longer backtick fence or tilde
-// fence is an error too. Other three-backtick blocks are skipped whole, so a
-// tagged line quoted inside one is never read as the digest.
+// fence is an error too, and so is an indented backtick fence, which Markdown
+// may still open or close a block with. Other three-backtick blocks are
+// skipped whole, so a tagged line quoted inside one is never read as the
+// digest.
 func ExtractDigest(answer string) ([]byte, error) {
 	if len(answer) > 4*MaxDigestBytes {
 		return nil, fmt.Errorf("answer exceeds %d bytes", 4*MaxDigestBytes)
 	}
 	lines := strings.Split(strings.ReplaceAll(answer, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		if trimmed := strings.TrimLeft(line, " \t"); trimmed != line && strings.HasPrefix(trimmed, "```") {
+			return nil, errors.New("answer must not contain indented backtick code fences")
+		}
+	}
 	var body []string
 	found := 0
 	for index := 0; index < len(lines); index++ {

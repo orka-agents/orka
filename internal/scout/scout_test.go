@@ -392,7 +392,13 @@ func TestExtractDigest(t *testing.T) {
 		// leaving no digest block.
 		"quoted in example fence": "```markdown\n```orka-scout-digest\n" + body + "\n```\n",
 		"unclosed other fence":    "```json\n" + body,
-		"oversized":               strings.Repeat("a", 4*MaxDigestBytes+1),
+		// Markdown opens and closes fences indented by up to three spaces,
+		// so an indented fence could quote a tagged line or hide a second
+		// digest block.
+		"quoted in indented fence": "  ```markdown\n```orka-scout-digest\n" + body + "\n```\n  ```\n",
+		"indented second block":    answer + "\n   ```orka-scout-digest\n{}\n   ```\n",
+		"indented closing fence":   "```text\na\n  ```\n```\n```orka-scout-digest\n" + body + "\n```\n```\n```\n",
+		"oversized":                strings.Repeat("a", 4*MaxDigestBytes+1),
 	} {
 		if _, err := ExtractDigest(input); err == nil {
 			t.Errorf("ExtractDigest(%s) = nil error, want error", name)
