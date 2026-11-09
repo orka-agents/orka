@@ -14,6 +14,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -208,6 +209,43 @@ func TestEvalExperimentFailsWithoutImprovement(t *testing.T) {
 	if experiment.Result != corev1alpha1.EvalExperimentFailed ||
 		!strings.Contains(strings.Join(experiment.Reasons, "; "), "rose by 0 points") {
 		t.Fatalf("experiment = %+v", experiment)
+	}
+}
+
+// failingCasesReader fails reads of the cases ConfigMap while fail is set,
+// as an API server timeout would.
+type failingCasesReader struct {
+	client.Reader
+	fail bool
+}
+
+func (r *failingCasesReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*corev1.ConfigMap); ok && r.fail && key.Name == "cases" {
+		return apierrors.NewServiceUnavailable("the API server is restarting")
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// An API error while rereading the tagged cases is retried; it neither
+// decides the experiment nor spends its held-out attempt.
+func TestEvalExperimentRetriesATransientCaseReadError(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	reader := &failingCasesReader{Reader: env.reconciler.uncachedReader(), fail: true}
+	env.reconciler.APIReader = reader
+	_, err := env.reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: evalTestNamespace, Name: "candidate"}})
+	if !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("Reconcile() error = %v, want the API error back for a retry", err)
+	}
+	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPending {
+		t.Fatalf("result after the API error = %q, want Pending", got)
+	}
+	reader.fail = false
+	env.reconcileRun("candidate")
+	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPassed {
+		t.Fatalf("result after the retry = %q, want Passed", got)
 	}
 }
 
