@@ -29,6 +29,12 @@ const (
 	// metadata and the copier's completion marker.
 	runtimePoolSkillVolumeBytes int64 = harnessv2.MaxRuntimeSkillTotalBytes +
 		harnessv2.MaxRuntimeSkillEntries*runtimePoolToolboxBlockBytes + 4<<20
+
+	// runtimePoolSkillSessionCopyBytes bounds the private copy of one skill
+	// that every resident session receives in the sessions volume: the content
+	// limit and one filesystem block per permitted entry.
+	runtimePoolSkillSessionCopyBytes int64 = harnessv2.MaxRuntimeSkillTotalBytes +
+		harnessv2.MaxRuntimeSkillEntries*runtimePoolToolboxBlockBytes
 )
 
 var runtimePoolSkillVolumeSizeLimit = resource.MustParse(strconv.FormatInt(runtimePoolSkillVolumeBytes, 10))
@@ -75,9 +81,10 @@ func runtimePoolSkillsFromEnvironment(environment map[string]string) ([]harnessv
 // mounts, and environment to a rendered runtime Pod template. It runs after
 // applyRuntimePoolToolboxTemplate; toolboxesApplied reports whether that call
 // already added the shared mount method, handoff, pull secrets, and node
-// selector. It is a no-op without skills, so pools that predate the feature
+// selector. maxResidentSessions sizes the storage for the per-session skill
+// copies. It is a no-op without skills, so pools that predate the feature
 // render byte-for-byte the same template.
-func applyRuntimePoolSkillTemplate(template *corev1.PodTemplateSpec, skills []harnessv2.RuntimeSkill, toolboxesApplied bool, policy ACPToolboxPolicy) error {
+func applyRuntimePoolSkillTemplate(template *corev1.PodTemplateSpec, skills []harnessv2.RuntimeSkill, maxResidentSessions int32, toolboxesApplied bool, policy ACPToolboxPolicy) error {
 	if template == nil || len(skills) == 0 {
 		return nil
 	}
@@ -124,10 +131,31 @@ func applyRuntimePoolSkillTemplate(template *corev1.PodTemplateSpec, skills []ha
 	// bound with either mount method, or kubelet restarts the container
 	// before a stalled read reports its classified failure.
 	extendRuntimePoolStartupProbe(runtime, skill.StartupCheckTimeout)
+	reserveRuntimePoolSkillSessionCopies(template, runtime, len(skills), maxResidentSessions)
 	if !toolboxesApplied {
 		applyRuntimePoolImagePullPolicy(template, policy)
 	}
 	return nil
+}
+
+// reserveRuntimePoolSkillSessionCopies raises the sessions volume limit and
+// the runtime container's ephemeral storage by the most the per-session skill
+// copies can occupy at full resident capacity, with either mount method.
+// Without it a pool with many residents and large skills would exhaust the
+// fixed sessions volume on skill copies alone, and exceeding an emptyDir limit
+// evicts the Pod with every session in it.
+func reserveRuntimePoolSkillSessionCopies(template *corev1.PodTemplateSpec, runtime *corev1.Container, skills int, maxResidentSessions int32) {
+	bytes := int64(max(maxResidentSessions, 1)) * int64(skills) * runtimePoolSkillSessionCopyBytes
+	for i := range template.Spec.Volumes {
+		volume := &template.Spec.Volumes[i]
+		if volume.Name != runtimePoolSessionsVolume || volume.EmptyDir == nil || volume.EmptyDir.SizeLimit == nil {
+			continue
+		}
+		limit := volume.EmptyDir.SizeLimit.DeepCopy()
+		limit.Add(*resource.NewQuantity(bytes, resource.BinarySI))
+		volume.EmptyDir.SizeLimit = &limit
+	}
+	addEphemeralStorage(&runtime.Resources, bytes)
 }
 
 func applyRuntimePoolSkillCopyTemplate(template *corev1.PodTemplateSpec, runtime *corev1.Container, skills []harnessv2.RuntimeSkill) {

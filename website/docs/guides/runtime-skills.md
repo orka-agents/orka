@@ -43,6 +43,9 @@ resource and `spec.skills`; see [Agents, skills, and tools](./agents-skills-and-
   session; the copy belongs to the session's unique UID and GID and is deleted with the
   session. OpenCode's file-editing tools are denied in the skill folders. A session that
   may run shell commands can still change its own copy, which no other session sees.
+  Orka reserves room for the copies: for every skill, 5 MiB per resident session the
+  pool allows (`maxResidentSessions`) is added to the session volume limit and to the
+  runtime Pod's ephemeral-storage request and limit.
 - **The feature is off by default.** A skill that can't be set up fails the Task with a
   stable reason; an agent never starts without the skills it was promised.
 

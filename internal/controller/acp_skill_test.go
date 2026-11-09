@@ -519,6 +519,66 @@ func TestRuntimePoolSkillStartupProbeOutlastsSkillCheck(t *testing.T) {
 	}
 }
 
+// TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage covers the
+// private skill copies every resident session receives under /sessions. The
+// sessions volume and the container's ephemeral storage must grow with the
+// pool's resident capacity and skill count, with either mount method, or a
+// pool at capacity exhausts the fixed volume on skill copies alone.
+func TestRuntimePoolSkillSessionCopiesAreCountedInSessionStorage(t *testing.T) {
+	sessionsLimit := func(template corev1.PodTemplateSpec) int64 {
+		for _, volume := range template.Spec.Volumes {
+			if volume.Name == runtimePoolSessionsVolume {
+				return volume.EmptyDir.SizeLimit.Value()
+			}
+		}
+		t.Fatal("template has no sessions volume")
+		return 0
+	}
+	ephemeral := func(list corev1.ResourceList) int64 {
+		quantity := list[corev1.ResourceEphemeralStorage]
+		return quantity.Value()
+	}
+	render := func(residents int32, policy ACPToolboxPolicy, skills ...harnessv2.RuntimeSkill) corev1.PodTemplateSpec {
+		pool := runtimePoolSkillTestObject(t, skills...)
+		pool.Spec.Capacity = &corev1alpha1.RuntimePoolCapacitySpec{MaxResidentSessions: residents, MaxRunningPrompts: 1}
+		_, template := renderToolboxTemplate(t, pool, policy)
+		return template
+	}
+	const baseLimit = int64(4 << 30)
+	perSkill := int64(harnessv2.MaxRuntimeSkillTotalBytes + harnessv2.MaxRuntimeSkillEntries*4096)
+	skills := runtimePoolTestSkills()
+	imagePolicy := acpTestSkillPolicy()
+	imagePolicy.MountMethod = ACPToolboxMountImageVolume
+
+	for _, residents := range []int32{10, 129} {
+		if got := sessionsLimit(render(residents, acpTestSkillPolicy())); got != baseLimit {
+			t.Fatalf("%d residents without skills: sessions volume limit %d, want the default %d", residents, got, baseLimit)
+		}
+	}
+	for name, policy := range map[string]ACPToolboxPolicy{"copy": acpTestSkillPolicy(), "imageVolume": imagePolicy} {
+		small, large := render(10, policy, skills...), render(129, policy, skills...)
+		for residents, template := range map[int64]corev1.PodTemplateSpec{10: small, 129: large} {
+			if got, want := sessionsLimit(template), baseLimit+residents*int64(len(skills))*perSkill; got != want {
+				t.Fatalf("%s, %d residents: sessions volume limit %d, want %d", name, residents, got, want)
+			}
+		}
+		// Everything else in the two templates is equal, so the difference in
+		// ephemeral storage is exactly the extra residents' skill copies.
+		want := int64(129-10) * int64(len(skills)) * perSkill
+		smallResources, largeResources := small.Spec.Containers[0].Resources, large.Spec.Containers[0].Resources
+		if got := ephemeral(largeResources.Requests) - ephemeral(smallResources.Requests); got != want {
+			t.Fatalf("%s: ephemeral-storage request grew by %d for 119 more residents, want %d", name, got, want)
+		}
+		if got := ephemeral(largeResources.Limits) - ephemeral(smallResources.Limits); got != want {
+			t.Fatalf("%s: ephemeral-storage limit grew by %d for 119 more residents, want %d", name, got, want)
+		}
+		// The sessions volume must fit inside the container's own storage limit.
+		if limit := ephemeral(largeResources.Limits); limit < sessionsLimit(large) {
+			t.Fatalf("%s: ephemeral-storage limit %d is below the sessions volume limit %d", name, limit, sessionsLimit(large))
+		}
+	}
+}
+
 func TestRuntimePoolSkillAdmissionFailsClosed(t *testing.T) {
 	pool := runtimePoolSkillTestObject(t, runtimePoolTestSkills()...)
 	r := runtimePoolTestReconciler(t, runtimePoolTestScheme(t), nil, pool)

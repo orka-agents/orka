@@ -2535,7 +2535,7 @@ func (r *RuntimePoolReconciler) runtimePoolPodTemplate(
 	// unreachable after runtimePoolToolboxAdmission; the template then omits
 	// the toolbox projection and the supervisor's digest check fails closed.
 	_ = applyRuntimePoolToolboxTemplate(&template, cfg.profile.Toolboxes, r.ToolboxPolicy)
-	_ = applyRuntimePoolSkillTemplate(&template, cfg.profile.Skills, len(cfg.profile.Toolboxes) > 0, r.ToolboxPolicy)
+	_ = applyRuntimePoolSkillTemplate(&template, cfg.profile.Skills, cfg.maxResidentSessions, len(cfg.profile.Toolboxes) > 0, r.ToolboxPolicy)
 	template.Annotations[runtimePoolTemplateRevisionAnnotation] = runtimePoolPodTemplateRevision(template)
 	return template
 }
