@@ -287,6 +287,33 @@ func TestControllerServiceAccountProtectionDeniesExecInControllerPods(t *testing
 	}
 }
 
+// TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName
+// covers a controller Deployment whose name is cut short in its Pods' names:
+// a generated Pod name keeps 58 characters of "<deployment>-<hash>-", so a
+// name of 58 characters or more loses its trailing hyphen there.
+func TestControllerServiceAccountProtectionDeniesExecUnderALongDeploymentName(t *testing.T) {
+	kind := schema.GroupVersionKind{Version: "v1", Kind: "PodExecOptions"}
+	pods := controllerSAResources["Pod"]
+	options := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "PodExecOptions", "command": []any{"sh"}}}
+	worker := &user.DefaultInfo{Name: aiWorkerUsername, Groups: []string{"system:serviceaccounts", "system:authenticated"}}
+	for _, length := range []int{57, 58, 63} {
+		deployment := strings.Repeat("d", length-len("-controller")) + "-controller"
+		policy := compileAdmissionPolicy(t, "controller_serviceaccount_protection.yaml", strings.NewReplacer(
+			"ORKA_NAMESPACE", admissionTestNamespace, "CONTROLLER_SA", protectedControllerSA, "CONTROLLER_DEPLOYMENT", deployment,
+		))
+		// The API server names the Pod: the first 58 characters of the
+		// ReplicaSet's name and a hyphen, then five random characters.
+		base := deployment + "-7d947dfbff-"
+		if len(base) > 58 {
+			base = base[:58]
+		}
+		require.False(t, policy.admitsAs(t, kind, pods, base+"nqbs8", apiserveradmission.Connect, worker, "exec", options, nil),
+			"exec in a Pod of a %d-character Deployment", length)
+		require.True(t, policy.admitsAs(t, kind, pods, "other-"+base[:40]+"-nqbs8", apiserveradmission.Connect, worker, "exec", options, nil),
+			"exec in an unrelated Pod beside a %d-character Deployment", length)
+	}
+}
+
 func TestControllerServiceAccountProtectionTreatsDefaultAsAnAccount(t *testing.T) {
 	policy := compileControllerServiceAccountProtection(t, admissionTestNamespace, "default")
 	job := controllerSAWorkload("Job", "j", "", "")
