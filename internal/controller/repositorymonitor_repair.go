@@ -309,6 +309,11 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 			return true, 0, err
 		}
 		if !reconcile {
+			// A halted command must not mark the shared PR item, which the
+			// action it was cancelled for or coalesced into still owns.
+			if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || halted {
+				return true, 0, err
+			}
 			if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 				item.RepairState = repositoryMonitorRepairPhaseFailed
 				item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -316,9 +321,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 					return true, 0, err
 				}
 				return true, 0, r.Store.UpsertMonitorItem(ctx, item)
-			}
-			if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-				return true, 0, err
 			}
 			reason, err := r.repositoryMonitorPolicyRepairWithdrawnReason(ctx, monitor, command, owner, repository, pr)
 			if err != nil {
@@ -330,6 +332,10 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 		}
 		return r.tryProcessPullRequestUpdateBranchCommand(ctx, monitor, run, command, owner, repository, pr, item)
 	case repositoryMonitorCommandIntentFix, repositoryMonitorCommandIntentFixCI:
+		// As for update_branch: a halted command leaves the PR item alone.
+		if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || halted {
+			return true, 0, err
+		}
 		if blockedLabel := repositoryMonitorBlockedLabel(monitor.Spec, pr.Labels); blockedLabel != "" {
 			item.RepairState = repositoryMonitorRepairPhaseFailed
 			item.SkipReason = repositoryMonitorSkipReasonBlockedLabel
@@ -337,9 +343,6 @@ func (r *RepositoryMonitorReconciler) tryProcessPullRequestCommandRun(ctx contex
 				return true, 0, err
 			}
 			return true, 0, r.Store.UpsertMonitorItem(ctx, item)
-		}
-		if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, repositoryMonitorRepairWorkflowActionKind(command.Intent)); err != nil || cancelled {
-			return true, 0, err
 		}
 		monitoredRepo := owner + "/" + repository
 		currentRepairJobID := "repair-" + repositoryMonitorShortHash(command.ID)

@@ -6974,6 +6974,44 @@ func TestRepositoryMonitorIssueCommandRunStopsForCoalescedAction(t *testing.T) {
 	}
 }
 
+// A halted fix command (cancelled, or coalesced into another action) must not
+// mark the shared PR item failed when the PR carries a blocked label: the item
+// belongs to the action that is still doing the work.
+func TestRepositoryMonitorHaltedRepairCommandLeavesBlockedPullRequestItem(t *testing.T) {
+	for _, status := range []string{repositoryMonitorWorkActionStatusCancelled, repositoryMonitorWorkActionStatusCompleted} {
+		t.Run(status, func(t *testing.T) {
+			ctx := context.Background()
+			monitorStore := setupControllerSQLiteStore(t)
+			monitor := &corev1alpha1.RepositoryMonitor{ObjectMeta: metav1.ObjectMeta{Name: "halted-repair", Namespace: defaultNS}}
+			monitor.Spec.Policy.ProtectedLabels = []string{"hold"}
+			pr := repositoryMonitorPullRequest{Number: 12, HeadSHA: "head-12", Labels: []string{"hold"}}
+			item := &store.MonitorItem{MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, ItemKey: "12", Number: 12, HeadSHA: "head-12", RepairState: repositoryMonitorRepairPhaseQueued}
+			command := &store.CommandEvent{ID: "cmd-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, Kind: repositoryMonitorPullRequestKind, Number: 12, Intent: repositoryMonitorCommandIntentFix, HeadSHA: "head-12", Status: "accepted", CreatedAt: time.Now()}
+			if err := monitorStore.CreateCommandEvent(ctx, command); err != nil {
+				t.Fatalf("CreateCommandEvent() error = %v", err)
+			}
+			desiredAction := store.RepositoryMonitorDesiredActionForActionKind(repositoryMonitorRepairWorkflowActionKind(command.Intent))
+			actionID := store.RepositoryMonitorWorkActionID(command.ID, desiredAction)
+			if err := monitorStore.CreateWorkAction(ctx, &store.WorkAction{ID: actionID, MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, DesiredAction: desiredAction, Status: status, CreatedAt: time.Now()}); err != nil {
+				t.Fatalf("CreateWorkAction() error = %v", err)
+			}
+			reconciler := &RepositoryMonitorReconciler{Store: monitorStore}
+			run := &store.MonitorRun{ID: "run-fix-halted", MonitorNamespace: defaultNS, MonitorName: monitor.Name, CommandEventID: command.ID, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: 12}
+
+			handled, created, err := reconciler.tryProcessPullRequestCommandRun(ctx, monitor, run, "orka-agents", "orka", pr, item)
+			if err != nil || !handled || created != 0 {
+				t.Fatalf("tryProcessPullRequestCommandRun() handled=%v created=%d err=%v", handled, created, err)
+			}
+			if item.RepairState != repositoryMonitorRepairPhaseQueued || item.SkipReason != "" {
+				t.Fatalf("item RepairState=%q SkipReason=%q, want the item left to its active action", item.RepairState, item.SkipReason)
+			}
+			if _, err := monitorStore.GetMonitorItem(ctx, defaultNS, monitor.Name, repositoryMonitorPullRequestKind, "12"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("GetMonitorItem() error = %v, want no item written for a halted command", err)
+			}
+		})
+	}
+}
+
 func TestRepositoryMonitorTransientCommandRunStopsAfterRetryBudget(t *testing.T) {
 	ctx := context.Background()
 	monitorStore := setupControllerSQLiteStore(t)
