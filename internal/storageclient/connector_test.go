@@ -427,7 +427,7 @@ type disconnectingStore struct {
 func (s *disconnectingStore) ReadConnectorCustody(ctx context.Context, uid string) (*storagev1.ConnectorCustody, error) {
 	custody, err := s.Store.ReadConnectorCustody(ctx, uid)
 	if err == nil && s.armed && !custody.Tombstoned {
-		if tombstoneErr := s.Store.TombstoneConnectorCustody(ctx, uid); tombstoneErr != nil {
+		if tombstoneErr := s.TombstoneConnectorCustody(ctx, uid); tombstoneErr != nil {
 			return nil, tombstoneErr
 		}
 	}
