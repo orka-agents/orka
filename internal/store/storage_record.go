@@ -117,7 +117,10 @@ type StorageRecordStore interface {
 	// refused while a hold is recorded.
 	RecordStorageWatermark(ctx context.Context, fence ControllerEpochFence, datasetID string, watermark int64, at time.Time) error
 	// HoldStorage records hold, with the StorageRecoveryRequired condition,
-	// unless a hold is already recorded, and returns the recorded one.
+	// unless a hold is already recorded, and returns the recorded one. A
+	// control-store change in progress finishes before the hold is recorded,
+	// and every later one is refused with a StorageHoldError until the hold
+	// is released.
 	HoldStorage(ctx context.Context, fence ControllerEpochFence, hold StorageRecoveryHold) (StorageRecoveryHold, error)
 	// ReleaseStorageHold clears the hold whose ID is id, which an operator
 	// has acknowledged, and replaces every acknowledgement with acks, in one

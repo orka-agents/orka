@@ -932,7 +932,11 @@ write, control-store changes stop, no Task Job is created and no Task reports
 success; reads continue. The storage client checks the fence again before
 each retry, so a write whose first attempt came before the hold is not
 retried into the held dataset: it is refused, or resolved when its outcome
-is unknown. Task Jobs also
+is unknown. The hold is recorded under the controller epoch mutation
+interlock that control-store changes take, and that interlock refuses every
+change while a hold is recorded, so a change in progress finishes before the
+hold and none commits after it, also under a fence obtained before the hold.
+Task Jobs also
 wait while any contract's fence is closed, so a restarted controller starts no
 work before every dataset passed its takeover checks, and `CurrentFence` waits
 whenever the state fence is closed. The `orka_storage_recovery_hold` metric is 1 with the reason.
