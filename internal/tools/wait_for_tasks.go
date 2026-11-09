@@ -224,9 +224,14 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	allTerminal := false
-	// A missing continuation is final only when a second poll confirms it,
-	// so a cache that has not yet observed a just-created continuation does
-	// not end the wait.
+	// A chain that cannot be followed is final only once an authoritative
+	// read agrees: k8sClient may be an informer cache, and two cache misses
+	// do not prove a continuation is gone. Without an authoritative reader, a
+	// missing continuation is final when a second poll confirms it.
+	var authoritative client.Reader
+	if toolCtx != nil {
+		authoritative = toolCtx.PolicyReader
+	}
 	missingContinuation := make(map[string]bool, len(waitArgs.Tasks))
 	for {
 		allTerminal = true
@@ -247,9 +252,14 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			// Task of that chain and treat the child as finished only when
 			// that Task is terminal and holds no active wait.
 			tail, chainErr := taskwait.ResolveTail(ctx, t.k8sClient, &task)
+			verified := false
+			if chainErr != nil && authoritative != nil && waitChainUnfollowable(chainErr) {
+				tail, verified, chainErr = resolveWaitTailAuthoritatively(ctx, authoritative, &task)
+			}
 			if chainErr != nil {
 				missing := apierrors.IsNotFound(chainErr)
-				confirmed := errors.Is(chainErr, taskwait.ErrChainBroken) || (missing && missingContinuation[taskName])
+				// An unverified re-read never returns an unfollowable error.
+				confirmed := waitChainUnfollowable(chainErr) && (!missing || verified || missingContinuation[taskName])
 				missingContinuation[taskName] = missing
 				reportBrokenWaitChain(results[taskName], &task, chainErr, confirmed)
 				if !confirmed {
@@ -387,6 +397,37 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 	}
 
 	return string(data), nil
+}
+
+// waitChainUnfollowable reports an error that, once confirmed, means the chain
+// has no Task left to follow: a missing continuation or a broken link.
+func waitChainUnfollowable(err error) bool {
+	return apierrors.IsNotFound(err) || errors.Is(err, taskwait.ErrChainBroken)
+}
+
+// resolveWaitTailAuthoritatively follows task's chain again from reader, which
+// bypasses the informer cache. verified is true when the chain was followed, or
+// failed, from the same Task incarnation the caller authorized; only then does
+// the returned error describe the chain.
+func resolveWaitTailAuthoritatively(
+	ctx context.Context,
+	reader client.Reader,
+	task *corev1alpha1.Task,
+) (tail *corev1alpha1.Task, verified bool, err error) {
+	current := &corev1alpha1.Task{}
+	if getErr := reader.Get(ctx, client.ObjectKeyFromObject(task), current); getErr != nil {
+		// Not wrapped: a failed read of the Task itself says nothing about
+		// its continuation.
+		return nil, false, fmt.Errorf("re-read task %s/%s: %v", task.Namespace, task.Name, getErr)
+	}
+	if current.UID != task.UID {
+		return nil, false, fmt.Errorf("task %s/%s was replaced while its continuation chain was resolved", task.Namespace, task.Name)
+	}
+	tail, err = taskwait.ResolveTail(ctx, reader, current)
+	if err != nil {
+		return nil, true, err
+	}
+	return tail, true, nil
 }
 
 // reportBrokenWaitChain describes a child whose continuation chain cannot be

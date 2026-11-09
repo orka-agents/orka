@@ -9,6 +9,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -197,5 +199,114 @@ func TestWaitForTasksReportsAReplacedContinuationAsAFinalChainError(t *testing.T
 	got := result.Results[0]
 	if !result.Completed || got.Phase != taskPhaseErrorString || got.Phase == string(corev1alpha1.TaskPhaseSucceeded) {
 		t.Fatalf("a replaced continuation must be a final chain error, got completed=%v %+v", result.Completed, got)
+	}
+}
+
+// resumedWaitChild returns a child that parked and resumed into child-next,
+// and that continuation.
+func resumedWaitChild() (*corev1alpha1.Task, *corev1alpha1.Task) {
+	child := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", Namespace: testNamespace, UID: "uid-child"},
+		Status: corev1alpha1.TaskStatus{
+			Phase: corev1alpha1.TaskPhaseSucceeded,
+			Wait: &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateResumed, Kind: corev1alpha1.TaskWaitKindTimer,
+				ContinuationTaskName: "child-next", ContinuationTaskUID: "uid-next",
+			},
+		},
+	}
+	next := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child-next", Namespace: testNamespace, UID: "uid-next",
+			Annotations: map[string]string{labels.AnnotationContinuationOfUID: "uid-child"},
+		},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded, Message: "continued work finished"},
+	}
+	return child, next
+}
+
+// runWaitForTasksWithPolicyReader waits on "child" through cache while the
+// tool context supplies authoritative as the uncached reader.
+func runWaitForTasksWithPolicyReader(t *testing.T, cache client.Client, authoritative client.Reader, timeout string) WaitForTasksResult {
+	t.Helper()
+	previous := waitForTasksPollInterval
+	waitForTasksPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() { waitForTasksPollInterval = previous })
+	ctx := WithToolContext(context.Background(), &ToolContext{Client: cache, PolicyReader: authoritative, Namespace: testNamespace})
+	out, err := NewWaitForTasksTool(cache).Execute(ctx, json.RawMessage(`{"tasks":["child"],"timeout":"`+timeout+`"}`))
+	if err != nil {
+		t.Fatalf("wait_for_tasks: %v", err)
+	}
+	var result WaitForTasksResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestWaitForTasksFollowsAContinuationOnlyTheAuthoritativeReaderSees(t *testing.T) {
+	for name, cached := range map[string]func(child *corev1alpha1.Task) []client.Object{
+		// The cache has not observed the continuation at all.
+		"missing from the cache": func(child *corev1alpha1.Task) []client.Object { return []client.Object{child} },
+		// The cache still holds another Task under the continuation's name.
+		"stale in the cache": func(child *corev1alpha1.Task) []client.Object {
+			return []client.Object{child, &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "child-next", Namespace: testNamespace, UID: "uid-older"},
+				Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseFailed},
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			child, next := resumedWaitChild()
+			cache := newFakeClient(cached(child.DeepCopy())...)
+			result := runWaitForTasksWithPolicyReader(t, cache, newFakeClient(child, next), "5s")
+			got := result.Results[0]
+			if !result.Completed || got.Phase != string(corev1alpha1.TaskPhaseSucceeded) ||
+				got.ContinuationTask != "child-next" || got.Result != "continued work finished" {
+				t.Fatalf("the wait must report the live continuation, got completed=%v %+v", result.Completed, got)
+			}
+		})
+	}
+}
+
+func TestWaitForTasksConfirmsABrokenChainOnlyFromAnAuthoritativeRead(t *testing.T) {
+	child, _ := resumedWaitChild()
+
+	// The authoritative reader agrees the continuation is gone: final.
+	result := runWaitForTasksWithPolicyReader(t, newFakeClient(child.DeepCopy()), newFakeClient(child.DeepCopy()), "5s")
+	got := result.Results[0]
+	if !result.Completed || got.Phase != taskPhaseErrorString || !strings.Contains(got.Result, "continuation chain is broken") {
+		t.Fatalf("an authoritatively missing continuation must be a final chain error, got completed=%v %+v", result.Completed, got)
+	}
+
+	unavailable := func(names ...string) client.Reader {
+		return newFakeClientWithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if slices.Contains(names, key.Name) {
+					return errors.New("apiserver unavailable")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}, child.DeepCopy())
+	}
+	replaced := child.DeepCopy()
+	replaced.UID = "uid-recreated"
+	for name, authoritative := range map[string]client.Reader{
+		"the Task cannot be re-read":         unavailable("child"),
+		"the continuation cannot be read":    unavailable("child-next"),
+		"the Task was deleted":               newFakeClient(),
+		"the Task was replaced by a new one": newFakeClient(replaced),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Many cached polls miss the continuation; none of them is proof.
+			result := runWaitForTasksWithPolicyReader(t, newFakeClient(child.DeepCopy()), authoritative, "200ms")
+			got := result.Results[0]
+			if result.Completed || strings.Contains(got.Result, "continuation chain is broken") {
+				t.Fatalf("an unconfirmed break must keep the wait open, got completed=%v %+v", result.Completed, got)
+			}
+			if got.Phase != taskPhaseErrorString {
+				t.Fatalf("the unresolved chain must be reported as an error, got %+v", got)
+			}
+		})
 	}
 }
