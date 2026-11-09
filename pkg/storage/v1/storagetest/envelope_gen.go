@@ -603,11 +603,11 @@ func (p envelopedState) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	})
 }
 
-func (p envelopedState) MarkWorkActionRetryPending(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) (bool, error) {
+func (p envelopedState) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
 	var r0 bool
-	err := p.ops.run(ctx, writeCall{method: "MarkWorkActionRetryPending", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+	err := p.ops.run(ctx, writeCall{method: "MarkWorkActionRetryPending", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		var err error
-		r0, err = p.StateProvider.MarkWorkActionRetryPending(ctx, a1, a2, a3, a4, a5)
+		r0, err = p.StateProvider.MarkWorkActionRetryPending(ctx, a1)
 		return err
 	})
 	return r0, err

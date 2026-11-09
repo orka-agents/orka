@@ -1179,19 +1179,20 @@ func (s *Store) cancelWorkActionsWrite(ctx context.Context, namespace, monitorNa
 
 // MarkWorkActionRetryPending parks an active work action for a retry and
 // leaves a finished one unchanged.
-func (s *Store) MarkWorkActionRetryPending(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
+func (s *Store) MarkWorkActionRetryPending(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
 	return writeOperation(ctx, s, "MarkWorkActionRetryPending", nil, func(ctx context.Context) (bool, error) {
-		return s.markWorkActionRetryPendingWrite(ctx, namespace, id, runID, reason, cause)
+		return s.markWorkActionRetryPendingWrite(ctx, request)
 	})
 }
 
-func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
+func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
 	exec := s.taskDataExecutor(ctx)
+	// The status list is storagev1.WorkActionActiveStatuses.
 	result, err := exec.ExecContext(ctx,
 		`UPDATE work_actions SET status = 'retry_pending', phase = 'retry_pending', run_id = ?, blocked_reason = ?,
 		 error = ?, completed_at = NULL, updated_at = ?
 		 WHERE monitor_namespace = ? AND id = ? AND status IN ('queued', 'leased', 'running', 'retry_pending')`,
-		runID, reason, cause, time.Now().UTC(), namespace, id)
+		request.RunID, request.BlockedReason, request.Error, time.Now().UTC(), request.Namespace, request.ID)
 	if err != nil {
 		return false, err
 	}
@@ -1201,7 +1202,7 @@ func (s *Store) markWorkActionRetryPendingWrite(ctx context.Context, namespace, 
 		return true, nil
 	}
 	var found int
-	err = exec.QueryRowContext(ctx, `SELECT 1 FROM work_actions WHERE monitor_namespace = ? AND id = ?`, namespace, id).Scan(&found)
+	err = exec.QueryRowContext(ctx, `SELECT 1 FROM work_actions WHERE monitor_namespace = ? AND id = ?`, request.Namespace, request.ID).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, store.ErrNotFound
 	}

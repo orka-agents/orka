@@ -528,11 +528,11 @@ func (s completingWriteStore) UpdateWorkAction(ctx context.Context, action *stor
 	return s.RepositoryMonitorStore.UpdateWorkAction(ctx, action)
 }
 
-func (s completingWriteStore) MarkWorkActionRetryPending(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error) {
-	if err := s.complete(ctx, namespace, id); err != nil {
+func (s completingWriteStore) MarkWorkActionRetryPending(ctx context.Context, request store.MarkWorkActionRetryPendingRequest) (bool, error) {
+	if err := s.complete(ctx, request.Namespace, request.ID); err != nil {
 		return false, err
 	}
-	return s.RepositoryMonitorStore.MarkWorkActionRetryPending(ctx, namespace, id, runID, reason, cause)
+	return s.RepositoryMonitorStore.MarkWorkActionRetryPending(ctx, request)
 }
 
 func TestMarkRepositoryMonitorCommandWorkActionRetryPendingKeepsConcurrentCompletion(t *testing.T) {

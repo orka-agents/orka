@@ -3,29 +3,25 @@ package store
 import (
 	"fmt"
 	"strings"
+
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
 	repositoryMonitorDesiredActionDecompose = "decompose"
 	repositoryMonitorDesiredActionRepair    = "repair"
 
-	// WorkAction statuses. Active statuses hold the action's dedupe key;
-	// terminal statuses are final and must not be reopened.
-	//
-	//	queued → (leased →) running → succeeded | failed | blocked | cancelled
-	//	retry_pending: a command handoff that failed to signal its MonitorRun
-	//	completed: an action coalesced into another active action at intake
-	RepositoryMonitorWorkActionStatusQueued    = "queued"
-	RepositoryMonitorWorkActionStatusLeased    = "leased"
-	RepositoryMonitorWorkActionStatusRunning   = "running"
-	RepositoryMonitorWorkActionStatusSucceeded = "succeeded"
-	RepositoryMonitorWorkActionStatusFailed    = "failed"
-	RepositoryMonitorWorkActionStatusBlocked   = "blocked"
-	RepositoryMonitorWorkActionStatusCancelled = "cancelled"
-	RepositoryMonitorWorkActionStatusCompleted = "completed"
-	// RepositoryMonitorWorkActionStatusRetryPending marks durable command handoffs
-	// that must be retried before a MonitorRun can safely proceed.
-	RepositoryMonitorWorkActionStatusRetryPending = "retry_pending"
+	// WorkAction statuses, defined by the storage contract; see
+	// storagev1.WorkActionStatusQueued.
+	RepositoryMonitorWorkActionStatusQueued       = storagev1.WorkActionStatusQueued
+	RepositoryMonitorWorkActionStatusLeased       = storagev1.WorkActionStatusLeased
+	RepositoryMonitorWorkActionStatusRunning      = storagev1.WorkActionStatusRunning
+	RepositoryMonitorWorkActionStatusRetryPending = storagev1.WorkActionStatusRetryPending
+	RepositoryMonitorWorkActionStatusSucceeded    = storagev1.WorkActionStatusSucceeded
+	RepositoryMonitorWorkActionStatusFailed       = storagev1.WorkActionStatusFailed
+	RepositoryMonitorWorkActionStatusBlocked      = storagev1.WorkActionStatusBlocked
+	RepositoryMonitorWorkActionStatusCancelled    = storagev1.WorkActionStatusCancelled
+	RepositoryMonitorWorkActionStatusCompleted    = storagev1.WorkActionStatusCompleted
 	// RepositoryMonitorWorkActionBlockedReasonRunSignalFailed identifies retryable
 	// failures between durable command intake and MonitorRun signaling.
 	RepositoryMonitorWorkActionBlockedReasonRunSignalFailed = "run_signal_failed"
@@ -34,23 +30,12 @@ const (
 // RepositoryMonitorWorkActionActiveStatuses lists the statuses of a WorkAction
 // that still owns its dedupe key, in lookup order.
 func RepositoryMonitorWorkActionActiveStatuses() []string {
-	return []string{
-		RepositoryMonitorWorkActionStatusQueued,
-		RepositoryMonitorWorkActionStatusLeased,
-		RepositoryMonitorWorkActionStatusRunning,
-		RepositoryMonitorWorkActionStatusRetryPending,
-	}
+	return storagev1.WorkActionActiveStatuses()
 }
 
 // IsRepositoryMonitorWorkActionActive reports whether status still owns its dedupe key.
 func IsRepositoryMonitorWorkActionActive(status string) bool {
-	switch status {
-	case RepositoryMonitorWorkActionStatusQueued, RepositoryMonitorWorkActionStatusLeased,
-		RepositoryMonitorWorkActionStatusRunning, RepositoryMonitorWorkActionStatusRetryPending:
-		return true
-	default:
-		return false
-	}
+	return storagev1.IsWorkActionActive(status)
 }
 
 // RepositoryMonitorCoalescedCommandError is the outcome recorded on a command

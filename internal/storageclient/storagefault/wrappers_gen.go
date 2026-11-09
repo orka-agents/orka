@@ -2224,10 +2224,10 @@ func (p *stateProvider) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	return err
 }
 
-func (p *stateProvider) MarkWorkActionRetryPending(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) (bool, error) {
+func (p *stateProvider) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "MarkWorkActionRetryPending", func(ctx context.Context) (err error) {
-		r0, err = p.inner.MarkWorkActionRetryPending(ctx, a1, a2, a3, a4, a5)
+		r0, err = p.inner.MarkWorkActionRetryPending(ctx, a1)
 		return err
 	})
 	if injected {

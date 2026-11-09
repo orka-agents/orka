@@ -224,7 +224,8 @@ func init() {
 			setup: func(t *testing.T, p storagev1.StateProvider) {
 				require.NoError(t, p.CreateWorkAction(t.Context(), catalogWorkAction("action-1", "running", 12)))
 			},
-			args:    fixed(workflowNamespace, "action-1", "run-2", "run_signal_failed", "signal failed"),
+			args: fixed(storagev1.MarkWorkActionRetryPendingRequest{Namespace: workflowNamespace, ID: "action-1", RunID: "run-2",
+				BlockedReason: "run_signal_failed", Error: "signal failed"}),
 			observe: observeWorkActions,
 		},
 		monitorCase{

@@ -779,9 +779,10 @@ func (h *Handlers) markRepositoryMonitorCommandWorkActionRetryPending(ctx contex
 	// The store checks the status and writes in one step: a finished action is
 	// final, and reopening it, even one the controller completes concurrently,
 	// would run its work again.
-	_, err := h.repositoryMonitorStore.MarkWorkActionRetryPending(ctx, monitor.Namespace,
-		store.RepositoryMonitorWorkActionID(command.ID, desiredAction), runID,
-		store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, cause.Error())
+	_, err := h.repositoryMonitorStore.MarkWorkActionRetryPending(ctx, store.MarkWorkActionRetryPendingRequest{
+		Namespace: monitor.Namespace, ID: store.RepositoryMonitorWorkActionID(command.ID, desiredAction), RunID: runID,
+		BlockedReason: store.RepositoryMonitorWorkActionBlockedReasonRunSignalFailed, Error: cause.Error(),
+	})
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}

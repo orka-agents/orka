@@ -336,14 +336,15 @@ type RepositoryMonitorStore interface {
 	GetWorkAction(ctx context.Context, namespace, id string) (*WorkAction, error)
 	ListWorkActions(ctx context.Context, filter WorkActionFilter) ([]WorkAction, string, error)
 	CancelWorkActions(ctx context.Context, namespace, monitorName, targetKind string, targetNumber int64, reason, exceptActionID string) (int, error)
-	// MarkWorkActionRetryPending moves an active work action (queued, leased,
-	// running or retry_pending) to retry_pending, records runID, reason as its
-	// blocked reason and cause as its error, and clears CompletedAt. It returns
-	// true when it changed the action. A finished action is left unchanged and
-	// false is returned, so a completion that commits first is never undone;
-	// a missing action returns ErrNotFound. The status check and the write are
-	// one step.
-	MarkWorkActionRetryPending(ctx context.Context, namespace, id, runID, reason, cause string) (bool, error)
+	// MarkWorkActionRetryPending parks a work action for a retry. When the
+	// action's status is active (see [IsWorkActionActive]) it sets Status and
+	// Phase to retry_pending, replaces RunID, BlockedReason and Error with the
+	// request's, clears CompletedAt, sets UpdatedAt from the provider's clock
+	// and returns true; every other field, the lease fields included, is left
+	// as it was. An action with any other status is left unchanged and false is
+	// returned, so a completion that commits first is never undone. A missing
+	// action returns ErrNotFound. The status check and the write are one step.
+	MarkWorkActionRetryPending(ctx context.Context, request MarkWorkActionRetryPendingRequest) (bool, error)
 
 	CreateActionRecord(ctx context.Context, record *ActionRecord) error
 	UpdateActionRecord(ctx context.Context, record *ActionRecord) error
