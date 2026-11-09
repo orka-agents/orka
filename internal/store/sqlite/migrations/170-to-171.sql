@@ -6,23 +6,23 @@
 --
 -- Earlier layouts let another active action take the key of a retry_pending
 -- one. Such a retry_pending action is redundant, so it is cancelled before
--- the index is rebuilt, as CancelWorkActions would; when only retry_pending
--- actions share a key, the newest stays. It adds no rows.
+-- the index is rebuilt, as CancelWorkActions would. Within each key the
+-- queued, leased or running action stays, and otherwise the newest
+-- retry_pending one (by created_at, then id). One ranked pass keeps the cost
+-- to a sort of the active actions. It adds no rows.
 -- Transaction and complete-layout validation are owned by the caller.
 
 UPDATE work_actions
 SET status = 'cancelled', blocked_reason = 'dedupe_superseded', error = '',
     completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-WHERE status = 'retry_pending' AND dedupe_key <> '' AND EXISTS (
-    SELECT 1 FROM work_actions AS other
-    WHERE other.monitor_namespace = work_actions.monitor_namespace
-      AND other.monitor_name = work_actions.monitor_name
-      AND other.dedupe_key = work_actions.dedupe_key
-      AND other.id <> work_actions.id
-      AND (other.status IN ('queued', 'leased', 'running')
-           OR (other.status = 'retry_pending'
-               AND (other.created_at > work_actions.created_at
-                    OR (other.created_at = work_actions.created_at AND other.id > work_actions.id)))));
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id, status, ROW_NUMBER() OVER (
+            PARTITION BY monitor_namespace, monitor_name, dedupe_key
+            ORDER BY status = 'retry_pending', created_at DESC, id DESC) AS keep_rank
+        FROM work_actions
+        WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending'))
+    WHERE status = 'retry_pending' AND keep_rank > 1);
 
 DROP INDEX idx_work_actions_dedupe;
 
