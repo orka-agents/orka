@@ -71,16 +71,17 @@ func ValidPathPattern(pattern string) bool {
 
 // ValidDeniedPathPattern reports whether pattern is a valid path pattern
 // whose segments are all canonical. The matcher compares segments literally,
-// so a denied pattern with an empty or "." segment, such as
-// "internal/./evals/**" or "docs/", would never match the canonical changed
-// paths it appears to protect; such a pattern is rejected instead.
+// so a denied pattern with an empty, "." or ".." segment, such as
+// "internal/./evals/**", "docs/" or "internal/evals/..", would never match the
+// canonical changed paths it appears to protect; such a pattern is rejected
+// instead.
 func ValidDeniedPathPattern(pattern string) bool {
 	if !ValidPathPattern(pattern) {
 		return false
 	}
 	cleaned := strings.TrimPrefix(strings.TrimSpace(pattern), "./")
 	for segment := range strings.SplitSeq(cleaned, "/") {
-		if segment == "" || segment == "." {
+		if segment == "" || segment == "." || segment == ".." {
 			return false
 		}
 	}

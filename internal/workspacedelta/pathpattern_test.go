@@ -30,7 +30,7 @@ func TestValidDeniedPathPatternRequiresCanonicalSegments(t *testing.T) {
 	}
 	// Each of these is a valid pattern, but the matcher would never match
 	// the canonical path it appears to protect.
-	for _, invalid := range []string{"internal/./evals/**", "internal//evals/**", "docs/", "a/."} {
+	for _, invalid := range []string{"internal/./evals/**", "internal//evals/**", "docs/", "a/.", "internal/evals/..", "internal/**/.."} {
 		if !ValidPathPattern(invalid) {
 			t.Fatalf("ValidPathPattern(%q) = false; the test needs a pattern only the denied check rejects", invalid)
 		}
