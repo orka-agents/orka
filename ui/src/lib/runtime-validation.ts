@@ -117,11 +117,7 @@ export function deriveRuntimeChecks({ task, trace, approvals, artifacts }: Valid
   })
 
   if (phase === 'Succeeded') {
-    // ResultReference serializes as { available }. For legacy shapes, require
-    // a concrete field; an empty tolerated object must not count as a result.
-    const ref = task.status?.resultRef
-    const legacyRefAvailable = ref?.available === undefined && Boolean(ref?.configMapName || ref?.key)
-    const hasResult = ref?.available === true || legacyRefAvailable || Boolean(trace?.task.resultAvailable)
+    const hasResult = task.status?.resultRef?.available === true || Boolean(trace?.task.resultAvailable)
     checks.push({
       id: 'result',
       label: 'Result available',

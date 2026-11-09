@@ -34,7 +34,7 @@ describe('runtime-validation', () => {
 
   it('succeeded clean task mostly passes', () => {
     const checks = deriveRuntimeChecks({
-      task: { ...base, status: { phase: 'Succeeded', resultRef: { configMapName: 'r' } } },
+      task: { ...base, status: { phase: 'Succeeded', resultRef: { available: true } } },
       trace: trace({ task: { namespace: 'default', name: 't', resultAvailable: true } }),
       approvals: [], artifacts: [{ filename: 'a' }],
     })
