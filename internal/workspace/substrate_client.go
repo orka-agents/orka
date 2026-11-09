@@ -128,7 +128,9 @@ func substrateTransportCredentials(cfg SubstrateConfig) (credentials.TransportCr
 // NewSubstrateRouterHTTPClient returns the client for Actor traffic through
 // atenet-router. Upstream v1 serves only mTLS from SPIFFE IDs on its ingress
 // allowlist, so the pod-certificate client identity is required. Proxies are
-// never used for Actor traffic.
+// never used for Actor traffic, and redirects are never followed: an Actor
+// answers these requests, and following its redirect would send the
+// controller's request, body and credentials wherever the Actor names.
 func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
 	router, err := url.Parse(strings.TrimSpace(cfg.RouterURL))
 	if err != nil || router.Scheme != "https" || router.Host == "" || router.User != nil {
@@ -142,7 +144,16 @@ func NewSubstrateRouterHTTPClient(cfg SubstrateConfig) (*http.Client, error) {
 		return nil, err
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true, Proxy: nil}
-	return &http.Client{Transport: newSubstrateTracingTransport(transport, cfg.EnableTelemetry)}, nil
+	return &http.Client{
+		Transport:     newSubstrateTracingTransport(transport, cfg.EnableTelemetry),
+		CheckRedirect: refuseSubstrateRouterRedirect,
+	}, nil
+}
+
+// refuseSubstrateRouterRedirect returns a redirect response to the caller
+// instead of following it.
+func refuseSubstrateRouterRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 func substrateTLSConfig(cfg SubstrateConfig) (*tls.Config, error) {

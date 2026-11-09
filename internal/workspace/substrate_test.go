@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +85,53 @@ func TestSubstrateExecutorCloseReleasesOnlyItsOwnRouterConnections(t *testing.T)
 	}
 	if err := shared.Close(); err != nil || sharedTransport.closed != 0 {
 		t.Fatalf("Close() = %v, idle closes = %d, want a caller-supplied client left alone", err, sharedTransport.closed)
+	}
+}
+
+// An Actor answers daemon requests. Its redirect must not move the controller's
+// request, which carries the bootstrap bearer and the handoff token, to a host
+// the Actor chooses.
+func TestSubstrateExecutorNeverFollowsActorRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		for _, name := range []string{"built router client", "caller-supplied client"} {
+			t.Run(fmt.Sprintf("%s %d", name, status), func(t *testing.T) {
+				var redirected, routed atomic.Int32
+				other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected.Add(1) }))
+				defer other.Close()
+				redirect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					routed.Add(1)
+					http.Redirect(w, r, other.URL+r.URL.Path, status)
+				})
+				cfg := SubstrateConfig{}
+				if name == "caller-supplied client" {
+					router := httptest.NewServer(redirect)
+					defer router.Close()
+					cfg.RouterURL, cfg.HTTPClient = router.URL, router.Client()
+				} else {
+					router := httptest.NewTLSServer(redirect)
+					defer router.Close()
+					cfg, _, _, _ = substrateTransportFixture(t)
+					cfg.RouterURL, cfg.APIInsecureSkipVerify = router.URL, true
+				}
+				cfg.Atespace = "tenant"
+				cfg.ControlClient = &recordingSubstrateControlClient{}
+				cfg.HandoffToken, cfg.BootstrapToken = "handoff-token", "bootstrap-token"
+				executor, err := NewSubstrateExecutor(cfg)
+				if err != nil {
+					t.Fatalf("NewSubstrateExecutor() error = %v", err)
+				}
+				defer executor.Close() //nolint:errcheck
+				if err := executor.restoreHandoffToken(t.Context(), "actor-1"); err == nil {
+					t.Fatal("restoreHandoffToken() = nil, want the redirect reported as a failure")
+				}
+				if err := executor.scrubDaemon(t.Context(), "actor-1"); err == nil {
+					t.Fatal("scrubDaemon() = nil, want the redirect reported as a failure")
+				}
+				if routed.Load() != 2 || redirected.Load() != 0 {
+					t.Fatalf("router requests = %d, redirected requests = %d, want 2 and 0", routed.Load(), redirected.Load())
+				}
+			})
+		}
 	}
 }
 

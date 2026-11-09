@@ -14,12 +14,15 @@ import (
 	"strings"
 	"testing"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"github.com/orka-agents/orka/internal/workspace"
 )
 
@@ -270,5 +273,363 @@ func TestToolReconcilerRejectsReservedSubstrateMCPHeaders(t *testing.T) {
 	executor, got, _ := reconcileEgressTestTool(t, tool, allowSubstrateEgressForTest)
 	if executor.claimName != "" || got.Status.Available || !strings.Contains(got.Status.Error, "reserved header") {
 		t.Fatalf("claim=%q status=%+v, want reserved header rejection", executor.claimName, got.Status)
+	}
+}
+
+// runningEgressTestTool reconciles a Tool until its Actor is running under a
+// verified egress policy, and returns the reconciler for the next change.
+func runningEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecutor, apply egressTestApplier, objects ...client.Object) (*ToolReconciler, corev1alpha1.Tool) {
+	t.Helper()
+	scheme := newToolScheme()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	t.Cleanup(srv.Close)
+	tool := newEgressTestMCPTool(corev1alpha1.SubstrateActorEgressRule{Scheme: "https", Host: "api.github.com"})
+	tool.Generation = 1
+	validator := substrateFixtureTemplateValidator
+	for _, object := range objects {
+		// A pool in another namespace keeps its Actor leases there.
+		if pool, ok := object.(*corev1alpha1.SubstrateActorPool); ok {
+			tool.Spec.MCP.SubstrateActor.PoolRef = &corev1alpha1.SubstrateActorPoolReference{Name: pool.Name, Namespace: pool.Namespace}
+			validator = substrateActorPoolFixtureValidator
+		}
+	}
+	objects = append(objects, tool, approvedMCPActorTemplateForTest())
+	r := &ToolReconciler{
+		Client:                       fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&corev1alpha1.Tool{}).WithObjects(objects...).Build(),
+		Scheme:                       scheme,
+		SubstrateRouterHTTPClient:    srv.Client(),
+		SubstrateMCPToolsEnabled:     true,
+		SubstrateConfig:              SubstrateConfig{RouterURL: srv.URL, ClaimTimeout: 1},
+		SubstrateEgressPolicyApplier: apply,
+		SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return executor, nil
+		},
+	}
+	r.SubstrateTemplateValidator = validator(r.Client)
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	got := getEgressTestTool(t, r)
+	if !got.Status.Available || got.Status.Actor == nil || !substrateMCPEgressVerified(&got) || len(executor.waitReadyBoots) == 0 {
+		t.Fatalf("status = %+v, want a running actor with a verified egress policy", got.Status)
+	}
+	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
+		t.Fatalf("releases=%v deletes=%v, want the actor left running", executor.releaseReqs, executor.deleteReqs)
+	}
+	return r, got
+}
+
+func getEgressTestTool(t *testing.T, r *ToolReconciler) corev1alpha1.Tool {
+	t.Helper()
+	var got corev1alpha1.Tool
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "mcp-tool", Namespace: defaultNS}, &got); err != nil {
+		t.Fatalf("Get tool: %v", err)
+	}
+	return got
+}
+
+// editEgressTestTool changes the running Tool's specification, as an API
+// server would, to a new generation.
+func editEgressTestTool(t *testing.T, r *ToolReconciler, edit func(*corev1alpha1.Tool)) {
+	t.Helper()
+	tool := getEgressTestTool(t, r)
+	edit(&tool)
+	tool.Generation++
+	if err := r.Update(context.Background(), &tool); err != nil {
+		t.Fatalf("Update tool: %v", err)
+	}
+	if got := getEgressTestTool(t, r); got.Generation != tool.Generation {
+		t.Fatalf("generation = %d, want %d", got.Generation, tool.Generation)
+	}
+}
+
+func requireEgressUnverified(t *testing.T, tool corev1alpha1.Tool) {
+	t.Helper()
+	condition := meta.FindStatusCondition(tool.Status.Conditions, toolConditionEgressPolicyReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.ObservedGeneration != tool.Generation {
+		t.Fatalf("EgressPolicyReady = %+v, want False for generation %d", condition, tool.Generation)
+	}
+	if tool.Status.Available {
+		t.Fatalf("status = %+v, want unavailable", tool.Status)
+	}
+}
+
+// An edit that the controller rejects never reaches the egress policy step.
+// The Actor must not keep running under the allowlist of the previous
+// specification, which can be broader than the one the edit asked for.
+func TestToolReconcilerStopsRunningActorWhenAnEditFailsBeforeItsEgressPolicy(t *testing.T) {
+	invalidEgress := func(tool *corev1alpha1.Tool) {
+		// Passes the schema, fails the controller: tls needs explicit ports.
+		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+	}
+	missingSecret := func(tool *corev1alpha1.Tool) {
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	}
+	for name, edit := range map[string]func(*corev1alpha1.Tool){"invalid egress": invalidEgress, "missing auth secret": missingSecret} {
+		t.Run(name, func(t *testing.T) {
+			executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+			r, running := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+			editEgressTestTool(t, r, edit)
+			for range 2 {
+				if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+					t.Fatalf("Reconcile() error = %v", err)
+				}
+			}
+			if len(executor.releaseReqs) == 0 || len(executor.deleteReqs) != 0 {
+				t.Fatalf("releases=%v deletes=%v, want the running actor suspended", executor.releaseReqs, executor.deleteReqs)
+			}
+			for _, req := range executor.releaseReqs {
+				if req.Ref.ID != running.Status.Actor.ActorID || !req.Retain || !req.SkipScrub {
+					t.Fatalf("release request = %+v, want a retained suspend of %q without scrub", req, running.Status.Actor.ActorID)
+				}
+			}
+			requireEgressUnverified(t, getEgressTestTool(t, r))
+		})
+	}
+}
+
+// A pooled Actor's ownership lease lives in the pool's namespace, on both
+// paths that stop one.
+func TestToolReconcilerStopsItsPooledActorWithoutAVerifiedEgressPolicy(t *testing.T) {
+	for _, name := range []string{"edit rejected before the policy", "policy apply fails"} {
+		t.Run(name, func(t *testing.T) {
+			pool := &corev1alpha1.SubstrateActorPool{
+				ObjectMeta: metav1.ObjectMeta{Name: testMCPPoolName, Namespace: "pools"},
+				Status:     corev1alpha1.SubstrateActorPoolStatus{TemplateUID: "validated-native-template-uid"},
+				Spec: corev1alpha1.SubstrateActorPoolSpec{
+					TemplateRef:  corev1alpha1.WorkspaceTemplateReference{Name: "mcp-template", Namespace: "ate-demo"},
+					TargetActors: 2,
+				},
+			}
+			fail := false
+			executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+			r, running := runningEgressTestTool(t, executor, func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
+				if fail {
+					return errors.New("control API unavailable")
+				}
+				return nil
+			}, pool)
+			if running.Status.Actor.PoolRef == nil || running.Status.Actor.PoolRef.Namespace != "pools" {
+				t.Fatalf("actor status = %+v, want a pooled actor from the pools namespace", running.Status.Actor)
+			}
+			if name == "policy apply fails" {
+				fail = true
+			} else {
+				editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+					tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+				})
+			}
+			if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+			if len(executor.releaseReqs) != 1 || executor.releaseReqs[0].Ref.ID != running.Status.Actor.ActorID {
+				t.Fatalf("releases = %+v, want the pooled actor %q suspended", executor.releaseReqs, running.Status.Actor.ActorID)
+			}
+		})
+	}
+}
+
+// A failure after admission, such as no executor, is handled the same way.
+func TestToolReconcilerRetriesWhenAnEditedToolHasNoExecutorToStopItsActor(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) { tool.Spec.MCP.SubstrateActor.Egress = nil })
+	factoryErr := errors.New("substrate API is not configured")
+	r.SubstrateExecutorFactory = func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return nil, factoryErr }
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); !errors.Is(err, factoryErr) {
+		t.Fatalf("Reconcile() error = %v, want the failed stop so the reconcile retries", err)
+	}
+	got := getEgressTestTool(t, r)
+	if !strings.Contains(got.Status.Error, "could not be stopped") {
+		t.Fatalf("status = %+v, want the failed stop named", got.Status)
+	}
+	requireEgressUnverified(t, got)
+}
+
+// A failure while the installed policy is the one the current specification
+// asked for leaves nothing stale, so the Actor keeps running.
+func TestToolReconcilerKeepsRunningActorWhenItsEgressPolicyIsCurrent(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	if err := r.Delete(context.Background(), approvedMCPActorTemplateForTest()); err != nil {
+		t.Fatalf("Delete template: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	got := getEgressTestTool(t, r)
+	if got.Status.Available || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 || !substrateMCPEgressVerified(&got) {
+		t.Fatalf("status=%+v releases=%v deletes=%v, want unavailable with the actor untouched", got.Status, executor.releaseReqs, executor.deleteReqs)
+	}
+}
+
+// Suspend or delete depends on the template the Actor runs. When it cannot be
+// read the controller must not guess, and must keep retrying.
+func TestToolReconcilerRetriesWhenItCannotTellHowToStopTheActor(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	if err := r.Delete(context.Background(), approvedMCPActorTemplateForTest()); err != nil {
+		t.Fatalf("Delete template: %v", err)
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) { tool.Spec.MCP.SubstrateActor.Egress = nil })
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil || !strings.Contains(err.Error(), "read the actor's template") {
+		t.Fatalf("Reconcile() error = %v, want the unreadable template so the reconcile retries", err)
+	}
+	got := getEgressTestTool(t, r)
+	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 || !strings.Contains(got.Status.Error, "could not be stopped") {
+		t.Fatalf("status=%+v releases=%v deletes=%v, want no guess and the failure named", got.Status, executor.releaseReqs, executor.deleteReqs)
+	}
+	requireEgressUnverified(t, got)
+}
+
+// The lease is what makes an Actor this Tool's. Without it the Tool stops nothing.
+func TestToolReconcilerDoesNotStopAnActorItHoldsNoLeaseFor(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	if err := r.DeleteAllOf(context.Background(), &coordinationv1.Lease{}, client.InNamespace(defaultNS)); err != nil {
+		t.Fatalf("Delete leases: %v", err)
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+	})
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
+		t.Fatalf("releases=%v deletes=%v, want an unowned actor left alone", executor.releaseReqs, executor.deleteReqs)
+	}
+	requireEgressUnverified(t, getEgressTestTool(t, r))
+}
+
+// Substrate cannot suspend an Actor whose template snapshots volumes only and
+// mounts no durable directory: the attempt fails before the workload stops.
+// Such an Actor is deleted under its UID instead, on both paths that stop one.
+func TestToolReconcilerDeletesAnActorThatCannotBeSuspended(t *testing.T) {
+	stateless := func(r *ToolReconciler) {
+		validate := r.SubstrateTemplateValidator
+		r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+			request.TemplateSuspendUnsupported = true
+			return validate(ctx, request)
+		}
+	}
+	requireDeleted := func(t *testing.T, executor *recordingToolWorkspaceExecutor, actorID string) {
+		t.Helper()
+		if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) == 0 {
+			t.Fatalf("releases=%v deletes=%v, want the actor deleted and never suspended", executor.releaseReqs, executor.deleteReqs)
+		}
+		for _, req := range executor.deleteReqs {
+			if req.Ref.ID != actorID || !req.SkipScrub {
+				t.Fatalf("delete request = %+v, want %q deleted without scrub", req, actorID)
+			}
+		}
+	}
+	t.Run("edit rejected before the policy", func(t *testing.T) {
+		executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+		r, running := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+		stateless(r)
+		editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+			tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+		})
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		requireDeleted(t, executor, running.Status.Actor.ActorID)
+	})
+	t.Run("policy apply fails", func(t *testing.T) {
+		fail := false
+		executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+		r, running := runningEgressTestTool(t, executor, func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
+			if fail {
+				return errors.New("control API unavailable")
+			}
+			return nil
+		})
+		stateless(r)
+		fail = true
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+		requireDeleted(t, executor, running.Status.Actor.ActorID)
+	})
+	t.Run("delete fails", func(t *testing.T) {
+		deleteErr := errors.New("delete refused")
+		executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}, deleteErrs: []error{deleteErr}}
+		r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+		stateless(r)
+		editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+			tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+		})
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); !errors.Is(err, deleteErr) {
+			t.Fatalf("Reconcile() error = %v, want the failed delete so the reconcile retries", err)
+		}
+		if got := getEgressTestTool(t, r); !strings.Contains(got.Status.Error, "could not be stopped") {
+			t.Fatalf("status = %+v, want the failed stop named", got.Status)
+		}
+	})
+}
+
+// A Tool moved to another template gets a new Actor. Until that one is ready
+// the previous Actor is still running; when the new policy cannot be applied,
+// the previous Actor must stop too.
+func TestToolReconcilerStopsThePreviousActorWhenItsReplacementHasNoEgressPolicy(t *testing.T) {
+	second := approvedMCPActorTemplateForTest()
+	second.SetName("mcp-template-next")
+	fail := false
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, running := runningEgressTestTool(t, executor, func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error {
+		if fail {
+			return errors.New("control API unavailable")
+		}
+		return nil
+	}, second)
+	executor.claimCreated = true
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) { tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-next" })
+	fail = true
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	if len(executor.releaseReqs) == 0 {
+		t.Fatal("the previous actor kept running although its replacement has no egress policy")
+	}
+	for _, req := range executor.releaseReqs {
+		if req.Ref.ID != running.Status.Actor.ActorID {
+			t.Fatalf("release request = %+v, want only the previous actor %q suspended", req, running.Status.Actor.ActorID)
+		}
+	}
+}
+
+func TestNativeSubstrateTemplateSuspendUnsupported(t *testing.T) {
+	template := func(fidelity ateapipb.SnapshotFidelity, volume *ateapipb.Volume, mount string) *ateapipb.ActorTemplate {
+		container := &ateapipb.Container{Name: "mcp"}
+		if mount != "" {
+			container.VolumeMounts = []*ateapipb.VolumeMount{{Name: mount, MountPath: "/data"}}
+		}
+		out := &ateapipb.ActorTemplate{Containers: []*ateapipb.Container{container}, SnapshotConfig: &ateapipb.SnapshotConfig{PreferredFidelity: fidelity}}
+		if volume != nil {
+			out.Volumes = []*ateapipb.Volume{volume}
+		}
+		return out
+	}
+	durable := func() *ateapipb.Volume {
+		return &ateapipb.Volume{Name: "data", DurableDir: &ateapipb.DurableDirVolumeSource{}}
+	}
+	volumes, memory := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	for name, tc := range map[string]struct {
+		template *ateapipb.ActorTemplate
+		want     bool
+	}{
+		"volumes snapshot without volumes":       {template(volumes, nil, ""), true},
+		"volumes snapshot, durable dir unused":   {template(volumes, durable(), ""), true},
+		"volumes snapshot, other volume mounted": {template(volumes, &ateapipb.Volume{Name: "info"}, "info"), true},
+		"volumes snapshot, durable dir mounted":  {template(volumes, durable(), "data"), false},
+		"memory snapshot without volumes":        {template(memory, nil, ""), false},
+	} {
+		if got := nativeSubstrateTemplateSuspendUnsupported(tc.template); got != tc.want {
+			t.Errorf("%s: suspend unsupported = %t, want %t", name, got, tc.want)
+		}
 	}
 }

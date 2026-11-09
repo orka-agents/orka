@@ -1,12 +1,15 @@
 package main
 
 import (
+	"net/url"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
+	"github.com/orka-agents/orka/internal/workspace"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 )
@@ -42,4 +45,22 @@ func TestNativeConformanceTemplatesUsePinnedProtocol(t *testing.T) {
 			require.Equal(t, int32(80), template.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPort())
 		})
 	}
+}
+
+// Substrate v1 denies an Actor without an egress policy everything. The policy
+// the proof installs must compile, and must allow exactly the request the proof
+// then makes from inside the Actor.
+func TestDirectConformanceEgressAllowsOnlyTheProviderProxyProbe(t *testing.T) {
+	policy, err := workspace.CompileSubstrateActorEgressPolicy(conformanceAtespace, providerProxyEgress())
+	require.NoError(t, err)
+	require.Len(t, policy.GetRules(), 1)
+	rule := policy.GetRules()[0].GetHttp()
+	require.NotNil(t, rule, "the probe uses plain HTTP")
+	probe, err := url.Parse(providerProxyHealthURL())
+	require.NoError(t, err)
+	require.Equal(t, "http", probe.Scheme)
+	require.Equal(t, []string{probe.Hostname()}, rule.GetHostnames())
+	port, err := strconv.ParseInt(probe.Port(), 10, 32)
+	require.NoError(t, err)
+	require.Equal(t, []int32{int32(port)}, rule.GetPorts().GetNumbers())
 }

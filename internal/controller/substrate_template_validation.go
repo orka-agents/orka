@@ -30,7 +30,34 @@ func validateNativeSubstrateRoutableTemplate(ctx context.Context, cfg SubstrateC
 		return err
 	}
 	request.TemplateUID = template.GetMetadata().GetUid()
+	request.TemplateSuspendUnsupported = nativeSubstrateTemplateSuspendUnsupported(template)
 	return nil
+}
+
+// nativeSubstrateTemplateSuspendUnsupported reports whether Substrate cannot
+// suspend an Actor of this template. A VOLUMES snapshot captures only
+// durable-directory mounts; with none, the worker refuses the checkpoint before
+// it stops the workload, and Substrate then records the Actor as crashed while
+// its sandbox may keep running. Such an Actor holds no data a suspend would
+// keep, so it is stopped by deleting it.
+func nativeSubstrateTemplateSuspendUnsupported(template *ateapipb.ActorTemplate) bool {
+	if template.GetSnapshotConfig().GetPreferredFidelity() != ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES {
+		return false
+	}
+	durable := map[string]bool{}
+	for _, volume := range template.GetVolumes() {
+		if volume.GetDurableDir() != nil {
+			durable[volume.GetName()] = true
+		}
+	}
+	for _, container := range template.GetContainers() {
+		for _, mount := range container.GetVolumeMounts() {
+			if durable[mount.GetName()] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validateNativeSubstrateRoute(template *ateapipb.ActorTemplate) error {
