@@ -440,16 +440,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 	if message, ok := requestedTaskCancellation(task); ok {
-		result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
-		// Recording the stop does not end a native Task's Job. It is deleted
-		// here, before the walk, so a large tree never keeps the cancelled
-		// container running; the next reconcile repeats a cleanup that fails.
-		if err == nil && task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-			if _, cleanupErr := r.cleanupTerminalTaskJob(ctx, task); cleanupErr != nil {
-				log.Error(cleanupErr, "failed to clean up cancelled task Job")
-			}
-		}
-		return stopThenCascade(result, err)
+		return stopThenCascade(r.cancelRequestedNativeTask(ctx, task, message))
 	}
 	if _, ok := requestedAgentTaskCancellation(task); ok {
 		return stopThenCascade(ctrl.Result{}, r.cancelRequestedAgentTask(ctx, task))
@@ -2802,6 +2793,21 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 	}
 
 	return nil
+}
+
+// cancelRequestedNativeTask records a requested cancel and deletes the Task's
+// Job. Recording the stop does not end the Job, so it is deleted here, before
+// the caller walks the delegated Tasks, and a large tree never keeps the
+// cancelled container running. The next reconcile repeats a cleanup that
+// fails.
+func (r *TaskReconciler) cancelRequestedNativeTask(ctx context.Context, task *corev1alpha1.Task, message string) (ctrl.Result, error) {
+	result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
+	if err == nil && task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+		if _, cleanupErr := r.cleanupTerminalTaskJob(ctx, task); cleanupErr != nil {
+			logf.FromContext(ctx).Error(cleanupErr, "failed to clean up cancelled task Job")
+		}
+	}
+	return result, err
 }
 
 // handleCompletedThenCascade runs a finished Task's own completion work, its
