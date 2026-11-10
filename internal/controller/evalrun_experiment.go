@@ -524,6 +524,36 @@ func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run, bas
 	return r.Status().Update(ctx, run)
 }
 
+// recordDeletedCandidateOutcome stores an Incomparable outcome for a
+// candidate deleted before its experiment was decided, such as while it
+// waited for its baseline. Its trial records are deleted next, and the
+// reserved attempt is never returned, so the history would otherwise keep a
+// reservation with no verdict or evidence. An outcome already stored wins.
+func (r *EvalRunReconciler) recordDeletedCandidateOutcome(ctx context.Context, run *corev1alpha1.EvalRun) error {
+	status := run.Status.Experiment
+	if status == nil || status.BaselineRun == nil || status.Result != corev1alpha1.EvalExperimentPending || r.ExperimentStore == nil {
+		return nil
+	}
+	var finished *corev1alpha1.EvalRun
+	baseline := &corev1alpha1.EvalRun{}
+	err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: status.BaselineRun.Name}, baseline)
+	switch {
+	case err == nil && baseline.UID == status.BaselineRun.UID && evalRunFinished(baseline.Status.Phase):
+		finished = baseline
+	case err != nil && !apierrors.IsNotFound(err):
+		return err
+	}
+	outcome, err := r.experimentOutcome(ctx, run, finished, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		Reasons: []string{"the candidate EvalRun was deleted before its experiment was decided"}})
+	if err != nil {
+		return err
+	}
+	if _, err := r.ExperimentStore.RecordEvalExperimentOutcome(ctx, outcome); err != nil {
+		return fmt.Errorf("record the outcome of deleted candidate %s/%s: %w", run.Namespace, run.Name, err)
+	}
+	return nil
+}
+
 // experimentOutcome builds the durable record of a decided experiment.
 func (r *EvalRunReconciler) experimentOutcome(ctx context.Context, run, baseline *corev1alpha1.EvalRun,
 	trials map[types.UID][]store.EvalTrialRecord, verdict evals.ExperimentVerdict) (*store.EvalExperimentOutcome, error) {

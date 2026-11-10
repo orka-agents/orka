@@ -155,6 +155,9 @@ func (r *EvalRunReconciler) finalizeEvalRun(ctx context.Context, run *corev1alph
 	if !controllerutil.ContainsFinalizer(run, evalRunFinalizer) {
 		return nil
 	}
+	if err := r.recordDeletedCandidateOutcome(ctx, run); err != nil {
+		return err
+	}
 	if err := r.TrialStore.DeleteEvalTrials(ctx, run.Namespace, run.Name); err != nil {
 		return fmt.Errorf("delete trial records of EvalRun %s/%s: %w", run.Namespace, run.Name, err)
 	}

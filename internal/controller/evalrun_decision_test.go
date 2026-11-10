@@ -232,3 +232,30 @@ func TestEvalExperimentOutcomeCountsItsOwnTrials(t *testing.T) {
 			arm.Planned, arm.Completed, arm.Passed, len(arm.Trials), passed)
 	}
 }
+
+// A candidate deleted while it waits for its baseline keeps its evidence: an
+// Incomparable outcome is stored before its trial records go.
+func TestEvalExperimentOutcomeSurvivesACandidateDeletedBeforeTheDecision(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("candidate", "needs_changes") // the baseline has not run
+	if got := env.getRun("candidate").Status.Experiment.Result; got != corev1alpha1.EvalExperimentPending {
+		t.Fatalf("result before deletion = %q", got)
+	}
+	if err := env.client.Delete(context.Background(), env.getRun("candidate")); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	outcome := env.experimentEntry().Outcome
+	if outcome == nil || outcome.Result != store.EvalExperimentResultIncomparable ||
+		!strings.Contains(strings.Join(outcome.Reasons, "; "), "deleted before its experiment was decided") {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if len(outcome.Candidate.Trials) != 9 || outcome.Candidate.Completed != 9 {
+		t.Fatalf("candidate arm = %+v", outcome.Candidate)
+	}
+	records, err := env.store.ListEvalTrials(context.Background(), evalTestNamespace, "candidate", "candidate-uid")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("trial records after deletion = %d, %v", len(records), err)
+	}
+}
