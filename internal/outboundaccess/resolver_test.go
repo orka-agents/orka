@@ -25,6 +25,7 @@ import (
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 )
 
@@ -451,5 +452,56 @@ func TestKubernetesResolverRefusesPolicyChangedAfterCheck(t *testing.T) {
 	}
 	if _, err := resolver.Resolve(context.Background(), request(nil)); err != nil {
 		t.Fatalf("a caller without a check is not fenced: %v", err)
+	}
+}
+
+// Tool execution revalidates references with the worker's own resolver: the
+// AI worker may exchange its own platform-marked ServiceAccount, but no other.
+func TestKubernetesResolverTokenRequesterMayUseOnlyItsOwnPlatformAccount(t *testing.T) {
+	for _, tc := range []struct {
+		account string
+		allowed bool
+	}{
+		{account: "orka-ai-worker", allowed: true},
+		{account: "orka-controller", allowed: false},
+	} {
+		t.Run(tc.account, func(t *testing.T) {
+			scheme := resolverScheme(t)
+			policy := readyPolicy("direct", corev1alpha1.OutboundAccessPolicySpec{Direct: &corev1alpha1.DirectOutboundAccess{
+				Grant:         corev1alpha1.OutboundGrantTokenExchange,
+				TokenEndpoint: corev1alpha1.OutboundTokenEndpoint{URL: "https://issuer.example.test/token"},
+				Subject: corev1alpha1.OutboundTokenSource{
+					Source:            corev1alpha1.OutboundTokenSourceServiceAccount,
+					ServiceAccountRef: &corev1alpha1.OutboundServiceAccountReference{Name: tc.account},
+				},
+				ExpectedIssuedTokenType: tokenexchange.TokenTypeAccessToken,
+			}})
+			reader := ctrlfake.NewClientBuilder().WithScheme(scheme).WithObjects(policy,
+				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: tc.account, Namespace: "tenant",
+					Labels: map[string]string{labels.LabelPlatformIdentity: labels.PlatformIdentityValue}}},
+			).Build()
+			tokenRequests := 0
+			clientset := k8sfake.NewSimpleClientset()
+			clientset.PrependReactor("create", "serviceaccounts", func(action ktesting.Action) (bool, runtime.Object, error) {
+				if action.GetSubresource() != "token" {
+					return false, nil, nil
+				}
+				tokenRequests++
+				return true, &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{
+					Token: "self", ExpirationTimestamp: metav1.NewTime(time.Now().Add(10 * time.Minute))}}, nil
+			})
+			exchanger := &captureExchanger{result: tokenexchange.Result{
+				AccessToken: "resource", IssuedTokenType: tokenexchange.TokenTypeAccessToken, TokenType: "Bearer"}}
+			resolver := &KubernetesResolver{Reader: reader, KubeClient: clientset, Exchanger: exchanger,
+				Trust: TrustConfig{TokenRequester: "tenant/orka-ai-worker"}}
+			_, err := resolver.Resolve(context.Background(), ResolveRequest{
+				Namespace: "tenant", PolicyName: "direct", TargetScheme: "https", CredentialScopeAllowed: true})
+			if tc.allowed && (err != nil || tokenRequests != 1) {
+				t.Fatalf("Resolve() error = %v, TokenRequests = %d; want success with one TokenRequest", err, tokenRequests)
+			}
+			if !tc.allowed && (err == nil || tokenRequests != 0) {
+				t.Fatalf("Resolve() error = %v, TokenRequests = %d; want a refusal before any TokenRequest", err, tokenRequests)
+			}
+		})
 	}
 }

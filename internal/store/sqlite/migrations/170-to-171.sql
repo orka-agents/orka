@@ -1,15 +1,31 @@
 -- SQLite transition: 170-to-171 (schema version 3 to 4).
--- Adds the order stamp of the write that stored each result and artifact:
--- the epoch and sequence of its write envelope. A replacement applies only
--- when its stamp is greater than the stored one. Existing rows get the stamp
--- (0, 0), which every enveloped write exceeds. It adds no rows, so a store
--- whose key bootstrap is unfinished can still finish it.
+-- A retry_pending work action still owns its dedupe key: command intake
+-- coalesces into it, monitor cancellation stops it, and its MonitorRun
+-- handoff is retried. The unique index now enforces that, as it already did
+-- for queued, leased and running actions.
+--
+-- Earlier layouts let another active action take the key of a retry_pending
+-- one. Such a retry_pending action is redundant, so it is cancelled before
+-- the index is rebuilt, as CancelWorkActions would. Within each key the
+-- queued, leased or running action stays, and otherwise the newest
+-- retry_pending one (by created_at, then id). One ranked pass keeps the cost
+-- to a sort of the active actions. It adds no rows.
 -- Transaction and complete-layout validation are owned by the caller.
 
-ALTER TABLE results ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
+UPDATE work_actions
+SET status = 'cancelled', blocked_reason = 'dedupe_superseded', error = '',
+    completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT id FROM (
+        SELECT id, status, ROW_NUMBER() OVER (
+            PARTITION BY monitor_namespace, monitor_name, dedupe_key
+            ORDER BY status = 'retry_pending', created_at DESC, id DESC) AS keep_rank
+        FROM work_actions
+        WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending'))
+    WHERE status = 'retry_pending' AND keep_rank > 1);
 
-ALTER TABLE results ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0;
+DROP INDEX idx_work_actions_dedupe;
 
-ALTER TABLE artifacts ADD COLUMN write_epoch INTEGER NOT NULL DEFAULT 0;
-
-ALTER TABLE artifacts ADD COLUMN write_seq INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX idx_work_actions_dedupe
+    ON work_actions(monitor_namespace, monitor_name, dedupe_key)
+    WHERE dedupe_key <> '' AND status IN ('queued', 'leased', 'running', 'retry_pending');

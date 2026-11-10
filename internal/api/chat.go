@@ -1657,13 +1657,9 @@ func hasRunningTasks(ctx context.Context, c client.Client, namespace, sessionID 
 		return false
 	}
 	for i := range taskList.Items {
-		switch taskList.Items[i].Status.Phase {
-		case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-			continue
-		case corev1alpha1.TaskPhaseScheduled:
-			// A recurring parent stays Scheduled by design and never completes.
-			continue
-		default:
+		phase := taskList.Items[i].Status.Phase
+		// A recurring parent stays Scheduled by design and never completes.
+		if !phase.IsTerminal() && phase != corev1alpha1.TaskPhaseScheduled {
 			return true
 		}
 	}
