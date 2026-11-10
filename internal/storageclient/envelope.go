@@ -331,7 +331,11 @@ func (o *operations) drive(
 		if ctx.Err() != nil || !o.now().Add(wait).Before(deadline) || !sleep(ctx, wait) {
 			break
 		}
-		if err := o.admitRetry(ctx, call.contract, deadline); err != nil {
+		ended, err := o.admitRetry(ctx, call.contract, capAt)
+		if ended {
+			break
+		}
+		if err != nil {
 			if unknown {
 				return o.resolve(ctx, call, envelope, attempt, err)
 			}
@@ -349,23 +353,42 @@ func (o *operations) drive(
 
 // admitRetry waits, before a retry, until the fence of the dataset that
 // serves contract is open, as run does before the first attempt, but no
-// longer than fenceWait and never past deadline. A fence closes after it
-// opened when the installation is held for storage recovery, at once, or
-// while its dataset is checked again after a restart or switch, so a retry
-// never reaches a dataset that a new write could not.
-func (o *operations) admitRetry(ctx context.Context, contract string, deadline time.Time) error {
-	waitCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	waitCtx, cancelWait := context.WithTimeout(waitCtx, o.fenceWait)
+// longer than fenceWait and never past the retry horizon. A fence closes
+// after it opened when the installation is held for storage recovery, at
+// once, or while its dataset is checked again after a restart or switch, so
+// a retry never reaches a dataset that a new write could not. A fence the
+// source reports closed (an error that matches ErrNotReady, as a hold does),
+// or one still not open when fenceWait ends while the call and its retry
+// horizon are live, refuses the retry with ErrNotReady. When the call or its
+// retry horizon ends during the wait instead, admitRetry reports ended, and
+// the caller ends its retries as when they end between attempts.
+//
+// capAt is the deadline retries run under (see retryBounds): zero when the
+// call's own deadline ends the retries, and the call's context then bounds
+// the wait alone, so the call's deadline error is set whenever the wait ends
+// with it.
+func (o *operations) admitRetry(ctx context.Context, contract string, capAt time.Time) (ended bool, err error) {
+	horizonCtx := ctx
+	if !capAt.IsZero() {
+		var cancel context.CancelFunc
+		horizonCtx, cancel = context.WithDeadline(ctx, capAt)
+		defer cancel()
+	}
+	waitCtx, cancelWait := context.WithTimeout(horizonCtx, o.fenceWait)
 	defer cancelWait()
 	o.fencesMu.Lock()
 	source := o.fences
 	o.fencesMu.Unlock()
 	if _, _, err := source.WriteFence(waitCtx, contract); err != nil {
-		return fmt.Errorf("%w: the controller epoch fence for %s closed after the write's first attempt: %w",
+		// Once the call or the horizon ended, an error that does not report
+		// the fence closed comes from that end, whatever the source wrapped.
+		if horizonCtx.Err() != nil && !errors.Is(err, storagev1.ErrNotReady) {
+			return true, nil
+		}
+		return false, fmt.Errorf("%w: the controller epoch fence for %s closed after the write's first attempt: %w",
 			storagev1.ErrNotReady, contract, err)
 	}
-	return nil
+	return false, nil
 }
 
 // retryBounds returns the end of the retry horizon a write's first failure
