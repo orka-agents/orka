@@ -821,7 +821,7 @@ metadata:
     {{- include "orka.labels" . | nindent 4 }}
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
 rules:
-  # Listed rather than "*" so admin never gains decide, which only the
+  # Listed rather than "*" so admin never gains decide or propose, which only the
   # eval-promoter role grants.
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns"]
@@ -842,5 +842,5 @@ metadata:
 rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns"]
-    verbs: ["decide", "get", "list", "watch"]
+    verbs: ["decide", "propose", "get", "list", "watch"]
 {{- end }}

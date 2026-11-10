@@ -20,7 +20,8 @@ func renderControllerArgs(t *testing.T, args ...string) []string {
 
 func TestStaticChartEvalsAreOffByDefault(t *testing.T) {
 	for _, arg := range renderControllerArgs(t) {
-		if strings.HasPrefix(arg, "--enable-evals") || strings.HasPrefix(arg, "--eval-") {
+		if strings.HasPrefix(arg, "--enable-evals") || strings.HasPrefix(arg, "--eval-") ||
+			strings.HasPrefix(arg, "--protected-set") {
 			t.Fatalf("default render passes %s", arg)
 		}
 	}
@@ -31,11 +32,17 @@ func TestStaticChartEvalFlags(t *testing.T) {
 		"--set", "controller.evals.enabled=true",
 		"--set-string", "controller.evals.gateConfigMap=orka-system/orka-protected-set",
 		"--set", "controller.evals.promoterGroups={orka-promoters,release-leads}",
+		"--set-string", "controller.evals.proposerAgent=proposer",
+		"--set-string", "controller.protectedSetConfigMap=orka-protected-set",
+		"--set", "controller.evals.proposerModels={openai/gpt-4.1,openai/gpt-4o-mini}",
 	)
 	for _, want := range []string{
 		"--enable-evals=true",
 		"--eval-gate-configmap=orka-system/orka-protected-set",
 		"--eval-promoter-groups=orka-promoters,release-leads",
+		"--eval-proposer-agent=proposer",
+		"--protected-set-configmap=orka-protected-set",
+		"--eval-proposer-models=openai/gpt-4.1,openai/gpt-4o-mini",
 	} {
 		if !containsString(args, want) {
 			t.Errorf("controller args are missing %s:\n%s", want, strings.Join(args, "\n"))

@@ -60,8 +60,16 @@ const (
 	LabelEvalRun           = "orka.ai/eval-run"
 	LabelEvalCase          = "orka.ai/eval-case"
 	LabelEvalTrial         = "orka.ai/eval-trial"
-	LabelTransactionID     = "orka.ai/transaction-id"
-	LabelAuthProfile       = "orka.ai/auth-profile"
+	// LabelEvalProposalOf marks a proposer Task with the training EvalRun it
+	// learns from; LabelEvalProposal marks the candidate Agent and the paired
+	// EvalRuns a proposal created with the proposer Task's name.
+	LabelEvalProposalOf = "orka.ai/eval-proposal-of"
+	LabelEvalProposal   = "orka.ai/eval-proposal"
+	// LabelCandidateOf marks a candidate Agent with the stable Agent it would
+	// replace; the candidate is also owner-referenced to that Agent.
+	LabelCandidateOf   = "orka.ai/candidate-of"
+	LabelTransactionID = "orka.ai/transaction-id"
+	LabelAuthProfile   = "orka.ai/auth-profile"
 
 	// Annotations
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"

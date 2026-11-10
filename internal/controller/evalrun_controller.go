@@ -99,6 +99,12 @@ type EvalRunReconciler struct {
 	// GateConfigMap names the protected-set ConfigMap whose gate section
 	// judges experiments. Empty fails every experiment closed.
 	GateConfigMap types.NamespacedName
+	// ProposerAgent names the Agent that runs proposer Tasks. Empty turns
+	// proposals off.
+	ProposerAgent string
+	// ProposerModels are the model names a candidate may switch to. Empty
+	// allows only prompt changes.
+	ProposerModels []string
 }
 
 // evalRunObservation is what one reconcile resolves from the cluster.
@@ -112,9 +118,9 @@ type evalRunObservation struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 func (r *EvalRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -184,6 +190,12 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 	if experiment := run.Status.Experiment; experiment != nil && experiment.Result == corev1alpha1.EvalExperimentPending {
 		return r.decideExperiment(ctx, run)
 	}
+	// A proposal owned by this run holds it until the proposal settles, so
+	// the TTL never deletes a proposer Task before its candidate exists.
+	proposing, err := r.reconcileEvalProposals(ctx, run)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	expiry, ok := evalRunExpiry(run)
 	if !ok {
 		return ctrl.Result{}, nil
@@ -192,7 +204,7 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 		return ctrl.Result{RequeueAfter: remaining}, nil
 	}
 	// A baseline outlives its TTL while a candidate still needs its trials.
-	if waiting, err := r.hasUndecidedCandidates(ctx, run); err != nil || waiting {
+	if waiting, err := r.hasUndecidedCandidates(ctx, run); err != nil || waiting || proposing {
 		return ctrl.Result{RequeueAfter: evalRunRequeueInterval}, err
 	}
 	logf.FromContext(ctx).Info("Deleting EvalRun after ttlSecondsAfterFinished", "evalRun", run.Name)

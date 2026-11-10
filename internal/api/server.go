@@ -92,6 +92,7 @@ type ServerConfig struct {
 	EvalTrialStore            store.EvalTrialStore
 	EvalExperimentStore       store.EvalExperimentStore
 	EvalDecisionVerifier      EvalDecisionVerifier
+	EvalProposer              EvalProposer
 	EvalPromoterGroups        []string
 	ExecutionEventStore       store.ExecutionEventStore
 	GatewayEventStore         store.GatewayEventStore
@@ -186,6 +187,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		EvalTrialStore:            config.EvalTrialStore,
 		EvalExperimentStore:       config.EvalExperimentStore,
 		EvalDecisionVerifier:      config.EvalDecisionVerifier,
+		EvalProposer:              config.EvalProposer,
 		EvalPromoterGroups:        config.EvalPromoterGroups,
 		ExecutionEventStore:       config.ExecutionEventStore,
 		GatewayEventStore:         config.GatewayEventStore,
@@ -500,6 +502,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/evals/runs/:name/trials", s.handlers.ListEvalRunTrials)
 	api.Get("/evals/runs/:name/decisions", s.handlers.GetEvalRunDecisions)
 	api.Post("/evals/runs/:name/decisions", s.handlers.DecideEvalRun)
+	api.Get("/evals/runs/:name/proposals", s.handlers.GetEvalRunProposals)
+	api.Post("/evals/runs/:name/proposals", s.handlers.ProposeEvalRun)
 	api.Get("/evals/experiments", s.handlers.ListEvalExperiments)
 	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
 	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)

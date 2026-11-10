@@ -206,6 +206,8 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/evals/runs/:name/trials":           coreAPIPolicy("get", "evalruns", "name"),
 	"GET /api/v1/evals/runs/:name/decisions":        coreAPIPolicy("get", "evalruns", "name"),
 	"POST /api/v1/evals/runs/:name/decisions":       coreAPIPolicy("decide", "evalruns", "name"),
+	"GET /api/v1/evals/runs/:name/proposals":        coreAPIPolicy("get", "evalruns", "name"),
+	"POST /api/v1/evals/runs/:name/proposals":       coreAPIPolicy("propose", "evalruns", "name"),
 	"GET /api/v1/evals/experiments":                 coreAPIPolicy("list", "evalruns", ""),
 	"GET /api/v1/monitors/repositories/:name/items": coreAPIPolicy("list", "repositorymonitors/items", "name"),
 	"POST /api/v1/monitors/repositories/:name/commands": coreAPIPolicy("create", "repositorymonitors/commands", "name",

@@ -196,6 +196,9 @@ spec:
             {{- if dig "dashboard" "enabled" false .Values.controller }}
             - --dashboard-enabled=true
             {{- end }}
+            {{- with .Values.controller.protectedSetConfigMap }}
+            - {{ printf "--protected-set-configmap=%s" . | quote }}
+            {{- end }}
             {{- with .Values.controller.evals }}
             {{- if .enabled }}
             - --enable-evals=true
@@ -204,6 +207,12 @@ spec:
             {{- end }}
             {{- if .promoterGroups }}
             - {{ printf "--eval-promoter-groups=%s" (join "," .promoterGroups) | quote }}
+            {{- end }}
+            {{- if .proposerAgent }}
+            - {{ printf "--eval-proposer-agent=%s" .proposerAgent | quote }}
+            {{- end }}
+            {{- if .proposerModels }}
+            - {{ printf "--eval-proposer-models=%s" (join "," .proposerModels) | quote }}
             {{- end }}
             {{- end }}
             {{- end }}

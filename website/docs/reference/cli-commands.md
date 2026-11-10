@@ -780,6 +780,8 @@ Available Commands:
   decisions   Show a candidate's experiment outcome, its decisions and whether an approval still holds
   experiments List experiments with their outcomes and decisions, including ones whose EvalRuns are gone
   get         Show an EvalRun's phase, counts and results, or wait for it and save them
+  proposals   List a training run's proposals: hypothesis, candidate Agent and paired experiment
+  propose     Ask a proposer to learn from a training run's failed trials and propose a candidate reviewer
   reject      Record that you reject a decided experiment
   run         Create an EvalRun, optionally wait for it, and save its results
 
@@ -876,6 +878,49 @@ Flags:
       --output-dir string   Write the run, trial records, a summary and failed-trial events here (implies --wait)
       --timeout duration    How long --wait waits (default 2h0m0s)
       --wait                Wait for the run to finish and print its results
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval proposals`
+
+```text
+List a training run's proposals: hypothesis, candidate Agent and paired experiment
+
+Usage:
+  orka eval proposals <training-run> [flags]
+
+Flags:
+  -h, --help            help for proposals
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval propose`
+
+```text
+Start a read-only proposer Task that reads the failed trials of a finished training run (never held-out cases) and proposes one change to the reviewer's system prompt or model. When it finishes, the controller creates the candidate Agent and a paired baseline and candidate EvalRun on a held-out case set. Follow it with orka eval proposals. Only a person in a promoter group with the propose verb on evalruns may ask, and each training run allows the gate's maxCandidatesPerBaseline proposals.
+
+Usage:
+  orka eval propose <training-run> [flags]
+
+Flags:
+      --held-out string   Held-out case ConfigMap for the experiment (default: the one that lists the run's monitor)
+  -h, --help              help for propose
+      --target string     Experiment target as grader or grader:tag (default: verdict)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

@@ -879,6 +879,7 @@ rules:
   - evalruns
   verbs:
   - decide
+  - propose
   - get
   - list
   - watch

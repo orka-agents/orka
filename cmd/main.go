@@ -392,6 +392,7 @@ func main() {
 	var evalsEnabled bool
 	var evalGateConfigMap string
 	var evalPromoterGroups string
+	var evalProposerAgent, evalProposerModels string
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -832,6 +833,11 @@ func main() {
 	flag.StringVar(&evalPromoterGroups, "eval-promoter-groups", os.Getenv("ORKA_EVAL_PROMOTER_GROUPS"),
 		"Comma-separated groups whose members may approve or reject EvalRun experiments, on top of the decide verb on evalruns. "+
 			"ServiceAccounts and transaction-token callers are always refused. Empty refuses every decision.")
+	flag.StringVar(&evalProposerAgent, "eval-proposer-agent", os.Getenv("ORKA_EVAL_PROPOSER_AGENT"),
+		"Agent, in the watch namespace, that runs proposer Tasks: read-only Tasks that learn from a training EvalRun's failed "+
+			"trials and propose a candidate reviewer change. Empty turns proposals off.")
+	flag.StringVar(&evalProposerModels, "eval-proposer-models", os.Getenv("ORKA_EVAL_PROPOSER_MODELS"),
+		"Comma-separated model names a proposed candidate may switch the reviewer to. Empty allows prompt changes only.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -2162,6 +2168,7 @@ func main() {
 		os.Exit(1)
 	}
 	var evalDecisionVerifier api.EvalDecisionVerifier
+	var evalProposer api.EvalProposer
 	if evalsEnabled {
 		gateConfigMap, err := parseEvalGateConfigMap(evalGateConfigMap, currentPodNamespace())
 		if err != nil {
@@ -2170,6 +2177,8 @@ func main() {
 		}
 		evalRunReconciler := &controller.EvalRunReconciler{
 			GateConfigMap:   gateConfigMap,
+			ProposerAgent:   strings.TrimSpace(evalProposerAgent),
+			ProposerModels:  splitCommaList(evalProposerModels),
 			Client:          mgr.GetClient(),
 			Scheme:          mgr.GetScheme(),
 			TrialStore:      appStorage,
@@ -2186,6 +2195,7 @@ func main() {
 			os.Exit(1)
 		}
 		evalDecisionVerifier = evalRunReconciler
+		evalProposer = evalRunReconciler
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -2249,6 +2259,7 @@ func main() {
 		EvalTrialStore:            appStorage,
 		EvalExperimentStore:       appStorage,
 		EvalDecisionVerifier:      evalDecisionVerifier,
+		EvalProposer:              evalProposer,
 		EvalPromoterGroups:        splitCommaList(evalPromoterGroups),
 		ExecutionEventStore:       appStorage,
 		GatewayEventStore:         appStorage,
