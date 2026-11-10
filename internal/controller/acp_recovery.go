@@ -812,6 +812,8 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 			if err := d.finalizeRecoveredTerminalSession(ctx, task, attempt, fence); err != nil {
 				return err
 			}
+		} else if err := d.recordRecoveredValidationOutcome(ctx, task, attempt); err != nil {
+			return err
 		}
 		cleanupComplete, cleanupErr := d.cleanupRecoveredTaskScopedRuntimeSession(ctx, task)
 		if cleanupErr != nil {
@@ -2659,6 +2661,43 @@ func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
 	}
 	recorded := taskDeliveryStatusForKubernetes(task, status)
 	task.Status.Delivery = &recorded
+	return nil
+}
+
+// recordRecoveredValidationOutcome records the unknown outcome on a Task
+// without a bound Session whose attempt recovery settled as OutcomeUnknown
+// with the recovered validation conflict, when the pass that settled it
+// stopped before the Task's terminal record, for example because the terminal
+// projection could not be enqueued. Runtime cleanup abandons a validation the
+// runtime still holds only for a Task that records the unknown outcome, so a
+// later pass would otherwise stop at cleanup and never reach that record. The
+// record is written from the attempt in the order the settling pass uses, the
+// projection and then the Task's execution state, which keeps the Task's
+// runtime identity; an enqueued projection is left to the outbox projector.
+// task is refreshed with the result.
+func (d *ACPDispatcher) recordRecoveredValidationOutcome(
+	ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt,
+) error {
+	if task.Status.Execution == nil || task.Status.Execution.State == corev1alpha1.TaskExecutionStateOutcomeUnknown ||
+		attempt.ExecutionState != store.PromptExecutionOutcomeUnknown || attempt.DeliveryState != store.PromptDeliveryConflict ||
+		!recoveredValidationConflict(task.Status.Delivery) {
+		return nil
+	}
+	exists, err := d.validateExistingStandaloneTaskProjection(ctx, task, attempt)
+	if err != nil || exists {
+		return err
+	}
+	if err := d.recoverMissingStandaloneTerminalProjection(ctx, task, attempt); err != nil {
+		return err
+	}
+	latest := &corev1alpha1.Task{}
+	if err := uncachedReader(d.APIReader, d.Client).Get(ctx, client.ObjectKeyFromObject(task), latest); err != nil {
+		return err
+	}
+	if latest.UID != task.UID {
+		return fmt.Errorf("%w: Task identity changed while recovery recorded its outcome", store.ErrConflict)
+	}
+	latest.DeepCopyInto(task)
 	return nil
 }
 
