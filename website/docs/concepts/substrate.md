@@ -143,8 +143,8 @@ public placeholder. Enable it by installing the gateway with
 `--credential-provider='{"name":"k8s.io"}'`, granting the profile Atespace the
 runtime namespace (narrowed to `orka.ai/runtime-pool-provider-credential: "true"`)
 in the credential provider's namespace policy and restarting it, and starting the
-provider with `--egress-credential-provider=k8s.io
---egress-credential-namespace=orka-runtimes`. The provider-auth-proxy URL must be
+provider with `--egress-credential-provider=k8s.io` and
+`--egress-credential-namespace=orka-runtimes`. The provider-auth-proxy URL must be
 `http` and must not share a host with the controller API, because the gateway
 re-originates `https` trusting only public roots. If injection is unavailable the
 pool reports why and stays closed; `--acp-workspace-allow-provider-token-in-sandbox`

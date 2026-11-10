@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -615,6 +616,60 @@ func TestToolReconcilerStopsThePreviousActorWhenItsReplacementHasNoEgressPolicy(
 		if req.Ref.ID != running.Status.Actor.ActorID {
 			t.Fatalf("release request = %+v, want only the previous actor %q suspended", req, running.Status.Actor.ActorID)
 		}
+	}
+}
+
+// A Tool can hold a replacement Actor while its status still names the one it
+// replaces, for example after the replacement's endpoint check failed. When the
+// Tool then becomes invalid, every Actor it holds has its egress denied, even
+// past one that cannot be reached, and every one is stopped.
+func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T) {
+	second := approvedMCPActorTemplateForTest()
+	second.SetName("mcp-template-next")
+	var denied []string
+	var failFor string
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, running := runningEgressTestTool(t, executor, func(_ context.Context, _ SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+		if rules != nil {
+			return nil
+		}
+		denied = append(denied, actorID)
+		if actorID == failFor {
+			return errors.New("control API unavailable")
+		}
+		return nil
+	}, second)
+	previous := running.Status.Actor.ActorID
+	replacement := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template-next")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, replacement)); err != nil {
+		t.Fatalf("Create replacement lease: %v", err)
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-next"
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	// Fail whichever Actor is denied first, so the other is denied only if the
+	// loop goes on past the failure.
+	failFor = min(previous, replacement)
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+		t.Fatal("Reconcile() error = nil, want the failed revocation so the reconcile retries")
+	}
+	slices.Sort(denied)
+	if want := []string{min(previous, replacement), max(previous, replacement)}; !slices.Equal(denied, want) {
+		t.Fatalf("denied = %v, want deny-all attempted for %v", denied, want)
+	}
+	stopped := map[string]bool{}
+	for _, req := range executor.releaseReqs {
+		stopped[req.Ref.ID] = true
+	}
+	if !stopped[previous] || !stopped[replacement] || len(executor.deleteReqs) != 0 {
+		t.Fatalf("releases=%v deletes=%v, want both %q and %q suspended", executor.releaseReqs, executor.deleteReqs, previous, replacement)
+	}
+	got := getEgressTestTool(t, r)
+	if condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady); got.Status.Available ||
+		condition == nil || condition.Reason != "EgressRevocationFailed" {
+		t.Fatalf("status = %+v, want an unavailable Tool with a reported revocation failure", got.Status)
 	}
 }
 
