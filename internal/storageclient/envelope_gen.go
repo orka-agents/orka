@@ -264,6 +264,12 @@ func (p envelopedState) CreateActionRecord(ctx context.Context, a1 *storagev1.Ac
 	})
 }
 
+func (p envelopedState) CreateAgentPromotion(ctx context.Context, a1 *storagev1.AgentPromotionRecord) error {
+	return p.ops.run(ctx, writeCall{method: "CreateAgentPromotion", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateAgentPromotion(ctx, a1)
+	})
+}
+
 func (p envelopedState) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	return p.ops.run(ctx, writeCall{method: "CreateCommandEvent", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CreateCommandEvent(ctx, a1)
@@ -891,6 +897,16 @@ func (p envelopedState) TombstoneConnectorCustody(ctx context.Context, a1 string
 	return p.ops.run(ctx, writeCall{method: "TombstoneConnectorCustody", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.TombstoneConnectorCustody(ctx, a1)
 	})
+}
+
+func (p envelopedState) TransitionAgentPromotion(ctx context.Context, a1 storagev1.AgentPromotionTransition) (*storagev1.AgentPromotionRecord, error) {
+	var r0 *storagev1.AgentPromotionRecord
+	err := p.ops.run(ctx, writeCall{method: "TransitionAgentPromotion", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.TransitionAgentPromotion(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) UpdateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {

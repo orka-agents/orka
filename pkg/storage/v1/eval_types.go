@@ -368,4 +368,26 @@ type EvalExperimentStore interface {
 	// read from one snapshot. An invalid After or a Limit above
 	// MaxEvalExperimentListLimit is a validation error.
 	ListEvalExperiments(ctx context.Context, namespace string, options EvalExperimentListOptions) (*EvalExperimentPage, error)
+	// GetEvalDecision returns a decision by its ID, or ErrNotFound.
+	GetEvalDecision(ctx context.Context, namespace, id string) (*EvalDecisionRecord, error)
+
+	// The promotion log of stable Agents. Records are never deleted, and at
+	// most one record per Agent is open (pending or applying) at a time,
+	// which serializes rollout actions on that Agent.
+
+	// CreateAgentPromotion adds a pending record. It returns ErrConflict
+	// when another record for the same Agent is open; an identical repeat of
+	// the same ID is a no-op and a different one returns
+	// ErrDuplicateMismatch.
+	CreateAgentPromotion(ctx context.Context, record *AgentPromotionRecord) error
+	// TransitionAgentPromotion compares and swaps a record's state and
+	// returns the updated record. A record not in From returns ErrConflict,
+	// as does a move to applying that requires the latest approval when the
+	// record's decision no longer is one.
+	TransitionAgentPromotion(ctx context.Context, transition AgentPromotionTransition) (*AgentPromotionRecord, error)
+	// ListAgentPromotions returns an Agent's records, oldest first.
+	ListAgentPromotions(ctx context.Context, namespace, agentUID string) ([]AgentPromotionRecord, error)
+	// ListOpenAgentPromotions returns every pending or applying record, for
+	// recovery after a restart.
+	ListOpenAgentPromotions(ctx context.Context) ([]AgentPromotionRecord, error)
 }

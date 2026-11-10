@@ -131,6 +131,27 @@ func reserveCatalogEvalExperiment(t *testing.T, p storagev1.StateProvider) {
 	require.True(t, granted.Granted)
 }
 
+func catalogAgentPromotion(id string) *storagev1.AgentPromotionRecord {
+	return &storagev1.AgentPromotionRecord{
+		SchemaVersion: storagev1.AgentPromotionSchemaVersion, ID: id, Namespace: workflowNamespace,
+		Agent: "reviewer", AgentUID: "reviewer-uid", Action: storagev1.AgentPromotionPromote, State: storagev1.AgentPromotionPending,
+		DecisionID: "decision-1", CandidateRun: "candidate-a", CandidateRunUID: "candidate-a-uid",
+		CandidateAgent:       &storagev1.EvalAgentIdentity{Name: "reviewer-c-1", UID: "candidate-agent-uid", Generation: 1},
+		Previous:             storagev1.AgentPromotionValues{SystemPrompt: "old"},
+		Target:               storagev1.AgentPromotionValues{SystemPrompt: "new"},
+		AgentResourceVersion: "7", AgentGeneration: 2,
+		Actor:     storagev1.EvalDecisionActor{Username: "alice", Groups: []string{"promoters"}},
+		CreatedAt: workflowAt(4), UpdatedAt: workflowAt(4),
+	}
+}
+
+func observeAgentPromotions(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	records, err := p.ListAgentPromotions(t.Context(), workflowNamespace, "reviewer-uid")
+	require.NoError(t, err)
+	return records
+}
+
 func init() {
 	type evalCase = writeCase[storagev1.StateProvider]
 	stateWriteCases = append(stateWriteCases,
@@ -192,6 +213,30 @@ func init() {
 				return []any{catalogEvalDecision("decision-2")}
 			}),
 			observe: observeEvalExperimentEntries,
+		},
+		evalCase{
+			method: "CreateAgentPromotion",
+			args: rebuiltArgs(func() []any {
+				return []any{catalogAgentPromotion("promotion-1")}
+			}),
+			observe: observeAgentPromotions,
+		},
+		evalCase{
+			method: "TransitionAgentPromotion",
+			// The transition checks, in its transaction, that the record's
+			// decision is still the latest approval.
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				reserveCatalogEvalExperiment(t, p)
+				_, err := p.RecordEvalExperimentOutcome(t.Context(), catalogEvalOutcome("candidate-a", storagev1.EvalExperimentResultPassed))
+				require.NoError(t, err)
+				require.NoError(t, p.AppendEvalDecision(t.Context(), catalogEvalDecision("decision-1")))
+				require.NoError(t, p.CreateAgentPromotion(t.Context(), catalogAgentPromotion("promotion-1")))
+			},
+			args: fixed(storagev1.AgentPromotionTransition{
+				Namespace: workflowNamespace, ID: "promotion-1", From: storagev1.AgentPromotionPending,
+				To: storagev1.AgentPromotionApplying, RequireLatestApproval: true, UpdatedAt: workflowAt(5),
+			}),
+			observe: observeAgentPromotions,
 		},
 	)
 }

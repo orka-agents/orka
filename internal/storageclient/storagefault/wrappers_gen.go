@@ -478,6 +478,16 @@ func (p *stateProvider) CreateActionRecord(ctx context.Context, a1 *storagev1.Ac
 	return err
 }
 
+func (p *stateProvider) CreateAgentPromotion(ctx context.Context, a1 *storagev1.AgentPromotionRecord) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateAgentPromotion", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateAgentPromotion(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) CreateCommandEvent(ctx context.Context, a1 *storagev1.CommandEvent) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateCommandEvent", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
@@ -960,6 +970,19 @@ func (p *stateProvider) GetDatasetBinding(ctx context.Context, a1 string) (stora
 	})
 	if injected {
 		var z0 storagev1.DatasetBinding
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetEvalDecision(ctx context.Context, a1 string, a2 string) (*storagev1.EvalDecisionRecord, error) {
+	var r0 *storagev1.EvalDecisionRecord
+	injected, err := p.injector.call(ctx, p.contract, "GetEvalDecision", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetEvalDecision(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.EvalDecisionRecord
 		return z0, err
 	}
 	return r0, err
@@ -1650,6 +1673,19 @@ func (p *stateProvider) ListAgentExecutionSnapshotMetadataBefore(ctx context.Con
 	return r0, err
 }
 
+func (p *stateProvider) ListAgentPromotions(ctx context.Context, a1 string, a2 string) ([]storagev1.AgentPromotionRecord, error) {
+	var r0 []storagev1.AgentPromotionRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListAgentPromotions", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListAgentPromotions(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AgentPromotionRecord
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListCommandEvents(ctx context.Context, a1 storagev1.CommandEventFilter) ([]storagev1.CommandEvent, string, error) {
 	var r0 []storagev1.CommandEvent
 	var r1 string
@@ -1900,6 +1936,19 @@ func (p *stateProvider) ListMonitorRuns(ctx context.Context, a1 storagev1.Monito
 		return z0, z1, err
 	}
 	return r0, r1, err
+}
+
+func (p *stateProvider) ListOpenAgentPromotions(ctx context.Context) ([]storagev1.AgentPromotionRecord, error) {
+	var r0 []storagev1.AgentPromotionRecord
+	injected, err := p.injector.call(ctx, p.contract, "ListOpenAgentPromotions", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListOpenAgentPromotions(ctx)
+		return err
+	})
+	if injected {
+		var z0 []storagev1.AgentPromotionRecord
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ListPatchProposals(ctx context.Context, a1 string, a2 string) ([]storagev1.PatchProposal, error) {
@@ -2815,6 +2864,19 @@ func (p *stateProvider) TombstoneConnectorCustody(ctx context.Context, a1 string
 		return p.inner.TombstoneConnectorCustody(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) TransitionAgentPromotion(ctx context.Context, a1 storagev1.AgentPromotionTransition) (*storagev1.AgentPromotionRecord, error) {
+	var r0 *storagev1.AgentPromotionRecord
+	injected, err := p.injector.call(ctx, p.contract, "TransitionAgentPromotion", func(ctx context.Context) (err error) {
+		r0, err = p.inner.TransitionAgentPromotion(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.AgentPromotionRecord
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) UpdateActionRecord(ctx context.Context, a1 *storagev1.ActionRecord) error {
