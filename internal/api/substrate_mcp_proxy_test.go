@@ -415,7 +415,7 @@ func TestSubstrateMCPProxyAuthorizesEgressCredentials(t *testing.T) {
 		header := http.Header{}
 		header.Set("Content-Type", "application/json")
 		workerexecutor.SetSubstrateMCPToolBinding(header, egressTool())
-		response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, `{}`)
+		response := f.do(t, http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", header, substrateMCPProxyToolCall)
 		require.Equal(t, http.StatusForbidden, response.StatusCode)
 		require.Zero(t, f.upstreamCalls())
 	})

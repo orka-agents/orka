@@ -884,6 +884,10 @@ func (r *ToolReconciler) stopUnnamedSubstrateMCPActor(ctx context.Context, tool 
 		}
 		return fmt.Errorf("read the actor's template: %w", err)
 	}
+	if description.Phase == workspace.PhaseDeleted {
+		// Describe reports an absent Actor as deleted, with no template.
+		return nil
+	}
 	templateName := strings.TrimSpace(description.Template.Name)
 	if templateName == "" {
 		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, held.stop(), fmt.Errorf("substrate does not report the actor's template"))

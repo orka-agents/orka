@@ -92,6 +92,31 @@ func TestExternalNativeWorkspaceRefusesWithoutProviderTokenInjection(t *testing.
 	}
 }
 
+// Credential injection is a gateway feature. A native provider that claims it
+// without the egress allowlist gets a NetworkPolicy-shaped request, whose
+// bootstrap would carry the real token, so admission refuses instead.
+func TestExternalNativeWorkspaceRefusesInjectionWithoutEgressAllowlist(t *testing.T) {
+	f := newExternalRuntimePoolFixture(t)
+	f.advertiseNativeProcess(t)
+	provider := &workspacev1alpha1.ExecutionWorkspaceProvider{}
+	if err := f.r.Get(t.Context(), client.ObjectKeyFromObject(f.provider), provider); err != nil {
+		t.Fatal(err)
+	}
+	provider.Status.SupportedFeatures = append(provider.Status.SupportedFeatures, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
+	if err := f.r.Update(t.Context(), provider); err != nil {
+		t.Fatal(err)
+	}
+	for range 6 {
+		runtimePoolReconcile(t, f.r, f.pool)
+	}
+	if f.currentWorkspace(t).Spec.Workload != nil {
+		t.Fatal("published a native request whose bootstrap would carry the provider token")
+	}
+	if message := runtimePoolTestGetPool(t, f.r, f.pool).Status.Message; !strings.Contains(message, "without "+string(workspacev1alpha1.WorkspaceFeatureEgressAllowlist)) {
+		t.Fatalf("refusal does not explain the capability combination: %q", message)
+	}
+}
+
 func TestExternalNativeWorkspaceExplicitSandboxTokenFallback(t *testing.T) {
 	f := newNativeSubstrateV1Fixture(t)
 	f.withdrawEgressCredentialInjection(t)

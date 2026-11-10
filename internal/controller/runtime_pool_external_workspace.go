@@ -347,6 +347,14 @@ func (r *RuntimePoolReconciler) publishExternalWorkspaceWorkload(ctx context.Con
 			required = append(required, workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
 		}
 	} else {
+		if nativeProcess && externalProviderSupportsEgressCredentialInjection(registration) {
+			// Credential injection is a gateway feature; without the egress
+			// allowlist there is no gateway policy to inject from, and the
+			// token would reach the sandbox through the bootstrap instead.
+			return r.externalPoolWorkspaceProgress(ctx, pool, w, corev1alpha1.RuntimePoolLifecycleDegraded,
+				"the workspace provider advertises "+string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)+
+					" without "+string(workspacev1alpha1.WorkspaceFeatureEgressAllowlist)+"; refusing to deliver the provider token into the sandbox")
+		}
 		network := &networkingv1.NetworkPolicySpec{PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{runtimePoolKeyLabel: cfg.labels[runtimePoolKeyLabel]}}, PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}}
 		if nativeProcess {
 			// Native infrastructure/router ingress is operator-managed. Freeze only

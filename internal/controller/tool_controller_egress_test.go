@@ -744,6 +744,30 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	}
 }
 
+// A held Actor that Substrate no longer has needs no stop: Describe reports it
+// deleted, without a template, and the invalid Tool must not keep retrying.
+func TestToolReconcilerTreatsAnAbsentHeldActorAsStopped(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	gone := deterministicSubstrateToolActorID(defaultNS, "mcp-tool", "ate-demo", "mcp-template-gone")
+	tool := getEgressTestTool(t, r)
+	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, gone)); err != nil {
+		t.Fatalf("Create lease: %v", err)
+	}
+	executor.describeDeleted = []string{gone}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
+	})
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v, want the absent Actor treated as stopped", err)
+	}
+	for _, req := range executor.releaseReqs {
+		if req.Ref.ID == gone {
+			t.Fatalf("releases = %v, want no stop for the absent Actor", executor.releaseReqs)
+		}
+	}
+}
+
 func TestNativeSubstrateTemplateSuspendUnsupported(t *testing.T) {
 	template := func(fidelity ateapipb.SnapshotFidelity, volume *ateapipb.Volume, mount string) *ateapipb.ActorTemplate {
 		container := &ateapipb.Container{Name: "mcp"}
