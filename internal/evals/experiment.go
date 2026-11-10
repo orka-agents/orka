@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"strings"
 
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -94,16 +95,28 @@ const (
 	SplitHeldOut = "heldOut"
 )
 
-// CaseSetSplits returns the split of every case ConfigMap the protected set
-// lists, keyed namespace/name. Experiments run only on held-out sets, and a
-// candidate Agent outside an experiment only on training sets, so which
-// cases judge a candidate, and when they rotate, stay operator choices.
-func CaseSetSplits(declaration []byte) (map[string]string, error) {
+// CaseSet is one case ConfigMap the protected set lists.
+type CaseSet struct {
+	Split string
+	// BaselineMonitors are the RepositoryMonitors, in the case set's
+	// namespace, whose own reviewer may run on a held-out set outside an
+	// experiment. Those runs are the baselines candidates are judged
+	// against; any other monitor could carry an unbudgeted candidate.
+	BaselineMonitors []string
+}
+
+// CaseSets returns every case ConfigMap the protected set lists, keyed
+// namespace/name. Experiments run only on held-out sets, a candidate Agent
+// outside an experiment only on training sets, and a plain run on a held-out
+// set only through a listed baseline monitor, so which cases judge a
+// candidate, and when they rotate, stay operator choices.
+func CaseSets(declaration []byte) (map[string]CaseSet, error) {
 	var document struct {
 		CaseSets []struct {
-			Namespace string `json:"namespace"`
-			Name      string `json:"name"`
-			Split     string `json:"split"`
+			Namespace        string   `json:"namespace"`
+			Name             string   `json:"name"`
+			Split            string   `json:"split"`
+			BaselineMonitors []string `json:"baselineMonitors"`
 		} `json:"caseSets"`
 	}
 	raw, err := sigsyaml.YAMLToJSON(declaration)
@@ -113,20 +126,42 @@ func CaseSetSplits(declaration []byte) (map[string]string, error) {
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return nil, fmt.Errorf("decode protected set caseSets: %w", err)
 	}
-	splits := map[string]string{}
+	sets := map[string]CaseSet{}
 	for _, caseSet := range document.CaseSets {
-		if (caseSet.Split == SplitTrain || caseSet.Split == SplitHeldOut) && caseSet.Namespace != "" && caseSet.Name != "" {
-			key := caseSet.Namespace + "/" + caseSet.Name
-			// A set listed twice must not take whichever split comes last:
-			// a held-out set also listed as train would admit unpaired
-			// candidates.
-			if split, listed := splits[key]; listed && split != caseSet.Split {
-				return nil, fmt.Errorf("protected set lists case set %s as both %s and %s", key, split, caseSet.Split)
+		if (caseSet.Split != SplitTrain && caseSet.Split != SplitHeldOut) || caseSet.Namespace == "" || caseSet.Name == "" {
+			continue
+		}
+		key := caseSet.Namespace + "/" + caseSet.Name
+		if len(caseSet.BaselineMonitors) > 0 && caseSet.Split != SplitHeldOut {
+			return nil, fmt.Errorf("protected set case set %s lists baselineMonitors, which only a heldOut set takes", key)
+		}
+		// A set listed twice must not take whichever split comes last:
+		// a held-out set also listed as train would admit unpaired
+		// candidates.
+		listed, seen := sets[key]
+		if seen && listed.Split != caseSet.Split {
+			return nil, fmt.Errorf("protected set lists case set %s as both %s and %s", key, listed.Split, caseSet.Split)
+		}
+		listed.Split = caseSet.Split
+		for _, monitor := range caseSet.BaselineMonitors {
+			if !slices.Contains(listed.BaselineMonitors, monitor) {
+				listed.BaselineMonitors = append(listed.BaselineMonitors, monitor)
 			}
-			splits[key] = caseSet.Split
+		}
+		sets[key] = listed
+	}
+	return sets, nil
+}
+
+// HeldOutBaselineMonitor reports whether monitor, in namespace, may run the
+// held-out sets there outside an experiment.
+func HeldOutBaselineMonitor(sets map[string]CaseSet, namespace, monitor string) bool {
+	for key, set := range sets {
+		if set.Split == SplitHeldOut && strings.HasPrefix(key, namespace+"/") && slices.Contains(set.BaselineMonitors, monitor) {
+			return true
 		}
 	}
-	return splits, nil
+	return false
 }
 
 // Digest digests the gate's thresholds.
@@ -266,7 +301,7 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 		}
 		if level := in.Gate.TestLevel(); target.PValue > level {
 			failures = append(failures, fmt.Sprintf("the paired sign test p-value %s is above the per-experiment level %s",
-				FormatDecimal(target.PValue), FormatDecimal(level)))
+				strconv.FormatFloat(target.PValue, 'g', 6, 64), FormatDecimal(level)))
 		}
 	}
 

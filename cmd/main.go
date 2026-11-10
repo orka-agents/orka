@@ -2836,6 +2836,12 @@ func parseEvalGateConfigMap(value, controllerNamespace string) (types.Namespaced
 	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
 		return types.NamespacedName{}, fmt.Errorf("namespace %q is invalid: %s", namespace, strings.Join(errs, "; "))
 	}
+	// The controller reads ConfigMaps only in its own namespace, where the
+	// operator-owned protected set belongs; elsewhere every read would be
+	// forbidden and candidates would wait forever.
+	if namespace != controllerNamespace {
+		return types.NamespacedName{}, fmt.Errorf("the gate ConfigMap must be in the controller namespace %q, not %q", controllerNamespace, namespace)
+	}
 	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 || strings.Contains(name, "/") {
 		return types.NamespacedName{}, fmt.Errorf("ConfigMap name %q is invalid", name)
 	}

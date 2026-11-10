@@ -50,7 +50,7 @@ func (r *EvalRunReconciler) CurrentEvalDecisionBinding(ctx context.Context, cand
 	}
 	// The cases must still be held out: cases moved to training, or no
 	// longer listed, may have been read since the experiment ran.
-	if ref := candidate.Spec.Cases.ConfigMapRef; ref == nil || splits[candidate.Namespace+"/"+ref.Name] != evals.SplitHeldOut {
+	if ref := candidate.Spec.Cases.ConfigMapRef; ref == nil || splits[candidate.Namespace+"/"+ref.Name].Split != evals.SplitHeldOut {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"the candidate's cases ConfigMap is no longer listed with split: heldOut in the protected set")
 	}

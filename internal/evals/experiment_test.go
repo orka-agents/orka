@@ -287,13 +287,13 @@ func TestHeldOutCaseKeys(t *testing.T) {
 // A case set listed under two splits is refused rather than taking the last.
 func TestCaseSetSplitsRejectsConflictingSplits(t *testing.T) {
 	conflicting := "caseSets:\n- {namespace: team-a, name: cases, split: heldOut}\n- {namespace: team-a, name: cases, split: train}\n"
-	if _, err := CaseSetSplits([]byte(conflicting)); err == nil || !strings.Contains(err.Error(), "both heldOut and train") {
-		t.Fatalf("CaseSetSplits() error = %v, want a conflict", err)
+	if _, err := CaseSets([]byte(conflicting)); err == nil || !strings.Contains(err.Error(), "both heldOut and train") {
+		t.Fatalf("CaseSets() error = %v, want a conflict", err)
 	}
 	repeated := "caseSets:\n- {namespace: team-a, name: cases, split: heldOut}\n- {namespace: team-a, name: cases, split: heldOut}\n"
-	splits, err := CaseSetSplits([]byte(repeated))
-	if err != nil || splits["team-a/cases"] != SplitHeldOut {
-		t.Fatalf("CaseSetSplits() = %v, %v", splits, err)
+	splits, err := CaseSets([]byte(repeated))
+	if err != nil || splits["team-a/cases"].Split != SplitHeldOut {
+		t.Fatalf("CaseSets() = %v, %v", splits, err)
 	}
 }
 
@@ -351,5 +351,25 @@ func TestParseExperimentGateGuardrailTolerance(t *testing.T) {
 	tolerantDigest, _ := gate.Digest()
 	if strictDigest == tolerantDigest {
 		t.Fatal("the gate digest ignores the guardrail tolerance")
+	}
+}
+
+func TestCaseSetsBaselineMonitors(t *testing.T) {
+	sets, err := CaseSets([]byte("caseSets:\n" +
+		"- {namespace: team-a, name: held, split: heldOut, baselineMonitors: [prod]}\n" +
+		"- {namespace: team-a, name: held, split: heldOut, baselineMonitors: [prod, staging]}\n" +
+		"- {namespace: team-a, name: train, split: train}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sets["team-a/held"]; got.Split != SplitHeldOut || !slices.Equal(got.BaselineMonitors, []string{"prod", "staging"}) {
+		t.Fatalf("held = %+v", got)
+	}
+	if !HeldOutBaselineMonitor(sets, "team-a", "staging") || HeldOutBaselineMonitor(sets, "team-a", "scratch") ||
+		HeldOutBaselineMonitor(sets, "team-b", "prod") {
+		t.Fatal("baseline monitor lookup is wrong")
+	}
+	if _, err := CaseSets([]byte("caseSets:\n- {namespace: team-a, name: train, split: train, baselineMonitors: [prod]}\n")); err == nil {
+		t.Fatal("a training set with baselineMonitors was accepted")
 	}
 }
