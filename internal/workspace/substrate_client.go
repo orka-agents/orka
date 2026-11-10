@@ -226,10 +226,14 @@ func (c *grpcSubstrateControlClient) GetActor(ctx context.Context, actorID strin
 
 // resolveBootedTemplateUID fills the guest-state template identity of an Actor
 // that is placed on a worker but has never been snapshotted. Upstream v1 records
-// the template UID only on snapshots; such an Actor booted from the template its
-// reference names, and ActorTemplates are immutable, so the named template's
-// current UID is its guest-state identity. A template recreated under the same
-// name has a new UID and fails the caller's identity comparison.
+// the template UID only on snapshots, and resolves an Actor's template by name
+// when it boots. ActorTemplates are immutable, so the template that name
+// resolves to now is the one the Actor booted from only if it already existed
+// when the Actor was created: a template that has existed since then was not
+// deleted, and the Actor cannot have booted before it was created. A template
+// created later may be a replacement under the same name while the Actor still
+// runs the deleted one, so its UID is not the Actor's identity. The identity is
+// then left unknown, as it is when either time is missing.
 func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Context, actor *ateapipb.Actor, converted *substrateActor) error {
 	if converted == nil || converted.TemplateUID != "" || len(actor.GetStatus().GetSnapshots()) != 0 ||
 		actor.GetStatus().GetWorkerAssignment() == nil || actor.GetActorTemplate().GetName() == "" {
@@ -247,6 +251,10 @@ func (c *grpcSubstrateControlClient) resolveBootedTemplateUID(ctx context.Contex
 			return nil
 		}
 		return substrateControlError("get actor template", err)
+	}
+	templateCreated, actorCreated := template.GetMetadata().GetCreateTime(), actor.GetMetadata().GetCreateTime()
+	if templateCreated == nil || actorCreated == nil || templateCreated.AsTime().After(actorCreated.AsTime()) {
+		return nil
 	}
 	converted.TemplateUID = template.GetMetadata().GetUid()
 	return nil

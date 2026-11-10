@@ -51,6 +51,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// defaultToolHTTPTimeout bounds a Tool call whose Tool sets no timeout.
+const defaultToolHTTPTimeout = 30 * time.Second
+
 const (
 	mcpJSONRPCVersion                = "2.0"
 	mcpProtocolVersion               = "2025-06-18"
@@ -301,7 +304,7 @@ func NewToolExecutor() *ToolExecutor {
 	authorityConstraint := strings.TrimSpace(os.Getenv(workerenv.TransactionCredentialSecret))
 	return &ToolExecutor{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultToolHTTPTimeout,
 		},
 		secretPath:                  "/secrets/tools",
 		namespace:                   namespace,
@@ -323,7 +326,7 @@ func NewToolExecutorForNamespace(namespace string, k8sClient kubernetes.Interfac
 		namespace = "default"
 	}
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
+		httpClient = &http.Client{Timeout: defaultToolHTTPTimeout}
 	}
 	var resolver outboundaccess.Resolver
 	if len(resolvers) > 0 {

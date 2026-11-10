@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -336,5 +337,45 @@ func TestSubstrateMCPRequiresReadinessForCurrentToolGeneration(t *testing.T) {
 	}
 	if got := requests(); len(got) != 0 {
 		t.Fatalf("unreconciled Tools reached the proxy %d times", len(got))
+	}
+}
+
+// The manager's router client is shared and has no timeout. A call through it
+// must still be bounded: by the Tool's timeout when it sets one, otherwise by
+// the executor's default.
+func TestToolExecutorSubstrateMCPRouterCallsHaveATimeout(t *testing.T) {
+	for name, tc := range map[string]struct {
+		timeout *metav1.Duration
+		want    time.Duration
+	}{
+		"tool sets none": {want: defaultToolHTTPTimeout},
+		"tool sets one":  {timeout: &metav1.Duration{Duration: 5 * time.Second}, want: 5 * time.Second},
+	} {
+		t.Run(name, func(t *testing.T) {
+			shared := &http.Client{}
+			router, err := NewSubstrateMCPRouter("https://router.test", shared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := &ToolExecutor{client: &http.Client{}, namespace: "tenant"}
+			executor.SetSubstrateMCPRouter(router)
+			tool := substrateMCPTestTool()
+			tool.Spec.HTTP.AuthSecretRef = nil
+			tool.Spec.HTTP.Timeout = tc.timeout
+			prepared, err := executor.prepareSubstrateMCPRequest(context.Background(), tool, map[string]any{"q": "x"})
+			if err != nil {
+				t.Fatalf("prepareSubstrateMCPRequest() error = %v", err)
+			}
+			client, err := toolHTTPClient(prepared.baseClient, prepared.httpConfig.Timeout, prepared.gatewayTLS, prepared.gateway, prepared.connection)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if client.Timeout != tc.want {
+				t.Fatalf("call timeout = %s, want %s", client.Timeout, tc.want)
+			}
+			if shared.Timeout != 0 {
+				t.Fatalf("shared router client timeout = %s, want it left alone", shared.Timeout)
+			}
+		})
 	}
 }
