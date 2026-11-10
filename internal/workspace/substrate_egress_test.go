@@ -126,8 +126,12 @@ func (f *fakeEgressControl) GetActor(_ context.Context, in *ateapipb.GetActorReq
 }
 
 func (f *fakeEgressControl) stampWrite() {
-	if !f.writeTime.IsZero() {
-		f.policy.Metadata.UpdateTime = timestamppb.New(f.writeTime)
+	if f.writeTime.IsZero() {
+		return
+	}
+	f.policy.Metadata.UpdateTime = timestamppb.New(f.writeTime)
+	if f.policy.Metadata.GetCreateTime() == nil {
+		f.policy.Metadata.CreateTime = f.policy.Metadata.UpdateTime
 	}
 }
 
@@ -211,9 +215,9 @@ func TestApplySubstrateActorEgressPolicyReportsTheStoredPolicy(t *testing.T) {
 		at    time.Time
 		want  SubstrateEgressPolicyState
 	}{
-		{"created", rules, created, SubstrateEgressPolicyState{Version: 1, UpdateTime: created, ActorCreateTime: actorCreated}},
-		{"unchanged", rules, replaced, SubstrateEgressPolicyState{Version: 1, UpdateTime: created, ActorCreateTime: actorCreated}},
-		{"replaced", nil, replaced, SubstrateEgressPolicyState{Version: 2, UpdateTime: replaced, ActorCreateTime: actorCreated}},
+		{"created", rules, created, SubstrateEgressPolicyState{Version: 1, CreateTime: created, UpdateTime: created, ActorCreateTime: actorCreated}},
+		{"unchanged", rules, replaced, SubstrateEgressPolicyState{Version: 1, CreateTime: created, UpdateTime: created, ActorCreateTime: actorCreated}},
+		{"replaced", nil, replaced, SubstrateEgressPolicyState{Version: 2, CreateTime: created, UpdateTime: replaced, ActorCreateTime: actorCreated}},
 	}
 	for _, step := range steps {
 		control.writeTime = step.at
@@ -243,16 +247,19 @@ func TestSubstrateEgressPolicyStateEnforcedAfter(t *testing.T) {
 		want  time.Time
 	}{
 		// The gateway may remember the rules this policy replaced.
-		"replaced policy": {SubstrateEgressPolicyState{Version: 2, UpdateTime: recent, ActorCreateTime: long}, recent.Add(window)},
+		"replaced policy": {SubstrateEgressPolicyState{Version: 2, CreateTime: long, UpdateTime: recent, ActorCreateTime: long}, recent.Add(window)},
+		// A policy deleted and created again for the same Actor starts at
+		// version 1 while the deleted rules may still be cached.
+		"recreated policy of an old actor": {SubstrateEgressPolicyState{Version: 1, CreateTime: recent, UpdateTime: recent, ActorCreateTime: long}, recent.Add(window)},
 		// A new Actor's name may have belonged to a deleted one, whose policy
 		// the gateway may remember.
-		"new actor": {SubstrateEgressPolicyState{Version: 1, UpdateTime: recent, ActorCreateTime: recent}, recent.Add(window)},
-		// An Actor created ahead of its first policy has no such history left.
-		"first policy of an old actor": {SubstrateEgressPolicyState{Version: 1, UpdateTime: recent, ActorCreateTime: long}, long.Add(window)},
-		"replaced before the actor was recreated": {
-			SubstrateEgressPolicyState{Version: 3, UpdateTime: long, ActorCreateTime: recent}, recent.Add(window),
-		},
-		"unknown": {SubstrateEgressPolicyState{}, time.Time{}},
+		"new actor": {SubstrateEgressPolicyState{Version: 1, CreateTime: recent, UpdateTime: recent, ActorCreateTime: recent}, recent.Add(window)},
+		// Each time is honoured even if a store stamps the others earlier.
+		"create time alone":       {SubstrateEgressPolicyState{Version: 1, CreateTime: recent}, recent.Add(window)},
+		"actor create time alone": {SubstrateEgressPolicyState{Version: 1, ActorCreateTime: recent}, recent.Add(window)},
+		// Nothing written for longer than the window: enforced already.
+		"old policy": {SubstrateEgressPolicyState{Version: 3, CreateTime: long, UpdateTime: long, ActorCreateTime: long}, long.Add(window)},
+		"unknown":    {SubstrateEgressPolicyState{}, time.Time{}},
 	} {
 		if got := tc.state.EnforcedAfter(window); !got.Equal(tc.want) {
 			t.Errorf("%s: EnforcedAfter = %s, want %s", name, got, tc.want)
