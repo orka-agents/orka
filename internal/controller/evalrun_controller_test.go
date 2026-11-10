@@ -500,6 +500,14 @@ func TestEvalRunFailsConfigurationsItCannotRun(t *testing.T) {
 		"copilot reviewer": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectUnsupported, mutate: func(objects []client.Object) {
 			objects[3].(*corev1alpha1.Agent).Spec.Runtime.Type = corev1alpha1.AgentRuntimeCopilot
 		}},
+		// A trial's ACP session refuses these, so the run fails before it
+		// freezes rather than counting every trial as an infra error.
+		"reviewer with skills": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectUnsupported, mutate: func(objects []client.Object) {
+			objects[3].(*corev1alpha1.Agent).Spec.Skills = []corev1alpha1.SkillReference{{Name: "style"}}
+		}},
+		"reviewer with tools": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectUnsupported, mutate: func(objects []client.Object) {
+			objects[3].(*corev1alpha1.Agent).Spec.Tools = []corev1alpha1.ToolReference{{Name: "web_fetch"}}
+		}},
 		"cross-namespace reviewer": {trials: 1, cases: evalTestCases(), reason: evalRunReasonSubjectInvalid, mutate: func(objects []client.Object) {
 			objects[2].(*corev1alpha1.RepositoryMonitor).Spec.Agents.Reviewer.Namespace = "other"
 		}},
