@@ -86,13 +86,19 @@ type EvalRunReconciler struct {
 	// APIReader reads case ConfigMaps uncached, so the controller does not
 	// cache every ConfigMap in its namespaces, and confirms trial Tasks the
 	// cache has not seen yet.
-	APIReader     client.Reader
-	TrialStore    store.EvalTrialStore
-	ResultStore   store.ResultStore
-	EventStore    store.ExecutionEventStore
-	RuntimeImages ACPRuntimeImages
-	Graders       *evals.Registry
-	Now           func() time.Time
+	APIReader  client.Reader
+	TrialStore store.EvalTrialStore
+	// ExperimentStore holds experiment attempt reservations, which outlive
+	// their EvalRuns. Nil fails every experiment closed.
+	ExperimentStore store.EvalExperimentStore
+	ResultStore     store.ResultStore
+	EventStore      store.ExecutionEventStore
+	RuntimeImages   ACPRuntimeImages
+	Graders         *evals.Registry
+	Now             func() time.Time
+	// GateConfigMap names the protected-set ConfigMap whose gate section
+	// judges experiments. Empty fails every experiment closed.
+	GateConfigMap types.NamespacedName
 }
 
 // evalRunObservation is what one reconcile resolves from the cluster.
@@ -171,12 +177,20 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 			return ctrl.Result{}, err
 		}
 	}
-	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
+	// Judge an experiment before the TTL can delete the candidate's records.
+	if experiment := run.Status.Experiment; experiment != nil && experiment.Result == corev1alpha1.EvalExperimentPending {
+		return r.decideExperiment(ctx, run)
+	}
+	expiry, ok := evalRunExpiry(run)
+	if !ok {
 		return ctrl.Result{}, nil
 	}
-	expiry := run.Status.CompletionTime.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second)
 	if remaining := expiry.Sub(r.now()); remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+	// A baseline outlives its TTL while a candidate still needs its trials.
+	if waiting, err := r.hasUndecidedCandidates(ctx, run); err != nil || waiting {
+		return ctrl.Result{RequeueAfter: evalRunRequeueInterval}, err
 	}
 	logf.FromContext(ctx).Info("Deleting EvalRun after ttlSecondsAfterFinished", "evalRun", run.Name)
 	propagation := metav1.DeletePropagationBackground
@@ -187,6 +201,20 @@ func (r *EvalRunReconciler) reconcileFinishedEvalRun(ctx context.Context, run *c
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// evalRunExpiry is when ttlSecondsAfterFinished lets a finished run be
+// deleted. A candidate keeps its whole retention window after the decision,
+// however long it waited for its baseline.
+func evalRunExpiry(run *corev1alpha1.EvalRun) (time.Time, bool) {
+	if run.Spec.TTLSecondsAfterFinished == nil || run.Status.CompletionTime == nil {
+		return time.Time{}, false
+	}
+	finished := run.Status.CompletionTime.Time
+	if experiment := run.Status.Experiment; experiment != nil && experiment.DecidedAt != nil && experiment.DecidedAt.After(finished) {
+		finished = experiment.DecidedAt.Time
+	}
+	return finished.Add(time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second), true
 }
 
 func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *corev1alpha1.EvalRun) (ctrl.Result, error) {
@@ -203,6 +231,32 @@ func (r *EvalRunReconciler) reconcileActiveEvalRun(ctx context.Context, run *cor
 			"the run configuration changed after it started: "+configErr.message)
 	}
 	if run.Status.Snapshot == nil {
+		if run.Spec.Experiment == nil && !evalRunAgentOverride(run) {
+			if err := r.refuseUnlistedHeldOutBaseline(ctx, run); err != nil {
+				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
+				}
+				return ctrl.Result{}, err
+			}
+		}
+		if run.Spec.Experiment == nil && evalRunAgentOverride(run) {
+			if err := r.refuseUnpairedHeldOutCandidate(ctx, run); err != nil {
+				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
+				}
+				return ctrl.Result{}, err
+			}
+		}
+		if run.Spec.Experiment != nil {
+			experiment, err := r.prepareExperiment(ctx, run, observed)
+			if err != nil {
+				if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+					return ctrl.Result{}, r.finishEvalRun(ctx, run, nil, corev1alpha1.EvalRunPhaseFailed, configErr.reason, configErr.message)
+				}
+				return ctrl.Result{}, err
+			}
+			run.Status.Experiment = experiment
+		}
 		return ctrl.Result{}, r.startEvalRun(ctx, run, observed)
 	}
 	if changed := evalRunSnapshotChanges(*run.Status.Snapshot, observed.Snapshot); len(changed) > 0 {
@@ -267,6 +321,24 @@ func (r *EvalRunReconciler) graders() *evals.Registry {
 // loadEvalCases reads, parses and selects the run's cases, and checks the
 // cases × trials cap that admission cannot check without spec.cases.ids.
 func (r *EvalRunReconciler) loadEvalCases(ctx context.Context, run *corev1alpha1.EvalRun) ([]evals.Case, error) {
+	parsed, err := r.loadEvalCaseSet(ctx, run)
+	if err != nil {
+		return nil, err
+	}
+	cases, err := evals.SelectCases(parsed, run.Spec.Cases.IDs)
+	if err != nil {
+		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
+	}
+	if total := int64(len(cases)) * int64(run.Spec.Trials); run.Spec.Trials < 1 || total > corev1alpha1.EvalRunMaxCaseTrials {
+		return nil, evalRunConfigErrorf(evalRunReasonCaseTrialCapExceeded,
+			"%d cases × %d trials exceeds the limit of %d trials per run", len(cases), run.Spec.Trials, corev1alpha1.EvalRunMaxCaseTrials)
+	}
+	return cases, nil
+}
+
+// loadEvalCaseSet reads and parses every case in the run's cases ConfigMap,
+// before spec.cases.ids selects any.
+func (r *EvalRunReconciler) loadEvalCaseSet(ctx context.Context, run *corev1alpha1.EvalRun) ([]evals.Case, error) {
 	ref := run.Spec.Cases.ConfigMapRef
 	if ref == nil {
 		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "spec.cases.configMapRef is required")
@@ -286,15 +358,7 @@ func (r *EvalRunReconciler) loadEvalCases(ctx context.Context, run *corev1alpha1
 	if err != nil {
 		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "case ConfigMap %q key %q: %v", ref.Name, ref.Key, err)
 	}
-	cases, err := evals.SelectCases(parsed, run.Spec.Cases.IDs)
-	if err != nil {
-		return nil, evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
-	}
-	if total := int64(len(cases)) * int64(run.Spec.Trials); run.Spec.Trials < 1 || total > corev1alpha1.EvalRunMaxCaseTrials {
-		return nil, evalRunConfigErrorf(evalRunReasonCaseTrialCapExceeded,
-			"%d cases × %d trials exceeds the limit of %d trials per run", len(cases), run.Spec.Trials, corev1alpha1.EvalRunMaxCaseTrials)
-	}
-	return cases, nil
+	return parsed, nil
 }
 
 func (r *EvalRunReconciler) startEvalRun(ctx context.Context, run *corev1alpha1.EvalRun, observed *evalRunObservation) error {

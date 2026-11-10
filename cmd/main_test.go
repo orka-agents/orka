@@ -862,3 +862,24 @@ func TestACPArtifactRetentionWiring(t *testing.T) {
 		t.Fatal("collector must remain a leader-elected cleanup runnable")
 	}
 }
+
+func TestParseEvalGateConfigMap(t *testing.T) {
+	for _, test := range []struct {
+		value, want string
+		ok          bool
+	}{
+		{"", "/", true},
+		{"orka-protected-set", "orka-system/orka-protected-set", true},
+		{"orka-system/protected-set", "orka-system/protected-set", true},
+		// The controller can read ConfigMaps only in its own namespace.
+		{"evals/protected-set", "", false},
+		{"Bad/protected-set", "", false},
+		{"orka-system/Bad_Name", "", false},
+		{"orka-system/a/b", "", false},
+	} {
+		got, err := parseEvalGateConfigMap(test.value, "orka-system")
+		if (err == nil) != test.ok || (test.ok && got.String() != test.want) {
+			t.Errorf("parseEvalGateConfigMap(%q) = %v, %v", test.value, got, err)
+		}
+	}
+}

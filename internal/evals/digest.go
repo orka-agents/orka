@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"sort"
+	"strings"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 )
@@ -20,6 +23,52 @@ func CaseSetDigest(cases []Case) (string, error) {
 		Schema string `json:"schema"`
 		Cases  []Case `json:"cases"`
 	}{Schema: corev1alpha1.EvalCaseSchemaVersion, Cases: cases})
+}
+
+// HeldOutCaseKeys returns the sorted, distinct keys of the evidence the
+// cases hold out: for a review case, the reviewed repository and commits.
+// Case IDs, order, tags, references and descriptive text do not change a
+// key, so rearranging or relabeling held-out cases never makes them fresh.
+func HeldOutCaseKeys(cases []Case) ([]string, error) {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(cases))
+	for i := range cases {
+		input := cases[i].Input.RepositoryMonitorReview
+		if input == nil {
+			return nil, fmt.Errorf("case %q has no repositoryMonitorReview input", cases[i].ID)
+		}
+		key, err := digestJSON(struct {
+			RepoURL string `json:"repoURL"`
+			BaseSHA string `json:"baseSHA"`
+			HeadSHA string `json:"headSHA"`
+		}{canonicalRepoURL(input.RepoURL), strings.ToLower(input.BaseSHA), strings.ToLower(input.HeadSHA)})
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[key]; !dup {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// canonicalRepoURL folds the spellings of one repository URL together: it
+// keeps only the parsed host and decoded owner/repository path, without case,
+// slashes or a .git suffix, so encodings, a scheme or a port never make the
+// same repository fresh. Folding two distinct repositories only shares their
+// budget, so it errs toward stricter limits.
+func canonicalRepoURL(repoURL string) string {
+	trimmed := strings.TrimSpace(repoURL)
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Host != "" {
+		trimmed = parsed.Hostname() + path.Clean("/"+parsed.Path)
+	}
+	canonical := strings.Trim(strings.ToLower(trimmed), "/")
+	for strings.HasSuffix(canonical, ".git") {
+		canonical = strings.Trim(strings.TrimSuffix(canonical, ".git"), "/")
+	}
+	return canonical
 }
 
 // GraderSetDigest returns the digest of the named graders' names and
@@ -87,4 +136,10 @@ func TrialPlanDigest(plan []PlannedTrial) (string, error) {
 		Schema string         `json:"schema"`
 		Plan   []PlannedTrial `json:"plan"`
 	}{Schema: "orka.eval.trialPlan.v1", Plan: plan})
+}
+
+// DigestJSON digests value's JSON encoding, for snapshot digests built
+// outside this package.
+func DigestJSON(value any) (string, error) {
+	return digestJSON(value)
 }

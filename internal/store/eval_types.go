@@ -9,6 +9,11 @@ type (
 	EvalTrialGrade    = storagev1.EvalTrialGrade
 	EvalTrialSnapshot = storagev1.EvalTrialSnapshot
 	EvalTrialStore    = storagev1.EvalTrialStore
+
+	EvalExperimentRecord      = storagev1.EvalExperimentRecord
+	EvalExperimentLimits      = storagev1.EvalExperimentLimits
+	EvalExperimentReservation = storagev1.EvalExperimentReservation
+	EvalExperimentStore       = storagev1.EvalExperimentStore
 )
 
 const (
@@ -17,4 +22,6 @@ const (
 	EvalTrialOutcomeFail       = storagev1.EvalTrialOutcomeFail
 	EvalTrialOutcomeInfraError = storagev1.EvalTrialOutcomeInfraError
 	MaxEvalTrialRecordBytes    = storagev1.MaxEvalTrialRecordBytes
+
+	EvalExperimentSchemaVersion = storagev1.EvalExperimentSchemaVersion
 )

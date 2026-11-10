@@ -1,6 +1,7 @@
 package storagetest
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,7 +9,7 @@ import (
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
-// The eval trial write cases.
+// The eval trial and experiment write cases.
 
 const (
 	evalRunName = "pr-review"
@@ -43,6 +44,36 @@ func observeEvalTrials(t *testing.T, p storagev1.StateProvider) any {
 	return records
 }
 
+func catalogEvalExperiment(candidate string) *storagev1.EvalExperimentRecord {
+	return &storagev1.EvalExperimentRecord{
+		SchemaVersion:   storagev1.EvalExperimentSchemaVersion,
+		Namespace:       workflowNamespace,
+		CandidateRun:    candidate,
+		CandidateRunUID: candidate + "-uid",
+		BaselineRun:     evalRunName,
+		BaselineRunUID:  evalRunUID,
+		CaseSetDigest:   "sha256:cases",
+		CaseKeys:        []string{"sha256:case-a", "sha256:case-b"},
+		GateDigest:      "sha256:gate",
+		Hypothesis:      "stricter review prompt",
+		ReservedAt:      workflowAt(1),
+	}
+}
+
+func observeEvalExperiments(t *testing.T, p storagev1.StateProvider) any {
+	t.Helper()
+	var records []*storagev1.EvalExperimentRecord
+	for _, candidate := range []string{"candidate-a", "candidate-b"} {
+		record, err := p.GetEvalExperiment(t.Context(), workflowNamespace, candidate+"-uid")
+		if errors.Is(err, storagev1.ErrNotFound) {
+			continue
+		}
+		require.NoError(t, err)
+		records = append(records, record)
+	}
+	return records
+}
+
 func init() {
 	type evalCase = writeCase[storagev1.StateProvider]
 	stateWriteCases = append(stateWriteCases,
@@ -67,6 +98,21 @@ func init() {
 			afterCommit: func(t *testing.T, p storagev1.StateProvider) {
 				require.NoError(t, p.CreateEvalTrial(t.Context(), catalogEvalTrial("case-a", storagev1.EvalTrialOutcomePass)))
 			},
+		},
+		evalCase{
+			method: "ReserveEvalExperiment",
+			// One attempt is already held on the baseline, so the
+			// reservation takes the last one the limits allow.
+			setup: func(t *testing.T, p storagev1.StateProvider) {
+				granted, err := p.ReserveEvalExperiment(t.Context(), catalogEvalExperiment("candidate-a"),
+					storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCase: 2})
+				require.NoError(t, err)
+				require.True(t, granted.Granted)
+			},
+			args: rebuiltArgs(func() []any {
+				return []any{catalogEvalExperiment("candidate-b"), storagev1.EvalExperimentLimits{MaxPerBaseline: 2, MaxPerCase: 2}}
+			}),
+			observe: observeEvalExperiments,
 		},
 	)
 }

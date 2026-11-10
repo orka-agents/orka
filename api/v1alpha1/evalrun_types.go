@@ -102,6 +102,42 @@ type EvalConfigMapKeyRef struct {
 type EvalRepositoryMonitorReviewSubject struct {
 	// MonitorRef names a RepositoryMonitor in the EvalRun's namespace.
 	MonitorRef EvalObjectReference `json:"monitorRef"`
+
+	// AgentRef names an Agent in the EvalRun's namespace to review with
+	// instead of the monitor's reviewer, such as a candidate in an
+	// experiment. The monitor still supplies every other review setting.
+	// +optional
+	AgentRef *EvalObjectReference `json:"agentRef,omitempty"`
+}
+
+// EvalExperimentTarget names the result an improvement experiment must raise:
+// one grader, overall or on one case tag.
+type EvalExperimentTarget struct {
+	// Grader is the grader whose pass@1 must improve. It must be one of the
+	// run's graders.
+	Grader EvalGraderName `json:"grader"`
+
+	// Tag limits the target to cases with this tag. Empty means every case.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^([A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?)?$`
+	// +optional
+	Tag string `json:"tag,omitempty"`
+}
+
+// EvalExperiment makes this run the candidate arm of an improvement
+// experiment paired with a baseline run over the same cases and trials.
+type EvalExperiment struct {
+	// Hypothesis states in one sentence what the candidate should improve.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	Hypothesis string `json:"hypothesis"`
+
+	// BaselineRunRef names the baseline EvalRun in this namespace: the same
+	// monitor, cases, trials and graders with the stable reviewer.
+	BaselineRunRef EvalObjectReference `json:"baselineRunRef"`
+
+	// Target is the result the candidate must raise.
+	Target EvalExperimentTarget `json:"target"`
 }
 
 // EvalSubject selects what an EvalRun evaluates. Exactly the member named by
@@ -140,8 +176,9 @@ type EvalCaseSource struct {
 // write "20m" back as "20m0s", and an empty cases.ids equals an omitted one
 // because typed clients drop the empty list; every other field is compared
 // exactly.
-// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject && self.cases.configMapRef == oldSelf.cases.configMapRef && (has(self.cases.ids) ? self.cases.ids : []) == (has(oldSelf.cases.ids) ? oldSelf.cases.ids : []) && self.trials == oldSelf.trials && self.graders == oldSelf.graders && has(self.maxConcurrentTrials) == has(oldSelf.maxConcurrentTrials) && (!has(self.maxConcurrentTrials) || self.maxConcurrentTrials == oldSelf.maxConcurrentTrials) && has(self.trialTimeout) == has(oldSelf.trialTimeout) && (!has(self.trialTimeout) || duration(self.trialTimeout) == duration(oldSelf.trialTimeout)) && has(self.maxInfraErrorPercent) == has(oldSelf.maxInfraErrorPercent) && (!has(self.maxInfraErrorPercent) || self.maxInfraErrorPercent == oldSelf.maxInfraErrorPercent) && has(self.ttlSecondsAfterFinished) == has(oldSelf.ttlSecondsAfterFinished) && (!has(self.ttlSecondsAfterFinished) || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished)",message="EvalRun spec is immutable; create a new EvalRun"
+// +kubebuilder:validation:XValidation:rule="self.subject == oldSelf.subject && self.cases.configMapRef == oldSelf.cases.configMapRef && (has(self.cases.ids) ? self.cases.ids : []) == (has(oldSelf.cases.ids) ? oldSelf.cases.ids : []) && self.trials == oldSelf.trials && self.graders == oldSelf.graders && has(self.maxConcurrentTrials) == has(oldSelf.maxConcurrentTrials) && (!has(self.maxConcurrentTrials) || self.maxConcurrentTrials == oldSelf.maxConcurrentTrials) && has(self.trialTimeout) == has(oldSelf.trialTimeout) && (!has(self.trialTimeout) || duration(self.trialTimeout) == duration(oldSelf.trialTimeout)) && has(self.maxInfraErrorPercent) == has(oldSelf.maxInfraErrorPercent) && (!has(self.maxInfraErrorPercent) || self.maxInfraErrorPercent == oldSelf.maxInfraErrorPercent) && has(self.ttlSecondsAfterFinished) == has(oldSelf.ttlSecondsAfterFinished) && (!has(self.ttlSecondsAfterFinished) || self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished) && has(self.experiment) == has(oldSelf.experiment) && (!has(self.experiment) || self.experiment == oldSelf.experiment)",message="EvalRun spec is immutable; create a new EvalRun"
 // +kubebuilder:validation:XValidation:rule="!has(self.cases.ids) || size(self.cases.ids) * self.trials <= 500",message="cases × trials must be at most 500"
+// +kubebuilder:validation:XValidation:rule="!has(self.experiment) || self.experiment.target.grader in self.graders",message="experiment.target.grader must be one of graders"
 type EvalRunSpec struct {
 	// Subject selects what is evaluated.
 	Subject EvalSubject `json:"subject"`
@@ -183,10 +220,17 @@ type EvalRunSpec struct {
 	MaxInfraErrorPercent *int32 `json:"maxInfraErrorPercent,omitempty"`
 
 	// TTLSecondsAfterFinished deletes the EvalRun and its trial records this
-	// long after it finishes. Unset keeps them.
+	// long after it finishes, or, for an experiment candidate, after its
+	// experiment is decided. Unset keeps them.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
+	// Experiment makes this run the candidate arm of an improvement
+	// experiment. The controller compares it with the baseline run once both
+	// finish and records the gate's result in status.experiment.
+	// +optional
+	Experiment *EvalExperiment `json:"experiment,omitempty"`
 }
 
 // EvalObjectIdentity records the exact identity of an object a run depends on.
@@ -350,15 +394,115 @@ type EvalRunStatus struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
 	// CompletionTime is when the run finished; ttlSecondsAfterFinished counts
-	// from it.
+	// from it, or from status.experiment.decidedAt for a candidate.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Experiment is the experiment gate's result for a candidate run.
+	// +optional
+	Experiment *EvalExperimentStatus `json:"experiment,omitempty"`
 
 	// Conditions represent the current state of the run.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// EvalExperimentResult is the experiment gate's verdict.
+// +kubebuilder:validation:Enum=Pending;Passed;Failed;Incomparable
+type EvalExperimentResult string
+
+const (
+	// EvalExperimentPending waits for the candidate and baseline to finish.
+	EvalExperimentPending EvalExperimentResult = "Pending"
+	// EvalExperimentPassed means the candidate cleared every gate check.
+	EvalExperimentPassed EvalExperimentResult = "Passed"
+	// EvalExperimentFailed means the runs were comparable and the candidate
+	// failed a gate check.
+	EvalExperimentFailed EvalExperimentResult = "Failed"
+	// EvalExperimentIncomparable means the two runs differ in something other
+	// than the candidate's promotable fields, or one of them did not succeed.
+	EvalExperimentIncomparable EvalExperimentResult = "Incomparable"
+)
+
+// EvalExperimentGate is the protected set's gate as the experiment froze it.
+type EvalExperimentGate struct {
+	MaxInfraErrorPercent        int32 `json:"maxInfraErrorPercent"`
+	MaxCandidatesPerBaseline    int32 `json:"maxCandidatesPerBaseline"`
+	MaxExperimentsPerHeldOutSet int32 `json:"maxExperimentsPerHeldOutSet"`
+	MinTargetImprovementPoints  int32 `json:"minTargetImprovementPoints"`
+	// Significance is the one-sided test level before it is divided by
+	// MaxExperimentsPerHeldOutSet, as a decimal string such as "0.05".
+	// +kubebuilder:validation:MaxLength=32
+	Significance string `json:"significance"`
+	// MaxGuardrailDropPoints is how many percentage points any other
+	// grader's pass@1 may fall; zero fails on any drop.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MaxGuardrailDropPoints int32 `json:"maxGuardrailDropPoints,omitempty"`
+}
+
+// EvalExperimentTargetResult compares the target result of the two arms.
+type EvalExperimentTargetResult struct {
+	BaselinePassedTrials  int32 `json:"baselinePassedTrials"`
+	BaselineTrials        int32 `json:"baselineTrials"`
+	CandidatePassedTrials int32 `json:"candidatePassedTrials"`
+	CandidateTrials       int32 `json:"candidateTrials"`
+	// ImprovedPairs counts paired trials the baseline failed and the
+	// candidate passed; RegressedPairs counts the reverse.
+	ImprovedPairs  int32 `json:"improvedPairs"`
+	RegressedPairs int32 `json:"regressedPairs"`
+	// ImprovementPoints is candidate minus baseline pass@1 in percentage
+	// points, as a decimal string.
+	// +kubebuilder:validation:MaxLength=32
+	ImprovementPoints string `json:"improvementPoints"`
+	// PValue is the one-sided exact sign test over the paired trials, as a
+	// decimal string.
+	// +kubebuilder:validation:MaxLength=32
+	PValue string `json:"pValue"`
+}
+
+// EvalExperimentStatus records an experiment's pairing and gate result.
+type EvalExperimentStatus struct {
+	// Result is the gate's verdict.
+	Result EvalExperimentResult `json:"result"`
+
+	// Reasons explain a result other than Passed, and the checks a Passed
+	// result cleared.
+	// +kubebuilder:validation:MaxItems=32
+	// +optional
+	Reasons []string `json:"reasons,omitempty"`
+
+	// BaselineRun is the baseline run's identity, frozen when the candidate
+	// started, so a recreated baseline is not mistaken for it.
+	// +optional
+	BaselineRun *EvalObjectIdentity `json:"baselineRun,omitempty"`
+
+	// CandidateDigest digests the candidate's promotable fields: the
+	// reviewer Agent's identity, resolved system prompt, model and runtime
+	// image.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	CandidateDigest string `json:"candidateDigest,omitempty"`
+
+	// GateDigest digests the frozen gate.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	GateDigest string `json:"gateDigest,omitempty"`
+
+	// DecidedAt is when the experiment left Pending.
+	// +optional
+	DecidedAt *metav1.Time `json:"decidedAt,omitempty"`
+
+	// Gate is the gate the experiment was judged by.
+	// +optional
+	Gate *EvalExperimentGate `json:"gate,omitempty"`
+
+	// Target compares the target result of the two arms.
+	// +optional
+	Target *EvalExperimentTargetResult `json:"target,omitempty"`
 }
 
 // EvalRun runs a set of cases through an Orka agent path several times and

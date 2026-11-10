@@ -408,6 +408,61 @@ func TestEvalRunWaitRetriesTransientErrors(t *testing.T) {
 	}
 }
 
+// A finished candidate is judged later; --wait holds until the experiment
+// leaves Pending, and only a Passed experiment exits successfully.
+func TestEvalRunWaitHoldsForTheExperimentDecision(t *testing.T) {
+	for _, decision := range []string{"Passed", "Failed", "Incomparable"} {
+		t.Run(decision, func(t *testing.T) {
+			gets := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/evals/runs":
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"}}`))
+				case "/api/v1/evals/runs/r":
+					gets++
+					result := "Pending"
+					if gets > 3 {
+						result = decision
+					}
+					_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"status":{"phase":"Succeeded","experiment":{"result":"` +
+						result + `"}}}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			out, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, evalTestManifest), "--server", srv.URL,
+				"--token", "tok", "--wait")
+			if gets < 4 || strings.Count(out, "Waiting for the experiment decision") != 1 {
+				t.Fatalf("Execute() = %v after %d gets\n%s", err, gets, out)
+			}
+			if decision == "Passed" && err != nil {
+				t.Fatalf("Execute() = %v for a passed experiment", err)
+			}
+			if decision != "Passed" && (err == nil || !strings.Contains(err.Error(), "experiment is "+decision)) {
+				t.Fatalf("Execute() = %v, want a failure for a %s experiment", err, decision)
+			}
+		})
+	}
+}
+
+// A declared experiment that finished without a decision, as a controller
+// without experiment support leaves it, never exits successfully.
+func TestEvalGetWaitFailsWithoutAnExperimentDecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a"},"spec":{"experiment":{"hypothesis":"h",` +
+			`"baselineRunRef":{"name":"b"},"target":{"grader":"verdict"}}},"status":{"phase":"Succeeded"}}`))
+	}))
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "get", "r", "-n", "team-a", "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "no experiment decision") {
+		t.Fatalf("Execute() = %v, want a failure for a missing decision", err)
+	}
+}
+
 func TestEvalRunWaitFailsOnNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -437,6 +492,25 @@ func TestEvalGetFollowsAnExistingRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "trials.jsonl")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEvalGetPrintsTheExperiment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"cand","namespace":"team-a"},
+			"spec":{"experiment":{"hypothesis":"h","baselineRunRef":{"name":"base"},"target":{"grader":"verdict","tag":"defect"}}},
+			"status":{"phase":"Succeeded","experiment":{"result":"Failed","reasons":["contract regressed from 8/8 to 6/8"],
+			"target":{"baselinePassedTrials":1,"baselineTrials":9,"candidatePassedTrials":7,"candidateTrials":9,
+			"improvedPairs":6,"regressedPairs":0,"improvementPoints":"66.6667","pValue":"0.015625"}}}}`))
+	}))
+	defer srv.Close()
+	out, err := runEvalCommand(t, "eval", "get", "cand", "--server", srv.URL, "--token", "tok")
+	for _, want := range []string{"Experiment: Failed against baseline base (target verdict on defect)",
+		"1/9 -> 7/9 (66.6667 points); paired trials 6 improved, 0 regressed; p = 0.015625", "  - contract regressed"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("Execute() = %v, output lacks %q:\n%s", err, want, out)
+		}
 	}
 }
 
@@ -581,6 +655,21 @@ func TestEvalOutputDropsEventsOfAnEarlierExport(t *testing.T) {
 	}
 }
 
+// A finished candidate whose experiment is still Pending is polled until the
+// decision, so a short TTL could delete it first; get --wait refuses it.
+func TestEvalGetWaitRefusesAShortTTLForAPendingDecision(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"metadata":{"name":"r","namespace":"team-a","uid":"uid-a"},"spec":{"ttlSecondsAfterFinished":0},` +
+			`"status":{"phase":"Succeeded","experiment":{"result":"Pending"}}}`))
+	}))
+	defer srv.Close()
+	_, err := runEvalCommand(t, "eval", "get", "r", "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "ttlSecondsAfterFinished 0") {
+		t.Fatalf("Execute() error = %v, want the short-TTL refusal", err)
+	}
+}
+
 // An events entry that is a symlink would send the mode change, the cleanup
 // and the transcripts to its target, so the export refuses it.
 func TestEvalOutputRefusesASymlinkedEventsDirectory(t *testing.T) {
@@ -618,6 +707,28 @@ func TestEvalOutputRefusesASymlinkedEventsDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "eval-b.json")); !os.IsNotExist(err) {
 		t.Fatalf("a transcript was written through the symlink: %v", err)
+	}
+}
+
+// A server whose CRD prunes spec.experiment or agentRef would turn a
+// candidate into a plain run; the CLI refuses to follow it.
+func TestEvalRunRefusesAPrunedExperiment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"metadata":{"name":"cand","namespace":"team-a","uid":"u"},"spec":{"subject":{"type":"repositoryMonitorReview",` +
+			`"repositoryMonitorReview":{"monitorRef":{"name":"m"}}}}}`))
+	}))
+	defer srv.Close()
+	manifest := evalTestManifest + `
+  experiment:
+    hypothesis: better
+    baselineRunRef: {name: base}
+    target: {grader: verdict}
+`
+	_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "created without spec.experiment") {
+		t.Fatalf("Execute() error = %v, want a refusal", err)
 	}
 }
 

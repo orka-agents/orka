@@ -96,3 +96,48 @@ orka eval run -f evalrun.yaml --output-dir ./results
 
 Results are in `status.results`; per-trial records are at
 `GET /api/v1/evals/runs/<name>/trials`.
+
+## Compare a candidate reviewer
+
+An experiment pairs a baseline run with a candidate run that reviews with a
+different Agent. Create the baseline first, then the candidate:
+
+```yaml
+apiVersion: core.orka.ai/v1alpha1
+kind: EvalRun
+metadata: {name: pr-review-candidate, namespace: <namespace>}
+spec:
+  subject:
+    type: repositoryMonitorReview
+    repositoryMonitorReview:
+      monitorRef: {name: <monitor>}
+      agentRef: {name: <candidate-agent>}     # reviews instead of the monitor's reviewer
+  cases:
+    configMapRef: {name: pr-review-cases, key: cases.jsonl}
+  trials: 3                                   # same cases, trials, concurrency, timeout and graders as the baseline
+  maxConcurrentTrials: 3
+  graders: [verdict, localization, contract, honesty]
+  experiment:
+    hypothesis: The candidate prompt reviews more accurately.
+    baselineRunRef: {name: <baseline-run>}
+    target: {grader: verdict}
+```
+
+Target `verdict` over every case rather than the `defect` tag alone: on defect
+cases, a reviewer that blocks every pull request scores perfectly.
+
+The controller must run with `--eval-gate-configmap` naming the protected-set
+ConfigMap. Its `gate` holds the thresholds, and its `caseSets` must list the
+candidate's cases ConfigMap with `split: heldOut` and name the monitor the
+baseline runs through in that entry's `baselineMonitors`; rotate the held-out set by
+listing a new ConfigMap of fresh commits. Outside an experiment, a run with
+`agentRef` needs cases listed with `split: train`. The baseline must not set
+`agentRef`. Each candidate spends one attempt before its first trial, against
+`maxCandidatesPerBaseline` and, for the reviewed commits of every case in its
+cases ConfigMap, `maxExperimentsPerHeldOutSet`; `spec.cases.ids` selecting a
+few cases still spends the whole set. Deleting a candidate does not return its
+attempt, and reordering, renaming or subsetting cases does not make them
+fresh. Raising `maxExperimentsPerHeldOutSet` or `significance` later loosens
+the correction for cases already spent; rotate in fresh cases instead. When both runs finish,
+`orka eval get <candidate>` prints the verdict, the paired target comparison
+and the reasons. With `--wait` it exits non-zero unless the experiment passed.

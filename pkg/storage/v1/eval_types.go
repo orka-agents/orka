@@ -100,3 +100,63 @@ type EvalTrialStore interface {
 	// EvalRun name.
 	DeleteEvalTrials(ctx context.Context, namespace, evalRun string) error
 }
+
+// EvalExperimentSchemaVersion is the schema of one stored experiment
+// reservation.
+const EvalExperimentSchemaVersion = "orka.eval.experiment.v1"
+
+// EvalExperimentRecord reserves one attempt of an improvement experiment: a
+// candidate EvalRun paired with a baseline over a held-out case set. Records
+// outlive their EvalRuns, so deleting a candidate never returns the attempt
+// it spent.
+type EvalExperimentRecord struct {
+	SchemaVersion   string `json:"schemaVersion"`
+	Namespace       string `json:"namespace"`
+	CandidateRun    string `json:"candidateRun"`
+	CandidateRunUID string `json:"candidateRunUID"`
+	BaselineRun     string `json:"baselineRun"`
+	BaselineRunUID  string `json:"baselineRunUID"`
+	// CaseSetDigest is the candidate's case set snapshot digest, for audit.
+	CaseSetDigest string `json:"caseSetDigest"`
+	// CaseKeys are the sorted, distinct keys of the held-out evidence the
+	// candidate runs on. Budgets count per key, so relabeling, reordering
+	// or subsetting the same cases never makes them fresh.
+	CaseKeys   []string  `json:"caseKeys"`
+	GateDigest string    `json:"gateDigest"`
+	Hypothesis string    `json:"hypothesis"`
+	ReservedAt time.Time `json:"reservedAt"`
+}
+
+// EvalExperimentLimits are the attempt budgets a reservation must fit.
+type EvalExperimentLimits struct {
+	// MaxPerBaseline bounds the candidates of one baseline incarnation.
+	MaxPerBaseline int32 `json:"maxPerBaseline"`
+	// MaxPerCase bounds the experiments any one held-out case key may be
+	// part of, across every baseline and namespace.
+	MaxPerCase int32 `json:"maxPerCase"`
+}
+
+// EvalExperimentReservation is the outcome of a reservation.
+type EvalExperimentReservation struct {
+	// Granted reports whether the candidate holds an attempt: a new one, or
+	// the one an identical earlier reservation already holds.
+	Granted bool `json:"granted"`
+	// BaselineAttempts counts the attempts held on the baseline, and
+	// CaseAttempts the most held on any one of the record's case keys, both
+	// including this one when granted.
+	BaselineAttempts int32 `json:"baselineAttempts"`
+	CaseAttempts     int32 `json:"caseAttempts"`
+}
+
+// EvalExperimentStore reserves experiment attempts. Only the EvalRun
+// controller writes them, and nothing deletes them.
+type EvalExperimentStore interface {
+	// ReserveEvalExperiment atomically counts the attempts already held on
+	// the record's baseline and on each of its case keys and adds the
+	// record when all fit the limits. A repeat for the same candidate returns its earlier grant;
+	// a different record for that candidate returns ErrDuplicateMismatch.
+	ReserveEvalExperiment(ctx context.Context, record *EvalExperimentRecord, limits EvalExperimentLimits) (EvalExperimentReservation, error)
+	// GetEvalExperiment returns the reservation a candidate incarnation
+	// holds, or ErrNotFound.
+	GetEvalExperiment(ctx context.Context, namespace, candidateRunUID string) (*EvalExperimentRecord, error)
+}

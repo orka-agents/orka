@@ -747,6 +747,16 @@ func (p envelopedState) RequestScanRunCancellation(ctx context.Context, a1 *stor
 	})
 }
 
+func (p envelopedState) ReserveEvalExperiment(ctx context.Context, a1 *storagev1.EvalExperimentRecord, a2 storagev1.EvalExperimentLimits) (storagev1.EvalExperimentReservation, error) {
+	var r0 storagev1.EvalExperimentReservation
+	err := p.ops.run(ctx, writeCall{method: "ReserveEvalExperiment", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.ReserveEvalExperiment(ctx, a1, a2)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) ResolveFindingIfCurrent(ctx context.Context, a1 string, a2 string, a3 string, a4 int) (bool, error) {
 	var r0 bool
 	err := p.ops.run(ctx, writeCall{method: "ResolveFindingIfCurrent", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {

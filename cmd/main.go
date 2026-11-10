@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/version"
@@ -376,6 +377,7 @@ func main() {
 	var agentHostAgentImage string
 	var agentHostControllerPodLabels string
 	var evalsEnabled bool
+	var evalGateConfigMap string
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -806,6 +808,9 @@ func main() {
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.BoolVar(&evalsEnabled, "enable-evals", envBool("ORKA_ENABLE_EVALS"),
 		"Enable the EvalRun controller, which runs capability eval trials as Tasks and grades them.")
+	flag.StringVar(&evalGateConfigMap, "eval-gate-configmap", os.Getenv("ORKA_EVAL_GATE_CONFIGMAP"),
+		"The protected-set ConfigMap, as namespace/name or a name in the controller namespace, whose gate section "+
+			"judges EvalRun experiments. Empty fails every experiment closed.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -2127,12 +2132,19 @@ func main() {
 		os.Exit(1)
 	}
 	if evalsEnabled {
+		gateConfigMap, err := parseEvalGateConfigMap(evalGateConfigMap, currentPodNamespace())
+		if err != nil {
+			setupLog.Error(err, "invalid --eval-gate-configmap")
+			os.Exit(1)
+		}
 		if err := (&controller.EvalRunReconciler{
-			Client:      mgr.GetClient(),
-			Scheme:      mgr.GetScheme(),
-			TrialStore:  appStorage,
-			ResultStore: appStorage,
-			EventStore:  appStorage,
+			GateConfigMap:   gateConfigMap,
+			Client:          mgr.GetClient(),
+			Scheme:          mgr.GetScheme(),
+			TrialStore:      appStorage,
+			ExperimentStore: appStorage,
+			ResultStore:     appStorage,
+			EventStore:      appStorage,
 			RuntimeImages: controller.ACPRuntimeImages{
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
@@ -2748,6 +2760,32 @@ func controllerHolderIDForIncarnation(hostname, incarnation string) string {
 		hostname = "controller"
 	}
 	return hostname + "-" + strings.TrimSpace(incarnation)
+}
+
+// parseEvalGateConfigMap reads --eval-gate-configmap: namespace/name, or a
+// name in the controller namespace. Empty is allowed and disables the gate.
+func parseEvalGateConfigMap(value, controllerNamespace string) (types.NamespacedName, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return types.NamespacedName{}, nil
+	}
+	namespace, name, qualified := strings.Cut(value, "/")
+	if !qualified {
+		namespace, name = controllerNamespace, value
+	}
+	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
+		return types.NamespacedName{}, fmt.Errorf("namespace %q is invalid: %s", namespace, strings.Join(errs, "; "))
+	}
+	// The controller reads ConfigMaps only in its own namespace, where the
+	// operator-owned protected set belongs; elsewhere every read would be
+	// forbidden and candidates would wait forever.
+	if namespace != controllerNamespace {
+		return types.NamespacedName{}, fmt.Errorf("the gate ConfigMap must be in the controller namespace %q, not %q", controllerNamespace, namespace)
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 || strings.Contains(name, "/") {
+		return types.NamespacedName{}, fmt.Errorf("ConfigMap name %q is invalid", name)
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}, nil
 }
 
 func currentPodNamespace() string {

@@ -172,6 +172,10 @@ func TestEvalRunSpecIsImmutable(t *testing.T) {
 		{name: "ttlSecondsAfterFinished", mutate: func(s map[string]any) { s["ttlSecondsAfterFinished"] = int64(1) }, want: true},
 		{name: "ttlSecondsAfterFinished removed", mutate: func(s map[string]any) { delete(s, "ttlSecondsAfterFinished") }, want: true},
 		{name: "trialTimeout removed", mutate: func(s map[string]any) { delete(s, "trialTimeout") }, want: true},
+		{name: "experiment added", mutate: func(s map[string]any) { s["experiment"] = validEvalExperiment() }, want: true},
+		{name: "agentRef added", mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"].(map[string]any)["agentRef"] = map[string]any{"name": "candidate"}
+		}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := validEvalRunSpec()
@@ -262,5 +266,51 @@ func TestEvalRunImmutabilityCoversEverySpecField(t *testing.T) {
 		if !strings.Contains(rule, "oldSelf."+name) {
 			t.Errorf("immutability rule does not compare spec.%s", name)
 		}
+	}
+}
+
+func validEvalExperiment() map[string]any {
+	return map[string]any{
+		"hypothesis":     "The reviewer misses defects.",
+		"baselineRunRef": map[string]any{"name": "baseline"},
+		"target":         map[string]any{"grader": "localization", "tag": "defect"},
+	}
+}
+
+func TestEvalRunExperimentAdmission(t *testing.T) {
+	for name, test := range map[string]struct {
+		mutate func(map[string]any)
+		want   string
+	}{
+		"valid": {mutate: func(s map[string]any) { s["experiment"] = validEvalExperiment() }},
+		"target grader not run": {mutate: func(s map[string]any) {
+			s["experiment"] = validEvalExperiment()
+			s["graders"] = []any{"verdict"}
+		}, want: "experiment.target.grader must be one of graders"},
+		"empty hypothesis": {mutate: func(s map[string]any) {
+			e := validEvalExperiment()
+			e["hypothesis"] = ""
+			s["experiment"] = e
+		}, want: "hypothesis"},
+		"bad tag": {mutate: func(s map[string]any) {
+			e := validEvalExperiment()
+			e["target"] = map[string]any{"grader": "verdict", "tag": "-bad"}
+			s["experiment"] = e
+		}, want: "tag"},
+		"agentRef": {mutate: func(s map[string]any) {
+			s["subject"].(map[string]any)["repositoryMonitorReview"].(map[string]any)["agentRef"] = map[string]any{"name": "candidate"}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := validEvalRunSpec()
+			test.mutate(spec)
+			got := validateEvalRunSpec(t, spec, nil)
+			if test.want == "" && got != "" {
+				t.Fatalf("rejected: %s", got)
+			}
+			if test.want != "" && !strings.Contains(got, test.want) {
+				t.Fatalf("errors = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

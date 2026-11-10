@@ -169,14 +169,15 @@ func newEvalRunTestEnv(t *testing.T, objects ...client.Object) *evalRunTestEnv {
 		Build()
 	env.client = kube
 	env.reconciler = &EvalRunReconciler{
-		Client:        kube,
-		Scheme:        scheme,
-		APIReader:     kube,
-		TrialStore:    sqliteStore,
-		ResultStore:   sqliteStore,
-		EventStore:    sqliteStore,
-		RuntimeImages: ACPRuntimeImages{Claude: evalTestImage},
-		Now:           func() time.Time { return env.now },
+		Client:          kube,
+		Scheme:          scheme,
+		APIReader:       kube,
+		TrialStore:      sqliteStore,
+		ExperimentStore: sqliteStore,
+		ResultStore:     sqliteStore,
+		EventStore:      sqliteStore,
+		RuntimeImages:   ACPRuntimeImages{Claude: evalTestImage},
+		Now:             func() time.Time { return env.now },
 	}
 	return env
 }

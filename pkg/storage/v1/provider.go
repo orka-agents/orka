@@ -184,6 +184,7 @@ type StateProvider interface {
 	GroupedExecutionEventStore
 
 	EvalTrialStore
+	EvalExperimentStore
 
 	GatewayEventStore
 	GatewayDeliveryStore

@@ -119,6 +119,13 @@ func buildEvalReviewTask(monitor *corev1alpha1.RepositoryMonitor, c evals.Case) 
 // Task builder. The trial clones the fixture anonymously and read-only: it
 // gets no read, publication or forge credential.
 func buildEvalReviewTrialTask(run *corev1alpha1.EvalRun, monitor *corev1alpha1.RepositoryMonitor, c evals.Case, trial int32, timeout metav1.Duration) (*corev1alpha1.Task, error) {
+	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
+		// The trial reviews with the candidate Agent, the same one the
+		// snapshot froze, instead of the monitor's reviewer. The prompt
+		// digest leaves the reviewer out, so it is unaffected.
+		monitor = monitor.DeepCopy()
+		monitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: agentRef.Name}
+	}
 	task, err := buildEvalReviewTask(monitor, c)
 	if err != nil {
 		return nil, err
@@ -179,6 +186,11 @@ func evalTrialTaskName(run *corev1alpha1.EvalRun, caseID string, trial int32) st
 // trials use, so a controller change to any of them changes the digest, as
 // does a monitor setting rendered into the Task.
 func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cases []evals.Case) (string, error) {
+	// Which Agent reviews is left out: the snapshot's reviewerAgent records
+	// it, a candidate differs from its baseline there by design, and a
+	// candidate needs no reviewer on the monitor at all.
+	monitor = monitor.DeepCopy()
+	monitor.Spec.Agents.Reviewer = &corev1alpha1.AgentReference{Name: evalPromptDigestReviewer}
 	hash := sha256.New()
 	for _, c := range cases {
 		task, err := buildEvalReviewTask(monitor, c)
@@ -193,6 +205,10 @@ func evalReviewPromptTemplateDigest(monitor *corev1alpha1.RepositoryMonitor, cas
 	}
 	return evals.DigestPrefix + hex.EncodeToString(hash.Sum(nil)), nil
 }
+
+// evalPromptDigestReviewer stands in for the reviewer Agent when the prompt
+// template is digested.
+const evalPromptDigestReviewer = "reviewer"
 
 // evalReviewTaskDigestInput is what the prompt digest covers of one rendered
 // review Task: its annotations and its whole spec, prompt included.
@@ -271,6 +287,11 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		return nil, err
 	}
 	reviewerRef := monitor.Spec.Agents.Reviewer
+	if agentRef := run.Spec.Subject.RepositoryMonitorReview.AgentRef; agentRef != nil {
+		// A candidate reviews with its own Agent; the monitor still supplies
+		// every other review setting.
+		reviewerRef = &corev1alpha1.AgentReference{Name: agentRef.Name}
+	}
 	if reviewerRef == nil || strings.TrimSpace(reviewerRef.Name) == "" {
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "RepositoryMonitor %q has no reviewer agent", monitor.Name)
 	}
