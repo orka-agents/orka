@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,9 +46,8 @@ func heldDeletingTask(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Tas
 }
 
 // requireDeletingTaskCleanupProceeds checks that recovery handed the released
-// deleting Task to the current epoch, whose terminal recovery owns its pending
-// runtime cleanup, and that this recovery completes the cleanup the Task
-// finalizer waits on.
+// deleting Task to the current epoch, whose terminal recovery owns any pending
+// runtime cleanup, and that the cleanup the Task finalizer waits on completes.
 func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
 	t.Helper()
 	released := &corev1alpha1.Task{}
@@ -56,11 +57,15 @@ func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, 
 	if released.Status.Execution == nil || released.Status.Execution.ControllerEpoch != fixture.fence.Epoch {
 		t.Fatalf("released deleting Task execution = %#v, want controller epoch %d", released.Status.Execution, fixture.fence.Epoch)
 	}
-	if taskScopedRuntimeSessionCleanupComplete(released) {
-		t.Fatal("the released deleting Task has no runtime cleanup left to prove")
+	if !released.Status.Phase.IsTerminal() {
+		t.Fatalf("released deleting Task phase = %s, want terminal", released.Status.Phase)
 	}
-	if err := fixture.dispatcher.recoverStaleTask(fixture.ctx, released, fixture.fence); err != nil {
-		t.Fatalf("current-epoch terminal recovery: %v", err)
+	if !taskScopedRuntimeSessionCleanupComplete(released) {
+		// The dispatcher's current-epoch sweep runs this for a deleting Task
+		// whose attempt is terminal and whose runtime cleanup is pending.
+		if err := fixture.dispatcher.recoverStaleTask(fixture.ctx, released, fixture.fence); err != nil {
+			t.Fatalf("current-epoch terminal recovery: %v", err)
+		}
 	}
 	cleaned := &corev1alpha1.Task{}
 	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), cleaned); err != nil {
@@ -117,4 +122,85 @@ func TestACPDispatcherReleasesRestoredHoldOfADeletingTask(t *testing.T) {
 	}
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
 	requireDeletingTaskCleanupProceeds(t, fixture, task)
+}
+
+// errInjectedProjection fails one terminal projection enqueue, as a lost
+// response or a store that is briefly unavailable would.
+var errInjectedProjection = errors.New("injected terminal projection failure")
+
+// failingProjectionStore fails the next failures terminal projection enqueues.
+type failingProjectionStore struct {
+	store.DurableControlStore
+	failures int
+}
+
+func (s *failingProjectionStore) EnqueueOutboxProjection(
+	ctx context.Context, projection *store.OutboxProjection, fence store.ControllerEpochFence,
+) (*store.OutboxProjection, error) {
+	if s.failures > 0 {
+		s.failures--
+		return nil, errInjectedProjection
+	}
+	return s.DurableControlStore.EnqueueOutboxProjection(ctx, projection, fence)
+}
+
+// recoverAfterAFailedPass runs a recovery pass over failing, whose injected
+// failure stops it after the held attempt left Settling, then the passes that
+// follow, and checks that they finish the deleting Task.
+func recoverAfterAFailedPass(
+	t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task, failing store.DurableControlStore, injected error,
+) {
+	t.Helper()
+	fixture.dispatcher.Store = failing
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); !errors.Is(err, injected) {
+		t.Fatalf("recovery error = %v, want the injected failure", err)
+	}
+	attempt, err := fixture.controlStore.GetPromptAttempt(fixture.ctx, fixture.attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.IsTerminalPromptExecutionState(attempt.ExecutionState) {
+		t.Fatalf("attempt after the failed pass = %s, want it settled", attempt.ExecutionState)
+	}
+	for range 3 {
+		if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+			t.Fatalf("recovery after the failed pass: %v", err)
+		}
+		latest := &corev1alpha1.Task{}
+		if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), latest); err != nil {
+			t.Fatal(err)
+		}
+		if latest.Status.Execution != nil && latest.Status.Execution.ControllerEpoch == fixture.fence.Epoch {
+			break
+		}
+	}
+	requireDeletingTaskCleanupProceeds(t, fixture, task)
+}
+
+// An acknowledged deleting Task whose pass failed after its outcome was
+// recorded as unknown is still finished by the next pass.
+func TestACPDispatcherFinishesAcknowledgedDeletingTaskAfterAFailedPass(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, _, hold := heldDeletingTask(t, fixture)
+	acknowledgeTaskStorageHold(t, fixture, task, hold.id())
+
+	failing := &failingProjectionStore{DurableControlStore: fixture.dispatcher.Store, failures: 1}
+	recoverAfterAFailedPass(t, fixture, task, failing, errInjectedProjection)
+	requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
+}
+
+// A restored deleting Task whose pass failed after its attempt succeeded, at
+// the delivery transition that follows, is still finished by the next pass.
+func TestACPDispatcherFinishesRestoredDeletingTaskAfterAFailedPass(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, receipt, _ := heldDeletingTask(t, fixture)
+	if err := fixture.controlStore.SavePromptResultReceipt(fixture.ctx, *receipt); err != nil {
+		t.Fatal(err)
+	}
+
+	failing := &failingDeliveryStore{DurableControlStore: fixture.dispatcher.Store, failures: 1}
+	recoverAfterAFailedPass(t, fixture, task, failing, errInjectedDeliveryTransition)
+	requireAttemptState(t, fixture, store.PromptExecutionSucceeded)
 }

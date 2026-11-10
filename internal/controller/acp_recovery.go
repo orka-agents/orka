@@ -689,13 +689,15 @@ func (d *ACPDispatcher) readRecoverableTask(
 //     cancels the deleting Task before any runtime contact.
 //   - A standalone attempt already settled. Recovery may still need to finish
 //     its terminal projection, for example after publication failed.
-//   - A Settling attempt of a Task that recovery held for a storage record.
-//     Only recovery can release that hold, from the restored receipt or the
-//     operator's acknowledgement, and the finalizer waits on the terminal
-//     attempt it leaves. Recovery never replays the prompt, its writes carry
-//     the current fence, and the Task's terminal projection keeps the frozen
-//     runtime identity, so runtime cleanup keeps its authority even when it
-//     has not finished yet.
+//   - The attempt of a Task that recovery held for a storage record, while it
+//     is Settling and after recovery settled it. Only recovery can release
+//     that hold, from the restored receipt or the operator's acknowledgement,
+//     and finish a pass that stopped after the attempt left Settling; the
+//     finalizer waits on the terminal Task and runtime cleanup it leaves. Such
+//     a Task recovers exactly as one that is not being deleted: recovery never
+//     replays the prompt, its writes carry the current fence, and the Task's
+//     terminal projection keeps the frozen runtime identity, so runtime
+//     cleanup keeps its authority even when it has not finished yet.
 func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
 	if !taskDispatchableByACP(task) || task.Status.Execution == nil || task.Status.Execution.Attempt < 1 ||
 		acpTaskHasRestoredSourceIdentityBinding(task) {
@@ -712,8 +714,8 @@ func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev
 	if err != nil {
 		return false, err
 	}
-	if attempt.ExecutionState == store.PromptExecutionSettling &&
-		meta.FindStatusCondition(task.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) != nil {
+	if meta.FindStatusCondition(task.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) != nil &&
+		(attempt.ExecutionState == store.PromptExecutionSettling || store.IsTerminalPromptExecutionState(attempt.ExecutionState)) {
 		return true, nil
 	}
 	if !taskScopedRuntimeSessionCleanupComplete(task) {
