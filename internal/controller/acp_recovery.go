@@ -849,10 +849,12 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		const reason = "RuntimeLost"
 		const message = "controller leadership changed after the prompt request-write boundary; outcome is unknown and was not replayed"
 		recoveredAt := time.Now().UTC()
-		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
+		// Settle the validation before the journal records a terminal event: a
+		// retry that finds that event takes the journaled path below.
+		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
 			return err
 		}
-		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
+		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
 			return err
 		}
 		if err := d.persistOutcomeUnknown(ctx, attempt.ID, fence, reason, message); err != nil {
@@ -1157,6 +1159,11 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		}
 	}
 	if evidence.TerminalEvent != harnessv2.EventCompleted {
+		// A terminal event an earlier recovery pass journaled can precede the
+		// settlement of a workspace validation that pass did not finish.
+		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
+			return true, err
+		}
 		session, err := d.recoveredTaskSession(ctx, task, attempt)
 		if err != nil {
 			return true, err
