@@ -48,7 +48,8 @@ const (
 	// EvalGraderVerdict passes when the verdict matches the case reference.
 	EvalGraderVerdict EvalGraderName = "verdict"
 	// EvalGraderLocalization passes when a finding falls within a reference
-	// location, with partial credit across reference locations.
+	// location, with partial credit across reference locations. A finding on
+	// a line the change removed counts where the removal happened.
 	EvalGraderLocalization EvalGraderName = "localization"
 	// EvalGraderContract passes when the result honors the review contract.
 	EvalGraderContract EvalGraderName = "contract"
