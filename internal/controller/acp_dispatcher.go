@@ -5596,7 +5596,9 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
-		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		if err := admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+		}); err != nil {
 			return err
 		}
 		task.Status = latest.Status
@@ -7016,7 +7018,9 @@ func (d *ACPDispatcher) failTaskWithProjection(
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Phase = phase
 		latest.Status.Message = message
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		})
 	})
 }
 

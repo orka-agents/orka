@@ -644,7 +644,9 @@ func (d *ACPDispatcher) patchRestoredTaskTerminal(
 		latest.Status.Execution.LastTransitionTime = &now
 		latest.Status.Delivery = delivery.DeepCopy()
 		latest.Status.CompletionTime = &now
-		return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		return admitTaskStatus(ctx, d.Epochs, taskSuccessOf(base), latest, func(ctx context.Context) error {
+			return d.Client.Status().Patch(ctx, latest, client.MergeFrom(base))
+		})
 	})
 }
 
