@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -253,8 +254,8 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 		// Compare pass counts exactly: 100*(c/ct - b/bt) >= min.
 		if 100*(int64(target.CandidatePassed)*int64(target.BaselineTrials)-int64(target.BaselinePassed)*int64(target.CandidateTrials)) <
 			int64(in.Gate.MinTargetImprovementPoints)*int64(target.BaselineTrials)*int64(target.CandidateTrials) {
-			failures = append(failures, fmt.Sprintf("the target pass@1 rose by %s points, less than the gate's %d",
-				FormatDecimal(target.ImprovementPoints), in.Gate.MinTargetImprovementPoints))
+			failures = append(failures, fmt.Sprintf("the target pass@1 changed by %s points, less than the gate's %d",
+				FormatDecimal(math.Round(target.ImprovementPoints*1e4)/1e4), in.Gate.MinTargetImprovementPoints))
 		}
 		if level := in.Gate.TestLevel(); target.PValue > level {
 			failures = append(failures, fmt.Sprintf("the paired sign test p-value %s is above the per-experiment level %s",
