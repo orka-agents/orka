@@ -48,7 +48,7 @@ func loadSample(t *testing.T) (*corev1.ConfigMap, *Set) {
 
 func TestSampleProtectedSetIsValid(t *testing.T) {
 	_, set := loadSample(t)
-	if set.SchemaVersion != SchemaVersion || len(set.CaseSets) != 2 || !set.HoldsCaseSets("orka-evals") || set.HoldsCaseSets("orka-proposers") {
+	if set.SchemaVersion != SchemaVersion || len(set.CaseSets) != 2 {
 		t.Fatalf("sample protected set = %#v", set)
 	}
 	_, again := loadSample(t)

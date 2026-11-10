@@ -360,17 +360,6 @@ func (s *Set) MissingDeniedPaths(denied []string, repositoryIDs ...string) []str
 	return missing
 }
 
-// HoldsCaseSets reports whether namespace holds any declared case set, of
-// either split. Proposers never run there.
-func (s *Set) HoldsCaseSets(namespace string) bool {
-	for _, caseSet := range s.CaseSets {
-		if caseSet.Namespace == namespace {
-			return true
-		}
-	}
-	return false
-}
-
 // Source reads the protected set from its ConfigMap on every call, so a
 // change takes effect on the next check without a controller restart.
 type Source struct {

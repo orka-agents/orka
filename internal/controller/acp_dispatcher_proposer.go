@@ -133,10 +133,13 @@ func proposerConstraintViolation(task *corev1alpha1.Task, effectiveTools []strin
 	if taskRequestsWorkspaceClass(task) {
 		return "a proposer cannot use an execution workspace class"
 	}
-	// Held-out cases and evaluation transcripts are namespace-scoped, so a
-	// proposer never runs where a case set lives.
-	if set.HoldsCaseSets(task.Namespace) {
-		return "a proposer cannot run in a namespace that holds an evaluation case set"
+	// Held-out fixtures sit in a private repository that only trial Tasks get
+	// a read credential for, so a proposer never holds one. It has no
+	// Kubernetes or Orka API token and only propose_memory among brokered
+	// tools, so it can reach neither held-out cases nor trial transcripts in
+	// the namespace it shares with them.
+	if workspace := task.Spec.Workspace; workspace != nil && workspace.ReadCredentialRef != nil {
+		return "a proposer cannot have a workspace read credential"
 	}
 	// Continuing a Session or forking another Task would hand the proposer a
 	// transcript it was not built from.

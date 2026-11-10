@@ -103,6 +103,15 @@ func TestProposerConstraintViolation(t *testing.T) {
 		{name: "read proposer needs no path limits", mutate: func(task *corev1alpha1.Task) {
 			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: proposerTestRepository}
 		}},
+		// Held-out fixtures need a read credential to clone; a proposer of
+		// either intent never gets one.
+		{name: "read proposer with a read credential", mutate: func(task *corev1alpha1.Task) {
+			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: proposerTestRepository,
+				ReadCredentialRef: &corev1alpha1.WorkspaceCredentialReference{Name: "fixtures-read"}}
+		}, want: "workspace read credential"},
+		{name: "write proposer with a read credential", mutate: func(task *corev1alpha1.Task) {
+			task.Spec.Workspace.ReadCredentialRef = &corev1alpha1.WorkspaceCredentialReference{Name: "fixtures-read"}
+		}, want: "workspace read credential"},
 		{name: "unknown role", mutate: func(task *corev1alpha1.Task) {
 			task.Annotations[labels.AnnotationImprovementRole] = "evaluator"
 		}, want: "is not supported"},
@@ -113,9 +122,11 @@ func TestProposerConstraintViolation(t *testing.T) {
 		{name: "container task", mutate: func(task *corev1alpha1.Task) {
 			task.Spec.Type = corev1alpha1.TaskTypeContainer
 		}, want: "agent Task"},
+		// The namespace a proposer shares with case sets gives it no way to
+		// read them; the read-credential rule and tool allowlist do the work.
 		{name: "case-set namespace", mutate: func(task *corev1alpha1.Task) {
 			task.Namespace = "orka-evals"
-		}, want: "case set"},
+		}},
 		{name: "session continuation", mutate: func(task *corev1alpha1.Task) {
 			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "evaluated"}
 		}, want: "Session"},
@@ -564,12 +575,12 @@ func TestDispatcherRechecksProposerConstraintsBeforeExecution(t *testing.T) {
 		wantViolation string
 	}{
 		{name: "ConfigMap removed", wantViolation: "proposer flows are disabled"},
-		{name: "case set added in the Task namespace", configMap: func(t *testing.T) *corev1.ConfigMap {
+		{name: "protected set became invalid", configMap: func(t *testing.T) *corev1.ConfigMap {
 			configMap := loadSampleProtectedSetConfigMap(t)
 			configMap.Data[protectedset.ConfigMapKey] = strings.Replace(configMap.Data[protectedset.ConfigMapKey],
-				"{namespace: orka-evals, name: pr-review-train,", "{namespace: default, name: pr-review-train,", 1)
+				"schemaVersion: orka.protectedSet.v1", "schemaVersion: orka.protectedSet.v2", 1)
 			return configMap
-		}, wantViolation: "namespace that holds an evaluation case set"},
+		}, wantViolation: "proposer flows are disabled"},
 		{name: "unchanged", configMap: loadSampleProtectedSetConfigMap},
 	}
 	for index, tt := range tests {
