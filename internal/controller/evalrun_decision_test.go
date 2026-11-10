@@ -118,7 +118,7 @@ func TestCurrentEvalDecisionBindingTracksTheLiveConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := gate.Data[evals.ProtectedSetConfigMapKey]
-	gate.Data[evals.ProtectedSetConfigMapKey] = strings.Replace(original, "split: heldOut", "split: train", 1)
+	gate.Data[evals.ProtectedSetConfigMapKey] = strings.Replace(original, "split: heldOut, baselineMonitors: [monitor]", "split: train", 1)
 	if err := env.client.Update(context.Background(), gate); err != nil {
 		t.Fatal(err)
 	}
