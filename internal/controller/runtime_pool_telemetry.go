@@ -65,11 +65,33 @@ func runtimePoolTelemetryEnv(enabled bool, getenv func(string) string) []corev1.
 	}
 	metrics, ok := runtimePoolMetricsTelemetryEnv(env, getenv)
 	if !ok {
+		if !slices.ContainsFunc(env, func(variable corev1.EnvVar) bool { return variable.Name == runtimePoolTelemetryEndpointEnv }) {
+			// Without a generic endpoint the supervisor resolves no metrics
+			// collector, so the native environment budget keeps the entry.
+			return env
+		}
 		// A generic trace endpoint must not become the metrics collector the
 		// controller just refused to project.
 		return append(env, corev1.EnvVar{Name: runtimePoolTelemetryMetricsExporterEnv, Value: runtimePoolTelemetryExporterNone})
 	}
-	return append(env, metrics...)
+	return shareRuntimePoolTelemetryScalars(env, metrics)
+}
+
+// shareRuntimePoolTelemetryScalars projects a scalar that traces and metrics
+// agree on once, under its generic name, which the supervisor and the SDK
+// resolve for both signals. The native backend admits 32 environment entries
+// per container, so a setting both signals share must not cost two of them.
+func shareRuntimePoolTelemetryScalars(traces, metrics []corev1.EnvVar) []corev1.EnvVar {
+	for _, suffix := range runtimePoolTelemetryScalarSuffixes {
+		trace := slices.IndexFunc(traces, func(variable corev1.EnvVar) bool { return variable.Name == "OTEL_EXPORTER_OTLP_TRACES_"+suffix })
+		metric := slices.IndexFunc(metrics, func(variable corev1.EnvVar) bool { return variable.Name == "OTEL_EXPORTER_OTLP_METRICS_"+suffix })
+		if trace < 0 || metric < 0 || traces[trace].Value != metrics[metric].Value {
+			continue
+		}
+		traces[trace].Name = "OTEL_EXPORTER_OTLP_" + suffix
+		metrics = slices.Delete(metrics, metric, metric+1)
+	}
+	return append(traces, metrics...)
 }
 
 // runtimePoolMetricsTelemetryEnv projects the metrics exporter for supervisor

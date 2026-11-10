@@ -68,6 +68,45 @@ func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimit(t *testing.T) {
 	}
 }
 
+// Supervisor telemetry shares that budget. A native runtime that cannot
+// suspend has three entries to spare, which the enable flag, one collector
+// endpoint and one exporter setting shared by traces and metrics must fit.
+func TestExternalRuntimePoolNativeEnvironmentFitsBackendLimitWithTelemetry(t *testing.T) {
+	const collector = "http://collector.otel.svc:4318"
+	for name, values := range map[string]map[string]string{
+		"generic endpoint":               {"OTEL_EXPORTER_OTLP_ENDPOINT": collector},
+		"generic endpoint, HTTP":         {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"},
+		"generic endpoint, insecure":     {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_INSECURE": "true"},
+		"generic endpoint, compression":  {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_COMPRESSION": "gzip"},
+		"endpoint per signal":            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": collector + "/v1/metrics"},
+		"trace endpoint only":            {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces"},
+		"trace endpoint only, HTTP":      {"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": collector + "/v1/traces", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"},
+		"equal protocols set per signal": {"OTEL_EXPORTER_OTLP_ENDPOINT": collector, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, signal := range []string{"", "TRACES_", "METRICS_"} {
+				for _, suffix := range append([]string{otlpEndpointSuffix}, runtimePoolTelemetryScalarSuffixes...) {
+					t.Setenv("OTEL_EXPORTER_OTLP_"+signal+suffix, values["OTEL_EXPORTER_OTLP_"+signal+suffix])
+				}
+			}
+			f := newExternalRuntimePoolFixture(t)
+			f.r.EnableTelemetry = true
+			f.advertiseNativeProcess(t)
+			env := f.publish(t).Spec.Workload.Runtime.Template.Spec.Containers[0].Env
+			names := make([]string, 0, len(env))
+			for _, variable := range env {
+				names = append(names, variable.Name)
+			}
+			if !slices.Contains(names, "ORKA_ENABLE_TELEMETRY") {
+				t.Fatalf("native environment carries no telemetry settings: %v", names)
+			}
+			if len(env) > 32 {
+				t.Fatalf("native environment has %d entries (backend limit 32): %v", len(env), names)
+			}
+		})
+	}
+}
+
 func TestExternalRuntimePoolFreezesMaterializationLayoutBeforeRevision(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/workspace.orka.ai_executionworkspaces.yaml")
 	if err != nil {

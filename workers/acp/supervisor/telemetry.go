@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -103,9 +104,10 @@ func NewSupervisorTelemetryFromEnv() (Telemetry, func(context.Context) error, er
 			}
 			return Telemetry{}, noop, err
 		}
+		metricResource := newSupervisorMetricResource()
 		provider := sdkmetric.NewMeterProvider(
-			sdkmetric.WithResource(supervisorTraceResource),
-			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(safeMetricExporter{exporter}, sdkmetric.WithTimeout(supervisorTelemetryTimeout))),
+			sdkmetric.WithResource(metricResource),
+			sdkmetric.WithReader(sdkmetric.NewPeriodicReader(safeMetricExporter{Exporter: exporter, resource: metricResource}, sdkmetric.WithTimeout(supervisorTelemetryTimeout))),
 		)
 		telemetry.Meter = provider.Meter(genai.InstrumentationName, metric.WithSchemaURL(genai.SchemaURL))
 		shutdowns = append(shutdowns, provider.Shutdown)
@@ -177,12 +179,16 @@ func newSupervisorMetricExporter(ctx context.Context) (sdkmetric.Exporter, error
 
 // safeMetricExporter enforces the supervisor resource allowlist and keeps
 // collector diagnostics out of supervisor logs, as safeTelemetryExporter does.
-type safeMetricExporter struct{ sdkmetric.Exporter }
+type safeMetricExporter struct {
+	sdkmetric.Exporter
+	// resource replaces whatever resource the SDK assembled.
+	resource *resource.Resource
+}
 
 func (e safeMetricExporter) Export(ctx context.Context, metrics *metricdata.ResourceMetrics) error {
 	if metrics != nil {
 		safe := *metrics
-		safe.Resource = supervisorTraceResource
+		safe.Resource = e.resource
 		metrics = &safe
 	}
 	if err := e.Exporter.Export(ctx, metrics); err != nil {
@@ -235,7 +241,21 @@ const (
 	supervisorExporterNone       = "none"
 )
 
-var supervisorTraceResource = resource.NewSchemaless(attribute.String("service.name", "orka-acp-supervisor"))
+const supervisorServiceName = "orka-acp-supervisor"
+
+var supervisorTraceResource = resource.NewSchemaless(attribute.String("service.name", supervisorServiceName))
+
+// newSupervisorMetricResource identifies one supervisor boot. Supervisors of
+// different RuntimePools report the same runtime and model attributes, and a
+// cumulative metric stream needs a single writer, so service.instance.id tells
+// their streams apart. It is a random UUID drawn at start: it names no Task,
+// user, session, Pod or credential, and a restarted supervisor gets a new one.
+func newSupervisorMetricResource() *resource.Resource {
+	return resource.NewSchemaless(
+		attribute.String("service.name", supervisorServiceName),
+		attribute.String("service.instance.id", uuid.NewString()),
+	)
+}
 
 type supervisorExportSpan struct{ sdktrace.ReadOnlySpan }
 

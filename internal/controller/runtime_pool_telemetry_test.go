@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"maps"
 	"strings"
 	"testing"
 )
@@ -22,7 +23,8 @@ func TestRuntimePoolTelemetryProjection(t *testing.T) {
 		t.Fatal("disabled runtime received telemetry")
 	}
 	got := runtimePoolTelemetryEnv(true, getenv)
-	if len(got) != 5 {
+	// The protocol both signals share is projected once, as the generic name.
+	if len(got) != 4 {
 		t.Fatalf("projected variable count = %d: %v", len(got), got)
 	}
 	for _, env := range got {
@@ -38,7 +40,7 @@ func TestRuntimePoolTelemetryProjection(t *testing.T) {
 			if env.Value != "https://collector.otel.svc:4318/base" {
 				t.Fatal("generic endpoint semantics changed")
 			}
-		case "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL":
+		case "OTEL_EXPORTER_OTLP_PROTOCOL":
 			if env.Value != "http/protobuf" {
 				t.Fatal("protocol changed")
 			}
@@ -104,7 +106,7 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, getenv))
 	// The generic base URL is projected for metrics; trace-specific settings
 	// keep precedence for traces under SDK semantics.
-	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://collector.otel.svc:4318" || env["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] != "http/protobuf" ||
+	if env["OTEL_EXPORTER_OTLP_ENDPOINT"] != "http://collector.otel.svc:4318" || env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/protobuf" ||
 		env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] != "http://traces.otel.svc:4318/v1/traces" {
 		t.Fatalf("metrics projection = %v", env)
 	}
@@ -117,6 +119,11 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	}
 	if env["ORKA_ENABLE_TELEMETRY"] != "true" {
 		t.Fatal("unreachable metrics endpoint disabled traces")
+	}
+	// No generic endpoint is projected, so the supervisor resolves no metrics
+	// collector and needs no explicit disable.
+	if _, disabled := env["OTEL_METRICS_EXPORTER"]; disabled || len(env) != 3 {
+		t.Fatalf("dropped metrics without a generic endpoint projected %v", env)
 	}
 	// A metrics setting the supervisor would reject drops metrics, never traces.
 	for name, value := range map[string]string{
@@ -164,6 +171,51 @@ func TestRuntimePoolTelemetryMetricsProjection(t *testing.T) {
 	metricsOnly := map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://metrics.otel.svc:4318/v1/metrics"}
 	if got := runtimePoolTelemetryEnv(true, func(name string) string { return metricsOnly[name] }); len(got) != 0 {
 		t.Fatalf("metrics-only configuration enabled supervisor telemetry: %v", got)
+	}
+}
+
+// The native backend caps a container at 32 environment entries, so a setting
+// traces and metrics share costs one entry, and one they disagree on keeps
+// both signal-specific entries.
+func TestRuntimePoolTelemetrySharesScalarsBothSignalsAgreeOn(t *testing.T) {
+	scalars := map[string]string{"PROTOCOL": "http/protobuf", "INSECURE": "true", "COMPRESSION": "gzip"}
+	for mask := range 1 << len(runtimePoolTelemetryScalarSuffixes) {
+		values := map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4318"}
+		want := map[string]string{"ORKA_ENABLE_TELEMETRY": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.otel.svc:4318"}
+		for i, suffix := range runtimePoolTelemetryScalarSuffixes {
+			if mask&(1<<i) != 0 {
+				values["OTEL_EXPORTER_OTLP_"+suffix] = scalars[suffix]
+				want["OTEL_EXPORTER_OTLP_"+suffix] = scalars[suffix]
+			}
+		}
+		got := runtimePoolTelemetryEnv(true, func(name string) string { return values[name] })
+		if env := runtimePoolLiteralEnvironment(got); len(got) != len(want) || !maps.Equal(env, want) {
+			t.Fatalf("shared settings %v projected %v, want %v", values, got, want)
+		}
+	}
+	// The same value set per signal is still one shared setting.
+	perSignal := map[string]string{
+		"OTEL_EXPORTER_OTLP_ENDPOINT":         "http://collector.otel.svc:4318",
+		"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL":  "http/protobuf",
+		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf",
+	}
+	env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(name string) string { return perSignal[name] }))
+	if len(env) != 3 || env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/protobuf" {
+		t.Fatalf("equal per-signal protocols projected %v", env)
+	}
+	// Signals that disagree, or a setting only one signal has, stay specific:
+	// the generic name would change the other signal.
+	for _, values := range []map[string]string{
+		{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"},
+		{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"},
+		{"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"},
+	} {
+		values["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://collector.otel.svc:4318"
+		env := runtimePoolLiteralEnvironment(runtimePoolTelemetryEnv(true, func(name string) string { return values[name] }))
+		if _, generic := env["OTEL_EXPORTER_OTLP_PROTOCOL"]; generic || env["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] != values["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] ||
+			env["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] != values["OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"] {
+			t.Fatalf("differing protocols %v projected %v", values, env)
+		}
 	}
 }
 

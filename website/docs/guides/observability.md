@@ -105,8 +105,14 @@ configuration enables neither supervisor tracing nor supervisor metrics. A
 metrics-specific endpoint that is not worker-reachable drops supervisor metrics
 rather than falling back to the generic collector; so does a metrics setting the
 supervisor would reject. When metrics are dropped, the supervisor also receives
-`OTEL_METRICS_EXPORTER=none`, so a generic endpoint kept for traces is not used
-for metrics. Headers, certificate paths,
+`OTEL_METRICS_EXPORTER=none` if it keeps a generic endpoint for traces, so that
+endpoint is not used for metrics. A protocol, insecure or compression value that
+traces and metrics share is passed once, under its generic name. Substrate native
+runtimes accept 32 environment entries per container and Orka's own settings use
+most of them: a native runtime has room for the enable flag, one endpoint and one
+shared setting, or for one endpoint per signal. More settings than that, or
+telemetry on a native runtime whose workspace can suspend, exceed the limit and
+the provider rejects the workload. Headers, certificate paths,
 resource attributes and content-capture settings are never copied. Adding metrics
 settings changes the supervisor Pod template, so existing RuntimePools roll through
 their normal drained replacement the first time a controller with these settings runs.
@@ -378,7 +384,11 @@ ACP runtime metrics:
 Metric attributes are limited to operation, agent/runtime name, provider, model,
 token type, tool name/type and `error.type`. Task, prompt and session identities
 stay on spans. Supervisor metrics use the supervisor's fixed `service.name`
-resource (`orka-acp-supervisor`), like its spans.
+resource (`orka-acp-supervisor`), like its spans, plus a `service.instance.id`:
+a random UUID drawn each time a supervisor starts. It keeps supervisors that
+report the same runtime and model as separate series, names no Task, user or
+Pod, and changes on every supervisor restart, so aggregate across it for
+fleet-wide totals.
 
 **Content capture stays off for ACP runtimes.** The supervisor never records
 prompts, completions, tool titles, tool arguments, tool results, or provider
