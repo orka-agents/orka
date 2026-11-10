@@ -328,8 +328,8 @@ type SessionOwnerWrite struct {
 
 // FencedSessionWriteStore binds transcript and token writes to the exact active
 // Task or transient lock owner so a stale owner cannot write after takeover.
-// A write whose owner no longer holds the lock at owner.Now returns a
-// FencedError.
+// AppendMessagesWithLock and UpdateTokenCountsWithLock return a FencedError
+// when the owner no longer holds the lock at owner.Now.
 type FencedSessionWriteStore interface {
 	AppendMessagesWithLock(ctx context.Context, owner SessionOwnerWrite, messages []SessionMessage) error
 	UpdateTokenCountsWithLock(ctx context.Context, owner SessionOwnerWrite, inputTokens, outputTokens int) error
