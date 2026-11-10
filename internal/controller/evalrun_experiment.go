@@ -539,9 +539,33 @@ func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run, bas
 // reserved attempt is never returned, so the history would otherwise keep a
 // reservation with no verdict or evidence. An outcome already stored wins.
 func (r *EvalRunReconciler) recordDeletedCandidateOutcome(ctx context.Context, run *corev1alpha1.EvalRun) error {
-	status := run.Status.Experiment
-	if status == nil || status.BaselineRun == nil || status.Result != corev1alpha1.EvalExperimentPending || r.ExperimentStore == nil {
+	if run.Spec.Experiment == nil || r.ExperimentStore == nil {
 		return nil
+	}
+	status := run.Status.Experiment
+	switch {
+	case status != nil && status.BaselineRun != nil:
+		if status.Result != corev1alpha1.EvalExperimentPending {
+			return nil
+		}
+	default:
+		// The reservation is stored before status.experiment, so a candidate
+		// deleted between the two writes has spent an attempt that only the
+		// store knows of.
+		reserved, err := r.ExperimentStore.GetEvalExperiment(ctx, run.Namespace, string(run.UID))
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		run = run.DeepCopy()
+		status = &corev1alpha1.EvalExperimentStatus{
+			Result:      corev1alpha1.EvalExperimentPending,
+			BaselineRun: &corev1alpha1.EvalObjectIdentity{Name: reserved.BaselineRun, UID: types.UID(reserved.BaselineRunUID)},
+			GateDigest:  reserved.GateDigest,
+		}
+		run.Status.Experiment = status
 	}
 	var finished *corev1alpha1.EvalRun
 	baseline := &corev1alpha1.EvalRun{}
