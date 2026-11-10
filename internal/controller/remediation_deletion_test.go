@@ -31,6 +31,9 @@ func (remediationDeletionBackend) RequestDigest(contract.ExecutionRequest) (stri
 func (remediationDeletionBackend) Start(context.Context, contract.ExecutionRequest, func(contract.ExecutionReceipt) error) (*pv.Record, error) {
 	return nil, contract.ErrDisabled
 }
+func (remediationDeletionBackend) Recover(context.Context, contract.ExecutionRequest) (contract.ExecutionRecovery, error) {
+	return contract.ExecutionRecovery{}, contract.ErrDisabled
+}
 func (remediationDeletionBackend) Resume(context.Context, contract.ExecutionRequest, contract.ExecutionReceipt) (*pv.Record, error) {
 	return nil, contract.ErrDisabled
 }

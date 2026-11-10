@@ -193,6 +193,43 @@ func TestBoundedRunSlotSurvivesDeadlineAndCoordinatorRestart(t *testing.T) {
 	require.NoError(t, restarted.acquireRunSlot(t.Context(), second))
 }
 
+func TestSucceededTaskReloadsConcurrentModelPermit(t *testing.T) {
+	f, r := boundedRunFixture(t)
+	claim := boundedRoleFixture(t, f, r.state.ID, "select")
+	r, err := f.service.load(t.Context(), r.state.ID)
+	require.NoError(t, err)
+	task := new(corev1alpha1.Task)
+	require.NoError(t, f.client.Get(t.Context(), client.ObjectKey{Namespace: claim.Namespace, Name: claim.TaskName}, task))
+	ready, err := f.service.observeNativeJob(t.Context(), r, "select", task)
+	require.NoError(t, err)
+	require.False(t, ready)
+	stale, err := f.service.load(t.Context(), r.state.ID)
+	require.NoError(t, err)
+	require.Nil(t, stale.state.Agents["select"].ModelCall)
+	require.NoError(t, f.service.ClaimModelCall(t.Context(), claim))
+	require.NoError(t, f.results.SaveResult(t.Context(), task.Namespace, task.Name, []byte(f.responses["select"])))
+	task.Status.Phase = corev1alpha1.TaskPhaseSucceeded
+	require.NoError(t, f.client.Status().Update(t.Context(), task))
+
+	_, ready, err = f.service.agentOutput(t.Context(), stale, "select", "synthetic proposal")
+	require.ErrorIs(t, err, contract.ErrUnavailable, "a stale negative claim read is retryable, not an identity conflict")
+	require.False(t, ready)
+	for range 2 {
+		current, err := f.service.load(t.Context(), r.state.ID)
+		require.NoError(t, err)
+		_, _, err = f.service.agentOutput(t.Context(), current, "select", "synthetic proposal")
+		require.NoError(t, err)
+	}
+	current, err := f.service.load(t.Context(), r.state.ID)
+	require.NoError(t, err)
+	output, ready, err := f.service.agentOutput(t.Context(), current, "select", "synthetic proposal")
+	require.NoError(t, err)
+	require.True(t, ready)
+	require.Equal(t, f.responses["select"], output)
+	require.Equal(t, claim.PodUID, current.state.Agents["select"].ModelCall.PodUID)
+	require.ErrorIs(t, f.service.ClaimModelCall(t.Context(), claim), contract.ErrConflict, "the permit is still single-use")
+}
+
 func TestBoundedExecutionLimitsAreOptInAndFrozen(t *testing.T) {
 	f := newServiceFixture(t)
 	config := f.service.config

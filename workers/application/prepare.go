@@ -34,10 +34,6 @@ func runPrepare(ctx context.Context, output io.Writer) error {
 	if err := verifyRuntimeManifest(input.Manifest); err != nil {
 		return err
 	}
-	entries, err := os.ReadDir("/source")
-	if err != nil || len(entries) != 0 {
-		return errors.New("application source volume is not empty")
-	}
 	operation, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	report, err := pv.PrepareApplicationSource(operation, input, pv.ApplicationWorkPath, pv.ApplicationWorkerPath)

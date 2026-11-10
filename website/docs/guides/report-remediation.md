@@ -177,6 +177,12 @@ control, denied subject egress, and restricted target API identity/permissions.
 Qualification failure leaves runtime admission unavailable. A node label or
 NetworkPolicy object alone is not isolation evidence.
 
+Qualification starts under elected controller ownership after the storage
+dataset accepts that controller's epoch. Until it completes, new submissions
+return unavailable rather than bypassing storage fencing or claiming runtime
+evidence. Fresh source and artifact PVCs may retain a real `lost+found` directory;
+stale application files, foreign entries, and symlinks remain rejected.
+
 An explicitly qualified `gvisor-bounded-v1` profile is not a blanket sandbox
 waiver. It must bind the operator qualification digest and exact target
 cluster/node/runtime identities, retain Pod/container/image/ServiceAccount
@@ -401,6 +407,11 @@ native worker's request context; restarting either component cannot reset it.
 Cancellation revokes the exact parent before backend recovery can continue.
 Cleanup may outlive the deadline but cannot authorize another experiment.
 
+If the coordinator loses a receipt acknowledgement, it recovers only an exact
+UID and input digest already recorded by the backend. A reservation proven never
+dispatched may settle without execution. A matching workload name, a deadline,
+or an unknown create outcome never authorizes replacement work or slot release.
+
 Each native role has one non-replayable **outbound model HTTP-attempt permit**.
 The worker consumes it through a Pod/Job/Task-bound authenticated internal API
 before sending. Consumption is persisted with the run, so a replacement Pod,
@@ -549,6 +560,12 @@ Use the same server, namespace, and authenticated identity for subsequent
 operations. Downloads must target a new private file; existing files are not
 overwritten. A downloadable patch remains a candidate unless the run's outcome
 explicitly says it was verified for the executed checks.
+
+Credential files require owner-only permissions on Unix. On Windows, ownership
+and file ACLs must restrict access to the current user, SYSTEM, and Administrators;
+Unix mode bits do not establish Windows privacy. Patch downloads must inherit a
+similarly private ACL from their output directory. Unsafe ACLs are rejected before
+credentials are read or patch bytes are written.
 
 ## What is recorded
 

@@ -1,6 +1,9 @@
 package patchverification
 
-import "encoding/json"
+import (
+	"encoding/json"
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
+)
 
 const (
 	ApplicationProtocolVersion           = 1
@@ -43,83 +46,21 @@ const (
 	MaxApplicationPreparationReportBytes = 2 << 20
 )
 
-// ApplicationPlan is run data, not permission to build or deploy. The backend
-// must also admit it against its operator-owned image, RBAC and target bounds.
-// The complete plan participates in the existing ManifestDigest.
-type ApplicationPlan struct {
-	Version          int                          `json:"version"`
-	Build            ApplicationBuild             `json:"build"`
-	Runtime          ApplicationRuntime           `json:"runtime"`
-	Resources        []json.RawMessage            `json:"resources,omitempty"`
-	Permissions      []ApplicationPermission      `json:"permissions,omitempty"`
-	Fixtures         []ApplicationFixture         `json:"fixtures,omitempty"`
-	SyntheticSecrets []ApplicationSyntheticSecret `json:"syntheticSecrets,omitempty"`
-}
+type ApplicationPlan = verificationv1.ApplicationPlan
 
-// Environment.Image/ImageID identify the pinned trusted worker/toolchain image.
-// No executable build instructions, flags, environment or Dockerfile are input.
-type ApplicationBuild struct {
-	Profile   string `json:"profile"`
-	Package   string `json:"package"`
-	GoVersion string `json:"goVersion"`
-}
+type ApplicationBuild = verificationv1.ApplicationBuild
 
-type ApplicationRuntime struct {
-	Image   string   `json:"image"`
-	ImageID string   `json:"imageID"`
-	Args    []string `json:"args,omitempty"`
-	Ports   []int    `json:"ports,omitempty"`
-}
+type ApplicationRuntime = verificationv1.ApplicationRuntime
 
-// Permissions can only become a namespace Role. Wildcards, RBAC mutations,
-// credential reads, subresource exec and cluster-scoped access are unsupported.
-type ApplicationPermission struct {
-	APIGroup      string   `json:"apiGroup"`
-	Resources     []string `json:"resources"`
-	Verbs         []string `json:"verbs"`
-	ResourceNames []string `json:"resourceNames,omitempty"`
-}
+type ApplicationPermission = verificationv1.ApplicationPermission
 
-// Fixtures are trusted TCP marker servers, not arbitrary image entrypoints.
-// The backend generates a fresh protected marker; it is never part of a plan.
-type ApplicationFixture struct {
-	ID      string            `json:"id"`
-	Port    int               `json:"port"`
-	Kind    string            `json:"kind,omitempty"`
-	Profile string            `json:"profile,omitempty"`
-	Config  map[string]string `json:"config,omitempty"`
-}
+type ApplicationFixture = verificationv1.ApplicationFixture
 
-type ApplicationCheck struct {
-	Version       int                         `json:"version"`
-	SettleSeconds int                         `json:"settleSeconds,omitempty"`
-	Resources     []json.RawMessage           `json:"resources,omitempty"`
-	Kubernetes    *ApplicationKubernetesCheck `json:"kubernetes,omitempty"`
-	TCP           *ApplicationTCPCheck        `json:"tcp,omitempty"`
-	Actions       []ApplicationAction         `json:"actions,omitempty"`
-}
+type ApplicationCheck = verificationv1.ApplicationCheck
 
-// Kubernetes observations are exact named GETs in the run namespace, never
-// arbitrary URLs, list queries, log streams, exec or fixture-written verdicts.
-type ApplicationKubernetesCheck struct {
-	APIVersion  string          `json:"apiVersion"`
-	Resource    string          `json:"resource"`
-	Name        string          `json:"name"`
-	Pointer     string          `json:"pointer"`
-	NormalValue json.RawMessage `json:"normalValue,omitempty"`
-}
+type ApplicationKubernetesCheck = verificationv1.ApplicationKubernetesCheck
 
-type ApplicationTCPCheck struct {
-	Target        string `json:"target"`
-	Port          int    `json:"port"`
-	Request       []byte `json:"request,omitempty"`
-	MarkerID      string `json:"markerID"`
-	MaxBytes      int    `json:"maxBytes"`
-	Mode          string `json:"mode,omitempty"`
-	WindowSeconds int    `json:"windowSeconds,omitempty"`
-	Terminator    []byte `json:"terminator,omitempty"`
-	Response      []byte `json:"response,omitempty"`
-}
+type ApplicationTCPCheck = verificationv1.ApplicationTCPCheck
 
 type ApplicationAPIValue struct {
 	Exists bool            `json:"exists"`
@@ -127,54 +68,15 @@ type ApplicationAPIValue struct {
 	Value  json.RawMessage `json:"value,omitempty"`
 }
 
-type ApplicationTCPValue struct {
-	Connected     bool `json:"connected"`
-	MarkerMatched bool `json:"markerMatched"`
-}
+type ApplicationTCPValue = verificationv1.ApplicationTCPValue
 
-type ApplicationTarget struct {
-	ClusterUID   string `json:"clusterUID"`
-	Namespace    string `json:"namespace"`
-	NamespaceUID string `json:"namespaceUID"`
-}
+type ApplicationTarget = verificationv1.ApplicationTarget
 
-// Container identities come from a live API read by the trusted backend or
-// observer, not from an application log or an untrusted source fixture.
-type ApplicationContainerIdentity struct {
-	PodName            string `json:"podName"`
-	PodUID             string `json:"podUID"`
-	ContainerName      string `json:"containerName"`
-	ContainerID        string `json:"containerID"`
-	ImageID            string `json:"imageID"`
-	JobUID             string `json:"jobUID,omitempty"`
-	ServiceAccountName string `json:"serviceAccountName"`
-	ServiceAccountUID  string `json:"serviceAccountUID"`
-	Namespace          string `json:"namespace,omitempty"`
-	NamespaceUID       string `json:"namespaceUID,omitempty"`
-}
+type ApplicationContainerIdentity = verificationv1.ApplicationContainerIdentity
 
-type ApplicationArtifact struct {
-	Version        int                          `json:"version"`
-	RunID          string                       `json:"runID"`
-	AttemptID      string                       `json:"attemptID"`
-	TaskID         string                       `json:"taskID"`
-	ManifestDigest string                       `json:"manifestDigest"`
-	PlanDigest     string                       `json:"planDigest"`
-	Side           string                       `json:"side"`
-	Source         SourceIdentity               `json:"source"`
-	BinaryDigest   string                       `json:"binaryDigest"`
-	BinaryBytes    int64                        `json:"binaryBytes"`
-	GoVersion      string                       `json:"goVersion"`
-	Platform       string                       `json:"platform"`
-	Build          ApplicationContainerIdentity `json:"build"`
-}
+type ApplicationArtifact = verificationv1.ApplicationArtifact
 
-type ApplicationEndpoint struct {
-	ID      string                       `json:"id"`
-	Address string                       `json:"address"`
-	Port    int                          `json:"port"`
-	Pod     ApplicationContainerIdentity `json:"pod"`
-}
+type ApplicationEndpoint = verificationv1.ApplicationEndpoint
 
 // WorkerInput is mounted read-only by the backend. Build uses SourcePath;
 // subject verifies Artifact then execs the read-only binary; observe uses an
@@ -217,63 +119,15 @@ type ApplicationReport struct {
 	Evidence ExecutionEvidence `json:"evidence"`
 }
 
-type ApplicationObservation struct {
-	Version     int                             `json:"version"`
-	Completed   bool                            `json:"completed"`
-	PlanDigest  string                          `json:"planDigest"`
-	Target      ApplicationTarget               `json:"target"`
-	Artifact    ApplicationArtifact             `json:"artifact"`
-	Subject     ApplicationContainerIdentity    `json:"subject"`
-	Kubernetes  *ApplicationAPIIdentity         `json:"kubernetes,omitempty"`
-	APIBaseline *ApplicationAPIIdentity         `json:"apiBaseline,omitempty"`
-	TCP         *ApplicationTCPIdentity         `json:"tcp,omitempty"`
-	Actions     []ApplicationActionObservation  `json:"actions,omitempty"`
-	SubjectTLS  []ApplicationSubjectTLSIdentity `json:"subjectTLS,omitempty"`
-	Replica     *ApplicationReplicaObservation  `json:"replica,omitempty"`
-}
+type ApplicationObservation = verificationv1.ApplicationObservation
 
-type ApplicationReplicaObservation struct {
-	DeploymentUID   string                         `json:"deploymentUID"`
-	ReplicaSetUIDs  []string                       `json:"replicaSetUIDs"`
-	Pods            []ApplicationContainerIdentity `json:"pods"`
-	DesiredReplicas int32                          `json:"desiredReplicas"`
-	ReadyReplicas   int32                          `json:"readyReplicas"`
-	InitialReplicas int32                          `json:"initialReplicas"`
-	MaxReplicas     int32                          `json:"maxReplicas"`
-}
+type ApplicationReplicaObservation = verificationv1.ApplicationReplicaObservation
 
-type ApplicationAPIIdentity struct {
-	APIVersion      string               `json:"apiVersion"`
-	Resource        string               `json:"resource"`
-	Name            string               `json:"name"`
-	Pointer         string               `json:"pointer,omitempty"`
-	UID             string               `json:"uid,omitempty"`
-	ResourceVersion string               `json:"resourceVersion,omitempty"`
-	Result          ApplicationAPIResult `json:"result"`
-}
+type ApplicationAPIIdentity = verificationv1.ApplicationAPIIdentity
 
-type ApplicationTCPIdentity struct {
-	Endpoint      ApplicationEndpoint            `json:"endpoint"`
-	MarkerID      string                         `json:"markerID"`
-	MarkerDigest  string                         `json:"markerDigest"`
-	MarkerBytes   int                            `json:"markerBytes"`
-	Bytes         int                            `json:"bytes"`
-	Result        ApplicationTCPValue            `json:"result"`
-	Mode          string                         `json:"mode,omitempty"`
-	WindowSeconds int                            `json:"windowSeconds,omitempty"`
-	Connections   int                            `json:"connections,omitempty"`
-	MarkerRef     *ApplicationProtectedMarkerRef `json:"markerRef,omitempty"`
-	ReceiverRoute *ApplicationReceiverRoute      `json:"receiverRoute,omitempty"`
-}
+type ApplicationTCPIdentity = verificationv1.ApplicationTCPIdentity
 
-// API values are reduced to canonical digest/size metadata before transport.
-// In particular, a subject cannot exfiltrate credentials through a status field.
-type ApplicationAPIResult struct {
-	Exists      bool   `json:"exists"`
-	Found       bool   `json:"found"`
-	ValueDigest string `json:"valueDigest,omitempty"`
-	ValueBytes  int    `json:"valueBytes,omitempty"`
-}
+type ApplicationAPIResult = verificationv1.ApplicationAPIResult
 
 type ApplicationBoundaryInput struct {
 	Version              int                              `json:"version"`

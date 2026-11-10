@@ -204,6 +204,36 @@ func (b *Backend) Start(ctx context.Context, request contract.ExecutionRequest, 
 	return b.await(ctx, frozen, receipt)
 }
 
+func (b *Backend) Recover(ctx context.Context, request contract.ExecutionRequest) (contract.ExecutionRecovery, error) {
+	frozen, digest, err := b.requestInput(request)
+	if err != nil {
+		return contract.ExecutionRecovery{}, err
+	}
+	r, err := b.load(ctx, runName(frozen))
+	if err != nil {
+		return contract.ExecutionRecovery{}, err
+	}
+	if r.state.Qualification || r.state.Configuration != b.ConfigurationDigest() || r.state.InputDigest != digest ||
+		r.state.ControlUID != b.config.ControlClusterUID || r.state.TargetUID != b.config.TargetClusterUID ||
+		!reflect.DeepEqual(r.state.Request, frozen) {
+		return contract.ExecutionRecovery{}, contract.ErrConflict
+	}
+	if r.state.Task.UID == "" {
+		if r.state.Task.Attempted && !r.state.Task.Rejected {
+			return contract.ExecutionRecovery{}, ErrUncertain
+		}
+		if err := b.recoverRootReservation(ctx, r); err != nil {
+			return contract.ExecutionRecovery{}, err
+		}
+		return contract.ExecutionRecovery{Settled: true}, nil
+	}
+	receipt := r.receipt()
+	if _, err := b.boundRun(ctx, receipt); err != nil {
+		return contract.ExecutionRecovery{}, err
+	}
+	return contract.ExecutionRecovery{Receipt: &receipt}, nil
+}
+
 func (b *Backend) Resume(ctx context.Context, request contract.ExecutionRequest, receipt contract.ExecutionReceipt) (*pv.Record, error) {
 	frozen, digest, err := b.requestInput(request)
 	if err != nil {

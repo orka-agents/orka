@@ -194,3 +194,22 @@ func validModelCallClaim(r *run, op *taskOperation) bool {
 	return !r.state.Authority.BoundedExecution ||
 		(op != nil && op.ModelCall != nil && op.ModelCall.PodUID != "" && op.Job != nil && op.ModelCall.JobUID == op.Job.UID)
 }
+
+func (s *Coordinator) completedModelCall(ctx context.Context, r *run, role string, task *corev1alpha1.Task) error {
+	if validModelCallClaim(r, r.state.Agents[role]) {
+		return nil
+	}
+	// A worker can consume its permit after the driver loads the run, then
+	// finish before the Task read. Re-read before declaring that claim absent.
+	current, err := s.load(ctx, r.state.ID)
+	if err != nil {
+		return err
+	}
+	op := current.state.Agents[role]
+	if current.object.UID != r.object.UID || !authorityMatches(r.state.Authority, current.state.Authority) ||
+		op == nil || op.Job == nil || op.UID != string(task.UID) || op.Job.UID != task.Status.JobUID ||
+		!validModelCallClaim(current, op) {
+		return uncertain()
+	}
+	return contract.ErrUnavailable
+}

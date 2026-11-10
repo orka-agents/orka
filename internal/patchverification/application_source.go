@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"io"
 	"io/fs"
 	"os"
@@ -21,18 +22,9 @@ import (
 // unlike the bounded model source packet it always imports the complete tree.
 type ApplicationPreparationInput = PreparationInput
 
-type ApplicationSourceMetadata struct {
-	Version  int                         `json:"version"`
-	Original ApplicationArchiveMetadata  `json:"original"`
-	Patched  *ApplicationArchiveMetadata `json:"patched,omitempty"`
-}
+type ApplicationSourceMetadata = verificationv1.ApplicationSourceMetadata
 
-type ApplicationArchiveMetadata struct {
-	ArchiveDigest string `json:"archiveDigest"`
-	ArchiveBytes  int64  `json:"archiveBytes"`
-	ContentBytes  int64  `json:"contentBytes"`
-	Entries       int    `json:"entries"`
-}
+type ApplicationArchiveMetadata = verificationv1.ApplicationArchiveMetadata
 
 type ApplicationPreparationReport struct {
 	Version     int               `json:"version"`

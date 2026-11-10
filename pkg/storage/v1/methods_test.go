@@ -27,7 +27,7 @@ var catalogInterfaces = map[string]reflect.Type{
 var readPrefixes = []string{"Get", "List", "Has", "Count", "Load", "Read", "Search", "Check", "Is", "Describe", "HealthCheck"}
 
 // writesNamedLikeReads are writes whose names start with a read prefix.
-var writesNamedLikeReads = []string{"GetMessages", "IsLocked"}
+var writesNamedLikeReads = []string{"GetMessages", "IsLocked", "GetPatchVerificationRun", "GetPatchVerificationBlob"}
 
 // readsNamedLikeWrites are reads whose names start with no read prefix.
 var readsNamedLikeWrites = []string{"PreviewScanTaskIngestion", "ResolveMemoryProposalApplication", "ResolveTaskDataFence"}
@@ -116,12 +116,27 @@ func TestMethodCatalogKinds(t *testing.T) {
 
 // classified lists every method whose call class is not CallInteractive.
 var classified = map[string]storagev1.CallClass{
-	"AdvanceControllerEpoch":    storagev1.CallControl,
-	"Describe":                  storagev1.CallControl,
-	"GetControllerEpochMirror":  storagev1.CallControl,
-	"HealthCheck":               storagev1.CallControl,
-	"ResolveOperation":          storagev1.CallControl,
-	"SyncControllerEpochMirror": storagev1.CallControl,
+	"InitializePatchVerificationStore":          storagev1.CallControl,
+	"InitializeKubernetesValidationStore":       storagev1.CallControl,
+	"CreatePatchVerificationRun":                storagev1.CallBulk,
+	"GetPatchVerificationRun":                   storagev1.CallBulk,
+	"GetCompletedReportValidation":              storagev1.CallBulk,
+	"GetPatchVerificationBlob":                  storagev1.CallBulk,
+	"RecordPatchVerificationEvidence":           storagev1.CallBulk,
+	"FinalizePatchVerificationRun":              storagev1.CallBulk,
+	"CancelPatchVerificationRun":                storagev1.CallBulk,
+	"RecoverInterruptedPatchVerificationRun":    storagev1.CallBulk,
+	"CreateKubernetesValidationSubmission":      storagev1.CallBulk,
+	"GetKubernetesValidationSubmission":         storagev1.CallBulk,
+	"GetKubernetesValidationSubmissionByTask":   storagev1.CallBulk,
+	"GetKubernetesValidationSubmissionByRun":    storagev1.CallBulk,
+	"ListActiveKubernetesValidationSubmissions": storagev1.CallBackground,
+	"AdvanceControllerEpoch":                    storagev1.CallControl,
+	"Describe":                                  storagev1.CallControl,
+	"GetControllerEpochMirror":                  storagev1.CallControl,
+	"HealthCheck":                               storagev1.CallControl,
+	"ResolveOperation":                          storagev1.CallControl,
+	"SyncControllerEpochMirror":                 storagev1.CallControl,
 
 	// The dataset binding establishes and checks identity before a fence
 	// exists, so it never waits behind ordinary work.

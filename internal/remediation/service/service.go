@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -61,6 +62,8 @@ type Config struct {
 	// BoundedExecution freezes the single-active-run, single-attempt-per-role
 	// native worker policy. Existing source-harness runs retain their policy.
 	BoundedExecution bool
+	// PrepareBackend runs under elected controller ownership before admission.
+	PrepareBackend func(context.Context) error
 }
 
 type Coordinator struct {
@@ -68,6 +71,7 @@ type Coordinator struct {
 	mu        sync.Mutex
 	active    map[string]context.CancelFunc
 	noEffects map[noEffectsKey]noEffectsProof
+	prepared  atomic.Bool
 }
 
 // Service is the controller-manager coordinator used by server composition.
@@ -320,6 +324,9 @@ func (s *Coordinator) Submit(ctx context.Context, namespace, subject string, req
 	if !errors.Is(err, contract.ErrNotFound) {
 		return nil, err
 	}
+	if s.config.PrepareBackend != nil && !s.prepared.Load() {
+		return nil, contract.ErrUnavailable
+	}
 	if err := contract.RequireEvidenceScope(request.RequiredEvidenceScope, s.backendEvidenceScope()); err != nil {
 		return nil, err
 	}
@@ -463,9 +470,19 @@ func (s *Coordinator) Patch(ctx context.Context, namespace, id string) ([]byte, 
 func (s *Coordinator) NeedLeaderElection() bool { return true }
 
 func (s *Coordinator) Start(ctx context.Context) error {
+	defer s.prepared.Store(false)
+	if s.config.PrepareBackend != nil {
+		if err := s.config.PrepareBackend(ctx); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+	}
 	if err := s.CheckReady(ctx); err != nil {
 		return err
 	}
+	s.prepared.Store(true)
 	var workers sync.WaitGroup
 	defer workers.Wait()
 	ticker := time.NewTicker(s.config.PollInterval)

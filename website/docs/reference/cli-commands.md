@@ -3182,7 +3182,7 @@ Global Flags:
 ## `orka remediate`
 
 ```text
-Submit one report to the operator-configured Orka remediation service. The service uses separate agent stages; failed candidates are not automatically retried or published. The current backend provides source-harness evidence, not application-runtime qualification.
+Submit one report to the operator-configured Orka remediation service. The service uses separate agent stages; failed candidates are not automatically retried or published. The default backend provides source-harness evidence. Application-runtime evidence requires explicit operator qualification.
 
 Usage:
   orka remediate [flags]
@@ -3265,7 +3265,7 @@ Flags:
       --input string                     report JSON: title, problem or description, repository, and ref (required)
       --mode string                      generate or validate (report only) (default "generate")
       --request-id string                stable request ID; reuse only with the identical request
-      --required-evidence-scope string   source-harness (default) or application-runtime (strict; unsupported by the current backend)
+      --required-evidence-scope string   source-harness (default) or application-runtime (strict; requires an operator-qualified application backend)
       --timeout duration                 command deadline; expiry does not cancel the remote run (default 45m0s)
       --wait                             wait and print the normal parent Task result; progress goes to stderr, without resubmitting
 
@@ -5694,3 +5694,4 @@ Global Flags:
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
+

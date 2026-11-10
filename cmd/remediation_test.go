@@ -16,6 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/controller"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -52,10 +53,11 @@ func TestRemediationDefaultCompositionAcceptsQualifiedConfiguration(t *testing.T
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	store := sqlite.NewStore(db, path)
+	storage := storageclienttest.Client(t, store)
 	builder := controller.NewJobBuilder(kube)
 	image := "example.invalid/worker@sha256:" + strings.Repeat("a", 64)
 	service, backend, err := setupRemediation(
-		t.Context(), mgr, kubefake.NewSimpleClientset(), store, store, builder, remediationOptions{
+		t.Context(), mgr, kubefake.NewSimpleClientset(), storage, builder, remediationOptions{
 			Enabled: true, Namespace: "fixture", AgentName: agent.Name,
 			AIWorkerImage: image, GeneralWorkerImage: image, GeneralWorkerImageID: image,
 			HelperImage: image, HelperImageID: image, ToolImage: image, ToolImageID: image,

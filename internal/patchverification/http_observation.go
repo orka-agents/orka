@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"io"
 	"net"
 	"net/http"
@@ -20,13 +21,7 @@ const (
 	maxHTTPPathBytes     = 2048
 )
 
-// HTTPCheck declares external behavior, not execution of a subject function.
-// The server is untrusted; only the supervisor performs and records the GET.
-type HTTPCheck struct {
-	Version       int      `json:"version"`
-	ServerCommand []string `json:"serverCommand"`
-	Path          string   `json:"path"`
-}
+type HTTPCheck = verificationv1.HTTPCheck
 
 type httpObservation struct {
 	Status int    `json:"status"`

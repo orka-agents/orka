@@ -22,7 +22,7 @@ func TestApplicationRemediationRequiresExplicitEnablementAndCompleteOptions(t *t
 		},
 		{Enabled: true, AgentName: "native", Backend: string(contract.ApplicationRuntime)},
 	} {
-		service, backend, err := setupRemediation(context.Background(), nil, nil, nil, nil, nil, options)
+		service, backend, err := setupRemediation(context.Background(), nil, nil, nil, nil, options)
 		require.Error(t, err)
 		require.Nil(t, service)
 		require.Nil(t, backend, "incomplete application config must fail before touching a Kubernetes manager")

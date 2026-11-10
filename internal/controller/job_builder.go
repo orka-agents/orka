@@ -492,20 +492,28 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	return b.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{})
 }
 
-// BuildWithOptions creates a Job for the given Task using additional resolved options.
-func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+func (b *JobBuilder) buildStandaloneValidationJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, bool, error) {
 	if task != nil {
 		for name := range task.Annotations {
 			if strings.HasPrefix(name, "patchverification.orka.ai/") {
 				if b.ValidationJobBuilder == nil {
-					return nil, fmt.Errorf("standalone validation execution is disabled")
+					return nil, true, fmt.Errorf("standalone validation execution is disabled")
 				}
 				if opts.RepositoryMonitorValidation || agent != nil || provider != nil {
-					return nil, fmt.Errorf("standalone validation cannot use monitor or agent execution")
+					return nil, true, fmt.Errorf("standalone validation cannot use monitor or agent execution")
 				}
-				return b.ValidationJobBuilder(ctx, task)
+				job, err := b.ValidationJobBuilder(ctx, task)
+				return job, true, err
 			}
 		}
+	}
+	return nil, false, nil
+}
+
+// BuildWithOptions creates a Job for the given Task using additional resolved options.
+func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+	if job, handled, err := b.buildStandaloneValidationJob(ctx, task, agent, provider, opts); handled {
+		return job, err
 	}
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err

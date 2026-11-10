@@ -51,6 +51,9 @@ func (s *Coordinator) prepareExecution(ctx context.Context, r *run, key string, 
 	if op.Rejected {
 		return nil, invalidExecutionInput(request.Action)
 	}
+	if op.Settled {
+		return nil, fail("execution-unavailable")
+	}
 	if op.InputDigest == "" {
 		if op.Receipt != nil && op.Receipt.InputDigest != digest {
 			return nil, uncertain()
@@ -105,7 +108,12 @@ func (s *Coordinator) execution(ctx context.Context, r *run, key string, request
 		})
 	} else {
 		if op.Receipt == nil {
-			return nil, false, uncertain()
+			if err := s.recoverExecution(ctx, r, key, op); err != nil {
+				return nil, false, err
+			}
+			if op.Settled {
+				return nil, false, fail("execution-unavailable")
+			}
 		}
 		if err := s.requireCurrentRun(ctx, r); err != nil {
 			return nil, false, err
@@ -138,8 +146,17 @@ func (s *Coordinator) execution(ctx context.Context, r *run, key string, request
 		return nil, false, loadErr
 	}
 	currentOp := current.state.Executions[key]
-	if currentOp == nil || currentOp.Receipt == nil {
+	if currentOp == nil {
 		return nil, false, uncertain()
+	}
+	if currentOp.Receipt == nil {
+		if err := s.recoverExecution(ctx, current, key, currentOp); err != nil {
+			return nil, false, err
+		}
+		if currentOp.Settled {
+			return nil, false, fail("execution-unavailable")
+		}
+		return nil, false, contract.ErrUnavailable
 	}
 	if err != nil {
 		return nil, false, executionFailure(err)
@@ -162,8 +179,7 @@ func (s *Coordinator) persistExecutionReceipt(ctx context.Context, id, key strin
 	}
 	_, err := s.update(ctx, id, func(current *run) error {
 		op := current.state.Executions[key]
-		if op == nil || !op.Attempted || op.Rejected || op.Request.Digest != expected.Request.Digest ||
-			op.InputDigest != expected.InputDigest || op.AdmissionAttempt != expected.AdmissionAttempt ||
+		if !sameExecutionAttempt(op, expected) ||
 			(op.Receipt != nil && *op.Receipt != receipt) {
 			return contract.ErrConflict
 		}
@@ -171,6 +187,56 @@ func (s *Coordinator) persistExecutionReceipt(ctx context.Context, id, key strin
 		op.Receipt = &copy
 		return nil
 	})
+	return err
+}
+
+func sameExecutionAttempt(op, expected *executionOperation) bool {
+	return op != nil && op.Attempted && !op.Rejected && !op.Settled &&
+		op.Request.Digest == expected.Request.Digest && op.InputDigest == expected.InputDigest &&
+		op.AdmissionAttempt == expected.AdmissionAttempt
+}
+
+func (s *Coordinator) recoverExecution(ctx context.Context, r *run, key string, op *executionOperation) error {
+	var request contract.ExecutionRequest
+	if err := s.readJSON(ctx, r, op.Request, &request); err != nil {
+		return err
+	}
+	digest, err := s.config.Backend.RequestDigest(request)
+	if err != nil || digest != op.InputDigest || request.EvidenceScope != r.state.Authority.EvidenceScope {
+		return uncertain()
+	}
+	if err := s.requireCurrentRun(ctx, r); err != nil {
+		return err
+	}
+	recovered, err := s.config.Backend.Recover(ctx, request)
+	if err != nil {
+		if errors.Is(err, contract.ErrUnavailable) || ctx.Err() != nil {
+			return contract.ErrUnavailable
+		}
+		return uncertain()
+	}
+	if recovered.Receipt != nil && !recovered.Settled {
+		if err := s.persistExecutionReceipt(ctx, r.state.ID, key, op, *recovered.Receipt); err != nil {
+			return err
+		}
+		copy := *recovered.Receipt
+		op.Receipt = &copy
+		return nil
+	}
+	if !recovered.Settled || recovered.Receipt != nil {
+		return uncertain()
+	}
+	_, err = s.update(ctx, r.state.ID, func(current *run) error {
+		actual := current.state.Executions[key]
+		if !sameExecutionAttempt(actual, op) || actual.Receipt != nil || !actual.Record.empty() {
+			return contract.ErrConflict
+		}
+		actual.Settled = true
+		return nil
+	})
+	if err == nil {
+		op.Settled = true
+	}
 	return err
 }
 
@@ -212,14 +278,7 @@ func checkRecord(request contract.ExecutionRequest, record *pv.Record) error {
 		return fail("original-evidence-invalid")
 	}
 	manifest := &record.Manifest
-	if request.EvidenceScope == contract.ApplicationRuntime {
-		if request.Deadline == nil || request.Deadline.IsZero() ||
-			request.Checks.Application == nil || manifest.Application == nil ||
-			manifest.Environment.Profile != pv.ApplicationRuntimeProfile {
-			return fail("original-evidence-invalid")
-		}
-	} else if request.Checks.Application != nil || manifest.Application != nil ||
-		request.ApplicationPolicy != nil || manifest.ApplicationPolicy != nil {
+	if !validRecordScope(request, manifest) {
 		return fail("original-evidence-invalid")
 	}
 	if !manifestMatchesRequest(manifest, request) {
@@ -249,6 +308,16 @@ func checkRecord(request contract.ExecutionRequest, record *pv.Record) error {
 		return fail("original-evidence-invalid")
 	}
 	return nil
+}
+
+func validRecordScope(request contract.ExecutionRequest, manifest *pv.Manifest) bool {
+	if request.EvidenceScope == contract.ApplicationRuntime {
+		return request.Deadline != nil && !request.Deadline.IsZero() &&
+			request.Checks.Application != nil && manifest.Application != nil &&
+			manifest.Environment.Profile == pv.ApplicationRuntimeProfile
+	}
+	return request.Checks.Application == nil && manifest.Application == nil &&
+		request.ApplicationPolicy == nil && manifest.ApplicationPolicy == nil
 }
 
 func manifestMatchesRequest(manifest *pv.Manifest, request contract.ExecutionRequest) bool {

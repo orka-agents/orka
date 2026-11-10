@@ -2,27 +2,15 @@ package patchverification
 
 import (
 	"fmt"
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"strings"
 )
 
-type DeclaredChange struct {
-	Kind        string   `json:"kind"`
-	Paths       []string `json:"paths,omitempty"`
-	Description string   `json:"description"`
-}
+type DeclaredChange = verificationv1.DeclaredChange
 
-type EnvironmentRequirement struct {
-	Kind        string `json:"kind"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-}
+type EnvironmentRequirement = verificationv1.EnvironmentRequirement
 
-type EarlierValidationReference struct {
-	RunID          string `json:"runID"`
-	ReportDigest   string `json:"reportDigest"`
-	ManifestDigest string `json:"manifestDigest"`
-	SealDigest     string `json:"sealDigest"`
-}
+type EarlierValidationReference = verificationv1.EarlierValidationReference
 
 func validateManifestMetadata(manifest Manifest) error {
 	if err := validateDeclaredChanges(manifest.Action, manifest.DeclaredChanges); err != nil {

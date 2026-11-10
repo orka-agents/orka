@@ -23,6 +23,7 @@ var (
 	_ storagev1.StateProvider                         = (*storageclient.Client)(nil)
 	_ storagev1.ArtifactProvider                      = (*storageclient.Client)(nil)
 	_ store.ResultStore                               = (*storageclient.Client)(nil)
+	_ storagev1.VerificationStore                     = (*storageclient.Client)(nil)
 	_ store.PromptResultReceiptStore                  = (*storageclient.Client)(nil)
 	_ store.SessionStore                              = (*storageclient.Client)(nil)
 	_ store.SessionTurnCommitter                      = (*storageclient.Client)(nil)

@@ -119,27 +119,36 @@ func applicationEmptyDirectory(directory string) error {
 	return nil
 }
 
-func applicationCreateSourceDirectory(volume string) (string, error) {
+// ValidateApplicationVolumeRoot accepts only a fresh volume, allowing the real
+// ext4 recovery directory but never following it or adopting other content.
+func ValidateApplicationVolumeRoot(volume string) error {
 	info, err := os.Lstat(volume)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return "", ErrEvidence
+		return ErrEvidence
 	}
 	entries, err := os.ReadDir(volume)
 	if err != nil {
-		return "", ErrEvidence
+		return ErrEvidence
 	}
 	// Fresh ext4 volumes may contain their filesystem recovery directory. It
 	// is not source content; no other existing entry or archive tree is adopted.
 	for _, entry := range entries {
 		if entry.Name() != "lost+found" || !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			return "", ErrEvidence
+			return ErrEvidence
 		}
+	}
+	return nil
+}
+
+func applicationCreateSourceDirectory(volume string) (string, error) {
+	if err := ValidateApplicationVolumeRoot(volume); err != nil {
+		return "", err
 	}
 	directory := path.Join(volume, ApplicationSourceDirectory)
 	if err := os.Mkdir(directory, 0700); err != nil {
 		return "", ErrEvidence
 	}
-	info, err = os.Lstat(directory)
+	info, err := os.Lstat(directory)
 	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
 		return "", ErrEvidence
 	}

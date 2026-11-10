@@ -232,6 +232,16 @@ func (b *fixtureBackend) Start(ctx context.Context, request contract.ExecutionRe
 	return record, nil
 }
 
+func (b *fixtureBackend) Recover(_ context.Context, request contract.ExecutionRequest) (contract.ExecutionRecovery, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	receipt, ok := b.receipts[request.ID]
+	if !ok {
+		return contract.ExecutionRecovery{}, contract.ErrNotFound
+	}
+	return contract.ExecutionRecovery{Receipt: &receipt}, nil
+}
+
 func (b *fixtureBackend) Resume(_ context.Context, request contract.ExecutionRequest, receipt contract.ExecutionReceipt) (*pv.Record, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -507,6 +517,23 @@ func (f *serviceFixture) completeTasks(ctx context.Context) {
 					continue
 				}
 				task.Status.JobName, task.Status.JobUID = job.Name, string(job.UID)
+				if f.service.config.BoundedExecution {
+					task.Status.Phase = corev1alpha1.TaskPhaseRunning
+					if f.client.Status().Update(ctx, task) != nil {
+						continue
+					}
+					_, resultErr := f.results.GetResult(ctx, task.Namespace, task.Name)
+					if errors.Is(resultErr, store.ErrNotFound) {
+						if f.service.ClaimModelCall(ctx, contract.ModelCallClaim{
+							Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID),
+							JobUID: string(job.UID), PodUID: "fixture-pod-" + string(job.UID),
+						}) != nil {
+							continue
+						}
+					} else if resultErr != nil {
+						continue
+					}
+				}
 			}
 			role := task.Labels[roleLabel]
 			f.mu.Lock()
@@ -531,7 +558,7 @@ func (f *serviceFixture) proposalJob(task *corev1alpha1.Task) *batchv1.Job {
 		image = f.service.config.AIWorkerImage
 	}
 	controller := true
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: task.Name + "-job", Namespace: task.Namespace,
 			Labels: map[string]string{labels.LabelTask: labels.SelectorValue(task.Name)},
@@ -544,6 +571,12 @@ func (f *serviceFixture) proposalJob(task *corev1alpha1.Task) *batchv1.Job {
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: image}}},
 		}},
 	}
+	if f.service.config.BoundedExecution {
+		job.Spec.BackoffLimit = new(int32)
+		job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+		job.Spec.Template.Spec.Containers[0].Env = slices.Clone(task.Spec.Env)
+	}
+	return job
 }
 
 func (f *serviceFixture) awaitStatus(id string, predicate func(*contract.Status) bool) *contract.Status {

@@ -1,57 +1,26 @@
 package patchverification
 
-import "time"
+import verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 
-type SubmissionState string
-
-const (
-	SubmissionPreparing  SubmissionState = "preparing"
-	SubmissionRunning    SubmissionState = "running"
-	SubmissionTerminal   SubmissionState = "terminal"
-	SubmissionCancelling SubmissionState = "cancelling"
-)
-
-type KubernetesSubmission struct {
-	Namespace        string            `json:"namespace"`
-	RequestID        string            `json:"requestID"`
-	SubmittedBy      string            `json:"submittedBy"`
-	AttemptID        string            `json:"attemptID"`
-	OriginalTaskName string            `json:"originalTaskName"`
-	PatchedTaskName  string            `json:"patchedTaskName,omitempty"`
-	OriginalTaskUID  string            `json:"originalTaskUID,omitempty"`
-	PatchedTaskUID   string            `json:"patchedTaskUID,omitempty"`
-	Manifest         Manifest          `json:"manifest"`
-	Provenance       map[string][]byte `json:"-"`
-	Binding          *Binding          `json:"binding,omitempty"`
-	RunID            string            `json:"runID,omitempty"`
-	State            SubmissionState   `json:"state"`
-	Failure          string            `json:"failure,omitempty"`
-	CreatedAt        time.Time         `json:"createdAt"`
-	UpdatedAt        time.Time         `json:"updatedAt"`
-	Assessment       *Assessment       `json:"assessment,omitempty"`
-	RequiredChecks   int               `json:"requiredChecks"`
-	RecordedChecks   int               `json:"recordedChecks"`
-}
-
-type DispatchState string
+type SubmissionState = verificationv1.SubmissionState
 
 const (
-	DispatchPlanned  DispatchState = "planned"
-	DispatchCreated  DispatchState = "created"
-	DispatchObserved DispatchState = "observed"
-	DispatchRecorded DispatchState = "recorded"
-	DispatchFailed   DispatchState = "failed"
+	SubmissionPreparing  SubmissionState = verificationv1.SubmissionPreparing
+	SubmissionRunning    SubmissionState = verificationv1.SubmissionRunning
+	SubmissionTerminal   SubmissionState = verificationv1.SubmissionTerminal
+	SubmissionCancelling SubmissionState = verificationv1.SubmissionCancelling
 )
 
-type KubernetesDispatch struct {
-	RunID       string        `json:"runID"`
-	Side        string        `json:"side"`
-	CheckID     string        `json:"checkID"`
-	JobName     string        `json:"jobName"`
-	SpecDigest  string        `json:"specDigest"`
-	JobUID      string        `json:"jobUID,omitempty"`
-	PodUID      string        `json:"podUID,omitempty"`
-	ContainerID string        `json:"containerID,omitempty"`
-	State       DispatchState `json:"state"`
-	Failure     string        `json:"failure,omitempty"`
-}
+type KubernetesSubmission = verificationv1.KubernetesSubmission
+
+type DispatchState = verificationv1.DispatchState
+
+const (
+	DispatchPlanned  DispatchState = verificationv1.DispatchPlanned
+	DispatchCreated  DispatchState = verificationv1.DispatchCreated
+	DispatchObserved DispatchState = verificationv1.DispatchObserved
+	DispatchRecorded DispatchState = verificationv1.DispatchRecorded
+	DispatchFailed   DispatchState = verificationv1.DispatchFailed
+)
+
+type KubernetesDispatch = verificationv1.KubernetesDispatch

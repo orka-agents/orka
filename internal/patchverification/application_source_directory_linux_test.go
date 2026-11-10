@@ -17,6 +17,7 @@ func TestApplicationSourceDirectoryAcceptsFreshExt4Metadata(t *testing.T) {
 			if recoveryDirectory {
 				require.NoError(t, os.Mkdir(filepath.Join(volume, "lost+found"), 0700))
 			}
+			require.NoError(t, ValidateApplicationVolumeRoot(volume))
 			directory, err := applicationCreateSourceDirectory(volume)
 			require.NoError(t, err)
 			require.Equal(t, filepath.Join(volume, "archives"), directory)
@@ -48,6 +49,9 @@ func TestApplicationSourceDirectoryRejectsStaleForeignAndSymlinkedEntries(t *tes
 		"foreign root file": func(t *testing.T, root string) {
 			require.NoError(t, os.WriteFile(filepath.Join(root, "foreign"), []byte("do not remove"), 0600))
 		},
+		"stale artifact binary": func(t *testing.T, root string) {
+			require.NoError(t, os.WriteFile(filepath.Join(root, "application"), []byte("previous binary"), 0500))
+		},
 		"foreign root directory": func(t *testing.T, root string) {
 			require.NoError(t, os.Mkdir(filepath.Join(root, "foreign"), 0700))
 		},
@@ -66,6 +70,7 @@ func TestApplicationSourceDirectoryRejectsStaleForeignAndSymlinkedEntries(t *tes
 			prepare(t, volume)
 			before, err := os.ReadDir(volume)
 			require.NoError(t, err)
+			require.Error(t, ValidateApplicationVolumeRoot(volume))
 			_, err = applicationCreateSourceDirectory(volume)
 			require.Error(t, err)
 			after, err := os.ReadDir(volume)

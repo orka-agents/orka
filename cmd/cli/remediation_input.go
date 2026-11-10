@@ -94,7 +94,7 @@ func remediationJSONObject(raw []byte) (map[string]json.RawMessage, error) {
 
 func readRemediationFile(filename string, limit int64, private bool) ([]byte, error) {
 	info, err := os.Lstat(filename)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > limit || (private && info.Mode().Perm()&0077 != 0) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, errors.New("input file is unavailable, not regular/private, or exceeds its size limit")
 	}
 	file, err := os.Open(filename)
@@ -105,6 +105,11 @@ func readRemediationFile(filename string, limit int64, private bool) ([]byte, er
 	current, err := file.Stat()
 	if err != nil || !os.SameFile(info, current) {
 		return nil, errors.New("input file changed while opening")
+	}
+	if private {
+		if err := checkRemediationPrivateFile(file, current); err != nil {
+			return nil, err
+		}
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil || int64(len(raw)) > limit {
@@ -203,6 +208,9 @@ func writeRemediationPatch(path string, patch []byte) error {
 	}()
 	if statErr != nil {
 		return errors.New("could not inspect the new patch file")
+	}
+	if err := checkRemediationPrivateFile(file, info); err != nil {
+		return err
 	}
 	if _, err := file.Write(patch); err != nil {
 		return errors.New("could not write the candidate patch")

@@ -1674,8 +1674,9 @@ func main() {
 	var validationTaskReconciler controller.ValidationTaskReconciler
 	var remediationTaskReconciler controller.RemediationTaskReconciler
 	var remediationAPIService remediationcontract.Service
-	remediationService, remediationBackend, err := setupRemediation(processCtx, mgr, kubeClient, sqliteStore, appStorage, jobBuilder, remediationOptions{
-		Enabled: remediationEnabled, Namespace: watchNamespace, AgentName: remediationAgentName, AIWorkerImage: aiWorkerImage,
+	remediationService, remediationBackend, err := setupRemediation(processCtx, mgr, kubeClient, appStorage, jobBuilder, remediationOptions{
+		StorageFences: controllerEpochManager,
+		Enabled:       remediationEnabled, Namespace: watchNamespace, AgentName: remediationAgentName, AIWorkerImage: aiWorkerImage,
 		Backend: remediationBackendName, Application: remediationApplication,
 		GeneralWorkerImage: generalWorkerImage, GeneralWorkerImageID: validationPreparationImageID,
 		HelperImage: validationHelperImage, HelperImageID: validationHelperImageID, ToolImage: validationToolImage,

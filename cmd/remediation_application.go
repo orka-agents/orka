@@ -28,8 +28,8 @@ import (
 	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/remediation/service"
 	"github.com/orka-agents/orka/internal/remediation/source"
-	"github.com/orka-agents/orka/internal/store"
-	"github.com/orka-agents/orka/internal/store/sqlite"
+	"github.com/orka-agents/orka/internal/storageclient"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 type remediationApplicationOptions struct {
@@ -255,7 +255,7 @@ func applicationBackendConfig(options remediationOptions, target *rest.Config) (
 }
 
 func setupApplicationRemediation(
-	ctx context.Context, mgr manager.Manager, storage *sqlite.Store, results store.ResultStore,
+	ctx context.Context, mgr manager.Manager, storage *storageclient.Client,
 	builder *controller.JobBuilder, options remediationOptions,
 ) (*service.Service, controller.ValidationTaskReconciler, error) {
 	targetConfig, err := applicationRESTConfig(options.Application)
@@ -283,23 +283,29 @@ func setupApplicationRemediation(
 	coordinatorConfig := service.Config{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Namespace: options.Namespace,
 		AgentName: options.AgentName, AIWorkerImage: options.AIWorkerImage,
-		Results: results, Backend: backend, Source: source.Client{},
+		Results: storage, Backend: backend, Source: source.Client{},
 		RunTimeout: contract.MaxRunDuration, BoundedExecution: true,
+	}
+	if options.StorageFences == nil {
+		return nil, nil, errors.New("application remediation requires controller-owned storage fencing")
+	}
+	coordinatorConfig.PrepareBackend = func(ctx context.Context) error {
+		qualification, cancel := context.WithTimeout(ctx, config.RunTimeout+config.CleanupTimeout)
+		defer cancel()
+		if _, _, err := options.StorageFences.WriteFence(qualification, storagev1.StateContract); err != nil {
+			return fmt.Errorf("await application remediation storage fence: %w", err)
+		}
+		if err := backend.CheckReadiness(qualification); err != nil {
+			return fmt.Errorf("qualify application remediation boundary: %w", err)
+		}
+		return nil
 	}
 	if err := service.CheckConfiguredAuthority(ctx, coordinatorConfig, contract.ApplicationRuntime); err != nil {
 		return nil, nil, fmt.Errorf("check retained application remediation authority: %w", err)
 	}
-	qualification, cancel := context.WithTimeout(ctx, config.RunTimeout+config.CleanupTimeout)
-	defer cancel()
-	if err := backend.CheckReadiness(qualification); err != nil {
-		return nil, nil, fmt.Errorf("qualify application remediation boundary: %w", err)
-	}
 	coordinator, err := service.New(coordinatorConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("configure application remediation coordinator: %w", err)
-	}
-	if err := coordinator.CheckReady(ctx); err != nil {
-		return nil, nil, fmt.Errorf("qualify application remediation authority: %w", err)
 	}
 	builder.ValidationJobBuilder = backend.BuildValidationJob
 	if err := mgr.Add(backend.CleanupRunnable()); err != nil {

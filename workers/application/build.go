@@ -103,9 +103,8 @@ func stageBuildSource(ctx context.Context, input pv.ApplicationWorkerInput) (str
 	if err != nil || len(entries) != 0 {
 		return "", errors.New("application build workspace is not empty")
 	}
-	entries, err = os.ReadDir(pv.ApplicationArtifactsPath)
-	if err != nil || len(entries) != 0 {
-		return "", errors.New("application artifact volume is not empty")
+	if err := pv.ValidateApplicationVolumeRoot(pv.ApplicationArtifactsPath); err != nil {
+		return "", err
 	}
 	sourceFile, err := openRegular(pv.ApplicationSourcePath)
 	if err != nil {

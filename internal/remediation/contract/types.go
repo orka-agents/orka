@@ -85,12 +85,20 @@ type ExecutionReceipt struct {
 	InputDigest string `json:"inputDigest"`
 }
 
+// ExecutionRecovery returns either a durably recorded exact workload identity,
+// or proof that a reservation settled without dispatch. Neither permits Start.
+type ExecutionRecovery struct {
+	Receipt *ExecutionReceipt
+	Settled bool
+}
+
 // ExecutionBackend must persist or recover an exact workload identity before
 // returning evidence. Resume never authorizes a replacement execution.
 type ExecutionBackend interface {
 	ConfigurationDigest() string
 	RequestDigest(ExecutionRequest) (string, error)
 	Start(context.Context, ExecutionRequest, func(ExecutionReceipt) error) (*pv.Record, error)
+	Recover(context.Context, ExecutionRequest) (ExecutionRecovery, error)
 	Resume(context.Context, ExecutionRequest, ExecutionReceipt) (*pv.Record, error)
 	Cancel(context.Context, ExecutionReceipt) error
 }

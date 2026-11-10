@@ -136,12 +136,32 @@ event vocabulary and two provider interfaces:
   usage, memories with their proposals (creation, review, archiving and
   application), SessionTurn records with their finalization, and sealed
   execution snapshots, native session records and connector custody (see
-  "Key custody and sealing").
+  "Key custody and sealing"), plus private verification records and dispatch
+  receipts through `VerificationStore`.
 - `ArtifactProvider` serves `artifacts.v1`: artifact bytes and metadata.
 
 `internal/store` keeps aliases for the moved names, so Orka callers keep their
 existing types. The contract and its test suite do not import Orka's internal
 packages.
+
+Contract revision 6 adds verification storage. Its record models live in
+`pkg/storage/v1/verification`; internal verification callers retain type aliases,
+so existing JSON fields and frozen input digests do not change. Providers must
+keep these private records separate from public Task artifact retention.
+The embedded provider initializes the optional verification tables only when
+the feature is enabled. Initialization is an administrative bootstrap action;
+evidence, lifecycle, and dispatch mutations carry the normal dataset/epoch write
+envelope. `GetPatchVerificationRun` and `GetPatchVerificationBlob` are also
+classified as writes because detecting corruption can persist an invalidation.
+
+Verification-domain errors are not storage-level refusals: conflicting or
+invalid evidence can intentionally record an incident and invalidate a run.
+The provider commits and replays that exact domain outcome with the operation
+receipt. Infrastructure failures still roll back both the evidence mutation and
+its receipt; missing envelopes and stale owners cannot mutate either.
+Application-runtime qualification and retained-run recovery wait for the elected
+controller's storage fence. New remediation submissions remain unavailable until
+qualification completes.
 
 ### Provider obligations
 

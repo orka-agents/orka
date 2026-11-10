@@ -96,20 +96,7 @@ func (s *Coordinator) drive(operation, manager context.Context, owner runIdentit
 			continue
 		}
 		if failure, ok := errors.AsType[*stageFailure](err); ok {
-			_, updateErr := s.update(manager, id, func(current *run) error {
-				if current.state.CancelRequested {
-					return nil
-				}
-				outcome := failure.outcome
-				if current.state.Status.PatchReady {
-					outcome = contract.OutcomeUnverified
-				}
-				setCompletion(current, failure.phase, outcome, failure.reason)
-				return nil
-			})
-			if updateErr == nil {
-				s.stop(manager, id, failure.reason)
-			}
+			s.stopAfterStageFailure(manager, id, failure)
 			return
 		}
 		if err != nil && !pending(err) {
@@ -117,6 +104,23 @@ func (s *Coordinator) drive(operation, manager context.Context, owner runIdentit
 			return
 		}
 		s.wait(ctx)
+	}
+}
+
+func (s *Coordinator) stopAfterStageFailure(ctx context.Context, id string, failure *stageFailure) {
+	_, err := s.update(ctx, id, func(current *run) error {
+		if current.state.CancelRequested {
+			return nil
+		}
+		outcome := failure.outcome
+		if current.state.Status.PatchReady {
+			outcome = contract.OutcomeUnverified
+		}
+		setCompletion(current, failure.phase, outcome, failure.reason)
+		return nil
+	})
+	if err == nil {
+		s.stop(ctx, id, failure.reason)
 	}
 }
 
@@ -631,13 +635,18 @@ func (s *Coordinator) stop(ctx context.Context, id, reason string) {
 		done, err := s.cancelAgent(ctx, r, op)
 		settled = settled && done && err == nil
 	}
-	for _, op := range r.state.Executions {
-		if !op.Attempted || op.Rejected || !op.Record.empty() {
+	for key, op := range r.state.Executions {
+		if !op.Attempted || op.Rejected || op.Settled || !op.Record.empty() {
 			continue
 		}
 		if op.Receipt == nil {
-			settled = false
-			continue
+			if err := s.recoverExecution(ctx, r, key, op); err != nil {
+				settled = false
+				continue
+			}
+			if op.Settled {
+				continue
+			}
 		}
 		if err := s.requireCurrentRun(ctx, r); err != nil {
 			return

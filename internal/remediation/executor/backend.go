@@ -116,11 +116,19 @@ func (b *Backend) Start(ctx context.Context, request contract.ExecutionRequest, 
 	created := false
 	if apierrors.IsNotFound(err) {
 		marker := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: expected.Name + "-intent", Namespace: expected.Namespace,
-			OwnerReferences: expected.OwnerReferences}, Immutable: new(true), Data: map[string]string{"inputDigest": digest}}
+			OwnerReferences: expected.OwnerReferences}, Data: map[string]string{"inputDigest": digest}}
 		if err := b.client.Create(ctx, marker); err != nil {
 			return nil, safeError(contract.ErrConflict, err)
 		}
 		if err := b.client.Create(ctx, expected); err != nil {
+			return nil, safeError(contract.ErrUnavailable, err)
+		}
+		if expected.UID == "" || marker.UID == "" {
+			return nil, contract.ErrConflict
+		}
+		marker.Data["taskUID"] = string(expected.UID)
+		marker.Immutable = new(true)
+		if err := b.client.Update(ctx, marker); err != nil {
 			return nil, safeError(contract.ErrUnavailable, err)
 		}
 		if err := b.reader.Get(ctx, client.ObjectKeyFromObject(expected), task); err != nil {
@@ -144,6 +152,32 @@ func (b *Backend) Start(ctx context.Context, request contract.ExecutionRequest, 
 		}
 	}
 	return b.await(ctx, input, receipt)
+}
+
+func (b *Backend) Recover(ctx context.Context, request contract.ExecutionRequest) (contract.ExecutionRecovery, error) {
+	input, digest, err := b.requestInput(request)
+	if err != nil {
+		return contract.ExecutionRecovery{}, err
+	}
+	expected := b.preparationTask(input, digest)
+	marker := &corev1.ConfigMap{}
+	if err := b.reader.Get(ctx, client.ObjectKey{Namespace: expected.Namespace, Name: expected.Name + "-intent"}, marker); err != nil {
+		if apierrors.IsNotFound(err) {
+			return contract.ExecutionRecovery{}, contract.ErrNotFound
+		}
+		return contract.ExecutionRecovery{}, safeError(contract.ErrUnavailable, err)
+	}
+	// Only the Create response's durably recorded UID is authority; observing
+	// a matching Task name or spec cannot recover an unacknowledged create.
+	uid := marker.Data["taskUID"]
+	if marker.UID == "" || !marker.DeletionTimestamp.IsZero() || marker.Immutable == nil || !*marker.Immutable ||
+		uid == "" || len(marker.Data) != 2 || len(marker.BinaryData) != 0 ||
+		marker.Data["inputDigest"] != digest || !reflect.DeepEqual(marker.OwnerReferences, expected.OwnerReferences) {
+		return contract.ExecutionRecovery{}, contract.ErrConflict
+	}
+	return contract.ExecutionRecovery{Receipt: &contract.ExecutionReceipt{
+		Namespace: expected.Namespace, TaskName: expected.Name, TaskUID: uid, InputDigest: digest,
+	}}, nil
 }
 
 func (b *Backend) Resume(ctx context.Context, request contract.ExecutionRequest, receipt contract.ExecutionReceipt) (*pv.Record, error) {

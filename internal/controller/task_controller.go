@@ -317,6 +317,22 @@ type RemediationTaskReconciler interface {
 	ReconcileRemediationTask(context.Context, *corev1alpha1.Task) (ctrl.Result, bool, error)
 }
 
+func (r *TaskReconciler) reconcileStandaloneTask(ctx context.Context, task *corev1alpha1.Task) (ctrl.Result, bool, error) {
+	if r.RemediationTaskReconciler != nil {
+		result, handled, err := r.RemediationTaskReconciler.ReconcileRemediationTask(ctx, task)
+		if handled || err != nil {
+			return result, true, err
+		}
+	}
+	if r.ValidationTaskReconciler != nil {
+		result, handled, err := r.ValidationTaskReconciler.ReconcileValidationTask(ctx, task)
+		if handled || err != nil {
+			return result, true, err
+		}
+	}
+	return ctrl.Result{}, false, nil
+}
+
 // Reconcile handles the reconciliation loop for Task resources
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -336,17 +352,8 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.retainUsageTask(ctx, task); err != nil {
 		return ctrl.Result{}, r.stopTaskAfterUsageRetentionFailure(ctx, task, err)
 	}
-	if r.RemediationTaskReconciler != nil {
-		result, handled, err := r.RemediationTaskReconciler.ReconcileRemediationTask(ctx, task)
-		if handled || err != nil {
-			return result, err
-		}
-	}
-	if r.ValidationTaskReconciler != nil {
-		result, handled, err := r.ValidationTaskReconciler.ReconcileValidationTask(ctx, task)
-		if handled || err != nil {
-			return result, err
-		}
+	if result, handled, err := r.reconcileStandaloneTask(ctx, task); handled {
+		return result, err
 	}
 	if tx := task.Spec.Transaction; tx != nil {
 		values := []any{}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 )
@@ -17,18 +18,7 @@ const (
 	applicationEndpointSliceManager  = "endpointslice-controller.k8s.io"
 )
 
-// ApplicationReceiverRoute is published once by the backend, after listener
-// readiness and before observation. Its resource version fences all subsequent
-// slice changes; it is a locator, not evidence that the data plane works.
-type ApplicationReceiverRoute struct {
-	Version                      int    `json:"version"`
-	Namespace                    string `json:"namespace"`
-	ServiceUID                   string `json:"serviceUID"`
-	PodUID                       string `json:"podUID"`
-	EndpointSliceName            string `json:"endpointSliceName"`
-	EndpointSliceUID             string `json:"endpointSliceUID"`
-	EndpointSliceResourceVersion string `json:"endpointSliceResourceVersion"`
-}
+type ApplicationReceiverRoute = verificationv1.ApplicationReceiverRoute
 
 func ApplicationReceiverRouteAnnotation(podUID string) string {
 	if !identifierPattern.MatchString(podUID) {

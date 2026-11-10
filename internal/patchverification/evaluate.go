@@ -8,173 +8,62 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-	"time"
+
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"unicode/utf8"
 )
 
-type Conclusion string
+type Conclusion = verificationv1.Conclusion
 
-type Action string
+type Action = verificationv1.Action
 
 const (
-	ValidateReport   Action     = "validate-report"
-	VerifyPatch      Action     = "verify-patch"
-	Reproduced       Conclusion = "Reproduced"
-	NotReproduced    Conclusion = "Not reproduced under these conditions"
-	UnableToValidate Conclusion = "Unable to validate"
-	Verified         Conclusion = "Verified for these checks"
-	NotFixed         Conclusion = "Not fixed"
-	PartiallyFixed   Conclusion = "Partially fixed"
-	Regression       Conclusion = "Introduces a regression"
-	UnableToVerify   Conclusion = "Unable to verify"
-	Original                    = "original"
-	Patched                     = "patched"
-	Reproduction                = "reproduction"
-	Normal                      = "normal"
-	Offline                     = "offline"
-	LocalServices               = "local-services"
-	SchemaVersion               = 1
+	ValidateReport   Action     = verificationv1.ValidateReport
+	VerifyPatch      Action     = verificationv1.VerifyPatch
+	Reproduced       Conclusion = verificationv1.Reproduced
+	NotReproduced    Conclusion = verificationv1.NotReproduced
+	UnableToValidate Conclusion = verificationv1.UnableToValidate
+	Verified         Conclusion = verificationv1.Verified
+	NotFixed         Conclusion = verificationv1.NotFixed
+	PartiallyFixed   Conclusion = verificationv1.PartiallyFixed
+	Regression       Conclusion = verificationv1.Regression
+	UnableToVerify   Conclusion = verificationv1.UnableToVerify
+	Original                    = verificationv1.Original
+	Patched                     = verificationv1.Patched
+	Reproduction                = verificationv1.Reproduction
+	Normal                      = verificationv1.Normal
+	Offline                     = verificationv1.Offline
+	LocalServices               = verificationv1.LocalServices
+	SchemaVersion               = verificationv1.SchemaVersion
 )
 
-type Expectation struct {
-	ExitCode int               `json:"exitCode"`
-	Stdout   string            `json:"stdout"`
-	Services map[string]string `json:"services,omitempty"`
-}
+type Expectation = verificationv1.Expectation
 
-type Check struct {
-	ID             string            `json:"id"`
-	Kind           string            `json:"kind"`
-	Command        []string          `json:"command"`
-	HTTP           *HTTPCheck        `json:"http,omitempty"`
-	Application    *ApplicationCheck `json:"application,omitempty"`
-	Stdin          string            `json:"stdin,omitempty"`
-	Healthy        Expectation       `json:"healthy"`
-	Failure        Expectation       `json:"failure"`
-	TimeoutSeconds int               `json:"timeoutSeconds"`
-	Lifecycle      []string          `json:"lifecycle,omitempty"`
-}
+type Check = verificationv1.Check
 
-type FrozenFile struct {
-	Path       string `json:"path"`
-	Content    []byte `json:"content"`
-	Digest     string `json:"digest"`
-	Executable bool   `json:"executable,omitempty"`
-}
+type FrozenFile = verificationv1.FrozenFile
 
-type SourceIdentity struct {
-	Commit        string `json:"commit,omitempty"`
-	Tree          string `json:"tree"`
-	ArchiveDigest string `json:"archiveDigest"`
-}
+type SourceIdentity = verificationv1.SourceIdentity
 
-type Sources struct {
-	Repository  string         `json:"repository"`
-	Original    SourceIdentity `json:"original"`
-	Patched     SourceIdentity `json:"patched"`
-	Paths       []string       `json:"paths,omitempty"`
-	PatchDigest string         `json:"patchDigest,omitempty"`
-	DiffDigest  string         `json:"diffDigest"`
-}
+type Sources = verificationv1.Sources
 
-type Service struct {
-	ID          string   `json:"id"`
-	Command     []string `json:"command"`
-	Port        int      `json:"port"`
-	ReadyOutput string   `json:"readyOutput"`
-}
+type Service = verificationv1.Service
 
-type Environment struct {
-	Image        string                   `json:"image"`
-	ImageID      string                   `json:"imageID"`
-	Platform     string                   `json:"platform"`
-	Profile      string                   `json:"profile"`
-	Variables    map[string]string        `json:"variables,omitempty"`
-	Dependencies map[string]string        `json:"dependencies,omitempty"`
-	Services     []Service                `json:"services,omitempty"`
-	Requirements []EnvironmentRequirement `json:"requirements,omitempty"`
-}
+type Environment = verificationv1.Environment
 
-type Manifest struct {
-	Version                   int                         `json:"version"`
-	Action                    Action                      `json:"action,omitempty"`
-	ReportDigest              string                      `json:"reportDigest,omitempty"`
-	EarlierValidation         *EarlierValidationReference `json:"earlierValidation,omitempty"`
-	DeclaredChanges           []DeclaredChange            `json:"declaredChanges,omitempty"`
-	Problem                   string                      `json:"problem"`
-	Scope                     []string                    `json:"scope"`
-	Gaps                      []string                    `json:"gaps"`
-	Sources                   Sources                     `json:"sources"`
-	Environment               Environment                 `json:"environment"`
-	Files                     []FrozenFile                `json:"files"`
-	Checks                    []Check                     `json:"checks"`
-	Application               *ApplicationPlan            `json:"application,omitempty"`
-	ApplicationPolicy         *ApplicationPolicy          `json:"applicationPolicy,omitempty"`
-	ApplicationSourceMetadata *ApplicationSourceMetadata  `json:"applicationSourceMetadata,omitempty"`
-}
+type Manifest = verificationv1.Manifest
 
-type Binding struct {
-	RunID          string `json:"runID"`
-	AttemptID      string `json:"attemptID"`
-	OriginalTaskID string `json:"originalTaskID"`
-	PatchedTaskID  string `json:"patchedTaskID"`
-	ManifestDigest string `json:"manifestDigest"`
-}
+type Binding = verificationv1.Binding
 
-type CapturedOutput struct {
-	Digest    string `json:"digest"`
-	Bytes     int    `json:"bytes"`
-	Truncated bool   `json:"truncated"`
-}
+type CapturedOutput = verificationv1.CapturedOutput
 
-type Observation struct {
-	RunID           string                    `json:"runID"`
-	AttemptID       string                    `json:"attemptID"`
-	TaskID          string                    `json:"taskID"`
-	ManifestDigest  string                    `json:"manifestDigest"`
-	Side            string                    `json:"side"`
-	CheckID         string                    `json:"checkID"`
-	SourceTree      string                    `json:"sourceTree"`
-	ImageID         string                    `json:"imageID"`
-	ContainerID     string                    `json:"containerID"`
-	JobUID          string                    `json:"jobUID,omitempty"`
-	PodUID          string                    `json:"podUID,omitempty"`
-	Origin          string                    `json:"origin"`
-	StartedAt       time.Time                 `json:"startedAt"`
-	FinishedAt      time.Time                 `json:"finishedAt"`
-	Executed        bool                      `json:"executed"`
-	HTTPCompleted   bool                      `json:"httpCompleted,omitempty"`
-	ExitCode        *int                      `json:"exitCode,omitempty"`
-	StdoutDigest    string                    `json:"stdoutDigest,omitempty"`
-	StdoutBytes     int                       `json:"stdoutBytes"`
-	StderrDigest    string                    `json:"stderrDigest,omitempty"`
-	StderrBytes     int                       `json:"stderrBytes"`
-	TimedOut        bool                      `json:"timedOut"`
-	Skipped         bool                      `json:"skipped"`
-	OutputTruncated bool                      `json:"outputTruncated"`
-	SetupError      string                    `json:"setupError,omitempty"`
-	ServiceOutputs  map[string]CapturedOutput `json:"serviceOutputs,omitempty"`
-	Application     *ApplicationObservation   `json:"application,omitempty"`
-}
+type Observation = verificationv1.Observation
 
-type CheckResult struct {
-	CheckID         string `json:"checkID"`
-	Outcome         string `json:"outcome"`
-	Reason          string `json:"reason,omitempty"`
-	OriginalOutcome string `json:"originalOutcome,omitempty"`
-	PatchedOutcome  string `json:"patchedOutcome,omitempty"`
-}
+type CheckResult = verificationv1.CheckResult
 
-type ExecutionEvidence struct {
-	Observation Observation       `json:"observation"`
-	Blobs       map[string][]byte `json:"blobs"`
-}
+type ExecutionEvidence = verificationv1.ExecutionEvidence
 
-type Assessment struct {
-	Conclusion Conclusion    `json:"conclusion"`
-	Reason     string        `json:"reason"`
-	Checks     []CheckResult `json:"checks"`
-}
+type Assessment = verificationv1.Assessment
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var sha256Pattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)

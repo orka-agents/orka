@@ -7,6 +7,7 @@ import (
 	"time"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
 func (p *stateProvider) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
@@ -172,6 +173,13 @@ func (p *stateProvider) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 	return err
 }
 
+func (p *stateProvider) AttachCancelledKubernetesValidationRun(ctx context.Context, a1 string, a2 string, a3 verification.Binding) error {
+	_, err := p.injector.call(ctx, p.contract, "AttachCancelledKubernetesValidationRun", func(ctx context.Context) error {
+		return p.inner.AttachCancelledKubernetesValidationRun(ctx, a1, a2, a3)
+	})
+	return err
+}
+
 func (p *stateProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatasetRequest) (storagev1.DatasetBinding, error) {
 	var r0 storagev1.DatasetBinding
 	injected, err := p.injector.call(ctx, p.contract, "BindDataset", func(ctx context.Context) (err error) {
@@ -183,6 +191,13 @@ func (p *stateProvider) BindDataset(ctx context.Context, a1 storagev1.BindDatase
 		return z0, err
 	}
 	return r0, err
+}
+
+func (p *stateProvider) BindKubernetesValidationTasks(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 verification.Binding) error {
+	_, err := p.injector.call(ctx, p.contract, "BindKubernetesValidationTasks", func(ctx context.Context) error {
+		return p.inner.BindKubernetesValidationTasks(ctx, a1, a2, a3, a4, a5)
+	})
+	return err
 }
 
 func (p *stateProvider) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
@@ -200,6 +215,19 @@ func (p *stateProvider) BindSessionCleanupIdentity(ctx context.Context, a1 strin
 		return p.inner.BindSessionCleanupIdentity(ctx, a1, a2, a3)
 	})
 	return err
+}
+
+func (p *stateProvider) CancelPatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	injected, err := p.injector.call(ctx, p.contract, "CancelPatchVerificationRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.CancelPatchVerificationRun(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *verification.Record
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) CancelWorkActions(ctx context.Context, a1 string, a2 string, a3 string, a4 int64, a5 string, a6 string) (int, error) {
@@ -349,6 +377,13 @@ func (p *stateProvider) CommitSessionTurn(ctx context.Context, a1 *storagev1.Ses
 func (p *stateProvider) CompleteDatasetBootstrap(ctx context.Context, a1 string) error {
 	_, err := p.injector.call(ctx, p.contract, "CompleteDatasetBootstrap", func(ctx context.Context) error {
 		return p.inner.CompleteDatasetBootstrap(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) CompleteKubernetesValidationSubmission(ctx context.Context, a1 string, a2 string, a3 string) error {
+	_, err := p.injector.call(ctx, p.contract, "CompleteKubernetesValidationSubmission", func(ctx context.Context) error {
+		return p.inner.CompleteKubernetesValidationSubmission(ctx, a1, a2, a3)
 	})
 	return err
 }
@@ -526,6 +561,23 @@ func (p *stateProvider) CreateImplementationJob(ctx context.Context, a1 *storage
 	return err
 }
 
+func (p *stateProvider) CreateKubernetesValidationDispatch(ctx context.Context, a1 verification.KubernetesDispatch) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateKubernetesValidationDispatch", func(ctx context.Context) error {
+		return p.inner.CreateKubernetesValidationDispatch(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) CreateKubernetesValidationSubmission(ctx context.Context, a1 verification.KubernetesSubmission) error {
+	_, err := p.injector.call(ctx, p.contract, "CreateKubernetesValidationSubmission", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.CreateKubernetesValidationSubmission(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) CreateMemory(ctx context.Context, a1 *storagev1.Memory) error {
 	_, err := p.injector.call(ctx, p.contract, "CreateMemory", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
@@ -572,6 +624,17 @@ func (p *stateProvider) CreatePatchProposal(ctx context.Context, a1 *storagev1.P
 			a1 = cloneArgument(a1)
 		}
 		return p.inner.CreatePatchProposal(ctx, a1)
+	})
+	return err
+}
+
+func (p *stateProvider) CreatePatchVerificationRun(ctx context.Context, a1 verification.Manifest, a2 verification.Binding, a3 map[string][]uint8) error {
+	_, err := p.injector.call(ctx, p.contract, "CreatePatchVerificationRun", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+			a3 = cloneArgument(a3)
+		}
+		return p.inner.CreatePatchVerificationRun(ctx, a1, a2, a3)
 	})
 	return err
 }
@@ -870,6 +933,19 @@ func (p *stateProvider) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 	return r0, r1, err
 }
 
+func (p *stateProvider) FinalizePatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	injected, err := p.injector.call(ctx, p.contract, "FinalizePatchVerificationRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.FinalizePatchVerificationRun(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *verification.Record
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, a1 string, a2 string, a3 string, a4 []string, a5 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	injected, err := p.injector.call(ctx, p.contract, "FreezeGatewayEventTaskRuntimeAllowedTools", func(ctx context.Context) (err error) {
@@ -907,6 +983,19 @@ func (p *stateProvider) GetCommandEvent(ctx context.Context, a1 string, a2 strin
 	})
 	if injected {
 		var z0 *storagev1.CommandEvent
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetCompletedReportValidation(ctx context.Context, a1 string) (*verification.Record, error) {
+	var r0 *verification.Record
+	injected, err := p.injector.call(ctx, p.contract, "GetCompletedReportValidation", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetCompletedReportValidation(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *verification.Record
 		return z0, err
 	}
 	return r0, err
@@ -1084,6 +1173,58 @@ func (p *stateProvider) GetImplementationJob(ctx context.Context, a1 string, a2 
 	return r0, err
 }
 
+func (p *stateProvider) GetKubernetesValidationDispatch(ctx context.Context, a1 string, a2 string, a3 string) (*verification.KubernetesDispatch, error) {
+	var r0 *verification.KubernetesDispatch
+	injected, err := p.injector.call(ctx, p.contract, "GetKubernetesValidationDispatch", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetKubernetesValidationDispatch(ctx, a1, a2, a3)
+		return err
+	})
+	if injected {
+		var z0 *verification.KubernetesDispatch
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetKubernetesValidationSubmission(ctx context.Context, a1 string, a2 string) (*verification.KubernetesSubmission, error) {
+	var r0 *verification.KubernetesSubmission
+	injected, err := p.injector.call(ctx, p.contract, "GetKubernetesValidationSubmission", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetKubernetesValidationSubmission(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *verification.KubernetesSubmission
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetKubernetesValidationSubmissionByRun(ctx context.Context, a1 string, a2 string) (*verification.KubernetesSubmission, error) {
+	var r0 *verification.KubernetesSubmission
+	injected, err := p.injector.call(ctx, p.contract, "GetKubernetesValidationSubmissionByRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetKubernetesValidationSubmissionByRun(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *verification.KubernetesSubmission
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetKubernetesValidationSubmissionByTask(ctx context.Context, a1 string, a2 string) (*verification.KubernetesSubmission, error) {
+	var r0 *verification.KubernetesSubmission
+	injected, err := p.injector.call(ctx, p.contract, "GetKubernetesValidationSubmissionByTask", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetKubernetesValidationSubmissionByTask(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *verification.KubernetesSubmission
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) GetLatestExecutionEventSeq(ctx context.Context, a1 string, a2 string, a3 string) (int64, error) {
 	var r0 int64
 	injected, err := p.injector.call(ctx, p.contract, "GetLatestExecutionEventSeq", func(ctx context.Context) (err error) {
@@ -1199,6 +1340,32 @@ func (p *stateProvider) GetOutboxProjection(ctx context.Context, a1 string) (*st
 	})
 	if injected {
 		var z0 *storagev1.OutboxProjection
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetPatchVerificationBlob(ctx context.Context, a1 string, a2 string) ([]uint8, error) {
+	var r0 []uint8
+	injected, err := p.injector.call(ctx, p.contract, "GetPatchVerificationBlob", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetPatchVerificationBlob(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 []uint8
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) GetPatchVerificationRun(ctx context.Context, a1 string) (*verification.Record, error) {
+	var r0 *verification.Record
+	injected, err := p.injector.call(ctx, p.contract, "GetPatchVerificationRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.GetPatchVerificationRun(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *verification.Record
 		return z0, err
 	}
 	return r0, err
@@ -1549,6 +1716,20 @@ func (p *stateProvider) HealthCheck(ctx context.Context) error {
 	return err
 }
 
+func (p *stateProvider) InitializeKubernetesValidationStore(ctx context.Context) error {
+	_, err := p.injector.call(ctx, p.contract, "InitializeKubernetesValidationStore", func(ctx context.Context) error {
+		return p.inner.InitializeKubernetesValidationStore(ctx)
+	})
+	return err
+}
+
+func (p *stateProvider) InitializePatchVerificationStore(ctx context.Context) error {
+	_, err := p.injector.call(ctx, p.contract, "InitializePatchVerificationStore", func(ctx context.Context) error {
+		return p.inner.InitializePatchVerificationStore(ctx)
+	})
+	return err
+}
+
 func (p *stateProvider) IsLocked(ctx context.Context, a1 string, a2 string, a3 string, a4 string) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "IsLocked", func(ctx context.Context) (err error) {
@@ -1582,6 +1763,19 @@ func (p *stateProvider) ListActionRecords(ctx context.Context, a1 storagev1.Acti
 		return z0, z1, err
 	}
 	return r0, r1, err
+}
+
+func (p *stateProvider) ListActiveKubernetesValidationSubmissions(ctx context.Context, a1 string) ([]verification.KubernetesSubmission, error) {
+	var r0 []verification.KubernetesSubmission
+	injected, err := p.injector.call(ctx, p.contract, "ListActiveKubernetesValidationSubmissions", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListActiveKubernetesValidationSubmissions(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 []verification.KubernetesSubmission
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) ListActiveScanRuns(ctx context.Context, a1 string, a2 string) ([]storagev1.ScanRun, error) {
@@ -2224,6 +2418,34 @@ func (p *stateProvider) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	return err
 }
 
+func (p *stateProvider) MarkKubernetesValidationDispatchCreated(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	_, err := p.injector.call(ctx, p.contract, "MarkKubernetesValidationDispatchCreated", func(ctx context.Context) error {
+		return p.inner.MarkKubernetesValidationDispatchCreated(ctx, a1, a2, a3, a4)
+	})
+	return err
+}
+
+func (p *stateProvider) MarkKubernetesValidationDispatchFailed(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	_, err := p.injector.call(ctx, p.contract, "MarkKubernetesValidationDispatchFailed", func(ctx context.Context) error {
+		return p.inner.MarkKubernetesValidationDispatchFailed(ctx, a1, a2, a3, a4)
+	})
+	return err
+}
+
+func (p *stateProvider) MarkKubernetesValidationDispatchObserved(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string, a6 string) error {
+	_, err := p.injector.call(ctx, p.contract, "MarkKubernetesValidationDispatchObserved", func(ctx context.Context) error {
+		return p.inner.MarkKubernetesValidationDispatchObserved(ctx, a1, a2, a3, a4, a5, a6)
+	})
+	return err
+}
+
+func (p *stateProvider) MarkKubernetesValidationDispatchRecorded(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
+	_, err := p.injector.call(ctx, p.contract, "MarkKubernetesValidationDispatchRecorded", func(ctx context.Context) error {
+		return p.inner.MarkKubernetesValidationDispatchRecorded(ctx, a1, a2, a3, a4, a5)
+	})
+	return err
+}
+
 func (p *stateProvider) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
 	var r0 bool
 	injected, err := p.injector.call(ctx, p.contract, "MarkWorkActionRetryPending", func(ctx context.Context) (err error) {
@@ -2375,6 +2597,23 @@ func (p *stateProvider) ReadSessionTurnFinalizationBasis(ctx context.Context, a1
 	return r0, err
 }
 
+func (p *stateProvider) RecordKubernetesValidationTaskUID(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	_, err := p.injector.call(ctx, p.contract, "RecordKubernetesValidationTaskUID", func(ctx context.Context) error {
+		return p.inner.RecordKubernetesValidationTaskUID(ctx, a1, a2, a3, a4)
+	})
+	return err
+}
+
+func (p *stateProvider) RecordPatchVerificationEvidence(ctx context.Context, a1 verification.Binding, a2 verification.ExecutionEvidence) error {
+	_, err := p.injector.call(ctx, p.contract, "RecordPatchVerificationEvidence", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a2 = cloneArgument(a2)
+		}
+		return p.inner.RecordPatchVerificationEvidence(ctx, a1, a2)
+	})
+	return err
+}
+
 func (p *stateProvider) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {
 	_, err := p.injector.call(ctx, p.contract, "RecordUsage", func(ctx context.Context) error {
 		if responseWillBeLost(ctx) {
@@ -2393,6 +2632,19 @@ func (p *stateProvider) RecordUsagePullRequest(ctx context.Context, a1 storagev1
 		return p.inner.RecordUsagePullRequest(ctx, a1)
 	})
 	return err
+}
+
+func (p *stateProvider) RecoverInterruptedPatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	injected, err := p.injector.call(ctx, p.contract, "RecoverInterruptedPatchVerificationRun", func(ctx context.Context) (err error) {
+		r0, err = p.inner.RecoverInterruptedPatchVerificationRun(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *verification.Record
+		return z0, err
+	}
+	return r0, err
 }
 
 func (p *stateProvider) RegisterTaskDataFence(ctx context.Context, a1 string, a2 string) (storagev1.TaskDataFence, bool, error) {
@@ -2485,6 +2737,13 @@ func (p *stateProvider) ReplaceSealedConnectorCredential(ctx context.Context, a1
 		return z0, err
 	}
 	return r0, err
+}
+
+func (p *stateProvider) RequestKubernetesValidationCancellation(ctx context.Context, a1 string, a2 string) error {
+	_, err := p.injector.call(ctx, p.contract, "RequestKubernetesValidationCancellation", func(ctx context.Context) error {
+		return p.inner.RequestKubernetesValidationCancellation(ctx, a1, a2)
+	})
+	return err
 }
 
 func (p *stateProvider) RequestScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun, a2 string) error {

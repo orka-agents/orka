@@ -444,21 +444,25 @@ func (manager *processManager) ownedProcesses() ([]processIdentity, error) {
 	if err != nil {
 		return nil, err
 	}
+	return manager.ownedProcessInventory(inventory, os.Getpid())
+}
+
+func (manager *processManager) ownedProcessInventory(inventory map[int]processIdentity, supervisor int) ([]processIdentity, error) {
 	uids := make(map[int]bool)
 	for _, process := range manager.processes {
 		uids[process.uid] = true
 	}
 	var result []processIdentity
 	for _, identity := range inventory {
-		if identity.pid == os.Getpid() || !uids[identity.uids[0]] {
+		if identity.pid == supervisor || !uids[identity.uids[0]] {
 			continue
-		}
-		if identity.uids != [4]int{identity.uids[0], identity.uids[0], identity.uids[0], identity.uids[0]} {
-			return nil, errors.New("owned process changed its sandbox identity")
 		}
 		parent := identity.parent
 		for depth := 0; depth < len(inventory); depth++ {
-			if parent == os.Getpid() {
+			if parent == supervisor {
+				if identity.uids != [4]int{identity.uids[0], identity.uids[0], identity.uids[0], identity.uids[0]} {
+					return nil, errors.New("owned process changed its sandbox identity")
+				}
 				result = append(result, identity)
 				break
 			}

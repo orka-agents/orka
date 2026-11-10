@@ -61,10 +61,10 @@ func patchVerificationSchemaStatements() []string {
 }
 
 func (storage *Store) InitializePatchVerificationStore(ctx context.Context) error {
-	if _, err := storage.db.ExecContext(ctx, patchVerificationWriteLockSchema); err != nil {
+	if _, err := storage.taskDataExecutor(ctx).ExecContext(ctx, patchVerificationWriteLockSchema); err != nil {
 		return err
 	}
-	if _, err := storage.db.ExecContext(ctx, `INSERT OR IGNORE INTO patch_verification_write_lock (id) VALUES (1)`); err != nil {
+	if _, err := storage.taskDataExecutor(ctx).ExecContext(ctx, `INSERT OR IGNORE INTO patch_verification_write_lock (id) VALUES (1)`); err != nil {
 		return err
 	}
 	return storage.withPatchVerificationTx(ctx, func(transaction *sql.Tx) error {
@@ -78,7 +78,7 @@ func (storage *Store) InitializePatchVerificationStore(ctx context.Context) erro
 }
 
 func (storage *Store) withPatchVerificationTx(ctx context.Context, operation func(*sql.Tx) error) error {
-	transaction, err := storage.db.BeginTx(ctx, nil)
+	transaction, err := storage.beginTx(ctx)
 	if err != nil {
 		return err
 	}
@@ -90,13 +90,13 @@ func (storage *Store) withPatchVerificationTx(ctx context.Context, operation fun
 	if err := rowsAffectedExactlyOne(result, "verification store lock"); err != nil {
 		return err
 	}
-	if err := operation(transaction); err != nil {
+	if err := operation(transaction.Tx); err != nil {
 		return err
 	}
 	return transaction.Commit()
 }
 
-func (storage *Store) CreatePatchVerificationRun(ctx context.Context, manifest verification.Manifest, binding verification.Binding, provenance map[string][]byte) error {
+func (storage *Store) createPatchVerificationRunWrite(ctx context.Context, manifest verification.Manifest, binding verification.Binding, provenance map[string][]byte) error {
 	manifestContent, manifestErr := patchVerificationJSON(manifest, verification.MaxManifestBytes)
 	bindingContent, err := patchVerificationJSON(binding, 4096)
 	if err != nil {
@@ -201,7 +201,7 @@ func validatePatchVerificationCreation(manifest verification.Manifest, binding v
 	return nil
 }
 
-func (storage *Store) GetPatchVerificationRun(ctx context.Context, runID string) (*verification.Record, error) {
+func (storage *Store) getPatchVerificationRunWrite(ctx context.Context, runID string) (*verification.Record, error) {
 	var record *verification.Record
 	var integrityErr error
 	err := storage.withPatchVerificationTx(ctx, func(transaction *sql.Tx) error {
@@ -221,12 +221,12 @@ func (storage *Store) GetPatchVerificationRun(ctx context.Context, runID string)
 }
 
 func (storage *Store) GetCompletedReportValidation(ctx context.Context, runID string) (*verification.Record, error) {
-	transaction, err := storage.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	transaction, err := storage.beginTx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = transaction.Rollback() }()
-	record, err := loadPatchVerificationRecord(ctx, transaction, runID)
+	record, err := loadPatchVerificationRecord(ctx, transaction.Tx, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func validateLinkedPatchVerification(ctx context.Context, transaction *sql.Tx, m
 	return nil
 }
 
-func (storage *Store) GetPatchVerificationBlob(ctx context.Context, runID, digest string) ([]byte, error) {
+func (storage *Store) getPatchVerificationBlobWrite(ctx context.Context, runID, digest string) ([]byte, error) {
 	var content []byte
 	var integrityErr error
 	err := storage.withPatchVerificationTx(ctx, func(transaction *sql.Tx) error {

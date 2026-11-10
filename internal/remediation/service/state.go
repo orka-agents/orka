@@ -104,6 +104,7 @@ type executionOperation struct {
 	Attempted        bool                       `json:"attempted"`
 	AdmissionAttempt uint64                     `json:"admissionAttempt,omitempty"`
 	Rejected         bool                       `json:"rejected,omitempty"`
+	Settled          bool                       `json:"settled,omitempty"`
 	Receipt          *contract.ExecutionReceipt `json:"receipt,omitempty"`
 	Record           blob                       `json:"record"`
 }
@@ -187,9 +188,7 @@ func decodeRun(object *corev1.ConfigMap, id, namespace string) (*run, error) {
 		return nil, contract.ErrConflict
 	}
 	st := &r.state
-	if st.Version != stateVersion || st.ID != id || r.input.ID != id || st.Namespace != namespace ||
-		st.Status.ID != id || st.Status.Namespace != namespace || st.InputDigest != pv.Digest(inputData) ||
-		st.Agents == nil || st.Executions == nil || st.Deadline.IsZero() ||
+	if !validRunStateIdentity(r, id, namespace, inputData) ||
 		st.ReviewRound < 0 || st.ReviewRound > 1 || !validStatus(st.Status) || !validOperations(st) ||
 		st.Status.EvidenceScope != st.Authority.EvidenceScope ||
 		((r.input.RequiredEvidenceScope != "" || st.Authority.EvidenceScope != "") &&
@@ -206,6 +205,13 @@ func decodeRun(object *corev1.ConfigMap, id, namespace string) (*run, error) {
 	return r, nil
 }
 
+func validRunStateIdentity(r *run, id, namespace string, input []byte) bool {
+	st := &r.state
+	return st.Version == stateVersion && st.ID == id && r.input.ID == id && st.Namespace == namespace &&
+		st.Status.ID == id && st.Status.Namespace == namespace && st.InputDigest == pv.Digest(input) &&
+		st.Agents != nil && st.Executions != nil && !st.Deadline.IsZero()
+}
+
 func validOperations(st *state) bool {
 	for _, op := range st.Agents {
 		if op == nil || (op.ModelCall != nil &&
@@ -214,7 +220,8 @@ func validOperations(st *state) bool {
 		}
 	}
 	for _, op := range st.Executions {
-		if op == nil || (op.Rejected && (!op.Attempted || op.Receipt != nil || !op.Record.empty())) {
+		if op == nil || ((op.Rejected || op.Settled) && (!op.Attempted || op.Receipt != nil || !op.Record.empty())) ||
+			(op.Rejected && op.Settled) {
 			return false
 		}
 	}
@@ -239,8 +246,8 @@ func validStatus(status contract.Status) bool {
 		"original-not-reproduced", "original-evidence-invalid", "original-setup-failed", "report-reproduced",
 		"candidate-invalid", "candidate-unverified", "candidate-not-fixed", "candidate-regression",
 		"validation-rejected", "validation-invalid", "verified", reasonCancelled, reasonDeadlineExceeded,
-		"execution-unavailable", reasonIdentityConflict, "state-conflict", contract.ReasonEvidenceScopeUnsupported}
-	reasons = append(reasons, "model-call-budget-exhausted")
+		"execution-unavailable", reasonIdentityConflict, "state-conflict", contract.ReasonEvidenceScopeUnsupported,
+		"model-call-budget-exhausted"}
 	return slices.Contains(phases, status.Phase) && slices.Contains(stages, status.Stage) &&
 		slices.Contains(outcomes, status.Outcome) && slices.Contains(reasons, status.Reason)
 }

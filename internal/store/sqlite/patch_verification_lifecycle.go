@@ -62,7 +62,7 @@ func patchVerificationSlot(manifest verification.Manifest, observation verificat
 	return patchVerificationUnknownCheckSlot
 }
 
-func (storage *Store) RecordPatchVerificationEvidence(ctx context.Context, binding verification.Binding, evidence verification.ExecutionEvidence) error {
+func (storage *Store) recordPatchVerificationEvidenceWrite(ctx context.Context, binding verification.Binding, evidence verification.ExecutionEvidence) error {
 	if !patchVerificationObservationIdentity(binding, evidence.Observation) {
 		return verification.ErrBinding
 	}
@@ -369,7 +369,7 @@ func patchVerificationCaseObservations(record *verification.Record, excluded []i
 	return observations
 }
 
-func (storage *Store) FinalizePatchVerificationRun(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
+func (storage *Store) finalizePatchVerificationRunWrite(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
 	var record *verification.Record
 	var integrityErr error
 	err := storage.withPatchVerificationTx(ctx, func(transaction *sql.Tx) error {
@@ -412,11 +412,11 @@ func (storage *Store) FinalizePatchVerificationRun(ctx context.Context, binding 
 	return record, integrityErr
 }
 
-func (storage *Store) CancelPatchVerificationRun(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
+func (storage *Store) cancelPatchVerificationRunWrite(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
 	return storage.stopPatchVerificationRun(ctx, binding, verification.RunCancelled)
 }
 
-func (storage *Store) RecoverInterruptedPatchVerificationRun(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
+func (storage *Store) recoverInterruptedPatchVerificationRunWrite(ctx context.Context, binding verification.Binding) (*verification.Record, error) {
 	return storage.stopPatchVerificationRun(ctx, binding, verification.RunInterrupted)
 }
 

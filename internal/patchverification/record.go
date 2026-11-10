@@ -2,72 +2,47 @@ package patchverification
 
 import (
 	"encoding/json"
-	"errors"
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
-type RunState string
+type RunState = verificationv1.RunState
 
 const (
-	RunRunning     RunState = "running"
-	RunFinalized   RunState = "finalized"
-	RunCancelled   RunState = "cancelled"
-	RunInterrupted RunState = "interrupted"
-	RunInvalid     RunState = "invalid"
+	RunRunning     RunState = verificationv1.RunRunning
+	RunFinalized   RunState = verificationv1.RunFinalized
+	RunCancelled   RunState = verificationv1.RunCancelled
+	RunInterrupted RunState = verificationv1.RunInterrupted
+	RunInvalid     RunState = verificationv1.RunInvalid
 
-	MaxManifestBytes    = 1 << 20
-	MaxObservationBytes = 32 << 10
-	MaxOutputBytes      = 64 << 10
-	MaxProvenanceBytes  = 32 << 20
-	MaxRunBlobBytes     = 128 << 20
-	MaxFrozenFiles      = 128
-	MaxServices         = 8
-	MaxIncidents        = 256
+	MaxManifestBytes    = verificationv1.MaxManifestBytes
+	MaxObservationBytes = verificationv1.MaxObservationBytes
+	MaxOutputBytes      = verificationv1.MaxOutputBytes
+	MaxProvenanceBytes  = verificationv1.MaxProvenanceBytes
+	MaxRunBlobBytes     = verificationv1.MaxRunBlobBytes
+	MaxFrozenFiles      = verificationv1.MaxFrozenFiles
+	MaxServices         = verificationv1.MaxServices
+	MaxIncidents        = verificationv1.MaxIncidents
 )
 
 var (
-	ErrRunNotFound = errors.New("verification run not found")
-	ErrBinding     = errors.New("verification identity mismatch")
-	ErrConflict    = errors.New("verification conflicting delivery")
-	ErrClosed      = errors.New("verification run is closed")
-	ErrIntegrity   = errors.New("verification evidence integrity failure")
-	ErrLimit       = errors.New("verification storage limit exceeded")
-	ErrEvidence    = errors.New("verification evidence is invalid")
+	ErrRunNotFound = verificationv1.ErrRunNotFound
+	ErrBinding     = verificationv1.ErrBinding
+	ErrConflict    = verificationv1.ErrConflict
+	ErrClosed      = verificationv1.ErrClosed
+	ErrIntegrity   = verificationv1.ErrIntegrity
+	ErrLimit       = verificationv1.ErrLimit
+	ErrEvidence    = verificationv1.ErrEvidence
 )
 
-type BlobReference struct {
-	Digest string `json:"digest"`
-	Bytes  int    `json:"bytes"`
-}
+type BlobReference = verificationv1.BlobReference
 
-type EvidenceRecord struct {
-	Observation Observation `json:"observation"`
-	Digest      string      `json:"digest"`
-	Rejection   string      `json:"rejection,omitempty"`
-}
+type EvidenceRecord = verificationv1.EvidenceRecord
 
-type Incident struct {
-	Kind   string `json:"kind"`
-	Slot   string `json:"slot"`
-	Digest string `json:"digest"`
-	Reason string `json:"reason"`
-}
+type Incident = verificationv1.Incident
 
-type Seal struct {
-	Digest     string     `json:"digest"`
-	Content    []byte     `json:"content"`
-	Assessment Assessment `json:"assessment"`
-}
+type Seal = verificationv1.Seal
 
-type Record struct {
-	Manifest   Manifest         `json:"manifest"`
-	Binding    Binding          `json:"binding"`
-	Provenance []BlobReference  `json:"provenance"`
-	Evidence   []EvidenceRecord `json:"evidence"`
-	State      RunState         `json:"state"`
-	Assessment Assessment       `json:"assessment"`
-	Seal       *Seal            `json:"seal,omitempty"`
-	Incidents  []Incident       `json:"incidents"`
-}
+type Record = verificationv1.Record
 
 func NewRunBinding(manifest Manifest, attemptID, originalTaskID, patchedTaskID string) (Binding, error) {
 	if err := ValidateManifest(manifest); err != nil {

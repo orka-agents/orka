@@ -133,38 +133,42 @@ func taskIdentityMatches(actual, expected *corev1alpha1.Task, uid string) bool {
 	return true
 }
 
+func (s *Coordinator) prepareTaskOperation(ctx context.Context, r *run, role, prompt string) error {
+	if role != parentRole && (r.state.Parent.UID == "" || len(prompt) > maxPromptBytes || !utf8.ValidString(prompt)) {
+		return fail("source-too-large")
+	}
+	if role != parentRole && r.state.Authority.BoundedExecution && len(r.state.Agents) >= contract.MaxModelCalls {
+		return fail("model-call-budget-exhausted")
+	}
+	if role != parentRole && r.state.Authority.BoundedExecution && time.Until(r.state.Deadline) < time.Second {
+		return &stageFailure{
+			phase: contract.PhaseTimedOut, outcome: contract.OutcomeTimedOut, reason: reasonDeadlineExceeded,
+		}
+	}
+	if err := s.requireRunSlot(ctx, r); err != nil {
+		return err
+	}
+	task := s.newTask(r, role, prompt)
+	reference, err := s.putJSON(ctx, r, task)
+	if err != nil {
+		return err
+	}
+	operation := &taskOperation{Name: task.Name, Spec: reference}
+	if role == parentRole {
+		r.state.Parent = *operation
+	} else {
+		r.state.Agents[role] = operation
+	}
+	return s.save(ctx, r)
+}
+
 func (s *Coordinator) ensureTask(ctx context.Context, r *run, role, prompt string) (*corev1alpha1.Task, bool, error) {
 	operation := r.state.Agents[role]
 	if role == parentRole {
 		operation = &r.state.Parent
 	}
 	if operation == nil || operation.Name == "" {
-		if role != parentRole && (r.state.Parent.UID == "" || len(prompt) > maxPromptBytes || !utf8.ValidString(prompt)) {
-			return nil, false, fail("source-too-large")
-		}
-		if role != parentRole && r.state.Authority.BoundedExecution && len(r.state.Agents) >= contract.MaxModelCalls {
-			return nil, false, fail("model-call-budget-exhausted")
-		}
-		if role != parentRole && r.state.Authority.BoundedExecution && time.Until(r.state.Deadline) < time.Second {
-			return nil, false, &stageFailure{
-				phase: contract.PhaseTimedOut, outcome: contract.OutcomeTimedOut, reason: reasonDeadlineExceeded,
-			}
-		}
-		if err := s.requireRunSlot(ctx, r); err != nil {
-			return nil, false, err
-		}
-		task := s.newTask(r, role, prompt)
-		reference, err := s.putJSON(ctx, r, task)
-		if err != nil {
-			return nil, false, err
-		}
-		operation = &taskOperation{Name: task.Name, Spec: reference}
-		if role == parentRole {
-			r.state.Parent = *operation
-		} else {
-			r.state.Agents[role] = operation
-		}
-		return nil, false, s.save(ctx, r)
+		return nil, false, s.prepareTaskOperation(ctx, r, role, prompt)
 	}
 	expected := new(corev1alpha1.Task)
 	if err := s.readJSON(ctx, r, operation.Spec, expected); err != nil {
@@ -239,8 +243,8 @@ func (s *Coordinator) agentOutput(ctx context.Context, r *run, role, prompt stri
 		if ready, err := s.observeNativeJob(ctx, r, role, task); err != nil || !ready {
 			return "", false, err
 		}
-		if !validModelCallClaim(r, r.state.Agents[role]) {
-			return "", false, uncertain()
+		if err := s.completedModelCall(ctx, r, role, task); err != nil {
+			return "", false, err
 		}
 		output, err := s.config.Results.GetResult(ctx, s.config.Namespace, task.Name)
 		if errors.Is(err, store.ErrNotFound) {

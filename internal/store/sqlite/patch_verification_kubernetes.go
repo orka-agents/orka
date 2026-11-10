@@ -132,7 +132,7 @@ func validationJSON(value any, limit int) ([]byte, error) {
 	return content, nil
 }
 
-func (storage *Store) CreateKubernetesValidationSubmission(ctx context.Context, submission verification.KubernetesSubmission) error {
+func (storage *Store) createKubernetesValidationSubmissionWrite(ctx context.Context, submission verification.KubernetesSubmission) error {
 	manifest, err := validationJSON(submission.Manifest, verification.MaxManifestBytes)
 	if err != nil {
 		return err
@@ -211,7 +211,7 @@ func (storage *Store) GetKubernetesValidationSubmission(ctx context.Context, nam
 	if strings.TrimSpace(namespace) == "" || requestID == "" {
 		return nil, verification.ErrBinding
 	}
-	return scanKubernetesValidation(storage.db.QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
+	return scanKubernetesValidation(storage.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
 		` FROM validation_submissions WHERE namespace=? AND request_id=?`, namespace, requestID))
 }
 
@@ -219,7 +219,7 @@ func (storage *Store) GetKubernetesValidationSubmissionByTask(ctx context.Contex
 	if strings.TrimSpace(namespace) == "" || taskName == "" {
 		return nil, verification.ErrBinding
 	}
-	return scanKubernetesValidation(storage.db.QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
+	return scanKubernetesValidation(storage.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
 		` FROM validation_submissions WHERE namespace=? AND (original_task_name=? OR patched_task_name=?)`, namespace, taskName, taskName))
 }
 
@@ -227,7 +227,7 @@ func (storage *Store) GetKubernetesValidationSubmissionByRun(ctx context.Context
 	if strings.TrimSpace(namespace) == "" || runID == "" {
 		return nil, verification.ErrBinding
 	}
-	return scanKubernetesValidation(storage.db.QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
+	return scanKubernetesValidation(storage.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+kubernetesValidationColumns+
 		` FROM validation_submissions WHERE namespace=? AND run_id=?`, namespace, runID))
 }
 
@@ -239,7 +239,7 @@ func (storage *Store) ListActiveKubernetesValidationSubmissions(ctx context.Cont
 	if strings.TrimSpace(namespace) == "" {
 		return nil, verification.ErrBinding
 	}
-	rows, err := storage.db.QueryContext(ctx, `SELECT namespace,request_id,state,created_at FROM validation_submissions
+	rows, err := storage.taskDataExecutor(ctx).QueryContext(ctx, `SELECT namespace,request_id,state,created_at FROM validation_submissions
 		WHERE namespace=? AND state IN (?,?,?) ORDER BY created_at,request_id LIMIT ?`, namespace,
 		verification.SubmissionPreparing, verification.SubmissionRunning, verification.SubmissionCancelling,
 		maxActiveKubernetesValidationSubmissions+1)
@@ -298,7 +298,7 @@ func validateKubernetesValidationBinding(submission *verification.KubernetesSubm
 	return nil
 }
 
-func (storage *Store) BindKubernetesValidationTasks(ctx context.Context, namespace, requestID, originalUID, patchedUID string, binding verification.Binding) error {
+func (storage *Store) bindKubernetesValidationTasksWrite(ctx context.Context, namespace, requestID, originalUID, patchedUID string, binding verification.Binding) error {
 	if strings.TrimSpace(namespace) == "" || requestID == "" || originalUID == "" ||
 		binding.OriginalTaskID != originalUID || binding.PatchedTaskID != patchedUID {
 		return verification.ErrBinding
@@ -353,7 +353,7 @@ func (storage *Store) BindKubernetesValidationTasks(ctx context.Context, namespa
 
 // AttachCancelledKubernetesValidationRun links a stopped preparatory run for audit.
 // It only accepts cancelling submissions and never changes their execution state.
-func (storage *Store) AttachCancelledKubernetesValidationRun(ctx context.Context, namespace, requestID string, binding verification.Binding) error {
+func (storage *Store) attachCancelledKubernetesValidationRunWrite(ctx context.Context, namespace, requestID string, binding verification.Binding) error {
 	if strings.TrimSpace(namespace) == "" || requestID == "" {
 		return verification.ErrBinding
 	}
@@ -403,7 +403,7 @@ func (storage *Store) AttachCancelledKubernetesValidationRun(ctx context.Context
 	})
 }
 
-func (storage *Store) RecordKubernetesValidationTaskUID(ctx context.Context, namespace, requestID, side, taskUID string) error {
+func (storage *Store) recordKubernetesValidationTaskUIDWrite(ctx context.Context, namespace, requestID, side, taskUID string) error {
 	column := "original_task_uid"
 	if side == verification.Patched {
 		column = "patched_task_uid"
@@ -448,7 +448,7 @@ func (storage *Store) RecordKubernetesValidationTaskUID(ctx context.Context, nam
 	})
 }
 
-func (storage *Store) RequestKubernetesValidationCancellation(ctx context.Context, namespace, requestID string) error {
+func (storage *Store) requestKubernetesValidationCancellationWrite(ctx context.Context, namespace, requestID string) error {
 	if strings.TrimSpace(namespace) == "" || requestID == "" {
 		return verification.ErrBinding
 	}
@@ -511,7 +511,7 @@ func kubernetesValidationSubmissionState(ctx context.Context, tx *sql.Tx, namesp
 	return state, err
 }
 
-func (storage *Store) CompleteKubernetesValidationSubmission(ctx context.Context, namespace, requestID, reason string) error {
+func (storage *Store) completeKubernetesValidationSubmissionWrite(ctx context.Context, namespace, requestID, reason string) error {
 	if strings.TrimSpace(namespace) == "" || requestID == "" {
 		return verification.ErrBinding
 	}
@@ -552,7 +552,7 @@ func boundedKubernetesValidationFailure(reason string) string {
 	return reason
 }
 
-func (storage *Store) CreateKubernetesValidationDispatch(ctx context.Context, dispatch verification.KubernetesDispatch) error {
+func (storage *Store) createKubernetesValidationDispatchWrite(ctx context.Context, dispatch verification.KubernetesDispatch) error {
 	if dispatch.RunID == "" || dispatch.CheckID == "" || dispatch.JobName == "" ||
 		store.ValidateCanonicalDigest("dispatch spec", dispatch.SpecDigest) != nil || dispatch.State != verification.DispatchPlanned ||
 		dispatch.JobUID != "" || dispatch.PodUID != "" || dispatch.ContainerID != "" || dispatch.Failure != "" {
@@ -631,11 +631,11 @@ func (storage *Store) GetKubernetesValidationDispatch(ctx context.Context, runID
 	if runID == "" || checkID == "" || (side != verification.Original && side != verification.Patched) {
 		return nil, verification.ErrBinding
 	}
-	return scanKubernetesValidationDispatch(storage.db.QueryRowContext(ctx, `SELECT `+kubernetesValidationDispatchColumns+
+	return scanKubernetesValidationDispatch(storage.taskDataExecutor(ctx).QueryRowContext(ctx, `SELECT `+kubernetesValidationDispatchColumns+
 		` FROM validation_dispatches WHERE run_id=? AND side=? AND check_id=?`, runID, side, checkID))
 }
 
-func (storage *Store) MarkKubernetesValidationDispatchCreated(ctx context.Context, runID, side, checkID, jobUID string) error {
+func (storage *Store) markKubernetesValidationDispatchCreatedWrite(ctx context.Context, runID, side, checkID, jobUID string) error {
 	if jobUID == "" {
 		return verification.ErrBinding
 	}
@@ -675,7 +675,7 @@ func (storage *Store) MarkKubernetesValidationDispatchCreated(ctx context.Contex
 	})
 }
 
-func (storage *Store) MarkKubernetesValidationDispatchObserved(ctx context.Context, runID, side, checkID, jobUID, podUID, containerID string) error {
+func (storage *Store) markKubernetesValidationDispatchObservedWrite(ctx context.Context, runID, side, checkID, jobUID, podUID, containerID string) error {
 	if jobUID == "" || podUID == "" || containerID == "" {
 		return verification.ErrBinding
 	}
@@ -719,7 +719,7 @@ func (storage *Store) MarkKubernetesValidationDispatchObserved(ctx context.Conte
 	})
 }
 
-func (storage *Store) MarkKubernetesValidationDispatchRecorded(ctx context.Context, runID, side, checkID, jobUID, podUID string) error {
+func (storage *Store) markKubernetesValidationDispatchRecordedWrite(ctx context.Context, runID, side, checkID, jobUID, podUID string) error {
 	if jobUID == "" || podUID == "" {
 		return verification.ErrBinding
 	}
@@ -768,7 +768,7 @@ func (storage *Store) MarkKubernetesValidationDispatchRecorded(ctx context.Conte
 	})
 }
 
-func (storage *Store) MarkKubernetesValidationDispatchFailed(ctx context.Context, runID, side, checkID, reason string) error {
+func (storage *Store) markKubernetesValidationDispatchFailedWrite(ctx context.Context, runID, side, checkID, reason string) error {
 	if !utf8.ValidString(reason) || patchVerificationCredentials.MatchString(reason) {
 		return verification.ErrEvidence
 	}
