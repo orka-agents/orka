@@ -173,7 +173,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRuntimePool(ctx contex
 				return r.externalPoolProgress(ctx, pool, corev1alpha1.RuntimePoolLifecycleStopping, "waiting for independent observation of the retired Pod's absence")
 			}
 		}
-		if externalEvictionSettlementPending(pool) {
+		if externalEvictionSettlementPending(pool, w) {
 			// An eviction whose outcome was never recorded settles against
 			// this stopped allocation before any cold boot replaces it.
 			return r.externalPoolStopped(ctx, pool, w)
@@ -877,7 +877,7 @@ func (r *RuntimePoolReconciler) reconcileExternalWorkspaceRetirement(ctx context
 // restart retries the recording instead of letting the allocation cold-boot.
 func (r *RuntimePoolReconciler) externalPoolStopped(ctx context.Context, pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) (ctrl.Result, error) {
 	if pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" || pool.Annotations[externalRuntimeEvictionAnnotation] != "" {
-		if externalEvictionSettlementPending(pool) {
+		if externalEvictionSettlementPending(pool, w) {
 			return r.finishRuntimePoolStatus(ctx, pool, r.externalPoolStoppedStatus(pool, w), time.Second)
 		}
 		before := pool.DeepCopy()

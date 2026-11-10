@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
@@ -431,7 +432,7 @@ func TestExternalEvictionSettlesAsSuspendedOnlyWithRetainedData(t *testing.T) {
 			// The outcome is recorded while the markers still hold the pool in
 			// retirement; only a later pass that observes it clears them.
 			pool = runtimePoolTestGetPool(t, f.r, f.pool)
-			if pool.Annotations[externalRuntimeEvictionAnnotation] == "" || externalEvictionSettlementPending(&pool) {
+			if pool.Annotations[externalRuntimeEvictionAnnotation] == "" || externalEvictionSettlementPending(&pool, w) {
 				t.Fatal("eviction markers were removed before its outcome was recorded")
 			}
 			if _, err := f.r.externalPoolStopped(t.Context(), &pool, w); err != nil {
@@ -646,5 +647,111 @@ func TestExternalEvictionOutcomeIsRecordedBeforeColdBoot(t *testing.T) {
 				t.Fatal("recorded eviction never resumed the workspace on a replacement instance")
 			}
 		})
+	}
+}
+
+// The pool's first eviction report can be lost to a status conflict, after
+// which the provider may report the instance Failed and then Stopped before any
+// drain probe republishes it. The persisted exact-instance record must still
+// hold the markers until this instance's outcome is recorded, whether the
+// condition was absent or still showed an earlier instance's outcome.
+func TestExternalEvictionOutcomeIsRecordedWhenItsDrainingReportWasLost(t *testing.T) {
+	for _, previous := range []string{"no earlier outcome", "earlier instance suspended"} {
+		t.Run(previous, func(t *testing.T) {
+			f, w, _, worker := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+			sequence := w.Spec.Workload.Sequence
+			if previous == "earlier instance suspended" {
+				pool := runtimePoolTestGetPool(t, f.r, f.pool)
+				meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+					Type: corev1alpha1.RuntimePoolConditionWorkerEviction, Status: metav1.ConditionFalse,
+					Reason: corev1alpha1.RuntimePoolReasonEvictionSuspended, Message: "an earlier instance was suspended",
+					LastTransitionTime: metav1.NewTime(runtimePoolTestNow.Add(-time.Hour)),
+				})
+				if err := f.r.Status().Update(t.Context(), &pool); err != nil {
+					t.Fatal(err)
+				}
+			}
+			terminateNativeWorker(t, f, worker)
+			base := f.r.Client
+			armed := true
+			f.r.Client = runtimePoolStatusConflictClient{Client: base, armed: &armed}
+			runtimePoolTestSyncBootEpoch(t, f.r)
+			_, _ = f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)})
+			f.r.Client = base
+			if armed {
+				t.Fatal("the draining report was never written")
+			}
+			if record := evictionRecord(t, f); record == nil || !record.matches(f.currentWorkspace(t)) || !record.Suspendable {
+				t.Fatalf("eviction record = %#v, want the exact instance's suspendable eviction", record)
+			}
+			if condition := evictionCondition(t, f); condition != nil && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining {
+				t.Fatal("the injected conflict did not drop the draining report")
+			}
+
+			// The lost native process answers no drain probe, so nothing
+			// republishes the eviction before the provider reports the
+			// instance Failed and then Stopped.
+			f.supervisor.probeErr = errors.New("lost native process cannot answer")
+			failExternalNativeInstance(t, f, nil)
+			for range 4 {
+				_, _ = f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)})
+			}
+			w = f.currentWorkspace(t)
+			if w.Spec.Retirement == nil || w.Spec.Retirement.Action != workspacev1alpha1.WorkloadRetirementStop {
+				t.Fatalf("failed instance was not retired by exact Stop: %#v", w.Spec.Retirement)
+			}
+			w.Status.Allocation.State = workspacev1alpha1.AllocationStopped
+			w.Status.ObservedGeneration = w.Generation
+			if err := f.r.Status().Update(t.Context(), w); err != nil {
+				t.Fatal(err)
+			}
+			for range 12 {
+				_, _ = f.r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.pool)})
+				pool := runtimePoolTestGetPool(t, f.r, f.pool)
+				condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
+				if pool.Annotations[externalRuntimeEvictionAnnotation] == "" &&
+					(condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded) {
+					t.Fatalf("eviction record was cleared without this instance's outcome: %#v", condition)
+				}
+			}
+			pool := runtimePoolTestGetPool(t, f.r, f.pool)
+			condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
+			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded {
+				t.Fatalf("eviction outcome = %#v, want EvictionDeadlineExceeded for the failed instance", condition)
+			}
+			if !condition.LastTransitionTime.After(runtimePoolTestNow.Add(-time.Hour)) {
+				t.Fatalf("outcome kept the earlier instance's transition time %s", condition.LastTransitionTime)
+			}
+			if pool.Annotations[externalRuntimeEvictionAnnotation] != "" || pool.Annotations[externalRuntimeRetirementRequestedAnnotation] != "" {
+				t.Fatal("recorded eviction kept its markers")
+			}
+			if got := f.currentWorkspace(t).Spec.Workload; got != nil && got.Sequence != sequence {
+				t.Fatal("a Failed instance was replaced")
+			}
+		})
+	}
+}
+
+// A record left by an earlier instance never holds a later instance's stop.
+func TestExternalEvictionRecordOfAnotherInstanceIsNotPending(t *testing.T) {
+	f, w, _, _ := nativeRecycleReviewFixtureWith(t, suspendableNativeWorkspace(t))
+	pool := runtimePoolTestGetPool(t, f.r, f.pool)
+	if _, err := f.r.recordExternalRuntimeEviction(t.Context(), &pool, w, externalEvictionSourceWorker, runtimePoolTestNow, runtimePoolTestNow.Add(time.Minute), true); err != nil {
+		t.Fatal(err)
+	}
+	pool = runtimePoolTestGetPool(t, f.r, f.pool)
+	if !externalEvictionSettlementPending(&pool, w) {
+		t.Fatal("the exact instance's unreported eviction was not pending")
+	}
+	later := w.DeepCopy()
+	later.Spec.Workload.Sequence++
+	later.Status.Allocation.Sequence++
+	if externalEvictionSettlementPending(&pool, later) {
+		t.Fatal("an earlier instance's eviction record held a later instance")
+	}
+	status := pool.Status.DeepCopy()
+	f.r.externalEvictionSettledCondition(&pool, status, later)
+	if meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction) != nil {
+		t.Fatal("an earlier instance's eviction record reported an outcome for a later instance")
 	}
 }

@@ -387,29 +387,64 @@ func (r *RuntimePoolReconciler) externalEvictionDeadlineExceeded(pool *corev1alp
 	return record != nil && !r.now().Before(record.Deadline)
 }
 
-// externalEvictionSettlementPending reports whether the pool's persisted
-// status still holds an eviction drain whose outcome has not been recorded.
-func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool) bool {
+// externalEvictionSettlementPending reports whether an eviction still needs
+// its outcome recorded before the markers that hold the pool in retirement are
+// removed. That is the case while the persisted condition reports this
+// eviction draining. It is also the case when the persisted record binds the
+// exact instance w but the draining report never landed, for example because
+// its status write conflicted: the condition is then absent or still shows an
+// earlier instance's outcome, and the record is the only evidence left. A
+// record for any other instance never makes this one pending.
+func externalEvictionSettlementPending(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
 	condition := meta.FindStatusCondition(pool.Status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
-	return condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
+	if condition != nil && condition.Status == metav1.ConditionTrue {
+		return condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
+	}
+	if !externalEvictionAwaitingOutcome(pool, w) {
+		return false
+	}
+	reason, _ := externalEvictionOutcome(w)
+	return condition == nil || condition.Reason != reason
 }
 
-// externalEvictionSettledCondition reports how a draining eviction ended once
-// its exact instance stopped: suspended with verified retained data, or lost.
-func (r *RuntimePoolReconciler) externalEvictionSettledCondition(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, w *workspacev1alpha1.ExecutionWorkspace) {
-	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
-	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != corev1alpha1.RuntimePoolReasonEvictionDraining {
-		return
+// externalEvictionAwaitingOutcome reports whether the pool's persisted
+// eviction record binds the exact instance w and announced a data-only
+// suspension, so that how it ended must be reported.
+func externalEvictionAwaitingOutcome(pool *corev1alpha1.RuntimePool, w *workspacev1alpha1.ExecutionWorkspace) bool {
+	if w == nil {
+		return false
 	}
+	record, malformed := currentExternalRuntimeEviction(pool, w)
+	return !malformed && record != nil && record.Suspendable
+}
+
+// externalEvictionOutcome is how an eviction ended once its exact instance
+// stopped: suspended with verified retained data, or lost.
+func externalEvictionOutcome(w *workspacev1alpha1.ExecutionWorkspace) (string, string) {
 	a := (*workspacev1alpha1.AllocationObservation)(nil)
 	if w != nil {
 		a = w.Status.Allocation
 	}
 	if a != nil && a.State == workspacev1alpha1.AllocationStopped && a.RetainedData != nil && w.Status.State != workspacev1alpha1.ExecutionWorkspaceStateFailed {
-		r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionWorkerEviction, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonEvictionSuspended,
-			"the evicted runtime was suspended with its data and resumes on a new worker")
-		return
+		return corev1alpha1.RuntimePoolReasonEvictionSuspended, "the evicted runtime was suspended with its data and resumes on a new worker"
 	}
-	r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionWorkerEviction, metav1.ConditionFalse, corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
-		"the evicted runtime stopped without a data-only suspension; its last checkpoint is retained and uncertain work is never replayed")
+	return corev1alpha1.RuntimePoolReasonEvictionDeadlineExceeded,
+		"the evicted runtime stopped without a data-only suspension; its last checkpoint is retained and uncertain work is never replayed"
+}
+
+// externalEvictionSettledCondition records how an eviction ended once its
+// exact instance stopped. An outcome recorded over an absent condition or an
+// earlier instance's is a new transition, so it carries the current time.
+func (r *RuntimePoolReconciler) externalEvictionSettledCondition(pool *corev1alpha1.RuntimePool, status *corev1alpha1.RuntimePoolStatus, w *workspacev1alpha1.ExecutionWorkspace) {
+	condition := meta.FindStatusCondition(status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
+	reason, message := externalEvictionOutcome(w)
+	draining := condition != nil && condition.Status == metav1.ConditionTrue && condition.Reason == corev1alpha1.RuntimePoolReasonEvictionDraining
+	if !draining {
+		if (condition != nil && condition.Status == metav1.ConditionTrue) || !externalEvictionAwaitingOutcome(pool, w) ||
+			(condition != nil && condition.Reason == reason) {
+			return
+		}
+		meta.RemoveStatusCondition(&status.Conditions, corev1alpha1.RuntimePoolConditionWorkerEviction)
+	}
+	r.setRuntimePoolCondition(pool, status, corev1alpha1.RuntimePoolConditionWorkerEviction, metav1.ConditionFalse, reason, message)
 }
