@@ -209,6 +209,39 @@ func TestAzureGatewayPassesASignInRefusalThrough(t *testing.T) {
 	}
 }
 
+// When reads of the Tool need approval, starting a prompt asks for none: the
+// placeholder stays until az itself sends a command.
+func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.T) {
+	fixture := newAzureGatewayFixtureSigningIn(t, false, nil, func(t *testing.T, authorization *harnessv2.PromptMCPAuthorization) {
+		authorization.ApprovalPolicy.RequiredTools = []string{testForwardTool}
+		digest, err := harnessv2.CanonicalMCPApprovalPolicyDigest(authorization.ApprovalPolicy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		authorization.ApprovalPolicyDigest = digest
+	})
+	if !fixture.session.approvalRequired(testForwardTool) {
+		t.Fatal("the prompt does not require approval for the forwarding Tool")
+	}
+	// Give a wrongly started background sign-in time to reach the broker.
+	time.Sleep(200 * time.Millisecond)
+	fixture.gateway.signInMu.Lock()
+	attempt, signedIn := fixture.gateway.signInAttempt, fixture.gateway.signedIn
+	fixture.gateway.signInMu.Unlock()
+	if attempt != nil || signedIn || len(fixture.brokerCalls()) != 0 {
+		t.Fatalf("the prompt start signed in: attempt %v, signed in %v, %d broker calls", attempt != nil, signedIn, len(fixture.brokerCalls()))
+	}
+	profile := readAzureProfile(t, fixture)
+	if len(profile.Subscriptions) != 1 || profile.Subscriptions[0].ID != azureZeroTenant {
+		t.Fatalf("profile = %+v", profile.Subscriptions)
+	}
+	// A command under the placeholder signs in, as the agent's own request.
+	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups", http.Header{"Authorization": {"Bearer " + fixture.token(t)}})
+	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") || len(fixture.brokerCalls()) != 1 {
+		t.Fatalf("status = %d, %d broker calls: %s", response.StatusCode, len(fixture.brokerCalls()), body)
+	}
+}
+
 // A prompt-start sign-in that runs after another sign-in succeeded does
 // nothing, so it cannot overwrite a profile the agent changed since.
 func TestAzureGatewayLatePromptStartSignInKeepsTheProfile(t *testing.T) {

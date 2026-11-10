@@ -112,7 +112,11 @@ func newAzureGatewayFixtureWith(t *testing.T, writes bool) *azureGatewayFixture 
 
 // newAzureGatewayFixtureSigningIn starts the prompt with respond already
 // answering, so the sign-in the prompt start begins is the test's to watch.
-func newAzureGatewayFixtureSigningIn(t *testing.T, writes bool, respond func(harnessv2.MCPBrokerCallRequest) json.RawMessage) *azureGatewayFixture {
+// adjust, if given, changes the prompt's authorization before it starts.
+func newAzureGatewayFixtureSigningIn(
+	t *testing.T, writes bool, respond func(harnessv2.MCPBrokerCallRequest) json.RawMessage,
+	adjust ...func(*testing.T, *harnessv2.PromptMCPAuthorization),
+) *azureGatewayFixture {
 	t.Helper()
 	fixture := &azureGatewayFixture{respond: respond}
 	broker := MCPBrokerFunc(func(_ context.Context, request harnessv2.MCPBrokerCallRequest) (harnessv2.MCPBrokerCallResponse, error) {
@@ -151,6 +155,9 @@ func newAzureGatewayFixtureSigningIn(t *testing.T, writes bool, respond func(har
 	}
 	now := time.Now().UTC()
 	authorization, lease := forwardingTestAuthorizationWith(t, fence, now, 1, writes)
+	for _, change := range adjust {
+		change(t, &authorization)
+	}
 	session, binding, err := proxy.newSession(fence, authorization.Configuration())
 	if err != nil {
 		t.Fatal(err)
