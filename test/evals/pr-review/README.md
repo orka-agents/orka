@@ -128,7 +128,8 @@ cases, a reviewer that blocks every pull request scores perfectly.
 
 The controller must run with `--eval-gate-configmap` naming the protected-set
 ConfigMap. Its `gate` holds the thresholds, and its `caseSets` must list the
-candidate's cases ConfigMap with `split: heldOut`; rotate the held-out set by
+candidate's cases ConfigMap with `split: heldOut` and name the monitor the
+baseline runs through in that entry's `baselineMonitors`; rotate the held-out set by
 listing a new ConfigMap of fresh commits. Outside an experiment, a run with
 `agentRef` needs cases listed with `split: train`. The baseline must not set
 `agentRef`. Each candidate spends one attempt before its first trial, against

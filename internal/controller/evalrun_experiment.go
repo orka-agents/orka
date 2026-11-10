@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -43,7 +44,7 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if err != nil {
 		return nil, err
 	}
-	if ref := run.Spec.Cases.ConfigMapRef; ref == nil || splits[run.Namespace+"/"+ref.Name] != evals.SplitHeldOut {
+	if ref := run.Spec.Cases.ConfigMapRef; ref == nil || splits[run.Namespace+"/"+ref.Name].Split != evals.SplitHeldOut {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"an experiment must run on a held-out case set that the protected set's caseSets lists for namespace %s", run.Namespace)
 	}
@@ -75,6 +76,13 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 	if evalRunAgentOverride(baseline) {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"baseline EvalRun %q sets agentRef; a baseline must review with the monitor's own reviewer", baseline.Name)
+	}
+	// The baseline was admitted on held-out cases only through a listed
+	// baseline monitor, but it may predate the listing.
+	if subject := baseline.Spec.Subject.RepositoryMonitorReview; subject == nil ||
+		!evals.HeldOutBaselineMonitor(splits, run.Namespace, subject.MonitorRef.Name) {
+		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+			"baseline EvalRun %q reviews through a monitor the protected set does not list in baselineMonitors", baseline.Name)
 	}
 	candidateDigest, err := evalCandidateDigest(snapshot)
 	if err != nil {
@@ -148,11 +156,93 @@ func (r *EvalRunReconciler) refuseUnpairedHeldOutCandidate(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && splits[run.Namespace+"/"+ref.Name] == evals.SplitTrain {
+	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && splits[run.Namespace+"/"+ref.Name].Split == evals.SplitTrain {
 		return nil
 	}
 	return evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 		"a run that sets agentRef outside an experiment must use a training case set the protected set's caseSets lists; add spec.experiment for held-out cases")
+}
+
+// refuseUnlistedHeldOutBaseline fails a plain run, one without agentRef or
+// an experiment, that would review held-out evidence through a monitor the
+// protected set does not list as a baseline monitor. Such a monitor's
+// reviewer can be any Agent, so the run would test a candidate on held-out
+// cases without spending an attempt. Its cases ConfigMap is checked by name
+// and, since a copy of held-out cases makes them no fresher, by the commits
+// its cases review. With no gate configured there are no case sets to
+// protect; a configured gate that cannot be read fails closed.
+func (r *EvalRunReconciler) refuseUnlistedHeldOutBaseline(ctx context.Context, run *corev1alpha1.EvalRun) error {
+	if r.GateConfigMap.Name == "" {
+		return nil
+	}
+	_, _, sets, err := r.loadExperimentGate(ctx)
+	if err != nil {
+		return err
+	}
+	subject := run.Spec.Subject.RepositoryMonitorReview
+	if subject == nil || evals.HeldOutBaselineMonitor(sets, run.Namespace, subject.MonitorRef.Name) {
+		return nil
+	}
+	refused := evalRunConfigErrorf(evalRunReasonExperimentInvalid,
+		"a run on held-out cases without agentRef must use a monitor the protected set lists in that case set's baselineMonitors; "+
+			"use a training case set, or add spec.experiment to compare a candidate")
+	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && sets[run.Namespace+"/"+ref.Name].Split == evals.SplitHeldOut {
+		return refused
+	}
+	cases, err := r.loadEvalCaseSet(ctx, run)
+	if err != nil {
+		return err
+	}
+	keys, err := evals.HeldOutCaseKeys(cases)
+	if err != nil {
+		return evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
+	}
+	// A run reads cases only from its own namespace, so a copy can only be
+	// of a held-out set there.
+	for key, set := range sets {
+		namespace, name, _ := strings.Cut(key, "/")
+		if set.Split != evals.SplitHeldOut || namespace != run.Namespace {
+			continue
+		}
+		heldOut, err := r.heldOutCaseKeys(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		for _, caseKey := range keys {
+			if slices.Contains(heldOut, caseKey) {
+				return refused
+			}
+		}
+	}
+	return nil
+}
+
+// heldOutCaseKeys reads a held-out case ConfigMap the protected set lists and
+// returns the keys of the evidence its cases review. A missing ConfigMap
+// holds nothing yet.
+func (r *EvalRunReconciler) heldOutCaseKeys(ctx context.Context, namespace, name string) ([]string, error) {
+	configMap := &corev1.ConfigMap{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var keys []string
+	for dataKey, data := range configMap.Data {
+		// Any key may hold cases: a run picks its key with configMapRef.key.
+		cases, err := evals.ParseCases([]byte(data), corev1alpha1.EvalSubjectRepositoryMonitorReview)
+		if err != nil {
+			continue
+		}
+		caseKeys, err := evals.HeldOutCaseKeys(cases)
+		if err != nil {
+			return nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
+				"held-out case ConfigMap %s/%s key %q: %v", namespace, name, dataKey, err)
+		}
+		keys = append(keys, caseKeys...)
+	}
+	return keys, nil
 }
 
 // reserveExperiment spends one of the gate's attempts on this candidate
@@ -220,7 +310,7 @@ func (r *EvalRunReconciler) reserveExperiment(ctx context.Context, run, baseline
 
 // loadExperimentGate reads the gate and the case set splits of the
 // protected-set ConfigMap. Without them, experiments fail closed.
-func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, map[string]string, error) {
+func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.ExperimentGate, string, map[string]evals.CaseSet, error) {
 	if r.GateConfigMap.Name == "" {
 		return evals.ExperimentGate{}, "", nil, evalRunConfigErrorf(evalRunReasonExperimentGateUnavailable,
 			"no experiment gate is configured; set --eval-gate-configmap to the protected-set ConfigMap")
@@ -236,8 +326,8 @@ func (r *EvalRunReconciler) loadExperimentGate(ctx context.Context) (evals.Exper
 	declaration := []byte(configMap.Data[evals.ProtectedSetConfigMapKey])
 	gate, err := evals.ParseExperimentGate(declaration)
 	if err == nil {
-		var splits map[string]string
-		if splits, err = evals.CaseSetSplits(declaration); err == nil {
+		var splits map[string]evals.CaseSet
+		if splits, err = evals.CaseSets(declaration); err == nil {
 			digest, digestErr := gate.Digest()
 			return gate, digest, splits, digestErr
 		}
