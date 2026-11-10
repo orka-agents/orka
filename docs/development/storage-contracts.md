@@ -16,7 +16,7 @@ controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed,
 and the dataset's write watermark with the time it last advanced.
-`PRAGMA user_version = 5` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 6` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -25,19 +25,25 @@ Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
-the 170-to-171 transition adds the write stamp columns of results and
-artifacts, the 171-to-172 transition adds the write watermark columns, and the
+the 170-to-171 transition makes a `retry_pending` work action own its dedupe
+key, the 171-to-172 transition adds the write stamp columns of results and
+artifacts, the 172-to-173 transition adds the write watermark columns, and the
 upgrade records an adopted identity. A store at an earlier schema version
 upgrades through numbered version steps under the same lock, backup and
-transaction: a version-1 store (the 159-object layout) gains the 168-to-169
-objects and the columns of every later step, a version-2 store gains the
-169-to-170, 170-to-171 and 171-to-172 columns, a version-3 store gains the
-170-to-171 and 171-to-172 columns, a version-4 store gains the 171-to-172
-columns, and each keeps its identity row, records and bootstrap state
-unchanged. Existing results and artifacts get the write stamp (0, 0), and the
-write watermark starts at zero. An
-installation a version-2 store's epoch advance recorded stays its owner, at
-switch generation 0 with no record. Missing or malformed
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
+169-to-170 and 170-to-171 objects and the 171-to-172 and 172-to-173 columns, a
+version-2 store gains the 169-to-170 columns, the 170-to-171 index and the
+171-to-172 and 172-to-173 columns, a version-3 store gains the 170-to-171 index
+and the 171-to-172 and 172-to-173 columns, a version-4 store gains the
+171-to-172 and 172-to-173 columns, a version-5 store gains the 172-to-173
+columns, and all keep their identity row, records and bootstrap state
+unchanged. Before the 170-to-171 index is rebuilt, a `retry_pending` work
+action that shares its dedupe key with a queued, leased or running action, or
+with a newer `retry_pending` one, is cancelled with reason
+`dedupe_superseded`. Existing results and artifacts get the write stamp
+(0, 0), and the write watermark starts at zero. An installation a version-2
+store's epoch advance recorded stays its owner, at switch generation 0 with no
+record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -299,15 +305,19 @@ the observable parts.
   provider contracts. Revision 3 added dataset binding (see "Installation
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
-  writes without one during the transition. Revision 5 split the inbox
-  read into `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage`
-  write the assigned ID and creation time back, and made every Session
-  lease decision, and the claim check in
+  writes without one during the transition. Revision 5 adds
+  `MarkWorkActionRetryPending`, which parks an active work action for retry
+  and leaves a finished one unchanged in one step, and defines the work-action
+  statuses and which of them are active (`WorkActionStatus*`,
+  `IsWorkActionActive`). Revision 6 split the inbox read into
+  `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage` write the
+  assigned ID and creation time back, and made every Session lease
+  decision, and the claim check in
   `FreezeGatewayEventTaskRuntimeAllowedTools`, use the time the request
   carries (see "Messages, counters and chat turns" and "Lease clocks").
-  Revision 6 orders the replacement of a whole result or artifact file by
+  Revision 7 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
-  artifact replacement order"). Revision 7 requires the write watermark,
+  artifact replacement order"). Revision 8 requires the write watermark,
   `AdvanceWriteWatermark` and `GetWriteWatermark`, on both provider contracts
   (see "Durability, switch detection and recovery holds").
   The revision Orka requires for each part belongs to Orka, not to the
@@ -577,7 +587,7 @@ write without one.
   the Task UID. Results are limited to `MaxResultBytes`, the API's 10 MiB,
   which a state.v1 provider reports in `ProviderLimits.MaxResultBytes`, and
   so is the data of a prompt result receipt. SQLite stores the stamp with
-  each result and artifact; rows written before schema version 4 have the
+  each result and artifact; rows written before schema version 5 have the
   stamp (0, 0), which every enveloped write exceeds.
 - **Controller ownership.** Kubernetes decides which controller may act. Each
   dataset holds its own controller epoch, which `AdvanceControllerEpoch`
@@ -653,9 +663,12 @@ write without one.
   lease early, but the old holder can no longer commit, and one whose clock
   is behind resumes the work up to twice `MaxClockSkew` later. A request's
   times are fixed for the operation and covered by its digest, so a retry is
-  judged at the original request time, which owner identity, not expiry,
-  makes harmless. Gateway claims, outbox claims and gateway message
-  admission carry the request time and lease they need, and
+  judged at the original request time, even when it arrives after the lease
+  has expired. That is harmless because the write is checked against the
+  owner's identity as well as the expiry: if another owner has taken the
+  lease in the meantime, the retry is still refused. Gateway claims, outbox
+  claims and gateway message admission carry the request time and lease they
+  need, and
   `FreezeGatewayEventTaskRuntimeAllowedTools` refuses a zero request time
   with `ErrValidation` rather than judging the claim on its own clock. Chat
   turns and Session locks carry them too: `AcquireChatTurnRequest` and
@@ -828,7 +841,7 @@ later.
   caller rotates keys. Binding a
   dataset records its installation as the advance does, so the advance then
   accepts only that installation and `SyncControllerEpochMirror` is refused.
-- **SQLite.** The binding lives in the `store_dataset` row (since schema version 3).
+- **SQLite.** The binding lives in the `store_dataset` row (schema version 3 and later).
   Every binding method runs in one transaction that reserves the writer, and a
   successful call checkpoints the WAL before it returns, as dataset identity
   does. A checkpoint that fails after the commit returns `ErrOutcomeUnknown`,

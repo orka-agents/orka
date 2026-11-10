@@ -308,8 +308,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		recoveryKind := ""
 		switch attempt.ExecutionState {
 		case store.PromptExecutionSucceeded:
-			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
-				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
+			terminalPhase := task.Status.Phase.IsTerminal()
 			if task.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
 				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil || !terminalPhase {
 				recoveryKind = acpSucceededOperation

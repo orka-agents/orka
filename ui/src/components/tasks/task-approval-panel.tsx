@@ -11,6 +11,7 @@ import { ApiError } from '@/lib/api-client'
 import type { Approval } from '@/schemas/execution-event'
 import type { TaskPhase } from '@/schemas/task'
 import { formatTimestamp } from '@/lib/time'
+import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 function statusStyle(status: string): { className: string; live: boolean; label: string } {
   switch (status) {
@@ -223,9 +224,9 @@ function ApprovalCard({
 
 export function TaskApprovalPanel({ taskId, taskPhase, taskUid }: { taskId: string; taskPhase?: TaskPhase; taskUid?: string }) {
   // Poll for new approvals while active and unresolved execution after termination.
-  const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
+  const taskRunning = isTaskInFlight(taskPhase)
   // Terminal tasks reject decisions, but recovery can still update their approvals.
-  const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
+  const taskTerminal = isTaskTerminal(taskPhase)
   const { data, isLoading, error, refetch } = useTaskApprovals(taskId, true, 5000, taskRunning, taskTerminal, taskUid)
   const approvals = data?.approvals ?? []
   const pending = approvals.filter((a) => a.status === 'pending')

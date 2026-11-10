@@ -11,7 +11,7 @@ import (
 
 // writeStamp is the order stamp of a whole-object replacement: the epoch and
 // sequence of its write envelope. Results and artifacts store the stamp of
-// the write that stored them; rows written before schema version 4 have the
+// the write that stored them; rows written before schema version 5 have the
 // stamp (0, 0). A write without an envelope, which only package tests make,
 // is unstamped and replaces unconditionally.
 type writeStamp struct {

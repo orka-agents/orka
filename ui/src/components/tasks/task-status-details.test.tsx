@@ -24,7 +24,7 @@ const fullTask: Task = {
       resumeLatency: '1.2s',
       message: 'placed',
     },
-    resultRef: { available: true, configMapName: 'parent-result', key: 'out' },
+    resultRef: { available: true },
   },
 }
 
@@ -65,14 +65,32 @@ describe('TaskStatusDetails', () => {
     expect(type.parentElement).toContainElement(badge)
   })
 
-  it('treats legacy result references as available', () => {
-    render(<TaskStatusDetails task={{
+  it('shows the execution binding with abbreviated digests', () => {
+    const digest = (character: string) => `sha256:${character.repeat(64)}`
+    const { container } = render(<TaskStatusDetails task={{
       ...minimalTask,
-      status: { phase: 'Succeeded', resultRef: { configMapName: 'legacy-result', key: 'out' } },
+      spec: { type: 'agent' },
+      status: {
+        phase: 'Running',
+        agentExecutionBinding: {
+          schemaVersion: 1,
+          contractVersion: 'orka.harness.v2',
+          backend: 'runtime-pool',
+          bindingDigest: digest('a'),
+          task: { namespaceUID: 'namespace-uid', uid: 'task-uid', boundSpecGeneration: 2 },
+          snapshot: { id: 'task-uid/snapshot', digest: digest('b'), schemaVersion: 1 },
+          runtimeType: 'codex',
+          boundAt: '2026-08-06T00:00:00Z',
+        },
+      },
     }} />)
-    expect(screen.getByText('Available')).toBeInTheDocument()
-    expect(screen.getByText('Yes')).toBeInTheDocument()
-    expect(screen.getByText('legacy-result')).toBeInTheDocument()
+    expect(screen.getByText('Execution binding')).toBeInTheDocument()
+    expect(screen.getByText('runtime-pool')).toBeInTheDocument()
+    expect(screen.getByText('codex')).toBeInTheDocument()
+    expect(screen.getByText('sha256:aaaaaaaaaa…aaaaaaaa')).toBeInTheDocument()
+    expect(screen.getByText('sha256:bbbbbbbbbb…bbbbbbbb')).toBeInTheDocument()
+    expect(container.innerHTML).not.toContain(digest('a'))
+    expect(container.innerHTML).not.toContain(digest('b'))
   })
 
   it('leaves out its sections, and itself, when a task has none of them', () => {
@@ -82,6 +100,7 @@ describe('TaskStatusDetails', () => {
     render(<TaskStatusDetails task={{ ...minimalTask, spec: { type: 'agent', sessionRef: { name: 'session-7' } } }} />)
     expect(screen.getByText('Session')).toBeInTheDocument()
     expect(screen.queryByText('Conditions')).not.toBeInTheDocument()
+    expect(screen.queryByText('Execution binding')).not.toBeInTheDocument()
     expect(screen.queryByText('Execution workspace')).not.toBeInTheDocument()
     expect(screen.queryByText('Result')).not.toBeInTheDocument()
     expect(screen.queryByText('Labels and annotations')).not.toBeInTheDocument()
