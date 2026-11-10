@@ -776,7 +776,11 @@ Usage:
   orka eval [command]
 
 Available Commands:
+  approve     Record that you approve a decided experiment
+  decisions   Show a candidate's experiment outcome, its decisions and whether an approval still holds
+  experiments List experiments with their outcomes and decisions, including ones whose EvalRuns are gone
   get         Show an EvalRun's phase, counts and results, or wait for it and save them
+  reject      Record that you reject a decided experiment
   run         Create an EvalRun, optionally wait for it, and save its results
 
 Flags:
@@ -793,6 +797,72 @@ Global Flags:
 Use "orka eval [command] --help" for more information about a command.
 ```
 
+## `orka eval approve`
+
+```text
+Append a decision to a candidate's experiment. Decisions are never edited; the latest one is in force. Only a person in a promoter group with the decide permission on evalruns may decide, and an approval needs a Passed experiment whose candidate, baseline, cases, graders and gate still match the live configuration. Recording a decision changes no Agent; roll the change out separately.
+
+Usage:
+  orka eval approve <candidate> --reason <text> [flags]
+
+Flags:
+  -h, --help            help for approve
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Why, in a sentence or two (required)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval decisions`
+
+```text
+Show a candidate's experiment outcome, its decisions and whether an approval still holds
+
+Usage:
+  orka eval decisions <candidate> [flags]
+
+Flags:
+  -h, --help            help for decisions
+  -o, --output string   Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval experiments`
+
+```text
+List the namespace's experiments, oldest first, with each one's stored outcome and the decision in force. Experiments stay listed after their EvalRuns are deleted. Pass --continue with the token the previous page printed to read the next page.
+
+Usage:
+  orka eval experiments [flags]
+
+Flags:
+      --continue string   Continue from the token a previous page printed
+  -h, --help              help for experiments
+      --limit int         Experiments per page (server default 50, at most 200)
+  -o, --output string     Output format: table, json, yaml (default "table")
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
 ## `orka eval get`
 
 ```text
@@ -806,6 +876,28 @@ Flags:
       --output-dir string   Write the run, trial records, a summary and failed-trial events here (implies --wait)
       --timeout duration    How long --wait waits (default 2h0m0s)
       --wait                Wait for the run to finish and print its results
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka eval reject`
+
+```text
+Append a decision to a candidate's experiment. Decisions are never edited; the latest one is in force. Only a person in a promoter group with the decide permission on evalruns may decide, and an approval needs a Passed experiment whose candidate, baseline, cases, graders and gate still match the live configuration. Recording a decision changes no Agent; roll the change out separately.
+
+Usage:
+  orka eval reject <candidate> --reason <text> [flags]
+
+Flags:
+  -h, --help            help for reject
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Why, in a sentence or two (required)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file

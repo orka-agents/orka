@@ -145,7 +145,8 @@ func (h *Handlers) DecideEvalRun(c fiber.Ctx) error {
 	}
 	if err := reviewKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c), namespace,
 		"decide", corev1alpha1.GroupVersion.Group, "evalruns", c.Params("name")); err != nil {
-		return err
+		return fiber.NewError(fiber.StatusForbidden,
+			"eval decisions need the decide verb on evalruns in this namespace, which the eval-promoter ClusterRole grants")
 	}
 	run, entry, err := h.evalRunExperiment(c)
 	if err != nil {

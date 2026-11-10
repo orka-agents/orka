@@ -525,6 +525,23 @@ delete the run yourself afterwards. The chart's `orka-client` Role and the
 `api-editor-role` ClusterRole grant `create`, `get` and `delete` on EvalRuns.
 See `test/evals/pr-review/README.md` for the PR review cases.
 
+Experiments keep their outcome and decisions after their EvalRuns are deleted:
+
+```bash
+orka eval experiments                                  # every experiment, its result and the decision in force
+orka eval decisions pr-review-cand                     # outcome, evidence summary, decision history, approval state
+orka eval approve pr-review-cand --reason "fewer missed defects, no regressions"
+orka eval reject pr-review-cand --reason "the gain is on one case only"
+```
+
+`approve` and `reject` append a decision; the latest one is in force. Only a
+person in a group named by the controller's `--eval-promoter-groups`, with the
+`decide` verb on `evalruns` (the `orka-eval-promoter` ClusterRole), may decide,
+and an approval needs a `Passed` experiment that still matches the live Agents,
+monitor, cases, graders and gate. `decisions` reports an approval as stale once
+any of them changes. A decision changes no Agent; roll the approved change out
+yourself. See [Evaluate a reviewer change](../guides/evals-getting-started.md).
+
 ## Usage and PR outcomes
 
 Usage commands read retained model measurements and verified PR outcomes through
