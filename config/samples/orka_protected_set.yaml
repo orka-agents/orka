@@ -50,8 +50,28 @@ data:
           - internal/controller/agent_execution_binding*.go # canary routing
           - internal/controller/evalrun*.go                # evaluator
           - internal/controller/runtime_pool_*.go          # RuntimePool tokens, credentials, network isolation and startup attestation
-          - internal/controller/repositorymonitor_issue_actions.go # implementation limits
-          - internal/controller/repositorymonitor_repair.go # repair limits
+          - internal/controller/repositorymonitor_*.go     # review verdicts, readiness gate, publication and implementation and repair limits
+          - internal/approvals/**                          # human approval records and keys
+          - internal/controller/acp_mcp_approval*.go       # approval holds for brokered tools
+          - internal/api/approval*.go
+          - workers/ai/approval_gate.go
+          - internal/api/*memory*.go                       # memory proposal review and apply
+          - internal/storageclient/memory*.go
+          - internal/contexttoken/**                       # context and transaction tokens
+          - internal/transactiontoken/**
+          - internal/tokenexchange/**
+          - internal/connectors/**                         # connector credential custody
+          - internal/api/*credential*.go
+          - internal/controller/*credential*.go
+          - internal/controller/*authority*.go             # frozen authority and transaction scopes
+          - internal/controller/*identity*.go
+          - internal/gateway/auth.go
+          - internal/gateway/task_identity.go
+          - internal/controller/*authoriz*.go
+          - internal/controller/*_auth.go
+          - internal/taskwebhook/**                        # webhook signing keys
+          - internal/api/*webhook*.go
+          - internal/controller/*webhook*.go
           - internal/protectedset/**                       # protected-set schema and checks
           - internal/workspacedelta/**                     # shared deniedPaths matcher
           - internal/harness/v2/**                         # operation capabilities, credential bootstrap, request digests, deniedPaths to the runtime
@@ -61,6 +81,7 @@ data:
           - internal/security/policy.go                    # secret detection in published and returned text
           - internal/security/secretscan.go
           - internal/store/**                              # trial, decision and promotion records
+          - pkg/storage/**                                 # the storage contract those records go through
           - workers/acp/supervisor/**                      # deniedPaths check
           - go.mod                                         # dependency selection, including replace directives
           - go.sum
