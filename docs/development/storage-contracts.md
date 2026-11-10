@@ -968,7 +968,11 @@ dataset holds now as acknowledged and clears the hold in the same update,
 without advancing anything first, so every advance keeps supplying the
 recorded acknowledgement as its floor; each contract's fence opens again once
 its dataset passes the takeover checks against the new record. An annotation naming another hold releases
-nothing. A dataset that passed its own checks opens its fence without
+nothing. A release retried after its update committed but its response was
+lost succeeds when the record, under the same controller epoch, shows
+exactly that release: no hold, the acknowledgement of that hold, the
+condition the release set and the acknowledgements it recorded; any other
+record still refuses it. A dataset that passed its own checks opens its fence without
 waiting for the others, so another dataset's hold can close a fence that was
 already open.
 
