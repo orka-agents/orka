@@ -3,6 +3,8 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"math"
+	"math/bits"
 	"time"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
@@ -93,7 +95,7 @@ func DiagnoseSubstrate(ctx context.Context, cfg SubstrateConfig, templateName st
 			}
 			workerStatus := worker.GetStatus()
 			if matches && workerStatus.GetState() == ateapipb.WorkerState_WORKER_STATE_ACTIVE &&
-				substrateWorkerRunsGVisor(workerStatus.GetSandboxClasses()) && substrateWorkerFitsExactlyOne(workerStatus.GetCapacity(), limits) {
+				substrateWorkerRunsGVisor(workerStatus.GetSandboxClasses()) && substrateWorkerFitsExactlyOne(workerStatus, limits) {
 				count++
 			}
 		}
@@ -125,12 +127,69 @@ func substrateWorkerRunsGVisor(classes []*ateapipb.WorkerSandboxClass) bool {
 }
 
 // Upstream workers accept up to --max-actors Actors, which no WorkerPool field
-// sets. Placement books template limits against worker capacity, so a worker
-// whose CPU or memory cannot hold a second template-sized Actor hosts one.
-func substrateWorkerFitsExactlyOne(capacity *ateapipb.WorkerResources, limits *ateapipb.Resources) bool {
-	cpu, memory := limits.GetCpuMillicores(), limits.GetMemoryBytes()
-	if cpu <= 0 || memory <= 0 || capacity.GetActors() < 1 || capacity.GetCpuMillicores() < cpu || capacity.GetMemoryBytes() < memory {
+// sets. Placement books each Actor against worker capacity, so a worker whose
+// CPU or memory cannot hold a second template-sized Actor hosts one.
+//
+// What placement books is the template's limits plus the actor_overhead of the
+// worker runtime the Actor runs under: a fixed amount of memory and an amount
+// per GiB of the memory limit. An Actor cold-boots under a class's default
+// runtime and restores under the restorable runtime that matches its snapshot,
+// so the worker must hold exactly one Actor under each runtime it reports.
+func substrateWorkerFitsExactlyOne(worker *ateapipb.WorkerStatus, limits *ateapipb.Resources) bool {
+	overheads := []*ateapipb.RuntimeOverhead{}
+	for _, class := range worker.GetSandboxClasses() {
+		overheads = append(overheads, class.GetDefaultRuntime().GetActorOverhead())
+		for _, runtime := range class.GetRestorableRuntimes() {
+			overheads = append(overheads, runtime.GetActorOverhead())
+		}
+	}
+	if len(overheads) == 0 {
+		// A runtime that reports no overhead has none.
+		overheads = append(overheads, nil)
+	}
+	for _, overhead := range overheads {
+		if !substrateCapacityFitsExactlyOne(worker.GetCapacity(), limits, overhead) {
+			return false
+		}
+	}
+	return true
+}
+
+func substrateCapacityFitsExactlyOne(capacity *ateapipb.WorkerResources, limits *ateapipb.Resources, overhead *ateapipb.RuntimeOverhead) bool {
+	cpu := limits.GetCpuMillicores()
+	memory, ok := substrateActorMemoryBooking(limits.GetMemoryBytes(), overhead)
+	if !ok || cpu <= 0 || limits.GetMemoryBytes() <= 0 || capacity.GetActors() < 1 ||
+		capacity.GetCpuMillicores() < cpu || capacity.GetMemoryBytes() < memory {
 		return false
 	}
-	return capacity.GetActors() == 1 || capacity.GetCpuMillicores() < 2*cpu || capacity.GetMemoryBytes() < 2*memory
+	// A second Actor needs twice the booking; compare by subtraction so a
+	// large booking cannot overflow.
+	return capacity.GetActors() == 1 || capacity.GetCpuMillicores()-cpu < cpu || capacity.GetMemoryBytes()-memory < memory
+}
+
+// substrateActorMemoryBooking mirrors upstream placement: the memory limit,
+// plus the runtime's fixed overhead, plus its per-GiB overhead scaled to the
+// limit and rounded down to a byte. It reports false for a negative input or a
+// sum that does not fit an int64, which placement treats as not fitting.
+func substrateActorMemoryBooking(limit int64, overhead *ateapipb.RuntimeOverhead) (int64, bool) {
+	fixed, rate := overhead.GetMemoryBytes(), overhead.GetMemoryBytesPerGib()
+	if limit < 0 || fixed < 0 || rate < 0 {
+		return 0, false
+	}
+	hi, lo := bits.Mul64(uint64(limit), uint64(rate))
+	if hi>>30 != 0 {
+		return 0, false
+	}
+	scaled := hi<<34 | lo>>30
+	if scaled > math.MaxInt64 {
+		return 0, false
+	}
+	total := limit
+	for _, part := range []int64{fixed, int64(scaled)} {
+		if part > math.MaxInt64-total {
+			return 0, false
+		}
+		total += part
+	}
+	return total, true
 }

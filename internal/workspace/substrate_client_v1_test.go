@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -175,23 +176,67 @@ func TestSubstrateDeleteAndSuspendUseNativeFences(t *testing.T) {
 
 func TestSubstrateWorkerFitsExactlyOne(t *testing.T) {
 	limits := &ateapipb.Resources{CpuMillicores: 1000, MemoryBytes: 1 << 30}
+	worker := func(capacity *ateapipb.WorkerResources, overheads ...*ateapipb.RuntimeOverhead) *ateapipb.WorkerStatus {
+		reported := &ateapipb.WorkerStatus{Capacity: capacity}
+		if len(overheads) > 0 {
+			class := &ateapipb.WorkerSandboxClass{SandboxClass: "gvisor", DefaultRuntime: &ateapipb.WorkerSandboxRuntime{ActorOverhead: overheads[0]}}
+			for _, overhead := range overheads[1:] {
+				class.RestorableRuntimes = append(class.RestorableRuntimes, &ateapipb.WorkerSandboxRuntime{ActorOverhead: overhead})
+			}
+			reported.SandboxClasses = []*ateapipb.WorkerSandboxClass{class}
+		}
+		return reported
+	}
+	fixed := &ateapipb.RuntimeOverhead{MemoryBytes: 64 << 20}
+	// 32MiB for each GiB of the limit: 32MiB for this template.
+	scaled := &ateapipb.RuntimeOverhead{MemoryBytesPerGib: 32 << 20}
 	for name, tc := range map[string]struct {
-		capacity *ateapipb.WorkerResources
-		want     bool
+		worker *ateapipb.WorkerStatus
+		want   bool
 	}{
-		"sized for one":        {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, want: true},
-		"memory bounds to one": {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (1 << 30) + (64 << 20)}, want: true},
-		"actor count is one":   {capacity: &ateapipb.WorkerResources{Actors: 1, CpuMillicores: 8000, MemoryBytes: 8 << 30}, want: true},
-		"fits two":             {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 2000, MemoryBytes: 2 << 30}},
-		"too small":            {capacity: &ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 500, MemoryBytes: 1 << 30}},
-		"no actors":            {capacity: &ateapipb.WorkerResources{CpuMillicores: 1000, MemoryBytes: 1 << 30}},
+		"sized for one":        {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}), want: true},
+		"memory bounds to one": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (1 << 30) + (64 << 20)}), want: true},
+		"actor count is one":   {worker: worker(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 8000, MemoryBytes: 8 << 30}), want: true},
+		"fits two":             {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 2000, MemoryBytes: 2 << 30})},
+		"too small":            {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 500, MemoryBytes: 1 << 30})},
+		"no actors":            {worker: worker(&ateapipb.WorkerResources{CpuMillicores: 1000, MemoryBytes: 1 << 30})},
+
+		// Placement books the runtime's overhead with every Actor.
+		"overhead leaves no room for one": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, fixed)},
+		"overhead makes one fit exactly":  {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (64 << 20)}, fixed), want: true},
+		"overhead keeps a second out":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: 2 << 30}, fixed), want: true},
+		"two fit with their overhead":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (128 << 20)}, fixed)},
+		"per-GiB overhead leaves no room": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20) - 1}, scaled)},
+		"per-GiB overhead fits exactly":   {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: (1 << 30) + (32 << 20)}, scaled), want: true},
+		"per-GiB overhead keeps two out":  {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: (2 << 30) + (64 << 20) - 1}, scaled), want: true},
+		// An Actor restored from a snapshot runs under the matching restorable
+		// runtime, so the worker must hold exactly one under that one too.
+		"restorable runtime leaves no room": {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 1000, MemoryBytes: 1 << 30}, nil, fixed)},
+		"lighter restorable admits two":     {worker: worker(&ateapipb.WorkerResources{Actors: 1000, CpuMillicores: 4000, MemoryBytes: 2 << 30}, fixed, nil)},
+		"overflowing overhead":              {worker: worker(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: math.MaxInt64}, &ateapipb.RuntimeOverhead{MemoryBytes: math.MaxInt64})},
 	} {
 		t.Run(name, func(t *testing.T) {
-			require.Equal(t, tc.want, substrateWorkerFitsExactlyOne(tc.capacity, limits))
+			require.Equal(t, tc.want, substrateWorkerFitsExactlyOne(tc.worker, limits))
 		})
 	}
-	require.False(t, substrateWorkerFitsExactlyOne(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: 1 << 30}, nil),
+	require.False(t, substrateWorkerFitsExactlyOne(worker(&ateapipb.WorkerResources{Actors: 1, CpuMillicores: 1000, MemoryBytes: 1 << 30}), nil),
 		"a template without limits cannot be bounded")
+
+	// Half a GiB under a 1GiB-per-GiB rate adds half a GiB, rounded down to a byte.
+	booking, ok := substrateActorMemoryBooking((1<<29)+1, &ateapipb.RuntimeOverhead{MemoryBytes: 7, MemoryBytesPerGib: 1 << 30})
+	require.True(t, ok)
+	require.EqualValues(t, (1<<29)+1+7+(1<<29)+1, booking)
+	booking, ok = substrateActorMemoryBooking(3, &ateapipb.RuntimeOverhead{MemoryBytesPerGib: 1 << 29})
+	require.True(t, ok)
+	require.EqualValues(t, 3+1, booking, "1.5 bytes of overhead rounds down")
+	_, ok = substrateActorMemoryBooking(math.MaxInt64, &ateapipb.RuntimeOverhead{MemoryBytesPerGib: 1 << 30})
+	require.False(t, ok, "the limit and its overhead do not fit an int64")
+	_, ok = substrateActorMemoryBooking(1<<40, &ateapipb.RuntimeOverhead{MemoryBytesPerGib: math.MaxInt64})
+	require.False(t, ok, "the scaled overhead alone does not fit an int64")
+	_, ok = substrateActorMemoryBooking(1<<47, &ateapipb.RuntimeOverhead{MemoryBytesPerGib: 1 << 47})
+	require.False(t, ok, "a scaled overhead of exactly 1<<64 bytes must not wrap to zero")
+	_, ok = substrateActorMemoryBooking(1<<30, &ateapipb.RuntimeOverhead{MemoryBytes: -1})
+	require.False(t, ok, "a negative overhead is not a booking")
 }
 
 func TestSubstrateWorkerRunsGVisor(t *testing.T) {
