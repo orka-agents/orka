@@ -138,12 +138,28 @@ func requireSameObject(fd int, expected *unix.Stat_t, kind uint32) error {
 	return nil
 }
 
+// dupCloseOnExec duplicates fd with close-on-exec set atomically. unix.Dup
+// clears the flag, so an adapter another session starts in the meantime would
+// inherit a handle into a private skill folder that outlives our close.
+func dupCloseOnExec(fd int) (int, error) {
+	return unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+}
+
+// openDirectoryStream returns a separate handle on dirFd for reading entries,
+// so closing it leaves dirFd open.
+func openDirectoryStream(dirFd int) (*os.File, error) {
+	dup, err := dupCloseOnExec(dirFd)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(dup), ""), nil
+}
+
 func readDirectoryNames(dirFd int, remaining int) ([]string, error) {
-	dup, err := unix.Dup(dirFd)
+	dir, err := openDirectoryStream(dirFd)
 	if err != nil {
 		return nil, failf(ReasonReadFailed, "read folder: %v", err)
 	}
-	dir := os.NewFile(uintptr(dup), "")
 	defer dir.Close() //nolint:errcheck
 	var names []string
 	for {
@@ -217,7 +233,7 @@ func (t *Tree) WriteTo(destination string) error {
 // component with O_NOFOLLOW and calls fn with it and the final name.
 func withParent(rootFd int, relative string, fn func(fd int, name string) error) error {
 	components := strings.Split(relative, "/")
-	fd, err := unix.Dup(rootFd)
+	fd, err := dupCloseOnExec(rootFd)
 	if err != nil {
 		return err
 	}

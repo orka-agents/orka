@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/orka-agents/orka/internal/acp/toolbox"
 )
 
@@ -288,5 +290,54 @@ func TestFailuresWithholdCredentialShapedDiagnostics(t *testing.T) {
 	requireReason(t, err, ReasonInvalidFrontmatter)
 	if !strings.Contains(err.Error(), `"allowed-tools"`) {
 		t.Fatalf("a benign diagnostic must keep its detail: %v", err)
+	}
+}
+
+func requireCloseOnExec(t *testing.T, what string, fd int) {
+	t.Helper()
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatalf("%s: F_GETFD: %v", what, err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Fatalf("%s: descriptor %d is inheritable; an adapter started meanwhile would keep it", what, fd)
+	}
+}
+
+// TestDuplicatedSkillFolderHandlesAreCloseOnExec covers the two places the
+// loader duplicates a folder handle. Another session can start an adapter at
+// any moment, so a duplicate must never be inheritable, even briefly.
+func TestDuplicatedSkillFolderHandlesAreCloseOnExec(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootFd, err := unix.Open(root, openDirFlags, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(rootFd) //nolint:errcheck
+
+	dir, err := openDirectoryStream(rootFd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCloseOnExec(t, "folder stream", int(dir.Fd()))
+	if err := dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if names, err := readDirectoryNames(rootFd, 10); err != nil || len(names) != 1 || names[0] != "nested" {
+		t.Fatalf("readDirectoryNames = %v, %v", names, err)
+	}
+
+	for _, relative := range []string{"file.md", "nested/file.md"} {
+		calls := 0
+		if err := withParent(rootFd, relative, func(fd int, name string) error {
+			calls++
+			requireCloseOnExec(t, "parent of "+relative, fd)
+			return nil
+		}); err != nil || calls != 1 {
+			t.Fatalf("withParent(%s) = %v after %d calls", relative, err, calls)
+		}
 	}
 }
