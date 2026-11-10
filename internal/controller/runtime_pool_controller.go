@@ -60,6 +60,7 @@ import (
 
 const (
 	baselineField = "baseline"
+	runtimeField  = "runtime"
 )
 
 var (
@@ -1002,6 +1003,7 @@ type runtimePoolPostProbeFence func(
 	*corev1alpha1.RuntimePoolActiveInstanceStatus,
 ) (ctrl.Result, bool, error)
 
+//nolint:gocyclo // Serving reconciliation rechecks every post-probe fence before admitting sessions.
 func (r *RuntimePoolReconciler) reconcileRuntimePoolServingWithPostProbeFence(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -2269,29 +2271,6 @@ func runtimePoolManagedCredentialSecret(secret *corev1.Secret, cfg runtimePoolCo
 	return false
 }
 
-func runtimePoolProviderSecretsForGeneration(
-	secrets []corev1.Secret,
-	epoch int64,
-	generation string,
-) []corev1.Secret {
-	epochValue := strconv.FormatInt(epoch, 10)
-	legacySuffix := "provider-e" + epochValue + "-g" + generation
-	randomSuffixPrefix := legacySuffix + "-"
-	matched := make([]corev1.Secret, 0, 1)
-	for i := range secrets {
-		secretEpoch := strings.TrimSpace(secrets[i].Labels[runtimePoolCredentialEpochLabel])
-		secretGeneration := strings.TrimSpace(secrets[i].Labels[runtimePoolProviderGenerationLabel])
-		labeledMatch := secretEpoch == epochValue && secretGeneration == generation
-		legacyMatch := secretEpoch == "" && secretGeneration == "" &&
-			(strings.HasSuffix(secrets[i].Name, legacySuffix) ||
-				strings.HasPrefix(runtimePoolProviderSuffixPattern.FindString(secrets[i].Name), randomSuffixPrefix))
-		if labeledMatch || legacyMatch {
-			matched = append(matched, *secrets[i].DeepCopy())
-		}
-	}
-	return matched
-}
-
 func (r *RuntimePoolReconciler) ensureRuntimePoolProviderSecret(
 	ctx context.Context,
 	pool *corev1alpha1.RuntimePool,
@@ -2946,7 +2925,7 @@ func runtimePoolPodFailure(pods []corev1.Pod) (string, string, bool) {
 				continue
 			}
 			switch waiting.Reason {
-			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "RunContainerError", "CrashLoopBackOff":
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", podWaitingReasonCreateContainerConfig, "RunContainerError", "CrashLoopBackOff":
 				message := sanitizeStatusMessage(waiting.Message)
 				if message == "" {
 					message = "runtime container failed: " + waiting.Reason

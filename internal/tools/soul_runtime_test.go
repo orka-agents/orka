@@ -28,18 +28,13 @@ func TestUpdateAgentSoulRuntimeCompatibility(t *testing.T) {
 			RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: "external"},
 			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
 		}},
-		testCase{name: "external v1", runtime: &corev1alpha1.AgentCLIRuntime{
-			RuntimeRef:      &corev1alpha1.AgentRuntimeReference{Name: "external"},
-			ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
-		}},
 	)
 	for _, kind := range []corev1alpha1.AgentRuntimeType{
 		corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude,
 		corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode,
 	} {
 		for _, contract := range []*corev1alpha1.AgentRuntimeContractVersion{
-			new(corev1alpha1.AgentRuntimeContractHarnessV2),
-			new(corev1alpha1.AgentRuntimeContractHarnessV1), nil,
+			new(corev1alpha1.AgentRuntimeContractHarnessV2), nil,
 		} {
 			version := "missing contract"
 			allowed := false
@@ -138,8 +133,7 @@ func TestSoulParameterSchemaDocumentsRuntimeCompatibility(t *testing.T) {
 	}
 	description := schema.Properties["soul"].Description
 	for _, constraint := range []string{
-		"AI", "codex", "claude", "copilot", "opencode", "runtimeRef",
-		string(corev1alpha1.AgentRuntimeContractHarnessV1), string(corev1alpha1.AgentRuntimeContractHarnessV2),
+		"AI", "codex", "claude", "copilot", "opencode", "runtimeRef", string(corev1alpha1.AgentRuntimeContractHarnessV2),
 	} {
 		if !strings.Contains(description, constraint) {
 			t.Errorf("soul schema omits runtime compatibility constraint %q", constraint)
@@ -155,7 +149,7 @@ func TestUpdateAgentSoulDefaultsOmittedContract(t *testing.T) {
 		allowed bool
 	}{
 		{executionmode.HarnessV2, true},
-		{executionmode.HarnessV1, false},
+		{executionmode.Mode("harness-v1"), false},
 	} {
 		t.Run(string(tc.mode), func(t *testing.T) {
 			ctx := context.Background()

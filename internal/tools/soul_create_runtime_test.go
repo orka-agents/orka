@@ -19,7 +19,7 @@ import (
 func TestSoulCreationRuntimeCompatibility(t *testing.T) {
 	t.Setenv(envOrkaTaskName, "parent")
 	t.Setenv(envOrkaTaskNamespace, defaultNamespace)
-	for _, mode := range []executionmode.Mode{executionmode.HarnessV1, executionmode.HarnessV2} {
+	for _, mode := range []executionmode.Mode{executionmode.HarnessV2} {
 		for _, kind := range []corev1alpha1.AgentRuntimeType{
 			"", corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude,
 			corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode,

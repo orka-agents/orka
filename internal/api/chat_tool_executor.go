@@ -36,6 +36,7 @@ const (
 	taskCreatedMsg       = "Task created"
 	toolNamespaceArg     = "namespace"
 	chatCreateAITaskTool = "create_ai_task"
+	limitReachedCode     = "limit_reached"
 )
 
 // ToolExecutor executes orchestrator LLM tool calls by creating and managing
@@ -278,7 +279,7 @@ func (e *ToolExecutor) Execute(ctx context.Context, toolCall llm.ToolCall) (stri
 		CheckTaskLimit: func() *tools.ChatToolError {
 			if e.tasksCreated >= e.maxTasks {
 				return &tools.ChatToolError{
-					Type:       "limit_reached",
+					Type:       limitReachedCode,
 					Message:    fmt.Sprintf("task creation limit reached (max %d per turn)", e.maxTasks),
 					Suggestion: "Wait for existing tasks to complete before creating new ones",
 				}

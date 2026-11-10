@@ -86,7 +86,7 @@ func TestPendingSoulAgentDoesNotRaceContractPersistence(t *testing.T) {
 }
 
 func TestSoulDefaultContractDoesNotEnableWrongMode(t *testing.T) {
-	for _, mode := range []executionmode.Mode{"", executionmode.HarnessV1} {
+	for _, mode := range []executionmode.Mode{"", executionmode.Mode("harness-v1")} {
 		t.Run(string(mode), func(t *testing.T) {
 			r, task, agent := soulOmittedContractFixture(t, corev1alpha1.AgentRuntimeCodex)
 			r.Mode = mode
@@ -99,11 +99,11 @@ func TestSoulDefaultContractDoesNotEnableWrongMode(t *testing.T) {
 		})
 	}
 	r, task, agent := soulOmittedContractFixture(t, corev1alpha1.AgentRuntimeCodex)
-	agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
+	agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))
 	if _, err := r.resolveAgentExecutionCandidate(context.Background(), task, agent); err == nil {
 		t.Fatal("explicit v1 contract was upgraded to allow SOUL")
 	}
-	if *agent.Spec.Runtime.ContractVersion != corev1alpha1.AgentRuntimeContractHarnessV1 {
+	if *agent.Spec.Runtime.ContractVersion != corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1") {
 		t.Fatal("explicit contract changed")
 	}
 }

@@ -308,6 +308,24 @@ type CreateTaskRequest struct {
 	Suspend           *bool                            `json:"suspend,omitempty"`
 }
 
+// UnmarshalJSON validates status in Kubernetes-style manifests even though
+// creation never copies controller-owned status into the new Task.
+func (in *CreateTaskRequest) UnmarshalJSON(data []byte) error {
+	var status struct {
+		Status corev1alpha1.TaskStatus `json:"status"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return err
+	}
+	type plain CreateTaskRequest
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*in = CreateTaskRequest(value)
+	return nil
+}
+
 func applyFlatTaskRequest(spec *corev1alpha1.TaskSpec, req CreateTaskRequest) {
 	if req.Type != "" {
 		spec.Type = req.Type
@@ -516,7 +534,7 @@ func (h *Handlers) CreateTask(c fiber.Ctx) error {
 
 	var req CreateTaskRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	name := req.Name
@@ -1533,7 +1551,7 @@ func (h *Handlers) GetAgentSystemPrompt(c fiber.Ctx) error {
 func (h *Handlers) CreateAgent(c fiber.Ctx) error {
 	var req CreateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
 	// Support both flat format {"name":"x"} and Kubernetes-style {"metadata":{"name":"x"}}
@@ -1607,7 +1625,7 @@ func (h *Handlers) UpdateAgent(c fiber.Ctx) error {
 	// namespace probes cannot learn whether the payload is syntactically valid.
 	var req UpdateAgentRequest
 	if err := c.Bind().JSON(&req); err != nil {
-		return fiber.NewError(fiber.StatusBadRequest, "invalid request body")
+		return fiber.NewError(fiber.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 	if err := validateAgentSpec(req.Spec); err != nil {
 		return err
@@ -2034,7 +2052,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "listTaskArtifacts", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2043,7 +2061,7 @@ func (h *Handlers) ListTaskArtifacts(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"artifacts": []any{}})
 	}
 
-	artifacts, err := h.artifactStore.ListArtifacts(ctx, namespace, id)
+	artifacts, err := h.artifactStore.ListArtifacts(ctx, store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)})
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list artifacts: %v", err))
 	}
@@ -2064,7 +2082,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return err
 	}
 	ctx := c.Context()
-	_, err = h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
+	task, err := h.taskAccess().loadReadable(c, "downloadTaskArtifact", namespace, id)
 	if err != nil {
 		return err
 	}
@@ -2073,7 +2091,7 @@ func (h *Handlers) DownloadTaskArtifact(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusNotFound, "artifact store not configured")
 	}
 
-	data, contentType, err := h.artifactStore.GetArtifact(ctx, namespace, id, filename)
+	data, contentType, err := h.artifactStore.GetArtifact(ctx, store.ArtifactKey{Owner: store.ArtifactOwner{Namespace: namespace, TaskName: id, TaskUID: string(task.UID)}, Filename: filename})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fiber.NewError(fiber.StatusNotFound, "artifact not found")

@@ -37,14 +37,6 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 			},
 		},
 		{
-			name: "harness runtime",
-			mutate: func(task *corev1alpha1.Task) {
-				task.Status.HarnessRuntime = &corev1alpha1.HarnessRuntimeStatus{
-					ContractVersion: "orka.harness.v1",
-				}
-			},
-		},
-		{
 			name: "execution",
 			mutate: func(task *corev1alpha1.Task) {
 				task.Status.Execution = &corev1alpha1.TaskExecutionStatus{
@@ -65,7 +57,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldTask := newAdmissionTestTask()
-			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+			oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 			statusUpdate := oldTask.DeepCopy()
 			tt.mutate(statusUpdate)
 
@@ -81,7 +73,7 @@ func TestTaskExecutionAuthorityValidatorRestrictsStatusWriters(t *testing.T) {
 func TestTaskExecutionAuthorityValidatorAllowsControllerStatusUpdate(t *testing.T) {
 	validator := newTestTaskExecutionAuthorityValidator(t)
 	oldTask := newAdmissionTestTask()
-	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{}
+	oldTask.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2, Backend: corev1alpha1.AgentExecutionBackendRuntimePool}
 	statusUpdate := oldTask.DeepCopy()
 	statusUpdate.Status.Phase = corev1alpha1.TaskPhaseRunning
 
@@ -145,7 +137,7 @@ func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
 		reader:  fake.NewClientBuilder().WithScheme(scheme).WithObjects(namespace).Build(),
 	}
 	v2 := executionmode.HarnessV2.ContractVersion()
-	v1 := executionmode.HarnessV1.ContractVersion()
+	v1 := corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1")
 	agent := func(contract *corev1alpha1.AgentRuntimeContractVersion) *corev1alpha1.Agent {
 		return &corev1alpha1.Agent{
 			TypeMeta:   metav1.TypeMeta{APIVersion: "core.orka.ai/v1alpha1", Kind: "Agent"},
@@ -182,10 +174,10 @@ func TestAgentContractValidatorDefaultsContractFromNamespaceMode(t *testing.T) {
 	}{
 		{name: "create without contract takes the namespace mode", operation: admissionv1.Create, object: agent(nil), allowed: true},
 		{name: "create with the namespace contract", operation: admissionv1.Create, object: agent(&v2), allowed: true},
-		{name: "create with the other contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "must match namespace execution mode"},
+		{name: "create with an unsupported contract", operation: admissionv1.Create, object: agent(&v1), messagePart: "only orka.harness.v2 is supported"},
 		{name: "update keeps an omitted contract omitted", operation: admissionv1.Update, object: agent(nil), old: agent(nil), allowed: true},
 		{name: "update may write the namespace contract", operation: admissionv1.Update, object: agent(&v2), old: agent(nil), allowed: true},
-		{name: "update may not write the other contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "must match namespace execution mode"},
+		{name: "update may not write an unsupported contract", operation: admissionv1.Update, object: agent(&v1), old: agent(nil), messagePart: "only orka.harness.v2 is supported"},
 		{name: "update may not remove a written contract", operation: admissionv1.Update, object: agent(nil), old: agent(&v2), messagePart: "immutable"},
 	}
 	for _, tt := range tests {

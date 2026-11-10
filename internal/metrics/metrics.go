@@ -37,6 +37,16 @@ const (
 )
 
 var (
+	// Approval labels are restricted to lifecycle outcomes and execution paths.
+	ApprovalDecisionDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "orka_approval_decision_duration_seconds",
+			Help:    "Time from approval request to committed decision in seconds",
+			Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 14400, 86400},
+		},
+		[]string{"outcome", "path"},
+	)
+
 	// API metrics
 	APIRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -217,6 +227,32 @@ var (
 		[]string{labelReason},
 	)
 
+	// Repository monitor review convergence metrics. Mode, verdict, priority,
+	// and outcome are fixed controller vocabularies.
+	RepositoryMonitorReviewsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_reviews_total",
+			Help: "Repository monitor pull request review records by review mode and recorded verdict",
+		},
+		[]string{"mode", "verdict"},
+	)
+
+	RepositoryMonitorReviewFindingsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "orka_repository_monitor_review_findings_total",
+			Help: "Repository monitor review findings by priority and outcome: reported when first recorded, fixed when a later review resolves one",
+		},
+		[]string{"priority", "outcome"},
+	)
+
+	RepositoryMonitorReviewRoundsToPass = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "orka_repository_monitor_review_rounds_to_pass",
+			Help:    "Distinct pull request heads reviewed up to and including a pull request's first passed review",
+			Buckets: []float64{1, 2, 3, 4, 5, 7, 10, 15},
+		},
+	)
+
 	// Execution event metrics. Labels intentionally exclude task/session IDs.
 	ExecutionEventsAppendedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -303,6 +339,7 @@ var (
 
 func init() {
 	metrics.Registry.MustRegister(
+		ApprovalDecisionDuration,
 		ACPWorkspaceRetentionActionsTotal,
 		APIRequestsTotal,
 		APIRequestDuration,
@@ -324,6 +361,9 @@ func init() {
 		RepositoryMonitorWorkActionsTotal,
 		RepositoryMonitorGitHubMutationsTotal,
 		RepositoryMonitorBlocksTotal,
+		RepositoryMonitorReviewsTotal,
+		RepositoryMonitorReviewFindingsTotal,
+		RepositoryMonitorReviewRoundsToPass,
 		ExecutionEventsAppendedTotal,
 		ExecutionEventAppendFailuresTotal,
 		ExecutionEventAppendDuration,
@@ -524,6 +564,26 @@ func RecordRepositoryMonitorGitHubMutation(operation, status string) {
 // RecordRepositoryMonitorBlock records a low-cardinality monitor block reason.
 func RecordRepositoryMonitorBlock(reason string) {
 	RepositoryMonitorBlocksTotal.WithLabelValues(normalizeMetricLabel(reason)).Inc()
+}
+
+// RecordRepositoryMonitorReview records one stored pull request review record.
+func RecordRepositoryMonitorReview(mode, verdict string) {
+	RepositoryMonitorReviewsTotal.WithLabelValues(normalizeMetricLabel(mode), normalizeMetricLabel(verdict)).Inc()
+}
+
+// RecordRepositoryMonitorReviewFindings adds count findings of one priority
+// and outcome.
+func RecordRepositoryMonitorReviewFindings(priority, outcome string, count int) {
+	if count <= 0 {
+		return
+	}
+	RepositoryMonitorReviewFindingsTotal.WithLabelValues(normalizeMetricLabel(priority), normalizeMetricLabel(outcome)).Add(float64(count))
+}
+
+// RecordRepositoryMonitorReviewRoundsToPass records how many heads a pull
+// request needed before its first passed review.
+func RecordRepositoryMonitorReviewRoundsToPass(rounds int) {
+	RepositoryMonitorReviewRoundsToPass.Observe(float64(rounds))
 }
 
 // RecordACPWorkspaceRetentionAction records one retention enforcement action

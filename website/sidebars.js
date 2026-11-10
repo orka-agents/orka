@@ -36,6 +36,7 @@ const sidebars = {
           items: [
             'guides/container-tasks',
             'guides/scheduled-tasks',
+            'guides/task-webhooks',
             'guides/codex-session-migration',
           ],
         },
@@ -102,6 +103,7 @@ const sidebars = {
       items: [
         'operations/provider-proxy',
         'operations/gateways',
+        'operations/agent-hosts',
         'operations/agent-runtime-security',
         'operations/upgrading',
         'operations/troubleshooting',

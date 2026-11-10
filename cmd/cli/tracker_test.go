@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -238,6 +239,162 @@ func TestUpdateAgentFromProgressFailed(t *testing.T) {
 	}
 	if tr.agents[0].success {
 		t.Error("expected no success on Failed")
+	}
+}
+
+func TestUpdateAgentFromProgressCancelledIsNotSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+
+	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
+	tr.addAgent(client.SSEEventData{Name: "delegate_task", Args: args})
+
+	result, _ := json.Marshal(map[string]any{"phase": "Cancelled", "name": "task-1"})
+	tr.updateAgentFromProgress(client.SSEEventData{Result: result})
+	if !tr.agents[0].done {
+		t.Error("expected done on Cancelled")
+	}
+	if tr.agents[0].success {
+		t.Error("expected no success on Cancelled")
+	}
+
+	// Stream completion must not later relabel the cancelled task as successful.
+	tr.completeAgents(client.SSEEventData{})
+	tr.stop()
+	if tr.agents[0].success {
+		t.Error("cancelled agent was reported as successful after stream completion")
+	}
+	// Non-TTY output must show the terminal outcome exactly once.
+	if out := buf.String(); strings.Count(out, "✗ worker") != 1 || strings.Contains(out, "✓") {
+		t.Errorf("non-TTY output = %q, want one failure line and no success line", out)
+	}
+}
+
+func TestTrackerAppliesWrappedToolResultPhases(t *testing.T) {
+	// Results use the shapes the chat API streams: check_task_progress and
+	// wait_for_task wrap their payload in the chat tool envelope, while
+	// wait_for_tasks returns a results list.
+	for _, test := range []struct {
+		name   string
+		tool   string
+		result string
+	}{
+		{name: "check_task_progress", tool: toolCheckTaskProgress, result: `{"success":true,"data":{"name":"task-1","namespace":"default","phase":"Cancelled"}}`},
+		{name: "wait_for_task", tool: toolWaitForTask, result: `{"success":true,"data":{"name":"task-1","phase":"Cancelled","message":"cancelled"}}`},
+		{name: "wait_for_tasks", tool: "wait_for_tasks", result: `{"completed":true,"results":[{"task":"task-1","phase":"Cancelled"},{"task":"task-2","phase":"Succeeded"}]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tr := newTracker(&buf, VerbosityDefault, false)
+			for _, name := range []string{"task-1", "task-2"} {
+				args, _ := json.Marshal(map[string]any{"agent": name, "name": name})
+				tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+			}
+			tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: test.tool, Result: json.RawMessage(test.result)}))
+			tr.completeAgents(client.SSEEventData{})
+			tr.stop()
+
+			if !tr.agents[0].done || tr.agents[0].success || tr.agents[0].status != "Cancelled" {
+				t.Fatalf("cancelled agent = done %v success %v status %q, want a failed Cancelled agent",
+					tr.agents[0].done, tr.agents[0].success, tr.agents[0].status)
+			}
+			if !tr.agents[1].done || !tr.agents[1].success {
+				t.Fatalf("other agent = done %v success %v, want successful", tr.agents[1].done, tr.agents[1].success)
+			}
+			if out := buf.String(); strings.Count(out, "✗ task-1") != 1 || strings.Count(out, "✓ task-2") != 1 || strings.Contains(out, "✓ task-1") {
+				t.Fatalf("non-TTY output = %q, want one failure line for task-1 and one success line for task-2", out)
+			}
+		})
+	}
+}
+
+func TestTrackerMatchesGeneratedTaskNames(t *testing.T) {
+	// delegate_task has no name argument; the server generates the child name
+	// and returns it, and later results must still reach the right agent.
+	for _, withIDs := range []bool{true, false} {
+		t.Run(fmt.Sprintf("tool-call-ids=%v", withIDs), func(t *testing.T) {
+			var buf bytes.Buffer
+			tr := newTracker(&buf, VerbosityDefault, false)
+			for i, agent := range []string{"alpha", "beta"} {
+				id := ""
+				if withIDs {
+					id = fmt.Sprintf("call-%d", i)
+				}
+				args, _ := json.Marshal(map[string]any{"agent": agent, "task": "work"})
+				tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{ID: id, Name: "delegate_task", Args: args}))
+				result := fmt.Sprintf(`{"taskName":"parent-child-%s","status":"created"}`, agent)
+				tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{ID: id, Name: "delegate_task", Result: json.RawMessage(result)}))
+			}
+			tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{
+				Name:   "wait_for_tasks",
+				Result: json.RawMessage(`{"completed":true,"results":[{"task":"parent-child-beta","phase":"Cancelled"},{"task":"parent-child-alpha","phase":"Succeeded"}]}`),
+			}))
+			tr.stop()
+
+			alpha, beta := tr.agents[0], tr.agents[1]
+			if alpha.taskName != "parent-child-alpha" || beta.taskName != "parent-child-beta" {
+				t.Fatalf("task names = %q, %q, want the generated names", alpha.taskName, beta.taskName)
+			}
+			if !alpha.done || !alpha.success || !beta.done || beta.success || beta.status != "Cancelled" {
+				t.Fatalf("alpha done %v success %v; beta done %v success %v status %q, want alpha succeeded and beta cancelled",
+					alpha.done, alpha.success, beta.done, beta.success, beta.status)
+			}
+			if out := buf.String(); strings.Count(out, "✗ beta") != 1 || strings.Count(out, "✓ alpha") != 1 || strings.Contains(out, "✓ beta") {
+				t.Fatalf("non-TTY output = %q, want alpha succeeded and beta failed exactly once", out)
+			}
+		})
+	}
+}
+
+func TestTrackerWaitResultsKeepUnfinishedAgentsPending(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+	for _, name := range []string{"task-1", "task-2"} {
+		args, _ := json.Marshal(map[string]any{"agent": name, "name": name})
+		tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+	}
+
+	// A timed-out wait reports a running phase; neither agent is finished.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Running","message":"Task is still running."}}`)}))
+	if tr.agents[0].done || tr.agents[1].done {
+		t.Fatal("a timed-out wait marked an agent finished")
+	}
+	// Waiting on task-1 alone must not finish task-2.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Succeeded"}}`)}))
+	if !tr.agents[0].done || !tr.agents[0].success || tr.agents[1].done {
+		t.Fatal("waiting on task-1 did not finish only task-1")
+	}
+	// task-2's later cancellation is still recorded.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolCheckTaskProgress,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-2","phase":"Cancelled"}}`)}))
+	tr.stop()
+	if !tr.agents[1].done || tr.agents[1].success {
+		t.Fatalf("task-2 = done %v success %v, want cancelled", tr.agents[1].done, tr.agents[1].success)
+	}
+	if out := buf.String(); strings.Count(out, "✓ task-1") != 1 || strings.Count(out, "✗ task-2") != 1 || strings.Contains(out, "✓ task-2") {
+		t.Fatalf("non-TTY output = %q, want task-1 succeeded and task-2 failed exactly once", out)
+	}
+}
+
+func TestTrackerFailedWaitResultFinishesNothing(t *testing.T) {
+	var buf bytes.Buffer
+	tr := newTracker(&buf, VerbosityDefault, false)
+	args, _ := json.Marshal(map[string]any{"agent": "worker", "name": "task-1"})
+	tr.handleEvent(makeSSEEvent("tool_call", client.SSEEventData{Name: "delegate_task", Args: args}))
+
+	// The payload a kind cluster returned for a wait_for_task with a rejected
+	// timeout argument.
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":false,"error":"invalid arguments: timeout must be a whole number, got a non-numeric string","errorType":"invalid_arguments","suggestion":"Resend the call with timeout as a whole number"}`)}))
+	if tr.agents[0].done {
+		t.Fatal("a failed wait_for_task call finished the agent")
+	}
+	tr.handleEvent(makeSSEEvent("tool_result", client.SSEEventData{Name: toolWaitForTask,
+		Result: json.RawMessage(`{"success":true,"data":{"name":"task-1","phase":"Cancelled"}}`)}))
+	if !tr.agents[0].done || tr.agents[0].success {
+		t.Fatalf("agent = done %v success %v, want cancelled", tr.agents[0].done, tr.agents[0].success)
 	}
 }
 

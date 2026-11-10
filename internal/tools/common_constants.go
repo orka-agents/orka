@@ -95,6 +95,7 @@ const (
 	jsonSchemaMinLengthField  = "minLength"
 	jsonSchemaPatternField    = "pattern"
 	nameField                 = "name"
+	temperatureField          = "temperature"
 	namespaceField            = "namespace"
 	taskNameField             = "task_name"
 	tokenKey                  = "token"

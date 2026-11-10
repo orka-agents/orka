@@ -397,9 +397,9 @@ func TestNewClientFromCmd_FallbackDefaultServer(t *testing.T) {
 	root.SetArgs([]string{"--token", "tok", "--namespace", "ns"})
 	root.RunE = func(cmd *cobra.Command, _ []string) error {
 		c := newClientFromCmd(cmd)
-		// Without kubeconfig or K8s cluster, server should fall back to default
+		// TestMain hides any ambient kubeconfig, so discovery finds no cluster.
 		if c.BaseURL != defaultServer {
-			t.Logf("BaseURL = %q (may not be default if kubeconfig exists)", c.BaseURL)
+			t.Errorf("BaseURL = %q, want the default server %q", c.BaseURL, defaultServer)
 		}
 		return nil
 	}

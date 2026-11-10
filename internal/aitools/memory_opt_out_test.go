@@ -18,6 +18,9 @@ func TestMemoryAutoEnableOptOutMatchesToolAuthorization(t *testing.T) {
 	if got := Resolve(task, nil); !slices.Equal(got, []string{"file_read"}) {
 		t.Fatalf("opt-out selected unexpected tools: %v", got)
 	}
+	if deprecated := DeprecatedMemoryToolNames(task, nil); len(deprecated) != 0 {
+		t.Fatalf("opt-out retained deprecation warnings for unselected tools: %v", deprecated)
+	}
 	for _, name := range MemoryToolNames() {
 		if IsImplicitTool(task, nil, name) {
 			t.Fatalf("opted-out tool %q retained implicit authorization", name)

@@ -40,7 +40,7 @@ func (d *ACPDispatcher) runtimePoolRetainedCleanupClient(
 	if task == nil || task.Status.Execution == nil || pool == nil || pool.Status.ActiveInstance == nil || d.APIReader == nil || d.Store == nil || pool.Spec.ExecutionWorkspace != nil {
 		return fail(errors.New("retained native runtime cleanup authority is incomplete"))
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	e := task.Status.Execution.DeepCopy()
 	active := pool.Status.ActiveInstance.DeepCopy()
 	if binding == nil || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool || binding.Task.UID != taskUID ||
@@ -83,7 +83,7 @@ func (d *ACPDispatcher) runtimePoolRetainedCleanupClient(
 		if err := d.APIReader.Get(checkCtx, client.ObjectKeyFromObject(expectedTask), latest); err != nil {
 			return err
 		}
-		currentBinding := executionBinding(latest, corev1alpha1.AgentRuntimeContractHarnessV2)
+		currentBinding := executionBinding(latest)
 		if latest.UID != expectedTask.UID || acpTaskControlUID(latest) != taskUID || currentBinding == nil || currentBinding.BindingDigest != binding.BindingDigest || latest.Status.Execution == nil ||
 			latest.Status.Execution.Attempt != e.Attempt || latest.Status.Execution.PromptID != e.PromptID || latest.Status.Execution.RequestDigest != e.RequestDigest ||
 			sessionRuntimeCleanupIdentityForExecution(latest.Status.Execution) != sessionRuntimeCleanupIdentityForExecution(e) {

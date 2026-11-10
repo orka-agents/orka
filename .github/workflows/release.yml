@@ -156,8 +156,6 @@ jobs:
       contents: read
       pull-requests: read
     uses: ./.github/workflows/lint.yml
-    with:
-      full_check: true
 
   tests:
     needs: validate-release
@@ -267,8 +265,7 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # Application releases publish the default harness-v2 stack and
-      # the digest-pinned harness-v1 compatibility wrapper.
+      # Application releases publish the harness-v2 stack and native workers.
       fail-fast: false
       matrix:
         include:
@@ -283,10 +280,6 @@ jobs:
           - image: general-worker
             image_suffix: "/general-worker"
             dockerfile: workers/general/Dockerfile
-            context: .
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            dockerfile: workers/harness/Dockerfile
             context: .
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
@@ -408,14 +401,6 @@ jobs:
             image_suffix: "/general-worker"
             platform: linux/arm64
             platform_slug: linux-arm64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            platform: linux/amd64
-            platform_slug: linux-amd64
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
-            platform: linux/arm64
-            platform_slug: linux-arm64
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
             platform: linux/amd64
@@ -513,8 +498,6 @@ jobs:
             image_suffix: "/ai-worker"
           - image: general-worker
             image_suffix: "/general-worker"
-          - image: agent-harness-wrapper
-            image_suffix: "/agent-harness-wrapper"
           - image: acp-codex-runtime
             image_suffix: "/acp-codex-runtime"
           - image: acp-claude-runtime
@@ -747,3 +730,47 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: go run ./cmd/build/release publish "${RUNNER_TEMP}/release-candidate"
+
+  homebrew-tap:
+    name: Update the Homebrew tap
+    needs: publish
+    if: ${{ !contains(inputs.release_version, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      # The tap verifies the signed CLI checksums itself, so the Orka Homebrew
+      # Tap app is installed only on orka-agents/homebrew-tap with Contents:
+      # write, enough to dispatch. Without its credentials, the tap's scheduled sync
+      # picks the release up within six hours.
+      - name: Check for the tap app credentials
+        id: app
+        env:
+          HAS_APP: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID != '' && secrets.HOMEBREW_TAP_APP_PRIVATE_KEY != '' }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          if [[ "${HAS_APP}" != true ]]; then
+            echo "::notice::HOMEBREW_TAP_APP_CLIENT_ID or HOMEBREW_TAP_APP_PRIVATE_KEY is not set; the tap's scheduled sync will publish ${RELEASE_VERSION}."
+            exit 0
+          fi
+          echo "enabled=true" >>"${GITHUB_OUTPUT}"
+
+      - name: Mint a tap token
+        id: token
+        if: steps.app.outputs.enabled
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.HOMEBREW_TAP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMEBREW_TAP_APP_PRIVATE_KEY }}
+          owner: orka-agents
+          repositories: homebrew-tap
+          permission-contents: write
+
+      - name: Dispatch the formula update
+        if: steps.app.outputs.enabled
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          gh api repos/orka-agents/homebrew-tap/dispatches \
+            -f event_type=orka-release -f "client_payload[version]=${RELEASE_VERSION}"

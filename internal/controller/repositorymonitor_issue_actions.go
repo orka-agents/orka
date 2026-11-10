@@ -196,6 +196,17 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 	if command.Intent == repositoryMonitorCommandIntentImplement && repositoryMonitorRequirePlan(monitor) && item.WorkflowPhase != repositoryMonitorIssuePhasePlanned {
 		actionKind, phase, agent = repositoryMonitorIssueActionPlan, repositoryMonitorIssuePhasePlanQueued, monitor.Spec.Agents.Planner
 	}
+	// A halted command (cancelled, or coalesced into another action) must not
+	// block or emit events for the shared issue, which the action that still
+	// owns the work is driving.
+	if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, actionKind); err != nil || halted {
+		return 0, err
+	}
+	if actionKind != command.Intent {
+		if halted, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, command.ID, command.Intent); err != nil || halted {
+			return 0, err
+		}
+	}
 	if !repositoryMonitorIssuePhaseTransitionAllowed(item.WorkflowPhase, phase) {
 		reason := fmt.Sprintf("phase_transition_not_allowed:%s_to_%s", item.WorkflowPhase, phase)
 		if err := r.recordRepositoryMonitorWorkActionState(ctx, monitor, run, command, repositoryMonitorIssueKind, item.Number, "", item.SnapshotDigest, actionKind, repositoryMonitorWorkActionStatusBlocked, item.WorkflowPhase, "", reason); err != nil {
@@ -216,14 +227,6 @@ func (r *RepositoryMonitorReconciler) processIssueCommandRun(ctx context.Context
 			return 0, err
 		}
 		return 0, r.createMonitorEvent(ctx, monitor, run.ID, repositoryMonitorIssueKind, item.Number, item.SnapshotDigest, "issue_action_blocked", fmt.Sprintf("Issue #%d blocked: %s is disabled", item.Number, actionKind), map[string]any{repositoryMonitorEventActionKindKey: actionKind})
-	}
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, actionKind); err != nil || cancelled {
-		return 0, err
-	}
-	if actionKind != command.Intent {
-		if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, command.ID, command.Intent); err != nil || cancelled {
-			return 0, err
-		}
 	}
 	if actionKind == repositoryMonitorIssueActionImplementation {
 		planID := ""
@@ -413,25 +416,6 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorCommandIntentForID(ctx co
 		return command.Intent
 	}
 	return fallback
-}
-
-func repositoryMonitorImplementationActionAlreadyStarted(action *store.WorkAction) bool {
-	if action == nil {
-		return false
-	}
-	switch strings.TrimSpace(action.Phase) {
-	case repositoryMonitorIssuePhaseImplementationQueued,
-		repositoryMonitorIssuePhaseImplementing,
-		repositoryMonitorIssuePhasePatchReady,
-		repositoryMonitorIssuePhaseMutationQueued,
-		repositoryMonitorIssuePhaseMutatingToPR,
-		repositoryMonitorIssuePhasePROpened,
-		repositoryMonitorIssuePhaseComplete,
-		repositoryMonitorIssuePhaseBlocked:
-		return true
-	default:
-		return false
-	}
 }
 
 func clearRepositoryMonitorRuntimeAuthMetadata(action *store.WorkAction, clearTaskName bool) {
@@ -709,7 +693,7 @@ func (r *RepositoryMonitorReconciler) ingestCompletedRepositoryMonitorIssueTasks
 			}
 			return ingested, err
 		}
-		if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+		if !task.Status.Phase.IsTerminal() {
 			continue
 		}
 		handled, err := r.ingestCompletedRepositoryMonitorIssueTask(ctx, monitor, &item, &task)
@@ -822,7 +806,7 @@ func (r *RepositoryMonitorReconciler) resumeRepositoryMonitorPausedIssue(ctx con
 		item.LastVerdict = repositoryMonitorReviewVerdictFailed
 		return nil
 	}
-	if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+	if !task.Status.Phase.IsTerminal() {
 		return nil
 	}
 	// Apply the retained result before a new command can restart its workflow.
@@ -994,7 +978,7 @@ func (r *RepositoryMonitorReconciler) cleanupRepositoryMonitorOrphanedRuntimeAut
 		var task corev1alpha1.Task
 		err := r.Get(ctx, types.NamespacedName{Namespace: monitor.Namespace, Name: taskName}, &task)
 		if err == nil {
-			if !repositoryMonitorReviewTaskTerminal(task.Status.Phase) {
+			if !task.Status.Phase.IsTerminal() {
 				continue
 			}
 			if _, awaiting := awaitingTasks[taskName]; awaiting {
@@ -1146,16 +1130,6 @@ func repositoryMonitorWorkspaceValidationGuidance(task *corev1alpha1.Task) strin
 	}
 }
 
-func anySliceField(body map[string]any, key string) []any {
-	if body == nil {
-		return nil
-	}
-	if values, ok := body[key].([]any); ok {
-		return values
-	}
-	return nil
-}
-
 func repositoryMonitorIssueActionRecordID(task *corev1alpha1.Task) string {
 	if task == nil {
 		return "act-unknown"
@@ -1251,7 +1225,7 @@ func repositoryMonitorImplementationResultBody(envelope map[string]any, sr *comm
 
 //nolint:gocyclo // Result ingestion intentionally keeps each durable workflow transition explicit.
 func (r *RepositoryMonitorReconciler) applyIssueActionRecord(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, item *store.MonitorItem, record *store.ActionRecord, task *corev1alpha1.Task) (bool, error) {
-	if cancelled, err := r.repositoryMonitorWorkActionCancelled(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
+	if cancelled, err := r.repositoryMonitorWorkActionHalted(ctx, monitor, record.CommandEventID, record.ActionKind); err != nil || cancelled {
 		return false, err
 	}
 	if item.LastActionID == record.ID && !repositoryMonitorIssuePhaseAwaitingTask(item.WorkflowPhase) {
@@ -1394,7 +1368,7 @@ func (r *RepositoryMonitorReconciler) queueRepositoryMonitorLinkedPullRequest(ct
 	id := "issue-pr-" + repositoryMonitorShortHash(fmt.Sprintf("%s|%d|%d", monitor.UID, monitor.Generation, number))
 	err := r.Store.CreateMonitorRun(ctx, &store.MonitorRun{
 		ID: id, MonitorNamespace: monitor.Namespace, MonitorName: monitor.Name,
-		Trigger: "workflow", TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
+		Trigger: repositoryMonitorRunTriggerWorkflow, TargetKind: repositoryMonitorPullRequestKind, TargetNumber: number,
 		Phase: repositoryMonitorRunPhaseQueued, StartedAt: time.Now(),
 	})
 	if errors.Is(err, store.ErrConflict) {
@@ -1660,7 +1634,12 @@ func (r *RepositoryMonitorReconciler) finishIssueImplementation(ctx context.Cont
 			"maxChangedFiles":   task.Spec.Workspace.MaxChangedFiles,
 			"allowedPaths":      task.Spec.Workspace.AllowedPaths,
 		})
-		if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, patchArtifact, "application/json", deliverySummary); err != nil {
+		if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: patchArtifact, ContentType: artifactContentTypeJSON, Data: deliverySummary}); err != nil {
+			// A store that has not accepted the write yet is retried, not
+			// recorded as a blocked implementation.
+			if store.IsTemporaryStorageError(err) {
+				return "", "", "", err
+			}
 			return repositoryMonitorIssuePhaseBlocked, "", "patch_summary_artifact_save_failed", nil
 		}
 		copyRecord := *record
@@ -2208,7 +2187,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		return repositoryMonitorPatchSensitiveContentReason, nil
 	}
 	diffName := repositoryMonitorIssuePatchDiffArtifact(item.Number, record.ID)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, diffName, "text/x-diff", []byte(sr.Diff)); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: diffName, ContentType: artifactContentTypeDiff, Data: []byte(sr.Diff)}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_diff_artifact_save_failed", nil
 	}
 	planID := ""
@@ -2232,7 +2214,10 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		"changedFiles":     sr.Files,
 	}
 	data, _ := json.Marshal(summary)
-	if err := r.ArtifactStore.SaveArtifact(ctx, task.Namespace, task.Name, repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), "application/json", data); err != nil {
+	if err := r.ArtifactStore.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID)}, Filename: repositoryMonitorIssuePatchSummaryArtifact(item.Number, record.ID), ContentType: artifactContentTypeJSON, Data: data}); err != nil {
+		if store.IsTemporaryStorageError(err) {
+			return "", err
+		}
 		return "patch_summary_artifact_save_failed", nil
 	}
 	return "", nil

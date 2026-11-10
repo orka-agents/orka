@@ -9,6 +9,19 @@ This page covers how to run Orka: Helm values, controller flags, environment var
 authentication settings, and metrics. The custom resources you create — Tasks, Agents,
 Providers, Tools, and the rest — are in the [Resource reference](resources.md).
 
+## Memory tools: warning release
+
+Every controller-launched native `type: ai` Task receives `recall_memory`, `remember`,
+`propose_memory`, and `search_transcript` during this warning release, regardless of
+selected tools or `coordination.enabled`. They cannot yet be disabled per Agent, including
+with `enabled: false` or `orka.ai/disable-coordination-tool-injection: "true"`.
+
+Calls relying on compatibility access emit deprecation warnings. The next release will
+require explicit Agent/Task selection or eligible coordination. See
+[migration and release notes](../operations/upgrading.md#memory-tool-opt-in).
+The worker exposes memory tools only when `ORKA_CONTROLLER_URL`, `ORKA_TASK_NAMESPACE`,
+and `ORKA_TASK_NAME` are all nonempty; registration alone does not enable them.
+
 ## Helm chart
 
 Key configuration values for the Helm chart. Published charts use release image
@@ -21,7 +34,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.image.repository` | `ghcr.io/orka-agents/orka` | Controller image |
 | `controller.image.tag` | release version | Controller image tag. |
 | `controller.image.digest` | `""` | Optional SHA256 digest; takes precedence over `tag`. |
-| `controller.mode` | `harness-v2` | Static agent execution mode: `harness-v1` or `harness-v2`. Select v1 explicitly for a compatibility release; a release never serves both or changes mode in place. |
+| `controller.mode` | `harness-v2` | Fixed agent execution protocol identity. Only `harness-v2` is supported. |
 | `controller.watchNamespace` | Helm release namespace | Must match the release namespace, labeled `orka.ai/controller-mode` with the matching mode. |
 | `controller.agentExecutionSnapshot.existingSecret` | `""` | Your own snapshot encryption Secret. Empty renders an empty `<release>-agent-execution-snapshot` that the controller fills on first start. Immutable after install. See [Snapshot encryption key](#snapshot-encryption-key). |
 | `controller.agentExecutionSnapshot.key` | `key` | Item inside that Secret holding 32 raw bytes or their base64 encoding. Immutable after install. |
@@ -33,6 +46,7 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.logLevel` | `info` | Log level (debug/info/warn/error) |
 | `controller.dashboard.enabled` | `false` | Serve the [web dashboard](../guides/ui.md) on the API port. |
 | `controller.connectors.enabled` / `controller.connectors.callbackBaseUrl` | `false` / `""` | Enable per-person [connectors](../guides/connectors.md), and the public https origin the OAuth provider redirects back to. |
+| `controller.agentHosts.enabled` / `.namespace` / `.agentImage` | `false` / `orka-agent-hosts` / `""` | Run [agent hosts](../operations/agent-hosts.md) in a chart-created namespace with the restricted Pod Security profile. An empty `agentImage` uses the controller image, which then must set `controller.image.digest`. |
 | `github.webhook.secretName` / `github.webhook.secretKey` | `""` / `secret` | Secret holding the shared secret for signed GitHub webhooks at `/webhooks/github`, used by [label triggers and pull request events](../guides/issue-to-pr-automation.md#start-from-a-github-label). |
 | `controller.acpRuntime.namespace` | `orka-runtimes` | Namespace for controller-owned RuntimePool workloads. |
 | `controller.acpRuntime.providerProxyNamespace` | `""` | Compatibility guard for the chart-managed provider proxy. Leave empty or set exactly to the Helm release namespace; any other nonempty value is rejected when the proxy is enabled. |
@@ -40,16 +54,15 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `controller.acpRuntime.claudeImage` | release image tag | Claude ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.copilotImage` | release image tag | GitHub Copilot ACP image tag or digest; an empty string disables it. |
 | `controller.acpRuntime.opencodeImage` | release image tag | OpenCode ACP image tag or digest; an empty string disables it. |
+| `controller.acpRuntime.pool.maxRunningPrompts` | `4` | Concurrent prompts in each new built-in runtime RuntimePool, such as repository scan review slices for one Agent. Cannot exceed `maxResidentSessions`. Existing pools keep their capacity. |
+| `controller.acpRuntime.pool.maxResidentSessions` | `10` | Resident RuntimeSessions in each new built-in runtime RuntimePool (1-1000). |
+| `controller.acpRuntime.dispatch.maxConcurrentTasks` | `4` | Agent Tasks the controller runs through ACP runtimes at once, across all RuntimePools (1-1000). Raise it with `pool.maxRunningPrompts`: each running prompt holds one place. A coordinator waiting on ACP child Tasks keeps its place, so keep this above the number of coordinators that can wait at once. |
 | `controller.acpRuntime.upgradeDrain.*` | enabled | Two-phase planned-upgrade admission closure and RuntimePool drain settings. |
 | `controller.acpRuntime.toolboxes.enabled` | `false` | Let built-in Agents declare `runtime.toolboxes`, read-only tool images bound into runtime Pods. See [Toolboxes](../guides/toolboxes.md). |
 | `controller.acpRuntime.toolboxes.allowedRegistries` | `[]` | Registry hosts or host/path prefixes toolbox images may come from. Empty allows nothing. |
 | `controller.acpRuntime.toolboxes.imagePullSecrets` | `[]` | Secret names in the runtime namespace added to runtime Pod `imagePullSecrets` when toolboxes are bound. Never mounted into containers. |
 | `controller.acpRuntime.toolboxes.nodeSelector` | `{}` | Node selector merged into runtime Pods that bind toolboxes. |
 | `controller.acpRuntime.toolboxes.mountMethod` | `copy` | `copy` (init-container copier, every Kubernetes version) or `imageVolume` (Kubernetes 1.36+ with containerd 2.2+ or CRI-O 1.33+). |
-| `harnessV1.image.digest` | `""` | Required immutable wrapper image digest for a `harness-v1` release. |
-| `harnessV1.auth.existingSecret` | `""` | Dedicated v1 wrapper bearer Secret, separate from its TLS Secret. Never share it with v2. |
-| `harnessV1.tls.existingSecret` | `""` | Dedicated v1 wrapper Secret containing `tls.crt`, `tls.key`, and `ca.crt`. |
-| `harnessV1.tls.rolloutNonce` | `""` | Non-secret revision marker for certificate renewal without changing the TLS Secret name. |
 | `providerProxy.enabled` | `false` | Enable the authenticated proxy when connecting built-in coding agents to your model gateway. Installation and AI-worker tasks do not require it. |
 | `providerProxy.upstreamBaseURL` | `""` | Your gateway's HTTP(S) endpoint. Required when the proxy is enabled. Credentials, queries, and fragments are forbidden in the URL. |
 | `providerProxy.egress` | `[]` | NetworkPolicy egress rules allowing the proxy to reach your gateway. Leave empty when `upstreamBaseURL` names an in-cluster Service; the chart then derives the rule from that Service at install time. Required for external gateways, named target ports, or offline renders. DNS access is always added. |
@@ -76,6 +89,8 @@ tags; development charts use the rolling `0.0.0-dev` tag. See
 | `workers.ai.image.repository` | `ghcr.io/orka-agents/orka/ai-worker` | AI worker image |
 | `workers.general.image.repository` | `ghcr.io/orka-agents/orka/general-worker` | General worker image |
 | `service.type` | `ClusterIP` | Service type |
+| `storage.bindings.state` / `storage.bindings.artifacts` | `sqlite` / `sqlite` | Backend for each storage contract: `sqlite` or a name in `storage.adapters`. See [Storage bindings](#storage-bindings). |
+| `storage.adapters` | `{}` | Storage adapters in the release namespace, keyed by name. |
 | `client.create` | `true` | Create client ServiceAccount for API access |
 | `client.name` | `orka-client` | Client ServiceAccount name |
 | `client.namespace` | Helm release namespace | Client ServiceAccount namespace; must match `controller.watchNamespace`. |
@@ -117,16 +132,22 @@ to disable that provider.
 The controller encrypts agent execution snapshots at rest with an AES-256 key
 mounted from a Secret. By default the chart renders an empty Secret named
 `<release>-agent-execution-snapshot` and the controller mints 32 random bytes
-into it on its first start, then reuses them on every later start. The chart
-never renders key material, so Helm release history and dry-run output contain
-no secrets, and Helm leaves the controller-written data alone on upgrade. The
-Secret is kept on `helm uninstall` so a restored data volume can still be
-decrypted. Back it up with the data volume.
+into it when it creates a new SQLite dataset, then reuses them on every later
+start. The chart never renders key material, so Helm release history and
+dry-run output contain no secrets, and Helm leaves the controller-written data
+alone on upgrade. The Secret is kept on `helm uninstall` so a restored data
+volume can still be decrypted. Back it up with the data volume.
 
-If the controller finds its SQLite store already present but the Secret empty,
-the key was lost. It refuses to start rather than mint a new key that could not
-read the existing records. Restore the Secret from backup, or delete the data
-volume to start over.
+The controller decides whether it may mint a key from the dataset history recorded
+inside the SQLite database, not from whether the database file exists. It mints a
+key only for a new dataset that has never completed key bootstrap and holds no
+records. A dataset that completed bootstrap, or was adopted from an older layout
+during an upgrade, needs its existing key even if every record has since been
+deleted. If the Secret is empty for such a dataset, the key was lost, and the
+controller refuses to start rather than mint a new key that could not read the
+existing records. Restore the Secret from backup, or delete the data volume to
+start over. See
+[Dataset identity and key bootstrap](../operations/upgrading.md#dataset-identity-and-key-bootstrap).
 
 To bring your own key, create the Secret before installing and set
 `controller.agentExecutionSnapshot.existingSecret`. The item must hold exactly
@@ -223,21 +244,6 @@ time.
 
 The Publisher, SCM proxy, and controller clients load these credentials at process startup. Update the Secret and bump its corresponding nonce in the same Helm upgrade: use `publisher.auth.rolloutNonce` for the publisher-auth Secret, and `scmEgressProxy.auth.rolloutNonce` for the SCM proxy-auth Secret. The publisher nonce is applied only to controller and Publisher Pod templates; the SCM nonce is applied only to Publisher and SCM proxy Pod templates. Nonces are safe revision strings, not Secret values. Coordinated rotation can briefly fail closed while Pods roll but prevents stale or split credential generations from persisting.
 
-### Harness v1 certificate rotation
-
-The harness-v1 wrapper keeps bearer and TLS credentials in separate Secrets.
-`harnessV1.auth.existingSecret` contains only the bearer token and is immutable
-while the wrapper Deployment exists. `harnessV1.tls.existingSecret` contains
-`tls.crt`, `tls.key`, and `ca.crt`.
-
-Changing the TLS Secret name triggers a drained wrapper restart. For certificate
-renewal under the same name, update the TLS Secret and bump
-`harnessV1.tls.rolloutNonce` in the same Helm upgrade. The hook drains the live
-wrapper before restarting the wrapper and controller.
-
-Keep the updated `ca.crt` able to verify the certificate served during the drain.
-Alternatively, use a new TLS Secret name so the hook can mount the prior CA.
-
 ### Canonical Kustomize overlay
 
 Direct Kustomize deployments must use:
@@ -290,13 +296,50 @@ agent. Never set it in a cluster manifest.
 
 When `ORKA_PUBLISHER_PUBLISH_TIMEOUT` is raised above the default on the Publisher, set the same value on the controller Deployment as well. The controller bounds each publisher-backed external-effect call and sizes the effect's ledger lease from this timeout plus a settlement margin; without the controller-side value, publisher operations are clamped to the default four-minute call bound. Brokered custom-Tool calls always keep the fixed four-minute clamp that their Tool descriptors were admitted under.
 
+### Storage bindings
+
+Orka stores application data under two contracts: `state` (Sessions, results,
+gateway and control records) and `artifacts` (artifact bytes and metadata).
+`storage.bindings` names the backend for each. With both on `sqlite` (the
+default) the controller keeps `--store-backend=sqlite` and `--store-path`.
+When a contract names an adapter, the chart renders the
+`<release>-storage` ConfigMap, passes it with `--storage-config`, and restarts
+the controller when it changes:
+
+```yaml
+storage:
+  bindings:
+    state: postgres
+    artifacts: postgres
+  adapters:
+    postgres:
+      serviceRef: {name: orka-storage-postgres, port: 8443}   # or url: https://...
+      tls:
+        serverName: orka-storage-postgres.orka-system.svc     # optional
+        caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+      clientAuth:
+        bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+```
+
+Each adapter sets exactly one of `serviceRef` and an `https://` `url`, and
+must be bound to at least one contract. Services and Secrets are in the
+release namespace. The controller reads the Secrets directly at startup; they
+are not mounted. A bearer token needs at least 32 visible ASCII characters.
+
+:::caution[SQLite only in this release]
+The controller cannot reach a storage adapter yet. With a contract bound to an
+adapter it reports `AdapterTransportUnavailable` and does not start, and it
+never falls back to SQLite. Keep both bindings on `sqlite`. The store volume is
+required either way.
+:::
+
 ### Helm CRD lifecycle
 
 CRD behavior is not controlled through chart values. A fresh install creates all CRDs in the chart unless `--skip-crds` is used. Because CRDs are cluster-scoped, designate one lifecycle owner and use `--skip-crds` for other Orka releases. Helm does not update CRDs during `helm upgrade`; apply the CRDs from the exact target chart before upgrading the controller. Helm retains CRDs and Orka custom resources on uninstall. See the [Helm CRD lifecycle guide](https://github.com/orka-agents/orka/blob/main/charts/orka/README.md).
 
-Harness v1 and v2 use separate releases, endpoints, watched namespaces, RBAC,
-Leases, stores, and data planes. They do not migrate Tasks or continue Sessions
-across modes. See [Operating harness v1 and v2 on one cluster](../operations/harness-modes.md).
+Each installation owns a separate watched namespace, runtime namespace, endpoint,
+RBAC, Lease, database, and credentials. See
+[installation ownership](../operations/harness-modes.md).
 
 Context-token flags can also be configured through Helm under
 `controller.contextToken`. For example:
@@ -373,7 +416,7 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--gateway-claim-lease` | `1m` | Event and delivery claim lease |
 | `--gateway-poll-interval` | `500ms` | Dispatcher and delivery poll interval |
 | `--gateway-batch-size` | `25` | Maximum gateway records processed per iteration |
-| `--controller-mode` / `ORKA_CONTROLLER_MODE` | required | Static controller mode: `harness-v1` or `harness-v2`. `dual`, `auto`, and drain modes are rejected. |
+| `--controller-mode` / `ORKA_CONTROLLER_MODE` | `harness-v2` | Fixed `harness-v2` protocol identity. Other values are rejected. |
 | `--watch-namespace` | required | One non-empty watched namespace. Its `orka.ai/controller-mode` label must match; the controller adds it when absent. |
 | `--claim-namespace-mode` | `true` | Label an unlabeled watched namespace with the controller's mode on first start. Set `false` to require an operator-applied label. |
 | `--enforce-namespace-isolation` | `false` | Restrict users to their ServiceAccount's namespace |
@@ -440,6 +483,9 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--task-provenance-admission-trusted-service-accounts` | `ORKA_TASK_PROVENANCE_ADMISSION_TRUSTED_SERVICE_ACCOUNTS` env or configured AI/vendor worker ServiceAccounts | Comma-separated ServiceAccount names trusted in the target Task namespace to set Orka-managed Task provenance fields for child Task creation. Explicit values override the worker ServiceAccount defaults. |
 | `--ai-worker-image` | `ghcr.io/orka-agents/orka/ai-worker:latest` | Native AI worker container image |
 | `--acp-runtime-namespace` / `ORKA_ACP_RUNTIME_NAMESPACE` | `orka-runtimes` | Namespace for managed runtime Deployments, Services, Secrets, and policies. |
+| `--acp-runtime-pool-max-running-prompts` | `4` | Concurrent prompts in each new built-in runtime RuntimePool; cannot exceed `--acp-runtime-pool-max-resident-sessions`. |
+| `--acp-runtime-pool-max-resident-sessions` | `10` | Resident RuntimeSessions in each new built-in runtime RuntimePool (1-1000). |
+| `--acp-dispatch-max-concurrent-tasks` | `4` | Agent Tasks the controller runs through ACP runtimes at once, across all RuntimePools (1-1000). Each running prompt holds one place, so pool capacity above this value is not used. A coordinator Task waiting on ACP child Tasks keeps its place, so keep this above the number of coordinators that can wait at once. |
 | `--acp-provider-proxy-namespace` / `ORKA_ACP_PROVIDER_PROXY_NAMESPACE` | `""` | Approved provider-proxy namespace selector. The Helm chart uses its release namespace when the proxy is enabled. |
 | `--acp-provider-proxy-base-url` / `ORKA_ACP_PROVIDER_PROXY_BASE_URL` | unset | Authenticated provider-proxy URL injected into built-in RuntimePools. |
 | `--acp-provider-proxy-pod-labels` / `ORKA_ACP_PROVIDER_PROXY_POD_LABELS` | `orka.ai/network-role=provider-auth-proxy` | Exact Pod labels selected by RuntimePool egress policy. |
@@ -449,8 +495,10 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--acp-copilot-runtime-image` / `ORKA_ACP_COPILOT_RUNTIME_IMAGE` | unset | GitHub Copilot runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--acp-opencode-runtime-image` / `ORKA_ACP_OPENCODE_RUNTIME_IMAGE` | unset | OpenCode runtime image with an explicit tag or SHA256 digest. Tags are resolved at startup. |
 | `--general-worker-image` | `ghcr.io/orka-agents/orka/general-worker:latest` | General worker container image |
-| `--store-backend` | `sqlite` | Payload/read-model backend. ACP control authority remains Kubernetes CRDs and Leases. |
-| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file. |
+| `--session-loader-image` | Digest-pinned BusyBox 1.37 multi-platform index | Session transcript fetcher image. Requires a SHA256 digest and BusyBox-compatible `sh`, `cat`, `wget`, `rm`, `mv`, and `sleep`; tag-only references fail startup. Helm: `workers.sessionLoader.image.repository` and `.digest`. No registry resolution is performed. |
+| `--store-backend` | `sqlite` | Payload/read-model backend when `--storage-config` is not set. Only `sqlite` is accepted, and it cannot be combined with `--storage-config`. ACP control authority remains Kubernetes CRDs and Leases. |
+| `--store-path` | `/data/orka.db` | Path to the SQLite transcript/outbox/artifact database file, used by every storage contract bound to `sqlite`. |
+| `--storage-config` | `""` | Storage configuration file binding each storage contract to `sqlite` or a storage adapter. Empty binds both contracts to SQLite at `--store-path`. See [Storage bindings](#storage-bindings). |
 | `--ai-worker-service-account-name` | `orka-ai-worker` | ServiceAccount name for AI worker Jobs and dynamically ensured worker RBAC |
 | `--vendor-worker-service-account-name` | `orka-vendor-worker` | ServiceAccount name for vendor/agent worker Jobs and dynamically ensured worker RBAC |
 | `--container-worker-service-account-name` | `orka-container-worker` | ServiceAccount name for container worker Jobs and dynamically ensured worker RBAC |
@@ -470,6 +518,18 @@ See [charts/orka/values.yaml](https://github.com/orka-agents/orka/blob/main/char
 | `--metrics-secure` | `true` | Serve metrics via HTTPS |
 | `--enable-http2` | `false` | Enable HTTP/2 for metrics and webhook servers |
 | `--enable-telemetry` / `--enable-tracing` | `false` | Enable OpenTelemetry traces and metrics (requires worker-reachable OTLP endpoint for worker telemetry) |
+
+### Agent hosts {#agent-hosts}
+
+Long-lived, single-user agent hosts on Orka-owned Pods. Off by default. See
+[Agent hosts](../operations/agent-hosts.md).
+
+| Flag | Environment variable | Default | Purpose |
+| --- | --- | --- | --- |
+| `--enable-agent-hosts` | `ORKA_ENABLE_AGENT_HOSTS` | `false` | Serves `AgentHostTemplate` and `AgentHost`. Helm: `controller.agentHosts.enabled`. |
+| `--agent-host-namespace` | `ORKA_AGENT_HOST_NAMESPACE` | `orka-agent-hosts` | Namespace for host Pods, volumes, NetworkPolicies and Secrets. Must differ from `--watch-namespace`. Helm: `controller.agentHosts.namespace`. |
+| `--agent-host-agent-image` | `ORKA_AGENT_HOST_AGENT_IMAGE` | — | Digest-pinned image with the `orka-host-agent` sidecar, normally the controller image. Required with `--enable-agent-hosts`. Helm: `controller.agentHosts.agentImage`. |
+| `--agent-host-controller-pod-labels` | `ORKA_AGENT_HOST_CONTROLLER_POD_LABELS` | `orka.ai/network-role=controller` | Labels of the controller Pods that may read host status through each host's NetworkPolicy. The default matches the shipped controller Pods. |
 
 ### Workspace providers (`workspace.orka.ai/v1alpha1`) {#workspace-providers}
 
@@ -714,7 +774,6 @@ Before upgrading from a controller that does not record `Task.status.jobUID`, pa
 
 The new authorization checks require the controller-recorded Job UID. They reject workers whose Tasks have only `status.jobName`, including otherwise valid Pods from the previous controller. Orka does not backfill UIDs by looking up Job names: namespace Job creators can replace those Jobs. Do not patch missing UIDs from a name lookup; finish the attempt before upgrading or explicitly submit a new Task after the upgrade.
 
-Built-in harness v1 artifact uploads also require the wrapper's Kubernetes workload identity. Configure the bound wrapper endpoint as a Kubernetes Service in the auth Secret's namespace. The uploading Pod must belong to a live ReplicaSet and Deployment selected by that Service. A worker Pod with a copy of the wrapper bearer does not receive artifact access.
 
 ## Prometheus metrics
 
@@ -746,6 +805,10 @@ Scrape configuration (for example a Prometheus Operator ServiceMonitor) is not s
 | `orka_acp_runtime_pool_queued_tasks` | Gauge | `namespace`, `runtime_pool` | Durable unsatisfied Task demand assigned to the pool |
 | `orka_acp_runtime_pool_admission_state` | Gauge | `namespace`, `runtime_pool`, `state` | One-hot authoritative admission state (`unknown`, `closed`, `accepting`, `draining`, or `ambiguous`) |
 | `orka_acp_runtime_pool_scale_to_zero_total` | Counter | `namespace`, `runtime_pool` | Completed RuntimePool scale-to-zero transitions |
+| `orka_repository_monitor_reviews_total` | Counter | `mode`, `verdict` | Repository monitor pull request review records by review mode (`full`, `incremental`, `same_head`) and recorded verdict |
+| `orka_repository_monitor_review_findings_total` | Counter | `priority`, `outcome` | Review findings by priority (`P0`–`P3`) and outcome: `reported` when first recorded, `fixed` when a later review resolves one |
+| `orka_repository_monitor_review_rounds_to_pass` | Histogram | — | Pull request heads reviewed up to and including each pull request's first passed review; see [Repository monitors](../guides/repository-monitors.md#review-metrics) |
+| `orka_approval_decision_duration_seconds` | Histogram | `outcome`, `path` | Seconds from approval request to committed decision; see [Observability](../guides/observability.md#approval-decision-duration) |
 
 All context-token metric labels use low-cardinality values only. See [Transaction tokens](../concepts/transaction-tokens.md) for the authentication they measure.
 

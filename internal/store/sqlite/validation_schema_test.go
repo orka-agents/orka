@@ -82,6 +82,61 @@ func TestValidationSchemaRejectsDamagedStateWithoutRewriting(t *testing.T) {
 	}
 }
 
+func TestValidationSchemaVersionedUpgradePreservesOptionalState(t *testing.T) {
+	path, db := schemaVersion1StoreDB(t, datasetOriginNew, true)
+	storage := NewStore(db, path)
+	require.NoError(t, storage.InitializeKubernetesValidationStore(t.Context()))
+	schema, err := readSchema(db)
+	require.NoError(t, err)
+	_, optional, err := splitOptionalValidationSchema(schema)
+	require.NoError(t, err)
+	identity, err := readDataset(db)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	upgraded, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = upgraded.close() })
+	schema, err = readSchema(upgraded.db)
+	require.NoError(t, err)
+	core, retained, err := splitOptionalValidationSchema(schema)
+	require.NoError(t, err)
+	require.Equal(t, optional, retained)
+	require.Equal(t, schema171, schemaFingerprint(core))
+	currentIdentity, err := readDataset(upgraded.db)
+	require.NoError(t, err)
+	require.Equal(t, identity, currentIdentity)
+	require.Len(t, migrationBackups(t, path), 1)
+	require.NoError(t, upgraded.close())
+
+	reopened, err := OpenLockedStore(path)
+	require.NoError(t, err)
+	require.NoError(t, reopened.close())
+	require.Len(t, migrationBackups(t, path), 1)
+}
+
+func TestValidationSchemaVersionedUpgradeRejectsOptionalChangeAfterBackup(t *testing.T) {
+	path, db := schemaVersion1StoreDB(t, datasetOriginNew, true)
+	require.NoError(t, NewStore(db, path).InitializeKubernetesValidationStore(t.Context()))
+	t.Cleanup(func() { _ = db.Close() })
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	schema, err := readSchema(conn)
+	require.NoError(t, err)
+	core, optional, err := splitOptionalValidationSchema(schema)
+	require.NoError(t, err)
+	_, err = backupSchemaDatabase(t.Context(), conn, path)
+	require.NoError(t, err)
+	_, err = conn.ExecContext(t.Context(), `DROP TABLE patch_verification_blobs`)
+	require.NoError(t, err)
+	require.ErrorContains(t, runVersionUpgrades(t.Context(), conn, 1, schemaFingerprint(core), optional, versionUpgrades()),
+		"schema changed after backup")
+	version, err := readSchemaVersion(conn)
+	require.NoError(t, err)
+	require.Equal(t, 1, version)
+}
+
 func TestValidationSchemaLockedStoreMigrationAndReopen(t *testing.T) {
 	for _, revision := range []string{"fresh", "0e567418", "1f18614c", "57583975"} {
 		t.Run(revision, func(t *testing.T) {
@@ -92,6 +147,7 @@ func TestValidationSchemaLockedStoreMigrationAndReopen(t *testing.T) {
 				seedMigrationRecords(t, old, path)
 				require.NoError(t, old.Close())
 			}
+
 			storage, err := OpenLockedStore(path)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = storage.close() })

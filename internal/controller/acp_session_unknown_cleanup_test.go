@@ -130,28 +130,3 @@ func assertUnknownCleanupRequiresOriginalRuntime(t *testing.T, fixture *external
 		t.Fatal(err)
 	}
 }
-
-func TestSessionRuntimeCleanupRejectsUnknownV1WithoutControlOrTask(t *testing.T) {
-	fixture, tasks := newContinuedSessionCleanupFixture(t)
-	turn, projection := sessionRuntimeCleanupTurnProjection(t, fixture, tasks[0])
-	body, err := json.Marshal(taskterminal.Projection{
-		Namespace: defaultNS, Task: "missing-v1-task", TaskUID: turn.Key.TaskUID, Attempt: int32(turn.Key.Attempt),
-		Phase: corev1alpha1.TaskPhaseFailed,
-		HarnessRuntime: &corev1alpha1.HarnessRuntimeStatus{
-			Attempt: int32(turn.Key.Attempt), State: corev1alpha1.TaskExecutionStateOutcomeUnknown,
-			Outcome: corev1alpha1.TaskExecutionOutcomeOutcomeUnknown,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	projection.Payload, projection.PayloadDigest = body, store.CanonicalBytesDigest(body)
-	turn.TerminalKind, turn.ProjectionDigest = store.SessionTurnOutcomeMarker, projection.PayloadDigest
-	dispatcher := &ACPDispatcher{
-		Store: &sessionRuntimeCleanupProjectionStore{DurableControlStore: fixture.controlStore, projection: projection},
-	}
-	intent := store.SessionCleanupIntent{Namespace: defaultNS, SessionName: "cleanup-conversation", SessionUID: turn.Key.SessionUID}
-	if target, err := dispatcher.sessionRuntimeCleanupTarget(fixture.ctx, intent, turn); err == nil || target != nil {
-		t.Fatalf("orphaned v1 unknown outcome lost its reconciliation barrier: target:%v err:%v", target, err)
-	}
-}

@@ -233,7 +233,6 @@ Not supported yet, and rejected with a clear message at admission and again
 at planning:
 
 - external runtimes (`runtime.runtimeRef`);
-- harness v1 installations (`controller.mode: harness-v1`);
 - Tasks with `spec.execution.workspace` (execution workspaces, including Agent
   Sandbox and Substrate).
 

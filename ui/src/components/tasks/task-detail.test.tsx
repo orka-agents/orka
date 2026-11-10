@@ -519,6 +519,28 @@ describe('TaskDetail', () => {
     await waitFor(() => expect(artifactRequests).toBe(2))
   })
 
+  it('keeps polling artifacts while the task is Finalizing', async () => {
+    // Finalizing is when the run publishes its PR and artifacts.
+    mockSearch.current = { tab: 'overview' }
+    const hits = { artifacts: 0 }
+    server.use(
+      http.get('/api/v1/tasks/:id', () =>
+        HttpResponse.json({
+          metadata: { name: 'publishing', namespace: 'default', uid: 'uid-pub' },
+          spec: { type: 'agent', agentRef: { name: 'a' } },
+          status: { phase: 'Finalizing' },
+        }),
+      ),
+      http.get('/api/v1/tasks/:id/artifacts', () => {
+        hits.artifacts += 1
+        return HttpResponse.json({ artifacts: [] })
+      }),
+    )
+    render(<TaskDetail taskId="publishing" />)
+    await waitFor(() => expect(hits.artifacts).toBe(1))
+    await waitFor(() => expect(hits.artifacts).toBeGreaterThanOrEqual(2), { timeout: 7000 })
+  }, 10000)
+
   it('shows activity as a trace or as raw events', async () => {
     const user = userEvent.setup()
     mockSearch.current = { tab: 'activity' }

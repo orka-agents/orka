@@ -20,6 +20,7 @@ import (
 	"github.com/orka-agents/orka/internal/remediation/executor"
 	"github.com/orka-agents/orka/internal/remediation/service"
 	"github.com/orka-agents/orka/internal/remediation/source"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -45,7 +46,7 @@ type remediationOptions struct {
 
 func setupRemediation(
 	ctx context.Context, mgr manager.Manager, kubeClient kubernetes.Interface,
-	storage *sqlite.Store, builder *controller.JobBuilder, options remediationOptions,
+	storage *sqlite.Store, results store.ResultStore, builder *controller.JobBuilder, options remediationOptions,
 ) (*service.Service, controller.ValidationTaskReconciler, error) {
 	if options.Backend == "" {
 		options.Backend = string(contract.SourceHarness)
@@ -69,7 +70,7 @@ func setupRemediation(
 		return nil, nil, errors.New("remediation requires an operator-configured native Agent")
 	}
 	if options.Backend == string(contract.ApplicationRuntime) {
-		return setupApplicationRemediation(ctx, mgr, storage, builder, options)
+		return setupApplicationRemediation(ctx, mgr, storage, results, builder, options)
 	}
 	if err := applicationexec.EnsureNoActive(ctx, mgr.GetAPIReader(), options.Namespace); err != nil {
 		return nil, nil, err
@@ -106,7 +107,7 @@ func setupRemediation(
 	coordinator, err := service.New(service.Config{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Namespace: options.Namespace,
 		AgentName: options.AgentName, AIWorkerImage: options.AIWorkerImage,
-		Results: storage, Backend: backend, Source: source.Client{},
+		Results: results, Backend: backend, Source: source.Client{},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("configure remediation coordinator: %w", err)

@@ -187,7 +187,7 @@ The GitHub OIDC live script requires GitHub Actions `id-token: write` or a manua
 `ORKA_GITHUB_OIDC_TOKEN`; without either, it fails before creating a cluster.
 Transaction-token provider E2E lives in the external integration repository.
 
-## Harness wrapper real-world validation
+## ACP runtime validation
 
 When changing ACP runtime supervision or broker boundaries, validate them against a live cluster, not only unit tests. Use `scripts/agent-runtime-e2e.sh` for an already deployed cluster, or `scripts/agent-runtime-kind-e2e.sh` to create the same ephemeral Kind/Vekil topology used by CI.
 
@@ -384,6 +384,6 @@ HTTP/2 is disabled for metrics and webhook servers due to CVEs ([GHSA-qppj-fm5r-
 ### Leader election
 
 Leader election ID is hardcoded as `03b49a10.orka.ai`, and its Lease is stored
-in the controller's required non-empty watch namespace. Static `harness-v1` and
-`harness-v2` installations use different watched namespaces and therefore
-different Leases; they do not coordinate ownership of one Task population.
+in the controller's required non-empty watch namespace. Separate installations
+use different watched namespaces and Leases. Each controller owns only the
+Tasks in its namespace.

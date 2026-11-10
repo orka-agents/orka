@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -27,7 +26,6 @@ func reclaimGatewayTranscriptTx(ctx context.Context, tx *sql.Tx, namespace, sess
 		  AND session.control_session_uid = '' AND session.updated_at < ?
 		  AND NOT EXISTS (SELECT 1 FROM session_turns WHERE namespace = session.namespace AND session_name = session.name)
 		  AND NOT EXISTS (SELECT 1 FROM session_controls WHERE namespace = session.namespace AND session_name = session.name)
-		  AND NOT EXISTS (SELECT 1 FROM runtime_sessions WHERE namespace = session.namespace AND session_name = session.name)
 		  AND NOT EXISTS (SELECT 1 FROM session_cleanup_intents WHERE namespace = session.namespace AND session_name = session.name)
 		  AND NOT EXISTS (SELECT 1 FROM session_cleanup_completions WHERE namespace = session.namespace AND session_name = session.name)
 		  AND NOT EXISTS (SELECT 1 FROM session_messages WHERE namespace = session.namespace AND session_name = session.name AND source_type <> 'soul-context')
@@ -189,11 +187,9 @@ func validateGatewayCleanupEligibilityTx(ctx context.Context, tx *sql.Tx, intent
 		EXISTS(SELECT 1 FROM session_messages WHERE namespace = ? AND session_name = ? AND source_type <> 'soul-context') OR
 		EXISTS(SELECT 1 FROM gateway_events WHERE namespace = ? AND session_name = ?) OR
 		EXISTS(SELECT 1 FROM gateway_deliveries WHERE namespace = ? AND session_name = ?) OR
-		EXISTS(SELECT 1 FROM runtime_sessions WHERE namespace = ? AND session_name = ? AND state <> ?) OR
 		EXISTS(SELECT 1 FROM session_turns WHERE namespace = ? AND session_name = ?
 		  AND (state <> 'Finalized' OR finalized_at IS NULL OR finalized_at >= ? OR updated_at >= ?))`,
 		intent.Namespace, intent.SessionName, intent.Namespace, intent.SessionName, intent.Namespace, intent.SessionName,
-		intent.Namespace, intent.SessionName, harness.RuntimeSessionStateDeleted,
 		intent.Namespace, intent.SessionName, proof.TerminalCutoff.UTC(), proof.TerminalCutoff.UTC()).Scan(&retained); err != nil {
 		return err
 	}

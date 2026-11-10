@@ -92,7 +92,7 @@ describe('demo runtimes', () => {
     expect(new Set(pools.items.map((pool) => pool.spec.runtime.profile.providerKind))).toEqual(new Set(['claude', 'codex', 'copilot', 'opencode']))
     expect(pools.items.every((pool) => /@sha256:[0-9a-f]{64}$/.test(pool.spec.runtime.image))).toBe(true)
     const runtimes = agentRuntimeListSchema.parse(await json('/agent-runtimes?namespace=default&limit=100'))
-    expect(runtimes.items).toHaveLength(2)
+    expect(runtimes.items).toHaveLength(1)
     const goose = agentRuntimeSchema.parse(await json(`/agent-runtimes/${runtimes.items[0].metadata.name}?namespace=default`))
     expect(goose.spec.contractVersion).toBe('orka.harness.v2')
   })

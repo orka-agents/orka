@@ -1307,13 +1307,10 @@ spec:
                   contractVersion:
                     description: |-
                       ContractVersion is the harness protocol selector for built-in runtime
-                      types. It may be omitted: the namespace is bound to exactly one
-                      execution mode, so an omitted selector means that mode. An explicit
-                      value must match the namespace mode and, once written, never changes.
-                      runtime.type alone (including opencode, which exists in both protocols)
-                      is never protocol evidence.
+                      types. Only orka.harness.v2 is supported, so an omitted selector means
+                      orka.harness.v2. Once written, the value never changes. runtime.type
+                      alone is never protocol evidence.
                     enum:
-                    - orka.harness.v1
                     - orka.harness.v2
                     type: string
                   defaultAllowBash:
@@ -1415,6 +1412,7 @@ spec:
                     - opencode
                     type: string
                 type: object
+                x-kubernetes-preserve-unknown-fields: true
                 x-kubernetes-validations:
                 - message: exactly one of type or runtimeRef is required
                   rule: has(self.type) != has(self.runtimeRef)
@@ -1427,10 +1425,6 @@ spec:
                 - message: runtime.toolboxes are supported only on built-in runtime
                     types; external runtimeRef runtimes cannot mount toolboxes
                   rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || has(self.type)'
-                - message: runtime.toolboxes require the orka.harness.v2 contract;
-                    harness v1 runtimes cannot mount toolboxes
-                  rule: '!has(self.toolboxes) || self.toolboxes.size() == 0 || !has(self.contractVersion)
-                    || self.contractVersion == ''orka.harness.v2'''
               secretRef:
                 description: SecretRef references a Secret containing LLM API keys
                 properties:

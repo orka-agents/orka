@@ -28,6 +28,7 @@ import (
 	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/remediation/service"
 	"github.com/orka-agents/orka/internal/remediation/source"
+	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 )
 
@@ -254,7 +255,7 @@ func applicationBackendConfig(options remediationOptions, target *rest.Config) (
 }
 
 func setupApplicationRemediation(
-	ctx context.Context, mgr manager.Manager, storage *sqlite.Store,
+	ctx context.Context, mgr manager.Manager, storage *sqlite.Store, results store.ResultStore,
 	builder *controller.JobBuilder, options remediationOptions,
 ) (*service.Service, controller.ValidationTaskReconciler, error) {
 	targetConfig, err := applicationRESTConfig(options.Application)
@@ -282,7 +283,7 @@ func setupApplicationRemediation(
 	coordinatorConfig := service.Config{
 		Client: mgr.GetClient(), Reader: mgr.GetAPIReader(), Namespace: options.Namespace,
 		AgentName: options.AgentName, AIWorkerImage: options.AIWorkerImage,
-		Results: storage, Backend: backend, Source: source.Client{},
+		Results: results, Backend: backend, Source: source.Client{},
 		RunTimeout: contract.MaxRunDuration, BoundedExecution: true,
 	}
 	if err := service.CheckConfiguredAuthority(ctx, coordinatorConfig, contract.ApplicationRuntime); err != nil {

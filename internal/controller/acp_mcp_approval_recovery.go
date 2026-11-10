@@ -427,11 +427,11 @@ func (d *ACPDispatcher) projectMCPApprovalExecution(
 	if effect.Identity != identity || effect.RequestDigest != expected.Binding.RequestDigest {
 		return store.ErrConflict
 	}
-	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, expected,
-		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) error {
+	_, err = withRetainedMCPApproval(ctx, d.EventStore, task.Namespace, task.Name, mcpApprovalNamespaceFence, expected,
+		func(txCtx context.Context, approval approvals.Approval, listed []store.ExecutionEvent) (*store.ExecutionEvent, error) {
 			outcome, reason, result := mcpApprovalRecoveredOutcome(effect, approval.ID)
 			if mcpApprovalProjectionCurrent(approval, outcome, reason) {
-				return nil
+				return nil, nil
 			}
 			return d.appendMCPApprovalRecoveryOutcome(txCtx, task, approval, effect.Version, listed, outcome, reason, result)
 		})
@@ -461,8 +461,11 @@ func mcpApprovalRecoveryDecisionType(approval approvals.Approval, outcome, reaso
 	}
 }
 
-// Called only inside withRetainedMCPApproval: the decision and execution event
-// commit together against its fresh retained request and observed history.
+// Called only inside withRetainedMCPApproval, against its fresh fenced read of
+// the retained request and history. The decision and execution event commit
+// together in one grouped append. A terminal decision that a reviewer recorded
+// after that read refuses the group; the projection then reads again, and the
+// reviewer's decision remains authoritative.
 func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	ctx context.Context,
 	task *corev1alpha1.Task,
@@ -471,7 +474,7 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	listed []store.ExecutionEvent,
 	outcome, reason string,
 	result json.RawMessage,
-) error {
+) (*store.ExecutionEvent, error) {
 	var source store.ExecutionEvent
 	var lastSeq int64
 	for _, event := range listed {
@@ -485,33 +488,50 @@ func (d *ACPDispatcher) appendMCPApprovalRecoveryOutcome(
 	}
 	content, err := acpMCPApprovalOutcomeContent(approval.ID, string(task.UID), outcome, reason, result)
 	if err != nil {
-		return err
-	}
-	eventStore, ok := d.EventStore.(store.DeduplicatingExecutionEventStore)
-	if !ok {
-		return errors.New("approval recovery requires deduplicating execution events")
-	}
-	if decisionType := mcpApprovalRecoveryDecisionType(approval, outcome, reason); decisionType != "" {
-		// Close an undecided review once its verified receipt proves that the
-		// action cannot start. An existing reviewer decision remains authoritative.
-		_, _, err := eventStore.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
-			Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
-			TaskName: task.Name, SessionName: source.SessionName, AgentName: source.AgentName,
-			Type: decisionType, Severity: events.ExecutionEventSeverityInfo,
-			ToolName: approval.TargetTool, ToolCallID: approval.ID, Summary: reason, Content: content,
-		}, "acp-approval:"+approval.ID+":"+decisionType)
-		if err != nil && !errors.Is(err, store.ErrConflict) {
-			return err
-		}
+		return nil, err
 	}
 	// Include the observed history position so a late stale writer cannot make
 	// an earlier dedupe key prevent the next scan from repairing its projection.
 	key := fmt.Sprintf("acp-approval:%s:recovery:%d:%d", approval.ID, version, lastSeq)
-	_, _, err = eventStore.AppendExecutionEventIfAbsent(ctx, &store.ExecutionEvent{
+	outcomeEvent := &store.ExecutionEvent{
 		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
 		TaskName: task.Name, SessionName: source.SessionName, AgentName: source.AgentName,
 		Type: events.ExecutionEventTypeApprovalExecutionUpdated, Severity: events.ExecutionEventSeverityInfo,
 		ToolName: approval.TargetTool, ToolCallID: approval.ID, Summary: "Tool execution " + outcome, Content: content,
-	}, key)
-	return err
+	}
+	decisionType := mcpApprovalRecoveryDecisionType(approval, outcome, reason)
+	if decisionType == "" {
+		eventStore, ok := d.EventStore.(store.DeduplicatingExecutionEventStore)
+		if !ok {
+			return nil, errors.New("approval recovery requires deduplicating execution events")
+		}
+		_, _, err = eventStore.AppendExecutionEventIfAbsent(ctx, outcomeEvent, key)
+		return nil, err
+	}
+	grouped, ok := d.EventStore.(store.GroupedExecutionEventStore)
+	if !ok {
+		return nil, errors.New("approval recovery requires grouped execution events")
+	}
+	// Close an undecided review once its verified receipt proves that the
+	// action cannot start.
+	decision := &store.ExecutionEvent{
+		Namespace: task.Namespace, StreamType: events.ExecutionEventStreamTypeTask, StreamID: task.Name,
+		TaskName: task.Name, SessionName: source.SessionName, AgentName: source.AgentName,
+		Type: decisionType, Severity: events.ExecutionEventSeverityInfo,
+		ToolName: approval.TargetTool, ToolCallID: approval.ID, Summary: reason, Content: content,
+	}
+	results, err := grouped.AppendExecutionEventsIfAbsent(ctx, []store.ExecutionEventAppend{
+		{Event: decision, DedupeKey: "acp-approval:" + approval.ID + ":" + decisionType},
+		{Event: outcomeEvent, DedupeKey: key},
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return nil, errMCPApprovalHistoryChanged
+	}
+	if err != nil {
+		return nil, err
+	}
+	if results[0].Appended {
+		return results[0].Event, nil
+	}
+	return nil, nil
 }

@@ -111,6 +111,12 @@ func ListSubjectConnectionsAuthoritative(ctx context.Context, reader client.Read
 	return owned, nil
 }
 
+// AgentHostProviderAnnotation names, on an AgentHost created for a
+// Connection, the ConnectorProvider that Connection links to. A Connection's
+// name keeps only a prefix of a long provider name, and the provider and the
+// Connection can both be gone while the host is kept.
+const AgentHostProviderAnnotation = "orka.ai/connector-provider"
+
 // ConnectionName derives the deterministic name for one person's Connection
 // to one provider, so a person has at most one Connection per provider. The
 // digest covers the full provider name, so two providers that share a long

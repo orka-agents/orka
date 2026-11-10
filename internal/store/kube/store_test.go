@@ -16,6 +16,7 @@ import (
 	"time"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	controlstore "github.com/orka-agents/orka/internal/store"
 	sqlitestore "github.com/orka-agents/orka/internal/store/sqlite"
 	"github.com/orka-agents/orka/internal/taskterminal"
@@ -2148,8 +2149,8 @@ func TestSessionMutationLeaseAndReconciliation(t *testing.T) {
 	crossProtocolLineage := *request.Lineage
 	crossProtocolLineage.ContractVersion = "orka.harness.v1"
 	crossProtocol.Lineage = &crossProtocolLineage
-	if _, err := kubeStore.AcquireSessionMutationLease(ctx, crossProtocol); !errors.Is(err, controlstore.ErrConflict) {
-		t.Fatalf("cross-protocol continuation error = %v, want conflict", err)
+	if _, err := kubeStore.AcquireSessionMutationLease(ctx, crossProtocol); !errors.Is(err, controlstore.ErrValidation) {
+		t.Fatalf("unsupported protocol error = %v, want validation error", err)
 	}
 	competitor := request
 	competitor.TaskUID = "task-other"
@@ -2563,7 +2564,8 @@ func TestSessionTurnDelegationIsExplicit(t *testing.T) {
 func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T) {
 	ctx := context.Background()
 	_, rawClient, fence := newTestStoreWithEpoch(t)
-	db, err := sqlitestore.NewDB(filepath.Join(t.TempDir(), "turns.db"))
+	dbPath := filepath.Join(t.TempDir(), "turns.db")
+	db, err := sqlitestore.NewDB(dbPath)
 	if err != nil {
 		t.Fatalf("NewDB: %v", err)
 	}
@@ -2572,9 +2574,28 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{Namespace: "tenant-a", Name: "session-finalize", SessionType: "task"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	kubeStore, err := NewComposite(rawClient, testControlNamespace, sqliteStore)
+	persistence := storageclienttest.Client(t, sqliteStore)
+	kubeStore, err := NewComposite(rawClient, testControlNamespace, persistence)
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
+	}
+	syncTestEpochMirror(t, kubeStore, sqliteStore)
+	reopenStore := func() {
+		t.Helper()
+		if err := db.Close(); err != nil {
+			t.Fatalf("close database: %v", err)
+		}
+		db, err = sqlitestore.NewDB(dbPath)
+		if err != nil {
+			t.Fatalf("reopen database: %v", err)
+		}
+		sqliteStore = sqlitestore.NewStore(db, dbPath)
+		persistence = storageclienttest.Client(t, sqliteStore)
+		kubeStore, err = NewComposite(rawClient, testControlNamespace, persistence)
+		if err != nil {
+			t.Fatalf("reopen composite store: %v", err)
+		}
+		syncTestEpochMirror(t, kubeStore, sqliteStore)
 	}
 	control, err := kubeStore.CreateSessionControl(ctx, &controlstore.SessionControl{
 		Namespace: "tenant-a", SessionName: "session-finalize", SessionUID: "session-finalize-uid",
@@ -2673,6 +2694,7 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 		t.Fatalf("changed projection retry error = %v, want conflict", err)
 	}
 
+	reopenStore()
 	failSessionLeaseOnce := true
 	kubeStore.client = interceptor.NewClient(withWatch, interceptor.Funcs{
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
@@ -2756,12 +2778,12 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}
 
 	activationErr := errors.New("simulated outbox activation crash")
-	failingActivation := &failOnceSessionTurnActivationStore{SessionTurnPersistenceStore: sqliteStore, err: activationErr}
+	failingActivation := &failOnceSessionTurnActivationStore{SessionTurnPersistenceStore: persistence, err: activationErr}
 	kubeStore.sessionTurns = failingActivation
 	if _, err := kubeStore.ResumeSessionTurnFinalization(ctx, resumeRequest); !errors.Is(err, activationErr) {
 		t.Fatalf("activation-boundary ResumeSessionTurnFinalization error = %v, want simulated error", err)
 	}
-	kubeStore.sessionTurns = sqliteStore
+	kubeStore.sessionTurns = persistence
 	finalized, err := kubeStore.ResumeSessionTurnFinalization(ctx, controlstore.ResumeSessionTurnFinalizationRequest{
 		Key: committedTurn.Key, PromptAttemptID: committedTurn.PromptAttemptID,
 		FinalizationDigest: committedTurn.FinalizationDigest, Fence: fence,
@@ -2804,6 +2826,21 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	}); err != nil {
 		t.Fatalf("CompleteOutboxProjection through Kubernetes fence: %v", err)
 	}
+	reopenStore()
+	if _, err := kubeStore.FinalizeSessionTurn(ctx, finalize); err != nil {
+		t.Fatalf("retry completed finalization after database reopen: %v", err)
+	}
+	delivered, err := sqliteStore.GetOutboxProjection(ctx, projection.ID)
+	if err != nil || delivered.State != controlstore.OutboxProjectionDelivered {
+		t.Fatalf("delivered projection after database reopen = %#v, %v", delivered, err)
+	}
+	claimed, err = kubeStore.ClaimOutboxProjections(ctx, controlstore.ClaimOutboxProjectionsRequest{
+		Fence: fence, WorkerID: "restarted-outbox-worker", Limit: 10, LeaseDuration: time.Minute,
+		Now: finalize.FinalizedAt.Add(3 * time.Second),
+	})
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("completed projection was requeued after database reopen: %#v, %v", claimed, err)
+	}
 	laterExpires := finalize.FinalizedAt.Add(30 * time.Minute)
 	advancedControl, err := kubeStore.AcquireSessionMutationLease(ctx, controlstore.AcquireSessionMutationLeaseRequest{
 		Namespace: updatedControl.Namespace, SessionName: updatedControl.SessionName, SessionUID: updatedControl.SessionUID,
@@ -2832,7 +2869,9 @@ func TestCrossStoreSessionTurnFinalizationResumesAfterSQLiteCommit(t *testing.T)
 	if len(transcript) != 2 {
 		t.Fatalf("idempotent retry duplicated transcript: %d entries", len(transcript))
 	}
-	for _, table := range []string{"controller_epochs", "prompt_attempts", "session_controls", "branch_claims", "publications", "external_effects"} {
+	// controller_epochs holds only the mirror of the Kubernetes epoch that
+	// SQLite checks fences against; it never decides ownership.
+	for _, table := range []string{"prompt_attempts", "session_controls", "branch_claims", "publications", "external_effects"} {
 		var count int
 		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil { //nolint:gosec // fixed test-only table allowlist
 			t.Fatalf("count SQLite %s: %v", table, err)
@@ -2856,10 +2895,11 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 	if err := sqliteStore.CreateSession(ctx, &controlstore.SessionRecord{Namespace: "tenant-a", Name: "session-publication", SessionType: "task"}); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	kubeStore, err := NewComposite(rawClient, testControlNamespace, sqliteStore)
+	kubeStore, err := NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, sqliteStore))
 	if err != nil {
 		t.Fatalf("NewComposite: %v", err)
 	}
+	syncTestEpochMirror(t, kubeStore, sqliteStore)
 	oldSHA := strings.Repeat("4", 40)
 	commitSHA := strings.Repeat("5", 40)
 	branch, err := kubeStore.CreateBranchClaim(ctx, &controlstore.BranchClaim{
@@ -3124,10 +3164,12 @@ func TestCrossStoreSessionTurnFinalizationDerivesPublicationBaseline(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	kubeStore, err = NewComposite(rawClient, testControlNamespace, sqlitestore.NewStore(reopened, databasePath))
+	reopenedStore := sqlitestore.NewStore(reopened, databasePath)
+	kubeStore, err = NewComposite(rawClient, testControlNamespace, storageclienttest.Client(t, reopenedStore))
 	if err != nil {
 		t.Fatal(err)
 	}
+	syncTestEpochMirror(t, kubeStore, reopenedStore)
 	if deleted, err := kubeStore.ReclaimPromptAttempts(ctx, fixture.request); err != nil || deleted != 1 {
 		t.Fatalf("reclaim published Task after restart = %d, %v", deleted, err)
 	}

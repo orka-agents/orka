@@ -332,8 +332,7 @@ additive.
   only name repositories its parent chain holds; a child delegated to another
   repository is refused rather than given the person's account there.
 - Curated `HTTP` connector tools are not available on external v2
-  `AgentRuntime` registrations, and harness v1 Tasks receive no connector
-  tools at all.
+  `AgentRuntime` registrations.
 
 ## Testing your setup
 

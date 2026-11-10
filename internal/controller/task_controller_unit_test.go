@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -46,16 +47,18 @@ import (
 	workspacev1alpha1 "github.com/orka-agents/orka-workspace/api/v1alpha1"
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/events"
-	"github.com/orka-agents/orka/internal/harness"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/outboundaccess"
+	"github.com/orka-agents/orka/internal/storageclient/storageclienttest"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/store/sqlite"
 	storetest "github.com/orka-agents/orka/internal/store/storetest"
+	"github.com/orka-agents/orka/internal/taskwebhook"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	"github.com/orka-agents/orka/internal/tracing/testutil"
 	"github.com/orka-agents/orka/internal/workerenv"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -541,8 +544,11 @@ func TestValidateTaskAgentCompatibility_ReadOnlyOpencodeAccepted(t *testing.T) {
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1"},
 		Spec: corev1alpha1.AgentSpec{
-			Model:   testOpenCodeModelConfig(),
-			Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeOpencode},
+			Model: testOpenCodeModelConfig(),
+			Runtime: &corev1alpha1.AgentCLIRuntime{
+				Type:            corev1alpha1.AgentRuntimeOpencode,
+				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
+			},
 		},
 	}
 	if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
@@ -839,20 +845,6 @@ func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *t
 		mutate    func(*corev1alpha1.Task, *corev1alpha1.Agent)
 	}{
 		{
-			name:     "harness v1 preserves legacy overrides",
-			contract: corev1alpha1.AgentRuntimeContractHarnessV1,
-			wantPath: agentExecutionPathHarnessV1,
-			mutate: func(task *corev1alpha1.Task, agent *corev1alpha1.Agent) {
-				defaultMaxTurns := int32(50)
-				taskMaxTurns := int32(7)
-				agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "frozen system prompt"}
-				agent.Spec.Skills = []corev1alpha1.SkillReference{{Name: "legacy-skill"}}
-				agent.Spec.Tools = []corev1alpha1.ToolReference{{Name: "legacy-tool"}}
-				agent.Spec.Runtime.DefaultMaxTurns = &defaultMaxTurns
-				task.Spec.AgentRuntime = &corev1alpha1.AgentRuntimeSpec{MaxTurns: &taskMaxTurns}
-			},
-		},
-		{
 			name:      "harness v2 rejects model override",
 			contract:  corev1alpha1.AgentRuntimeContractHarnessV2,
 			wantPath:  agentExecutionPathExternal,
@@ -880,8 +872,6 @@ func TestValidatePlannedRuntimeRefAgentTaskRestrictionsUsesResolvedContract(t *t
 				tt.mutate(task, agent)
 			}
 			r := newUnitReconciler(newTestScheme(), runtime)
-			r.ACPRuntimeEnabled = true
-			r.HarnessV1Enabled = true
 
 			if err := r.validateTaskAgentCompatibility(task, agent); err != nil {
 				t.Fatalf("validateTaskAgentCompatibility() error = %v", err)
@@ -2177,6 +2167,9 @@ func TestEnsureWorkerServiceAccountPreservesAppManagedByLabel(t *testing.T) {
 	}
 	if got.Labels[orkaManagedByLabelKey] != managedByLabelValue {
 		t.Fatalf("expected Orka managed-by label to be reconciled, got labels %#v", got.Labels)
+	}
+	if got.Labels[labels.LabelPlatformIdentity] != "true" {
+		t.Fatalf("expected the platform identity label to be reconciled, got labels %#v", got.Labels)
 	}
 	if got.Labels["custom"] != "keep" {
 		t.Fatalf("expected existing labels to be preserved, got labels %#v", got.Labels)
@@ -4132,6 +4125,10 @@ func TestCompleteTask_RecordsSessionTokenUsage(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
 	}
 	r := newUnitReconciler(scheme, task)
+	// Task token attribution runs in the storage client, as production wires
+	// the reconciler.
+	storage := storageclienttest.NewEmbedded(t, r.ExecutionEventStore.(*sqlite.Store))
+	r.ExecutionEventStore = storage
 	sessions := r.SessionManager.store
 	now := time.Now().UTC()
 	if err := sessions.CreateSession(ctx, &store.SessionRecord{
@@ -5439,49 +5436,6 @@ func TestHandlePending_TransactionTokenPendingRequeuesWithoutJob(t *testing.T) {
 	}
 }
 
-func TestHandlePending_BuiltInAgentRuntimeFailsClosedWhenACPDisabled(t *testing.T) {
-	scheme := newTestScheme()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: defaultNS},
-		Spec: corev1alpha1.AgentSpec{
-			Runtime: &corev1alpha1.AgentCLIRuntime{
-				Type:            corev1alpha1.AgentRuntimeCodex,
-				ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV2),
-			},
-		},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "agent-no-secret", Namespace: defaultNS},
-		Spec: corev1alpha1.TaskSpec{
-			Type:     corev1alpha1.TaskTypeAgent,
-			AgentRef: &corev1alpha1.AgentReference{Name: agent.Name},
-			Prompt:   "do work",
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
-	}
-	r := newUnitReconciler(scheme, task, agent)
-
-	result, err := r.handlePending(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handlePending() error = %v", err)
-	}
-	if result.RequeueAfter != time.Second {
-		t.Fatalf("RequeueAfter = %v, want %v", result.RequeueAfter, time.Second)
-	}
-
-	updated := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), types.NamespacedName{Name: task.Name, Namespace: task.Namespace}, updated); err != nil {
-		t.Fatalf("Get updated task: %v", err)
-	}
-	if updated.Status.Phase != corev1alpha1.TaskPhaseFailed {
-		t.Fatalf("phase = %s, want Failed", updated.Status.Phase)
-	}
-	if !strings.Contains(updated.Status.Message, "no fallback execution path") {
-		t.Fatalf("message = %q, want fail-closed ACP-disabled error", updated.Status.Message)
-	}
-	assertNoJobsForTask(t, r, task)
-}
-
 func TestHandlePending_ExternalRuntimeRefQueuesDurableAttempt(t *testing.T) {
 	fixture := newExternalACPDispatchFixture(t)
 	fixture.queueTask(t, "external-task", types.UID("external-task-uid"), "do work", nil)
@@ -5510,7 +5464,6 @@ func TestHandlePending_AgentRuntimeWithResourcesFailsBeforeJobBackend(t *testing
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5584,7 +5537,6 @@ func TestHandlePending_AgentRuntimeUnsupportedPlannerFeaturesFailBeforeJobBacken
 			}
 			tt.mutateTask(task)
 			r := newUnitReconciler(scheme, task, agent)
-			r.ACPRuntimeEnabled = true
 			r.EnforceNamespaceIsolation = true
 
 			result, err := r.handlePending(context.Background(), task)
@@ -5638,7 +5590,6 @@ func TestHandlePending_ClasslessWorkspaceFailsBeforeJobBackend(t *testing.T) {
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5690,7 +5641,6 @@ func TestHandlePending_ExecutionWorkspaceValidationFailureSetsWorkspaceStatus(t 
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent)
-	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5733,7 +5683,6 @@ func TestHandlePending_ExecutionWorkspaceMissingClassStatusOmitsProviderDetails(
 	}
 	r := newUnitReconciler(scheme, task, agent)
 	r.WorkspaceProviderAPIEnabled = true
-	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -5792,7 +5741,6 @@ func TestHandlePending_ExecutionWorkspaceDispatchDisabledFailsClosed(t *testing.
 	}
 	r := newUnitReconciler(scheme, task, agent)
 	installTestACPWorkspaceClass(t, r)
-	r.ACPRuntimeEnabled = true
 
 	result, err := r.handlePending(context.Background(), task)
 	if err != nil {
@@ -6011,14 +5959,24 @@ func TestHandleCompleted_WebhookFails(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	r.WebhookNotifier = NewWebhookNotifier()
+	notifier := newWebhookNotifier(&taskwebhook.Dialer{
+		Policy: taskwebhook.PublicAddressPolicy,
+		Resolver: webhookTestResolver(func(context.Context, string) ([]net.IPAddr, error) {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}),
+	})
+	notifier.SetKeySource(taskwebhook.StaticKeySource{Keys: newWebhookTestKeys(t)})
+	r.WebhookNotifier = notifier
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should requeue for webhook retry
-	if result.RequeueAfter != 30*time.Second {
-		t.Errorf("expected 30s requeue for webhook retry, got %v", result.RequeueAfter)
+	// Should requeue for webhook retry after the first backoff step.
+	if result.RequeueAfter != defaultWebhookInitialBackoff {
+		t.Errorf("expected %v requeue for webhook retry, got %v", defaultWebhookInitialBackoff, result.RequeueAfter)
+	}
+	if delivery := task.Status.WebhookDelivery; delivery == nil || delivery.Attempts != 1 || delivery.LastError != taskwebhook.ErrResolution.Error() {
+		t.Errorf("unexpected webhook delivery state %#v", delivery)
 	}
 }
 
@@ -6478,9 +6436,7 @@ func TestHandleCompleted_WebhookSuccess(t *testing.T) {
 		},
 	}
 	r := newUnitReconciler(scheme, task)
-	notifier := NewWebhookNotifier()
-	notifier.skipURLValidation = true
-	r.WebhookNotifier = notifier
+	r.WebhookNotifier = newTestWebhookNotifier(t, newWebhookTestKeys(t), nil)
 	result, err := r.handleCompleted(context.Background(), task)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -6784,6 +6740,7 @@ func TestHandlePending_BoundV2AgentExpiresAtDefaultDeadlineBeforeQueue(t *testin
 			Phase: corev1alpha1.TaskPhasePending,
 			AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
 				ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV2,
+				Backend:         corev1alpha1.AgentExecutionBackendRuntimePool,
 			},
 		},
 	}
@@ -6831,7 +6788,6 @@ func TestHandlePending_UnboundV2AgentExpiresAtDefaultDeadlineAtNamespaceLimit(t 
 		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
 	}
 	r := newUnitReconciler(scheme, task, agent, active)
-	r.ACPRuntimeEnabled = true
 	r.MaxTasksPerNamespace = 1
 
 	result, err := r.handlePending(context.Background(), task)
@@ -6848,49 +6804,6 @@ func TestHandlePending_UnboundV2AgentExpiresAtDefaultDeadlineAtNamespaceLimit(t 
 	if updated.Status.Phase != corev1alpha1.TaskPhaseCancelled || updated.Status.Execution == nil ||
 		updated.Status.Execution.Reason != corev1alpha1.TaskExecutionReason("TaskTimeout") {
 		t.Fatalf("expired unbound v2 Task status = %#v", updated.Status)
-	}
-}
-
-func TestHandlePending_UnboundV1AgentRetainsBindingRelativeDefaultAtNamespaceLimit(t *testing.T) {
-	scheme := newTestScheme()
-	agent := &corev1alpha1.Agent{
-		ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: "default"},
-		Spec: corev1alpha1.AgentSpec{Runtime: &corev1alpha1.AgentCLIRuntime{
-			Type: corev1alpha1.AgentRuntimeCodex, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
-		}},
-	}
-	active := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: "default"},
-		Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeContainer},
-		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
-	}
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "unbound-v1-default-timeout", Namespace: "default", UID: "12345678-abcd-efgh-ijkl-1234567890b2",
-			CreationTimestamp: metav1.NewTime(time.Now().UTC().Add(-defaultACPTaskTimeout - time.Minute)),
-		},
-		Spec: corev1alpha1.TaskSpec{
-			Type: corev1alpha1.TaskTypeAgent, AgentRef: &corev1alpha1.AgentReference{Name: agent.Name}, Prompt: "wait at namespace limit",
-		},
-		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
-	}
-	r := newUnitReconciler(scheme, task, agent, active)
-	r.HarnessV1Enabled = true
-	r.MaxTasksPerNamespace = 1
-
-	result, err := r.handlePending(context.Background(), task)
-	if err != nil {
-		t.Fatalf("handlePending() error = %v", err)
-	}
-	if result.RequeueAfter != 10*time.Second {
-		t.Fatalf("RequeueAfter = %v, want 10s", result.RequeueAfter)
-	}
-	updated := &corev1alpha1.Task{}
-	if err := r.Get(context.Background(), client.ObjectKeyFromObject(task), updated); err != nil {
-		t.Fatal(err)
-	}
-	if updated.Status.Phase != corev1alpha1.TaskPhasePending || updated.Status.Execution != nil {
-		t.Fatalf("queued unbound v1 Task status = %#v", updated.Status)
 	}
 }
 
@@ -8877,11 +8790,12 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	defer persistDB.Close() //nolint:errcheck
 	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", sqlite.NewStore(persistDB, "reclaim-test"))
+	persistence := sqlite.NewStore(persistDB, "reclaim-test")
+	controlStore, err := storekube.NewComposite(controlClient, "default", sealedStore(t, persistence))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "reclaim-controller")
+	epochs := NewControllerEpochManager(controlStore, "reclaim-controller").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -8924,143 +8838,6 @@ func TestHandleDeletionReclaimsNoAttemptAgentTask(t *testing.T) {
 	}
 	cancelEpoch()
 	if err := <-epochDone; err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestHandleDeletionWaitsForHarnessV1AttemptReclamation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	scheme := newTestScheme()
-	bindingDigest := "sha256:" + strings.Repeat("a", 64)
-	snapshotDigest := "sha256:" + strings.Repeat("b", 64)
-	requestDigest := "sha256:" + strings.Repeat("c", 64)
-	task := &corev1alpha1.Task{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "v1-active-delete", Namespace: "default", UID: types.UID("v1-active-delete-uid"),
-			Finalizers: []string{labels.TaskFinalizer},
-		},
-		Spec: corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
-		Status: corev1alpha1.TaskStatus{AgentExecutionBinding: &corev1alpha1.AgentExecutionBinding{
-			ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
-			BindingDigest:   bindingDigest,
-			Snapshot:        corev1alpha1.AgentExecutionSnapshotRef{Digest: snapshotDigest},
-		}},
-	}
-	r := newUnitReconciler(scheme, task)
-	db, err := sqlite.NewDB(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	durable := sqlite.NewStore(db, "v1-finalizer-test")
-	controlClient := withControllerEpochLeaseUIDs(t, r.Client)
-	controlStore, err := storekube.NewComposite(controlClient, "default", durable)
-	if err != nil {
-		t.Fatal(err)
-	}
-	epochs := NewControllerEpochManager(controlStore, "v1-finalizer-controller").WithMirror(durable)
-	epochCtx, cancelEpoch := context.WithCancel(ctx)
-	epochDone := make(chan error, 1)
-	go func() { epochDone <- epochs.Start(epochCtx) }()
-	defer func() {
-		cancelEpoch()
-		if err := <-epochDone; err != nil {
-			t.Errorf("stop epoch manager: %v", err)
-		}
-	}()
-	fence, err := epochs.CurrentFence(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt := &store.HarnessV1Attempt{
-		Namespace: task.Namespace, TaskName: task.Name, TaskUID: string(task.UID), Attempt: 1,
-		BindingDigest: bindingDigest, SnapshotDigest: snapshotDigest, RequestDigest: requestDigest,
-		TurnID: "turn-v1-active-delete", RuntimeSessionID: "runtime-v1-active-delete",
-		State:      store.HarnessV1AttemptPrepared,
-		RetryClass: store.HarnessV1RetryClassNone,
-	}
-	runtimeSession := &harness.RuntimeSession{
-		ID: harness.RuntimeSessionID(attempt.RuntimeSessionID),
-		Owner: harness.RuntimeSessionOwner{
-			Namespace: task.Namespace, SessionName: "task-runtime", ActiveTask: task.Name,
-			Provider: harness.ProviderKindKubernetesService,
-		},
-		State: harness.RuntimeSessionStateReady, CleanupPolicy: harness.RuntimeCleanupPolicyDelete,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	if err := durable.CreateRuntimeSession(ctx, runtimeSession); err != nil {
-		t.Fatal(err)
-	}
-	if err := durable.CreateHarnessV1Attempt(ctx, attempt, fence); err != nil {
-		t.Fatal(err)
-	}
-	r.HarnessV1Attempts = durable
-	r.HarnessV1SettlementAcknowledger = &recordingHarnessV1SettlementAcknowledger{}
-	r.ControllerEpochManager = epochs
-	r.APIReader = r.Client
-
-	current := &corev1alpha1.Task{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Delete(ctx, current); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(task), current); err != nil {
-		t.Fatal(err)
-	}
-	result, err := r.handleDeletion(ctx, current)
-	if err != nil {
-		t.Fatalf("handleDeletion() with active v1 attempt: %v", err)
-	}
-	if result.RequeueAfter != 2*time.Second {
-		t.Fatalf("active v1 deletion requeue = %v, want 2s", result.RequeueAfter)
-	}
-	retained := &corev1alpha1.Task{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(task), retained); err != nil {
-		t.Fatal(err)
-	}
-	if !controllerutil.ContainsFinalizer(retained, labels.TaskFinalizer) {
-		t.Fatal("active harness v1 attempt did not retain the Task finalizer")
-	}
-	persisted, err := durable.GetHarnessV1Attempt(ctx, store.HarnessV1AttemptKey{
-		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reason := "BackendDisabled"
-	if _, err := durable.TransitionHarnessV1Attempt(ctx, store.HarnessV1AttemptTransition{
-		Key:             store.HarnessV1AttemptKey{Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1},
-		ExpectedVersion: persisted.Version,
-		ExpectedState:   store.HarnessV1AttemptPrepared,
-		TargetState:     store.HarnessV1AttemptRejected,
-		OperationID:     "reject-before-delete",
-		OperationDigest: store.CanonicalAgentExecutionSnapshotDigest([]byte("reject-before-delete")),
-		Fence:           fence,
-		Updates:         store.HarnessV1AttemptUpdates{TerminalReason: &reason},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := r.handleDeletion(ctx, retained); err != nil {
-		t.Fatalf("handleDeletion() after terminal v1 attempt: %v", err)
-	}
-	if _, err := durable.GetHarnessV1Attempt(ctx, store.HarnessV1AttemptKey{
-		Namespace: task.Namespace, TaskUID: string(task.UID), Attempt: 1,
-	}); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("reclaimed harness v1 attempt error = %v, want not found", err)
-	}
-	if _, err := durable.GetRuntimeSession(ctx, task.Namespace, runtimeSession.ID); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("reclaimed harness v1 runtime session error = %v, want not found", err)
-	}
-	deleted := &corev1alpha1.Task{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(task), deleted); err == nil {
-		if controllerutil.ContainsFinalizer(deleted, labels.TaskFinalizer) {
-			t.Fatalf("Task finalizer remained after terminal v1 reclamation: %#v", deleted.Finalizers)
-		}
-	} else if !apierrors.IsNotFound(err) {
 		t.Fatal(err)
 	}
 }

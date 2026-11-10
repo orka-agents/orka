@@ -281,7 +281,7 @@ func TestAgentDefaultInstructionsAILiteralSoulEnvelope(t *testing.T) {
 
 func TestAgentDefaultInstructionsPreservesExternalAndLegacy(t *testing.T) {
 	for _, provider := range []corev1alpha1.AgentRuntimeType{corev1alpha1.AgentRuntimeCodex, corev1alpha1.AgentRuntimeClaude, corev1alpha1.AgentRuntimeCopilot, corev1alpha1.AgentRuntimeOpencode} {
-		for _, contract := range []*corev1alpha1.AgentRuntimeContractVersion{nil, new(corev1alpha1.AgentRuntimeContractHarnessV1)} {
+		for _, contract := range []*corev1alpha1.AgentRuntimeContractVersion{nil, new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"))} {
 			name := string(provider) + "/unclassified"
 			if contract != nil {
 				name = string(provider) + "/v1"

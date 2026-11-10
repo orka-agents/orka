@@ -64,7 +64,7 @@ func (d *ACPDispatcher) finishAbandonedWorkspaceValidation(
 	default:
 		return fmt.Errorf("%w: live or successful execution cannot abandon workspace validation", store.ErrConflict)
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || attempt.Key.TaskUID != string(taskUID) || attempt.Key.Attempt != int64(execution.Attempt) ||
 		attempt.Key.PromptID != execution.PromptID || attempt.RequestDigest != execution.RequestDigest ||
 		attempt.BindingDigest != binding.BindingDigest || attempt.SnapshotDigest != binding.Snapshot.Digest ||
@@ -159,7 +159,7 @@ func (d *ACPDispatcher) recoveredValidationWorkspace(ctx context.Context, task *
 	if task == nil || task.Status.Execution == nil || d.Snapshots == nil {
 		return fail(fmt.Errorf("%w: workspace recovery requires an immutable execution snapshot", store.ErrConflict))
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.Task.UID != taskUID || binding.Backend != corev1alpha1.AgentExecutionBackendRuntimePool {
 		return fail(fmt.Errorf("%w: abandoned validation requires a built-in runtime binding", store.ErrConflict))
 	}

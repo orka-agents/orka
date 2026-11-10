@@ -7,7 +7,6 @@ MIT License - see LICENSE file for details.
 package controller
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -117,7 +116,7 @@ func bindingTestNamespace() *corev1.Namespace {
 	}}
 }
 
-func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sqlite.Store) {
+func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReconciler, *sealedTestStore) {
 	t.Helper()
 	scheme := bindingTestScheme(t)
 	kubeClient := fake.NewClientBuilder().WithScheme(scheme).
@@ -129,19 +128,11 @@ func newBindingTestReconciler(t *testing.T, objects ...client.Object) (*TaskReco
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	snapshotStore := sqlite.NewStore(db, "test")
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x24}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := snapshotStore.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
+	snapshotStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	return &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10),
 		AgentExecutionSnapshots: snapshotStore,
-		ACPRuntimeEnabled:       true, ACPRuntimeNamespace: "orka-runtimes",
-		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
+		ACPRuntimeImages:        ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}, snapshotStore
 }
 
@@ -195,6 +186,16 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 		}
 	}
 
+	recorder := reconciler.Recorder.(*record.FakeRecorder)
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, agentExecutionSettingsReason) || !strings.Contains(event, "model "+acpTestModel) {
+			t.Fatalf("binding event = %q, want the effective model", event)
+		}
+	default:
+		t.Fatal("first binding did not report its execution settings")
+	}
+
 	// A second pass verifies the existing binding instead of re-binding.
 	_, err, handled = reconciler.ensureAgentExecutionBinding(ctx, bound, agent)
 	if err != nil || handled {
@@ -206,6 +207,11 @@ func TestEnsureAgentExecutionBindingFreezesSnapshotBeforeDispatch(t *testing.T) 
 	}
 	if again.Status.AgentExecutionBinding.BindingDigest != binding.BindingDigest {
 		t.Fatal("verify pass must not rewrite the binding")
+	}
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("verify pass reported settings again: %q", event)
+	default:
 	}
 }
 

@@ -167,11 +167,22 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
     complete.mutate({ name: search.connection, completion: completionToken })
   }, [returning, completionToken, search.connection, complete])
 
+  // Consent opens only after the page has shown what it grants: a provider
+  // that began serving agent hosts after the page loaded is shown first.
+  const openConsent = (result: ConnectionAuthorizeResponse & { authorizeURL: string }) => {
+    const disclosed = providers.data?.items.find((p) => p.name === result.connection.provider)?.agentHost
+    if (result.agentHost && !disclosed) {
+      toast.info(`${result.connection.provider} now creates a Copilot environment on Orka. Read its notice, then connect again.`)
+      void queryClient.invalidateQueries({ queryKey: ['connectors', namespace] })
+      return
+    }
+    openAuthorizeURL(result.authorizeURL)
+  }
   const start = useMutation({
     mutationFn: ({ provider, mode }: { provider: string; mode: ConnectionMode }) =>
       api.post<ConnectionAuthorizeResponse>('/connections', { provider, mode }, params),
     onSuccess: (result) => {
-      if (result.authorizeURL) openAuthorizeURL(result.authorizeURL)
+      if (result.authorizeURL) openConsent({ ...result, authorizeURL: result.authorizeURL })
       else {
         toast.success(`${result.connection.provider} is already linked`)
         invalidate()
@@ -183,7 +194,7 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
     mutationFn: ({ name, mode }: { name: string; mode: ConnectionMode }) =>
       api.put<ConnectionAuthorizeResponse>(`/connections/${encodeURIComponent(name)}`, { mode }, params),
     onSuccess: (result) => {
-      if (result.authorizeURL) openAuthorizeURL(result.authorizeURL)
+      if (result.authorizeURL) openConsent({ ...result, authorizeURL: result.authorizeURL })
       else {
         toast.success(`Mode set to ${result.connection.mode}`)
         const wanted = result.connection.mode
@@ -196,7 +207,7 @@ function ConnectorsPageContent({ namespace, search, clearCallback }: { namespace
   })
   const reauthorize = useMutation({
     mutationFn: (name: string) => api.post<ConnectionAuthorizeResponse>(`/connections/${encodeURIComponent(name)}/authorize`, undefined, params),
-    onSuccess: (result) => { if (result.authorizeURL) openAuthorizeURL(result.authorizeURL) },
+    onSuccess: (result) => { if (result.authorizeURL) openConsent({ ...result, authorizeURL: result.authorizeURL }) },
     onError: (error: unknown) => toast.error(`Could not restart consent: ${errorText(error)}`),
   })
   const disconnect = useMutation({
@@ -351,6 +362,11 @@ function ProviderCard({ provider, connection, busy, duplicate, onConnect, onChan
       <CardContent className="space-y-3 text-sm">
         {readTools.length > 0 && <p><span className="text-muted-foreground">Reads:</span> {readTools.join(', ')}</p>}
         {writeTools.length > 0 && <p><span className="text-muted-foreground">Writes (ask for approval):</span> {writeTools.join(', ')}</p>}
+        {provider.agentHost && (
+          <p data-testid={`connector-${provider.name}-agent-host`} className="text-muted-foreground">
+            Linking creates your Copilot environment on Orka. Code running there can read this account&apos;s token, whatever the link&apos;s mode.
+          </p>
+        )}
         {connection?.message && !duplicate && (connection.state !== 'Ready' || !connection.ready) && <p className="text-muted-foreground">{connection.message}</p>}
         {connection?.deleting ? (
           <p className="text-muted-foreground">Revoking tokens and removing the link.</p>

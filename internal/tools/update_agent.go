@@ -30,7 +30,7 @@ func (t *UpdateAgentTool) Parameters() json.RawMessage {
 	return marshalAgentSchema(map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{nameField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: agentNameDescription}, namespaceField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: namespaceDescription}, systemPromptField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Role instructions for the agent. Built-in runtimes deliver these through their native instruction mechanism. Built-in harness v2 Copilot instructions cannot contain @ characters."}, toolsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeArray, itemsField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString}, jsonSchemaDescriptionField: "Tool names to attach"}, modelField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeObject, jsonSchemaPropertiesField: map[string]any{
 		providerField: map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model provider (e.g. anthropic, openai). For OpenCode this is normalized into model.name."},
 		nameField:     map[string]any{jsonSchemaTypeField: jsonSchemaTypeString, jsonSchemaDescriptionField: "Model name. OpenCode accepts a provider/model ID or a bare model name when the existing provider is retained."},
-		"temperature": map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2,
+		temperatureField: map[string]any{jsonSchemaTypeField: "number", jsonSchemaMinimumField: 0, "maximum": 2,
 			jsonSchemaDescriptionField: "Sampling temperature. OpenCode only accepts the legacy default 0.7."},
 		"contextWindow": map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed model context capacity; required for OpenCode"},
 		"maxTokens":     map[string]any{jsonSchemaTypeField: jsonSchemaTypeInteger, jsonSchemaMinimumField: 1, jsonSchemaDescriptionField: "Reviewed maximum output tokens; required for OpenCode"},
@@ -113,7 +113,7 @@ func (t *UpdateAgentTool) Execute(ctx context.Context, args json.RawMessage) (st
 		}
 	}
 	if err := agentcontext.ValidateSoulRuntime(agent); err != nil {
-		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef and orka.harness.v1 Agents do not support souls.")
+		return ChatToolErrorResult("invalid_arguments", err.Error(), "Use an AI worker Agent or a built-in orka.harness.v2 Agent; external runtimeRef Agents do not support souls.")
 	}
 	if err := agentcontext.ValidateInlineCopilotInstructions(agent); err != nil {
 		return ChatToolErrorResult("invalid_arguments", err.Error(), "Inline referenced text; built-in harness v2 Copilot role and soul instructions cannot contain @ characters.")
@@ -149,7 +149,7 @@ func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
 	if !ok {
 		return values, nil
 	}
-	if _, numeric := model["temperature"].(float64); !numeric {
+	if _, numeric := model[temperatureField].(float64); !numeric {
 		return values, nil
 	}
 	var raw map[string]json.RawMessage
@@ -161,9 +161,9 @@ func decodeUpdateAgentArgs(args json.RawMessage) (map[string]any, error) {
 		return nil, err
 	}
 	var temperature json.Number
-	if err := json.Unmarshal(fields["temperature"], &temperature); err != nil {
+	if err := json.Unmarshal(fields[temperatureField], &temperature); err != nil {
 		return nil, err
 	}
-	model["temperature"] = temperature
+	model[temperatureField] = temperature
 	return values, nil
 }

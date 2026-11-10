@@ -75,6 +75,7 @@ func resolveScopedForgeRepoAndToken(ctx context.Context, k8sClient client.Client
 	return resolveRepoAndTokenWithPolicy(ctx, k8sClient, toolName, taskName, repoURL, overrideBaseURL, true, githubCredentialForgeMutation)
 }
 
+//nolint:gocyclo // Repository and credential resolution tries each policy-ordered source in turn.
 func resolveRepoAndTokenWithPolicy(
 	ctx context.Context,
 	k8sClient client.Client,
@@ -384,10 +385,6 @@ func withGitHubTaskNamespace(ctx context.Context, namespace string) context.Cont
 	scoped := *tc
 	scoped.Namespace = namespace
 	return WithToolContext(ctx, &scoped)
-}
-
-func loadGitHubTaskContext(ctx context.Context, k8sClient client.Client, taskName string) (githubTaskContext, error) {
-	return loadGitHubTaskScopes(ctx, k8sClient, taskName, false)
 }
 
 // loadGitHubTaskScopes loads the Task's repository scopes. With

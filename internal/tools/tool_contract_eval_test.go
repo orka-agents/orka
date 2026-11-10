@@ -1108,6 +1108,17 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 			},
 		},
 		{
+			name:   "chat create_agent runtime contract",
+			limits: []string{"chat/create_agent.runtime.contractVersion enum=orka.harness.v2"},
+			check: func(t *testing.T) (bool, string) {
+				call := func() (Tool, context.Context) { return chatTool("create_agent", newFakeClient()) }
+				contract := func(v string) string {
+					return fmt.Sprintf(`{"name":"a","model":{"name":"test-model"},"runtime":{"type":"claude","contractVersion":%q}}`, v)
+				}
+				return evalRejectsChange(call, contract("orka.harness.v2"), contract("orka.harness.v1"), "contractVersion")
+			},
+		},
+		{
 			name:   "chat create_agent model counts",
 			limits: []string{"chat/create_agent.model.contextWindow minimum=1", "chat/create_agent.model.maxTokens minimum=1"},
 			check: func(t *testing.T) (bool, string) {
@@ -1343,6 +1354,18 @@ func TestToolEvalSchemaLimitsEnforced(t *testing.T) {
 				// The tool stores contextWindow as given; the Agent CRD rejects it on create.
 				limits := evalCRDModelField(t, "contextWindow")
 				return limits["minimum"] == float64(1), fmt.Sprintf("Agent CRD contextWindow limits = %v", limits)
+			},
+		},
+		{
+			name:   "worker create_agent runtime contract",
+			limits: []string{"worker/create_agent.runtime.contractVersion enum=orka.harness.v2"},
+			check: func(t *testing.T) (bool, string) {
+				t.Setenv(envOrkaTaskName, "parent")
+				call := func() (Tool, context.Context) { return workerTool("create_agent", evalParentTaskCluster()) }
+				contract := func(v string) string {
+					return fmt.Sprintf(`{"role":"coder","systemPrompt":"s","model":{"name":"m"},"runtime":{"type":"claude","contractVersion":%q}}`, v)
+				}
+				return evalRejectsChange(call, contract("orka.harness.v2"), contract("orka.harness.v1"), "contractVersion")
 			},
 		},
 		{

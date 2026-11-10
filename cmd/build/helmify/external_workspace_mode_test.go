@@ -44,18 +44,6 @@ func TestStaticChartExternalWorkspaceDispatchAndMCPFlags(t *testing.T) {
 	}
 }
 
-func TestStaticChartRejectsExternalWorkspaceDispatchInHarnessV1(t *testing.T) {
-	rendered, err := helmTemplateStaticChart(t,
-		"--set-string", "controller.mode=harness-v1",
-		"--set", "controller.executionWorkspace.dispatchEnabled=true",
-		"--set-string", "harnessV1.image.digest=sha256:"+strings.Repeat("1", 64),
-		"--set-string", "harnessV1.auth.existingSecret=harness-wrapper-auth",
-		"--set-string", "harnessV1.tls.existingSecret=harness-wrapper-tls")
-	if err == nil || !strings.Contains(rendered, "controller.executionWorkspace.dispatchEnabled requires harness-v2") {
-		t.Fatalf("harness-v1 dispatch render = %v: %s", err, rendered)
-	}
-}
-
 func TestStaticChartDoesNotGrantNativeProviderAuthority(t *testing.T) {
 	rendered := requireHelmRender(t, "--show-only", "templates/rbac.yaml")
 	for _, group := range []string{

@@ -55,7 +55,7 @@ func TestRemediationDefaultCompositionAcceptsQualifiedConfiguration(t *testing.T
 	builder := controller.NewJobBuilder(kube)
 	image := "example.invalid/worker@sha256:" + strings.Repeat("a", 64)
 	service, backend, err := setupRemediation(
-		t.Context(), mgr, kubefake.NewSimpleClientset(), store, builder, remediationOptions{
+		t.Context(), mgr, kubefake.NewSimpleClientset(), store, store, builder, remediationOptions{
 			Enabled: true, Namespace: "fixture", AgentName: agent.Name,
 			AIWorkerImage: image, GeneralWorkerImage: image, GeneralWorkerImageID: image,
 			HelperImage: image, HelperImageID: image, ToolImage: image, ToolImageID: image,

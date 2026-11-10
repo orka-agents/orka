@@ -31,7 +31,8 @@ resource describing an HTTP endpoint or MCP server.
 
 **Built-in tool** — a tool Orka ships, such as `web_search`, `delegate_task`, or
 `create_pull_request`. Some are selected by name; others are added automatically, for
-example memory tools on every AI Task. See [Built-in tools](built-in-tools.md).
+example memory tools on every native AI Task during the warning release. See
+[Built-in tools](built-in-tools.md) and [migration notes](../operations/upgrading.md#memory-tool-opt-in).
 
 **Coordinator** — an Agent with `coordination.enabled` that delegates work to other Agents
 as child Tasks. See [Multi-agent coordination](../guides/multi-agent-coordination.md).
@@ -74,16 +75,16 @@ directly.
 it was delivered, so a controller restart never sends the same prompt twice.
 
 **Harness** — the contract between the controller and the thing executing agent work.
-`harness-v1` is the deprecated sidecar-wrapper design, to be removed in a future release; `harness-v2` is the current ACP pool
-design. An installation picks one at install time and cannot switch.
+Orka supports `orka.harness.v2` for built-in ACP runtimes and externally registered
+runtimes. Its controller identity is fixed to `harness-v2`.
 Orka harness v2 uses the `orka.harness.v2` controller-to-supervisor contract. The
 supervisor separately speaks ACP to agent CLIs over stdin/stdout. The harness
 version describes Orka's contract, independently of the ACP protocol version.
-See [Harness modes](../operations/harness-modes.md).
+See [installation ownership](../operations/harness-modes.md).
 
 **Producer** — anything that creates Tasks: a person with the CLI, CI, a webhook, another
-agent. The term matters during a v1-to-v2 migration, where you point producers at one
-installation's endpoint or the other.
+agent. When a cluster runs several installations, each producer points at one
+installation's endpoint.
 
 ## Safety and correctness
 

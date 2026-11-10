@@ -7,14 +7,14 @@ description: "Back up Orka, update its Kubernetes resource definitions, and chec
 
 Orka supports in-place SQLite upgrades from the exact layouts listed below.
 This is a narrow database compatibility guarantee, not support for every older
-release, controller mode, or deployment topology. Follow
-[Install Orka](installation.md) for new installations.
+release or deployment topology. This procedure covers harness v2 installations
+only. Follow [Install Orka](installation.md) for new installations.
 
 ## What release checks cover {#release-checks}
 
 The release checks install the chart after creating CRDs and internal Secrets
 separately. They restart the controller using the same data and encryption key,
-confirm that tasks still work, and check that Helm blocks a change to
+confirm that tasks still work, and check that Helm rejects an unsupported
 `controller.mode`. Results are in the release's `acceptance.json`.
 
 These checks do not test Helm's automatic CRD and Secret creation.
@@ -22,6 +22,117 @@ Broader coverage for upgrades between versions and restoring a lost installation
 from backups is tracked in
 [#499](https://github.com/orka-agents/orka/issues/499) and
 [#505](https://github.com/orka-agents/orka/issues/505).
+
+## Memory tool opt-in: warning release {#memory-tool-opt-in}
+
+This release is the compatibility/warning phase of [#680](https://github.com/orka-agents/orka/issues/680).
+All native `type: ai` Tasks still receive `recall_memory`, `remember`, `propose_memory`,
+and `search_transcript`, regardless of their selected tools or coordination configuration.
+This includes Tasks with `orka.ai/disable-coordination-tool-injection: "true"` and
+Agents whose memory-tool references have `enabled: false`. **This release does not yet
+provide per-Agent memory-tool denial.**
+
+The worker emits a structured warning when the model calls a memory tool that will
+lose automatic access in the next release. Unused tools do not warn. Tools explicitly
+selected by the Agent or Task do not warn, nor do automatically injected tools for an
+Agent with `coordination.enabled: true` and no disable-injection annotation. Child-task
+identity alone is not coordination opt-in. Update the controller and AI worker together
+so the worker receives the controller's deprecation metadata.
+
+**The next release will enforce opt-in.** Before upgrading to that release:
+
+- List the memory tools the Agent needs in `spec.tools`, with `enabled` omitted or `true`,
+  or list them in the Task's `spec.ai.tools`. Explicit selections will remain available
+  even with the disable-injection annotation.
+- Alternatively, use an Agent with `coordination.enabled: true` and no disable-injection
+  annotation. This also adds other coordination tools; prefer explicit memory selections
+  when those capabilities are not needed.
+- Keep transaction-token `tctx.allowedTools` grants for all four memory tools throughout
+  this warning release. Narrow grants only after the enforcing release's effective tool
+  list no longer contains the omitted tools.
+
+For example, preserve only the memory tools an Agent needs by adding these selections
+before the enforcing release (the warning release still exposes all four):
+
+```yaml
+spec:
+  tools:
+    - name: recall_memory
+    - name: remember
+```
+
+`remember` and `propose_memory` still create review proposals rather than applying durable memories.
+Startup loading of reviewed memories into the prompt is separate and unchanged; tool
+opt-in does not disable that context. ACP/coding-agent runtime tool policy is unchanged.
+
+## Task webhooks are signed and fail closed {#task-webhooks}
+
+`spec.webhookURL` notices are now signed, durable, and bounded. Review receivers before
+upgrading:
+
+- Every request carries an Ed25519-signed `X-Orka-Signature` and a stable
+  `X-Orka-Delivery-ID`. Unverified receivers keep working, but should start verifying
+  against `/.well-known/orka/task-webhook-jwks.json`. See
+  [Task webhooks](../guides/task-webhooks.md#verifying-a-notice).
+- The signing key lives in a new namespace that holds only that Secret and binds only
+  the controller: `<release namespace>-task-webhook-signing` for Helm (value
+  `controller.taskWebhooks.signingNamespace`), `orka-task-webhook-signing` for kustomize
+  (flag `--task-webhook-signing-namespace`). The chart and the kustomize
+  install create the namespace and a controller Role in it; the controller creates the
+  Secret and mints the key on first use. Installs that grant RBAC some other way must
+  grant the controller `get` and `update` on that Secret and `create` on Secrets there.
+  The controller refuses to start if the signing namespace is its own, the watch, ACP
+  runtime or agent-host namespace. See
+  [Who can read the signing key](../guides/task-webhooks.md#who-can-read-the-signing-key).
+- Builds of `main` from before this change kept the key in the controller namespace,
+  where Tasks could mount it. They mint a new key in the new namespace, so receivers see a
+  new `kid` and refetch the JWKS. Delete the old Secret (`<fullname>-task-webhook-signing`
+  or `orka-task-webhook-signing` in the controller namespace) after upgrading.
+- A new ValidatingAdmissionPolicy, `<fullname>-ai-worker-identity-protection`
+  (`orka-ai-worker-identity-protection` for kustomize), limits what the AI worker
+  ServiceAccount may create. Before, the default AI worker role could create a
+  ServiceAccount-token Secret or a Job that named the controller's ServiceAccount and
+  act as the controller, or delete and recreate a platform ServiceAccount to inherit its
+  RoleBindings. Now it may write only Opaque Secrets, create or delete only `code_exec`'s
+  own `orka-code-exec-*` ServiceAccounts, and create only
+  `code_exec`-shaped Jobs: named `orka-code-exec-*`, running as the ServiceAccount of
+  the same name with `automountServiceAccountToken: false`, with only `code_exec` Pod
+  labels (so the Pod joins no other component's Service or NetworkPolicy allowance), no
+  subdomain, only emptyDir and Secret volumes, no host namespaces or ports, no init or
+  ephemeral containers, and non-root, unprivileged containers with
+  `allowPrivilegeEscalation: false`, all capabilities dropped and none added, and a
+  `RuntimeDefault` or `Localhost` seccomp profile.
+  Orka's own worker already works this way. Anything else that writes Secrets, Jobs or
+  ServiceAccounts as the AI worker ServiceAccount is now rejected. If you run such code
+  and cannot move it to its own ServiceAccount, set `workers.ai.identityProtection: false`
+  (Helm) or drop `orka-ai-worker-identity-protection` and its binding from your kustomize
+  build. Under the default AI worker RBAC profile, that lets the AI worker act as the
+  controller again, including reading the webhook signing key.
+- Orka's ServiceAccounts now carry `orka.ai/platform-identity: "true"`, in both installs
+  and on worker accounts the controller creates. An OutboundAccessPolicy whose
+  `serviceAccountRef` names one, or names the controller or a worker ServiceAccount the
+  controller is configured with (labeled or not, for example an externally managed
+  controller account), now reports `ReferenceDenied`, and the controller revokes any
+  TokenRequest grant it held. The AI worker's own ServiceAccount is the one exception: a
+  token for itself gives it nothing new. Point other such policies at a dedicated
+  ServiceAccount.
+- Check the release namespace for ServiceAccount-token Secrets
+  (`kubectl -n <namespace> get secrets --field-selector type=kubernetes.io/service-account-token`).
+  The default AI worker profile can read them; delete any you do not need, and treat a
+  token for a privileged account as exposed.
+- With signing enabled but no usable key (the Secret cannot be read or holds a malformed
+  key), nothing is sent and no attempt is consumed: the delivery stays `Pending` until a
+  key is available.
+- With signing disabled (`--task-webhook-signing-secret=""`), notices are not sent and
+  their deliveries are marked `Failed`; enabling signing later does not retry them.
+- Destinations are checked at connect time. A DNS failure, any non-public resolved
+  address, a redirect, or a proxy is no longer tolerated, so a host name that resolves to
+  a private address stops receiving notices. Use a Service in the Task's namespace for
+  in-cluster receivers.
+- Failed deliveries are retried at most 8 times with exponential backoff, not every 30
+  seconds forever. Literal private IPs and other policy violations fail at once.
+- The JSON body gains `deliveryId`, `eventType`, `occurredAt`, and `taskUID`. Existing
+  fields are unchanged.
 
 ## Supported database layout
 
@@ -38,10 +149,54 @@ compatibility.
 
 | Source core layout | Representative revision | Transition |
 | --- | --- | --- |
-| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes. |
-| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes. |
-| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables. |
-| 166 objects (current) | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Validate only; no migration or automatic backup. |
+| 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
+| 162 objects | [`57583975`](https://github.com/orka-agents/orka/commit/57583975d265a1ca23ebc8106d8fe769c84ae4f3), #701 | Add empty native-session tables, then remove the empty harness v1 tables and add dataset metadata. |
+| 166 objects | [`abd2c0406ab660abd37af7c176b4eef610a19ce1`](https://github.com/orka-agents/orka/commit/abd2c0406ab660abd37af7c176b4eef610a19ce1), #732 | Remove the empty `harness_v1_attempts` and `runtime_sessions` tables and their indexes, then add dataset metadata. |
+| 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
+| 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns; keep the dataset identity, records and key bootstrap state. |
+| 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
+| 162 objects, schema version 3 | Dataset binding layout | Rebuild the work action dedupe index so a `retry_pending` action owns its key, first cancelling any `retry_pending` action whose key another active action shares (reason `dedupe_superseded`); keep the dataset identity, binding, records and key bootstrap state. |
+| 162 objects (current), schema version 4 | Work action dedupe layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+
+A harness v2 store never writes the harness v1 tables or harness v1 Session
+lineages. If either table holds records, or a Session lineage uses
+`orka.harness.v1`, the upgrade stops before changing the schema and reports
+`harness v1 ... records`; that store belongs to an unsupported harness v1
+installation.
+
+The five historical source layouts have SQLite `user_version = 0` and upgrade
+to the current layout in one transaction, ending with the schema version 4
+objects. A schema version 1, 2 or 3 store keeps its identity row and upgrades in
+place through each later version, after the same automatic backup. A nonzero marker on any other layout is
+refused rather than adopted.
+
+### Dataset identity and key bootstrap
+
+The current database records a stable dataset UUID, whether it was freshly
+created or adopted during upgrade, and whether key bootstrap completed.
+`PRAGMA user_version = 4` records this metadata layout; the controller also checks
+every actual schema definition. Unknown versions and missing or malformed
+established identity are refused without regenerating metadata or replacing data.
+
+The controller acquires the SQLite process lock before inspecting this history
+or loading the key. It may populate an empty managed snapshot-key Secret only
+for a new, unfinished dataset containing no application records. It never mints
+a key for an adopted dataset, even an empty one, or after bootstrap completed.
+Restore a missing key for such a dataset from backup. Key-file mode always
+requires an operator-supplied key.
+
+An interrupted first start can resume with the same dataset identity. A key
+already committed to the Secret is reused; bootstrap completes only after the
+key authenticates retained execution snapshots, native sessions and connector
+custody under the existing retention and consent-expiry rules. Key-load/authentication failure releases the database lock and
+stops startup before consumers run. Deleting ordinary records does not reset the
+bootstrap history.
+
+Dataset identity is stored inside the database. It does not detect replacement
+of the entire database, restoration of older history, or establish an independent
+installation binding. Preserve the volume, Kubernetes state and key together;
+this metadata is not a backup/restore protocol.
 
 ### Optional report-validation stores
 
@@ -315,11 +470,14 @@ existing tasks and data depend on them:
 
 | Value | Why it is fixed |
 | --- | --- |
-| `controller.mode` | Determines how this installation runs coding agents. |
+| `controller.mode` | The `harness-v2` execution contract is the installation's identity. |
 | `controller.watchNamespace` | Existing Tasks live there. |
 | `controller.agentExecutionSnapshot.existingSecret` and `.key` | Saved agent configuration needs the original encryption key. A generated key cannot be swapped for your own later, or the reverse. |
 | `controller.acpRuntime.namespace` | Running pools live there. |
 | The release fullname | Every owned resource is named from it. |
+
+To change one, install a new release alongside the old one and migrate producers across.
+See [installation ownership](harness-modes.md).
 
 The snapshot key also seals linked accounts (connectors). When the controller
 starts, it checks that its key opens every retained execution snapshot and
@@ -358,3 +516,10 @@ readable. Keeping them does not preserve the data stored in volumes.
 Deleting a CRD also deletes every resource of that type across the cluster.
 Keep CRDs until their data is no longer needed or has been backed up.
 :::
+
+## Unsupported installations
+
+The current controller only supports harness v2. Older execution protocols have
+no in-place upgrade, automatic Task or Session conversion, or database backfill.
+A database holding harness v1 records is refused at startup. Use a fresh
+installation with the current schema and images.

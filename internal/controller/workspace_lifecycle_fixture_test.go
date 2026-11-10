@@ -131,7 +131,6 @@ func bindSuspendableSessionTaskForSettlement(
 ) *corev1alpha1.Task {
 	t.Helper()
 	ctx := context.Background()
-	r.ACPRuntimeEnabled = true
 	r.ACPRuntimeNamespace = acpTestRuntimeNamespace
 	r.ACPRuntimeImages = ACPRuntimeImages{
 		Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64),

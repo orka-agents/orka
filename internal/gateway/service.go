@@ -336,7 +336,7 @@ func (s *Service) cleanupRetainedGatewayTasks(ctx context.Context, terminalCutof
 	for i := range tasks.Items {
 		task := &tasks.Items[i]
 		if !task.DeletionTimestamp.IsZero() || task.CreationTimestamp.IsZero() || !task.CreationTimestamp.Time.Before(terminalCutoff) ||
-			!isTerminalTaskPhase(task.Status.Phase) {
+			!task.Status.Phase.IsTerminal() {
 			continue
 		}
 		owner, gatewayOwned := TaskOwner(task)
@@ -709,6 +709,11 @@ func (s *Service) AdmitEvent(ctx context.Context, namespace, gatewayName, author
 		}
 		if errors.Is(err, store.ErrDuplicateMismatch) {
 			return nil, &HTTPError{Code: http.StatusConflict, Message: externalEventConflictMessage}
+		}
+		// A replaced controller's write is fenced, which also matches
+		// ErrConflict; it says nothing about Session ownership.
+		if errors.Is(err, store.ErrFenced) {
+			return nil, fmt.Errorf("persist accepted gateway event: %w", err)
 		}
 		if errors.Is(err, store.ErrConflict) {
 			return s.admitRejectedEvent(ctx, baseEvent, "the selected Session is owned by another source")
@@ -1323,7 +1328,7 @@ func (s *Service) projectTerminalEvents(ctx context.Context, events []store.Gate
 			}
 			continue
 		}
-		if isTerminalTaskPhase(task.Status.Phase) {
+		if task.Status.Phase.IsTerminal() {
 			projected, err := s.projectTerminal(ctx, event, task)
 			if errors.Is(err, errGatewayResultNotReady) {
 				s.deferProjection(ctx, event, now)
@@ -1366,6 +1371,7 @@ func (s *Service) deferProjection(ctx context.Context, event *store.GatewayEvent
 	)
 }
 
+//nolint:gocyclo // Terminal projection handles each delivery outcome explicitly.
 func (s *Service) projectTerminal(
 	ctx context.Context,
 	event *store.GatewayEvent,
@@ -1473,6 +1479,8 @@ func (s *Service) projectTerminal(
 }
 
 // DeliverOnce claims one due delivery and records the synchronous terminal adapter result.
+//
+//nolint:gocyclo // Delivery keeps claim, send, and settlement branches together under one lease.
 func (s *Service) DeliverOnce(ctx context.Context) error {
 	claimAt := time.Now().UTC()
 	delivery, err := s.DeliveryStore.ClaimNextGatewayDelivery(ctx, s.Config.Namespace, s.Owner, claimAt, s.Config.ClaimLease)
@@ -2347,10 +2355,6 @@ func terminalErrorText(phase corev1alpha1.TaskPhase, statusMessage string) strin
 		return "The conversation is too long for the configured model. Please shorten the request and try again."
 	}
 	return "The task could not be completed."
-}
-
-func isTerminalTaskPhase(phase corev1alpha1.TaskPhase) bool {
-	return phase == corev1alpha1.TaskPhaseSucceeded || phase == corev1alpha1.TaskPhaseFailed || phase == corev1alpha1.TaskPhaseCancelled
 }
 
 func eventBackoff(attempt int) time.Duration {

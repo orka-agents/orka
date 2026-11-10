@@ -1,4 +1,4 @@
-{{- if and .Values.rbac.create (eq .Values.controller.mode "harness-v2") -}}
+{{- if .Values.rbac.create -}}
 {{- range .Values.controller.executionWorkspace.workerNamespaces | uniq }}
 ---
 # Provider worker namespace. Runtime identity reads never authorize compute mutation.

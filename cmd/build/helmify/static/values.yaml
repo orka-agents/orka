@@ -2,9 +2,7 @@
 
 # Controller configuration
 controller:
-  # Immutable execution contract for this installation. Fresh installs default
-  # to v2; select v1 explicitly only for a separate compatibility release.
-  # One release never serves both contracts or changes mode in place.
+  # Fixed execution protocol identity. Only harness-v2 is supported.
   mode: harness-v2
 
   # Number of controller replicas
@@ -32,7 +30,7 @@ controller:
 
   # Defaults to the Helm release namespace. On first start the controller
   # labels it orka.ai/controller-mode=<controller.mode>; a namespace already
-  # labeled for the other mode fails startup, and the label never changes.
+  # labeled for another mode fails startup, and the label never changes.
   watchNamespace: ""
 
   # API server port
@@ -59,6 +57,22 @@ controller:
 
   # Max active tasks per namespace (0 = unlimited)
   maxTasksPerNamespace: 0
+
+  # Ed25519 keys that sign Task webhook deliveries (spec.webhookURL). The
+  # controller reads Secret <fullname>-task-webhook-signing (or
+  # signingSecretName) in signingNamespace, creating it and minting the
+  # "current" key on first use. Rotate by moving "current" to "previous" and
+  # writing a new PEM PKCS#8 Ed25519 key to "current". Receivers verify against
+  # GET /.well-known/orka/task-webhook-jwks.json on the API service.
+  taskWebhooks:
+    signingSecretName: ""
+    # Chart-created namespace that holds only the signing Secret, so Task and
+    # Agent secretRefs and worker roles in the release namespace cannot reach
+    # the key. Empty means <release namespace>-task-webhook-signing, so each
+    # release owns its own. Must differ from the release, client, ACP runtime
+    # and agent-host namespaces. Kept on helm uninstall so the key survives a
+    # reinstall.
+    signingNamespace: ""
 
   # Operation-scoped ACP artifact transport stored on the controller PVC.
   acpArtifact:
@@ -100,6 +114,20 @@ controller:
     claudeImage: ghcr.io/orka-agents/orka/acp-claude-runtime:0.0.0-dev
     copilotImage: ghcr.io/orka-agents/orka/acp-copilot-runtime:0.0.0-dev
     opencodeImage: ghcr.io/orka-agents/orka/acp-opencode-runtime:0.0.0-dev
+    # Concurrency of each new built-in runtime RuntimePool. Raise
+    # maxRunningPrompts to run more Tasks for the same Agent at once, such as
+    # repository scan review slices. maxRunningPrompts cannot exceed
+    # maxResidentSessions; both accept 1-1000.
+    pool:
+      maxRunningPrompts: 4
+      maxResidentSessions: 10
+    # Agent Tasks the controller runs through ACP runtimes at once, across
+    # all RuntimePools. Each running prompt holds one place, so raise this
+    # with pool.maxRunningPrompts to run more prompts concurrently (1-1000).
+    # A coordinator waiting on ACP child Tasks keeps its place; keep this
+    # above the number of coordinators that can wait at once.
+    dispatch:
+      maxConcurrentTasks: 4
     # Planned controller upgrades use a same-binary preStop child to call a
     # loopback-only coordinator. Keep terminationGracePeriodSeconds greater
     # than timeout and triggerTimeout so SIGTERM shutdown still has headroom.
@@ -194,6 +222,52 @@ controller:
   # orka CLI work without it, and `orka dashboard` needs it.
   dashboard:
     enabled: false
+
+  # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
+  # Orka-owned Pods. Off by default.
+  agentHosts:
+    enabled: false
+    # Host Pods, volumes, NetworkPolicies and Secrets live here. The chart
+    # creates it with the restricted Pod Security profile; it must differ from
+    # the Helm release namespace and controller.acpRuntime.namespace.
+    namespace: orka-agent-hosts
+    # Digest-pinned image with the orka-host-agent sidecar. Empty uses the
+    # controller image, which then must be pinned with controller.image.digest.
+    agentImage: ""
+    # Give each person who links GitHub their own host, fed by their link
+    # (ADR 0036). Needs controller.connectors and a GitHub App with expiring
+    # user tokens whose callback URL is controller.connectors.callbackBaseUrl
+    # + /api/v1/connections/callback. The chart renders the GitHub
+    # ConnectorProvider and the host template below.
+    github:
+      enabled: false
+      # Name people link with, as in `orka connect github`.
+      providerName: github
+      displayName: GitHub
+      # The GitHub App's client ID.
+      clientID: ""
+      # The app's client secret: name an existing Secret, or give the value
+      # and the chart stores it in a Secret.
+      clientSecret:
+        existingSecret: ""
+        key: clientSecret
+        value: ""
+    # The copilotd template those hosts run, from
+    # config/samples/core_v1alpha1_agenthosttemplate.yaml. Its spec is
+    # immutable: to change these values on an existing install, delete the
+    # AgentHostTemplate, then upgrade; hosts move to it on their volumes.
+    template:
+      name: copilotd
+      copilotdImage: ghcr.io/github/copilotd:0.9.6@sha256:0abd0d0bc20ab7c1a6c8d73d4dce7ab8c80d48f78e80d746b485c0415451c72f
+      hostImage: mcr.microsoft.com/devcontainers/go:1@sha256:8f1c83128e4bce9d745b1dc0f28f8c027e303d3886e2434966ff135296c41770
+      storage: 20Gi
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
 
   # OIDC/JWT authentication for external API requests
   oidc:
@@ -311,6 +385,17 @@ publisher:
     apiBaseURL: https://api.github.com
     requestTimeout: 15s
     maxResponseBytes: 4194304
+  # Per-checkout source workspace limits. 0 keeps the publisher default:
+  # 100000 entries, 64 MiB per file, 96 MiB expanded, 100 MiB archive. The
+  # controller reads the archive limit at startup, so restart it after a change.
+  workspaceLimits:
+    maxEntries: 0
+    maxFileBytes: 0
+    maxBytes: 0
+    maxArtifactBytes: 0
+  # Scratch volume for fetched Git objects and the archive being built; keep it
+  # well above maxArtifactBytes, and the ephemeral-storage limit above it.
+  scratchSizeLimit: 1Gi
   auth:
     existingSecret: ""
     controllerTokenKey: controller-token
@@ -426,72 +511,21 @@ providerProxy:
       memory: 128Mi
       ephemeral-storage: 128Mi
 
-# orka.harness.v1 data plane configuration. It is rendered only when
-# controller.mode is harness-v1 and is never an ACP fallback.
-harnessV1:
-  dispatch:
-    interval: 1s
-    workers: 1
-  upgradeDrain:
-    # Before an upgrade, rollback, or deletion mutates an existing wrapper, a
-    # Helm hook durably closes admission and proves that no unsettled turns
-    # remain. Keep this below Helm's default five-minute operation timeout.
-    timeout: 4m
-    pollInterval: 2s
-    resources:
-      requests:
-        cpu: 10m
-        memory: 32Mi
-        ephemeral-storage: 16Mi
-      limits:
-        cpu: 100m
-        memory: 64Mi
-        ephemeral-storage: 64Mi
-  image:
-    repository: ghcr.io/orka-agents/orka/agent-harness-wrapper
-    tag: "0.0.0-dev"
-    # Required when controller.mode is harness-v1. Tags are never accepted for
-    # a running wrapper.
-    digest: ""
-    pullPolicy: IfNotPresent
-  auth:
-    # Use a dedicated operator-created Secret. Bearer credentials are never
-    # accepted through Helm values or emitted into rendered release manifests.
-    # The Secret source and key are immutable while a harness-v1 wrapper
-    # Deployment exists because controller attempts pin its resourceVersion.
-    existingSecret: ""
-    tokenKey: token
-  tls:
-    # Use a different operator-created Secret containing tls.crt, tls.key, and
-    # ca.crt. Its serving certificate must authenticate the release-scoped
-    # Service DNS name: <release>-orka-agent-harness-wrapper.<namespace>.svc.
-    existingSecret: ""
-    # Bump this non-secret revision whenever certificate data changes without
-    # changing existingSecret. The chart drains the live wrapper before it
-    # restarts both the wrapper and controller onto the new TLS generation.
-    rolloutNonce: ""
-  ledger:
-    # The admission ledger is always PVC-backed when harness v1 is enabled.
-    size: 1Gi
-    storageClass: ""
-    # Controller-acknowledged terminal records remain replay-safe for this
-    # audit/backup window before bounded wrapper GC may reclaim them.
-    retention: 720h
-  # Codex defaults to workspace-write. Broader modes require explicit policy.
-  codexSandboxMode: workspace-write
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-      ephemeral-storage: 512Mi
-    limits:
-      cpu: "2"
-      memory: 2Gi
-      ephemeral-storage: 2Gi
-
 # Worker configuration
 workers:
   ai:
+    # default preserves current permissions; restricted grants read-only lookups.
+    # Restricted also enforces context-token authorization controller-wide:
+    # existing off/audit callers must satisfy their issuer grants. It does not
+    # narrow those grants or OIDC authority. See the chart README.
+    rbacProfile: default
+    # ValidatingAdmissionPolicy that holds the AI worker ServiceAccount to the
+    # Secrets, ServiceAccounts and code_exec Jobs Orka itself creates, so it
+    # cannot take on the controller's or another account's identity. Turn it
+    # off only if you run other code as the AI worker ServiceAccount that must
+    # make other writes; that reopens the path to the controller's identity
+    # (and the Task webhook signing key) under the default rbacProfile.
+    identityProtection: true
     image:
       repository: ghcr.io/orka-agents/orka/ai-worker
       tag: "0.0.0-dev"
@@ -503,6 +537,13 @@ workers:
       repository: ghcr.io/orka-agents/orka/general-worker
       tag: "0.0.0-dev"
       digest: ""
+
+  # Session transcript fetcher. Requires BusyBox-compatible sh, cat, wget, rm, mv, and sleep.
+  # Only SHA256 digest references are accepted by the controller.
+  sessionLoader:
+    image:
+      repository: docker.io/library/busybox
+      digest: "sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e"
 
 # GitHub webhook and label-trigger configuration.
 # Configure a repository webhook to POST to /webhooks/github with the secret below.
@@ -516,6 +557,19 @@ github:
 service:
   type: ClusterIP
   port: 8080
+
+# Ingress to the Orka API, for `orka` and the dashboard. With the Tailscale
+# Kubernetes operator, className: tailscale and tls.hosts: [orka] serve
+# https://orka.<tailnet>.ts.net to the tailnet with no domain to buy. The
+# metrics port is never exposed.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Empty serves every host name the controller in className answers.
+  host: ""
+  # For example [{hosts: [orka]}] with Tailscale, or hosts plus secretName.
+  tls: []
 
 # ServiceAccount configuration
 serviceAccount:
@@ -575,6 +629,35 @@ store:
     size: 1Gi
     storageClass: ""     # use cluster default
     accessMode: ReadWriteOnce
+
+# Storage bindings. Each storage contract is served by embedded SQLite
+# ("sqlite", at store.path) or by a storage adapter named in storage.adapters.
+# With both contracts on sqlite and no adapters, the chart renders no storage
+# configuration file and the controller keeps its defaults. Otherwise the chart
+# renders the <release>-storage ConfigMap, passes it with --storage-config and
+# restarts the controller when it changes. The store volume stays required.
+#
+# This controller serves both contracts only from sqlite: it refuses to start
+# with a contract bound to an adapter (reason AdapterTransportUnavailable) and
+# never falls back to SQLite.
+storage:
+  bindings:
+    state: sqlite        # state.v1: sessions, results, gateway and control records
+    artifacts: sqlite    # artifacts.v1: artifact bytes and metadata
+  # Storage adapters in the release namespace, keyed by name. Each adapter must
+  # be bound above, sets exactly one of serviceRef or url (https:// only), and
+  # authenticates with a bearer token of at least 32 visible ASCII characters.
+  # Secret references name Secrets in the release namespace; the controller
+  # reads them directly and never mounts them. For example:
+  #
+  #   postgres:
+  #     serviceRef: {name: orka-storage-postgres, port: 8443}
+  #     tls:
+  #       serverName: orka-storage-postgres.orka-system.svc   # optional
+  #       caSecretRef: {name: orka-storage-postgres-ca, key: ca.crt}   # optional; system roots otherwise
+  #     clientAuth:
+  #       bearerTokenSecretRef: {name: orka-storage-postgres-client, key: token}
+  adapters: {}
 
 # Client ServiceAccount for API access
 client:

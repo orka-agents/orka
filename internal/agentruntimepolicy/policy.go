@@ -31,7 +31,7 @@ type RuntimeRefPolicy struct {
 }
 
 // ResolveRuntimeRefPolicy resolves an Agent's external harness-v2 policy.
-// Built-in and harness-v1 Agents return a nil policy.
+// Built-in Agents return a nil policy.
 func ResolveRuntimeRefPolicy(
 	ctx context.Context,
 	reader client.Reader,
@@ -57,13 +57,13 @@ func ResolveRuntimeRefPolicy(
 }
 
 // PolicyForRuntime returns the registered harness-v2 policy from an already
-// resolved AgentRuntime. Other contracts return a nil policy.
+// resolved AgentRuntime. Unsupported contracts are rejected.
 func PolicyForRuntime(runtime *corev1alpha1.AgentRuntime) (*RuntimeRefPolicy, error) {
 	if runtime == nil {
 		return nil, fmt.Errorf("external AgentRuntime is required")
 	}
 	if runtime.RegisteredContractVersion() != corev1alpha1.AgentRuntimeContractHarnessV2 {
-		return nil, nil
+		return nil, fmt.Errorf("external AgentRuntime %q requires contractVersion orka.harness.v2", runtime.Name)
 	}
 	runtimeName := strings.TrimSpace(runtime.Name)
 	if runtime.Spec.Capabilities == nil || runtime.Spec.Capabilities.MCPPolicy == nil {
@@ -159,8 +159,7 @@ func ResolveAndMaterializeTaskRuntimeRefAllowedTools(
 
 // ResolveAndReplaceTaskRuntimeRefAllowedTools resolves the Agent referenced by
 // a copied Task and replaces inherited runtime overrides for external harness-v2
-// execution with the registered allowlist. Built-in and harness-v1 settings are
-// preserved unchanged.
+// execution with the registered allowlist. Built-in settings are preserved.
 func ResolveAndReplaceTaskRuntimeRefAllowedTools(
 	ctx context.Context,
 	reader client.Reader,

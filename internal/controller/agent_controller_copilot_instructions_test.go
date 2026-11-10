@@ -125,10 +125,6 @@ func TestAgentCopilotSoulReadinessPreservesOtherPaths(t *testing.T) {
 			agent.Spec.Soul = nil
 			agent.Spec.Runtime.ContractVersion = nil
 		}},
-		{name: "legacy Copilot without soul", mutate: func(agent *corev1alpha1.Agent) {
-			agent.Spec.Soul = nil
-			agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
-		}},
 		{name: "AI", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime = nil; agent.Spec.Model.Provider = "openai" }},
 		{name: "Codex", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex }},
 		{name: "Claude", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude }},

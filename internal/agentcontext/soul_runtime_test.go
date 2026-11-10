@@ -48,7 +48,7 @@ func TestValidateSoulRuntime(t *testing.T) {
 	} {
 		for _, contract := range []*corev1alpha1.AgentRuntimeContractVersion{
 			new(corev1alpha1.AgentRuntimeContractHarnessV2),
-			new(corev1alpha1.AgentRuntimeContractHarnessV1), nil,
+			new(corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1")), nil,
 		} {
 			version := "missing contract"
 			allowed := false

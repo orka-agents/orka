@@ -487,34 +487,45 @@ func (s *Source) validateProvider(ctx context.Context, connection *corev1alpha1.
 	if err := s.reader().Get(ctx, types.NamespacedName{Namespace: connection.Namespace, Name: connection.Spec.ProviderRef.Name}, provider); err != nil {
 		return nil, errors.New("connector provider is unavailable")
 	}
+	if err := checkProvider(connection, provider, credential, tool); err != nil {
+		return nil, err
+	}
+	return provider, nil
+}
+
+// checkProvider judges held material against a provider already read: every
+// error it returns is a provider that does not authorize the material, never
+// a failed read.
+func checkProvider(connection *corev1alpha1.Connection, provider *corev1alpha1.ConnectorProvider,
+	credential store.ConnectorCredential, tool *outboundaccess.ToolBinding) error {
 	if !connectors.ProviderAccepted(provider) {
-		return nil, errors.New("connector provider is not accepted")
+		return errors.New("connector provider is not accepted")
 	}
 	// The token was issued by the OAuth client sealed with it (the issuer
 	// digest: client identity and endpoints, not tool destinations); a
 	// replaced provider or rotated client must never receive or use it.
 	if credential.AuthorityDigest == "" || credential.AuthorityDigest != connectors.ProviderIssuerDigest(provider) {
-		return nil, errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
+		return errors.New("connector provider OAuth client changed since the token was issued; the person must reconnect")
 	}
 	if !connectors.ConsentMatchesProvider(connection, provider) {
-		return nil, errors.New("connector provider changed since consent; the person must consent again")
+		return errors.New("connector provider changed since consent; the person must consent again")
 	}
 	mode := connection.Spec.Mode
 	if mode == "" {
 		mode = corev1alpha1.ConnectionModeReadOnly
 	}
 	if !connectors.ScopesCover(credential.Scopes, connectors.ScopesForMode(provider, mode)) {
-		return nil, errors.New("connection credential does not cover the connection mode; the person must consent again")
+		return errors.New("connection credential does not cover the connection mode; the person must consent again")
 	}
 	// The executing Tool is judged against this same provider state, so a
 	// credential returned after a re-consent on a retargeted provider can
 	// never be paired with a destination that provider no longer declares.
 	if tool != nil {
 		if _, err := outboundaccess.DeclaredConnectorTool(provider, *tool); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return provider, nil
+	return nil
 }
 
 func (s *Source) providerConfig(ctx context.Context, provider *corev1alpha1.ConnectorProvider) (connectors.OAuthProviderConfig, error) {

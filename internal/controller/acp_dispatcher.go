@@ -309,8 +309,7 @@ func (d *ACPDispatcher) scheduleACPDeliveryRecoveries(ctx context.Context, tasks
 		recoveryKind := ""
 		switch attempt.ExecutionState {
 		case store.PromptExecutionSucceeded:
-			terminalPhase := task.Status.Phase == corev1alpha1.TaskPhaseSucceeded ||
-				task.Status.Phase == corev1alpha1.TaskPhaseFailed || task.Status.Phase == corev1alpha1.TaskPhaseCancelled
+			terminalPhase := task.Status.Phase.IsTerminal()
 			if task.Status.Execution.State != corev1alpha1.TaskExecutionStateSucceeded ||
 				!store.IsTerminalPromptDeliveryState(attempt.DeliveryState) || task.Status.Delivery == nil || !terminalPhase {
 				recoveryKind = acpSucceededOperation
@@ -2899,6 +2898,7 @@ func waitForRuntimeSessionAdmissionState(
 	}
 }
 
+//nolint:gocyclo // Planned-session reconciliation keeps each fenced lifecycle branch in order.
 func (d *ACPDispatcher) reconcilePlannedRuntimeSession(
 	ctx context.Context,
 	runtimeClient *harnessv2.Client,
@@ -5625,11 +5625,17 @@ func promptAttemptIDFromTaskUID(task *corev1alpha1.Task, taskUID types.UID) (str
 	}).CanonicalID()
 }
 
+// patchExecution applies mutate to the latest Task execution status and moves
+// a Pending Task to Running once its prompt is admitted. The patch carries the
+// read resourceVersion, so a concurrent status write (for example a
+// cancellation) forces a fresh read instead of being overwritten by a phase
+// decided from stale state. The read bypasses the informer cache so that cache
+// lag after this dispatcher's own writes cannot exhaust the conflict retries.
 func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.Task, mutate func(*corev1alpha1.TaskExecutionStatus)) error {
 	key := types.NamespacedName{Namespace: task.Namespace, Name: task.Name}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		latest := &corev1alpha1.Task{}
-		if err := d.Client.Get(ctx, key, latest); err != nil {
+		if err := uncachedReader(d.APIReader, d.Client).Get(ctx, key, latest); err != nil {
 			return err
 		}
 		base := latest.DeepCopy()
@@ -5639,6 +5645,8 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 		mutate(latest.Status.Execution)
 		switch latest.Status.Execution.State {
 		case corev1alpha1.TaskExecutionStateAccepted, corev1alpha1.TaskExecutionStateRunning, corev1alpha1.TaskExecutionStateSettling:
+			// Only a Task that is still Pending in the read just made starts
+			// running; a terminal phase written by another actor stays in place.
 			if latest.Status.Phase == corev1alpha1.TaskPhasePending || latest.Status.Phase == "" {
 				latest.Status.Phase = corev1alpha1.TaskPhaseRunning
 				if latest.Status.StartTime == nil {
@@ -5647,7 +5655,7 @@ func (d *ACPDispatcher) patchExecution(ctx context.Context, task *corev1alpha1.T
 				}
 			}
 		}
-		if err := d.Client.Status().Patch(ctx, latest, client.MergeFrom(base)); err != nil {
+		if err := d.Client.Status().Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 			return err
 		}
 		task.Status = latest.Status
@@ -6422,6 +6430,7 @@ func (d *ACPDispatcher) handlePrePromptClientError(ctx context.Context, task *co
 	return false, d.failTask(ctx, task, corev1alpha1.TaskExecutionStateFailed, corev1alpha1.TaskExecutionOutcomeFailed, "RuntimeSessionStartFailed", runtimeSessionStartFailureMessage(err))
 }
 
+//nolint:gocyclo // Each prompt-stream failure class maps to a distinct terminal or retry outcome.
 func (d *ACPDispatcher) handlePromptStreamError(
 	ctx context.Context,
 	promptTrace *acpSpan,

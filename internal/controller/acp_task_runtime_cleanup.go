@@ -136,7 +136,7 @@ func standaloneRuntimeCleanupBinding(task *corev1alpha1.Task, taskUID types.UID)
 		task.Status.Delivery == nil || !store.IsTerminalPromptDeliveryState(store.PromptDeliveryState(task.Status.Delivery.State)) {
 		return nil, fmt.Errorf("%w: standalone runtime cleanup requires a terminal Task", store.ErrConflict)
 	}
-	binding := executionBinding(task, corev1alpha1.AgentRuntimeContractHarnessV2)
+	binding := executionBinding(task)
 	if binding == nil || binding.RuntimeRef == nil || binding.Task.UID != taskUID ||
 		binding.Backend != corev1alpha1.AgentExecutionBackendExternalEndpoint {
 		return nil, fmt.Errorf("%w: standalone runtime cleanup frozen binding is incomplete", store.ErrConflict)

@@ -327,3 +327,32 @@ func TestConnectionListGetDeleteAndProviders(t *testing.T) {
 	}
 	requireOutput(t, "providers", run("connection", "providers"), "GitHub", "list_pull_requests (read)")
 }
+
+// A provider that gives the person an agent host says so before consent.
+func TestConnectDisclosesAnAgentHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"connection":   map[string]any{"name": "github-abc", "namespace": "team-a", "provider": "github", "mode": "readOnly", "state": "Pending"},
+			"authorizeURL": "https://github.com/login/oauth/authorize?state=signed",
+			"agentHost":    true,
+		})
+	}))
+	defer srv.Close()
+	origBrowser := openBrowserFunc
+	openBrowserFunc = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFunc = origBrowser })
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetArgs([]string{"connect", "github", "--server", srv.URL, "--token", "person-token", "--no-wait"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	disclosure := strings.Index(out.String(), "creates your Copilot environment on Orka")
+	if disclosure < 0 || disclosure > strings.Index(out.String(), "Authorize github") {
+		t.Fatalf("output = %q; want the disclosure before the consent URL", out.String())
+	}
+}

@@ -350,6 +350,7 @@ func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testin
 		external    bool
 		wantReady   bool
 		wantMessage string
+		wantError   string
 	}{
 		{
 			name:      "built-in harness v2",
@@ -357,10 +358,10 @@ func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testin
 			wantReady: true,
 		},
 		{
-			name:      "external harness v1",
-			contract:  corev1alpha1.AgentRuntimeContractHarnessV1,
+			name:      "external harness v1 is rejected",
+			contract:  corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 			external:  true,
-			wantReady: true,
+			wantError: "only orka.harness.v2 is supported",
 		},
 		{
 			name:        "external harness v2",
@@ -396,7 +397,12 @@ func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testin
 				WithObjects(objects...).Build()
 			reconciler := &GatewayBindingReconciler{Client: fakeClient, Scheme: scheme}
 			request := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: binding.Name}}
-			if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+			_, err := reconciler.Reconcile(context.Background(), request)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("Reconcile() error = %v, want substring %q", err, test.wantError)
+				}
+			} else if err != nil {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
 
@@ -406,6 +412,9 @@ func TestGatewayBindingReconcilerValidatesRuntimeMaxTurnsCompatibility(t *testin
 			}
 			if updated.Status.Ready != test.wantReady || updated.Status.Programmed != test.wantReady {
 				t.Fatalf("GatewayBinding status = %+v, want ready=%t", updated.Status, test.wantReady)
+			}
+			if test.wantError != "" {
+				return
 			}
 			if !updated.Status.Accepted || !updated.Status.ResolvedRefs {
 				t.Fatalf("GatewayBinding status = %+v, want accepted and resolved", updated.Status)

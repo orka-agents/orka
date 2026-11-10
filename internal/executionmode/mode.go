@@ -5,7 +5,7 @@ MIT License - see LICENSE file for details.
 */
 
 // Package executionmode defines the immutable execution-plane identity shared
-// by controllers and admission. A namespace belongs to exactly one mode.
+// by controllers and admission. Each installation claims its namespace.
 package executionmode
 
 import (
@@ -23,7 +23,6 @@ const NamespaceLabel = "orka.ai/controller-mode"
 type Mode string
 
 const (
-	HarnessV1 Mode = "harness-v1"
 	HarnessV2 Mode = "harness-v2"
 )
 
@@ -31,18 +30,15 @@ const (
 func Parse(raw string) (Mode, error) {
 	mode := Mode(strings.TrimSpace(raw))
 	switch mode {
-	case HarnessV1, HarnessV2:
+	case HarnessV2:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("execution mode must be %q or %q, got %q", HarnessV1, HarnessV2, raw)
+		return "", fmt.Errorf("unsupported execution mode %q; only %q is supported", raw, HarnessV2)
 	}
 }
 
 // ContractVersion returns the only harness contract admitted by the mode.
 func (m Mode) ContractVersion() corev1alpha1.AgentRuntimeContractVersion {
-	if m == HarnessV1 {
-		return corev1alpha1.AgentRuntimeContractHarnessV1
-	}
 	if m == HarnessV2 {
 		return corev1alpha1.AgentRuntimeContractHarnessV2
 	}
@@ -51,7 +47,7 @@ func (m Mode) ContractVersion() corev1alpha1.AgentRuntimeContractVersion {
 
 // DefaultBuiltInAgentContract stamps the installation's immutable harness
 // contract on a built-in Agent runtime when the trusted producer omitted it.
-// Explicit selectors are never rewritten, and an opposite-mode selector is
+// Explicit selectors are never rewritten, and an unsupported selector is
 // rejected before the object reaches admission.
 func DefaultBuiltInAgentContract(agent *corev1alpha1.Agent, mode Mode) error {
 	if agent == nil || agent.Spec.Runtime == nil || agent.Spec.Runtime.Type == "" || agent.Spec.Runtime.RuntimeRef != nil {

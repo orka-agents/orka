@@ -8,8 +8,7 @@ description: "Versioned Agent persona for AI workers and built-in harness v2 run
 `Agent.spec.soul` supplies persistent persona and communication defaults, separate
 from the Agent's role instructions and a Task's assignment. It supports AI worker
 Tasks and all four built-in harness v2 runtimes: Codex, Claude, Copilot, and
-OpenCode. External `runtimeRef` Agents, including harness v1 registrations, do not
-support this field.
+OpenCode. External `runtimeRef` Agents do not support this field.
 
 A soul is configuration, not durable memory or an authorization policy. Tool,
 workspace, publication, credential, and approval controls remain authoritative.

@@ -35,13 +35,16 @@ import (
 	"github.com/orka-agents/orka/internal/tools"
 )
 
-// The binding stage implements the coexistence plan's write-once execution
-// binding: every executable agent Task freezes its protocol, backend, and an
+// The binding stage creates a write-once execution binding: every executable
+// agent Task freezes its protocol, backend, and an
 // immutable content-addressed execution snapshot before any executor-specific
 // side effect. The snapshot store and revisioned backend control are mandatory:
 // a controller that cannot prove either one never queues executor demand.
 
-const agentExecutionBindingConflictReason = "BindingConflict"
+const (
+	agentExecutionBindingConflictReason = "BindingConflict"
+	agentExecutionSettingsReason        = "ExecutionSettings"
+)
 
 var errExternalAgentRuntimeMCPToolDescriptorsNotConformed = errors.New("external AgentRuntime MCP tool descriptors do not match current conformance")
 
@@ -69,6 +72,10 @@ type agentExecutionCandidate struct {
 	binding             corev1alpha1.AgentExecutionBinding
 	snapshotBody        []byte
 	workspaceSessionUID string
+	// model and reasoningEffort are the effective built-in session settings,
+	// reported when the binding is first written.
+	model           string
+	reasoningEffort string
 }
 
 // agentExecutionSnapshotBody is the canonical non-secret executable input
@@ -93,7 +100,6 @@ type agentExecutionSnapshotBody struct {
 	Workspace        *corev1alpha1.WorkspaceConfig          `json:"workspace,omitempty"`
 	RuntimeOverride  *corev1alpha1.AgentRuntimeSpec         `json:"runtimeOverride,omitempty"`
 	DefaultTools     *agentExecutionSnapshotToolPolicy      `json:"defaultTools,omitempty"`
-	HarnessV1        *agentExecutionSnapshotHarnessV1       `json:"harnessV1,omitempty"`
 	ExternalRuntime  *agentExecutionSnapshotExternalRuntime `json:"externalRuntime,omitempty"`
 	// ExecutionWorkspace freezes the resolved execution-workspace binding for
 	// workspace-provider-backed RuntimePools. It is absent for plain pools.
@@ -231,46 +237,6 @@ type agentExecutionSnapshotToolPolicy struct {
 	AllowBash           *bool    `json:"allowBash,omitempty"`
 }
 
-// agentExecutionSnapshotHarnessV1 freezes the non-secret wrapper or external
-// endpoint identity used by the v1 dispatcher. Secret contents never enter the
-// snapshot; the exact Secret UID/resourceVersion is verified again before the
-// first executor side effect.
-type agentExecutionSnapshotHarnessV1 struct {
-	Endpoint                  string                                           `json:"endpoint"`
-	Backend                   string                                           `json:"backend"`
-	RuntimeName               string                                           `json:"runtimeName"`
-	TaskSpecDigest            string                                           `json:"taskSpecDigest,omitempty"`
-	ToolExecutionMode         string                                           `json:"toolExecutionMode,omitempty"`
-	BrokeredToolClasses       []corev1alpha1.AgentRuntimeBrokeredToolClass     `json:"brokeredToolClasses,omitempty"`
-	BrokeredTools             []agentExecutionSnapshotHarnessV1BrokeredTool    `json:"brokeredTools,omitempty"`
-	RuntimeAuthOnly           bool                                             `json:"runtimeAuthOnly,omitempty"`
-	AuthSecretNamespace       string                                           `json:"authSecretNamespace"`
-	AuthSecretName            string                                           `json:"authSecretName"`
-	AuthSecretKey             string                                           `json:"authSecretKey"`
-	AuthSecretUID             string                                           `json:"authSecretUID"`
-	AuthSecretResourceVersion string                                           `json:"authSecretResourceVersion"`
-	DuplicateSafe             bool                                             `json:"duplicateSafe"`
-	SessionName               string                                           `json:"sessionName"`
-	SessionBootstrap          *agentExecutionSnapshotHarnessV1SessionBootstrap `json:"sessionBootstrap,omitempty"`
-	CredentialRefs            []agentExecutionSnapshotSecretRef                `json:"credentialRefs,omitempty"`
-}
-
-// agentExecutionSnapshotHarnessV1SessionBootstrap freezes the canonical
-// transcript suffix used to give a fresh v1 CLI process conversation context.
-// The rendered JSONL is kept inside the encrypted, content-addressed snapshot
-// so dispatch and recovery never re-read mutable transcript state.
-type agentExecutionSnapshotHarnessV1SessionBootstrap struct {
-	SchemaVersion   int    `json:"schemaVersion"`
-	SessionUID      string `json:"sessionUID"`
-	ControlVersion  int64  `json:"controlVersion"`
-	LeaseGeneration int64  `json:"leaseGeneration"`
-	Artifact        string `json:"artifact"`
-	Digest          string `json:"digest"`
-	MessageCount    uint32 `json:"messageCount"`
-	TotalMessages   int    `json:"totalMessages"`
-	Truncated       bool   `json:"truncated,omitempty"`
-}
-
 type agentExecutionSnapshotSecretRef struct {
 	Role            string   `json:"role"`
 	Namespace       string   `json:"namespace"`
@@ -348,7 +314,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 			"runtime.toolboxes are not supported with Task.spec.execution.workspace; execution workspaces cannot mount toolboxes yet",
 		))
 	}
-	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false, false); reason != "" {
+	if reason := r.ACPToolboxPolicy.agentToolboxPlanRejection(task, agent, false); reason != "" {
 		return nil, permanentACPAgentConfiguration(errors.New(reason))
 	}
 	plan, err := PlanACPRuntimeWithConfiguration(task, agent, r.ACPRuntimeImages, configuration)
@@ -541,6 +507,7 @@ func (r *TaskReconciler) resolveAgentExecutionCandidateWithWorkspaceSessionUID(
 
 	return &agentExecutionCandidate{
 		binding: binding, snapshotBody: encoded, workspaceSessionUID: workspaceSessionUID,
+		model: configuration.Model, reasoningEffort: configuration.ReasoningEffort,
 	}, nil
 }
 
@@ -1035,7 +1002,7 @@ func validateExternalAgentExecutionSnapshot(
 		return errors.New("external v2 execution snapshot is missing its frozen AgentRuntime authority")
 	}
 	if binding.RuntimeType != "" || body.RuntimeType != "" || body.RuntimeImage != "" || body.PoolName != "" ||
-		body.ExecutionWorkspace != nil || body.HarnessV1 != nil || body.Configuration != (agentExecutionSnapshotConfig{}) {
+		body.ExecutionWorkspace != nil || body.Configuration != (agentExecutionSnapshotConfig{}) {
 		return errors.New("external v2 execution snapshot carries RuntimePool or adapter-owned configuration")
 	}
 	if strings.TrimSpace(binding.RuntimeRef.Name) == "" || binding.RuntimeRef.UID == "" || binding.RuntimeRef.Generation < 1 {
@@ -1536,7 +1503,11 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 			}
 		}
 	}
+	firstBinding := task.Status.AgentExecutionBinding == nil
 	binding, err := r.persistAgentExecutionBinding(ctx, task, candidate)
+	if err == nil && firstBinding {
+		r.recordAgentExecutionSettings(task, candidate)
+	}
 	if err != nil {
 		conflict := &errAgentExecutionBindingConflict{}
 		if errors.As(err, &conflict) {
@@ -1670,4 +1641,18 @@ func brokeredCustomCandidates(names []string, providerKind string, registry *too
 		kept = append(kept, name)
 	}
 	return kept
+}
+
+// recordAgentExecutionSettings reports the model and reasoning effort a
+// built-in runtime Task runs with. The binding stores only digests of them.
+func (r *TaskReconciler) recordAgentExecutionSettings(task *corev1alpha1.Task, candidate *agentExecutionCandidate) {
+	if r.Recorder == nil || candidate == nil || candidate.binding.RuntimeType == "" {
+		return
+	}
+	effort := candidate.reasoningEffort
+	if effort == "" {
+		effort = "runtime default"
+	}
+	r.Recorder.Eventf(task, corev1.EventTypeNormal, agentExecutionSettingsReason,
+		"Runtime %s, model %s, reasoning effort %s", candidate.binding.RuntimeType, candidate.model, effort)
 }

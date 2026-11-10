@@ -2,17 +2,17 @@
 set -Eeuo pipefail
 
 usage() {
-  echo "Usage: $0 KUBECTL NAMESPACE harness-v1|harness-v2" >&2
+  echo "Usage: $0 KUBECTL NAMESPACE [harness-v2]" >&2
 }
 
-[[ $# -eq 3 ]] || {
+[[ $# -eq 2 || $# -eq 3 ]] || {
   usage
   exit 2
 }
 
 kubectl_bin="$1"
 namespace="$2"
-controller_mode="$3"
+controller_mode="${3:-harness-v2}"
 
 command -v "${kubectl_bin}" >/dev/null 2>&1 || {
   echo "kubectl command not found: ${kubectl_bin}" >&2
@@ -27,9 +27,9 @@ command -v jq >/dev/null 2>&1 || {
   exit 2
 }
 case "${controller_mode}" in
-  harness-v1|harness-v2) ;;
+  harness-v2) ;;
   *)
-    echo "controller mode must be harness-v1 or harness-v2" >&2
+    echo "controller mode must be harness-v2; other harness protocols are unsupported" >&2
     exit 2
     ;;
 esac
@@ -62,7 +62,7 @@ has_exact_identity() {
 }
 
 identity_error() {
-  echo "namespace ${namespace} must already claim orka.ai/controller-mode=${controller_mode}; unlabeled, malformed, or opposite-mode namespaces cannot be adopted in place" >&2
+  echo "namespace ${namespace} must already claim orka.ai/controller-mode=${controller_mode}; unlabeled, malformed, or incompatible namespaces cannot be adopted in place" >&2
 }
 
 read_namespace || exit 1

@@ -234,9 +234,6 @@ func TestAgentSoulConfigMapWatchCopilotRoleDependencies(t *testing.T) {
 		{name: "Claude", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeClaude }, want: true},
 		{name: "Codex", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeCodex }, want: true},
 		{name: "OpenCode", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.Type = corev1alpha1.AgentRuntimeOpencode }, want: true},
-		{name: "legacy Copilot", mutate: func(agent *corev1alpha1.Agent) {
-			agent.Spec.Runtime.ContractVersion = new(corev1alpha1.AgentRuntimeContractHarnessV1)
-		}, want: true},
 		{name: "unclassified Copilot", mutate: func(agent *corev1alpha1.Agent) { agent.Spec.Runtime.ContractVersion = nil }, want: true},
 		{name: "runtimeRef", mutate: func(agent *corev1alpha1.Agent) {
 			agent.Spec.Runtime.Type = ""
@@ -300,16 +297,14 @@ func TestAgentSoulConfigMapWatchCopilotRoleReferenceChanges(t *testing.T) {
 
 func TestAgentRoleConfigMapWatchIncludesLegacyAndExternal(t *testing.T) {
 	for _, external := range []bool{false, true} {
-		name := "legacy"
+		name := "unclassified"
 		if external {
 			name = "external"
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			agent := baseAgent("role-only")
-			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{
-				Type: corev1alpha1.AgentRuntimeClaude, ContractVersion: new(corev1alpha1.AgentRuntimeContractHarnessV1),
-			}
+			agent.Spec.Runtime = &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeClaude}
 			if external {
 				agent.Spec.Runtime.Type = ""
 				agent.Spec.Runtime.RuntimeRef = &corev1alpha1.AgentRuntimeReference{Name: "external"}

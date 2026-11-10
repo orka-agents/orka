@@ -62,7 +62,7 @@ func TestQueueACPRuntimeTaskCreatesPoolAndDurableAttempt(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -186,7 +186,7 @@ func TestQueueACPRuntimeTaskRejectsUnsafeRepositoryBeforePoolDemand(t *testing.T
 			}
 			reconciler := &TaskReconciler{
 				Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-				ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+				ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 				ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 			}
 			bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -265,7 +265,7 @@ func TestQueueACPRuntimeTaskReportsInvalidWorkspaceWhenReadCredentialDoesNotExis
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	bound := bindACPQueueTaskForTest(t, ctx, reconciler, task, agent)
@@ -337,7 +337,7 @@ func TestQueueACPRuntimeTaskReportsInvalidRuntimeProfile(t *testing.T) {
 	}
 	reconciler := &TaskReconciler{
 		Client: kubeClient, Scheme: scheme, Recorder: record.NewFakeRecorder(10), DurableControlStore: controlStore,
-		ControllerEpochManager: epochs, ACPRuntimeEnabled: true, ACPRuntimeNamespace: acpTestRuntimeNamespace,
+		ControllerEpochManager: epochs, ACPRuntimeNamespace: acpTestRuntimeNamespace,
 		ACPRuntimeImages: ACPRuntimeImages{Codex: "docker.io/example/codex@sha256:" + strings.Repeat("a", 64)},
 	}
 	current := configureAgentExecutionBindingTest(t, ctx, reconciler, task)
@@ -730,5 +730,23 @@ func TestValidateACPWorkspacePreflightRejectsUnsafeChangePolicies(t *testing.T) 
 	base.Spec.Workspace.AllowedPaths = []string{"internal/**"}
 	if err := validateACPWorkspacePreflight(base); err != nil {
 		t.Fatalf("valid change policy error = %v", err)
+	}
+}
+
+func TestACPRuntimePoolCapacityUsesConfiguredLimits(t *testing.T) {
+	reconciler := &TaskReconciler{}
+	if got := reconciler.acpRuntimePoolCapacity(); got.MaxRunningPrompts != corev1alpha1.DefaultRuntimePoolMaxRunningPrompts ||
+		got.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions {
+		t.Fatalf("default capacity = %+v", got)
+	}
+	reconciler.ACPRuntimePoolCapacity = corev1alpha1.RuntimePoolCapacitySpec{MaxRunningPrompts: 12}
+	got := reconciler.acpRuntimePoolCapacity()
+	if got.MaxRunningPrompts != 12 || got.MaxResidentSessions != corev1alpha1.DefaultRuntimePoolMaxResidentSessions {
+		t.Fatalf("configured capacity = %+v, want 12 prompts and default sessions", got)
+	}
+	// The returned spec is a copy; pools must not share the reconciler's value.
+	got.MaxRunningPrompts = 1
+	if reconciler.ACPRuntimePoolCapacity.MaxRunningPrompts != 12 {
+		t.Fatal("capacity result aliases reconciler configuration")
 	}
 }

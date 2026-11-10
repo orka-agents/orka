@@ -16,6 +16,7 @@ import (
 	"time"
 
 	verification "github.com/orka-agents/orka/internal/patchverification"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 func patchVerificationFixture(test *testing.T) (verification.Manifest, verification.Binding, map[string][]byte, []verification.ExecutionEvidence) {
@@ -83,13 +84,14 @@ func TestPatchVerificationCreateReadCleanup(test *testing.T) {
 		if err := storage.SaveResult(ctx, "default", taskID, []byte("mutable result")); err != nil {
 			test.Fatal(err)
 		}
-		if err := storage.SaveArtifact(ctx, "default", taskID, "output", "text/plain", []byte("mutable output")); err != nil {
+		if err := storage.SaveArtifact(ctx, store.SaveArtifactRequest{Owner: store.ArtifactOwner{Namespace: "default", TaskName: taskID},
+			Filename: "output", ContentType: "text/plain", Data: []byte("mutable output")}); err != nil {
 			test.Fatal(err)
 		}
 		if err := storage.DeleteResult(ctx, "default", taskID); err != nil {
 			test.Fatal(err)
 		}
-		if err := storage.DeleteArtifacts(ctx, "default", taskID); err != nil {
+		if err := storage.DeleteArtifacts(ctx, store.ArtifactOwner{Namespace: "default", TaskName: taskID}); err != nil {
 			test.Fatal(err)
 		}
 	}
@@ -859,7 +861,7 @@ func TestPatchVerificationSealedReopenCleanup(test *testing.T) {
 		if err := reopened.DeleteResult(test.Context(), "default", taskID); err != nil {
 			test.Fatal(err)
 		}
-		if err := reopened.DeleteArtifacts(test.Context(), "default", taskID); err != nil {
+		if err := reopened.DeleteArtifacts(test.Context(), store.ArtifactOwner{Namespace: "default", TaskName: taskID}); err != nil {
 			test.Fatal(err)
 		}
 	}

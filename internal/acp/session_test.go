@@ -474,6 +474,7 @@ func readHelperState(name string) string {
 	return string(data)
 }
 
+//nolint:gocyclo // Helper process dispatches every scripted ACP scenario in one switch.
 func TestACPHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_ACP_HELPER") != "1" {
 		return

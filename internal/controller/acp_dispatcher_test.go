@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +44,7 @@ import (
 	"github.com/orka-agents/orka/internal/tasktrace"
 	orkatracing "github.com/orka-agents/orka/internal/tracing"
 	tracingtest "github.com/orka-agents/orka/internal/tracing/testutil"
+	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
 )
 
 const (
@@ -153,7 +153,7 @@ func TestACPDispatcherStartRequiresAtomicEventDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-event-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-event-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -176,7 +176,7 @@ func TestACPDispatcherStartRequiresAtomicPlanProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	persistence := sqlite.NewStore(db, "start-plan-store-test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "start-plan-store-test"))
 	dispatcher := &ACPDispatcher{
 		Client:      fake.NewClientBuilder().Build(),
 		Store:       persistence,
@@ -367,7 +367,7 @@ func prepareBoundACPDispatcherTaskForTest(
 	ctx context.Context,
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
-	controlStore *sqlite.Store,
+	controlStore *sealedTestStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
@@ -383,27 +383,19 @@ func prepareBoundACPDispatcherTaskWithStoresForTest(
 	kubeClient client.Client,
 	scheme *runtime.Scheme,
 	controlStore store.DurableControlStore,
-	persistence *sqlite.Store,
+	persistence store.AgentExecutionSnapshotStore,
 	task *corev1alpha1.Task,
 	agent *corev1alpha1.Agent,
 	images ACPRuntimeImages,
 	epochs ...*ControllerEpochManager,
 ) *corev1alpha1.Task {
 	t.Helper()
-	cipher, err := sqlite.NewAgentExecutionSnapshotCipher(bytes.Repeat([]byte{0x61}, sqlite.AgentExecutionSnapshotKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := persistence.SetAgentExecutionSnapshotCipher(cipher); err != nil {
-		t.Fatal(err)
-	}
 	binder := &TaskReconciler{
 		Client:                  kubeClient,
 		APIReader:               kubeClient,
 		Scheme:                  scheme,
 		DurableControlStore:     controlStore,
 		AgentExecutionSnapshots: persistence,
-		ACPRuntimeEnabled:       true,
 		ACPRuntimeImages:        images,
 	}
 	if len(epochs) > 0 {
@@ -795,7 +787,7 @@ func TestACPTaskDeadlineIncludesTimeBeforeRuntimeAdmission(t *testing.T) {
 		t.Fatalf("unbound default deadline = %s, %v; want zero, false", deadline, ok)
 	}
 	task.Status.AgentExecutionBinding = &corev1alpha1.AgentExecutionBinding{
-		ContractVersion: corev1alpha1.AgentRuntimeContractHarnessV1,
+		ContractVersion: corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1"),
 	}
 	if deadline, ok = acpTaskDeadline(task, now); ok || !deadline.IsZero() {
 		t.Fatalf("harness v1 default deadline = %s, %v; want zero, false", deadline, ok)
@@ -1646,7 +1638,7 @@ func TestPromptTimeoutPersistsProvenCancellationSettlement(t *testing.T) {
 				TerminalEvent: harnessv2.EventFailed, Outcome: harnessv2.PromptOutcomeFailed,
 				StopReason: harnessv2.ACPStopReasonRefusal, SettledAt: time.Now().UTC(),
 			},
-			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: harnessV1ReasonFailed,
+			wantState: corev1alpha1.TaskExecutionStateFailed, wantReason: "PromptFailed",
 			wantAttempt: store.PromptExecutionFailed, wantTerminal: harnessv2.EventFailed,
 		},
 	} {
@@ -1696,7 +1688,7 @@ func TestACPDispatcherExplicitRuntimeRPCFailureIsPromptFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "rpc-failure")
 	defer stopEpoch()
 	fence, err := epochs.CurrentFence(ctx)
@@ -1863,12 +1855,12 @@ func TestACPDispatcherExecutesNoChangeTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	persistence := sqlite.NewStore(db, "test")
+	persistence := sealedStore(t, sqlite.NewStore(db, "test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", persistence, kubestore.WithAPIReader(kubeClient))
 	if err != nil {
 		t.Fatal(err)
 	}
-	epochs := NewControllerEpochManager(controlStore, "controller-test").WithMirror(persistence)
+	epochs := NewControllerEpochManager(controlStore, "controller-test").WithStorage(storagev1.StateContract, persistence)
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
 	go func() { epochDone <- epochs.Start(epochCtx) }()
@@ -2384,7 +2376,7 @@ func TestACPDispatcherUsesFrozenAgentAndToolAfterLiveResourcesChange(t *testing.
 				t.Fatal(err)
 			}
 			defer db.Close() //nolint:errcheck
-			controlStore := sqlite.NewStore(db, "frozen-dispatch-test")
+			controlStore := sealedStore(t, sqlite.NewStore(db, "frozen-dispatch-test"))
 			epochs, stopEpoch := startACPRecoveryEpochManager(t, ctx, controlStore, "frozen-"+test.name)
 			defer stopEpoch()
 			fence, err := epochs.CurrentFence(ctx)
@@ -2530,7 +2522,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 	var operationMu sync.Mutex
 	operations := make([]string, 0, 2)
 	var finalizationRequest harnessv2.FinalizeRuntimeSessionPublicationRequest
-	var persistence *sqlite.Store
+	var persistence *sealedTestStore
 	var nativeSnapshot *harnessv2.NativeSessionSnapshot
 	if nativeCapture {
 		snapshot := storetest.NativeSessionSnapshot(t, "completed write-session native conversation")
@@ -2609,7 +2601,7 @@ func testACPDispatcherWriteSessionFinalization(t *testing.T, requeueAfterCreateC
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	persistence = controlStore
 	epochs := NewControllerEpochManager(controlStore, "controller-write-session")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
@@ -2993,7 +2985,7 @@ func testACPDispatcherDeadlineCancellation(t *testing.T, workspaceLifetime bool)
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-timeout-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -3262,7 +3254,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -3295,7 +3287,7 @@ func testACPDispatcherPublishesPreparedWorkspaceDelta(t *testing.T, supportsPres
 	if err != nil {
 		t.Fatal(err)
 	}
-	attempt = completeACPAttemptExecutionForTest(t, controlStore, fence, attempt, false)
+	attempt = completeACPAttemptExecutionForTest(t, controlStore.Store, fence, attempt, false)
 	transitionDigest := testControlDigestForDispatcher("delivery-validating")
 	_, err = controlStore.TransitionPromptAttemptDelivery(ctx, store.PromptAttemptDeliveryTransition{
 		ID: attempt.ID, Fence: fence, ExpectedVersion: attempt.Version, ExpectedState: store.PromptDeliveryNotRequested,
@@ -4019,6 +4011,7 @@ func newDispatcherRuntimeServerWithOptions(
 	)
 }
 
+//nolint:gocyclo // Fake runtime server routes every v2 endpoint the dispatcher tests exercise.
 func newDispatcherRuntimeServerForPoolWithOptions(
 	t *testing.T,
 	profile harnessv2.RuntimeProfile,
@@ -4737,7 +4730,7 @@ func TestACPDispatcherPreAcceptanceRateLimitRequeuesWithoutTerminalFailure(t *te
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4816,7 +4809,7 @@ func TestACPDispatcherRejectedExternalPromptAdmissionReleasesTaskForRequeue(t *t
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	controlStore := sqlite.NewStore(db, "test")
+	controlStore := sealedStore(t, sqlite.NewStore(db, "test"))
 	epochs := NewControllerEpochManager(controlStore, "controller-test")
 	epochCtx, cancelEpoch := context.WithCancel(context.Background())
 	epochDone := make(chan error, 1)
@@ -4974,7 +4967,7 @@ func TestACPDispatcherReserveTaskRecoversIncompletePreSubmissionRollback(t *test
 		t.Fatal(err)
 	}
 	defer db.Close() //nolint:errcheck
-	sqliteStore := sqlite.NewStore(db, "session-rollback-test")
+	sqliteStore := sealedStore(t, sqlite.NewStore(db, "session-rollback-test"))
 	controlStore, err := kubestore.NewComposite(kubeClient, "orka-system", sqliteStore)
 	if err != nil {
 		t.Fatal(err)

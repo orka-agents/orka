@@ -83,8 +83,6 @@ const (
 		"Memory proposals are review-only and are not automatically applied."
 )
 
-var memoryToolNames = []string{"recall_memory", "remember", "propose_memory", "search_transcript"}
-
 const modelLoopEventTimeout = 250 * time.Millisecond
 const maxSessionContextBytes = 96 << 10
 const roleUser = "user"
@@ -107,6 +105,7 @@ func main() {
 	}
 }
 
+//nolint:gocyclo // Worker startup wires each optional subsystem in order.
 func run(transcriptPath string) (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
@@ -279,11 +278,8 @@ func run(transcriptPath string) (err error) {
 		return err
 	}
 
-	// Memory tools use the controller's internal API and are safe to register
-	// independently of coordination mode. Auto-enable them when the controller
-	// context needed to execute them is present.
+	// Registration does not enable tools omitted by the controller.
 	registerMemoryTools()
-	enabledTools = autoEnableMemoryTools(enabledTools)
 
 	// Load custom Tool CRDs
 	customTools, err := loadCustomTools(ctx, k8sClient, taskNamespace, enabledTools)
@@ -785,8 +781,12 @@ func buildLLMTools(
 ) []llm.Tool {
 	var llmTools []llm.Tool
 	toolCtx := optionalToolContext(toolContexts)
+	memoryConfigured := memoryControllerConfigPresent()
 
 	for _, name := range enabledTools {
+		if !memoryConfigured && slices.Contains(aitools.MemoryToolNames(), name) {
+			continue
+		}
 		if name == aitools.GatewayReplyToolName && (toolCtx == nil || toolCtx.GatewayReplySender == nil ||
 			toolCtx.TaskUID == "" || toolCtx.Namespace == "" || toolCtx.TaskID == "") {
 			continue
@@ -838,21 +838,6 @@ func memoryControllerConfigPresent() bool {
 	return strings.TrimSpace(os.Getenv(workerenv.ControllerURL)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskNamespace)) != "" &&
 		strings.TrimSpace(os.Getenv(workerenv.TaskName)) != ""
-}
-
-func autoEnableMemoryTools(enabled []string) []string {
-	normalized := normalizeEnabledTools(enabled)
-	if strings.EqualFold(strings.TrimSpace(os.Getenv(workerenv.MemoryToolsAutoEnable)), "false") ||
-		!memoryControllerConfigPresent() {
-		return normalized
-	}
-
-	for _, name := range memoryToolNames {
-		if !containsTool(normalized, name) {
-			normalized = append(normalized, name)
-		}
-	}
-	return normalized
 }
 
 func containsTool(enabled []string, name string) bool {
@@ -1342,6 +1327,7 @@ func loadPlanContext(ctx context.Context) (string, error) {
 		plan.ProgressPct, plan.Iteration, plan.Summary, plan.PlanDocument), nil
 }
 
+//nolint:gocyclo // The agent loop keeps tool, approval, and overflow handling in one ordered pass.
 func executeAgentLoopWithEvents(
 	ctx context.Context,
 	provider llm.Provider,
@@ -1373,6 +1359,7 @@ func executeAgentLoopWithEvents(
 		maxIterations = 1
 	}
 	allowedToolCalls := advertisedToolNames(llmTools)
+	deprecatedMemoryTools := workerenv.SplitCSV(os.Getenv(workerenv.AIDeprecatedMemoryTools))
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
 		return "", fmt.Errorf("human approval tools require autonomous coordination mode")
 	}
@@ -1626,6 +1613,7 @@ func executeAgentLoopWithEvents(
 				}
 				if execErr == nil {
 					approvalGate.markFired(approvalKey)
+					warnDeprecatedMemoryTool(toolName, deprecatedMemoryTools)
 					result, execErr = tools.DefaultRegistry.Execute(execCtx, toolName, execArgs)
 				}
 			}

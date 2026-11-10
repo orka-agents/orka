@@ -385,6 +385,8 @@ func (e RegistryACPMCPToolExecutor) ExecuteACPMCPTool(
 // Prepare the local executor without invoking a tool. Approval calls perform
 // these reads before starting their execution budget, then revalidate authority
 // before invoking the returned call exactly once.
+//
+//nolint:gocyclo // Tool preparation enforces every frozen-binding and policy check before execution.
 func (e RegistryACPMCPToolExecutor) prepareACPMCPTool(
 	ctx context.Context,
 	request harnessv2.MCPBrokerCallRequest,

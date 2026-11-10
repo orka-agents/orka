@@ -18,7 +18,7 @@ import (
 )
 
 func TestWithEffectiveBuiltInContract(t *testing.T) {
-	v1 := corev1alpha1.AgentRuntimeContractHarnessV1
+	v1 := corev1alpha1.AgentRuntimeContractVersion("orka.harness.v1")
 	omitted := &corev1alpha1.Agent{Spec: corev1alpha1.AgentSpec{
 		Runtime: &corev1alpha1.AgentCLIRuntime{Type: corev1alpha1.AgentRuntimeCodex},
 	}}

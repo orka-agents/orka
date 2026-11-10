@@ -72,8 +72,8 @@ What the picture is telling you:
 
 | Component | Can reach | Cannot reach |
 | --- | --- | --- |
-| ACP runtime Pod | the provider auth proxy, and the controller's loopback MCP broker | the Kubernetes API, Git remotes, any other host — egress is default-deny |
-| Workspace/Publisher | DNS, the controller API, the SCM egress proxy | LLM providers, the MCP broker, arbitrary internet hosts |
+| ACP runtime Pod | DNS, the provider auth proxy, the controller API (prompt MCP and artifact brokers) | the Kubernetes API, Git remotes, any other host — egress is default-deny |
+| Workspace/Publisher | DNS, the controller API, the SCM egress proxy | LLM providers, arbitrary internet hosts — its identity has no MCP broker access |
 | Controller | everything above, plus the Kubernetes API | — it is the trusted core, so protect it accordingly |
 
 The runtime Pod never holds a Git credential, and the Publisher never holds a model credential.
@@ -102,7 +102,7 @@ Built-in `type: agent` Tasks run as private RuntimeSessions inside one controlle
 
 - uses a digest-pinned immutable runtime image and profile digest;
 - disables service-account token automount and has no Kubernetes RBAC;
-- uses a read-only root filesystem and default-deny egress;
+- uses a read-only root filesystem and default-deny egress that allows only cluster DNS (UDP and TCP 53 to `k8s-app=kube-dns` Pods in `kube-system`), the provider auth proxy (TCP to `--acp-provider-proxy-pod-labels` Pods in `--acp-provider-proxy-namespace`, on the `--acp-provider-proxy-base-url` port, or 80 for `http` and 443 for `https` when the URL has no port), and the controller API (TCP to `orka.ai/network-role=controller` Pods in the controller namespace, on `--api-port`);
 - runs the supervisor as root with only the documented process/identity capabilities;
 - launches ACP children with no capabilities, private `HOME`/`TMPDIR`/XDG/workspace paths, and distinct non-reused UIDs/GIDs;
 - tracks, terminates, and reaps the full process tree; cleanup uncertainty poisons and recycles the pool;
@@ -114,7 +114,7 @@ ACP Tasks reject per-Task container settings and custom resource requests. Runti
 and resources come from the reviewed RuntimePool profile. For built-in runtimes,
 `spec.execution.workspace` can bind a dedicated RuntimePool through a sandbox provider when
 the operator enables the workspace provider API and `--acp-workspace-dispatch-enabled`,
-with required admission webhooks and an admitted external provider and class. External `runtimeRef` dispatch rejects execution workspaces. Other
+with required admission webhooks and an admitted external provider and class. That runtime gets the same egress rules. For Pod-backed providers, Core's NetworkPolicies select the runtime Pod, and Core does not admit the runtime if another NetworkPolicy in its namespace widens them. Native-process providers such as [Agent Substrate](substrate.md) receive the rules in the workload request and are responsible for enforcing them; Core does not verify that enforcement. External `runtimeRef` dispatch rejects execution workspaces. Other
 per-Task execution placement fields fail closed.
 
 ### Workspace/Publisher
@@ -240,13 +240,13 @@ for every route's permissions, namespace precedence, and grant examples.
 
 ## Namespace scoping
 
-- Every controller requires one non-empty `--watch-namespace` and one static
-  `--controller-mode` (`harness-v1` or `harness-v2`)
+- Every controller requires one non-empty `--watch-namespace` and the fixed
+  `harness-v2` installation identity
 - The watched namespace carries the matching `orka.ai/controller-mode`
   label. The controller claims an unlabeled namespace on first start; a
   mismatched claim fails startup, and a per-release ValidatingAdmissionPolicy
   keeps the claim immutable and lets only that controller add it
-- Same-cluster v1/v2 installations use distinct namespaces, ServiceAccounts,
+- Separate installations use distinct namespaces, ServiceAccounts,
   RBAC, Leases, stores, Services, Secrets, and execution data planes
 - Chat endpoint blocks operations in `kube-system` and `kube-public` namespaces
 - The web dashboard is off by default. When enabled with `--dashboard-enabled`, it is served on the API port, with no separate listener
