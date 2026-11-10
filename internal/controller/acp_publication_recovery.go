@@ -177,6 +177,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 			BranchClaimGeneration: publication.BranchClaimGeneration, BaselineOID: publication.SourceBaselineSHA,
 			RemoteBefore: publisherRemoteRef(publication.Baseline), DeltaArtifactDigest: publication.ArtifactDigest,
 			RelativeRoot:  strings.TrimSpace(recovery.workspace.SubPath),
+			DeniedPaths:   publicationDeniedPaths(recovery.workspace),
 			CommitMessage: publication.CommitMessage, CommitTimestamp: publication.CommitTimestamp,
 		},
 	}
@@ -201,7 +202,7 @@ func (d *ACPDispatcher) recoverPublicationPreparing(
 			}
 			publicationState := store.PublicationPreparationFailed
 			deliveryState := store.PromptDeliveryConflict
-			reason := "publication preparation failed during recovery"
+			reason := publicationRecoveryPrepareFailureReason(err)
 			if retryableACPExternalEffectError(err) {
 				publicationState = store.PublicationOutcomeUnknown
 				deliveryState = store.PromptDeliveryPublicationOutcomeUnknown
@@ -579,4 +580,17 @@ func (d *ACPDispatcher) recoveryDeliveryTransition(ctx context.Context, attemptI
 		return fmt.Errorf("publication recovery delivery state is %s, want %s", attempt.DeliveryState, from)
 	}
 	return d.transitionDelivery(ctx, attemptID, fence, from, to, operation, "")
+}
+
+// publicationRecoveryPrepareFailureReason is the terminal reason of a
+// preparation that failed during recovery. A publisher denied-path rejection
+// keeps the runtime's denied-path message, as a first-time rejection does, so
+// the Task's delivery message and the monitor's failure classification don't
+// depend on whether a restart happened in between.
+func publicationRecoveryPrepareFailureReason(err error) string {
+	var clientErr *publisherservice.ClientError
+	if errors.As(err, &clientErr) && clientErr.Response.Code == publisherservice.ErrorCodeDeniedPath {
+		return harnessv2.WorkspaceDeltaDeniedPathMessage
+	}
+	return "publication preparation failed during recovery"
 }

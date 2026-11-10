@@ -2232,6 +2232,8 @@ func unsupportedContainerWorkspacePolicyField(workspace *corev1alpha1.WorkspaceC
 		return "workspace.allowedPaths"
 	case workspace.DenyRepositoryControlPaths:
 		return "workspace.denyRepositoryControlPaths"
+	case len(workspace.DeniedPaths) > 0:
+		return "workspace.deniedPaths"
 	case workspace.RejectBinaryFiles:
 		return "workspace.rejectBinaryFiles"
 	case workspace.RejectSecretLikeContent:

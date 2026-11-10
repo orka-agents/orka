@@ -603,3 +603,23 @@ func TestWorkspaceDeltaLimitsRejectUnsafePathPolicies(t *testing.T) {
 		t.Fatalf("Validate() rejected valid policy: %v", err)
 	}
 }
+
+func TestWorkspaceDeltaLimitsValidateDeniedPaths(t *testing.T) {
+	limits := WorkspaceDeltaLimits{MaxBytes: 1, MaxEntries: 1, DeniedPaths: []string{".github/**", "AGENTS.md"}}
+	if err := limits.Validate(); err != nil {
+		t.Fatalf("Validate() valid denied paths error = %v", err)
+	}
+	for _, pattern := range []string{"", "/abs", "../escape", "a["} {
+		limits.DeniedPaths = []string{pattern}
+		if err := limits.Validate(); err == nil {
+			t.Fatalf("Validate() accepted denied path pattern %q", pattern)
+		}
+	}
+	limits.DeniedPaths = make([]string, 257)
+	for index := range limits.DeniedPaths {
+		limits.DeniedPaths[index] = "a"
+	}
+	if err := limits.Validate(); err == nil {
+		t.Fatal("Validate() accepted more than 256 denied path patterns")
+	}
+}
