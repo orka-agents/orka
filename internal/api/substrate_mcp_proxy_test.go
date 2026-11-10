@@ -390,7 +390,7 @@ func TestSubstrateMCPProxyAuthorizesEgressCredentials(t *testing.T) {
 		t.Run("context token/"+tc.name, func(t *testing.T) {
 			f := newSubstrateMCPProxyFixture(t, egressTool())
 			app := contextTokenProxyApp(f, enforce, tc.ui)
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(`{}`))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(substrateMCPProxyToolCall))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer caller-token")
 			workerexecutor.SetSubstrateMCPToolBinding(request.Header, egressTool())
@@ -430,7 +430,7 @@ func TestSubstrateMCPProxyRefusesToolChangedSinceCallerValidated(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newSubstrateMCPProxyFixture(t)
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(`{}`))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/tools/lookup/mcp?namespace=default", strings.NewReader(substrateMCPProxyToolCall))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer worker-sa-token-"+t.Name())
 			workerexecutor.SetSubstrateMCPToolBinding(request.Header, substrateMCPProxyTool())
