@@ -1196,6 +1196,11 @@ func publicationTaskDeliveryStatus(workspace *corev1alpha1.WorkspaceConfig, base
 		status.State, status.Outcome = corev1alpha1.TaskDeliveryStatePublicationOutcomeUnknown, corev1alpha1.TaskDeliveryOutcomePublicationOutcomeUnknown
 	}
 	status.Message = publication.TerminalReason
+	// A denied-path rejection recorded during recovery reads like a
+	// first-time one, which reaches the Task through its delivery error.
+	if publication.State == store.PublicationPreparationFailed && publication.TerminalReason == harnessv2.WorkspaceDeltaDeniedPathMessage {
+		status.Reason = acpWorkspaceValidationFailedReason
+	}
 	return status
 }
 

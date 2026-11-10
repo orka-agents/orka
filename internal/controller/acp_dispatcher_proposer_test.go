@@ -630,3 +630,26 @@ func TestDispatcherRechecksProposerConstraintsBeforeExecution(t *testing.T) {
 		})
 	}
 }
+
+// A denied-path rejection that ends a publication during recovery classifies
+// like a first-time rejection: the delivery status built from the stored
+// publication carries WorkspaceValidationFailed and the denied-path message.
+func TestRecoveredPublisherDeniedPathRejectionKeepsItsClassification(t *testing.T) {
+	denied := &publisherservice.ClientError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Response:   publisherservice.ErrorResponse{Code: publisherservice.ErrorCodeDeniedPath},
+	}
+	if got := publicationRecoveryPrepareFailureReason(denied); got != harnessv2.WorkspaceDeltaDeniedPathMessage {
+		t.Fatalf("recovery reason = %q", got)
+	}
+	if got := publicationRecoveryPrepareFailureReason(errors.New("boom")); got != "publication preparation failed during recovery" {
+		t.Fatalf("recovery reason for another error = %q", got)
+	}
+	publication := &store.Publication{State: store.PublicationPreparationFailed, TerminalReason: harnessv2.WorkspaceDeltaDeniedPathMessage}
+	status := publicationTaskDeliveryStatus(&corev1alpha1.WorkspaceConfig{}, harnessv2.WorkspaceBaseline{},
+		harnessv2.WorkspaceDeltaDescriptor{Artifact: &harnessv2.ArtifactReference{}}, publication, "")
+	task := &corev1alpha1.Task{Status: corev1alpha1.TaskStatus{Delivery: &status}}
+	if reason := repositoryMonitorWorkspacePathRejectionReason(task); reason != repositoryMonitorPatchPathDenied {
+		t.Fatalf("recovered rejection reason = %q (delivery %+v), want %q", reason, status, repositoryMonitorPatchPathDenied)
+	}
+}
