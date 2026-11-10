@@ -840,6 +840,9 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		if err := d.closeRecoveredPromptJournal(ctx, task, recoveredAt, message); err != nil {
 			return err
 		}
+		if err := d.settleRecoveredWorkspaceValidation(ctx, task, attempt.ID, fence); err != nil {
+			return err
+		}
 		if err := d.persistOutcomeUnknown(ctx, attempt.ID, fence, reason, message); err != nil {
 			return err
 		}
@@ -2578,6 +2581,53 @@ func (d *ACPDispatcher) finalizeRecoveredTerminalSession(ctx context.Context, ta
 	return finalizeErr
 }
 
+// A workspace validation that recovery cannot finish fails closed: the
+// runtime workspace it validated is gone, so delivery ends as a conflict.
+const (
+	acpRecoveredWorkspaceLostOperation = "controller-restart-workspace-lost"
+	acpRecoveredWorkspaceLostMessage   = "runtime workspace was lost before durable validation completed"
+	acpRecoveredWorkspaceLostReason    = corev1alpha1.TaskDeliveryReason("RuntimeWorkspaceLost")
+)
+
+// settleRecoveredWorkspaceValidation ends a workspace validation that recovery
+// cannot finish before it records the prompt's outcome as unknown. Session
+// turn finalization and Task reclamation both need a terminal delivery, so a
+// Validating delivery fails closed as DeliveryConflict, as it does for a
+// succeeded attempt, and the Task records that delivery so its terminal
+// projection carries it. A later pass finds the delivery settled and only
+// completes the Task's record of it.
+func (d *ACPDispatcher) settleRecoveredWorkspaceValidation(
+	ctx context.Context, task *corev1alpha1.Task, attemptID string, fence store.ControllerEpochFence,
+) error {
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	switch attempt.DeliveryState {
+	case store.PromptDeliveryValidating:
+		if err := d.transitionDelivery(ctx, attemptID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict,
+			acpRecoveredWorkspaceLostOperation, acpRecoveredWorkspaceLostMessage); err != nil {
+			return err
+		}
+	case store.PromptDeliveryConflict:
+	default:
+		return nil
+	}
+	if task.Status.Delivery != nil && task.Status.Delivery.State == corev1alpha1.TaskDeliveryStateDeliveryConflict {
+		return nil
+	}
+	status := corev1alpha1.TaskDeliveryStatus{
+		State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
+		Reason: acpRecoveredWorkspaceLostReason, Message: acpRecoveredWorkspaceLostMessage, LastTransitionTime: nowMeta(),
+	}
+	if err := d.patchDeliveryStatus(ctx, task, status); err != nil {
+		return err
+	}
+	recorded := taskDeliveryStatusForKubernetes(task, status)
+	task.Status.Delivery = &recorded
+	return nil
+}
+
 func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task *corev1alpha1.Task, attempt *store.PromptAttempt, fence store.ControllerEpochFence) error {
 	if _, err := d.ResultStore.GetResult(ctx, task.Namespace, task.Name); err != nil {
 		return err
@@ -2589,7 +2639,7 @@ func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task
 		switch attempt.DeliveryState {
 		case store.PromptDeliveryValidating:
 			if err := d.transitionDelivery(ctx, attempt.ID, fence, store.PromptDeliveryValidating, store.PromptDeliveryConflict,
-				"controller-restart-workspace-lost", "runtime workspace was lost before durable validation completed"); err != nil {
+				acpRecoveredWorkspaceLostOperation, acpRecoveredWorkspaceLostMessage); err != nil {
 				return err
 			}
 			updatedAttempt, err := d.Store.GetPromptAttempt(ctx, attempt.ID)
@@ -2602,7 +2652,7 @@ func (d *ACPDispatcher) recoverSucceededTaskProjection(ctx context.Context, task
 			}
 			status := corev1alpha1.TaskDeliveryStatus{
 				State: corev1alpha1.TaskDeliveryStateDeliveryConflict, Outcome: corev1alpha1.TaskDeliveryOutcomeDeliveryConflict,
-				Reason: "RuntimeWorkspaceLost", Message: "runtime workspace was lost before durable validation completed", LastTransitionTime: nowMeta(),
+				Reason: acpRecoveredWorkspaceLostReason, Message: acpRecoveredWorkspaceLostMessage, LastTransitionTime: nowMeta(),
 			}
 			return d.failTaskForDelivery(ctx, task, status, status.Message)
 		case store.PromptDeliveryPreparing, store.PromptDeliveryPrepared, store.PromptDeliveryPublishing, store.PromptDeliveryVerifying:

@@ -1130,7 +1130,8 @@ completed prompt.
   takeover, which records an attempt still `Running` as unknown and repairs
   step 3 from the receipt for one already `Settling`. An attempt whose
   workspace validation had started is settled only when the journal records
-  the prompt's completion; otherwise its outcome is recorded as unknown.
+  the prompt's completion; otherwise its outcome is recorded as unknown and
+  the validation, which recovery cannot finish, as a delivery conflict.
 - A delayed step 1 or step 3 from the replaced controller returns
   `ErrFenced`.
 - Step 2 moves a PromptAttempt to `Settling` only after its receipt was

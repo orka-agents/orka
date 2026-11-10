@@ -184,6 +184,8 @@ kubectl -n <namespace> annotate task <name> \
 
 Recovery then records the prompt's outcome as unknown, without running it
 again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
+If workspace validation had started, the Task's delivery ends as
+`DeliveryConflict`, because recovery cannot finish that validation.
 An annotation that names any other hold releases nothing. Deleting a held
 Task does not release its hold: the Task stays until a restored record or
 your acknowledgement releases it, and then its deletion completes.
