@@ -436,6 +436,12 @@ type EvalExperimentGate struct {
 	// MaxExperimentsPerHeldOutSet, as a decimal string such as "0.05".
 	// +kubebuilder:validation:MaxLength=32
 	Significance string `json:"significance"`
+	// MaxGuardrailDropPoints is how many percentage points any other
+	// grader's pass@1 may fall; zero fails on any drop.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	MaxGuardrailDropPoints int32 `json:"maxGuardrailDropPoints,omitempty"`
 }
 
 // EvalExperimentTargetResult compares the target result of the two arms.

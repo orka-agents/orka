@@ -118,10 +118,13 @@ spec:
   maxConcurrentTrials: 3
   graders: [verdict, localization, contract, honesty]
   experiment:
-    hypothesis: The candidate prompt catches more defects.
+    hypothesis: The candidate prompt reviews more accurately.
     baselineRunRef: {name: <baseline-run>}
-    target: {grader: verdict, tag: defect}
+    target: {grader: verdict}
 ```
+
+Target `verdict` over every case rather than the `defect` tag alone: on defect
+cases, a reviewer that blocks every pull request scores perfectly.
 
 The controller must run with `--eval-gate-configmap` naming the protected-set
 ConfigMap. Its `gate` holds the thresholds, and its `caseSets` must list the

@@ -425,6 +425,14 @@ spec:
                       maxExperimentsPerHeldOutSet:
                         format: int32
                         type: integer
+                      maxGuardrailDropPoints:
+                        description: |-
+                          MaxGuardrailDropPoints is how many percentage points any other
+                          grader's pass@1 may fall; zero fails on any drop.
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
                       maxInfraErrorPercent:
                         format: int32
                         type: integer

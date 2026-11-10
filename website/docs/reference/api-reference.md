@@ -486,7 +486,7 @@ An EvalRun with `spec.experiment` is the candidate arm of an improvement experim
   - neither run spent more than the gate's infra error budget;
   - the target pass@1, over the same paired trials as the sign test, rose by at least `minTargetImprovementPoints`;
   - a one-sided exact sign test over paired trials (same case and trial, graded in both runs) is at or below `significance / maxExperimentsPerHeldOutSet`;
-  - no grader's overall pass@1 fell.
+  - no other grader's overall pass@1 fell by more than the gate's optional `maxGuardrailDropPoints` (default `0`, so any drop fails). One malformed review in 36 trials is a 2.8-point drop, so a small tolerance keeps a single noisy trial from failing a clearly better candidate.
 
   Infra errors are left out of both arms. A candidate trial that ran but got no pass or fail where the baseline's same trial did, such as a review the grader cannot judge, counts as a failure. `orka eval run --wait` and `orka eval get --wait` wait for the decision and exit non-zero unless the experiment `Passed`.
 

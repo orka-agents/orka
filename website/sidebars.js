@@ -50,6 +50,7 @@ const sidebars = {
             'guides/issue-to-pr-automation',
             'guides/repository-security-scanning',
             'guides/usage-and-pr-outcomes',
+            'guides/evals-getting-started',
           ],
         },
         {

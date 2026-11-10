@@ -1,0 +1,248 @@
+---
+slug: /evals-getting-started
+description: "Prove that a change to the PR review agent is better, with evidence, and record who approved it."
+---
+
+# Evaluate a reviewer change
+
+You want to change the Agent that reviews your pull requests: a new prompt, a different
+model, other tools. This guide shows how to find out, with evidence, whether the change
+is better than what runs today, and how to record a person's decision about it.
+
+**Input**
+
+- **A candidate Agent:** the changed reviewer, as an Agent next to the current one.
+- **Cases:** pull requests with known answers. Orka ships twelve in
+  `test/evals/pr-review/cases.jsonl`: six with a real defect and six clean changes.
+- **Graders:** code that scores each review. `verdict` checks the review's decision,
+  `localization` checks it points at the defect's lines, `contract` checks the output
+  format, and `honesty` checks it doesn't claim tests it never ran.
+- **A gate:** the thresholds a candidate must meet, set by an operator in a protected
+  ConfigMap the candidate's author can't change.
+
+**Outcome**
+
+- **A verdict:** `Passed`, `Failed` or `Incomparable`.
+- **An evidence record** that outlives the runs: every trial and grade, the token
+  spend, and digests of the Agents, prompt, cases, graders and gate it used, including
+  the reviewer it would replace, which is the rollback target.
+- **A decision:** a person approves or rejects the experiment. Decisions are
+  append-only, and an approval goes stale as soon as anything it was based on changes.
+
+Approving records the decision; it doesn't change the reviewer. Roll the approved
+Agent out yourself.
+
+## 1. Turn on evals
+
+Install or upgrade Orka with evals on, naming the ConfigMap that will hold the gate and
+the group whose members may approve:
+
+```bash
+helm upgrade --install orka ./manifest_staging/charts/orka \
+  --namespace orka-system --reuse-values \
+  --set controller.evals.enabled=true \
+  --set-string controller.evals.gateConfigMap=orka-protected-set \
+  --set 'controller.evals.promoterGroups={orka-promoters}'
+```
+
+Approving needs a person signed in through OIDC whose token carries a `groups` claim.
+Set `controller.oidc.issuer` and `.audience` (and `.jwksUrl` if the issuer serves no
+discovery document), list who may sign in with `.allowedSubjects`, and set
+`.namespace` to the namespace your evals run in; OIDC users can't reach any other.
+See [API authorization](../reference/api-authorization.md). ServiceAccounts and
+transaction-token callers can run evals but can never decide.
+
+People who run and read evals need `create`, `get`, `list` and `delete` on `evalruns`
+in that namespace. The chart's `orka-client` Role grants them:
+
+```bash
+kubectl -n orka-system create rolebinding eval-users --role=orka-client --user=alice --user=bob
+```
+
+## 2. Set the gate and the held-out cases
+
+The protected set names the case ConfigMaps that judge candidates (`split: heldOut`)
+and the gate. Only operators should be able to write it:
+
+```yaml title="protected-set.yaml"
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: orka-protected-set, namespace: orka-system}
+data:
+  protectedSet.yaml: |
+    schemaVersion: orka.protectedSet.v1
+    paths: [".github/**"]
+    caseSets:
+      - {namespace: orka-system, name: pr-review-heldout, split: heldOut}
+    gate:
+      maxInfraErrorPercent: 10        # either run may lose at most this share of trials to infra errors
+      maxCandidatesPerBaseline: 2     # candidates one baseline run may judge
+      maxExperimentsPerHeldOutSet: 2  # experiments each held-out case may take part in
+      minTargetImprovementPoints: 5   # the target pass@1 must rise by at least this much
+      significance: 0.05              # one-sided paired sign test, shared across those experiments
+```
+
+```bash
+kubectl apply -f protected-set.yaml
+kubectl -n orka-system create configmap pr-review-heldout \
+  --from-file=cases.jsonl=test/evals/pr-review/cases.jsonl
+```
+
+Each held-out case can only judge `maxExperimentsPerHeldOutSet` experiments, counted by
+the commits it reviews, so renaming, reordering or copying cases doesn't make them
+fresh. When the budget is spent, add new cases in a new ConfigMap and list it instead.
+
+## 3. Describe the current reviewer
+
+Evals review with a RepositoryMonitor's settings and its reviewer Agent. A suspended
+monitor is enough; it never polls:
+
+```yaml title="reviewer.yaml"
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata: {name: reviewer, namespace: orka-system}
+spec:
+  model: {name: "openai/gpt-4o-mini", contextWindow: 65536, maxTokens: 4096}
+  systemPrompt:
+    configMapRef: {name: reviewer-prompt, key: prompt.md}
+  runtime:
+    contractVersion: orka.harness.v2
+    type: opencode
+    defaultAllowBash: false
+    defaultAllowedTools: [read, glob]
+---
+apiVersion: core.orka.ai/v1alpha1
+kind: RepositoryMonitor
+metadata: {name: fixtures, namespace: orka-system}
+spec:
+  provider: github
+  repoURL: https://github.com/orka-agents/orka-eval-fixtures
+  branch: main
+  suspend: true
+  agents:
+    reviewer: {name: reviewer}
+```
+
+Trials clone the public fixture repository anonymously and read-only. They get no
+repository, publication or forge credential, and post nothing.
+
+## 4. Run the baseline
+
+```yaml title="baseline.yaml"
+apiVersion: core.orka.ai/v1alpha1
+kind: EvalRun
+metadata: {name: review-baseline, namespace: orka-system}
+spec:
+  subject:
+    type: repositoryMonitorReview
+    repositoryMonitorReview:
+      monitorRef: {name: fixtures}
+  cases:
+    configMapRef: {name: pr-review-heldout, key: cases.jsonl}
+  trials: 3
+  maxConcurrentTrials: 6
+  graders: [verdict, localization, contract, honesty]
+```
+
+```bash
+orka eval run -f baseline.yaml
+```
+
+You don't need to wait for it before starting candidates.
+
+## 5. Run a candidate
+
+Create the changed Agent, then an EvalRun that reviews with it (`agentRef`) and names
+the baseline. Everything else must match the baseline: cases, trials, concurrency,
+timeout and graders.
+
+```yaml title="candidate.yaml"
+apiVersion: core.orka.ai/v1alpha1
+kind: EvalRun
+metadata: {name: review-careful, namespace: orka-system}
+spec:
+  subject:
+    type: repositoryMonitorReview
+    repositoryMonitorReview:
+      monitorRef: {name: fixtures}
+      agentRef: {name: reviewer-careful}
+  cases:
+    configMapRef: {name: pr-review-heldout, key: cases.jsonl}
+  trials: 3
+  maxConcurrentTrials: 6
+  graders: [verdict, localization, contract, honesty]
+  experiment:
+    hypothesis: The careful prompt on a larger model reviews more accurately.
+    baselineRunRef: {name: review-baseline}
+    target: {grader: verdict}
+```
+
+Pick the target with care. `verdict` over every case rewards a reviewer that catches
+defects *and* passes clean changes. A target on the `defect` tag alone rewards one that
+blocks everything: a reviewer that flags every pull request scores perfectly there. The
+other graders still guard against regressions, but only the target has to improve.
+
+```bash
+orka eval run -f candidate.yaml --wait
+```
+
+`--wait` follows the run, waits for the baseline and the decision, prints the verdict,
+and exits non-zero unless the experiment passed. The candidate spends one attempt from
+each budget before its first trial; deleting it doesn't give the attempt back.
+
+A candidate passes when:
+
+- the target pass@1, over trials graded in both runs, rose by at least
+  `minTargetImprovementPoints`;
+- a paired sign test over those trials is at or below
+  `significance / maxExperimentsPerHeldOutSet`;
+- no grader's overall pass@1 fell;
+- neither run lost more than `maxInfraErrorPercent` of its trials to infrastructure
+  errors.
+
+If the runs can't be compared fairly, for example because their cases or trial plans
+differ, the verdict is `Incomparable`.
+
+## 6. Read the result
+
+```bash
+orka eval get review-careful        # per-grader results and the experiment verdict
+orka eval experiments               # every experiment and the decision in force
+orka eval decisions review-careful  # outcome, evidence, rollback target, decisions
+```
+
+Read the failed trials' transcripts before trusting a score:
+`orka eval get review-careful --output-dir ./results` writes them under `events/`.
+
+## 7. Approve or reject
+
+A promoter needs two things: membership in a group named by
+`controller.evals.promoterGroups`, and the `decide` verb on `evalruns`, which the
+chart's `<release>-controller-cluster-eval-promoter` ClusterRole grants. The `admin`
+role doesn't include it, and a ServiceAccount is refused even with it.
+
+```bash
+kubectl create clusterrolebinding alice-eval-promoter \
+  --clusterrole=orka-controller-cluster-eval-promoter --user=alice
+```
+
+Signed in as that person:
+
+```bash
+orka eval approve review-careful --reason "Catches the path and unit bugs; no regressions."
+orka eval reject review-skim --reason "Misses most defects."
+```
+
+An approval needs a `Passed` experiment that still matches the live configuration. If
+anyone edits either Agent, the prompt, the monitor, the cases, the graders or the gate,
+or moves the cases out of the held-out set, `orka eval decisions` reports the approval
+as stale and names what changed. Run a new experiment for the changed configuration.
+
+## 8. Roll it out
+
+Point the monitor's reviewer at the approved Agent, or copy its settings into the
+current reviewer. `orka eval decisions` names the rollback target: the reviewer and
+generation the baseline ran.
+
+Experiments, outcomes and decisions stay in Orka's store after their EvalRuns are
+deleted, so the record of what was tried, what passed and who approved it remains.

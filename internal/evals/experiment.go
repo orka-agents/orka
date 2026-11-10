@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -27,6 +28,10 @@ type ExperimentGate struct {
 	MaxExperimentsPerHeldOutSet int32   `json:"maxExperimentsPerHeldOutSet"`
 	MinTargetImprovementPoints  int32   `json:"minTargetImprovementPoints"`
 	Significance                float64 `json:"significance"`
+	// MaxGuardrailDropPoints is how many percentage points any other
+	// grader's pass@1 may fall before the candidate fails. Zero, the
+	// default, fails on any drop.
+	MaxGuardrailDropPoints int32 `json:"maxGuardrailDropPoints,omitempty"`
 }
 
 // ParseExperimentGate reads the gate section of an orka.protectedSet.v1
@@ -77,6 +82,8 @@ func ParseExperimentGate(declaration []byte) (ExperimentGate, error) {
 		return gate, errors.New("protected set gate.minTargetImprovementPoints must be between 0 and 100")
 	case !(gate.Significance > 0 && gate.Significance <= 0.5):
 		return gate, errors.New("protected set gate.significance must be greater than 0 and at most 0.5")
+	case gate.MaxGuardrailDropPoints < 0 || gate.MaxGuardrailDropPoints > 100:
+		return gate, errors.New("protected set gate.maxGuardrailDropPoints must be between 0 and 100")
 	}
 	return gate, nil
 }
@@ -130,8 +137,9 @@ func (g ExperimentGate) Digest() (string, error) {
 		MaxExperimentsPerHeldOutSet int32  `json:"maxExperimentsPerHeldOutSet"`
 		MinTargetImprovementPoints  int32  `json:"minTargetImprovementPoints"`
 		Significance                string `json:"significance"`
+		MaxGuardrailDropPoints      int32  `json:"maxGuardrailDropPoints,omitempty"`
 	}{g.MaxInfraErrorPercent, g.MaxCandidatesPerBaseline, g.MaxExperimentsPerHeldOutSet, g.MinTargetImprovementPoints,
-		strconv.FormatFloat(g.Significance, 'g', -1, 64)})
+		strconv.FormatFloat(g.Significance, 'g', -1, 64), g.MaxGuardrailDropPoints})
 }
 
 // TestLevel is the significance a single experiment must meet: the gate's
@@ -253,8 +261,8 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 		// Compare pass counts exactly: 100*(c/ct - b/bt) >= min.
 		if 100*(int64(target.CandidatePassed)*int64(target.BaselineTrials)-int64(target.BaselinePassed)*int64(target.CandidateTrials)) <
 			int64(in.Gate.MinTargetImprovementPoints)*int64(target.BaselineTrials)*int64(target.CandidateTrials) {
-			failures = append(failures, fmt.Sprintf("the target pass@1 rose by %s points, less than the gate's %d",
-				FormatDecimal(target.ImprovementPoints), in.Gate.MinTargetImprovementPoints))
+			failures = append(failures, fmt.Sprintf("the target pass@1 changed by %s points, less than the gate's %d",
+				FormatDecimal(math.Round(target.ImprovementPoints*1e4)/1e4), in.Gate.MinTargetImprovementPoints))
 		}
 		if level := in.Gate.TestLevel(); target.PValue > level {
 			failures = append(failures, fmt.Sprintf("the paired sign test p-value %s is above the per-experiment level %s",
@@ -271,8 +279,14 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 			// A guardrail the candidate never produced a result for cannot
 			// show it did not regress.
 			failures = append(failures, fmt.Sprintf("%s has %d graded baseline trials but no graded candidate trials", grader, bt))
-		case bt > 0 && cp*bt < bp*ct:
-			failures = append(failures, fmt.Sprintf("%s regressed from %d/%d to %d/%d", grader, bp, bt, cp, ct))
+		// Compare exactly: the drop 100*(bp/bt - cp/ct) exceeds the
+		// tolerance.
+		case bt > 0 && 100*(int64(bp)*int64(ct)-int64(cp)*int64(bt)) > int64(in.Gate.MaxGuardrailDropPoints)*int64(bt)*int64(ct):
+			reason := fmt.Sprintf("%s regressed from %d/%d to %d/%d", grader, bp, bt, cp, ct)
+			if in.Gate.MaxGuardrailDropPoints > 0 {
+				reason += fmt.Sprintf(", more than the gate's %d points", in.Gate.MaxGuardrailDropPoints)
+			}
+			failures = append(failures, reason)
 		}
 	}
 	if len(failures) > 0 {
