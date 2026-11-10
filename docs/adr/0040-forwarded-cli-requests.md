@@ -60,8 +60,25 @@ be pointed at a local endpoint and signed in without a real credential.
 - Forwarding Tools are hidden from the model's tool list and refused on the MCP
   endpoint. The executor runs them only when the ACP broker enables it, so a
   native `ai` worker or the internal connector endpoint cannot.
-- The toolbox image (`examples/azure-cli`) holds the Azure CLI and a wrapper
-  that signs in on the first command. It carries no credential.
+- The supervisor signs `az` in, so a stock Azure CLI needs no wrapper. `az`
+  runs nothing before its profile names an account, and listing the
+  identity's subscriptions is a Resource Manager read, which needs a running
+  prompt. So session setup writes a placeholder profile (a tenant-level
+  account under the zero tenant), and when a prompt first runs, the supervisor
+  lists the subscriptions through the forwarding Tool and writes them as
+  `az`'s profile, in the shape `az login --identity` writes. The profile holds
+  no credential. The read runs once per session, under a call ID marked as
+  the sign-in, and not at all when reads of the Tool need approval. A request
+  `az` still sends under the placeholder is never forwarded: it triggers the
+  same sign-in and is answered `OrkaSignedIn` (run it again),
+  `OrkaNoSubscription`, or the sign-in's own error.
+- The child owns `~/.azure` while the session runs, and the supervisor runs as
+  root, so the supervisor never reads the child's files, and writes the
+  profile through a directory handle opened at setup: a new file with an
+  exclusive name, owned by the child, renamed over the profile. A link the
+  child plants cannot redirect it.
+- The toolbox image (`examples/azure-cli`) holds the stock Azure CLI. It
+  carries no credential.
 
 ## Writes
 

@@ -1,9 +1,10 @@
 # Azure CLI toolbox for Orka's built-in coding agents.
 #
-# The image holds a self-contained Python and the Azure CLI under
+# The image holds a self-contained Python and the stock Azure CLI under
 # /opt/azure-cli. It carries no credentials: in a runtime whose Task allows an
 # Azure forwarding Tool, the supervisor points az at a loopback endpoint that
-# forwards Azure Resource Manager reads through Orka's broker.
+# forwards Azure Resource Manager requests through Orka's broker, and signs az
+# in, so any az works there.
 #
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t registry.example.com/tools/azure-cli:2.92.0 --push examples/azure-cli
@@ -28,9 +29,11 @@ RUN set -eu; \
     # times, so az neither recompiles on every session nor prints the SDK's
     # compile-time warnings.
     /opt/azure-cli/venv/bin/python -Im compileall -q -j 0 --invalidation-mode unchecked-hash /opt/azure-cli/venv/lib >/dev/null 2>&1; \
-    mkdir -p /opt/azure-cli/bin
-COPY --chmod=0755 az /opt/azure-cli/bin/az
-RUN /opt/azure-cli/bin/az version --output json >/dev/null
+    # Only az goes on PATH, not the venv's python or pip. The entry point
+    # names the venv's python, so the link runs it from anywhere.
+    mkdir -p /opt/azure-cli/bin; \
+    ln -s ../venv/bin/az /opt/azure-cli/bin/az; \
+    /opt/azure-cli/bin/az version --output json >/dev/null
 
 FROM scratch
 COPY --from=build /opt/azure-cli /opt/azure-cli
