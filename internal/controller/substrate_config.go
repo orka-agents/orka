@@ -43,6 +43,12 @@ const (
 	defaultSubstrateBootstrapKey   = "token"
 	defaultSubstrateClaimTimeout   = 2 * time.Minute
 	defaultSubstrateCommandTimeout = 30 * time.Minute
+	// defaultSubstrateEgressPolicyPropagation is how long the Substrate v1
+	// egress gateway may keep deciding by a replaced policy with its default
+	// settings: the 10s per-Actor policy cache (--egress-policy-cache-ttl),
+	// which nothing invalidates, plus the 4s a fetch that read the previous
+	// policy may take before its result is cached.
+	defaultSubstrateEgressPolicyPropagation = 14 * time.Second
 )
 
 // SubstrateConfig holds disabled-by-default alpha configuration for the
@@ -68,6 +74,12 @@ type SubstrateConfig struct {
 	// gateway was installed with (only "k8s.io"). Empty disables MCP Tool
 	// egress credentials: Tools that request one fail closed.
 	EgressCredentialProvider string
+	// EgressPolicyPropagation is how long after an Actor's egress policy is
+	// replaced the egress gateway may still apply the previous rules. A Tool
+	// is not ready, and its Actor is not resumed, until it has passed. Set it
+	// to the gateway's --egress-policy-cache-ttl plus 4s; zero does not wait,
+	// which is correct only for a gateway whose cache is disabled.
+	EgressPolicyPropagation time.Duration
 }
 
 // DefaultSubstrateConfig returns safe alpha defaults. Substrate is still
@@ -79,6 +91,8 @@ func DefaultSubstrateConfig() SubstrateConfig {
 		ClaimTimeout:   defaultSubstrateClaimTimeout,
 		CommandTimeout: defaultSubstrateCommandTimeout,
 		CleanupPolicy:  corev1alpha1.WorkspaceCleanupPolicyDelete,
+
+		EgressPolicyPropagation: defaultSubstrateEgressPolicyPropagation,
 	}
 }
 
@@ -230,6 +244,9 @@ func (c SubstrateConfig) ValidateMCPTools() error {
 	}
 	if provider := strings.TrimSpace(cfg.EgressCredentialProvider); provider != "" && provider != workspace.SubstrateKubernetesSecretsCredentialProvider {
 		return fmt.Errorf("substrate egress credential provider %q is unsupported; only %q is", provider, workspace.SubstrateKubernetesSecretsCredentialProvider)
+	}
+	if cfg.EgressPolicyPropagation < 0 {
+		return fmt.Errorf("substrate egress policy propagation must not be negative")
 	}
 	return validateSubstrateRouting(cfg.RouterURL)
 }
