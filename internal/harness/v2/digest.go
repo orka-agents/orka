@@ -27,8 +27,9 @@ const (
 type canonicalNumber string
 
 type canonicalParser struct {
-	dec   *json.Decoder
-	items int
+	dec      *json.Decoder
+	items    int
+	maxItems int
 }
 
 // CanonicalJSON parses JSON with duplicate-key rejection and emits the stable
@@ -36,27 +37,13 @@ type canonicalParser struct {
 // whitespace is removed, strings use encoding/json escaping, and numerically
 // equivalent finite JSON numbers use the same non-exponent decimal spelling.
 func CanonicalJSON(raw []byte) ([]byte, error) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, fmt.Errorf("canonical JSON is empty")
-	}
-	if len(raw) > MaxCanonicalJSONBytes {
-		return nil, fmt.Errorf("canonical JSON exceeds %d bytes", MaxCanonicalJSONBytes)
-	}
-	if !utf8.Valid(raw) {
-		return nil, fmt.Errorf("canonical JSON contains invalid UTF-8")
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	parser := canonicalParser{dec: dec}
-	value, err := parser.parse(0)
+	return canonicalJSONWithLimits(raw, MaxCanonicalJSONBytes, maxCanonicalJSONItems)
+}
+
+func canonicalJSONWithLimits(raw []byte, maxBytes, maxItems int) ([]byte, error) {
+	value, err := parseCanonicalJSONWithLimits(raw, maxBytes, maxItems)
 	if err != nil {
 		return nil, err
-	}
-	if tok, err := dec.Token(); err != io.EOF {
-		if err == nil {
-			return nil, fmt.Errorf("canonical JSON has trailing token %v", tok)
-		}
-		return nil, fmt.Errorf("canonical JSON has trailing data: %w", err)
 	}
 	var out bytes.Buffer
 	if err := appendCanonicalJSON(&out, value); err != nil {
@@ -72,6 +59,21 @@ func CanonicalValue(value any) ([]byte, error) {
 		return nil, fmt.Errorf("marshal canonical value: %w", err)
 	}
 	return CanonicalJSON(raw)
+}
+
+// CanonicalValueWithLimits is CanonicalValue for a locally built value that
+// never crosses the v2 wire, such as a workspace manifest digest input. The
+// caller derives both bounds from its own configured limits; the output is
+// byte-identical to CanonicalValue whenever both would succeed.
+func CanonicalValueWithLimits(value any, maxBytes, maxItems int) ([]byte, error) {
+	if maxBytes < 1 || maxItems < 1 {
+		return nil, fmt.Errorf("canonical JSON limits must be positive")
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal canonical value: %w", err)
+	}
+	return canonicalJSONWithLimits(raw, maxBytes, maxItems)
 }
 
 // CanonicalRequestDigest hashes the canonical request after removing the sole
@@ -223,6 +225,10 @@ func parseCanonicalJSON(raw []byte) (any, error) {
 }
 
 func parseCanonicalJSONWithLimit(raw []byte, limit int) (any, error) {
+	return parseCanonicalJSONWithLimits(raw, limit, maxCanonicalJSONItems)
+}
+
+func parseCanonicalJSONWithLimits(raw []byte, limit, maxItems int) (any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, fmt.Errorf("canonical JSON is empty")
 	}
@@ -234,7 +240,7 @@ func parseCanonicalJSONWithLimit(raw []byte, limit int) (any, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	parser := canonicalParser{dec: dec}
+	parser := canonicalParser{dec: dec, maxItems: maxItems}
 	value, err := parser.parse(0)
 	if err != nil {
 		return nil, err
@@ -253,8 +259,8 @@ func (p *canonicalParser) parse(depth int) (any, error) {
 		return nil, fmt.Errorf("canonical JSON exceeds maximum depth %d", maxCanonicalJSONDepth)
 	}
 	p.items++
-	if p.items > maxCanonicalJSONItems {
-		return nil, fmt.Errorf("canonical JSON exceeds maximum item count %d", maxCanonicalJSONItems)
+	if p.items > p.maxItems {
+		return nil, fmt.Errorf("canonical JSON exceeds maximum item count %d", p.maxItems)
 	}
 	tok, err := p.dec.Token()
 	if err != nil {

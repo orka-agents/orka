@@ -126,17 +126,18 @@ const (
 	// [ControllerEpochAdvancer] on both provider contracts. Revision 3 added
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
-	// Revision 5 split the inbox read into [MessageStore.ListUnreadMessages]
+	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
+	// Revision 6 split the inbox read into [MessageStore.ListUnreadMessages]
 	// and [MessageStore.ConsumeMessages], bounded by [MaxMessageBatch], made
 	// [MessageStore.SendMessage] write the assigned ID and creation time back,
 	// and made every Session lease decision, and the claim check when
 	// freezing a gateway event's allowed tools, use the time the request
-	// carries. Revision 6 orders whole-object replacement by write stamp: a
+	// carries. Revision 7 orders whole-object replacement by write stamp: a
 	// SaveResult or SaveArtifact replaces a stored result or file only when
 	// the (Fence.Epoch, Sequence) of its [WriteEnvelope] is greater than the
 	// stored one's, and results are limited to [MaxResultBytes], reported in
 	// [ProviderLimits.MaxResultBytes].
-	ContractRevision = 6
+	ContractRevision = 7
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.

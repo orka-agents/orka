@@ -15,7 +15,7 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 4` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 5` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -24,16 +24,22 @@ Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
-the 170-to-171 transition adds the write stamp columns of results and
+the 170-to-171 transition makes a `retry_pending` work action own its dedupe
+key, the 171-to-172 transition adds the write stamp columns of results and
 artifacts, and the upgrade records an adopted identity. A store at an earlier
 schema version upgrades through numbered version steps under the same lock,
 backup and transaction: a version-1 store (the 159-object layout) gains the
-168-to-169 objects and the 169-to-170 and 170-to-171 columns, a version-2 store
-gains the 169-to-170 and 170-to-171 columns, a version-3 store gains the
-170-to-171 columns, and each keeps its identity row, records and bootstrap
-state unchanged. Existing results and artifacts get the write stamp (0, 0). An
-installation a version-2 store's epoch advance recorded stays its owner, at
-switch generation 0 with no record. Missing or malformed
+168-to-169, 169-to-170 and 170-to-171 objects and the 171-to-172 columns, a
+version-2 store gains the 169-to-170 columns, the 170-to-171 index and the
+171-to-172 columns, a version-3 store gains the 170-to-171 index and the
+171-to-172 columns, a version-4 store gains the 171-to-172 columns, and all
+keep their identity row, records and bootstrap state unchanged. Before the
+170-to-171 index is rebuilt, a `retry_pending` work action that shares its
+dedupe key with a queued, leased or running action, or with a newer
+`retry_pending` one, is cancelled with reason `dedupe_superseded`. Existing
+results and artifacts get the write stamp (0, 0). An installation a version-2
+store's epoch advance recorded stays its owner, at switch generation 0 with no
+record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
 Startup synchronizes a full WAL checkpoint after schema/identity initialization
 and after bootstrap completion, before key decisions or consumer access. A busy
@@ -286,13 +292,17 @@ the observable parts.
   provider contracts. Revision 3 added dataset binding (see "Installation
   binding"). Revision 4 requires a valid write envelope on every write and
   `ErrValidation` when it is missing; revision 3 still required accepting
-  writes without one during the transition. Revision 5 split the inbox
-  read into `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage`
-  write the assigned ID and creation time back, and made every Session
-  lease decision, and the claim check in
+  writes without one during the transition. Revision 5 adds
+  `MarkWorkActionRetryPending`, which parks an active work action for retry
+  and leaves a finished one unchanged in one step, and defines the work-action
+  statuses and which of them are active (`WorkActionStatus*`,
+  `IsWorkActionActive`). Revision 6 split the inbox read into
+  `ListUnreadMessages` and `ConsumeMessages`, made `SendMessage` write the
+  assigned ID and creation time back, and made every Session lease
+  decision, and the claim check in
   `FreezeGatewayEventTaskRuntimeAllowedTools`, use the time the request
   carries (see "Messages, counters and chat turns" and "Lease clocks").
-  Revision 6 orders the replacement of a whole result or artifact file by
+  Revision 7 orders the replacement of a whole result or artifact file by
   write stamp and limits results to `MaxResultBytes` (see "Result and
   artifact replacement order").
   The revision Orka requires for each part belongs to Orka, not to the
@@ -560,7 +570,7 @@ write without one.
   the Task UID. Results are limited to `MaxResultBytes`, the API's 10 MiB,
   which a state.v1 provider reports in `ProviderLimits.MaxResultBytes`, and
   so is the data of a prompt result receipt. SQLite stores the stamp with
-  each result and artifact; rows written before schema version 4 have the
+  each result and artifact; rows written before schema version 5 have the
   stamp (0, 0), which every enveloped write exceeds.
 - **Controller ownership.** Kubernetes decides which controller may act. Each
   dataset holds its own controller epoch, which `AdvanceControllerEpoch`
@@ -799,7 +809,7 @@ later.
   caller rotates keys. Binding a
   dataset records its installation as the advance does, so the advance then
   accepts only that installation and `SyncControllerEpochMirror` is refused.
-- **SQLite.** The binding lives in the `store_dataset` row (since schema version 3).
+- **SQLite.** The binding lives in the `store_dataset` row (schema version 3 and later).
   Every binding method runs in one transaction that reserves the writer, and a
   successful call checkpoints the WAL before it returns, as dataset identity
   does. A checkpoint that fails after the commit returns `ErrOutcomeUnknown`,

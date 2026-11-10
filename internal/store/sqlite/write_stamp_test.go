@@ -14,7 +14,7 @@ import (
 )
 
 // stampedApplicationRows returns the application rows before, taken from a
-// store below schema version 4, as the version 4 step leaves them: results and
+// store below schema version 5, as the version 5 step leaves them: results and
 // artifacts gain the write stamp (0, 0). Tables before does not hold are left
 // out.
 func stampedApplicationRows(t *testing.T, before map[string][]string) map[string][]string {
@@ -58,7 +58,7 @@ func TestOrderStampRefusesASequenceSQLiteCannotStore(t *testing.T) {
 // Results and artifacts stored before the write stamp have the stamp (0, 0)
 // after the upgrade, so the first stamped write for them replaces them.
 func TestStampedWritesReplaceRecordsStoredBeforeTheStamp(t *testing.T) {
-	path, db := schemaVersion3StoreDB(t, datasetOriginNew, true, "", false)
+	path, db := schemaVersion4StoreDB(t, datasetOriginNew, true, "", false)
 	_, err := db.Exec(`INSERT INTO results(namespace, task_name, data) VALUES('tenant', 'task', ?)`, []byte("earlier result"))
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO artifacts(namespace, task_name, filename, content_type, size, data)
