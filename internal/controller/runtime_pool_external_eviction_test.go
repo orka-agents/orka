@@ -301,6 +301,44 @@ func TestExternalWorkerEvictionSignal(t *testing.T) {
 	}
 }
 
+// A Pod first seen with a disruption and a later deletion keeps the window the
+// disruption started: the deletion's own grace must not move the cutoff later.
+func TestExternalWorkerEvictionSignalKeepsEarliestSignalAndDeadline(t *testing.T) {
+	now := runtimePoolTestNow
+	disrupted := now.Add(-20 * time.Minute)
+	disruption := corev1.PodCondition{Type: podConditionDisruptionTarget, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(disrupted)}
+
+	// Deleted ten minutes after the disruption with an hour of grace.
+	deleting := metav1.NewTime(disrupted.Add(10*time.Minute + time.Hour))
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &deleting, DeletionGracePeriodSeconds: ptr.To[int64](3600)},
+		Status:     corev1.PodStatus{Conditions: []corev1.PodCondition{disruption}},
+	}
+	signaledAt, deadline, evicting := externalWorkerEvictionSignal(pod, now)
+	if !evicting || !signaledAt.Equal(disrupted) || !deadline.Equal(disrupted.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("signal = %s, %s, %t; want the disruption's window %s to %s",
+			signaledAt, deadline, evicting, disrupted, disrupted.Add(harnessv2.WorkerEvictionSuspendWindow))
+	}
+
+	// A deletion with a short grace still ends the window at the Pod's own
+	// deadline, while the signal stays at the earlier disruption.
+	short := metav1.NewTime(disrupted.Add(10*time.Minute + 15*time.Second))
+	pod.DeletionTimestamp, pod.DeletionGracePeriodSeconds = &short, ptr.To[int64](15)
+	signaledAt, deadline, evicting = externalWorkerEvictionSignal(pod, now)
+	if !evicting || !signaledAt.Equal(disrupted) || !deadline.Equal(short.Time) {
+		t.Fatalf("signal = %s, %s, %t; want %s to the Pod deadline %s", signaledAt, deadline, evicting, disrupted, short.Time)
+	}
+
+	// A condition that is not True is no signal: the deletion alone decides.
+	pod.Status.Conditions[0].Status = corev1.ConditionFalse
+	pod.DeletionTimestamp, pod.DeletionGracePeriodSeconds = &deleting, ptr.To[int64](3600)
+	deleted := disrupted.Add(10 * time.Minute)
+	signaledAt, deadline, evicting = externalWorkerEvictionSignal(pod, now)
+	if !evicting || !signaledAt.Equal(deleted) || !deadline.Equal(deleted.Add(harnessv2.WorkerEvictionSuspendWindow)) {
+		t.Fatalf("signal = %s, %s, %t; want the deletion's window from %s", signaledAt, deadline, evicting, deleted)
+	}
+}
+
 // A DisruptionTarget dated in Core's future starts the window at Core's now,
 // so a drain probe that straddles the real shutdown cutoff never earns Suspend.
 func TestExternalEvictionFromFutureDisruptionTargetNeverExtendsTheWindow(t *testing.T) {

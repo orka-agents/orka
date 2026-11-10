@@ -111,6 +111,10 @@ func (e *externalWorkerEvictionError) Unwrap() error { return workspaceprovider.
 // Pod. The worker forwards SIGTERM to its Actors when the kubelet signals it,
 // which is the Pod's deletion time less its grace period. The window ends at
 // the worker's shutdown budget or the Pod's own grace, whichever is first.
+// A DisruptionTarget condition announces the termination earlier still. When
+// the Pod carries both, the window starts at the earlier signal and ends at
+// the earlier deadline: a deletion that follows a disruption never reopens or
+// extends the window the disruption started.
 // Every signal time is clamped to Core's clock, as the supervisor signal is:
 // a node or API server clock ahead of Core never extends the window.
 func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time, time.Time, bool) {
@@ -124,27 +128,38 @@ func externalWorkerEvictionSignal(worker *corev1.Pod, now time.Time) (time.Time,
 		}
 		return at.UTC()
 	}
+	var signaledAt, deadline time.Time
+	evicting := false
+	observe := func(at, until time.Time) {
+		if !evicting || at.Before(signaledAt) {
+			signaledAt = at
+		}
+		if !evicting || until.Before(deadline) {
+			deadline = until
+		}
+		evicting = true
+	}
 	if worker.DeletionTimestamp != nil {
 		podDeadline := worker.DeletionTimestamp.UTC()
-		signaledAt, window := now, harnessv2.WorkerEvictionSuspendWindow
+		at, window := now, harnessv2.WorkerEvictionSuspendWindow
 		if grace := worker.DeletionGracePeriodSeconds; grace != nil && *grace >= 0 {
 			graceWindow := time.Duration(*grace) * time.Second
-			signaledAt = clamp(podDeadline.Add(-graceWindow))
+			at = clamp(podDeadline.Add(-graceWindow))
 			window = min(window, graceWindow)
 		}
-		deadline := signaledAt.Add(window)
-		if podDeadline.Before(deadline) {
-			deadline = podDeadline
+		until := at.Add(window)
+		if podDeadline.Before(until) {
+			until = podDeadline
 		}
-		return signaledAt, deadline, true
+		observe(at, until)
 	}
 	for _, condition := range worker.Status.Conditions {
 		if condition.Type == podConditionDisruptionTarget && condition.Status == corev1.ConditionTrue {
-			signaledAt := clamp(condition.LastTransitionTime.Time)
-			return signaledAt, signaledAt.Add(harnessv2.WorkerEvictionSuspendWindow), true
+			at := clamp(condition.LastTransitionTime.Time)
+			observe(at, at.Add(harnessv2.WorkerEvictionSuspendWindow))
 		}
 	}
-	return time.Time{}, time.Time{}, false
+	return signaledAt, deadline, evicting
 }
 
 func externalWorkspaceSuspendable(w *workspacev1alpha1.ExecutionWorkspace) bool {
