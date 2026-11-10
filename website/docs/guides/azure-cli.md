@@ -310,4 +310,4 @@ orka task get az-groups -n team-a
 | `(AuthorizationFailed)` | Azure refused the identity. Give it a role on the scope you are reading. |
 | `(OrkaSignedIn)` | The command started before Orka finished signing `az` in, or under a sign-in that is out of date. Orka has signed in now; run the command again. |
 | `(OrkaNoSubscription)` | The identity has no role on any subscription, so `az` has no subscription to use. Give it a role on one, then run the command again. |
-| `Please run 'az login'` | `az` forgot its sign-in, for example after `az account clear`: run `az login --identity`. If that fails too, the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |
+| `Please run 'az login'` | `az` forgot its sign-in, for example after `az account clear`: run `az login --identity`. If that fails with one of the codes above, that row says why. If it cannot reach a managed identity endpoint at all, the Task does not allow the forwarding Tool, so the session has no Azure endpoint. |
