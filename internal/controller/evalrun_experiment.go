@@ -78,12 +78,12 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 			"baseline EvalRun %q sets agentRef; a baseline must review with the monitor's own reviewer", baseline.Name)
 	}
-	// The baseline was admitted on held-out cases only through a listed
-	// baseline monitor, but it may predate the listing.
+	// The baseline was admitted on held-out cases only through a monitor
+	// listed for them, but it may predate the listing.
 	if subject := baseline.Spec.Subject.RepositoryMonitorReview; subject == nil ||
-		!evals.HeldOutBaselineMonitor(splits, run.Namespace, subject.MonitorRef.Name) {
+		!splits[run.Namespace+"/"+run.Spec.Cases.ConfigMapRef.Name].AllowsBaseline(subject.MonitorRef.Name) {
 		return nil, evalRunConfigErrorf(evalRunReasonExperimentInvalid,
-			"baseline EvalRun %q reviews through a monitor the protected set does not list in baselineMonitors", baseline.Name)
+			"baseline EvalRun %q reviews through a monitor the protected set does not list in this case set's baselineMonitors", baseline.Name)
 	}
 	candidateDigest, err := evalCandidateDigest(snapshot)
 	if err != nil {
@@ -181,15 +181,24 @@ func (r *EvalRunReconciler) refuseUnlistedHeldOutBaseline(ctx context.Context, r
 		return err
 	}
 	subject := run.Spec.Subject.RepositoryMonitorReview
-	if subject == nil || evals.HeldOutBaselineMonitor(sets, run.Namespace, subject.MonitorRef.Name) {
+	if subject == nil {
 		return nil
 	}
+	monitor := subject.MonitorRef.Name
 	refused := evalRunConfigErrorf(evalRunReasonExperimentInvalid,
 		"a run on held-out cases without agentRef must use a monitor the protected set lists in that case set's baselineMonitors; "+
 			"use a training case set, or add spec.experiment to compare a candidate")
-	if ref := run.Spec.Cases.ConfigMapRef; ref != nil && sets[run.Namespace+"/"+ref.Name].Split == evals.SplitHeldOut {
-		return refused
+	// A listed held-out set admits only its own baseline monitors.
+	if ref := run.Spec.Cases.ConfigMapRef; ref != nil {
+		if set := sets[run.Namespace+"/"+ref.Name]; set.Split == evals.SplitHeldOut {
+			if set.AllowsBaseline(monitor) {
+				return nil
+			}
+			return refused
+		}
 	}
+	// Any other cases ConfigMap may copy held-out evidence; every held-out
+	// set it overlaps must list the monitor.
 	cases, err := r.loadEvalCaseSet(ctx, run)
 	if err != nil {
 		return err
@@ -198,11 +207,11 @@ func (r *EvalRunReconciler) refuseUnlistedHeldOutBaseline(ctx context.Context, r
 	if err != nil {
 		return evalRunConfigErrorf(evalRunReasonCasesInvalid, "%v", err)
 	}
-	// A run reads cases only from its own namespace, so a copy can only be
-	// of a held-out set there.
+	// A run reads cases only from its own namespace, which is also the only
+	// namespace this controller watches and reads ConfigMaps in.
 	for key, set := range sets {
 		namespace, name, _ := strings.Cut(key, "/")
-		if set.Split != evals.SplitHeldOut || namespace != run.Namespace {
+		if set.Split != evals.SplitHeldOut || namespace != run.Namespace || set.AllowsBaseline(monitor) {
 			continue
 		}
 		heldOut, err := r.heldOutCaseKeys(ctx, namespace, name)

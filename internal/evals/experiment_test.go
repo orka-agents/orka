@@ -365,8 +365,8 @@ func TestCaseSetsBaselineMonitors(t *testing.T) {
 	if got := sets["team-a/held"]; got.Split != SplitHeldOut || !slices.Equal(got.BaselineMonitors, []string{"prod", "staging"}) {
 		t.Fatalf("held = %+v", got)
 	}
-	if !HeldOutBaselineMonitor(sets, "team-a", "staging") || HeldOutBaselineMonitor(sets, "team-a", "scratch") ||
-		HeldOutBaselineMonitor(sets, "team-b", "prod") {
+	if !sets["team-a/held"].AllowsBaseline("staging") || sets["team-a/held"].AllowsBaseline("scratch") ||
+		sets["team-a/train"].AllowsBaseline("prod") || sets["team-a/other"].AllowsBaseline("prod") {
 		t.Fatal("baseline monitor lookup is wrong")
 	}
 	if _, err := CaseSets([]byte("caseSets:\n- {namespace: team-a, name: train, split: train, baselineMonitors: [prod]}\n")); err == nil {
