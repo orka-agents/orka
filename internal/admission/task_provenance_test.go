@@ -570,3 +570,29 @@ func TestTaskProvenanceValidatorProtectsImprovementRole(t *testing.T) {
 	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposer, nil, ""))
 	require.True(t, resp.Allowed, resp.Result.Message)
 }
+
+// Proposal metadata is controller-managed too: a Task editor can neither
+// forge a proposal nor rewrite or settle a real one.
+func TestTaskProvenanceValidatorProtectsProposalMetadata(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposal := newAdmissionTestTask()
+	proposal.Labels = map[string]string{labels.LabelEvalProposalOf: "training"}
+	proposal.Annotations = map[string]string{labels.AnnotationEvalProposalRequest: `{"heldOut":"heldout"}`}
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		forged := newAdmissionTestTask()
+		forged.Labels = map[string]string{labels.LabelEvalProposalOf: "training"}
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, user, forged, nil, ""))
+		require.False(t, resp.Allowed, "%s labelled a Task as a proposal", user)
+		require.Contains(t, resp.Result.Message, labels.LabelEvalProposalOf)
+
+		for _, key := range []string{labels.AnnotationEvalProposalRequest, labels.AnnotationEvalProposalState} {
+			edited := proposal.DeepCopy()
+			edited.Annotations[key] = "forged"
+			resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, edited, proposal, ""))
+			require.False(t, resp.Allowed, "%s changed %s", user, key)
+			require.Contains(t, resp.Result.Message, key)
+		}
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposal, nil, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}

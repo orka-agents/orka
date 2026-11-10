@@ -78,6 +78,19 @@ var (
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
 		labels.AnnotationImprovementRole,
+		labels.AnnotationEvalProposalRequest,
+		labels.AnnotationEvalProposalState,
+		labels.AnnotationEvalProposalReason,
+		labels.AnnotationEvalProposalHypothesis,
+		labels.AnnotationEvalProposalCandidateAgent,
+		labels.AnnotationEvalProposalBaselineRun,
+		labels.AnnotationEvalProposalCandidateRun,
+	}
+
+	// controllerManagedTaskLabelKeys are labels only the controller sets:
+	// a proposer Task's training run.
+	controllerManagedTaskLabelKeys = []string{
+		labels.LabelEvalProposalOf,
 	}
 )
 
@@ -255,6 +268,7 @@ func presentTaskProvenanceFields(task *corev1alpha1.Task, workerTrusted bool) []
 		fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, managedTransactionAnnotationKeys)...)
 	}
 	fields = append(fields, presentManagedMapFields(fieldMetadataAnnotations, task.Annotations, controllerManagedTaskAnnotationKeys)...)
+	fields = append(fields, presentManagedMapFields(fieldMetadataLabels, task.Labels, controllerManagedTaskLabelKeys)...)
 	fields = append(fields, presentManagedPrefixFields(fieldMetadataLabels, task.Labels)...)
 	fields = append(fields, presentManagedPrefixFields(fieldMetadataAnnotations, task.Annotations)...)
 	return fields
@@ -277,6 +291,7 @@ func changedTaskProvenanceFields(oldTask, newTask *corev1alpha1.Task, workerTrus
 		fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, managedTransactionAnnotationKeys)...)
 	}
 	fields = append(fields, changedManagedMapFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations, controllerManagedTaskAnnotationKeys)...)
+	fields = append(fields, changedManagedMapFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels, controllerManagedTaskLabelKeys)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataLabels, oldTask.Labels, newTask.Labels)...)
 	fields = append(fields, changedManagedPrefixFields(fieldMetadataAnnotations, oldTask.Annotations, newTask.Annotations)...)
 	return fields

@@ -72,6 +72,16 @@ const (
 	LabelAuthProfile   = "orka.ai/auth-profile"
 
 	// Annotations
+	// Eval proposal annotations on a proposer Task: the request as JSON, and
+	// what became of it once the proposer finished. Admission reserves them
+	// to the controller, with LabelEvalProposalOf.
+	AnnotationEvalProposalRequest           = "orka.ai/eval-proposal-request"
+	AnnotationEvalProposalState             = "orka.ai/eval-proposal-state"
+	AnnotationEvalProposalReason            = "orka.ai/eval-proposal-reason"
+	AnnotationEvalProposalHypothesis        = "orka.ai/eval-proposal-hypothesis"
+	AnnotationEvalProposalCandidateAgent    = "orka.ai/eval-proposal-candidate-agent"
+	AnnotationEvalProposalBaselineRun       = "orka.ai/eval-proposal-baseline-run"
+	AnnotationEvalProposalCandidateRun      = "orka.ai/eval-proposal-candidate-run"
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"
