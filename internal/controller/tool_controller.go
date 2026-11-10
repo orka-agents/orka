@@ -742,13 +742,7 @@ func (r *ToolReconciler) stopSubstrateMCPActor(
 	stop substrateMCPActorStop,
 	timeout time.Duration,
 ) error {
-	var held bool
-	var err error
-	if stop.pooled {
-		_, held, err = r.substrateMCPPoolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
-	} else {
-		_, held, err = r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
-	}
+	held, err := r.substrateMCPActorHeld(ctx, tool, stop)
 	if err != nil || !held {
 		// Without the lease the Actor is not this Tool's to stop.
 		return err
@@ -768,6 +762,19 @@ func (r *ToolReconciler) stopSubstrateMCPActor(
 		SkipScrub: true,
 	})
 	return err
+}
+
+// substrateMCPActorHeld reports whether the Tool holds the lease that makes
+// the Actor its own.
+func (r *ToolReconciler) substrateMCPActorHeld(ctx context.Context, tool *corev1alpha1.Tool, stop substrateMCPActorStop) (bool, error) {
+	var held bool
+	var err error
+	if stop.pooled {
+		_, held, err = r.substrateMCPPoolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
+	} else {
+		_, held, err = r.substrateMCPToolActorLeaseHeldByTool(ctx, tool, stop.leaseNamespace, stop.actorID)
+	}
+	return held, err
 }
 
 // forgetSubstrateMCPToolActor drops what the Tool recorded about an Actor it
@@ -846,7 +853,7 @@ func (r *ToolReconciler) stopSubstrateMCPStatusActor(ctx context.Context, tool *
 		}
 	}
 	if actor.TemplateRef == nil || strings.TrimSpace(actor.TemplateRef.Name) == "" {
-		return fmt.Errorf("tool status does not name the actor's template")
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, held.stop(), fmt.Errorf("tool status does not name the actor's template"))
 	}
 	return r.stopHeldSubstrateMCPActor(ctx, tool, held,
 		strings.TrimSpace(actor.TemplateRef.Name), cmp.Or(strings.TrimSpace(actor.TemplateRef.Namespace), tool.Namespace))
@@ -879,7 +886,7 @@ func (r *ToolReconciler) stopUnnamedSubstrateMCPActor(ctx context.Context, tool 
 	}
 	templateName := strings.TrimSpace(description.Template.Name)
 	if templateName == "" {
-		return fmt.Errorf("substrate does not report the actor's template")
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, held.stop(), fmt.Errorf("substrate does not report the actor's template"))
 	}
 	return r.stopHeldSubstrateMCPActor(ctx, tool, held, templateName, cmp.Or(strings.TrimSpace(description.Template.Namespace), tool.Namespace))
 }
@@ -889,12 +896,8 @@ func (r *ToolReconciler) stopUnnamedSubstrateMCPActor(ctx context.Context, tool 
 func (r *ToolReconciler) stopHeldSubstrateMCPActor(
 	ctx context.Context, tool *corev1alpha1.Tool, held substrateMCPHeldActor, templateName, templateNamespace string,
 ) error {
-	stop := substrateMCPActorStop{
-		actorID: held.actorID, ref: workspace.WorkspaceRef{ClaimName: held.actorID, ID: held.actorID},
-		leaseNamespace: held.leaseNamespace, pooled: held.pooled,
-	}
+	stop := held.stop()
 	// Whether to suspend or delete depends on the template the Actor runs.
-	// Without it, do not guess: a wrong delete would discard the Actor's data.
 	cfg := r.SubstrateConfig.WithDefaults()
 	request := &ExecutionWorkspaceRequest{
 		TemplateName:                 templateName,
@@ -902,8 +905,12 @@ func (r *ToolReconciler) stopHeldSubstrateMCPActor(
 		SubstrateBootstrapSecretName: cfg.BootstrapSecretName,
 		SubstrateBootstrapSecretKey:  cfg.BootstrapSecretKey,
 	}
+	var templateErr error
 	if err := r.validateSubstrateMCPTemplate(ctx, request); err != nil {
-		return fmt.Errorf("read the actor's template: %w", err)
+		templateErr = fmt.Errorf("read the actor's template: %w", err)
+	}
+	if templateErr != nil {
+		return r.denySubstrateMCPActorEgressWithoutTemplate(ctx, tool, stop, templateErr)
 	}
 	stop.suspendUnsupported = request.TemplateSuspendUnsupported
 	executorFactory := r.SubstrateExecutorFactory
@@ -918,6 +925,29 @@ func (r *ToolReconciler) stopHeldSubstrateMCPActor(
 	}
 	defer closeWorkspaceExecutor(ctx, executor)
 	return r.stopSubstrateMCPActor(ctx, tool, executor, stop, cfg.ClaimTimeout)
+}
+
+// denySubstrateMCPActorEgressWithoutTemplate keeps an Actor whose template
+// cannot be read from reaching anything. Substrate refuses to suspend an Actor
+// without its template, before it touches the workload, so the Actor cannot be
+// stopped that way. Deleting it would discard data on durable volumes, which
+// only the template declares. Replacing its egress policy with one that denies
+// all needs neither. The gateway applies it within its cache window. The
+// error is still returned, so the reconcile retries the stop.
+func (r *ToolReconciler) denySubstrateMCPActorEgressWithoutTemplate(
+	ctx context.Context, tool *corev1alpha1.Tool, stop substrateMCPActorStop, templateErr error,
+) error {
+	held, err := r.substrateMCPActorHeld(ctx, tool, stop)
+	if err != nil {
+		return goerrors.Join(templateErr, err)
+	}
+	if !held {
+		return templateErr
+	}
+	if _, err := r.applySubstrateMCPActorEgressRules(ctx, stop.actorID, nil); err != nil {
+		return goerrors.Join(templateErr, fmt.Errorf("deny the actor's egress: %w", err))
+	}
+	return fmt.Errorf("%w; the actor's egress is denied instead", templateErr)
 }
 
 func shouldBootSubstrateMCPToolActor(tool *corev1alpha1.Tool, actorID string, requested bool, created bool) bool {
@@ -2015,9 +2045,13 @@ func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, router
 	// probe with 401/403 and is still reachable. The router may reject an
 	// unlisted client either during TLS or with a 403, so a 403 alone cannot
 	// distinguish the two; a router identity problem surfaces on Tool calls.
+	// Redirects are never followed for Actor traffic, so an Actor that
+	// answers its MCP path with one cannot serve MCP through the proxy.
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
+	case resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest:
+		return fmt.Errorf("MCP endpoint returned HTTP %d; redirects are not followed", resp.StatusCode)
 	case resp.StatusCode >= http.StatusInternalServerError:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
 	default:
@@ -2078,6 +2112,14 @@ func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool 
 	if err := workspace.ValidateSubstrateEgressRules(rules); err != nil {
 		return workspace.SubstrateEgressPolicyState{}, err
 	}
+	return r.applySubstrateMCPActorEgressRules(ctx, actorID, rules)
+}
+
+// applySubstrateMCPActorEgressRules installs and verifies an Actor's egress
+// policy. No rules deny all egress.
+func (r *ToolReconciler) applySubstrateMCPActorEgressRules(
+	ctx context.Context, actorID string, rules []workspace.SubstrateEgressRule,
+) (workspace.SubstrateEgressPolicyState, error) {
 	cfg := r.SubstrateConfig.WithDefaults()
 	switch {
 	case r.SubstrateEgressPolicyStateApplier != nil:
@@ -2222,6 +2264,15 @@ type substrateMCPHeldActor struct {
 	// otherwise the Tool's.
 	leaseNamespace string
 	pooled         bool
+}
+
+// stop is the stop request for this held Actor; whether its template allows
+// suspension is filled in by the caller once the template is read.
+func (h substrateMCPHeldActor) stop() substrateMCPActorStop {
+	return substrateMCPActorStop{
+		actorID: h.actorID, ref: workspace.WorkspaceRef{ClaimName: h.actorID, ID: h.actorID},
+		leaseNamespace: h.leaseNamespace, pooled: h.pooled,
+	}
 }
 
 func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {

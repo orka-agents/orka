@@ -326,7 +326,13 @@ func (e *ToolExecutor) prepareSubstrateMCPRequest(
 		if err != nil {
 			return preparedToolRequest{}, fmt.Errorf("failed to create MCP actor request: %w", err)
 		}
-		baseClient = e.substrateMCPRouter.HTTPClient()
+		// The router client is shared and has no timeout of its own; give
+		// this call the executor's default unless the Tool sets one.
+		routerClient := *e.substrateMCPRouter.HTTPClient()
+		if routerClient.Timeout <= 0 {
+			routerClient.Timeout = defaultToolHTTPTimeout
+		}
+		baseClient = &routerClient
 		for name, value := range httpConfig.Headers {
 			req.Header.Set(name, value)
 			if sensitiveToolHeader(name) {

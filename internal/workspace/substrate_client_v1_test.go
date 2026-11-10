@@ -12,6 +12,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // stubSubstrateControl answers only the RPCs a test configures; any other call
@@ -149,12 +151,51 @@ func TestSubstrateBootedActorTemplateUIDComesFromImmutableTemplate(t *testing.T)
 	actor := freshActor()
 	actor.Status.State = ateapipb.ActorState_ACTOR_STATE_RUNNING
 	actor.Status.WorkerAssignment = &ateapipb.WorkerAssignment{WorkerPod: "worker-0", WorkerPodUid: "pod-uid", WorkerPodIps: []string{"", "10.0.0.7"}}
-	stub := &stubSubstrateControl{actor: actor, template: goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED)}
+	template := goldenTemplate(ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED)
+	templateCreated := time.Unix(1_800_000_000, 0)
+	template.Metadata.CreateTime = timestamppb.New(templateCreated)
+	actor.Metadata.CreateTime = timestamppb.New(templateCreated.Add(time.Minute))
+	stub := &stubSubstrateControl{actor: actor, template: template}
 	client := &grpcSubstrateControlClient{client: stub, atespace: "team-a"}
 	observed, err := client.GetActor(t.Context(), "actor-1")
 	require.NoError(t, err)
-	require.Equal(t, "template-uid", observed.TemplateUID)
+	require.Equal(t, "template-uid", observed.TemplateUID, "a template older than the Actor is the one it booted from")
 	require.Equal(t, "10.0.0.7", observed.PodIP)
+
+	// The template was deleted and created again under the same name after the
+	// Actor was created. The Actor may still run the deleted one, so the
+	// replacement's UID is not its identity.
+	replacement := proto.CloneOf(template)
+	replacement.Metadata.Uid = "replacement-template-uid"
+	replacement.Metadata.CreateTime = timestamppb.New(templateCreated.Add(time.Hour))
+	stub.template = replacement
+	observed, err = client.GetActor(t.Context(), "actor-1")
+	require.NoError(t, err)
+	require.Empty(t, observed.TemplateUID, "a template newer than the Actor proves nothing about what it runs")
+	executor := &SubstrateWorkspaceExecutor{control: client, now: time.Now}
+	_, err = executor.Claim(t.Context(), ClaimRequest{
+		ClaimName: "actor-1", Template: TemplateRef{Namespace: "team-a", Name: "mcp", UID: "replacement-template-uid"},
+	})
+	require.True(t, IsKind(err, ErrorKindFailedPrecondition), "Claim must not reattach a workload to a template it may not run: %v", err)
+	_, err = executor.WaitReady(t.Context(), WaitReadyRequest{
+		Ref: WorkspaceRef{ID: "actor-1"}, Template: TemplateRef{Namespace: "team-a", Name: "mcp", UID: "replacement-template-uid"},
+	})
+	require.True(t, IsKind(err, ErrorKindFailedPrecondition), "WaitReady must not accept it either: %v", err)
+	require.Zero(t, stub.resumes, "nothing is resumed against an unproven template")
+
+	// Without both times nothing can be proven.
+	for name, clear := range map[string]func(){
+		"template": func() { stub.template.Metadata.CreateTime = nil },
+		"actor":    func() { stub.actor.Metadata.CreateTime = nil },
+	} {
+		stub.template = proto.CloneOf(template)
+		stub.actor = proto.CloneOf(actor)
+		clear()
+		observed, err = client.GetActor(t.Context(), "actor-1")
+		require.NoError(t, err)
+		require.Empty(t, observed.TemplateUID, "no %s creation time", name)
+	}
+	stub.template, stub.actor = template, actor
 
 	// A never-placed Actor has no guest state and keeps an empty identity.
 	stub.actor = freshActor()
