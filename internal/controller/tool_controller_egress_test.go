@@ -457,24 +457,27 @@ func TestToolReconcilerRetriesWhenAnEditedToolHasNoExecutorToStopItsActor(t *tes
 	requireEgressUnverified(t, got)
 }
 
-// A failure while the installed policy is the one the current specification
-// asked for leaves nothing stale, so the Actor is not stopped. An invalid Tool
-// still has its egress denied, because the gateway may be injecting credentials
-// for it.
-func TestToolReconcilerRevokesEgressButKeepsActorWhenItsPolicyWasCurrent(t *testing.T) {
+// An invalid Tool has its egress denied and its Actor stopped. With the
+// template gone the controller cannot tell whether to suspend or delete, so it
+// does neither and keeps retrying, with egress already denied. Repeating the
+// reconcile changes nothing.
+func TestToolReconcilerDeniesEgressAndRetriesTheStopWhenAnInvalidToolsTemplateIsGone(t *testing.T) {
 	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
 	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
 	if err := r.Delete(context.Background(), approvedMCPActorTemplateForTest()); err != nil {
 		t.Fatalf("Delete template: %v", err)
 	}
-	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
-		t.Fatalf("Reconcile() error = %v", err)
-	}
-	got := getEgressTestTool(t, r)
-	condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
-	if got.Status.Available || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 ||
-		condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" {
-		t.Fatalf("status=%+v releases=%v deletes=%v, want unavailable, egress revoked and the actor not stopped", got.Status, executor.releaseReqs, executor.deleteReqs)
+	for range 2 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err == nil {
+			t.Fatal("Reconcile() error = nil, want the failed stop so the reconcile retries")
+		}
+		got := getEgressTestTool(t, r)
+		condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+		if got.Status.Available || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 ||
+			condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" ||
+			!strings.Contains(got.Status.Error, "could not be stopped") {
+			t.Fatalf("status=%+v releases=%v deletes=%v, want unavailable, egress revoked and the failed stop named", got.Status, executor.releaseReqs, executor.deleteReqs)
+		}
 	}
 }
 

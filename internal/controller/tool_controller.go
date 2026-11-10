@@ -2003,11 +2003,12 @@ func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool 
 // that was running before the Tool became invalid (for example a cleared
 // egress credential provider or a credential Secret that no longer resolves)
 // would keep egressing, and keep using a gateway-injected credential, under
-// its last installed policy. A failed revocation is reported and retried.
-// Reconcile reinstalls the Tool's policy before the actor serves again.
+// its last installed policy. The actor is then stopped, because the gateway
+// may apply the previous policy from its cache for a while. A failed
+// revocation or stop is reported and retried. Reconcile reinstalls the Tool's
+// policy before the actor serves again.
 func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, tool *corev1alpha1.Tool, validationErr error) (ctrl.Result, error) {
 	message := validationErr.Error()
-	verified := substrateMCPEgressVerified(tool)
 	revoked, revokeErr := r.revokeSubstrateMCPToolActorEgress(ctx, tool)
 	if revokeErr == nil && !revoked {
 		// This Tool holds no actor lease to revoke. An actor its status still
@@ -2027,13 +2028,13 @@ func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, too
 			Message: "Tool is invalid; actor egress is denied", ObservedGeneration: tool.Generation,
 		})
 	}
-	// Revocation denies egress. The actor is also stopped when its policy was
-	// not verified for this specification, as failSubstrateMCPTool does, and
-	// when revocation failed: it would otherwise keep its last installed rules,
-	// and any credential the gateway injects for them, until a retry succeeds.
+	// The actor is stopped as well. A deny-all policy takes effect only once
+	// the egress gateway drops its cached copy of the previous one, and may not
+	// have been installed at all, so until then the actor could keep using its
+	// last rules and any credential the gateway injects for them.
 	var stopErr error
 	actor := tool.Status.Actor
-	if (revokeErr != nil || !verified) && actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != "" {
+	if actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != "" {
 		if stopErr = r.stopSubstrateMCPStatusActor(ctx, tool); stopErr != nil {
 			message += "; the actor could not be stopped: " + stopErr.Error()
 		}

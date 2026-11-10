@@ -128,7 +128,8 @@ func TestToolReconcilerEgressCredentialsFailClosed(t *testing.T) {
 }
 
 // A running credential-bearing actor whose Tool stops validating must lose
-// all egress, not keep the last installed policy and its injected credential.
+// all egress and be stopped, not keep the last installed policy and its
+// injected credential while the gateway still caches it.
 func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *testing.T) {
 	for name, invalidate := range map[string]func(t *testing.T, r *ToolReconciler){
 		"credential provider cleared": func(_ *testing.T, r *ToolReconciler) { r.SubstrateConfig.EgressCredentialProvider = "" },
@@ -162,10 +163,17 @@ func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *
 			if got.Status.Available || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" {
 				t.Fatalf("status = %+v, want an unavailable Tool with revoked egress", got.Status)
 			}
-			// Denied egress is enough while the policy was current: the actor
-			// keeps its state and is not stopped.
-			if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
-				t.Fatalf("releases=%v deletes=%v, want the actor left running with egress denied", executor.releaseReqs, executor.deleteReqs)
+			if stops := len(executor.releaseReqs) + len(executor.deleteReqs); stops != 1 {
+				t.Fatalf("releases=%v deletes=%v, want the actor stopped once", executor.releaseReqs, executor.deleteReqs)
+			}
+			// The Tool stays invalid: reconciling again reports the same state.
+			if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+				t.Fatal(err)
+			}
+			again := getEgressCredentialTool(t, r)
+			condition = meta.FindStatusCondition(again.Status.Conditions, toolConditionEgressPolicyReady)
+			if again.Status.Available || condition == nil || condition.Reason != "EgressRevoked" {
+				t.Fatalf("status = %+v, want the Tool still unavailable with revoked egress", again.Status)
 			}
 		})
 	}
@@ -230,13 +238,8 @@ func TestToolReconcilerRevokesCredentialedActorEgressAfterRestartWithMCPToolsDis
 			if stopper.claimName != "" || stopper.waitReadyCalled {
 				t.Fatal("disabled controller must not claim or resume actors")
 			}
-			// It stops the actor only when it could not deny its egress.
-			wantStops := 0
-			if applyErr != nil {
-				wantStops = 1
-			}
-			if stops := len(stopper.releaseReqs) + len(stopper.deleteReqs); stops != wantStops {
-				t.Fatalf("stops = %d, want %d", stops, wantStops)
+			if stops := len(stopper.releaseReqs) + len(stopper.deleteReqs); stops != 1 {
+				t.Fatalf("stops = %d, want the actor stopped once", stops)
 			}
 			if len(applications) != 1 || applications[0].actorID != running.Status.Actor.ActorID || len(applications[0].rules) != 0 {
 				t.Fatalf("applications = %+v, want only a deny-all policy for actor %q", applications, running.Status.Actor.ActorID)
