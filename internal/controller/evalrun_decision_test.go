@@ -259,3 +259,30 @@ func TestEvalExperimentOutcomeSurvivesACandidateDeletedBeforeTheDecision(t *test
 		t.Fatalf("trial records after deletion = %d, %v", len(records), err)
 	}
 }
+
+// A candidate deleted after its reservation was stored but before its status
+// recorded the experiment still gets an outcome: the store knows of the
+// spent attempt even though the status does not.
+func TestEvalExperimentOutcomeSurvivesADeletionBeforeTheStatusWrite(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.reconcileRun("candidate") // finalizer
+	env.reconcileRun("candidate") // snapshot, reservation and status
+	run := env.getRun("candidate")
+	if run.Status.Experiment == nil {
+		t.Fatal("the candidate reserved no experiment")
+	}
+	// The status write that followed the reservation was lost.
+	run.Status.Experiment = nil
+	if err := env.client.Status().Update(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.client.Delete(context.Background(), env.getRun("candidate")); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	outcome := env.experimentEntry().Outcome
+	if outcome == nil || outcome.Result != store.EvalExperimentResultIncomparable || outcome.Baseline.Run != "baseline" {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+}
