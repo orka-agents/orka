@@ -31,10 +31,11 @@ import (
 // --identity` writes. It holds no credential: az still gets the session's
 // placeholder token from IDENTITY_ENDPOINT for every command.
 //
-// The child owns ~/.azure once the session starts, and the supervisor runs as
-// root, so every write goes through an os.Root opened at setup: a link the
-// child plants cannot redirect it. The supervisor never reads the child's
-// files; it keeps the sign-in state in memory.
+// The child owns ~/.azure once the session starts. The supervisor runs as
+// root without DAC_OVERRIDE, so a sign-in writes the profile as the child,
+// through an os.Root opened at setup: a link the child plants cannot redirect
+// it, and the write can do nothing the child could not. The supervisor never
+// reads the child's files; it keeps the sign-in state in memory.
 const (
 	azureProfileName = "azureProfile.json"
 	// azureZeroTenant is the tenant the placeholder token names, and so the
@@ -231,7 +232,7 @@ func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error)
 		accounts[chosen].IsDefault = true
 		profile.Subscriptions = accounts
 	}
-	if err := g.writeProfile(profile); err != nil {
+	if err := g.writeProfile(profile, true); err != nil {
 		return 0, err
 	}
 	return len(accounts), nil
@@ -311,9 +312,11 @@ func (g *azureGateway) nextSubscriptionPage(link string) *harnessv2.MCPForwardRe
 }
 
 // writeProfile replaces az's profile without following any link in the
-// child's directory: it creates a new file under a random name, gives it to
-// the child, and renames it over the profile.
-func (g *azureGateway) writeProfile(profile azureProfile) error {
+// child's directory: it creates a new file under a random name and renames it
+// over the profile. Once the session runs, the directory is the child's, so
+// asChild does the write as the child; before that, the supervisor writes it
+// and gives it to the child.
+func (g *azureGateway) writeProfile(profile azureProfile, asChild bool) error {
 	content, err := json.Marshal(profile)
 	if err != nil {
 		return err
@@ -323,32 +326,40 @@ func (g *azureGateway) writeProfile(profile azureProfile) error {
 		return err
 	}
 	name := "." + azureProfileName + ".orka-" + hex.EncodeToString(raw)
-	file, err := g.profileDir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("write az's profile: %w", err)
-	}
-	written := false
-	defer func() {
-		if !written {
-			_ = g.profileDir.Remove(name)
+	write := func() error {
+		file, err := g.profileDir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("write az's profile: %w", err)
 		}
-	}()
-	if err := file.Chown(g.uid, g.gid); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("give az's profile to the session: %w", err)
+		written := false
+		defer func() {
+			if !written {
+				_ = g.profileDir.Remove(name)
+			}
+		}()
+		if !asChild {
+			if err := file.Chown(g.uid, g.gid); err != nil {
+				_ = file.Close()
+				return fmt.Errorf("give az's profile to the session: %w", err)
+			}
+		}
+		if _, err := file.Write(content); err != nil {
+			_ = file.Close()
+			return fmt.Errorf("write az's profile: %w", err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("write az's profile: %w", err)
+		}
+		if err := g.profileDir.Rename(name, azureProfileName); err != nil {
+			return fmt.Errorf("write az's profile: %w", err)
+		}
+		written = true
+		return nil
 	}
-	if _, err := file.Write(content); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write az's profile: %w", err)
+	if asChild {
+		return asSessionChild(g.uid, g.gid, write)
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("write az's profile: %w", err)
-	}
-	if err := g.profileDir.Rename(name, azureProfileName); err != nil {
-		return fmt.Errorf("write az's profile: %w", err)
-	}
-	written = true
-	return nil
+	return write()
 }
 
 // underPlaceholderAccount reports whether a request names the zero tenant as
