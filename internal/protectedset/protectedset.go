@@ -76,6 +76,10 @@ type CaseSet struct {
 	Namespace string `json:"namespace"`
 	Name      string `json:"name"`
 	Split     string `json:"split"`
+	// BaselineMonitors, read by the EvalRun experiment gate (#993), are the
+	// RepositoryMonitors in Namespace whose own reviewer may run a heldOut
+	// set outside an experiment.
+	BaselineMonitors []string `json:"baselineMonitors,omitempty"`
 }
 
 // Gate holds the improvement thresholds frozen into experiments. The last
@@ -92,6 +96,8 @@ type Gate struct {
 	// Significance is the one-sided paired test's level before it is divided
 	// by MaxExperimentsPerHeldOutSet.
 	Significance *float64 `json:"significance,omitempty"`
+	// MaxGuardrailDropPoints is how far another grader's pass@1 may fall.
+	MaxGuardrailDropPoints *int32 `json:"maxGuardrailDropPoints,omitempty"`
 }
 
 // Parse strictly decodes and validates a declaration. Unknown fields are
@@ -173,6 +179,14 @@ func (s *Set) normalize() error {
 		if caseSet.Split != SplitTrain && caseSet.Split != SplitHeldOut {
 			return fmt.Errorf("protected set caseSets[%d].split must be %q or %q", index, SplitTrain, SplitHeldOut)
 		}
+		if len(caseSet.BaselineMonitors) > 0 && caseSet.Split != SplitHeldOut {
+			return fmt.Errorf("protected set caseSets[%d].baselineMonitors is only for a %q set", index, SplitHeldOut)
+		}
+		for _, monitor := range caseSet.BaselineMonitors {
+			if errs := validation.IsDNS1123Subdomain(monitor); len(errs) > 0 {
+				return fmt.Errorf("protected set caseSets[%d].baselineMonitors entry %q is invalid: %s", index, monitor, strings.Join(errs, "; "))
+			}
+		}
 		key := caseSet.Namespace + "/" + caseSet.Name
 		if _, duplicate := seenCaseSets[key]; duplicate {
 			return fmt.Errorf("protected set caseSets[%d]: %s is listed twice", index, key)
@@ -193,6 +207,9 @@ func (s *Set) normalize() error {
 	}
 	if v := s.Gate.Significance; v != nil && (*v <= 0 || *v > 0.5) {
 		return fmt.Errorf("protected set gate.significance must be greater than 0 and at most 0.5")
+	}
+	if v := s.Gate.MaxGuardrailDropPoints; v != nil && (*v < 0 || *v > 100) {
+		return fmt.Errorf("protected set gate.maxGuardrailDropPoints must be between 0 and 100")
 	}
 	return nil
 }

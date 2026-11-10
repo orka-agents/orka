@@ -81,7 +81,7 @@ data:
           - AGENTS.md
     caseSets:                      # case ConfigMaps by split
       - {namespace: orka-evals, name: pr-review-train,   split: train}
-      - {namespace: orka-evals, name: pr-review-heldout, split: heldOut}
+      - {namespace: orka-evals, name: pr-review-heldout, split: heldOut, baselineMonitors: [pr-review]}
     gate:                          # improvement thresholds, see #994
       maxInfraErrorPercent: 10
       maxCandidatesPerBaseline: 3

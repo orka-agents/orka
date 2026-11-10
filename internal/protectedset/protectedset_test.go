@@ -157,6 +157,9 @@ func TestParseRejectsInvalidDeclarations(t *testing.T) {
 		"bad split":           validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: test}]\n",
 		"bad namespace":       validMinimalSetDoc + "caseSets: [{namespace: Evals, name: cases, split: train}]\n",
 		"duplicate case set":  validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: train}, {namespace: evals, name: cases, split: heldOut}]\n",
+		"guardrail range":     strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3", "maxCandidatesPerBaseline: 3, maxGuardrailDropPoints: 101", 1),
+		"train baselines":     validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: train, baselineMonitors: [prod]}]\n",
+		"bad baseline name":   validMinimalSetDoc + "caseSets: [{namespace: evals, name: cases, split: heldOut, baselineMonitors: [Prod_1]}]\n",
 		"bad repository":      validMinimalSetDoc + "repositories: [{repository: orka, paths: [\"a/**\"]}]\n",
 		"repository no paths": validMinimalSetDoc + "repositories: [{repository: github.com/a/b, paths: []}]\n",
 		"duplicate repo":      validMinimalSetDoc + "repositories: [{repository: github.com/a/b, paths: [\"a\"]}, {repository: https://GitHub.com/A/B.git, paths: [\"b\"]}]\n",
@@ -299,7 +302,8 @@ func TestSourceLoadFailsClosed(t *testing.T) {
 // and kept when present.
 func TestParseKeepsTheExperimentGate(t *testing.T) {
 	document := strings.Replace(validMinimalSetDoc, "maxCandidatesPerBaseline: 3",
-		"maxCandidatesPerBaseline: 3, maxExperimentsPerHeldOutSet: 10, minTargetImprovementPoints: 5, significance: 0.05", 1)
+		"maxCandidatesPerBaseline: 3, maxExperimentsPerHeldOutSet: 10, minTargetImprovementPoints: 5, significance: 0.05, maxGuardrailDropPoints: 5", 1) +
+		"caseSets: [{namespace: evals, name: cases, split: heldOut, baselineMonitors: [prod]}]\n"
 	set, err := Parse([]byte(document))
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +311,11 @@ func TestParseKeepsTheExperimentGate(t *testing.T) {
 	gate := set.Gate
 	if gate.MaxExperimentsPerHeldOutSet == nil || *gate.MaxExperimentsPerHeldOutSet != 10 ||
 		gate.MinTargetImprovementPoints == nil || *gate.MinTargetImprovementPoints != 5 ||
-		gate.Significance == nil || *gate.Significance != 0.05 {
+		gate.Significance == nil || *gate.Significance != 0.05 ||
+		gate.MaxGuardrailDropPoints == nil || *gate.MaxGuardrailDropPoints != 5 {
 		t.Fatalf("gate = %+v", gate)
+	}
+	if len(set.CaseSets) != 1 || len(set.CaseSets[0].BaselineMonitors) != 1 || set.CaseSets[0].BaselineMonitors[0] != "prod" {
+		t.Fatalf("case sets = %+v", set.CaseSets)
 	}
 }
