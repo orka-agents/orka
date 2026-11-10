@@ -949,7 +949,10 @@ phase; every status write that newly reports success on any of these waits
 for the hold. The storage client checks the fence again before
 each retry, so a write whose first attempt came before the hold is not
 retried into the held dataset: it is refused, or resolved when its outcome
-is unknown. The hold is recorded under the controller epoch mutation
+is unknown. A call or retry horizon that ends while a retry waits for the
+fence ends the retries as it does between attempts: the write returns the
+last attempt's error, or is resolved when an attempt's outcome was unknown.
+The hold is recorded under the controller epoch mutation
 interlock that control-store changes take, and that interlock refuses every
 change while a hold is recorded, so a change in progress finishes before the
 hold and none commits after it, also under a fence obtained before the hold.
