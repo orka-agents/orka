@@ -168,6 +168,20 @@ func TestControllerServiceAccountProtection(t *testing.T) {
 			name: "existing controller token Secret populated", username: "system:kube-controller-manager",
 			object: serviceAccountTokenSecret(protectedControllerSA, tokenType), oldObject: serviceAccountTokenSecret(protectedControllerSA, tokenType), allowed: true,
 		},
+		// The answer to an update carries the token, so an existing one is
+		// written only by the token controller, whatever the change.
+		{
+			name: "existing controller token Secret patched by a worker", username: aiWorkerUsername,
+			object: serviceAccountTokenSecret(protectedControllerSA, tokenType), oldObject: serviceAccountTokenSecret(protectedControllerSA, tokenType),
+		},
+		{
+			name: "existing controller token Secret retargeted away by a worker", username: aiWorkerUsername,
+			object: serviceAccountTokenSecret("code-exec-run", tokenType), oldObject: serviceAccountTokenSecret(protectedControllerSA, tokenType),
+		},
+		{
+			name: "another account's token Secret updated by a worker", username: aiWorkerUsername,
+			object: serviceAccountTokenSecret("code-exec-run", tokenType), oldObject: serviceAccountTokenSecret("code-exec-run", tokenType), allowed: true,
+		},
 		{name: "token Secret for another account", username: aiWorkerUsername, object: serviceAccountTokenSecret("code-exec-run", tokenType), allowed: true},
 		{name: "opaque Secret naming the controller", username: aiWorkerUsername, object: serviceAccountTokenSecret(protectedControllerSA, "Opaque"), allowed: true},
 	}
