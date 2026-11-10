@@ -274,6 +274,17 @@ func (e *ToolExecutor) validateSubstrateMCPEgressCredentialAuthority(tool *corev
 	)
 }
 
+// substrateMCPRouterClient copies the shared router client, which has no
+// timeout of its own, and gives the copy the executor's default; a Tool's own
+// timeout still applies on top.
+func substrateMCPRouterClient(shared *http.Client) *http.Client {
+	client := *shared
+	if client.Timeout <= 0 {
+		client.Timeout = defaultToolHTTPTimeout
+	}
+	return &client
+}
+
 // prepareSubstrateMCPRequest routes a Substrate MCP tools/call either through
 // the in-process router (Orka manager) or the authenticated Orka API proxy.
 func (e *ToolExecutor) prepareSubstrateMCPRequest(
@@ -326,13 +337,7 @@ func (e *ToolExecutor) prepareSubstrateMCPRequest(
 		if err != nil {
 			return preparedToolRequest{}, fmt.Errorf("failed to create MCP actor request: %w", err)
 		}
-		// The router client is shared and has no timeout of its own; give
-		// this call the executor's default unless the Tool sets one.
-		routerClient := *e.substrateMCPRouter.HTTPClient()
-		if routerClient.Timeout <= 0 {
-			routerClient.Timeout = defaultToolHTTPTimeout
-		}
-		baseClient = &routerClient
+		baseClient = substrateMCPRouterClient(e.substrateMCPRouter.HTTPClient())
 		for name, value := range httpConfig.Headers {
 			req.Header.Set(name, value)
 			if sensitiveToolHeader(name) {
