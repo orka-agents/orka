@@ -201,3 +201,34 @@ func TestEvalExperimentOutcomeKeepsTheBaselineWhenTheCandidateFails(t *testing.T
 		t.Fatalf("baseline arm = %+v", outcome.Baseline)
 	}
 }
+
+// The outcome counts the trials it records, even when the run's status
+// counters fell behind a stored trial.
+func TestEvalExperimentOutcomeCountsItsOwnTrials(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	stale := env.getRun("candidate")
+	stale.Status.Counts.Completed--
+	stale.Status.Counts.Passed--
+	if err := env.client.Status().Update(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	env.reconcileRun("candidate")
+	outcome := env.experimentEntry().Outcome
+	if outcome == nil {
+		t.Fatal("no outcome was stored")
+	}
+	arm := outcome.Candidate
+	passed := int32(0)
+	for _, trial := range arm.Trials {
+		if trial.Outcome == store.EvalTrialOutcomePass {
+			passed++
+		}
+	}
+	if arm.Completed != int32(len(arm.Trials)) || arm.Passed != passed || arm.Planned != stale.Status.Counts.Planned {
+		t.Fatalf("candidate arm counts = planned %d completed %d passed %d over %d trials (%d passed)",
+			arm.Planned, arm.Completed, arm.Passed, len(arm.Trials), passed)
+	}
+}
