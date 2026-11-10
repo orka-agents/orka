@@ -184,7 +184,9 @@ kubectl -n <namespace> annotate task <name> \
 
 Recovery then records the prompt's outcome as unknown, without running it
 again, and sets the condition to `False` with reason `RecoveryAcknowledged`.
-An annotation that names any other hold releases nothing.
+An annotation that names any other hold releases nothing. Deleting a held
+Task does not release its hold: the Task stays until a restored record or
+your acknowledgement releases it, and then its deletion completes.
 
 On a Gateway-owned Task, the Gateway Task admission policy admits this change
 only when the annotation is the only thing it changes and you may also update
