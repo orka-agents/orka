@@ -3756,8 +3756,12 @@ func (r *TaskReconciler) handleScheduled(ctx context.Context, task *corev1alpha1
 		}
 		for i := range childList.Items {
 			// A parked run still owns its unfinished work through its
-			// continuation chain, so it counts as active.
-			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) || taskwait.Active(childList.Items[i].Status.Wait) {
+			// continuation chain, so it counts as active until the chain's
+			// tail is settled. A resumed wait is itself terminal, and its
+			// continuation may not have a phase yet or be in this cached
+			// list, so the tail is resolved from the authoritative reader.
+			_, settled := r.settledTaskContinuationTail(ctx, &childList.Items[i])
+			if taskPhaseCountsTowardConcurrency(childList.Items[i].Status.Phase) || !settled {
 				log.Info("Concurrency policy Forbid: active child task exists, skipping", "activeChild", childList.Items[i].Name)
 				next := sched.Next(now)
 				nextSchedule := metav1.NewTime(next)

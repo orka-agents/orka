@@ -1194,3 +1194,94 @@ func TestContinuationLinkedBetweenReadsIsNeverOrphaned(t *testing.T) {
 		t.Fatalf("the linked continuation must run, got pending=%v orphaned=%v err=%v", pending, orphaned, err)
 	}
 }
+
+func TestForbidConcurrencyCountsAResumedRunUntilItsContinuationSettles(t *testing.T) {
+	run := func(name string) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: taskWaitTestNamespace, UID: types.UID("uid-" + name),
+				Labels: map[string]string{labels.LabelParentTask: "nightly", labels.LabelScheduledRun: scheduledRunLabelValue},
+			},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+		}
+	}
+	continuation := func(phase corev1alpha1.TaskPhase) *corev1alpha1.Task {
+		next := run("parked-run-next")
+		next.Annotations = map[string]string{
+			labels.AnnotationContinuationOfName: "parked-run", labels.AnnotationContinuationOfUID: "uid-parked-run",
+		}
+		next.Status.Phase = phase
+		return next
+	}
+	for name, tc := range map[string]struct {
+		cached        *corev1alpha1.Task // the continuation as the informer cache holds it
+		authoritative *corev1alpha1.Task // the continuation as the API server holds it
+		wantNewRun    bool
+	}{
+		"continuation has no phase yet": {
+			cached: continuation(""), authoritative: continuation(""),
+		},
+		"continuation is not in the cache yet": {
+			authoritative: continuation(corev1alpha1.TaskPhaseRunning),
+		},
+		"continuation is not in the cache and has no phase": {
+			authoritative: continuation(""),
+		},
+		"continuation parked again": {
+			cached: continuation(corev1alpha1.TaskPhaseSucceeded),
+			authoritative: func() *corev1alpha1.Task {
+				next := continuation(corev1alpha1.TaskPhaseSucceeded)
+				next.Status.Wait = &corev1alpha1.TaskWaitStatus{State: corev1alpha1.TaskWaitStateWaiting, Kind: corev1alpha1.TaskWaitKindTimer}
+				return next
+			}(),
+		},
+		"continuation finished": {
+			cached: continuation(corev1alpha1.TaskPhaseSucceeded), authoritative: continuation(corev1alpha1.TaskPhaseSucceeded),
+			wantNewRun: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scheduled := &corev1alpha1.Task{
+				ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: taskWaitTestNamespace, UID: "uid-nightly"},
+				Spec: corev1alpha1.TaskSpec{
+					Type: corev1alpha1.TaskTypeContainer, Image: "busybox", Schedule: "* * * * *",
+					ConcurrencyPolicy: corev1alpha1.ForbidConcurrent,
+				},
+				Status: corev1alpha1.TaskStatus{
+					Phase: corev1alpha1.TaskPhaseScheduled,
+					// The next tick after this is already due and inside the starting deadline.
+					LastScheduleTime: new(metav1.NewTime(time.Now().Add(-70 * time.Second))),
+				},
+			}
+			parked := run("parked-run")
+			parked.Status.Wait = &corev1alpha1.TaskWaitStatus{
+				State: corev1alpha1.TaskWaitStateResumed, Kind: corev1alpha1.TaskWaitKindTimer,
+				ContinuationTaskName: "parked-run-next", ContinuationTaskUID: "uid-parked-run-next",
+			}
+			cachedObjects := []client.Object{scheduled, parked}
+			if tc.cached != nil {
+				cachedObjects = append(cachedObjects, tc.cached)
+			}
+			r := newUnitReconciler(newTestScheme(), cachedObjects...)
+			r.APIReader = fake.NewClientBuilder().WithScheme(newTestScheme()).
+				WithObjects(scheduled.DeepCopy(), parked.DeepCopy(), tc.authoritative).Build()
+
+			if _, err := r.handleScheduled(context.Background(), scheduled); err != nil {
+				t.Fatal(err)
+			}
+			list := &corev1alpha1.TaskList{}
+			if err := r.List(context.Background(), list, client.InNamespace(taskWaitTestNamespace)); err != nil {
+				t.Fatal(err)
+			}
+			newRun := false
+			for _, item := range list.Items {
+				if strings.HasPrefix(item.Name, "nightly-") {
+					newRun = true
+				}
+			}
+			if newRun != tc.wantNewRun {
+				t.Fatalf("new scheduled run created = %v, want %v", newRun, tc.wantNewRun)
+			}
+		})
+	}
+}
