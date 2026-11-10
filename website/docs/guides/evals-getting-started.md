@@ -73,7 +73,10 @@ data:
     schemaVersion: orka.protectedSet.v1
     paths: [".github/**"]
     caseSets:
-      - {namespace: orka-system, name: pr-review-heldout, split: heldOut}
+      - namespace: orka-system
+        name: pr-review-heldout
+        split: heldOut
+        baselineMonitors: [fixtures]  # monitors whose own reviewer may run these cases as a baseline
     gate:
       maxInfraErrorPercent: 10        # either run may lose at most this share of trials to infra errors
       maxCandidatesPerBaseline: 2     # candidates one baseline run may judge
@@ -92,6 +95,10 @@ kubectl -n orka-system create configmap pr-review-heldout \
 Each held-out case can only judge `maxExperimentsPerHeldOutSet` experiments, counted by
 the commits it reviews, so renaming, reordering or copying cases doesn't make them
 fresh. When the budget is spent, add new cases in a new ConfigMap and list it instead.
+
+A run without a candidate reviews with its monitor's own reviewer, which could be any
+Agent. On held-out cases, including copies of them, such a run must use a monitor named
+in `baselineMonitors`; any other monitor can only run training or unrelated cases.
 
 ## 3. Describe the current reviewer
 
@@ -202,6 +209,12 @@ A candidate passes when:
   `contract`, which a zero tolerance treats as a regression;
 - neither run lost more than `maxInfraErrorPercent` of its trials to infrastructure
   errors.
+
+Size the run for the change you want to detect. The sign test only counts trials where
+the two reviewers disagree, and the level it must meet shrinks as
+`maxExperimentsPerHeldOutSet` grows. With twelve cases and three trials each, even a
+candidate that wins 19 disagreements and loses 8 isn't significant at `0.05 / 4`. More
+trials per case, or more cases, buy that power.
 
 If the runs can't be compared fairly, for example because their cases or trial plans
 differ, the verdict is `Incomparable`.
