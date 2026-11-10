@@ -301,7 +301,7 @@ func DecideExperiment(in ExperimentInput) ExperimentVerdict {
 		}
 		if level := in.Gate.TestLevel(); target.PValue > level {
 			failures = append(failures, fmt.Sprintf("the paired sign test p-value %s is above the per-experiment level %s",
-				FormatDecimal(target.PValue), FormatDecimal(level)))
+				strconv.FormatFloat(target.PValue, 'g', 6, 64), FormatDecimal(level)))
 		}
 	}
 
