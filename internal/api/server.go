@@ -489,6 +489,8 @@ func (s *Server) setupRoutes() {
 	api.Get("/monitors/commands/:id", s.handlers.GetRepositoryMonitorCommandEvent)
 
 	// Eval endpoints
+	api.Post("/evals/runs", s.handlers.CreateEvalRun)
+	api.Get("/evals/runs/:name", s.handlers.GetEvalRun)
 	api.Get("/evals/runs/:name/trials", s.handlers.ListEvalRunTrials)
 	api.Get("/monitors/actions", s.handlers.ListRepositoryMonitorActionRecords)
 	api.Get("/monitors/actions/:id", s.handlers.GetRepositoryMonitorActionRecord)

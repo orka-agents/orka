@@ -103,7 +103,7 @@ type evalRunObservation struct {
 	Monitor  *corev1alpha1.RepositoryMonitor
 }
 
-// +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns,verbs=get;list;watch;update;patch;delete
+// +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;delete

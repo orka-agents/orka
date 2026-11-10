@@ -469,7 +469,11 @@ See [Repository Monitors](../guides/repository-monitors.md) for the full workflo
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/api/v1/evals/runs` | POST | Create an EvalRun |
+| `/api/v1/evals/runs/:name` | GET | Get an EvalRun, including its status and results |
 | `/api/v1/evals/runs/:name/trials` | GET | List the trial records of an EvalRun |
+
+`POST /api/v1/evals/runs` takes `{"metadata": {"name" or "generateName", "namespace", "labels", "annotations"}, "spec": {...}}`, the same shape as the EvalRun resource, and returns the created EvalRun. The EvalRun's own validation applies; a duplicate name is `409`. Creating needs `create` on `evalruns` in the target namespace, and reading needs `get`. `orka eval run` uses these endpoints.
 
 Trial records (`orka.eval.trial.v1`) hold the case id, trial number, Task name, outcome (`pass`, `fail` or `infraError`), infra class, each grader's result, the verdict, token and tool-call counts, latency and the run snapshot digests. They never hold transcripts; read those from `/api/v1/tasks/{name}/events`. The response is `{"items": [...]}`, or one record per line with `?format=jsonl` or `Accept: application/jsonl`. Access needs `get` on the EvalRun; transaction-token callers are refused. Records are deleted with the EvalRun. The EvalRun controller runs only with `--enable-evals`.
 
