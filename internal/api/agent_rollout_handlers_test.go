@@ -47,7 +47,9 @@ func (f *fakeAgentPromoter) ListAgentPromotions(_ context.Context, _, agent stri
 	if agent != "reviewer" {
 		return nil, &evals.RolloutRefusal{Reason: "Agent \"" + agent + "\" does not exist in demo"}
 	}
-	return []store.AgentPromotionRecord{{ID: "p1", Agent: agent, Action: store.AgentPromotionPromote}}, nil
+	return []store.AgentPromotionRecord{{ID: "p1", Agent: agent, Action: store.AgentPromotionPromote,
+		Previous: store.AgentPromotionValues{SystemPrompt: "secret from a ConfigMap", Model: "m1"},
+		Target:   store.AgentPromotionValues{SystemPrompt: "new prompt", Model: "m2"}}}, nil
 }
 
 // setupAgentRolloutHandlers grants promote on agents in "demo" to everyone
@@ -133,11 +135,18 @@ func TestGetAgentPromotions(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "secret from a ConfigMap", "prompt text is never returned")
+	require.NotContains(t, string(raw), "new prompt")
 	var page struct {
-		Items []store.AgentPromotionRecord `json:"items"`
+		Items []AgentPromotionResponse `json:"items"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&page))
+	require.NoError(t, json.Unmarshal(raw, &page))
 	require.Len(t, page.Items, 1)
+	require.Equal(t, "m1", page.Items[0].Previous.Model)
+	require.Equal(t, len("secret from a ConfigMap"), page.Items[0].Previous.SystemPromptBytes)
+	require.Contains(t, page.Items[0].Previous.SystemPromptDigest, "sha256:")
 
 	missing, err := app.Test(httptest.NewRequest(http.MethodGet, "/agents/nope/promotions?namespace=demo", nil))
 	require.NoError(t, err)

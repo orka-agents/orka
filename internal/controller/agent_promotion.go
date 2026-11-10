@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	"github.com/orka-agents/orka/internal/agentcontext"
 	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/store"
@@ -191,7 +194,7 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 	if err != nil {
 		return nil, err
 	}
-	run, err := r.promotionExperimentRun(ctx, decision)
+	run, outcome, err := r.promotionExperimentRun(ctx, decision)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +206,7 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 	if err != nil {
 		return nil, err
 	}
-	target, err := r.agentPromotionValues(ctx, candidate)
+	target, err := r.promotionTargetValues(ctx, candidate, outcome)
 	if err != nil {
 		return nil, err
 	}
@@ -231,39 +234,40 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 // promotionExperimentRun reads the candidate EvalRun a decision names and
 // checks the decision is still the approval in force for it, with a bound
 // tuple that still matches.
-func (r *EvalRunReconciler) promotionExperimentRun(ctx context.Context, decision *store.EvalDecisionRecord) (*corev1alpha1.EvalRun, error) {
+func (r *EvalRunReconciler) promotionExperimentRun(ctx context.Context,
+	decision *store.EvalDecisionRecord) (*corev1alpha1.EvalRun, *store.EvalExperimentOutcome, error) {
 	page, err := r.ExperimentStore.ListEvalExperiments(ctx, decision.Namespace,
 		store.EvalExperimentListOptions{CandidateRunUID: decision.CandidateRunUID, Limit: 1})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(page.Items) != 1 || len(page.Items[0].Decisions) == 0 {
-		return nil, refuseRollout("decision %q has no experiment", decision.ID)
+	if len(page.Items) != 1 || len(page.Items[0].Decisions) == 0 || page.Items[0].Outcome == nil {
+		return nil, nil, refuseRollout("decision %q has no experiment", decision.ID)
 	}
 	decisions := page.Items[0].Decisions
 	if latest := decisions[len(decisions)-1]; latest.ID != decision.ID || latest.Decision != store.EvalDecisionApproved {
-		return nil, refuseRollout("decision %q is not the approval in force for evalrun/%s; the latest decision is %s %q",
+		return nil, nil, refuseRollout("decision %q is not the approval in force for evalrun/%s; the latest decision is %s %q",
 			decision.ID, decision.CandidateRun, latest.Decision, latest.ID)
 	}
 	run := &corev1alpha1.EvalRun{}
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: decision.Namespace, Name: decision.CandidateRun}, run); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, refuseRollout("evalrun/%s is gone, so its approval cannot be checked; run the experiment again", decision.CandidateRun)
+			return nil, nil, refuseRollout("evalrun/%s is gone, so its approval cannot be checked; run the experiment again", decision.CandidateRun)
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	if string(run.UID) != decision.CandidateRunUID {
-		return nil, refuseRollout("evalrun/%s was replaced after decision %q; run the experiment again", decision.CandidateRun, decision.ID)
+		return nil, nil, refuseRollout("evalrun/%s was replaced after decision %q; run the experiment again", decision.CandidateRun, decision.ID)
 	}
 	current, err := r.CurrentEvalDecisionBinding(ctx, run)
 	if err != nil {
-		return nil, refuseRollout("the approval of evalrun/%s cannot be checked: %v", run.Name, err)
+		return nil, nil, refuseRollout("the approval of evalrun/%s cannot be checked: %v", run.Name, err)
 	}
 	if decision.Binding == nil || *current != *decision.Binding {
-		return nil, refuseRollout("the approval of evalrun/%s is stale: the Agents, cases, graders or gate changed since it was given; "+
+		return nil, nil, refuseRollout("the approval of evalrun/%s is stale: the Agents, cases, graders or gate changed since it was given; "+
 			"see orka eval decisions %s", run.Name, run.Name)
 	}
-	return run, nil
+	return run, page.Items[0].Outcome, nil
 }
 
 // promotionAgents reads the stable and candidate Agents the bound tuple
@@ -286,11 +290,38 @@ func (r *EvalRunReconciler) promotionAgents(ctx context.Context, run *corev1alph
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: binding.CandidateAgent.Name}, candidate); err != nil {
 		return nil, nil, err
 	}
+	// The approval was checked against an earlier read; this read is what
+	// gets promoted, so it must be the candidate the experiment ran.
+	if string(candidate.UID) != binding.CandidateAgent.UID || candidate.Generation != binding.CandidateAgent.Generation {
+		return nil, nil, refuseRollout("candidate Agent %q changed after its experiment; run the experiment again", candidate.Name)
+	}
 	if candidate.Labels[labels.LabelCandidateOf] != labels.SelectorValue(stable.Name) || !ownedByAgent(candidate, stable) {
 		return nil, nil, refuseRollout("Agent %q is not a candidate of %q: it needs the %s label and an owner reference to it",
 			candidate.Name, stable.Name, labels.LabelCandidateOf)
 	}
 	return stable, candidate, nil
+}
+
+// promotionTargetValues resolves the candidate's promotable values once and
+// checks that the prompt is the one its experiment arm ran with: a
+// ConfigMap-backed prompt can change without the Agent's generation moving.
+func (r *EvalRunReconciler) promotionTargetValues(ctx context.Context, candidate *corev1alpha1.Agent,
+	outcome *store.EvalExperimentOutcome) (store.AgentPromotionValues, error) {
+	reader := r.uncachedReader()
+	prompt, err := resolveACPSystemPrompt(ctx, reader, candidate)
+	if err != nil {
+		return store.AgentPromotionValues{}, fmt.Errorf("resolve Agent %q's system prompt: %w", candidate.Name, err)
+	}
+	soul, err := agentcontext.ResolveSoul(ctx, reader, candidate)
+	if err != nil {
+		return store.AgentPromotionValues{}, fmt.Errorf("resolve Agent %q's soul: %w", candidate.Name, err)
+	}
+	sum := sha256.Sum256([]byte(agentcontext.Compose(prompt, soul)))
+	if evals.DigestPrefix+hex.EncodeToString(sum[:]) != outcome.Candidate.SystemPromptDigest {
+		return store.AgentPromotionValues{}, refuseRollout(
+			"candidate Agent %q's system prompt is not the one its experiment ran; run the experiment again", candidate.Name)
+	}
+	return store.AgentPromotionValues{SystemPrompt: prompt, Model: evalAgentModelName(candidate)}, nil
 }
 
 // RollbackAgent writes back the values the Agent's latest promotion

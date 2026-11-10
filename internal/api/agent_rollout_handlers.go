@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,6 +34,41 @@ type AgentRolloutRequest struct {
 	Action     string `json:"action"`
 	DecisionID string `json:"decisionID,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+}
+
+// AgentPromotionValuesView shows promotable values without the prompt text.
+// A previous prompt may have been resolved from a ConfigMap the reader
+// cannot read, so responses carry its digest and size only.
+type AgentPromotionValuesView struct {
+	SystemPromptDigest string `json:"systemPromptDigest,omitempty"`
+	SystemPromptBytes  int    `json:"systemPromptBytes"`
+	Model              string `json:"model,omitempty"`
+}
+
+// AgentPromotionResponse is a promotion record as the API returns it.
+type AgentPromotionResponse struct {
+	store.AgentPromotionRecord
+	Previous AgentPromotionValuesView `json:"previous"`
+	Target   AgentPromotionValuesView `json:"target"`
+}
+
+func agentPromotionValuesView(values store.AgentPromotionValues) AgentPromotionValuesView {
+	view := AgentPromotionValuesView{SystemPromptBytes: len(values.SystemPrompt), Model: values.Model}
+	if values.SystemPrompt != "" {
+		sum := sha256.Sum256([]byte(values.SystemPrompt))
+		view.SystemPromptDigest = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	return view
+}
+
+func agentPromotionResponse(record store.AgentPromotionRecord) AgentPromotionResponse {
+	response := AgentPromotionResponse{
+		AgentPromotionRecord: record,
+		Previous:             agentPromotionValuesView(record.Previous),
+		Target:               agentPromotionValuesView(record.Target),
+	}
+	response.AgentPromotionRecord.Previous, response.AgentPromotionRecord.Target = store.AgentPromotionValues{}, store.AgentPromotionValues{}
+	return response
 }
 
 // RolloutAgent promotes an approved candidate onto the Agent, or rolls back
@@ -89,7 +126,7 @@ func (h *Handlers) RolloutAgent(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("the %s did not finish: %v", req.Action, err))
 	}
-	return c.Status(fiber.StatusCreated).JSON(record)
+	return c.Status(fiber.StatusCreated).JSON(agentPromotionResponse(*record))
 }
 
 // GetAgentPromotions lists the Agent's promotion log, oldest first.
@@ -111,8 +148,9 @@ func (h *Handlers) GetAgentPromotions(c fiber.Ctx) error {
 	if err != nil {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list promotions: %v", err))
 	}
-	if records == nil {
-		records = []store.AgentPromotionRecord{}
+	items := make([]AgentPromotionResponse, 0, len(records))
+	for _, record := range records {
+		items = append(items, agentPromotionResponse(record))
 	}
-	return c.JSON(fiber.Map{apiFieldItems: records})
+	return c.JSON(fiber.Map{apiFieldItems: items})
 }

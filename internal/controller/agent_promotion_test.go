@@ -290,3 +290,30 @@ func TestRecoverAgentPromotions(t *testing.T) {
 		t.Fatal("recovery changed the Agent")
 	}
 }
+
+// What gets promoted is read after the approval was checked, so it is
+// pinned to the experiment's candidate: its identity and the prompt digest
+// its arm ran with.
+func TestPromotionPinsTheCandidateToItsExperiment(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	entry := env.experimentEntry()
+	decision := entry.Decisions[0]
+	candidate := env.getAgent("candidate-agent")
+
+	values, err := env.reconciler.promotionTargetValues(ctx, candidate, entry.Outcome)
+	if err != nil || values.SystemPrompt != promotionTestPrompt {
+		t.Fatalf("promotionTargetValues() = %+v, %v", values, err)
+	}
+	edited := *entry.Outcome
+	edited.Candidate.SystemPromptDigest = "sha256:other"
+	_, err = env.reconciler.promotionTargetValues(ctx, candidate, &edited)
+	refusedRollout(t, err, "not the one its experiment ran")
+
+	binding := *decision.Binding
+	binding.CandidateAgent.Generation++
+	decision.Binding = &binding
+	_, _, err = env.reconciler.promotionAgents(ctx, env.getRun("candidate"), &decision, "reviewer")
+	refusedRollout(t, err, "changed after its experiment")
+}
