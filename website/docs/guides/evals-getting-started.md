@@ -80,6 +80,7 @@ data:
       maxExperimentsPerHeldOutSet: 2  # experiments each held-out case may take part in
       minTargetImprovementPoints: 5   # the target pass@1 must rise by at least this much
       significance: 0.05              # one-sided paired sign test, shared across those experiments
+      maxGuardrailDropPoints: 5       # how far any other grader's pass@1 may fall (default 0: any drop fails)
 ```
 
 ```bash
@@ -196,7 +197,9 @@ A candidate passes when:
   `minTargetImprovementPoints`;
 - a paired sign test over those trials is at or below
   `significance / maxExperimentsPerHeldOutSet`;
-- no grader's overall pass@1 fell;
+- no other grader's overall pass@1 fell by more than `maxGuardrailDropPoints`. Models
+  occasionally produce a malformed review: one in 36 trials is a 2.8-point drop on
+  `contract`, which a zero tolerance treats as a regression;
 - neither run lost more than `maxInfraErrorPercent` of its trials to infrastructure
   errors.
 
