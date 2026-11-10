@@ -209,7 +209,7 @@ func TestEvalExperimentFailsWithoutImprovement(t *testing.T) {
 	env.reconcileRun("candidate")
 	experiment := env.getRun("candidate").Status.Experiment
 	if experiment.Result != corev1alpha1.EvalExperimentFailed ||
-		!strings.Contains(strings.Join(experiment.Reasons, "; "), "rose by 0 points") {
+		!strings.Contains(strings.Join(experiment.Reasons, "; "), "changed by 0 points") {
 		t.Fatalf("experiment = %+v", experiment)
 	}
 }
