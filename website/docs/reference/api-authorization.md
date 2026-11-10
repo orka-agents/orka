@@ -266,6 +266,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/evals/runs/:name/trials` | `core.orka.ai` | `evalruns` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
 | `GET` | `/api/v1/evals/runs/:name/decisions` | `core.orka.ai` | `evalruns` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
 | `POST` | `/api/v1/evals/runs/:name/decisions` | `core.orka.ai` | `evalruns` | `decide` | `:name` | `Q` | Only a person in a `--eval-promoter-groups` group; `system:` users and transaction-token callers are refused. `decide` is checked against Kubernetes RBAC for every caller, direct OIDC users included |
+| `GET` | `/api/v1/evals/runs/:name/proposals` | `core.orka.ai` | `evalruns` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
+| `POST` | `/api/v1/evals/runs/:name/proposals` | `core.orka.ai` | `evalruns` | `propose` | `:name` | `Q` | Only a person in a `--eval-promoter-groups` group; `system:` users and transaction-token callers are refused. `propose` is checked against Kubernetes RBAC for every caller, direct OIDC users included |
 | `GET` | `/api/v1/evals/experiments` | `core.orka.ai` | `evalruns` | `list` | empty | `Q` | none; transaction-token callers are refused |
 | `POST` | `/api/v1/monitors/repositories/:name/commands` | `core.orka.ai` | `repositorymonitors/commands` | `create` | `:name` | `Q` | `create` on `core.orka.ai/repositorymonitors/runs`, `:name`; `patch` on `core.orka.ai/repositorymonitors`, `:name` |
 | `GET` | `/api/v1/monitors/commands` | `core.orka.ai` | `monitorcommands` | `list` | empty | `Q` | none |
