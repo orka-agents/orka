@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -430,7 +431,7 @@ func TestSchemaVersion1StoreUpgradesInPlace(t *testing.T) {
 				require.NoError(t, err)
 				after := readVersion1StoreState(t, s.db, path)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema170,
+					fingerprint:  schema171,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -491,7 +492,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
 	assertMigrationRecords(t, s.db, path)
 }
 
@@ -625,7 +626,7 @@ func TestSchemaVersion2StoreUpgradesInPlace(t *testing.T) {
 				s, err := OpenLockedStore(path)
 				require.NoError(t, err)
 				require.Equal(t, version1StoreState{
-					fingerprint:  schema170,
+					fingerprint:  schema171,
 					version:      SchemaVersion,
 					origin:       state.origin,
 					complete:     state.complete,
@@ -718,9 +719,11 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	steps := versionUpgrades()
-	require.Equal(t, 2, steps[len(steps)-1].from)
+	first := slices.IndexFunc(steps, func(step versionUpgrade) bool { return step.from == 2 })
+	require.GreaterOrEqual(t, first, 0)
+	// The final step fails, so every step from version 2 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps[len(steps)-1:]))
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps[first:]))
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
 	require.NoError(t, err)
@@ -736,7 +739,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, s.close()) }()
-	require.Equal(t, schema170, readVersion1StoreState(t, s.db, path).fingerprint)
+	require.Equal(t, schema171, readVersion1StoreState(t, s.db, path).fingerprint)
 	binding, err := readDatasetBinding(t.Context(), s.db)
 	require.NoError(t, err)
 	require.Equal(t, datasetBinding{installation: "installation-a"}, binding)

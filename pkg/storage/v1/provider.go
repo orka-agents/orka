@@ -126,7 +126,8 @@ const (
 	// [ControllerEpochAdvancer] on both provider contracts. Revision 3 added
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
-	ContractRevision = 4
+	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
+	ContractRevision = 5
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
