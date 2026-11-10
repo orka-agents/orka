@@ -161,7 +161,7 @@ func (h *Handlers) DecideTaskApproval(c fiber.Ctx) error {
 	}
 	// A parked turn has ended, but its sign-off approval stays decidable
 	// while the wait is active: the decision starts the continuation turn.
-	if isTerminalInternalTaskPhase(task.Status.Phase) && !taskwait.AcceptsApprovalDecision(task, approvalID) {
+	if task.Status.Phase.IsTerminal() && !taskwait.AcceptsApprovalDecision(task, approvalID) {
 		return fiber.NewError(fiber.StatusConflict, "task is complete")
 	}
 

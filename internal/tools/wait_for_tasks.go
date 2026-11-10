@@ -80,15 +80,6 @@ type TaskResultInfo struct {
 	WaitState string `json:"waitState,omitempty"`
 }
 
-func waitTaskTerminal(phase corev1alpha1.TaskPhase) bool {
-	switch phase {
-	case corev1alpha1.TaskPhaseSucceeded, corev1alpha1.TaskPhaseFailed, corev1alpha1.TaskPhaseCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
 // FailureDetails provides structured information about a failed task
 type FailureDetails struct {
 	Message    string `json:"message"`
@@ -298,7 +289,7 @@ func (t *WaitForTasksTool) Execute(ctx context.Context, args json.RawMessage) (s
 			results[taskName].WorkspaceStatus = task.Status.ExecutionWorkspace
 			results[taskName].Delivery = task.Status.Delivery
 
-			if !waitTaskTerminal(phase) || taskwait.Active(task.Status.Wait) {
+			if !phase.IsTerminal() || taskwait.Active(task.Status.Wait) {
 				allTerminal = false
 				continue
 			}

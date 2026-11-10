@@ -11,6 +11,7 @@ import { ApiError } from '@/lib/api-client'
 import type { Approval } from '@/schemas/execution-event'
 import type { TaskPhase } from '@/schemas/task'
 import { formatTimestamp } from '@/lib/time'
+import { isTaskInFlight, isTaskTerminal } from '@/lib/task-phase'
 
 function statusStyle(status: string): { className: string; live: boolean; label: string } {
   switch (status) {
@@ -239,9 +240,9 @@ export function TaskApprovalPanel({
   parkedApprovalId?: string
 }) {
   // Poll for new approvals while active and unresolved execution after termination.
-  const taskRunning = taskPhase === 'Running' || taskPhase === 'Pending'
+  const taskRunning = isTaskInFlight(taskPhase)
   // Terminal tasks reject decisions, but recovery can still update their approvals.
-  const taskTerminal = taskPhase === 'Succeeded' || taskPhase === 'Failed' || taskPhase === 'Cancelled'
+  const taskTerminal = isTaskTerminal(taskPhase)
   // A parked sign-off keeps polling until it is decided, including across an
   // empty first response or a failed read, which carry no pending approval.
   const { data, isLoading, error, refetch } = useTaskApprovals(

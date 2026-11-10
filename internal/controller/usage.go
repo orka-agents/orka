@@ -41,7 +41,7 @@ func usageTaskSnapshot(task *corev1alpha1.Task) store.UsageTask {
 	}
 	// Deleting an unfinished Task cancels its retained accounting lifecycle.
 	// Otherwise a snapshot can pin its cohort forever after the Task disappears.
-	if !task.DeletionTimestamp.IsZero() && phase != corev1alpha1.TaskPhaseSucceeded && phase != corev1alpha1.TaskPhaseFailed && phase != corev1alpha1.TaskPhaseCancelled {
+	if !task.DeletionTimestamp.IsZero() && !phase.IsTerminal() {
 		result.Phase = string(corev1alpha1.TaskPhaseCancelled)
 		result.PhaseObservedAt = task.DeletionTimestamp.Time
 		if outcome := task.Status.ExecutionOutcome; outcome != nil {
