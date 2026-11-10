@@ -502,18 +502,28 @@ func TestEvalPlainHeldOutRunNeedsABaselineMonitor(t *testing.T) {
 	for name, test := range map[string]struct {
 		monitor  string
 		cases    string // cases ConfigMap name
+		gate     string // default evalTestGate
 		wantFail bool
 	}{
 		"listed baseline monitor":           {monitor: "monitor", cases: "cases"},
 		"scratch monitor on held-out cases": {monitor: "scratch", cases: "cases", wantFail: true},
 		"scratch monitor on a copy":         {monitor: "scratch", cases: "copied", wantFail: true},
 		"scratch monitor on other cases":    {monitor: "scratch", cases: "fresh"},
+		// Listed for a different held-out set only.
+		"monitor of another held-out set": {monitor: "scratch", cases: "cases", gate: strings.Replace(evalTestGate,
+			"  - {namespace: team-a, name: cases, split: heldOut, baselineMonitors: [monitor]}",
+			"  - {namespace: team-a, name: cases, split: heldOut, baselineMonitors: [monitor]}\n"+
+				"  - {namespace: team-a, name: fresh, split: heldOut, baselineMonitors: [scratch]}", 1), wantFail: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			baseline, candidate := experimentRuns(1, 1)
 			baseline.Spec.Subject.RepositoryMonitorReview.MonitorRef.Name = test.monitor
 			baseline.Spec.Cases.ConfigMapRef.Name = test.cases
-			env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+			gate := test.gate
+			if gate == "" {
+				gate = evalTestGate
+			}
+			env := newExperimentEnv(t, baseline, candidate, gate)
 			ctx := context.Background()
 			fresh := strings.ReplaceAll(experimentCases(), evalTestHeadSHA, strings.Repeat("3", 40))
 			for _, object := range []client.Object{

@@ -9,7 +9,6 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
-	"strings"
 
 	sigsyaml "sigs.k8s.io/yaml"
 )
@@ -153,15 +152,10 @@ func CaseSets(declaration []byte) (map[string]CaseSet, error) {
 	return sets, nil
 }
 
-// HeldOutBaselineMonitor reports whether monitor, in namespace, may run the
-// held-out sets there outside an experiment.
-func HeldOutBaselineMonitor(sets map[string]CaseSet, namespace, monitor string) bool {
-	for key, set := range sets {
-		if set.Split == SplitHeldOut && strings.HasPrefix(key, namespace+"/") && slices.Contains(set.BaselineMonitors, monitor) {
-			return true
-		}
-	}
-	return false
+// AllowsBaseline reports whether monitor may run this held-out set outside
+// an experiment.
+func (s CaseSet) AllowsBaseline(monitor string) bool {
+	return s.Split == SplitHeldOut && slices.Contains(s.BaselineMonitors, monitor)
 }
 
 // Digest digests the gate's thresholds.
