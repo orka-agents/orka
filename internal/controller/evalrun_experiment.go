@@ -599,11 +599,10 @@ func (r *EvalRunReconciler) experimentOutcome(ctx context.Context, run, baseline
 // text. It uses the records the gate judged when trials has them.
 func (r *EvalRunReconciler) experimentArm(ctx context.Context, run *corev1alpha1.EvalRun,
 	trials map[types.UID][]store.EvalTrialRecord) (store.EvalExperimentArmOutcome, error) {
-	counts := run.Status.Counts
-	arm := store.EvalExperimentArmOutcome{
-		Run: run.Name, RunUID: string(run.UID),
-		Planned: counts.Planned, Completed: counts.Completed, Passed: counts.Passed, Failed: counts.Failed, InfraError: counts.InfraError,
-	}
+	// Only the plan comes from status; the other counts come from the same
+	// records as the trials below, which a failed status update could leave
+	// behind status.
+	arm := store.EvalExperimentArmOutcome{Run: run.Name, RunUID: string(run.UID), Planned: run.Status.Counts.Planned}
 	if snapshot := run.Status.Snapshot; snapshot != nil {
 		arm.Agent = evalAgentIdentity(snapshot.ReviewerAgent)
 		arm.Model = snapshot.Model
@@ -622,6 +621,15 @@ func (r *EvalRunReconciler) experimentArm(ctx context.Context, run *corev1alpha1
 		}
 	}
 	for _, record := range records {
+		arm.Completed++
+		switch record.Outcome {
+		case store.EvalTrialOutcomePass:
+			arm.Passed++
+		case store.EvalTrialOutcomeFail:
+			arm.Failed++
+		case store.EvalTrialOutcomeInfraError:
+			arm.InfraError++
+		}
 		arm.InputTokens = addEvalTokens(arm.InputTokens, record.InputTokens)
 		arm.OutputTokens = addEvalTokens(arm.OutputTokens, record.OutputTokens)
 		trial := store.EvalExperimentTrialOutcome{CaseID: record.CaseID, Trial: record.Trial, Outcome: record.Outcome, InfraClass: record.InfraClass}
