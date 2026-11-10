@@ -265,6 +265,38 @@ func runConcurrency(t *testing.T, newProvider StateFactory) {
 		require.Len(t, listEvents(t, provider, storagev1.ExecutionEventFilter{Namespace: eventsTenant, StreamID: "task-approval"}), 1)
 	})
 
+	t.Run("a work action completed while it is parked for retry stays completed", func(t *testing.T) {
+		provider := newProvider(t)
+		const rounds = 8
+		for round := range rounds {
+			id := fmt.Sprintf("racing-%d", round)
+			action := &storagev1.WorkAction{ID: id, MonitorNamespace: workflowNamespace, MonitorName: workflowMonitor,
+				TargetKind: "pull_request", TargetNumber: int64(round + 1), DesiredAction: "review",
+				Status: storagev1.WorkActionStatusRunning}
+			require.NoError(t, provider.CreateWorkAction(t.Context(), action))
+			// One caller completes the action; the others park it. A park that
+			// reads before the completion and writes after it would reopen it.
+			errs := runConcurrently(func(caller int) error {
+				if caller == 0 {
+					completed := *action
+					at := time.Now().UTC()
+					completed.Status, completed.CompletedAt = storagev1.WorkActionStatusSucceeded, &at
+					return provider.UpdateWorkAction(t.Context(), &completed)
+				}
+				_, err := provider.MarkWorkActionRetryPending(t.Context(), storagev1.MarkWorkActionRetryPendingRequest{
+					Namespace: workflowNamespace, ID: id, RunID: "run-late", BlockedReason: "run_signal_failed", Error: "signal failed"})
+				return err
+			})
+			for caller, err := range errs {
+				require.NoError(t, err, "round %d caller %d", round, caller)
+			}
+			got, err := provider.GetWorkAction(t.Context(), workflowNamespace, id)
+			require.NoError(t, err)
+			require.Equal(t, storagev1.WorkActionStatusSucceeded, got.Status, "round %d", round)
+			require.NotNil(t, got.CompletedAt, "round %d", round)
+		}
+	})
+
 	t.Run("parallel gateway claims lease each event once", func(t *testing.T) {
 		provider := newProvider(t)
 		now := time.Now().UTC().Truncate(time.Second)
