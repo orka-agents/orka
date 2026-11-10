@@ -942,7 +942,11 @@ condition. While it is recorded, every contract's write fence and
 `CurrentFence` refuse with an error that matches `ErrNotReady` (and
 `store.ErrStorageRecoveryRequired`), so the storage client refuses every
 write, control-store changes stop, no Task Job is created and no Task reports
-success; reads continue. The storage client checks the fence again before
+success; reads continue. A Task reports success in its phase, in the workload
+outcome it records, and in the state or outcome of its ACP execution, which a
+Task whose delivery failed or was cancelled keeps under a failed or cancelled
+phase; every status write that newly reports success on any of these waits
+for the hold. The storage client checks the fence again before
 each retry, so a write whose first attempt came before the hold is not
 retried into the held dataset: it is refused, or resolved when its outcome
 is unknown. The hold is recorded under the controller epoch mutation

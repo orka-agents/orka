@@ -725,29 +725,40 @@ func (m *ControllerEpochManager) setHold(hold store.StorageRecoveryHold) {
 	m.drainAdmittedWork()
 }
 
-// taskSuccess says whether a Task's phase, and the execution outcome it
-// recorded, report success. The outcome is recorded before the phase
-// changes, so each reports success on its own.
-type taskSuccess struct{ phase, outcome bool }
+// taskSuccess says whether each surface on which a Task reports success
+// does: its phase, the workload execution outcome it recorded, and the state
+// or outcome of its ACP execution. Each is written on its own: the outcome
+// before the phase, an ACP execution before its delivery settles, and an ACP
+// Task whose delivery failed or was cancelled keeps its successful execution
+// under a failed or cancelled phase.
+type taskSuccess struct{ phase, outcome, execution bool }
 
 func taskSuccessOf(task *corev1alpha1.Task) taskSuccess {
+	execution := task.Status.Execution
 	return taskSuccess{
 		phase:   task.Status.Phase == corev1alpha1.TaskPhaseSucceeded,
 		outcome: task.Status.ExecutionOutcome != nil && task.Status.ExecutionOutcome.Phase == corev1alpha1.TaskPhaseSucceeded,
+		execution: execution != nil && (execution.State == corev1alpha1.TaskExecutionStateSucceeded ||
+			execution.Outcome == corev1alpha1.TaskExecutionOutcomeSucceeded),
 	}
 }
 
+// reportsNew says whether s reports success on a surface that reported does
+// not.
+func (s taskSuccess) reportsNew(reported taskSuccess) bool {
+	return (s.phase && !reported.phase) || (s.outcome && !reported.outcome) || (s.execution && !reported.execution)
+}
+
 // admitTaskStatus runs write, which publishes task's status, through
-// epochs.AdmitWork when that status reports success that reported did not.
-// No Task then reports success while storage is held for recovery, also
-// when the hold is raised after the storage writes that came before the
-// status write. Other status writes run as they are.
+// epochs.AdmitWork when that status reports success on any surface that
+// reported did not. No Task then reports success while storage is held for
+// recovery, also when the hold is raised after the storage writes that came
+// before the status write. Other status writes run as they are.
 func admitTaskStatus(
 	ctx context.Context, epochs *ControllerEpochManager, reported taskSuccess,
 	task *corev1alpha1.Task, write func(context.Context) error,
 ) error {
-	reports := taskSuccessOf(task)
-	if (reports.phase && !reported.phase) || (reports.outcome && !reported.outcome) {
+	if taskSuccessOf(task).reportsNew(reported) {
 		return epochs.AdmitWork(ctx, write)
 	}
 	return write(ctx)
