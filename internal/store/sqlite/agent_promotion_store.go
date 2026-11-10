@@ -35,7 +35,7 @@ func validateAgentPromotion(record *store.AgentPromotionRecord) error {
 		return store.ValidationErrorf("agent promotion schemaVersion must be %q", store.AgentPromotionSchemaVersion)
 	}
 	for _, field := range []struct{ name, value string }{
-		{"id", record.ID}, {"namespace", record.Namespace}, {"agent", record.Agent}, {"agentUID", record.AgentUID},
+		{"id", record.ID}, {gatewayNamespaceField, record.Namespace}, {"agent", record.Agent}, {"agentUID", record.AgentUID},
 		{"agentResourceVersion", record.AgentResourceVersion}, {"actor.username", record.Actor.Username},
 	} {
 		if err := requireEvalField("agent promotion", field.name, field.value); err != nil {

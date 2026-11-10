@@ -238,9 +238,9 @@ func promotionTestRecord(env *experimentEnv, id string) *store.AgentPromotionRec
 		SchemaVersion: store.AgentPromotionSchemaVersion, ID: id, Namespace: evalTestNamespace, Agent: "reviewer",
 		AgentUID: string(stable.UID), Action: store.AgentPromotionPromote, State: store.AgentPromotionPending,
 		DecisionID: "d1", CandidateRun: "candidate", CandidateRunUID: "candidate-uid",
-		CandidateAgent: &store.EvalAgentIdentity{Name: "candidate-agent", UID: "candidate-agent-uid", Generation: 1},
-		Previous:       store.AgentPromotionValues{Model: "claude-haiku"},
-		Target:         store.AgentPromotionValues{SystemPrompt: promotionTestPrompt, Model: "claude-sonnet"},
+		CandidateAgent:       &store.EvalAgentIdentity{Name: "candidate-agent", UID: "candidate-agent-uid", Generation: 1},
+		Previous:             store.AgentPromotionValues{Model: "claude-haiku"},
+		Target:               store.AgentPromotionValues{SystemPrompt: promotionTestPrompt, Model: "claude-sonnet"},
 		AgentResourceVersion: stable.ResourceVersion, AgentGeneration: stable.Generation,
 		Actor: promotionTestActor, CreatedAt: env.now, UpdatedAt: env.now,
 	}

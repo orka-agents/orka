@@ -33,7 +33,7 @@ func newAgentPromoteCmd() *cobra.Command {
 			if strings.TrimSpace(decision) == "" {
 				return errors.New("--decision is required")
 			}
-			return postAgentRollout(cmd, args[0], map[string]string{"action": "promote", "decisionID": strings.TrimSpace(decision)})
+			return postAgentRollout(cmd, args[0], agentRolloutBody{Action: store.AgentPromotionPromote, DecisionID: strings.TrimSpace(decision)})
 		},
 	}
 	cmd.Flags().StringVar(&decision, "decision", "", "ID of the approval to carry out (required)")
@@ -55,7 +55,7 @@ func newAgentRollbackCmd() *cobra.Command {
 			if len(reason) > store.MaxEvalDecisionReasonBytes {
 				return fmt.Errorf("--reason is %d bytes; at most %d", len(reason), store.MaxEvalDecisionReasonBytes)
 			}
-			return postAgentRollout(cmd, args[0], map[string]string{"action": "rollback", "reason": reason})
+			return postAgentRollout(cmd, args[0], agentRolloutBody{Action: store.AgentPromotionRollback, Reason: reason})
 		},
 	}
 	cmd.Flags().StringVar(&reason, "reason", "", "Why, in a sentence or two")
@@ -63,7 +63,14 @@ func newAgentRollbackCmd() *cobra.Command {
 	return cmd
 }
 
-func postAgentRollout(cmd *cobra.Command, agent string, request map[string]string) error {
+// agentRolloutBody is the request POST /api/v1/agents/:name/rollout takes.
+type agentRolloutBody struct {
+	Action     string `json:"action"`
+	DecisionID string `json:"decisionID,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+func postAgentRollout(cmd *cobra.Command, agent string, request agentRolloutBody) error {
 	body, err := json.Marshal(request)
 	if err != nil {
 		return err
@@ -104,29 +111,35 @@ func newAgentPromotionsCmd() *cobra.Command {
 		Short: "List the Agent's promotions and rollbacks, oldest first",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			raw, _, err := newClientFromCmd(cmd).GetRaw(cmd.Context(), agentsRolloutAPIPath+"/"+url.PathEscape(args[0])+"/promotions", nil)
-			if err != nil {
-				return err
-			}
-			var page struct {
-				Items []store.AgentPromotionRecord `json:"items"`
-			}
-			if err := json.Unmarshal(raw, &page); err != nil {
-				return fmt.Errorf("decode promotions: %w", err)
-			}
-			format, err := outputFormat(cmd)
-			if err != nil {
-				return err
-			}
-			if format != outputTable {
-				return printStructuredTo(cmd.OutOrStdout(), format, page)
-			}
-			printAgentPromotions(cmd.OutOrStdout(), page.Items)
-			return nil
+			return printItemsPage(cmd, agentsRolloutAPIPath+"/"+url.PathEscape(args[0])+"/promotions", "promotions", printAgentPromotions)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
 	return cmd
+}
+
+// printItemsPage reads an {"items": [...]} page and prints it as a table or
+// in the requested structured format.
+func printItemsPage[T any](cmd *cobra.Command, path, what string, table func(io.Writer, []T)) error {
+	raw, _, err := newClientFromCmd(cmd).GetRaw(cmd.Context(), path, nil)
+	if err != nil {
+		return err
+	}
+	var page struct {
+		Items []T `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return fmt.Errorf("decode %s: %w", what, err)
+	}
+	format, err := outputFormat(cmd)
+	if err != nil {
+		return err
+	}
+	if format != outputTable {
+		return printStructuredTo(cmd.OutOrStdout(), format, page)
+	}
+	table(cmd.OutOrStdout(), page.Items)
+	return nil
 }
 
 func printAgentPromotions(out io.Writer, items []store.AgentPromotionRecord) {

@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -288,10 +286,7 @@ func (r *EvalRunReconciler) promotionAgents(ctx context.Context, run *corev1alph
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: binding.CandidateAgent.Name}, candidate); err != nil {
 		return nil, nil, err
 	}
-	owned := slices.ContainsFunc(candidate.OwnerReferences, func(ref metav1.OwnerReference) bool {
-		return ref.Kind == "Agent" && ref.UID == stable.UID
-	})
-	if candidate.Labels[labels.LabelCandidateOf] != labels.SelectorValue(stable.Name) || !owned {
+	if candidate.Labels[labels.LabelCandidateOf] != labels.SelectorValue(stable.Name) || !ownedByAgent(candidate, stable) {
 		return nil, nil, refuseRollout("Agent %q is not a candidate of %q: it needs the %s label and an owner reference to it",
 			candidate.Name, stable.Name, labels.LabelCandidateOf)
 	}
