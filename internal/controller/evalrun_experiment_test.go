@@ -31,7 +31,7 @@ import (
 const evalTestGate = `schemaVersion: orka.protectedSet.v1
 paths: [".github/**"]
 caseSets:
-  - {namespace: team-a, name: cases, split: heldOut}
+  - {namespace: team-a, name: cases, split: heldOut, baselineMonitors: [monitor]}
 gate:
   maxInfraErrorPercent: 10
   maxCandidatesPerBaseline: 2
@@ -384,7 +384,7 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 		"unlisted cases": {gate: strings.Replace(evalTestGate, "name: cases,", "name: gone,", 1), wantFail: true},
 		"copied held-out cases": {gate: strings.Replace(evalTestGate, "name: cases,", "name: protected-cases,", 1), copied: true,
 			wantFail: true},
-		"training":   {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1)},
+		"training":   {gate: strings.Replace(evalTestGate, "split: heldOut, baselineMonitors: [monitor]", "split: train", 1)},
 		"no gate":    {},
 		"unreadable": {gate: "{", wantFail: true},
 	} {
@@ -421,7 +421,7 @@ func TestEvalRunRefusesAnUnpairedCandidateOnHeldOutCases(t *testing.T) {
 func TestEvalTrainingRunWithAnAgentNeedsNoMonitorReviewer(t *testing.T) {
 	baseline, candidate := experimentRuns(1, 1)
 	candidate.Spec.Experiment = nil
-	env := newExperimentEnv(t, baseline, candidate, strings.Replace(evalTestGate, "split: heldOut", "split: train", 1))
+	env := newExperimentEnv(t, baseline, candidate, strings.Replace(evalTestGate, "split: heldOut, baselineMonitors: [monitor]", "split: train", 1))
 	monitors := &corev1alpha1.RepositoryMonitorList{}
 	if err := env.client.List(context.Background(), monitors, client.InNamespace(evalTestNamespace)); err != nil || len(monitors.Items) == 0 {
 		t.Fatalf("list monitors: %d, %v", len(monitors.Items), err)
@@ -495,6 +495,70 @@ func TestEvalExperimentSpendsTheWholeHeldOutSet(t *testing.T) {
 	}
 }
 
+// A plain run reviews with its monitor's own reviewer, which can be any
+// Agent. On held-out evidence, by name or as a copy, it must go through a
+// monitor the protected set lists as a baseline monitor.
+func TestEvalPlainHeldOutRunNeedsABaselineMonitor(t *testing.T) {
+	for name, test := range map[string]struct {
+		monitor  string
+		cases    string // cases ConfigMap name
+		wantFail bool
+	}{
+		"listed baseline monitor":           {monitor: "monitor", cases: "cases"},
+		"scratch monitor on held-out cases": {monitor: "scratch", cases: "cases", wantFail: true},
+		"scratch monitor on a copy":         {monitor: "scratch", cases: "copied", wantFail: true},
+		"scratch monitor on other cases":    {monitor: "scratch", cases: "fresh"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			baseline, candidate := experimentRuns(1, 1)
+			baseline.Spec.Subject.RepositoryMonitorReview.MonitorRef.Name = test.monitor
+			baseline.Spec.Cases.ConfigMapRef.Name = test.cases
+			env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+			ctx := context.Background()
+			fresh := strings.ReplaceAll(experimentCases(), evalTestHeadSHA, strings.Repeat("3", 40))
+			for _, object := range []client.Object{
+				&corev1alpha1.RepositoryMonitor{
+					ObjectMeta: metav1.ObjectMeta{Name: "scratch", Namespace: evalTestNamespace, UID: "scratch-uid", Generation: 1},
+					Spec: corev1alpha1.RepositoryMonitorSpec{
+						RepoURL: "https://github.com/orka-agents/orka",
+						Agents:  corev1alpha1.RepositoryMonitorAgents{Reviewer: &corev1alpha1.AgentReference{Name: "candidate-agent"}},
+					},
+				},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "copied", Namespace: evalTestNamespace},
+					Data: map[string]string{"cases.jsonl": experimentCases()}},
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: evalTestNamespace},
+					Data: map[string]string{"cases.jsonl": fresh}},
+			} {
+				if err := env.client.Create(ctx, object); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env.reconcileRun("baseline")
+			env.reconcileRun("baseline")
+			run := env.getRun("baseline")
+			if failed := run.Status.Phase == corev1alpha1.EvalRunPhaseFailed; failed != test.wantFail {
+				t.Fatalf("phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+			}
+			if test.wantFail && !strings.Contains(evalCompletedCondition(run).Message, "baselineMonitors") {
+				t.Fatalf("condition = %+v", evalCompletedCondition(run))
+			}
+		})
+	}
+}
+
+// A baseline that predates the listing of its monitor cannot judge a
+// candidate.
+func TestEvalExperimentRefusesABaselineOutsideTheListedMonitors(t *testing.T) {
+	baseline, candidate := experimentRuns(1, 1)
+	env := newExperimentEnv(t, baseline, candidate, strings.Replace(evalTestGate, ", baselineMonitors: [monitor]", "", 1))
+	env.reconcileRun("candidate")
+	env.reconcileRun("candidate")
+	run := env.getRun("candidate")
+	if run.Status.Phase != corev1alpha1.EvalRunPhaseFailed || !strings.Contains(evalCompletedCondition(run).Message, "baselineMonitors") {
+		t.Fatalf("phase = %q condition = %+v", run.Status.Phase, evalCompletedCondition(run))
+	}
+}
+
 // A candidate that cannot be paired fails before any trial starts.
 func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 	for name, test := range map[string]struct {
@@ -514,7 +578,7 @@ func TestEvalExperimentFailsClosedBeforeTrials(t *testing.T) {
 				BaselineRunRef: corev1alpha1.EvalObjectReference{Name: "other"},
 				Target:         corev1alpha1.EvalExperimentTarget{Grader: corev1alpha1.EvalGraderVerdict}}
 		}, reason: evalRunReasonExperimentInvalid},
-		"cases not held out": {gate: strings.Replace(evalTestGate, "split: heldOut", "split: train", 1),
+		"cases not held out": {gate: strings.Replace(evalTestGate, "split: heldOut, baselineMonitors: [monitor]", "split: train", 1),
 			reason: evalRunReasonExperimentInvalid},
 		// Its TTL check may have run already without seeing this candidate.
 		"baseline past its TTL": {gate: evalTestGate, mutate: func(baseline, _ *corev1alpha1.EvalRun) {

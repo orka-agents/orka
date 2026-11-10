@@ -870,10 +870,12 @@ func TestParseEvalGateConfigMap(t *testing.T) {
 	}{
 		{"", "/", true},
 		{"orka-protected-set", "orka-system/orka-protected-set", true},
-		{"evals/protected-set", "evals/protected-set", true},
+		{"orka-system/protected-set", "orka-system/protected-set", true},
+		// The controller can read ConfigMaps only in its own namespace.
+		{"evals/protected-set", "", false},
 		{"Bad/protected-set", "", false},
-		{"evals/Bad_Name", "", false},
-		{"evals/a/b", "", false},
+		{"orka-system/Bad_Name", "", false},
+		{"orka-system/a/b", "", false},
 	} {
 		got, err := parseEvalGateConfigMap(test.value, "orka-system")
 		if (err == nil) != test.ok || (test.ok && got.String() != test.want) {
