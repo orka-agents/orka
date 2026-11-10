@@ -152,7 +152,9 @@ func (d *ACPDispatcher) scheduleStaleAttemptRecoveries(ctx context.Context, task
 			err := d.recoverStaleCandidate(recoveryCtx, task, fence)
 			cancel()
 			d.unmarkActive(task.UID)
-			if err != nil && !errors.Is(err, context.Canceled) {
+			// A held Task stays blocked until its hold is released, and the hold
+			// logs once when it changes, so each pass does not log it again.
+			if _, held := errors.AsType[*taskStorageRecordHoldError](err); err != nil && !held && !errors.Is(err, context.Canceled) {
 				logf.FromContext(ctx).Error(err, "ACP Task remains blocked on epoch recovery", "namespace", task.Namespace, "task", task.Name)
 			}
 		}
