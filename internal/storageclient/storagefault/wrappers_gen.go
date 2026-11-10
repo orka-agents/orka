@@ -76,6 +76,16 @@ func (p *stateProvider) AdvanceControllerEpoch(ctx context.Context, a1 storagev1
 	return r0, err
 }
 
+func (p *stateProvider) AppendEvalDecision(ctx context.Context, a1 *storagev1.EvalDecisionRecord) error {
+	_, err := p.injector.call(ctx, p.contract, "AppendEvalDecision", func(ctx context.Context) error {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		return p.inner.AppendEvalDecision(ctx, a1)
+	})
+	return err
+}
+
 func (p *stateProvider) AppendExecutionEvent(ctx context.Context, a1 *storagev1.ExecutionEvent) (*storagev1.ExecutionEvent, error) {
 	var r0 *storagev1.ExecutionEvent
 	injected, err := p.injector.call(ctx, p.contract, "AppendExecutionEvent", func(ctx context.Context) (err error) {
@@ -1670,6 +1680,19 @@ func (p *stateProvider) ListDroppedFindings(ctx context.Context, a1 storagev1.Dr
 	return r0, r1, err
 }
 
+func (p *stateProvider) ListEvalExperiments(ctx context.Context, a1 string, a2 storagev1.EvalExperimentListOptions) (*storagev1.EvalExperimentPage, error) {
+	var r0 *storagev1.EvalExperimentPage
+	injected, err := p.injector.call(ctx, p.contract, "ListEvalExperiments", func(ctx context.Context) (err error) {
+		r0, err = p.inner.ListEvalExperiments(ctx, a1, a2)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.EvalExperimentPage
+		return z0, err
+	}
+	return r0, err
+}
+
 func (p *stateProvider) ListEvalTrials(ctx context.Context, a1 string, a2 string, a3 string) ([]storagev1.EvalTrialRecord, error) {
 	var r0 []storagev1.EvalTrialRecord
 	injected, err := p.injector.call(ctx, p.contract, "ListEvalTrials", func(ctx context.Context) (err error) {
@@ -2400,6 +2423,22 @@ func (p *stateProvider) ReadSessionTurnFinalizationBasis(ctx context.Context, a1
 	})
 	if injected {
 		var z0 *storagev1.SessionTurnFinalizationBasis
+		return z0, err
+	}
+	return r0, err
+}
+
+func (p *stateProvider) RecordEvalExperimentOutcome(ctx context.Context, a1 *storagev1.EvalExperimentOutcome) (*storagev1.EvalExperimentOutcome, error) {
+	var r0 *storagev1.EvalExperimentOutcome
+	injected, err := p.injector.call(ctx, p.contract, "RecordEvalExperimentOutcome", func(ctx context.Context) (err error) {
+		if responseWillBeLost(ctx) {
+			a1 = cloneArgument(a1)
+		}
+		r0, err = p.inner.RecordEvalExperimentOutcome(ctx, a1)
+		return err
+	})
+	if injected {
+		var z0 *storagev1.EvalExperimentOutcome
 		return z0, err
 	}
 	return r0, err

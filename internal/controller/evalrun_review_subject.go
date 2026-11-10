@@ -275,12 +275,13 @@ type evalReviewSubject struct {
 	SystemPromptDigest string
 }
 
-// resolveEvalReviewSubject reads the monitor and its reviewer Agent and
-// checks that trials can run without any credential or forge effect.
-func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *corev1alpha1.EvalRun) (*evalReviewSubject, error) {
+// resolveEvalReviewSubject reads the monitor and its reviewer Agent through
+// reader and checks that trials can run without any credential or forge
+// effect.
+func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, reader client.Reader, run *corev1alpha1.EvalRun) (*evalReviewSubject, error) {
 	ref := run.Spec.Subject.RepositoryMonitorReview.MonitorRef
 	monitor := &corev1alpha1.RepositoryMonitor{}
-	if err := r.getEvalDependency(ctx, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
+	if err := r.getEvalDependency(ctx, reader, types.NamespacedName{Namespace: run.Namespace, Name: ref.Name}, monitor); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "RepositoryMonitor %q was not found", ref.Name)
 		}
@@ -306,7 +307,7 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 			"RepositoryMonitor %q runs a validation image; evals do not support validation yet", monitor.Name)
 	}
 	reviewer := &corev1alpha1.Agent{}
-	if err := r.getEvalDependency(ctx, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
+	if err := r.getEvalDependency(ctx, reader, types.NamespacedName{Namespace: run.Namespace, Name: reviewerRef.Name}, reviewer); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, evalRunConfigErrorf(evalRunReasonSubjectInvalid, "reviewer agent %q was not found", reviewerRef.Name)
 		}
@@ -350,11 +351,11 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 	}, nil
 }
 
-// getEvalDependency reads an object the run depends on from the cache, and
+// getEvalDependency reads an object the run depends on through reader, and
 // confirms a miss against the API server: an object created just before the
 // run may not be cached yet, and a miss fails the run for good.
-func (r *EvalRunReconciler) getEvalDependency(ctx context.Context, key types.NamespacedName, obj client.Object) error {
-	err := r.Get(ctx, key, obj)
+func (r *EvalRunReconciler) getEvalDependency(ctx context.Context, reader client.Reader, key types.NamespacedName, obj client.Object) error {
+	err := reader.Get(ctx, key, obj)
 	if apierrors.IsNotFound(err) {
 		return r.uncachedReader().Get(ctx, key, obj)
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/gofiber/fiber/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -80,12 +81,25 @@ func (h *Handlers) GetEvalRun(c fiber.Ctx) error {
 }
 
 func (h *Handlers) getEvalRun(c fiber.Ctx) (*corev1alpha1.EvalRun, error) {
+	return h.getEvalRunFrom(c, h.client)
+}
+
+// getEvalRunUncached reads the EvalRun from the API server, so a run that
+// was deleted and recreated is never seen as its earlier incarnation.
+func (h *Handlers) getEvalRunUncached(c fiber.Ctx) (*corev1alpha1.EvalRun, error) {
+	if h.apiReader != nil {
+		return h.getEvalRunFrom(c, h.apiReader)
+	}
+	return h.getEvalRunFrom(c, h.client)
+}
+
+func (h *Handlers) getEvalRunFrom(c fiber.Ctx, reader client.Reader) (*corev1alpha1.EvalRun, error) {
 	namespace, err := h.resolveNamespace(c, c.Query("namespace", ""))
 	if err != nil {
 		return nil, err
 	}
 	run := &corev1alpha1.EvalRun{}
-	if err := h.client.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: c.Params("name")}, run); err != nil {
+	if err := reader.Get(c.Context(), types.NamespacedName{Namespace: namespace, Name: c.Params("name")}, run); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, fiber.NewError(fiber.StatusNotFound, "eval run not found")
 		}

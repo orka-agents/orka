@@ -821,10 +821,26 @@ metadata:
     {{- include "orka.labels" . | nindent 4 }}
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
 rules:
+  # Listed rather than "*" so admin never gains decide, which only the
+  # eval-promoter role grants.
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns"]
-    verbs: ["*"]
+    verbs: ["create", "delete", "deletecollection", "get", "list", "patch", "update", "watch"]
   - apiGroups: ["core.orka.ai"]
     resources: ["evalruns/status"]
     verbs: ["get"]
+---
+# Approving and rejecting EvalRun experiments. Not aggregated into edit or
+# admin: bind it only to people. The API also refuses ServiceAccounts,
+# transaction-token callers and anyone outside --eval-promoter-groups.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "orka.controllerClusterRoleName" . }}-eval-promoter
+  labels:
+    {{- include "orka.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["core.orka.ai"]
+    resources: ["evalruns"]
+    verbs: ["decide", "get", "list", "watch"]
 {{- end }}

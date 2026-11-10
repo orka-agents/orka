@@ -378,6 +378,7 @@ func main() {
 	var agentHostControllerPodLabels string
 	var evalsEnabled bool
 	var evalGateConfigMap string
+	var evalPromoterGroups string
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -811,6 +812,9 @@ func main() {
 	flag.StringVar(&evalGateConfigMap, "eval-gate-configmap", os.Getenv("ORKA_EVAL_GATE_CONFIGMAP"),
 		"The protected-set ConfigMap, as namespace/name or a name in the controller namespace, whose gate section "+
 			"judges EvalRun experiments. Empty fails every experiment closed.")
+	flag.StringVar(&evalPromoterGroups, "eval-promoter-groups", os.Getenv("ORKA_EVAL_PROMOTER_GROUPS"),
+		"Comma-separated groups whose members may approve or reject EvalRun experiments, on top of the decide verb on evalruns. "+
+			"ServiceAccounts and transaction-token callers are always refused. Empty refuses every decision.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -2131,13 +2135,14 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
 	}
+	var evalDecisionVerifier api.EvalDecisionVerifier
 	if evalsEnabled {
 		gateConfigMap, err := parseEvalGateConfigMap(evalGateConfigMap, currentPodNamespace())
 		if err != nil {
 			setupLog.Error(err, "invalid --eval-gate-configmap")
 			os.Exit(1)
 		}
-		if err := (&controller.EvalRunReconciler{
+		evalRunReconciler := &controller.EvalRunReconciler{
 			GateConfigMap:   gateConfigMap,
 			Client:          mgr.GetClient(),
 			Scheme:          mgr.GetScheme(),
@@ -2149,10 +2154,12 @@ func main() {
 				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
 				Opencode: acpOpencodeRuntimeImage,
 			},
-		}).SetupWithManager(mgr); err != nil {
+		}
+		if err := evalRunReconciler.SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "EvalRun")
 			os.Exit(1)
 		}
+		evalDecisionVerifier = evalRunReconciler
 	}
 	// +kubebuilder:scaffold:builder
 
@@ -2214,6 +2221,9 @@ func main() {
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
 		EvalTrialStore:            appStorage,
+		EvalExperimentStore:       appStorage,
+		EvalDecisionVerifier:      evalDecisionVerifier,
+		EvalPromoterGroups:        splitCommaList(evalPromoterGroups),
 		ExecutionEventStore:       appStorage,
 		GatewayEventStore:         appStorage,
 		GatewayDeliveryStore:      appStorage,

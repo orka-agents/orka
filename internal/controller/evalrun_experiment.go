@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -360,46 +361,55 @@ func evalCandidateDigest(snapshot corev1alpha1.EvalRunSnapshot) (string, error) 
 // the baseline has finished too. It requeues while the baseline runs.
 func (r *EvalRunReconciler) decideExperiment(ctx context.Context, run *corev1alpha1.EvalRun) (ctrl.Result, error) {
 	status := run.Status.Experiment
-	if run.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded {
-		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
-			Reasons: []string{fmt.Sprintf("the candidate run ended %s", run.Status.Phase)}})
-	}
 	baseline := &corev1alpha1.EvalRun{}
 	err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: status.BaselineRun.Name}, baseline)
+	if run.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded {
+		// Keep the baseline's evidence when it finished; the outcome is final.
+		var finished *corev1alpha1.EvalRun
+		if err == nil && baseline.UID == status.BaselineRun.UID && evalRunFinished(baseline.Status.Phase) {
+			finished = baseline
+		} else if err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, finished, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+			Reasons: []string{fmt.Sprintf("the candidate run ended %s", run.Status.Phase)}})
+	}
 	if apierrors.IsNotFound(err) || (err == nil && baseline.UID != status.BaselineRun.UID) {
-		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, nil, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
 			Reasons: []string{fmt.Sprintf("baseline EvalRun %q is gone or was recreated", status.BaselineRun.Name)}})
 	}
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if evalRunAgentOverride(baseline) {
-		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, baseline, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
 			Reasons: []string{fmt.Sprintf("baseline EvalRun %q sets agentRef", baseline.Name)}})
 	}
 	if !evalRunFinished(baseline.Status.Phase) {
 		return ctrl.Result{RequeueAfter: evalRunRequeueInterval}, nil
 	}
 	if baseline.Status.Phase != corev1alpha1.EvalRunPhaseSucceeded || baseline.Status.Snapshot == nil {
-		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, baseline, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
 			Reasons: []string{fmt.Sprintf("the baseline run ended %s", baseline.Status.Phase)}})
 	}
-	input, incomparable, err := r.experimentInput(ctx, run, baseline)
+	input, trials, incomparable, err := r.experimentInput(ctx, run, baseline)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if incomparable != "" {
-		return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		return ctrl.Result{}, r.recordExperimentResult(ctx, run, baseline, trials, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
 			Reasons: []string{incomparable}})
 	}
-	return ctrl.Result{}, r.recordExperimentResult(ctx, run, evals.DecideExperiment(input))
+	return ctrl.Result{}, r.recordExperimentResult(ctx, run, baseline, trials, evals.DecideExperiment(input))
 }
 
-func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, baseline *corev1alpha1.EvalRun) (evals.ExperimentInput, string, error) {
+// experimentInput builds the gate's input. It returns the trial records it
+// read, by run UID, so the outcome records the evidence the gate judged.
+func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, baseline *corev1alpha1.EvalRun) (evals.ExperimentInput, map[types.UID][]store.EvalTrialRecord, string, error) {
 	gate := candidate.Status.Experiment.Gate
 	significance, err := strconv.ParseFloat(gate.Significance, 64)
 	if err != nil {
-		return evals.ExperimentInput{}, "", fmt.Errorf("parse the frozen gate significance: %w", err)
+		return evals.ExperimentInput{}, nil, "", fmt.Errorf("parse the frozen gate significance: %w", err)
 	}
 	in := evals.ExperimentInput{
 		Gate: evals.ExperimentGate{
@@ -424,30 +434,32 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 			// A missing or changed ConfigMap is final; an API error is
 			// retried, so it doesn't spend the held-out attempt.
 			if _, ok := errors.AsType[*evalRunConfigError](err); !ok {
-				return in, "", fmt.Errorf("reload the cases to find tagged cases: %w", err)
+				return in, nil, "", fmt.Errorf("reload the cases to find tagged cases: %w", err)
 			}
-			return in, "the cases ConfigMap can no longer be read to find tagged cases", nil
+			return in, nil, "the cases ConfigMap can no longer be read to find tagged cases", nil
 		}
 		digest, err := evals.CaseSetDigest(cases)
 		if err != nil {
-			return in, "", err
+			return in, nil, "", err
 		}
 		if digest != candidate.Status.Snapshot.CaseSetDigest {
-			return in, "the cases ConfigMap changed after the runs", nil
+			return in, nil, "the cases ConfigMap changed after the runs", nil
 		}
 		in.CaseTags = make(map[string][]string, len(cases))
 		for _, c := range cases {
 			in.CaseTags[c.ID] = c.Tags
 		}
 	}
+	trials := make(map[types.UID][]store.EvalTrialRecord, 2)
 	for _, arm := range []struct {
 		run *corev1alpha1.EvalRun
 		out *evals.ExperimentArm
 	}{{baseline, &in.Baseline}, {candidate, &in.Candidate}} {
 		records, err := r.TrialStore.ListEvalTrials(ctx, arm.run.Namespace, arm.run.Name, string(arm.run.UID))
 		if err != nil {
-			return in, "", err
+			return in, nil, "", err
 		}
+		trials[arm.run.UID] = records
 		arm.out.Comparable = evalExperimentComparable(arm.run)
 		arm.out.Planned = int(arm.run.Status.Counts.Planned)
 		arm.out.InfraError = int(arm.run.Status.Counts.InfraError)
@@ -460,7 +472,7 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 			arm.out.Trials = append(arm.out.Trials, trial)
 		}
 	}
-	return in, "", nil
+	return in, trials, "", nil
 }
 
 // evalExperimentComparable lists what both arms must share: everything that
@@ -482,20 +494,122 @@ func evalExperimentComparable(run *corev1alpha1.EvalRun) map[string]string {
 	}
 }
 
-func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run *corev1alpha1.EvalRun, verdict evals.ExperimentVerdict) error {
-	status := run.Status.Experiment
-	status.Result = corev1alpha1.EvalExperimentResult(verdict.Result)
-	decidedAt := metav1.NewTime(r.now())
-	status.DecidedAt = &decidedAt
-	status.Reasons = verdict.Reasons
-	if len(status.Reasons) > evalExperimentMaxReasons {
-		status.Reasons = append(status.Reasons[:evalExperimentMaxReasons-1], "more reasons omitted")
+// recordExperimentResult stores the experiment's outcome, then reports the
+// stored one in status. The store keeps the first outcome, so a decision
+// repeated after a failed status update reports what was recorded, and the
+// record outlives both runs. baseline is nil when it could not be read, and
+// trials holds the records the gate judged, by run UID, when it ran.
+func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run, baseline *corev1alpha1.EvalRun,
+	trials map[types.UID][]store.EvalTrialRecord, verdict evals.ExperimentVerdict) error {
+	if r.ExperimentStore == nil {
+		return errors.New("the eval experiment store is not configured")
 	}
-	for i := range status.Reasons {
-		status.Reasons[i] = evalRunConditionMessage(status.Reasons[i])
+	outcome, err := r.experimentOutcome(ctx, run, baseline, trials, verdict)
+	if err != nil {
+		return err
+	}
+	stored, err := r.ExperimentStore.RecordEvalExperimentOutcome(ctx, outcome)
+	if err != nil {
+		return fmt.Errorf("record the experiment outcome: %w", err)
+	}
+	status := run.Status.Experiment
+	status.Result = corev1alpha1.EvalExperimentResult(stored.Result)
+	decidedAt := metav1.NewTime(stored.DecidedAt)
+	status.DecidedAt = &decidedAt
+	status.Reasons = stored.Reasons
+	status.Target = nil
+	if target := stored.Target; target != nil {
+		status.Target = &corev1alpha1.EvalExperimentTargetResult{
+			BaselinePassedTrials:  target.BaselinePassedTrials,
+			BaselineTrials:        target.BaselineTrials,
+			CandidatePassedTrials: target.CandidatePassedTrials,
+			CandidateTrials:       target.CandidateTrials,
+			ImprovedPairs:         target.ImprovedPairs,
+			RegressedPairs:        target.RegressedPairs,
+			ImprovementPoints:     target.ImprovementPoints,
+			PValue:                target.PValue,
+		}
+	}
+	return r.Status().Update(ctx, run)
+}
+
+// recordDeletedCandidateOutcome stores an Incomparable outcome for a
+// candidate deleted before its experiment was decided, such as while it
+// waited for its baseline. Its trial records are deleted next, and the
+// reserved attempt is never returned, so the history would otherwise keep a
+// reservation with no verdict or evidence. An outcome already stored wins.
+func (r *EvalRunReconciler) recordDeletedCandidateOutcome(ctx context.Context, run *corev1alpha1.EvalRun) error {
+	if run.Spec.Experiment == nil || r.ExperimentStore == nil {
+		return nil
+	}
+	status := run.Status.Experiment
+	switch {
+	case status != nil && status.BaselineRun != nil:
+		if status.Result != corev1alpha1.EvalExperimentPending {
+			return nil
+		}
+	default:
+		// The reservation is stored before status.experiment, so a candidate
+		// deleted between the two writes has spent an attempt that only the
+		// store knows of.
+		reserved, err := r.ExperimentStore.GetEvalExperiment(ctx, run.Namespace, string(run.UID))
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		run = run.DeepCopy()
+		status = &corev1alpha1.EvalExperimentStatus{
+			Result:      corev1alpha1.EvalExperimentPending,
+			BaselineRun: &corev1alpha1.EvalObjectIdentity{Name: reserved.BaselineRun, UID: types.UID(reserved.BaselineRunUID)},
+			GateDigest:  reserved.GateDigest,
+		}
+		run.Status.Experiment = status
+	}
+	var finished *corev1alpha1.EvalRun
+	baseline := &corev1alpha1.EvalRun{}
+	err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: status.BaselineRun.Name}, baseline)
+	switch {
+	case err == nil && baseline.UID == status.BaselineRun.UID && evalRunFinished(baseline.Status.Phase):
+		finished = baseline
+	case err != nil && !apierrors.IsNotFound(err):
+		return err
+	}
+	outcome, err := r.experimentOutcome(ctx, run, finished, nil, evals.ExperimentVerdict{Result: evals.ExperimentIncomparable,
+		Reasons: []string{"the candidate EvalRun was deleted before its experiment was decided"}})
+	if err != nil {
+		return err
+	}
+	if _, err := r.ExperimentStore.RecordEvalExperimentOutcome(ctx, outcome); err != nil {
+		return fmt.Errorf("record the outcome of deleted candidate %s/%s: %w", run.Namespace, run.Name, err)
+	}
+	return nil
+}
+
+// experimentOutcome builds the durable record of a decided experiment.
+func (r *EvalRunReconciler) experimentOutcome(ctx context.Context, run, baseline *corev1alpha1.EvalRun,
+	trials map[types.UID][]store.EvalTrialRecord, verdict evals.ExperimentVerdict) (*store.EvalExperimentOutcome, error) {
+	status := run.Status.Experiment
+	outcome := &store.EvalExperimentOutcome{
+		SchemaVersion:   store.EvalExperimentOutcomeSchemaVersion,
+		Namespace:       run.Namespace,
+		CandidateRun:    run.Name,
+		CandidateRunUID: string(run.UID),
+		Result:          verdict.Result,
+		Reasons:         verdict.Reasons,
+		DecidedAt:       r.now().UTC().Truncate(time.Second),
+	}
+	if len(outcome.Reasons) > evalExperimentMaxReasons {
+		outcome.Reasons = append(outcome.Reasons[:evalExperimentMaxReasons-1], "more reasons omitted")
+	}
+	for i := range outcome.Reasons {
+		outcome.Reasons[i] = evalRunConditionMessage(outcome.Reasons[i])
 	}
 	if target := verdict.Target; target != nil {
-		status.Target = &corev1alpha1.EvalExperimentTargetResult{
+		outcome.Target = &store.EvalExperimentTargetOutcome{
+			Grader:                string(run.Spec.Experiment.Target.Grader),
+			Tag:                   run.Spec.Experiment.Target.Tag,
 			BaselinePassedTrials:  int32(target.BaselinePassed),
 			BaselineTrials:        int32(target.BaselineTrials),
 			CandidatePassedTrials: int32(target.CandidatePassed),
@@ -506,7 +620,108 @@ func (r *EvalRunReconciler) recordExperimentResult(ctx context.Context, run *cor
 			PValue:                strconv.FormatFloat(target.PValue, 'g', 6, 64),
 		}
 	}
-	return r.Status().Update(ctx, run)
+	var err error
+	if outcome.Candidate, err = r.experimentArm(ctx, run, trials); err != nil {
+		return nil, err
+	}
+	if baseline != nil && baseline.UID == status.BaselineRun.UID {
+		if outcome.Baseline, err = r.experimentArm(ctx, baseline, trials); err != nil {
+			return nil, err
+		}
+	} else {
+		outcome.Baseline = store.EvalExperimentArmOutcome{Run: status.BaselineRun.Name, RunUID: string(status.BaselineRun.UID)}
+	}
+	if verdict.Result == evals.ExperimentIncomparable {
+		return outcome, nil
+	}
+	if baseline == nil || baseline.Status.Snapshot == nil || run.Status.Snapshot == nil {
+		return nil, errors.New("a compared experiment needs both run snapshots")
+	}
+	baselineDigest, err := evalCandidateDigest(*baseline.Status.Snapshot)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := run.Status.Snapshot
+	outcome.Binding = &store.EvalDecisionBinding{
+		CandidateAgent:       evalAgentIdentity(snapshot.ReviewerAgent),
+		CandidateDigest:      status.CandidateDigest,
+		BaselineAgent:        evalAgentIdentity(baseline.Status.Snapshot.ReviewerAgent),
+		BaselineDigest:       baselineDigest,
+		MonitorUID:           string(snapshot.MonitorUID),
+		MonitorGeneration:    snapshot.MonitorGeneration,
+		PromptTemplateDigest: snapshot.PromptTemplateDigest,
+		CaseSetDigest:        snapshot.CaseSetDigest,
+		GraderSetDigest:      snapshot.GraderSetDigest,
+		GateDigest:           status.GateDigest,
+	}
+	return outcome, nil
+}
+
+// experimentArm summarizes one run for the outcome: its reviewer and
+// snapshot, counts, token use and each trial's grader statuses, never review
+// text. It uses the records the gate judged when trials has them.
+func (r *EvalRunReconciler) experimentArm(ctx context.Context, run *corev1alpha1.EvalRun,
+	trials map[types.UID][]store.EvalTrialRecord) (store.EvalExperimentArmOutcome, error) {
+	// Only the plan comes from status; the other counts come from the same
+	// records as the trials below, which a failed status update could leave
+	// behind status.
+	arm := store.EvalExperimentArmOutcome{Run: run.Name, RunUID: string(run.UID), Planned: run.Status.Counts.Planned}
+	if snapshot := run.Status.Snapshot; snapshot != nil {
+		arm.Agent = evalAgentIdentity(snapshot.ReviewerAgent)
+		arm.Model = snapshot.Model
+		arm.SystemPromptDigest = snapshot.ReviewerSystemPromptDigest
+		arm.RuntimeImageDigest = snapshot.RuntimeImageDigest
+		arm.MonitorUID, arm.MonitorGeneration = string(snapshot.MonitorUID), snapshot.MonitorGeneration
+		arm.PromptTemplateDigest = snapshot.PromptTemplateDigest
+		arm.CaseSetDigest, arm.GraderSetDigest = snapshot.CaseSetDigest, snapshot.GraderSetDigest
+		arm.TrialPlanDigest = snapshot.TrialPlanDigest
+	}
+	records, judged := trials[run.UID]
+	if !judged {
+		var err error
+		if records, err = r.TrialStore.ListEvalTrials(ctx, run.Namespace, run.Name, string(run.UID)); err != nil {
+			return arm, err
+		}
+	}
+	for _, record := range records {
+		arm.Completed++
+		switch record.Outcome {
+		case store.EvalTrialOutcomePass:
+			arm.Passed++
+		case store.EvalTrialOutcomeFail:
+			arm.Failed++
+		case store.EvalTrialOutcomeInfraError:
+			arm.InfraError++
+		}
+		arm.InputTokens = addEvalTokens(arm.InputTokens, record.InputTokens)
+		arm.OutputTokens = addEvalTokens(arm.OutputTokens, record.OutputTokens)
+		trial := store.EvalExperimentTrialOutcome{CaseID: record.CaseID, Trial: record.Trial, Outcome: record.Outcome, InfraClass: record.InfraClass}
+		for _, grade := range record.Grades {
+			trial.Grades = append(trial.Grades, store.EvalExperimentGrade{Grader: grade.Grader, Status: grade.Status})
+		}
+		arm.Trials = append(arm.Trials, trial)
+	}
+	return arm, nil
+}
+
+// addEvalTokens adds a trial's reported count, keeping the total unset until
+// some trial reports one.
+func addEvalTokens(total, reported *int64) *int64 {
+	if reported == nil {
+		return total
+	}
+	sum := *reported
+	if total != nil {
+		sum += *total
+	}
+	return &sum
+}
+
+func evalAgentIdentity(identity *corev1alpha1.EvalObjectIdentity) store.EvalAgentIdentity {
+	if identity == nil {
+		return store.EvalAgentIdentity{}
+	}
+	return store.EvalAgentIdentity{Name: identity.Name, UID: string(identity.UID), Generation: identity.Generation}
 }
 
 // evalExperimentMaxReasons matches the status reasons list bound.

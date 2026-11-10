@@ -131,6 +131,10 @@ func TestDatasetAdoptsPinnedPopulatedSchemaWithoutDataLoss(t *testing.T) {
 	before["eval_experiments"] = nil
 	require.NotContains(t, before, "eval_experiment_cases")
 	before["eval_experiment_cases"] = nil
+	require.NotContains(t, before, "eval_experiment_outcomes")
+	before["eval_experiment_outcomes"] = nil
+	require.NotContains(t, before, "eval_decisions")
+	before["eval_decisions"] = nil
 	s, err := OpenLockedStore(path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })

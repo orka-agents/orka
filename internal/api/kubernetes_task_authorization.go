@@ -100,7 +100,18 @@ func authorizeKubernetesResourceAction(
 	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview {
 		return nil
 	}
-	if kubernetesClientsetIsNil(clientset) {
+	return reviewKubernetesResourceAction(ctx, clientset, userInfo, namespace, verb, group, resource, name)
+}
+
+// reviewKubernetesResourceAction asks Kubernetes RBAC whether the caller may
+// act, whatever authenticated them. A missing user or clientset refuses.
+func reviewKubernetesResourceAction(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	userInfo *UserInfo,
+	namespace, verb, group, resource, name string,
+) error {
+	if userInfo == nil || kubernetesClientsetIsNil(clientset) {
 		return fiber.NewError(fiber.StatusForbidden, "not authorized")
 	}
 	extra := make(map[string]authorizationv1.ExtraValue, len(userInfo.Extra))
