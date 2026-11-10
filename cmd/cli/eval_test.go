@@ -709,3 +709,25 @@ func TestEvalOutputRefusesASymlinkedEventsDirectory(t *testing.T) {
 		t.Fatalf("a transcript was written through the symlink: %v", err)
 	}
 }
+
+// A server whose CRD prunes spec.experiment or agentRef would turn a
+// candidate into a plain run; the CLI refuses to follow it.
+func TestEvalRunRefusesAPrunedExperiment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"metadata":{"name":"cand","namespace":"team-a","uid":"u"},"spec":{"subject":{"type":"repositoryMonitorReview",` +
+			`"repositoryMonitorReview":{"monitorRef":{"name":"m"}}}}}`))
+	}))
+	defer srv.Close()
+	manifest := evalTestManifest + `
+  experiment:
+    hypothesis: better
+    baselineRunRef: {name: base}
+    target: {grader: verdict}
+`
+	_, err := runEvalCommand(t, "eval", "run", "-f", writeEvalTestManifest(t, manifest), "--server", srv.URL, "--token", "tok", "--wait")
+	if err == nil || !strings.Contains(err.Error(), "created without spec.experiment") {
+		t.Fatalf("Execute() error = %v, want a refusal", err)
+	}
+}

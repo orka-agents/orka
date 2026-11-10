@@ -247,7 +247,29 @@ func createEvalRun(ctx context.Context, c *client.Client, body []byte) (*corev1a
 	if err != nil {
 		return nil, err
 	}
-	return decodeEvalRun(c.DoJSON(ctx, http.MethodPost, evalRunsAPIPath, nil, body))
+	created, err := decodeEvalRun(c.DoJSON(ctx, http.MethodPost, evalRunsAPIPath, nil, body))
+	if err != nil {
+		return nil, err
+	}
+	// A server whose EvalRun CRD predates these fields prunes them, which
+	// would turn a candidate into a plain run that can only succeed.
+	for field, dropped := range map[string]bool{
+		"spec.experiment": request.Spec.Experiment != nil && created.Spec.Experiment == nil,
+		"spec.subject.repositoryMonitorReview.agentRef": evalRunAgentRef(&request.Spec) != nil && evalRunAgentRef(&created.Spec) == nil,
+	} {
+		if dropped {
+			return nil, fmt.Errorf("evalrun/%s was created without %s: the server's EvalRun CRD predates it; upgrade the CRDs and delete this run",
+				created.Name, field)
+		}
+	}
+	return created, nil
+}
+
+func evalRunAgentRef(spec *corev1alpha1.EvalRunSpec) *corev1alpha1.EvalObjectReference {
+	if subject := spec.Subject.RepositoryMonitorReview; subject != nil {
+		return subject.AgentRef
+	}
+	return nil
 }
 
 // getEvalRun reads a run. An empty namespace means the CLI's namespace.
