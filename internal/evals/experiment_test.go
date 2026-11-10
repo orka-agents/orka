@@ -294,3 +294,14 @@ func TestCaseSetSplitsRejectsConflictingSplits(t *testing.T) {
 		t.Fatalf("CaseSetSplits() = %v, %v", splits, err)
 	}
 }
+
+// A fall reads as a change, rounded like the status field.
+func TestDecideExperimentReportsARoundedChange(t *testing.T) {
+	ids := cases(3)
+	in := experimentInput(ids, map[string]bool{"case-a": true, "case-b": true}, map[string]bool{"case-a": true})
+	verdict := DecideExperiment(in)
+	reasons := strings.Join(verdict.Reasons, "; ")
+	if !strings.Contains(reasons, "the target pass@1 changed by -33.3333 points") {
+		t.Fatalf("reasons = %q", reasons)
+	}
+}
