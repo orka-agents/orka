@@ -22,7 +22,7 @@ func TestParseExperimentGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gate != (ExperimentGate{10, 3, 10, 5, 0.05}) {
+	if gate != (ExperimentGate{10, 3, 10, 5, 0.05, 0}) {
 		t.Fatalf("gate = %+v", gate)
 	}
 	if level := gate.TestLevel(); math.Abs(level-0.005) > 1e-12 {
@@ -46,7 +46,9 @@ func TestParseExperimentGate(t *testing.T) {
 		"zero significance":  strings.Replace(testGateDeclaration, "significance: 0.05", "significance: 0", 1),
 		"no experiments":     strings.Replace(testGateDeclaration, "maxExperimentsPerHeldOutSet: 10", "maxExperimentsPerHeldOutSet: 0", 1),
 		"points too large":   strings.Replace(testGateDeclaration, "minTargetImprovementPoints: 5", "minTargetImprovementPoints: 101", 1),
-		"not yaml":           "{",
+		"negative guardrail tolerance": strings.Replace(testGateDeclaration, "significance: 0.05",
+			"significance: 0.05\n  maxGuardrailDropPoints: -1", 1),
+		"not yaml": "{",
 	} {
 		if _, err := ParseExperimentGate([]byte(declaration)); err == nil {
 			t.Errorf("%s: ParseExperimentGate accepted an invalid gate", name)
@@ -303,5 +305,51 @@ func TestDecideExperimentReportsARoundedChange(t *testing.T) {
 	reasons := strings.Join(verdict.Reasons, "; ")
 	if !strings.Contains(reasons, "the target pass@1 changed by -33.3333 points") {
 		t.Fatalf("reasons = %q", reasons)
+	}
+}
+
+// A guardrail drop within the gate's tolerance passes; a larger one fails.
+// Without a tolerance, any drop fails.
+func TestDecideExperimentGuardrailTolerance(t *testing.T) {
+	ids := cases(4)
+	improved := map[string]bool{"case-a": true, "case-b": true, "case-c": true}
+	// One of eight candidate trials fails the contract: a 12.5-point drop.
+	oneBadTrial := func() ExperimentInput {
+		in := experimentInput(ids, map[string]bool{}, improved)
+		in.Candidate.Trials[0].Grades["contract"] = GradeFail
+		return in
+	}
+	in := oneBadTrial()
+	if verdict := DecideExperiment(in); verdict.Result != ExperimentFailed ||
+		!strings.Contains(strings.Join(verdict.Reasons, "; "), "contract regressed from 8/8 to 7/8") {
+		t.Fatalf("strict gate verdict = %+v", verdict)
+	}
+	in = oneBadTrial()
+	in.Gate.MaxGuardrailDropPoints = 13
+	if verdict := DecideExperiment(in); verdict.Result != ExperimentPassed {
+		t.Fatalf("tolerant gate verdict = %+v", verdict)
+	}
+	in = oneBadTrial()
+	in.Gate.MaxGuardrailDropPoints = 12
+	if verdict := DecideExperiment(in); verdict.Result != ExperimentFailed ||
+		!strings.Contains(strings.Join(verdict.Reasons, "; "), "more than the gate's 12 points") {
+		t.Fatalf("too-small tolerance verdict = %+v", verdict)
+	}
+}
+
+func TestParseExperimentGateGuardrailTolerance(t *testing.T) {
+	gate, err := ParseExperimentGate([]byte(strings.Replace(testGateDeclaration, "significance: 0.05",
+		"significance: 0.05\n  maxGuardrailDropPoints: 5", 1)))
+	if err != nil || gate.MaxGuardrailDropPoints != 5 {
+		t.Fatalf("gate = %+v, %v", gate, err)
+	}
+	strict, err := ParseExperimentGate([]byte(testGateDeclaration))
+	if err != nil {
+		t.Fatal(err)
+	}
+	strictDigest, _ := strict.Digest()
+	tolerantDigest, _ := gate.Digest()
+	if strictDigest == tolerantDigest {
+		t.Fatal("the gate digest ignores the guardrail tolerance")
 	}
 }
