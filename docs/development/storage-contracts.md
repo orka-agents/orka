@@ -626,9 +626,12 @@ write without one.
   lease early, but the old holder can no longer commit, and one whose clock
   is behind resumes the work up to twice `MaxClockSkew` later. A request's
   times are fixed for the operation and covered by its digest, so a retry is
-  judged at the original request time, which owner identity, not expiry,
-  makes harmless. Gateway claims, outbox claims and gateway message
-  admission carry the request time and lease they need, and
+  judged at the original request time, even when it arrives after the lease
+  has expired. That is harmless because the write is checked against the
+  owner's identity as well as the expiry: if another owner has taken the
+  lease in the meantime, the retry is still refused. Gateway claims, outbox
+  claims and gateway message admission carry the request time and lease they
+  need, and
   `FreezeGatewayEventTaskRuntimeAllowedTools` refuses a zero request time
   with `ErrValidation` rather than judging the claim on its own clock. Chat
   turns and Session locks carry them too: `AcquireChatTurnRequest` and
