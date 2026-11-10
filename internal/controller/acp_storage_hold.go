@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -128,6 +129,39 @@ func (d *ACPDispatcher) clearTaskStorageRecordHold(ctx context.Context, task *co
 		Message: "the store record the Task was held for was found",
 	})
 	return err
+}
+
+// releaseSettledTaskStorageHold marks latest's hold as released when its
+// attempt was settled from the store record. Recovery holds a Task only while
+// the attempt is Settling, so such a hold is a late condition write from a
+// replaced controller that the API server applied after the successor read
+// the Task. The caller writes latest with its resourceVersion: a late write
+// that lands earlier is cleared here, and one that lands later fails its own
+// resourceVersion precondition.
+func (d *ACPDispatcher) releaseSettledTaskStorageHold(ctx context.Context, latest *corev1alpha1.Task) error {
+	if !meta.IsStatusConditionTrue(latest.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired) {
+		return nil
+	}
+	attemptID, err := promptAttemptIDFromTaskUID(latest, acpTaskControlUID(latest))
+	if err != nil {
+		return err
+	}
+	attempt, err := d.Store.GetPromptAttempt(ctx, attemptID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if attempt.ExecutionState != store.PromptExecutionSucceeded {
+		return nil
+	}
+	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+		Type: corev1alpha1.ConditionStorageRecoveryRequired, Status: metav1.ConditionFalse,
+		Reason: corev1alpha1.StorageRecoveryRecordFoundReason, ObservedGeneration: latest.Generation,
+		Message: "the store record the Task was held for was found",
+	})
+	return nil
 }
 
 // setTaskStorageRecordCondition writes condition to the exact Task

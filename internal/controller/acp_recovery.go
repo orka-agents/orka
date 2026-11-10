@@ -2385,6 +2385,9 @@ func (d *ACPDispatcher) patchRecoveredTerminalEpoch(ctx context.Context, task *c
 			return nil
 		}
 		latest.Status.Execution.ControllerEpoch = epoch
+		if err := d.releaseSettledTaskStorageHold(ctx, latest); err != nil {
+			return err
+		}
 		return d.Client.Status().Update(ctx, latest)
 	})
 }

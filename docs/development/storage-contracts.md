@@ -988,10 +988,13 @@ below): the Task gets `StorageRecoveryRequired=True` with reason
 `MissingRecord` or `ConflictingRecord`, and the message names the record,
 its key, the digest Kubernetes recorded and a hold ID derived from them.
 Recovery writes the condition under its controller epoch, and only while the
-PromptAttempt is as recovery read it, so a replaced controller cannot hold a
-Task its successor settled. While held, the prompt is not run again, the
-attempt stays `Settling`, the outcome is not guessed, success is not
-reported and nothing is deleted.
+PromptAttempt is as recovery read it and still `Settling`. A write from a
+replaced controller that the API server applies late carries the Task's
+earlier resourceVersion, so it lands only before that resourceVersion next
+changes; when stale-epoch recovery settles the attempt from its restored
+receipt, its terminal epoch write releases such a hold. While held, the
+prompt is not run again, the attempt stays `Settling`, the outcome is not
+guessed, success is not reported and nothing is deleted.
 When the record is found again, after a restore, the condition becomes
 `False` with reason `RecordFound` and recovery settles the Task from it. An
 operator who cannot restore it sets the Task's
@@ -1013,9 +1016,12 @@ delivery transition, the PromptAttempt no longer carries the settling
 digest, so a receipt is checked only against its own settling operation: a
 receipt replaced with another result and a matching digest is not detected.
 That needs the settling digest kept on the PromptAttempt across delivery
-transitions. Detecting a restart or switch of an `async-replicated` dataset
-that happened while no controller ran needs the incarnation recorded with the
-acknowledgement.
+transitions. Such a late hold write is not yet released on a Task restored
+under a new UID, or when an attempt in workspace validation is recorded as
+unknown although its receipt was found; there the Task reports the hold
+while its outcome stays the one recovery settled. Detecting a restart or
+switch of an `async-replicated` dataset that happened while no controller
+ran needs the incarnation recorded with the acknowledgement.
 
 **Shared suite.** `storagetest.WithDurability(DurabilityHarness{Restart,
 Failovers, HoldWrites})` checks, for every write in the write catalog, that after a
