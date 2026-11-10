@@ -124,7 +124,9 @@ type StorageRecordStore interface {
 	HoldStorage(ctx context.Context, fence ControllerEpochFence, hold StorageRecoveryHold) (StorageRecoveryHold, error)
 	// ReleaseStorageHold clears the hold whose ID is id, which an operator
 	// has acknowledged, and replaces every acknowledgement with acks, in one
-	// update. It returns ErrConflict when that hold is not the recorded one
-	// or was not acknowledged.
+	// update. A retry after that update committed succeeds without changing
+	// anything when the record still shows exactly that release. It returns
+	// ErrConflict when that hold is not the recorded one or was not
+	// acknowledged, and the record does not show its release.
 	ReleaseStorageHold(ctx context.Context, fence ControllerEpochFence, id string, acks []StorageAcknowledgement) error
 }

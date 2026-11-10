@@ -234,7 +234,12 @@ func storageRecordFenced(object *corev1alpha1.ControllerEpoch, fence store.Contr
 // tries the interlock again.
 const controllerEpochMutationRetryDelay = 100 * time.Millisecond
 
-// ReleaseStorageHold implements store.StorageRecordStore.
+// ReleaseStorageHold implements store.StorageRecordStore. A retry of a
+// release whose status update committed but whose response was lost
+// succeeds without writing again, when the object still shows exactly that
+// release under fence: no hold, the acknowledgement of id, the condition the
+// release set and the acknowledgements it recorded. Anything else is a
+// conflict.
 func (s *Store) ReleaseStorageHold(
 	ctx context.Context, fence store.ControllerEpochFence, id string, acks []store.StorageAcknowledgement,
 ) error {
@@ -243,9 +248,13 @@ func (s *Store) ReleaseStorageHold(
 			return err
 		}
 	}
+	entries := releasedStorageEpochs(acks)
 	return s.updateStorageRecordObject(ctx, fence, func(object *corev1alpha1.ControllerEpoch) (bool, error) {
 		status := &object.Status
 		hold := status.StorageRecovery
+		if hold == nil && storageHoldReleased(object, id, entries) {
+			return false, nil
+		}
 		if hold == nil || hold.ID != id {
 			return false, store.ConflictErrorf("storage recovery hold %q is not the recorded hold", id)
 		}
@@ -253,20 +262,64 @@ func (s *Store) ReleaseStorageHold(
 			return false, store.ConflictErrorf("storage recovery hold %q is not acknowledged", id)
 		}
 		status.StorageRecovery = nil
-		status.StorageEpochs = nil
-		for _, ack := range acks {
-			status.StorageEpochs = append(status.StorageEpochs, storageEpochEntry(ack))
-		}
-		slices.SortFunc(status.StorageEpochs, func(a, b corev1alpha1.StorageEpochAcknowledgement) int {
-			return strings.Compare(a.Contract, b.Contract)
-		})
+		status.StorageEpochs = entries
 		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
 			Type: corev1alpha1.ConditionStorageRecoveryRequired, Status: metav1.ConditionFalse,
 			Reason:  corev1alpha1.StorageRecoveryAcknowledgedReason,
-			Message: truncateMessage(fmt.Sprintf("storage recovery hold %s was acknowledged; storage acknowledgements were recorded again", id)),
+			Message: storageReleaseMessage(id),
 		})
 		return true, nil
 	})
+}
+
+// releasedStorageEpochs returns the storage record entries a release of acks
+// records, in contract order.
+func releasedStorageEpochs(acks []store.StorageAcknowledgement) []corev1alpha1.StorageEpochAcknowledgement {
+	if len(acks) == 0 {
+		return nil
+	}
+	entries := make([]corev1alpha1.StorageEpochAcknowledgement, 0, len(acks))
+	for _, ack := range acks {
+		entries = append(entries, storageEpochEntry(ack))
+	}
+	slices.SortFunc(entries, func(a, b corev1alpha1.StorageEpochAcknowledgement) int {
+		return strings.Compare(a.Contract, b.Contract)
+	})
+	return entries
+}
+
+func storageReleaseMessage(id string) string {
+	return truncateMessage(fmt.Sprintf("storage recovery hold %s was acknowledged; storage acknowledgements were recorded again", id))
+}
+
+// storageHoldReleased reports whether object shows the release of hold id
+// that records entries as committed: no hold is recorded, the operator
+// acknowledged id, the StorageRecoveryRequired condition is the one that
+// release sets, and the record holds exactly entries. Times are compared to
+// the second, as the API server stores them. The caller has checked that the
+// object holds its fence, so no other controller epoch made this release.
+func storageHoldReleased(object *corev1alpha1.ControllerEpoch, id string, entries []corev1alpha1.StorageEpochAcknowledgement) bool {
+	if object.Status.StorageRecovery != nil ||
+		strings.TrimSpace(object.Annotations[corev1alpha1.StorageRecoveryAcknowledgedAnnotation]) != id {
+		return false
+	}
+	condition := meta.FindStatusCondition(object.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired)
+	if condition == nil || condition.Status != metav1.ConditionFalse ||
+		condition.Reason != corev1alpha1.StorageRecoveryAcknowledgedReason || condition.Message != storageReleaseMessage(id) {
+		return false
+	}
+	return slices.EqualFunc(object.Status.StorageEpochs, entries, storedStorageEpochEqual)
+}
+
+// storedStorageEpochEqual reports whether a stored entry is want, with times
+// compared to the second.
+func storedStorageEpochEqual(stored, want corev1alpha1.StorageEpochAcknowledgement) bool {
+	sameSecond := func(a, b time.Time) bool { return a.Truncate(time.Second).Equal(b.Truncate(time.Second)) }
+	sameWatermarkTime := (stored.WatermarkAcknowledgedAt == nil) == (want.WatermarkAcknowledgedAt == nil) &&
+		(stored.WatermarkAcknowledgedAt == nil || sameSecond(stored.WatermarkAcknowledgedAt.Time, want.WatermarkAcknowledgedAt.Time))
+	return stored.Contract == want.Contract && stored.DatasetID == want.DatasetID && stored.Epoch == want.Epoch &&
+		stored.WriteWatermark == want.WriteWatermark && sameSecond(stored.AcknowledgedAt.Time, want.AcknowledgedAt.Time) &&
+		sameWatermarkTime
 }
 
 // updateStorageRecord applies change to the ControllerEpoch status while
