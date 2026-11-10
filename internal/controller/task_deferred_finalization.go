@@ -47,7 +47,7 @@ func (r *TaskReconciler) stopTaskAfterUsageRetentionFailure(ctx context.Context,
 	// Durable finalization remains pending until storage recovers.
 	intent, lookupErr := r.loadDeferredTaskFinalization(ctx, task)
 	err = errors.Join(err, lookupErr)
-	if intent != nil && !isTerminalTaskPhase(task.Status.Phase) {
+	if intent != nil && !task.Status.Phase.IsTerminal() {
 		stopping := task.DeepCopy()
 		stopping.Status.Phase = intent.Phase
 		err = errors.Join(err, r.stopJobForDeferredFinalization(ctx, stopping, *intent))
