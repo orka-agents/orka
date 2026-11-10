@@ -189,9 +189,38 @@ func TestAzureGatewayPassesASignInRefusalThrough(t *testing.T) {
 		return raw
 	}
 	fixture.mu.Unlock()
-	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant, http.Header{"Authorization": {"Bearer " + fixture.token(t)}})
+	token := fixture.token(t)
+	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant, http.Header{"Authorization": {"Bearer " + token}})
 	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "AuthorizationFailed") {
 		t.Fatalf("status = %d: %s", response.StatusCode, body)
+	}
+	// A throttled discovery keeps Azure's pace for az's retry.
+	fixture.mu.Lock()
+	fixture.respond = func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{Status: http.StatusTooManyRequests,
+			Headers: map[string]string{"Content-Type": "application/json", "Retry-After": "17"},
+			Body:    `{"error":{"code":"TooManyRequests","message":"slow down"}}`})
+		return raw
+	}
+	fixture.mu.Unlock()
+	response, body = fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant, http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "17" {
+		t.Fatalf("status = %d, Retry-After = %q: %s", response.StatusCode, response.Header.Get("Retry-After"), body)
+	}
+}
+
+// A prompt-start sign-in that runs after another sign-in succeeded does
+// nothing, so it cannot overwrite a profile the agent changed since.
+func TestAzureGatewayLatePromptStartSignInKeepsTheProfile(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	if _, err := fixture.gateway.signIn(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 0 {
+		t.Fatalf("a late prompt-start sign-in made %d broker calls", len(calls))
+	}
+	if _, err := fixture.gateway.signIn(t.Context(), false); err != nil || len(fixture.brokerCalls()) != 1 {
+		t.Fatalf("a sign-in for a command under the placeholder must run: %v", err)
 	}
 }
 

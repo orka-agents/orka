@@ -157,15 +157,21 @@ func (g *azureGateway) signInAtPromptStart() {
 	go func() {
 		ctx, cancel := context.WithTimeout(g.ctx, azureSignInTimeout)
 		defer cancel()
-		_, _ = g.signIn(ctx)
+		_, _ = g.signIn(ctx, true)
 	}()
 }
 
 // signIn finds the identity's subscriptions and writes them as az's profile.
 // It joins an attempt already running. It reports how many subscriptions the
-// profile names.
-func (g *azureGateway) signIn(ctx context.Context) (int, error) {
+// profile names. With unlessSignedIn, it does nothing once an attempt has
+// succeeded, so a prompt-start sign-in that started late never overwrites a
+// profile the agent has since changed, for example with az account set.
+func (g *azureGateway) signIn(ctx context.Context, unlessSignedIn bool) (int, error) {
 	g.signInMu.Lock()
+	if unlessSignedIn && g.signedIn {
+		g.signInMu.Unlock()
+		return 0, nil
+	}
 	attempt := g.signInAttempt
 	if attempt == nil {
 		attempt = &azureSignIn{done: make(chan struct{})}
@@ -361,15 +367,16 @@ func underPlaceholderAccount(path string) bool {
 // cannot. The command itself is never sent: the zero tenant is no
 // subscription.
 func (g *azureGateway) answerUnderPlaceholderAccount(w http.ResponseWriter, r *http.Request) {
-	subscriptions, err := g.signIn(r.Context())
+	subscriptions, err := g.signIn(r.Context(), false)
 	if toolErr, ok := errors.AsType[*azureSignInToolError](err); ok {
 		writeAzureToolError(w, false, toolErr.result)
 		return
 	}
 	if upstream, ok := errors.AsType[*azureSignInUpstreamError](err); ok {
 		// Resource Manager's own answer, such as an expired role
-		// assignment, says more than any summary.
-		for _, name := range []string{"Content-Type", "X-Ms-Request-Id", "X-Ms-Correlation-Request-Id"} {
+		// assignment, says more than any summary. Retry-After keeps a
+		// throttled client to Azure's pace.
+		for _, name := range []string{"Content-Type", "Retry-After", "X-Ms-Request-Id", "X-Ms-Correlation-Request-Id"} {
 			if value := upstream.headers[name]; value != "" {
 				w.Header().Set(name, value)
 			}
