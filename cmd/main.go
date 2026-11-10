@@ -805,7 +805,7 @@ func main() {
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
 	flag.BoolVar(&evalsEnabled, "enable-evals", envBool("ORKA_ENABLE_EVALS"),
-		"Enable EvalRun capability evals. Reserved: this release serves the EvalRun API but does not reconcile it.")
+		"Enable the EvalRun controller, which runs capability eval trials as Tasks and grades them.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -850,9 +850,6 @@ func main() {
 		// The logger is not set up yet, so setupLog would drop this.
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
-	}
-	if evalsEnabled {
-		setupLog.Info("--enable-evals is set, but this release does not reconcile EvalRuns yet")
 	}
 
 	if !enableLeaderElection {
@@ -2129,6 +2126,22 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "RepositoryMonitor")
 		os.Exit(1)
 	}
+	if evalsEnabled {
+		if err := (&controller.EvalRunReconciler{
+			Client:      mgr.GetClient(),
+			Scheme:      mgr.GetScheme(),
+			TrialStore:  appStorage,
+			ResultStore: appStorage,
+			EventStore:  appStorage,
+			RuntimeImages: controller.ACPRuntimeImages{
+				Codex: acpCodexRuntimeImage, Claude: acpClaudeRuntimeImage, Copilot: acpCopilotRuntimeImage,
+				Opencode: acpOpencodeRuntimeImage,
+			},
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "EvalRun")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -2188,6 +2201,7 @@ func main() {
 		MemoryProposalStore:       appStorage,
 		SecurityStore:             appStorage,
 		RepositoryMonitorStore:    appStorage,
+		EvalTrialStore:            appStorage,
 		ExecutionEventStore:       appStorage,
 		GatewayEventStore:         appStorage,
 		GatewayDeliveryStore:      appStorage,

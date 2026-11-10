@@ -208,6 +208,11 @@ type EvalObjectIdentity struct {
 // EvalRunSnapshot freezes, at start, the identities that decide outcomes. A
 // change to any of them mid-run makes the run Invalid.
 type EvalRunSnapshot struct {
+	// MonitorUID is the RepositoryMonitor UID, so a recreated monitor with
+	// the same name and generation is still a change.
+	// +optional
+	MonitorUID types.UID `json:"monitorUID,omitempty"`
+
 	// MonitorGeneration is the RepositoryMonitor generation.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -232,10 +237,28 @@ type EvalRunSnapshot struct {
 	// +optional
 	PromptTemplateDigest string `json:"promptTemplateDigest,omitempty"`
 
+	// ReviewerSystemPromptDigest is the digest of the reviewer's system
+	// prompt as trials receive it, after resolving a ConfigMap source, so an
+	// edit to a ConfigMap-backed prompt is a change.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	ReviewerSystemPromptDigest string `json:"reviewerSystemPromptDigest,omitempty"`
+
 	// CaseSetDigest is the digest of the selected cases.
 	// +kubebuilder:validation:MaxLength=128
 	// +optional
 	CaseSetDigest string `json:"caseSetDigest,omitempty"`
+
+	// GraderSetDigest is the digest of the graders' names and versions.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	GraderSetDigest string `json:"graderSetDigest,omitempty"`
+
+	// TrialPlanDigest is the digest of the ordered (case id, trial) plan.
+	// Two runs with the same digest assign the same trials.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	TrialPlanDigest string `json:"trialPlanDigest,omitempty"`
 }
 
 // EvalRunCounts counts trials. Infra errors are neither passed nor failed.

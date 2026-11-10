@@ -183,6 +183,8 @@ type StateProvider interface {
 	AtomicExecutionEventPlanStore
 	GroupedExecutionEventStore
 
+	EvalTrialStore
+
 	GatewayEventStore
 	GatewayDeliveryStore
 	GatewayTaskCleanupReceiptStore

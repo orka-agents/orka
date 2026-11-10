@@ -15,7 +15,7 @@ the installation that owns it (recorded by `BindDataset`, or by the first
 controller epoch advance until the installation binds it itself), the record
 UID and storage switch generation that bound it, the snapshot key fingerprint,
 whether the installation has detached it, and when the binding last changed.
-`PRAGMA user_version = 3` identifies this metadata layout. Opening a database
+`PRAGMA user_version = 4` identifies this metadata layout. Opening a database
 still validates every table and index definition: a version marker alone cannot
 establish compatibility.
 
@@ -24,11 +24,13 @@ Exact supported historical layouts are backed up and upgraded under the existing
 process lock and one `BEGIN IMMEDIATE` transaction. The 167-to-168 transition
 adds the metadata table, the 168-to-169 transition adds operation receipts and
 the epoch advance columns, the 169-to-170 transition adds the binding columns,
-and the upgrade records an adopted identity. A store at an earlier schema
+the 170-to-171 transition adds the eval trial table, and the upgrade records an
+adopted identity. A store at an earlier schema
 version upgrades through numbered version steps under the same lock, backup and
-transaction: a version-1 store (the 159-object layout) gains the 168-to-169 and
-169-to-170 objects, a version-2 store gains the 169-to-170 columns, and both
-keep their identity row, records and bootstrap state unchanged. An installation
+transaction: a version-1 store (the 159-object layout) gains the 168-to-169,
+169-to-170 and 170-to-171 objects, a version-2 store gains the 169-to-170
+columns and the eval trial table, a version-3 store gains the eval trial table,
+and each keeps its identity row, records and bootstrap state unchanged. An installation
 a version-2 store's epoch advance recorded stays its owner, at switch
 generation 0 with no record. Missing or malformed
 metadata in an established versioned dataset is an error, never a repair request.
@@ -92,6 +94,7 @@ Kubernetes authority remains separate from either boundary.
 | `MessageStore` | Inter-agent messages and read state; state. | Worker APIs, task message tools and Task cleanup. Consume-and-mark-read behavior matters for future retry semantics. |
 | `SecurityStore` | Scan runs, ingestion receipts, slices, threat models, findings, dropped findings and patch proposals; state. | RepositoryScan reconciler and security APIs. Ingestion groups result application, run changes and receipt. Kubernetes RepositoryScan/Task identity remains authoritative. |
 | `RepositoryMonitorStore`, `tools.RepositoryValidationBindingStore` | Monitor snapshots/runs/items, actions, review/publication records, commands, implementation/repair jobs, GitHub mutation records and monitor events; state. | RepositoryMonitor reconciler, APIs and repository validation tools. The narrow binding interface uses monitor-event persistence; it is not a separate database. |
+| `EvalTrialStore` | Immutable `orka.eval.trial.v1` records, one per graded EvalRun trial; state. | EvalRun reconciler and the eval trials API. A repeat of a recorded trial must succeed only when identical, so an adapter keys records by namespace, EvalRun name and UID, case and trial. |
 | `UsageStore` | Immutable work ownership, Task observations, PR links/outcomes and retention watermark; state. | Usage reconciler, monitor workflows, event ingestion and usage API. Observation retries are idempotent; usage retention is independent of transcript cleanup. |
 | `TaskJobAuthorityStore`, `TaskDataFenceStore` | Job revocations and Task/namespace cleanup generations; state, also fencing colocated artifact writes. | Worker API and brokered tool access, Task finalization and cleanup. Authorization is checked against live Kubernetes identity with no store transaction open; each fenced data call then checks the cleanup generation and authorized Jobs in its own transaction. |
 | `ControllerEpochMirror` | A subordinate copy of the Kubernetes-acquired epoch for payload transaction fences; state. | Controller epoch manager and SQLite turn/outbox persistence. A mirror cannot elect or advance controller ownership. |
@@ -722,7 +725,7 @@ later.
   caller rotates keys. Binding a
   dataset records its installation as the advance does, so the advance then
   accepts only that installation and `SyncControllerEpochMirror` is refused.
-- **SQLite.** The binding lives in the `store_dataset` row (schema version 3).
+- **SQLite.** The binding lives in the `store_dataset` row (schema version 3 and later).
   Every binding method runs in one transaction that reserves the writer, and a
   successful call checkpoints the WAL before it returns, as dataset identity
   does. A checkpoint that fails after the commit returns `ErrOutcomeUnknown`,

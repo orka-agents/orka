@@ -30,11 +30,16 @@ rules:
   - apiGroups: ["core.orka.ai"]
     resources: ["sessions"]
     verbs: ["get", "list", "delete"]
+  # Users create EvalRuns; the controller runs their trials, manages their
+  # finalizer and status, and deletes them after ttlSecondsAfterFinished.
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status"]
+    resources: ["evalruns"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["core.orka.ai"]
+    resources: ["tasks/status", "tools/status", "agents/status", "agentruntimes/status", "runtimepools/status", "promptattempts/status", "runtimesessioncontrols/status", "publications/status", "controllerepochs/status", "externaleffects/status", "providers/status", "skills/status", "repositorymonitors/status", "repositoryscans/status", "substrateactorpools/status", "outboundaccesspolicies/status", "connectorproviders/status", "connections/status", "agenthosts/status", "evalruns/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["core.orka.ai"]
-    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers", "agenthosts/finalizers"]
+    resources: ["tasks/finalizers", "tools/finalizers", "agents/finalizers", "agentruntimes/finalizers", "runtimepools/finalizers", "promptattempts/finalizers", "runtimesessioncontrols/finalizers", "publications/finalizers", "controllerepochs/finalizers", "externaleffects/finalizers", "providers/finalizers", "skills/finalizers", "repositorymonitors/finalizers", "repositoryscans/finalizers", "substrateactorpools/finalizers", "outboundaccesspolicies/finalizers", "connectorproviders/finalizers", "connections/finalizers", "agenthosts/finalizers", "evalruns/finalizers"]
     verbs: ["update"]
   - apiGroups: ["gateway.orka.ai"]
     resources: ["gateways", "gatewaybindings"]

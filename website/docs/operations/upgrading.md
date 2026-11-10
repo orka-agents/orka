@@ -154,7 +154,8 @@ Object counts alone do not establish compatibility.
 | 158 objects | [`fdb64ecd`](https://github.com/orka-agents/orka/commit/fdb64ecd2c827c14422a4d5ad1e481b0026f8cfd), #574 | Add dataset metadata. |
 | 159 objects, schema version 1 | Dataset identity layout | Add the operation receipt table and the controller epoch advance and installation columns; keep the dataset identity, records and key bootstrap state. |
 | 162 objects, schema version 2 | Operation receipt layout | Add the dataset binding columns; keep the dataset identity, the installation an epoch advance recorded, records, receipts and key bootstrap state. |
-| 162 objects (current), schema version 3 | Dataset binding layout | Validate schema, version, identity and binding; no migration or automatic backup. |
+| 162 objects, schema version 3 | Dataset binding layout | Add the eval trial table; keep the dataset identity, binding, records, receipts and key bootstrap state. |
+| 163 objects (current), schema version 4 | Eval trial layout | Validate schema, version, identity and binding; no migration or automatic backup. |
 
 A harness v2 store never writes the harness v1 tables or harness v1 Session
 lineages. If either table holds records, or a Session lineage uses
@@ -163,8 +164,8 @@ lineages. If either table holds records, or a Session lineage uses
 installation.
 
 The five historical source layouts have SQLite `user_version = 0` and upgrade
-to the current layout in one transaction, ending with the schema version 3
-objects. A schema version 1 or 2 store keeps its identity row and upgrades in
+to the current layout in one transaction, ending with the schema version 4
+objects. A schema version 1, 2 or 3 store keeps its identity row and upgrades in
 place through each later version, after the same automatic backup. A nonzero marker on any other layout is
 refused rather than adopted.
 
@@ -172,7 +173,7 @@ refused rather than adopted.
 
 The current database records a stable dataset UUID, whether it was freshly
 created or adopted during upgrade, and whether key bootstrap completed.
-`PRAGMA user_version = 3` records this metadata layout; the controller also checks
+`PRAGMA user_version = 4` records this metadata layout; the controller also checks
 every actual schema definition. Unknown versions and missing or malformed
 established identity are refused without regenerating metadata or replacing data.
 
