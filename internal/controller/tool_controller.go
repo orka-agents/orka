@@ -852,6 +852,38 @@ func (r *ToolReconciler) stopSubstrateMCPStatusActor(ctx context.Context, tool *
 		strings.TrimSpace(actor.TemplateRef.Name), cmp.Or(strings.TrimSpace(actor.TemplateRef.Namespace), tool.Namespace))
 }
 
+// stopUnnamedSubstrateMCPActor stops a held Actor that Tool status does not
+// name. Its template is the one Substrate reports for it: the Tool's
+// specification may have moved on since it was claimed, and the template
+// decides between suspending and deleting it.
+func (r *ToolReconciler) stopUnnamedSubstrateMCPActor(ctx context.Context, tool *corev1alpha1.Tool, held substrateMCPHeldActor) error {
+	cfg := r.SubstrateConfig.WithDefaults()
+	executorFactory := r.SubstrateExecutorFactory
+	if executorFactory == nil {
+		executorFactory = func(cfg SubstrateConfig) (workspace.WorkspaceExecutor, error) {
+			return workspace.NewSubstrateExecutor(cfg.WorkspaceClientConfig())
+		}
+	}
+	executor, err := executorFactory(cfg)
+	if err != nil {
+		return err
+	}
+	description, err := executor.Describe(ctx, workspace.DescribeRequest{Ref: workspace.WorkspaceRef{ClaimName: held.actorID, ID: held.actorID}})
+	closeWorkspaceExecutor(ctx, executor)
+	if err != nil {
+		if workspace.IsKind(err, workspace.ErrorKindNotFound) {
+			// Substrate no longer has it: nothing runs.
+			return nil
+		}
+		return fmt.Errorf("read the actor's template: %w", err)
+	}
+	templateName := strings.TrimSpace(description.Template.Name)
+	if templateName == "" {
+		return fmt.Errorf("substrate does not report the actor's template")
+	}
+	return r.stopHeldSubstrateMCPActor(ctx, tool, held, templateName, cmp.Or(strings.TrimSpace(description.Template.Namespace), tool.Namespace))
+}
+
 // stopHeldSubstrateMCPActor stops an Actor the Tool holds a lease on, running
 // the named template.
 func (r *ToolReconciler) stopHeldSubstrateMCPActor(
@@ -2104,10 +2136,7 @@ func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, too
 		if actor.actorID == statusActorID {
 			continue
 		}
-		// An actor status does not name runs the Tool's current template: it
-		// was claimed for this specification.
-		template := r.substrateMCPTemplateRequest(tool)
-		if err := r.stopHeldSubstrateMCPActor(ctx, tool, actor, template.TemplateName, template.TemplateNamespace); err != nil {
+		if err := r.stopUnnamedSubstrateMCPActor(ctx, tool, actor); err != nil {
 			stopErrs = append(stopErrs, fmt.Errorf("actor %q: %w", actor.actorID, err))
 		}
 	}

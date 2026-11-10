@@ -2592,6 +2592,8 @@ type recordingToolWorkspaceExecutor struct {
 	deletedActorIDs                []string
 	deleteReqs                     []workspace.DeleteRequest
 	deleteErrs                     []error
+	// describeTemplates is the template Describe reports for each Actor ID.
+	describeTemplates map[string]workspace.TemplateRef
 }
 
 func (e *recordingToolWorkspaceExecutor) Claim(ctx context.Context, req workspace.ClaimRequest) (*workspace.ClaimResult, error) {
@@ -2664,7 +2666,7 @@ func (e *recordingToolWorkspaceExecutor) Delete(ctx context.Context, req workspa
 }
 
 func (e *recordingToolWorkspaceExecutor) Describe(ctx context.Context, req workspace.DescribeRequest) (*workspace.Description, error) {
-	return &workspace.Description{Ref: req.Ref}, nil
+	return &workspace.Description{Ref: req.Ref, Template: e.describeTemplates[req.Ref.ID]}, nil
 }
 
 func (e *recordingToolWorkspaceExecutor) Close() error {

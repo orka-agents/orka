@@ -645,8 +645,26 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	if err := r.Create(context.Background(), newSubstrateMCPToolActorLease(&tool, defaultNS, replacement)); err != nil {
 		t.Fatalf("Create replacement lease: %v", err)
 	}
+	// The replacement was claimed for mcp-template-next; the Tool has since
+	// moved to a third template, whose suspend support must not decide how the
+	// replacement is stopped.
+	executor.describeTemplates = map[string]workspace.TemplateRef{replacement: {Namespace: "ate-demo", Name: "mcp-template-next"}}
+	third := approvedMCPActorTemplateForTest()
+	third.SetName("mcp-template-stateless")
+	if err := r.Create(context.Background(), third); err != nil {
+		t.Fatalf("Create third template: %v", err)
+	}
+	statelessTemplates := map[string]bool{"mcp-template-stateless": true}
+	validate := r.SubstrateTemplateValidator
+	r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		if err := validate(ctx, request); err != nil {
+			return err
+		}
+		request.TemplateSuspendUnsupported = statelessTemplates[request.TemplateName]
+		return nil
+	}
 	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
-		tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-next"
+		tool.Spec.MCP.SubstrateActor.TemplateRef.Name = "mcp-template-stateless"
 		tool.Spec.HTTP = &corev1alpha1.HTTPExecution{AuthSecretRef: &corev1alpha1.SecretKeySelector{Name: "missing", Key: "token"}}
 	})
 	// Fail whichever Actor is denied first, so the other is denied only if the
@@ -663,6 +681,7 @@ func TestToolReconcilerRevokesAndStopsEveryHeldActorOfAnInvalidTool(t *testing.T
 	for _, req := range executor.releaseReqs {
 		stopped[req.Ref.ID] = true
 	}
+	// Both run templates that keep data, so both are suspended, not deleted.
 	if !stopped[previous] || !stopped[replacement] || len(executor.deleteReqs) != 0 {
 		t.Fatalf("releases=%v deletes=%v, want both %q and %q suspended", executor.releaseReqs, executor.deleteReqs, previous, replacement)
 	}
