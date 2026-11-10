@@ -2003,9 +2003,13 @@ func (r *ToolReconciler) healthCheckMCPActorEndpoint(ctx context.Context, router
 	// probe with 401/403 and is still reachable. The router may reject an
 	// unlisted client either during TLS or with a 403, so a 403 alone cannot
 	// distinguish the two; a router identity problem surfaces on Tool calls.
+	// Redirects are never followed for Actor traffic, so an Actor that
+	// answers its MCP path with one cannot serve MCP through the proxy.
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
+	case resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest:
+		return fmt.Errorf("MCP endpoint returned HTTP %d; redirects are not followed", resp.StatusCode)
 	case resp.StatusCode >= http.StatusInternalServerError:
 		return fmt.Errorf("MCP endpoint returned HTTP %d", resp.StatusCode)
 	default:
