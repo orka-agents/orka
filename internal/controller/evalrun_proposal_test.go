@@ -266,6 +266,21 @@ func TestEvalProposalRefusals(t *testing.T) {
 		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
 		refused(t, err, "maxCandidatesPerBaseline")
 	})
+	t.Run("a racing request took the slot", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		run := env.getRun("baseline")
+		// Another replica's create landed between this request's list and
+		// its create.
+		racer := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: evalProposalTaskName(run, 0), Namespace: evalTestNamespace},
+			Spec:       corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent, Prompt: "x"},
+		}
+		if err := env.client.Create(ctx, racer); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, run, evals.ProposalRequest{})
+		refused(t, err, "took the same slot")
+	})
 	t.Run("reviewer changed since the run", func(t *testing.T) {
 		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
 		reviewer := &corev1alpha1.Agent{}
@@ -279,4 +294,46 @@ func TestEvalProposalRefusals(t *testing.T) {
 		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
 		refused(t, err, "changed after")
 	})
+}
+
+// A candidate Agent edited after a proposal created it is never reused by a
+// later proposal that computes the same name: the later one is refused.
+func TestEvalProposalRefusesAnEditedCandidate(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	first, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(first, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || proposals[0].CandidateAgent == "" {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+	agent := &corev1alpha1.Agent{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: proposals[0].CandidateAgent}, agent); err != nil {
+		t.Fatal(err)
+	}
+	agent.Spec.Model.Provider = "openai"
+	if err := env.client.Update(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(second, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err = env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 2 {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+	for _, proposal := range proposals {
+		if proposal.Name == second.Name && (proposal.State != evalProposalStateRefused ||
+			!strings.Contains(proposal.Reason, "differs from the proposed change") || proposal.CandidateRun != "") {
+			t.Fatalf("second proposal = %+v", proposal)
+		}
+	}
 }

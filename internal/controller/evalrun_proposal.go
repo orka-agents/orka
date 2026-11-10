@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -127,7 +128,8 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 	if err != nil {
 		return nil, err
 	}
-	if int32(len(existing)) >= gate.MaxCandidatesPerBaseline {
+	slot, ok := freeEvalProposalSlot(run, existing, gate.MaxCandidatesPerBaseline)
+	if !ok {
 		return nil, refuseEvalProposal("evalrun/%s already has %d proposals, the gate's maxCandidatesPerBaseline", run.Name, len(existing))
 	}
 	input, err := r.evalProposalInput(ctx, run, stable)
@@ -158,10 +160,9 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 	if err != nil {
 		return nil, err
 	}
-	nameSum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%d", run.UID, len(existing), r.now().UnixNano()))
 	task := &corev1alpha1.Task{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      repositoryMonitorBoundedDNSName("eval-proposal-"+run.Name, 48) + "-" + hex.EncodeToString(nameSum[:])[:10],
+			Name:      slot,
 			Namespace: run.Namespace,
 			Labels: map[string]string{
 				labels.LabelManaged:        booleanTrueValue,
@@ -187,6 +188,9 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 		return nil, err
 	}
 	if err := r.Create(ctx, task); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil, refuseEvalProposal("another proposal from evalrun/%s took the same slot; ask again", run.Name)
+		}
 		return nil, fmt.Errorf("create the proposer Task: %w", err)
 	}
 	logf.FromContext(ctx).Info("Started an eval proposal", "evalRun", run.Name, "task", task.Name, "heldOut", heldOut)
@@ -415,6 +419,29 @@ func truncatedData(value string, maxBytes int) string {
 }
 
 // listEvalProposalTasks returns the proposer Tasks this run owns.
+// evalProposalTaskName names a run's proposal slot. The names are fixed, so
+// the API server's create is what spends a slot: two requests that race for
+// the last one cannot both win, on one replica or several.
+func evalProposalTaskName(run *corev1alpha1.EvalRun, slot int32) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d", run.UID, slot))
+	return repositoryMonitorBoundedDNSName("eval-proposal-"+run.Name, 48) + "-" + hex.EncodeToString(sum[:])[:10]
+}
+
+// freeEvalProposalSlot returns the name of the first of the run's limit
+// proposal slots that no Task holds.
+func freeEvalProposalSlot(run *corev1alpha1.EvalRun, existing []corev1alpha1.Task, limit int32) (string, bool) {
+	taken := make(map[string]bool, len(existing))
+	for _, task := range existing {
+		taken[task.Name] = true
+	}
+	for slot := range limit {
+		if name := evalProposalTaskName(run, slot); !taken[name] {
+			return name, int32(len(existing)) < limit
+		}
+	}
+	return "", false
+}
+
 func (r *EvalRunReconciler) listEvalProposalTasks(ctx context.Context, run *corev1alpha1.EvalRun) ([]corev1alpha1.Task, error) {
 	var list corev1alpha1.TaskList
 	if err := r.uncachedReader().List(ctx, &list, client.InNamespace(run.Namespace),
@@ -545,9 +572,9 @@ func (r *EvalRunReconciler) createEvalProposalCandidate(ctx context.Context, run
 	if err != nil {
 		return evalProposalCandidate{}, "the proposer's answer was refused: " + err.Error(), nil
 	}
-	agent, err := r.ensureEvalCandidateAgent(ctx, stable, task, candidate)
-	if err != nil {
-		return evalProposalCandidate{}, "", err
+	agent, refusal, err := r.ensureEvalCandidateAgent(ctx, stable, task, candidate)
+	if err != nil || refusal != "" {
+		return evalProposalCandidate{}, refusal, err
 	}
 	baseline, candidateRun, err := r.ensureEvalProposalRuns(ctx, run, task, record, agent.Name, candidate.Hypothesis)
 	if err != nil {
@@ -559,7 +586,7 @@ func (r *EvalRunReconciler) createEvalProposalCandidate(ctx context.Context, run
 // ensureEvalCandidateAgent creates the candidate Agent: the stable Agent with
 // the patch applied, labelled and owner-referenced to it.
 func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable *corev1alpha1.Agent, task *corev1alpha1.Task,
-	candidate *evals.Candidate) (*corev1alpha1.Agent, error) {
+	candidate *evals.Candidate) (*corev1alpha1.Agent, string, error) {
 	spec := stable.Spec.DeepCopy()
 	if candidate.AgentPatch.SystemPrompt != "" {
 		spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: candidate.AgentPatch.SystemPrompt}
@@ -575,7 +602,7 @@ func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable
 		Spec   *corev1alpha1.AgentSpec `json:"spec"`
 	}{stable.UID, spec})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	agent := &corev1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -595,18 +622,26 @@ func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable
 	}
 	if err := r.Create(ctx, agent); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("create candidate Agent %q: %w", agent.Name, err)
+			return nil, "", fmt.Errorf("create candidate Agent %q: %w", agent.Name, err)
 		}
 		existing := &corev1alpha1.Agent{}
 		if err := r.uncachedReader().Get(ctx, client.ObjectKeyFromObject(agent), existing); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		if existing.Labels[labels.LabelCandidateOf] != agent.Labels[labels.LabelCandidateOf] {
-			return nil, fmt.Errorf("agent %q already exists and is not a candidate of %q", agent.Name, stable.Name)
+		// The name is a digest of the intended spec, but an existing Agent
+		// of that name may have been edited or made by hand. Reuse it only
+		// when it is exactly the candidate this proposal would create.
+		owned := slices.ContainsFunc(existing.OwnerReferences, func(ref metav1.OwnerReference) bool {
+			return ref.Kind == "Agent" && ref.UID == stable.UID
+		})
+		if !owned || existing.Labels[labels.LabelCandidateOf] != agent.Labels[labels.LabelCandidateOf] ||
+			!equality.Semantic.DeepEqual(existing.Spec, agent.Spec) {
+			return nil, fmt.Sprintf("candidate Agent %q already exists and differs from the proposed change; delete it and propose again",
+				agent.Name), nil
 		}
-		return existing, nil
+		return existing, "", nil
 	}
-	return agent, nil
+	return agent, "", nil
 }
 
 // ensureEvalProposalRuns creates the paired held-out runs: a baseline of the
