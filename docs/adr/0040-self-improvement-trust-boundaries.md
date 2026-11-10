@@ -236,14 +236,19 @@ intent (read-only or write), or whose
 
 **Held-out cases.** Three rules keep them unreadable:
 
-1. The controller refuses to create a proposer Task in a namespace that holds an EvalRun
-   or a case set listed in the protected set. Memory and transcript tools are scoped to
-   a namespace, so even a misconfigured tool list cannot reach evaluation transcripts.
-   For #997 this means the RepositoryMonitor that implements issues lives in a different
-   namespace from the one whose reviewer is evaluated.
+1. A proposer reaches nothing in its namespace. Its runtime Pod mounts no Kubernetes
+   token and runs in the ACP runtime namespace, every Orka API route needs a bearer it
+   doesn't hold, and the broker refuses it every brokered tool except `propose_memory`,
+   so the namespace-scoped transcript and memory tools are out of reach. Proposers
+   therefore share the controller's single watch namespace with EvalRuns and case sets.
+   An earlier draft of this ADR required a separate proposer namespace instead; a
+   controller watches one namespace, and adding a second for Tasks would need its own
+   cache, RBAC and admission coverage, where a gap would let anyone mark a Task as a
+   proposer.
 2. Held-out fixtures live in a private fixture repository. Only trial Tasks get a
-   `readCredentialRef` for it, resolved by the clean-room boundary. #976's public fixture
-   repository holds training cases only.
+   `readCredentialRef` for it, resolved by the clean-room boundary, and the controller
+   refuses a proposer whose workspace has any `readCredentialRef`, so proposers work on
+   public repositories only. #976's public fixture repository holds training cases only.
 3. The proposer prompt is built by the controller from training-split trial records.
    Held-out records are never rendered into it.
 
@@ -381,8 +386,8 @@ Piloted on the PR reviewer's Agent configuration only.
 2. A promoter calls `POST /api/v1/evals/runs/:name/proposals` (SubjectAccessReview verb
    `propose` on `evalruns`; like every promoter route, it refuses
    `system:serviceaccount:` usernames even if the role is bound to one). It refuses a run
-   whose case set is not listed with `split: train`. The controller creates one read-only proposer Task in the
-   proposer namespace. Its prompt holds the failed training trials' case summaries and
+   whose case set is not listed with `split: train`. The controller creates one read-only proposer Task, with no
+   workspace, in the run's namespace. Its prompt holds the failed training trials' case summaries and
    grader reasons, earlier experiment summaries (training-split results and decisions
    only), and the current promotable fields. It
    refuses after `gate.maxCandidatesPerBaseline` proposals for the same baseline.
@@ -601,7 +606,7 @@ the protected set.
 
 ## Consequences
 
-- Proposer Tasks need a second namespace, a private fixture repository for held-out
+- Proposer Tasks need a private fixture repository for held-out
   cases, and the protected-set ConfigMap before any proposer flow turns on. All flows
   are off by default behind controller flags.
 - The Task CRD gains `spec.workspace.deniedPaths`; the harness workspace limits gain the
