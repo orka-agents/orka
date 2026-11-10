@@ -14,18 +14,30 @@ import (
 
 func TestSubstrateMCPReadinessTreatsActorAuthenticationAsReachable(t *testing.T) {
 	for status, reachable := range map[int]bool{
-		http.StatusOK:                  true,
-		http.StatusMethodNotAllowed:    true,
-		http.StatusUnauthorized:        true, // Actor protected by spec.http.authSecretRef
-		http.StatusForbidden:           true,
-		http.StatusNotFound:            false,
+		http.StatusOK:               true,
+		http.StatusMethodNotAllowed: true,
+		http.StatusUnauthorized:     true, // Actor protected by spec.http.authSecretRef
+		http.StatusForbidden:        true,
+		http.StatusNotFound:         false,
+		// Redirects are not followed, so the MCP path cannot be served.
+		http.StatusMovedPermanently:    false,
+		http.StatusFound:               false,
+		http.StatusNotModified:         false,
+		http.StatusTemporaryRedirect:   false,
+		http.StatusPermanentRedirect:   false,
 		http.StatusBadGateway:          false,
 		http.StatusInternalServerError: false,
 	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var target string
+			var requests int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
 				target = r.Header.Get("ate-target-actor")
+				if status >= http.StatusMultipleChoices && status < http.StatusBadRequest {
+					// Somewhere that would answer 200 if the probe followed it.
+					w.Header().Set("Location", "/healthy")
+				}
 				w.WriteHeader(status)
 			}))
 			defer server.Close()
@@ -41,6 +53,7 @@ func TestSubstrateMCPReadinessTreatsActorAuthenticationAsReachable(t *testing.T)
 			err = (&ToolReconciler{}).healthCheckMCPActorEndpoint(t.Context(), router, tool)
 			require.Equal(t, reachable, err == nil, "status %d: %v", status, err)
 			require.Equal(t, "tools/actor-1", target, "the probe is routed by Actor target")
+			require.Equal(t, 1, requests, "the probe must not follow a redirect")
 		})
 	}
 }

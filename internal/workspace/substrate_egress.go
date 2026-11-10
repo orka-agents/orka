@@ -106,6 +106,8 @@ func (c *SubstrateNativeClient) EnsureActorEgressPolicy(ctx context.Context, act
 type SubstrateEgressPolicyState struct {
 	// Version is 1 for a policy that was created and never replaced.
 	Version int64
+	// CreateTime is when the control plane created the policy.
+	CreateTime time.Time
 	// UpdateTime is when the control plane stored the current rules.
 	UpdateTime time.Time
 	// ActorCreateTime is when the control plane created the Actor.
@@ -113,21 +115,27 @@ type SubstrateEgressPolicyState struct {
 }
 
 // EnforcedAfter returns the time from which the gateway can only apply the
-// stored rules, given how long it may keep a cached policy. Before that it may
-// hold other rules under this Actor's name from two sources:
+// stored rules, given how long it may keep a cached policy: window after the
+// latest of these, each of which can leave other rules cached under this
+// Actor's name.
 //
-//   - The rules this policy replaced, cached until window after UpdateTime.
-//   - The policy of an earlier Actor of the same name. Deleting an Actor
-//     deletes its policy, so the one stored now is new (Version 1) while the
-//     gateway may remember the old. That Actor was gone before this one was
-//     created, so its entry is gone by window after ActorCreateTime.
+//   - UpdateTime: the rules this write replaced.
+//   - CreateTime: a policy deleted and created again starts at version 1, and
+//     the deleted one's rules may still be cached. A new policy and a
+//     recreated one cannot be told apart, so every new policy waits.
+//   - ActorCreateTime: deleting an Actor deletes its policy, and a new Actor
+//     of the same name starts without one.
 //
-// A policy created for an Actor that has existed for longer than window has
-// neither, which is why an Actor created ahead of its first use is not delayed.
+// The control plane stamps a new policy's UpdateTime with its CreateTime and
+// creates a policy only for an existing Actor, so UpdateTime alone is the
+// latest. All three are compared so that no store's stamping is relied on.
+// Only a policy that has not been written for a window is enforced at once.
 func (s SubstrateEgressPolicyState) EnforcedAfter(window time.Duration) time.Time {
-	changed := s.ActorCreateTime
-	if s.Version > 1 && s.UpdateTime.After(changed) {
-		changed = s.UpdateTime
+	changed := s.UpdateTime
+	for _, candidate := range []time.Time{s.CreateTime, s.ActorCreateTime} {
+		if candidate.After(changed) {
+			changed = candidate
+		}
 	}
 	if changed.IsZero() || window <= 0 {
 		return time.Time{}
@@ -180,6 +188,9 @@ func applySubstrateActorEgressPolicy(ctx context.Context, control substrateEgres
 			}
 			metadata := existing.GetMetadata()
 			state := SubstrateEgressPolicyState{Version: metadata.GetVersion()}
+			if created := metadata.GetCreateTime(); created != nil {
+				state.CreateTime = created.AsTime()
+			}
 			if updated := metadata.GetUpdateTime(); updated != nil {
 				state.UpdateTime = updated.AsTime()
 			}

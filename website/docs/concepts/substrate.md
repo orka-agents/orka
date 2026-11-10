@@ -270,7 +270,11 @@ Secret), the Tool reports `EgressPolicyReady=False` and the controller stops the
 Actor it owns, retrying until it has. It suspends the Actor when the template
 keeps data, and the next successful reconcile resumes it. A template that
 snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
-Substrate, so its Actor is deleted and created again later.
+Substrate, so its Actor is deleted and created again later. Substrate also lets
+an Actor outlive its template. When the template cannot be read, the controller
+can neither suspend the Actor (Substrate refuses without it) nor safely delete it
+(only the template says which volumes hold data), so it replaces the Actor's
+egress policy with one that denies all egress and keeps retrying the stop.
 
 A stored policy is not enforced at once. The Substrate egress gateway caches each
 Actor's policy by Actor name for `--egress-policy-cache-ttl` (10s by default) and
@@ -288,10 +292,11 @@ unavailable. Operators will notice two effects:
   durable directory, the loss of whatever the Actor held in memory. Edits that
   leave `egress` unchanged do not restart it.
 - **A new Actor's first boot waits.** An Actor's name is derived from its Tool
-  or pool slot, so a new Actor can share its name with one deleted moments ago,
-  whose policy the gateway may still hold. The controller cannot tell, so every
-  Actor boots no sooner than one wait after it was created. A pool's Actors
-  created ahead of use have usually waited already.
+  or pool slot, and a policy deleted and created again looks like a new one, so
+  a new policy can share its Actor name with rules the gateway still holds. The
+  controller cannot tell, so an Actor runs no sooner than one wait after its
+  policy was created or last changed. That includes a pool's Actors created
+  ahead of use: their policy is created when a Tool first claims them.
 
 Set the flag to your gateway's cache TTL plus 4s. Set it to `0` only if the
 gateway runs with `--egress-policy-cache-ttl=0`; the controller then neither
@@ -356,7 +361,8 @@ use Substrate MCP Tools with `http.authSecretRef` must
 [grant the worker that Secret](#mcp-tool-credential-grant) before upgrading.
 
 Substrate MCP Tools behave differently around egress from this release on. A
-Tool becomes available about 14 seconds later than before when its Actor is new,
+Tool becomes available about 14 seconds later than before when its Actor or its
+Actor's egress policy is new,
 and editing a Tool's `egress` allowlist restarts its Actor, with about 15 seconds
 of downtime. Both come from waiting for the Substrate egress gateway to apply a
 changed policy; see [Native MCP Tools in core](#native-mcp-tools-in-core) for the
