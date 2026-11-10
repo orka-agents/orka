@@ -641,6 +641,11 @@ func main() {
 		"Timeout for Substrate actor claim, readiness, release, retain, and delete operations.")
 	flag.DurationVar(&substrateConfig.CommandTimeout, "substrate-command-timeout", substrateConfig.CommandTimeout,
 		"Timeout for agent runtime execution inside the Substrate actor.")
+	flag.DurationVar(&substrateConfig.EgressPolicyPropagation, "substrate-egress-policy-propagation",
+		substrateConfig.EgressPolicyPropagation,
+		"How long after a Substrate MCP Tool Actor's egress policy is replaced the Tool stays unavailable and its Actor "+
+			"is not resumed, because the Substrate egress gateway may still apply the previous rules. Set it to the "+
+			"gateway's --egress-policy-cache-ttl plus 4s. 0 does not wait and is correct only with that cache disabled.")
 	flag.StringVar(&substrateCleanupPolicy, "substrate-cleanup-policy", substrateCleanupPolicy,
 		"Default Substrate workspace cleanup policy (delete, retain).")
 	flag.StringVar(&oidcIssuer, "oidc-issuer", os.Getenv("ORKA_OIDC_ISSUER"),

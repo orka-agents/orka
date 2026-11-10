@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -280,11 +281,31 @@ func TestToolReconcilerRejectsReservedSubstrateMCPHeaders(t *testing.T) {
 // verified egress policy, and returns the reconciler for the next change.
 func runningEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecutor, apply egressTestApplier, objects ...client.Object) (*ToolReconciler, corev1alpha1.Tool) {
 	t.Helper()
+	tool := newEgressTestMCPTool(corev1alpha1.SubstrateActorEgressRule{Scheme: "https", Host: "api.github.com"})
+	tool.Generation = 1
+	r := newEgressTestReconcilerFor(t, tool, executor, apply, objects...)
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	got := getEgressTestTool(t, r)
+	if !got.Status.Available || got.Status.Actor == nil || !substrateMCPEgressVerified(&got) || len(executor.waitReadyBoots) == 0 {
+		t.Fatalf("status = %+v, want a running actor with a verified egress policy", got.Status)
+	}
+	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
+		t.Fatalf("releases=%v deletes=%v, want the actor left running", executor.releaseReqs, executor.deleteReqs)
+	}
+	return r, got
+}
+
+// newEgressTestReconcilerFor builds a reconciler around a Tool that has not
+// been reconciled yet.
+func newEgressTestReconcilerFor(t *testing.T, tool *corev1alpha1.Tool, executor *recordingToolWorkspaceExecutor, apply egressTestApplier, objects ...client.Object) *ToolReconciler {
+	t.Helper()
 	scheme := newToolScheme()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	t.Cleanup(srv.Close)
-	tool := newEgressTestMCPTool(corev1alpha1.SubstrateActorEgressRule{Scheme: "https", Host: "api.github.com"})
-	tool.Generation = 1
 	validator := substrateFixtureTemplateValidator
 	for _, object := range objects {
 		// A pool in another namespace keeps its Actor leases there.
@@ -306,19 +327,7 @@ func runningEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecuto
 		},
 	}
 	r.SubstrateTemplateValidator = validator(r.Client)
-	for range 3 {
-		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
-			t.Fatalf("Reconcile() error = %v", err)
-		}
-	}
-	got := getEgressTestTool(t, r)
-	if !got.Status.Available || got.Status.Actor == nil || !substrateMCPEgressVerified(&got) || len(executor.waitReadyBoots) == 0 {
-		t.Fatalf("status = %+v, want a running actor with a verified egress policy", got.Status)
-	}
-	if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
-		t.Fatalf("releases=%v deletes=%v, want the actor left running", executor.releaseReqs, executor.deleteReqs)
-	}
-	return r, got
+	return r
 }
 
 func getEgressTestTool(t *testing.T, r *ToolReconciler) corev1alpha1.Tool {
@@ -631,5 +640,149 @@ func TestNativeSubstrateTemplateSuspendUnsupported(t *testing.T) {
 		if got := nativeSubstrateTemplateSuspendUnsupported(tc.template); got != tc.want {
 			t.Errorf("%s: suspend unsupported = %t, want %t", name, got, tc.want)
 		}
+	}
+}
+
+// propagatingEgressTestTool is a running Tool whose stored egress policy the
+// test controls, with the gateway's default propagation window.
+func propagatingEgressTestTool(t *testing.T, executor *recordingToolWorkspaceExecutor) (*ToolReconciler, *workspace.SubstrateEgressPolicyState) {
+	t.Helper()
+	// Created long ago: nothing to wait for while the Tool starts.
+	policy := &workspace.SubstrateEgressPolicyState{Version: 1, UpdateTime: time.Now().Add(-time.Hour)}
+	r, _ := runningEgressTestTool(t, executor, allowSubstrateEgressForTest)
+	r.SubstrateConfig.EgressPolicyPropagation = defaultSubstrateEgressPolicyPropagation
+	r.SubstrateEgressPolicyStateApplier = func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
+		return *policy, nil
+	}
+	return r, policy
+}
+
+// The Substrate egress gateway caches an Actor's policy and nothing invalidates
+// the entry, so a replaced policy is stored before it is enforced. Until the
+// gateway must have dropped the old rules, the Tool is not ready and its Actor
+// is not resumed.
+func TestToolReconcilerHoldsReadinessWhileAReplacedEgressPolicyPropagates(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, policy := propagatingEgressTestTool(t, executor)
+	resumes := len(executor.waitReadyBoots)
+
+	// The allowlist was tightened two seconds ago.
+	*policy = workspace.SubstrateEgressPolicyState{Version: 2, UpdateTime: time.Now().Add(-2 * time.Second)}
+	result, err := r.Reconcile(context.Background(), mcpToolRequest())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 10*time.Second || result.RequeueAfter > 12*time.Second {
+		t.Fatalf("RequeueAfter = %s, want the rest of the %s window", result.RequeueAfter, defaultSubstrateEgressPolicyPropagation)
+	}
+	got := getEgressTestTool(t, r)
+	condition := meta.FindStatusCondition(got.Status.Conditions, toolConditionEgressPolicyReady)
+	if got.Status.Available || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressPolicyPropagating" {
+		t.Fatalf("available=%t EgressPolicyReady=%+v, want unavailable while the policy propagates", got.Status.Available, condition)
+	}
+	if len(executor.waitReadyBoots) != resumes {
+		t.Fatal("the actor was resumed before its replaced egress policy could be in effect")
+	}
+	if got.Status.Actor == nil || len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
+		t.Fatalf("actor=%+v releases=%v deletes=%v, want the actor kept", got.Status.Actor, executor.releaseReqs, executor.deleteReqs)
+	}
+
+	// The window has passed: the gateway can no longer hold the old rules.
+	policy.UpdateTime = time.Now().Add(-defaultSubstrateEgressPolicyPropagation - time.Second)
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	got = getEgressTestTool(t, r)
+	if !got.Status.Available || !substrateMCPEgressVerified(&got) || len(executor.waitReadyBoots) != resumes+1 {
+		t.Fatalf("status=%+v resumes=%d, want ready and resumed once the window passed", got.Status, len(executor.waitReadyBoots)-resumes)
+	}
+}
+
+// A policy created for an Actor the Tool uses for the first time has no cached
+// predecessor, so a new Tool is not delayed. Nor is a Tool edited soon after.
+func TestToolReconcilerDoesNotWaitForAnEgressPolicyThatReplacedNothing(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	fresh := func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
+		return workspace.SubstrateEgressPolicyState{Version: 1, UpdateTime: time.Now()}, nil
+	}
+	tool := newEgressTestMCPTool()
+	tool.Generation = 1
+	r := newEgressTestReconcilerFor(t, tool, executor, nil)
+	r.SubstrateConfig.EgressPolicyPropagation = defaultSubstrateEgressPolicyPropagation
+	r.SubstrateEgressPolicyStateApplier = fresh
+	for range 3 {
+		if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+			t.Fatalf("Reconcile() error = %v", err)
+		}
+	}
+	if got := getEgressTestTool(t, r); !got.Status.Available || !substrateMCPEgressVerified(&got) {
+		t.Fatalf("status = %+v, want a new Tool ready without waiting", got.Status)
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) { tool.Spec.Description = "MCP tool, described again" })
+	if result, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil || result.RequeueAfter < time.Minute {
+		t.Fatalf("Reconcile() = %+v, %v, want the edited Tool reconciled without a propagation wait", result, err)
+	}
+	if got := getEgressTestTool(t, r); !got.Status.Available || !substrateMCPEgressVerified(&got) {
+		t.Fatalf("status = %+v, want the edited Tool still ready", got.Status)
+	}
+}
+
+// An Actor deleted because it could not be suspended takes its policy with it,
+// but the gateway may remember that policy under the same Actor name. The
+// policy created for its replacement is held back like a replaced one.
+func TestToolReconcilerHoldsADeletedActorsNewEgressPolicy(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, policy := propagatingEgressTestTool(t, executor)
+	validate := r.SubstrateTemplateValidator
+	r.SubstrateTemplateValidator = func(ctx context.Context, request *ExecutionWorkspaceRequest) error {
+		request.TemplateSuspendUnsupported = true
+		return validate(ctx, request)
+	}
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) {
+		tool.Spec.MCP.SubstrateActor.Egress = []corev1alpha1.SubstrateActorEgressRule{{Scheme: "tls", Host: "example.com"}}
+	})
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil || len(executor.deleteReqs) != 1 {
+		t.Fatalf("Reconcile() error = %v, deletes = %v, want the actor deleted", err, executor.deleteReqs)
+	}
+	resumes := len(executor.waitReadyBoots)
+
+	// The edit is corrected and the Actor created again, with a new policy.
+	editEgressTestTool(t, r, func(tool *corev1alpha1.Tool) { tool.Spec.MCP.SubstrateActor.Egress = nil })
+	executor.claimCreated = true
+	*policy = workspace.SubstrateEgressPolicyState{Version: 1, UpdateTime: time.Now()}
+	result, err := r.Reconcile(context.Background(), mcpToolRequest())
+	if err != nil || result.RequeueAfter <= 0 || result.RequeueAfter > defaultSubstrateEgressPolicyPropagation {
+		t.Fatalf("Reconcile() = %+v, %v, want a wait within the propagation window", result, err)
+	}
+	if got := getEgressTestTool(t, r); got.Status.Available || len(executor.waitReadyBoots) != resumes {
+		t.Fatalf("available=%t resumes=%d, want the new actor held back", got.Status.Available, len(executor.waitReadyBoots)-resumes)
+	}
+	policy.UpdateTime = time.Now().Add(-defaultSubstrateEgressPolicyPropagation - time.Second)
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if got := getEgressTestTool(t, r); !got.Status.Available || len(executor.waitReadyBoots) != resumes+1 {
+		t.Fatalf("status=%+v resumes=%d, want the new actor resumed once the window passed", got.Status, len(executor.waitReadyBoots)-resumes)
+	}
+}
+
+// With the gateway's policy cache disabled there is nothing to wait for.
+func TestToolReconcilerDoesNotWaitWhenEgressPolicyPropagationIsZero(t *testing.T) {
+	executor := &recordingToolWorkspaceExecutor{claimCreateds: []bool{true}}
+	r, policy := propagatingEgressTestTool(t, executor)
+	r.SubstrateConfig.EgressPolicyPropagation = 0
+	*policy = workspace.SubstrateEgressPolicyState{Version: 2, UpdateTime: time.Now()}
+	if _, err := r.Reconcile(context.Background(), mcpToolRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if got := getEgressTestTool(t, r); !got.Status.Available || !substrateMCPEgressVerified(&got) {
+		t.Fatalf("status = %+v, want ready at once", got.Status)
+	}
+}
+
+func TestSubstrateConfigWaitsForEgressPolicyPropagationByDefault(t *testing.T) {
+	cfg, err := SubstrateConfigFromEnv(func(string) string { return "" })
+	if err != nil || cfg.EgressPolicyPropagation != 14*time.Second {
+		t.Fatalf("EgressPolicyPropagation = %s, %v, want the gateway default of 10s cache plus a 4s fetch", cfg.EgressPolicyPropagation, err)
 	}
 }

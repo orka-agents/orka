@@ -102,6 +102,10 @@ type ToolReconciler struct {
 	// native egress policy. Nil uses the Substrate control API. Injectable
 	// for tests.
 	SubstrateEgressPolicyApplier func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) error
+	// SubstrateEgressPolicyStateApplier is SubstrateEgressPolicyApplier for a
+	// test that also sets when the stored policy was written. It takes
+	// precedence.
+	SubstrateEgressPolicyStateApplier func(context.Context, SubstrateConfig, string, []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error)
 	// SubstrateRouterHTTPClient reaches MCP actors for readiness checks. Nil
 	// builds the mTLS router client from SubstrateConfig. Injectable for tests.
 	SubstrateRouterHTTPClient *http.Client
@@ -620,7 +624,8 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 	// Substrate v1 routes all actor egress through the gateway under the
 	// actor's native policy. Install and verify it before every resume; any
 	// failure leaves the actor suspended.
-	if err := r.applySubstrateMCPActorEgress(ctx, tool, actorID); err != nil {
+	policy, err := r.applySubstrateMCPActorEgress(ctx, tool, actorID)
+	if err != nil {
 		message := "actor egress policy was not applied; actor not resumed: " + err.Error()
 		var suspendErr error
 		// An actor this claim created has never been resumed, and one observed
@@ -648,6 +653,20 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 			return ctrl.Result{}, true, suspendErr
 		}
 		return result, true, updateErr
+	}
+	if wait := r.substrateMCPEgressPropagationWait(tool, actorID, policy); wait > 0 {
+		// The stored policy is right, but the gateway may not apply it yet.
+		// Do not resume the Actor or offer the Tool until it must.
+		message := fmt.Sprintf("actor egress policy was replaced; the egress gateway may apply the previous rules for up to %s more",
+			wait.Round(time.Second))
+		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
+			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyPropagating",
+			Message: message, ObservedGeneration: tool.Generation,
+		})
+		if _, updateErr := r.updateStatus(ctx, tool, false, message); updateErr != nil {
+			return ctrl.Result{}, true, updateErr
+		}
+		return ctrl.Result{RequeueAfter: wait}, true, nil
 	}
 	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
 		Type: toolConditionEgressPolicyReady, Status: metav1.ConditionTrue, Reason: "EgressPolicyApplied",
@@ -1961,28 +1980,60 @@ func (r *ToolReconciler) waitForMCPActorEndpoint(
 	}
 }
 
-func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool *corev1alpha1.Tool, actorID string) error {
+func (r *ToolReconciler) applySubstrateMCPActorEgress(ctx context.Context, tool *corev1alpha1.Tool, actorID string) (workspace.SubstrateEgressPolicyState, error) {
 	rules := substrateMCPEgressRules(tool)
 	if err := workspace.ValidateSubstrateEgressRules(rules); err != nil {
-		return err
+		return workspace.SubstrateEgressPolicyState{}, err
 	}
-	apply := r.SubstrateEgressPolicyApplier
-	if apply == nil {
-		apply = applyNativeSubstrateActorEgressPolicy
+	cfg := r.SubstrateConfig.WithDefaults()
+	switch {
+	case r.SubstrateEgressPolicyStateApplier != nil:
+		return r.SubstrateEgressPolicyStateApplier(ctx, cfg, actorID, rules)
+	case r.SubstrateEgressPolicyApplier != nil:
+		return workspace.SubstrateEgressPolicyState{}, r.SubstrateEgressPolicyApplier(ctx, cfg, actorID, rules)
 	}
-	return apply(ctx, r.SubstrateConfig.WithDefaults(), actorID, rules)
+	return applyNativeSubstrateActorEgressPolicy(ctx, cfg, actorID, rules)
 }
 
-func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) error {
+func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateConfig, actorID string, rules []workspace.SubstrateEgressRule) (workspace.SubstrateEgressPolicyState, error) {
 	cfg = cfg.WithDefaults()
 	ctx, cancel := context.WithTimeout(ctx, cfg.ClaimTimeout)
 	defer cancel()
 	api, err := workspace.NewSubstrateNativeClient(cfg.WorkspaceClientConfig())
 	if err != nil {
-		return err
+		return workspace.SubstrateEgressPolicyState{}, err
 	}
 	defer api.Close() //nolint:errcheck
-	return api.EnsureActorEgressPolicy(ctx, actorID, rules)
+	return api.ApplyActorEgressPolicy(ctx, actorID, rules)
+}
+
+// substrateMCPEgressPropagationWait returns how much longer the egress gateway
+// may apply rules that the Actor's stored policy replaced.
+//
+// The gateway caches a policy by Actor name and nothing invalidates the entry,
+// so a write takes effect only after the configured window. That matters when
+// the name may have a cached entry with other rules: when the policy was
+// replaced, or when it was created for an Actor this Tool had stopped. A
+// stopped Actor may have been deleted, which deletes its policy too, so the
+// one found now is new while the gateway may remember the old. A policy
+// created for an Actor the Tool is using for the first time has no such entry.
+func (r *ToolReconciler) substrateMCPEgressPropagationWait(
+	tool *corev1alpha1.Tool, actorID string, policy workspace.SubstrateEgressPolicyState,
+) time.Duration {
+	window := r.SubstrateConfig.EgressPolicyPropagation
+	if window <= 0 || policy.UpdateTime.IsZero() {
+		return 0
+	}
+	if policy.Version <= 1 {
+		previous := tool.Status.Actor
+		ready := meta.FindStatusCondition(tool.Status.Conditions, toolConditionEgressPolicyReady)
+		stopped := previous != nil && strings.TrimSpace(previous.ActorID) == actorID &&
+			ready != nil && ready.Status == metav1.ConditionFalse
+		if !stopped {
+			return 0
+		}
+	}
+	return max(0, time.Until(policy.UpdateTime.Add(window)))
 }
 
 func substrateMCPEgressRules(tool *corev1alpha1.Tool) []workspace.SubstrateEgressRule {
