@@ -323,6 +323,13 @@ func (r *EvalRunReconciler) resolveEvalReviewSubject(ctx context.Context, run *c
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported,
 			"reviewer agent %q cannot use copilot for read-only reviews; use claude, codex, or opencode", reviewer.Name)
 	}
+	// The settings a trial's ACP session refuses fail the run here, before
+	// it freezes, rather than every trial as an infra error.
+	for _, validate := range []func(*corev1alpha1.Agent) error{validateSoulRuntime, validateACPAgentSkills, validateACPAgentTools} {
+		if err := validate(reviewer); err != nil {
+			return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported, "reviewer agent %q: %v", reviewer.Name, err)
+		}
+	}
 	_, image, err := acpRuntimeArtifacts(runtimeSpec.Type, r.RuntimeImages)
 	if err != nil {
 		return nil, evalRunConfigErrorf(evalRunReasonSubjectUnsupported, "reviewer agent %q: %v", reviewer.Name, err)
