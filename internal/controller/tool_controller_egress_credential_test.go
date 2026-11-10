@@ -139,7 +139,7 @@ func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r, _, applications := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
+			r, executor, applications := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
 			for range 3 {
 				_, _ = r.Reconcile(context.Background(), mcpToolRequest())
 			}
@@ -162,12 +162,19 @@ func TestToolReconcilerRevokesRunningActorEgressWhenCredentialBecomesInvalid(t *
 			if got.Status.Available || condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "EgressRevoked" {
 				t.Fatalf("status = %+v, want an unavailable Tool with revoked egress", got.Status)
 			}
+			// Denied egress is enough while the policy was current: the actor
+			// keeps its state and is not stopped.
+			if len(executor.releaseReqs) != 0 || len(executor.deleteReqs) != 0 {
+				t.Fatalf("releases=%v deletes=%v, want the actor left running with egress denied", executor.releaseReqs, executor.deleteReqs)
+			}
 		})
 	}
 }
 
+// An actor whose egress cannot be denied would keep its last rules and the
+// credential the gateway injects for them, so it is stopped instead.
 func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
-	r, _, _ := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
+	r, executor, _ := newEgressCredentialToolReconciler(t, workspace.SubstrateKubernetesSecretsCredentialProvider, githubTokenSecret("ghp_secret_value"))
 	for range 3 {
 		_, _ = r.Reconcile(context.Background(), mcpToolRequest())
 	}
@@ -187,6 +194,9 @@ func TestToolReconcilerReportsAndRetriesFailedEgressRevocation(t *testing.T) {
 		!strings.Contains(got.Status.Error, "actor egress was not revoked") {
 		t.Fatalf("status = %+v, want a reported revocation failure", got.Status)
 	}
+	if len(executor.releaseReqs)+len(executor.deleteReqs) != 1 {
+		t.Fatalf("releases=%v deletes=%v, want the actor stopped once", executor.releaseReqs, executor.deleteReqs)
+	}
 }
 
 // Turning Substrate MCP Tools off must not leave a running actor egressing
@@ -204,6 +214,7 @@ func TestToolReconcilerRevokesCredentialedActorEgressAfterRestartWithMCPToolsDis
 			}
 
 			var applications []egressPolicyApplication
+			stopper := &recordingToolWorkspaceExecutor{}
 			disabled := &ToolReconciler{
 				Client:          enabled.Client,
 				Scheme:          enabled.Scheme,
@@ -212,12 +223,21 @@ func TestToolReconcilerRevokesCredentialedActorEgressAfterRestartWithMCPToolsDis
 					applications = append(applications, egressPolicyApplication{actorID: actorID, rules: rules})
 					return applyErr
 				},
-				SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) {
-					t.Fatal("disabled controller must not claim or resume actors")
-					return nil, nil
-				},
+				SubstrateExecutorFactory: func(SubstrateConfig) (workspace.WorkspaceExecutor, error) { return stopper, nil },
 			}
+			disabled.SubstrateTemplateValidator = substrateFixtureTemplateValidator(disabled.Client)
 			_, err := disabled.Reconcile(context.Background(), mcpToolRequest())
+			if stopper.claimName != "" || stopper.waitReadyCalled {
+				t.Fatal("disabled controller must not claim or resume actors")
+			}
+			// It stops the actor only when it could not deny its egress.
+			wantStops := 0
+			if applyErr != nil {
+				wantStops = 1
+			}
+			if stops := len(stopper.releaseReqs) + len(stopper.deleteReqs); stops != wantStops {
+				t.Fatalf("stops = %d, want %d", stops, wantStops)
+			}
 			if len(applications) != 1 || applications[0].actorID != running.Status.Actor.ActorID || len(applications[0].rules) != 0 {
 				t.Fatalf("applications = %+v, want only a deny-all policy for actor %q", applications, running.Status.Actor.ActorID)
 			}

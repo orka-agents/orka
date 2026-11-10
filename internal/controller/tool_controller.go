@@ -2027,11 +2027,13 @@ func (r *ToolReconciler) failSubstrateMCPToolValidation(ctx context.Context, too
 			Message: "Tool is invalid; actor egress is denied", ObservedGeneration: tool.Generation,
 		})
 	}
-	// Revocation denies egress; an actor whose policy was not verified for this
-	// specification is also stopped, as failSubstrateMCPTool does.
+	// Revocation denies egress. The actor is also stopped when its policy was
+	// not verified for this specification, as failSubstrateMCPTool does, and
+	// when revocation failed: it would otherwise keep its last installed rules,
+	// and any credential the gateway injects for them, until a retry succeeds.
 	var stopErr error
 	actor := tool.Status.Actor
-	if !verified && actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != "" {
+	if (revokeErr != nil || !verified) && actor != nil && actor.Provider == corev1alpha1.WorkspaceProviderSubstrate && strings.TrimSpace(actor.ActorID) != "" {
 		if stopErr = r.stopSubstrateMCPStatusActor(ctx, tool); stopErr != nil {
 			message += "; the actor could not be stopped: " + stopErr.Error()
 		}
