@@ -108,6 +108,7 @@ func compileSubstrateEgressEffects(credential *SubstrateEgressCredential) *ateap
 // substrateEgressControl is the subset of the native Control API used to
 // manage an Actor's egress policy. ateapipb.ControlClient satisfies it.
 type substrateEgressControl interface {
+	GetActor(ctx context.Context, in *ateapipb.GetActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error)
 	GetActorEgressPolicy(ctx context.Context, in *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
 	CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
 	UpdateActorEgressPolicy(ctx context.Context, in *ateapipb.UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error)
@@ -161,14 +162,38 @@ func (c *SubstrateNativeClient) EnsureActorEgressPolicy(ctx context.Context, act
 //
 // Storing a policy does not make it effective at once. The Substrate egress
 // gateway caches each Actor's policy by Actor name (--egress-policy-cache-ttl,
-// 10s by default, plus a fetch of up to 4s that may have read the previous
-// rules) and nothing invalidates an entry. Until that time has passed since
-// UpdateTime, the gateway may still decide by the rules this write replaced.
+// 10s by default, plus a fetch of up to 4s that may have read earlier rules)
+// and nothing invalidates an entry.
 type SubstrateEgressPolicyState struct {
 	// Version is 1 for a policy that was created and never replaced.
 	Version int64
 	// UpdateTime is when the control plane stored the current rules.
 	UpdateTime time.Time
+	// ActorCreateTime is when the control plane created the Actor.
+	ActorCreateTime time.Time
+}
+
+// EnforcedAfter returns the time from which the gateway can only apply the
+// stored rules, given how long it may keep a cached policy. Before that it may
+// hold other rules under this Actor's name from two sources:
+//
+//   - The rules this policy replaced, cached until window after UpdateTime.
+//   - The policy of an earlier Actor of the same name. Deleting an Actor
+//     deletes its policy, so the one stored now is new (Version 1) while the
+//     gateway may remember the old. That Actor was gone before this one was
+//     created, so its entry is gone by window after ActorCreateTime.
+//
+// A policy created for an Actor that has existed for longer than window has
+// neither, which is why an Actor created ahead of its first use is not delayed.
+func (s SubstrateEgressPolicyState) EnforcedAfter(window time.Duration) time.Time {
+	changed := s.ActorCreateTime
+	if s.Version > 1 && s.UpdateTime.After(changed) {
+		changed = s.UpdateTime
+	}
+	if changed.IsZero() || window <= 0 {
+		return time.Time{}
+	}
+	return changed.Add(window)
 }
 
 // ApplyActorEgressPolicy is EnsureActorEgressPolicy that also reports the
@@ -210,10 +235,17 @@ func applySubstrateActorEgressPolicy(ctx context.Context, control substrateEgres
 			return fail(substrateControlError("get egress policy", getErr))
 		case substrateEgressRulesEqual(existing.GetRules(), desired.GetRules()):
 			// Verified by a fresh read after any write.
+			actor, actorErr := control.GetActor(ctx, &ateapipb.GetActorRequest{Actor: proto.CloneOf(ref)})
+			if actorErr != nil {
+				return fail(substrateControlError("get actor", actorErr))
+			}
 			metadata := existing.GetMetadata()
 			state := SubstrateEgressPolicyState{Version: metadata.GetVersion()}
 			if updated := metadata.GetUpdateTime(); updated != nil {
 				state.UpdateTime = updated.AsTime()
+			}
+			if created := actor.GetMetadata().GetCreateTime(); created != nil {
+				state.ActorCreateTime = created.AsTime()
 			}
 			return state, nil
 		default:

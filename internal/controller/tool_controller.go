@@ -657,11 +657,23 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 		}
 		return result, true, updateErr
 	}
-	if wait := r.substrateMCPEgressPropagationWait(tool, actorID, policy); wait > 0 {
-		// The stored policy is right, but the gateway may not apply it yet.
-		// Do not resume the Actor or offer the Tool until it must.
-		message := fmt.Sprintf("actor egress policy was replaced; the egress gateway may apply the previous rules for up to %s more",
+	if wait := r.substrateMCPEgressPropagationWait(policy); wait > 0 {
+		// The stored policy is right, but the gateway may still apply other
+		// rules under this Actor's name. Until it cannot, the Actor must not
+		// run and the Tool is not offered.
+		message := fmt.Sprintf("actor egress policy is stored; the egress gateway may apply earlier rules for up to %s more",
 			wait.Round(time.Second))
+		requeue := wait
+		var stopErr error
+		if !claim.Created && claim.Phase != workspace.PhaseRetained {
+			if stopErr = r.stopSubstrateMCPActor(ctx, tool, executor, stop, timeout); stopErr != nil {
+				message += "; the actor could not be stopped and may still reach what those rules allow: " + stopErr.Error()
+			} else if stop.suspendUnsupported {
+				// The Actor was deleted. Create its replacement now, so that
+				// its own wait starts at once instead of after this one.
+				requeue = time.Second
+			}
+		}
 		meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
 			Type: toolConditionEgressPolicyReady, Status: metav1.ConditionFalse, Reason: "EgressPolicyPropagating",
 			Message: message, ObservedGeneration: tool.Generation,
@@ -669,7 +681,11 @@ func (r *ToolReconciler) waitForSubstrateMCPToolActor(
 		if _, updateErr := r.updateStatus(ctx, tool, false, message); updateErr != nil {
 			return ctrl.Result{}, true, updateErr
 		}
-		return ctrl.Result{RequeueAfter: wait}, true, nil
+		if stopErr != nil {
+			// Retry with backoff until the actor is confirmed stopped.
+			return ctrl.Result{}, true, stopErr
+		}
+		return ctrl.Result{RequeueAfter: requeue}, true, nil
 	}
 	meta.SetStatusCondition(&tool.Status.Conditions, metav1.Condition{
 		Type: toolConditionEgressPolicyReady, Status: metav1.ConditionTrue, Reason: "EgressPolicyApplied",
@@ -737,7 +753,10 @@ func (r *ToolReconciler) stopSubstrateMCPActor(
 		return err
 	}
 	if stop.suspendUnsupported {
-		return deleteSubstrateMCPActor(ctx, executor, stop.actorID, substrateMCPActorStopReason, timeout)
+		if err := deleteSubstrateMCPActor(ctx, executor, stop.actorID, substrateMCPActorStopReason, timeout); err != nil {
+			return err
+		}
+		return r.forgetSubstrateMCPToolActor(ctx, tool, stop.actorID)
 	}
 	// MCP actors run no workspace daemon, so there is nothing to scrub.
 	_, err = executor.Release(ctx, workspace.ReleaseRequest{
@@ -748,6 +767,33 @@ func (r *ToolReconciler) stopSubstrateMCPActor(
 		SkipScrub: true,
 	})
 	return err
+}
+
+// forgetSubstrateMCPToolActor drops what the Tool recorded about an Actor it
+// has deleted: that status names it, and that it was booted. The Actor created
+// in its place under the same name has never run, and may be resumed by a later
+// reconcile than the one that creates it, which must still ask for a boot from
+// scratch. The caller writes the status.
+func (r *ToolReconciler) forgetSubstrateMCPToolActor(ctx context.Context, tool *corev1alpha1.Tool, actorID string) error {
+	if previous := tool.Status.Actor; previous != nil && strings.TrimSpace(previous.ActorID) == actorID {
+		tool.Status.Actor = nil
+	}
+	if !substrateMCPToolActorBootRecorded(tool, actorID) {
+		return nil
+	}
+	// A patch of this one annotation, on a copy: the Tool in hand carries
+	// status changes that have not been written yet.
+	patched := tool.DeepCopy()
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, substrateMCPToolBootedIDAnno)
+	if err := r.Patch(ctx, patched, client.RawPatch(types.MergePatchType, []byte(patch))); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	delete(tool.Annotations, substrateMCPToolBootedIDAnno)
+	tool.ResourceVersion = patched.ResourceVersion
+	return nil
 }
 
 // substrateMCPEgressVerified reports whether the Actor's egress policy was
@@ -2118,32 +2164,14 @@ func applyNativeSubstrateActorEgressPolicy(ctx context.Context, cfg SubstrateCon
 }
 
 // substrateMCPEgressPropagationWait returns how much longer the egress gateway
-// may apply rules that the Actor's stored policy replaced.
-//
-// The gateway caches a policy by Actor name and nothing invalidates the entry,
-// so a write takes effect only after the configured window. That matters when
-// the name may have a cached entry with other rules: when the policy was
-// replaced, or when it was created for an Actor this Tool had stopped. A
-// stopped Actor may have been deleted, which deletes its policy too, so the
-// one found now is new while the gateway may remember the old. A policy
-// created for an Actor the Tool is using for the first time has no such entry.
-func (r *ToolReconciler) substrateMCPEgressPropagationWait(
-	tool *corev1alpha1.Tool, actorID string, policy workspace.SubstrateEgressPolicyState,
-) time.Duration {
-	window := r.SubstrateConfig.EgressPolicyPropagation
-	if window <= 0 || policy.UpdateTime.IsZero() {
+// may apply rules other than the Actor's stored policy. See
+// workspace.SubstrateEgressPolicyState.EnforcedAfter.
+func (r *ToolReconciler) substrateMCPEgressPropagationWait(policy workspace.SubstrateEgressPolicyState) time.Duration {
+	enforced := policy.EnforcedAfter(r.SubstrateConfig.EgressPolicyPropagation)
+	if enforced.IsZero() {
 		return 0
 	}
-	if policy.Version <= 1 {
-		previous := tool.Status.Actor
-		ready := meta.FindStatusCondition(tool.Status.Conditions, toolConditionEgressPolicyReady)
-		stopped := previous != nil && strings.TrimSpace(previous.ActorID) == actorID &&
-			ready != nil && ready.Status == metav1.ConditionFalse
-		if !stopped {
-			return 0
-		}
-	}
-	return max(0, time.Until(policy.UpdateTime.Add(window)))
+	return max(0, time.Until(enforced))
 }
 
 // substrateMCPEgressRules converts the Tool allowlist. A credential names a
