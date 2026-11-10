@@ -731,3 +731,83 @@ func TestEvalRunRefusesAPrunedExperiment(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want a refusal", err)
 	}
 }
+
+// exportTestServer serves one finished run with the given status and trial
+// records, a Task whose UID is taskUID, and one page of its events.
+func exportTestServer(t *testing.T, runJSON, trialsJSONL, taskUID string, eventReads *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/evals/runs/r":
+			_, _ = w.Write([]byte(runJSON))
+		case "/api/v1/evals/runs/r/trials":
+			_, _ = w.Write([]byte(trialsJSONL))
+		case "/api/v1/tasks/eval-b":
+			_, _ = w.Write([]byte(`{"metadata":{"name":"eval-b","uid":"` + taskUID + `"}}`))
+		case "/api/v1/tasks/eval-b/events":
+			*eventReads++
+			_, _ = w.Write([]byte(`{"latestSeq":1,"events":[{"seq":1,"type":"ModelMessage"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+const exportTestTrial = `{"caseID":"c","trial":1,"evalRunUID":"uid-r","taskName":"eval-b","taskUID":"task-1","outcome":"fail"}` + "\n"
+
+// A run on its way out, or one whose listing lost records, is not exported
+// as if it were complete.
+func TestEvalOutputRefusesIncompleteTrialRecords(t *testing.T) {
+	for name, runJSON := range map[string]string{
+		"being deleted": `{"metadata":{"name":"r","namespace":"team-a","uid":"uid-r","deletionTimestamp":"2026-11-09T00:00:00Z"},` +
+			`"status":{"phase":"Succeeded","counts":{"planned":1,"completed":1}}}`,
+		"fewer records than completed": `{"metadata":{"name":"r","namespace":"team-a","uid":"uid-r"},` +
+			`"status":{"phase":"Succeeded","counts":{"planned":2,"completed":2}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			reads := 0
+			srv := exportTestServer(t, runJSON, exportTestTrial, "task-1", &reads)
+			defer srv.Close()
+			dir := filepath.Join(t.TempDir(), "out")
+			_, err := runEvalCommand(t, "eval", "get", "r", "-n", "team-a", "--server", srv.URL, "--token", "tok", "--output-dir", dir)
+			if err == nil || (!strings.Contains(err.Error(), "being deleted") && !strings.Contains(err.Error(), "trial records were read")) {
+				t.Fatalf("Execute() error = %v, want a refusal", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "trials.jsonl")); !os.IsNotExist(statErr) {
+				t.Fatalf("an incomplete export was written: %v", statErr)
+			}
+		})
+	}
+}
+
+// A failed trial's transcript comes only from the Task the record names: a
+// replacement with the same name is marked, not exported as the trial's.
+func TestEvalOutputBindsTranscriptsToTheTrialTask(t *testing.T) {
+	runJSON := `{"metadata":{"name":"r","namespace":"team-a","uid":"uid-r"},"status":{"phase":"Succeeded","counts":{"planned":1,"completed":1}}}`
+	for name, test := range map[string]struct {
+		taskUID  string
+		want     string
+		wantRead bool
+	}{
+		"same Task":     {taskUID: "task-1", want: `"ModelMessage"`, wantRead: true},
+		"replaced Task": {taskUID: "task-2", want: "replaced by another with the same name"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reads := 0
+			srv := exportTestServer(t, runJSON, exportTestTrial, test.taskUID, &reads)
+			defer srv.Close()
+			dir := filepath.Join(t.TempDir(), "out")
+			if out, err := runEvalCommand(t, "eval", "get", "r", "-n", "team-a", "--server", srv.URL, "--token", "tok", "--output-dir", dir); err != nil {
+				t.Fatalf("Execute() = %v\n%s", err, out)
+			}
+			events, err := os.ReadFile(filepath.Join(dir, "events", "eval-b.json"))
+			if err != nil || !strings.Contains(string(events), test.want) {
+				t.Fatalf("events = %s, %v; want %q", events, err, test.want)
+			}
+			if (reads > 0) != test.wantRead {
+				t.Fatalf("event pages read = %d", reads)
+			}
+		})
+	}
+}
