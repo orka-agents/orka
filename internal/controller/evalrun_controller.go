@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
@@ -105,6 +106,8 @@ type EvalRunReconciler struct {
 	// ProposerModels are the model names a candidate may switch to. Empty
 	// allows only prompt changes.
 	ProposerModels []string
+
+	promotions promotionGate
 }
 
 // evalRunObservation is what one reconcile resolves from the cluster.
@@ -120,7 +123,7 @@ type evalRunObservation struct {
 // +kubebuilder:rbac:groups=core.orka.ai,resources=evalruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core.orka.ai,resources=tasks,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=core.orka.ai,resources=repositorymonitors,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=core.orka.ai,resources=agents,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get
 
 func (r *EvalRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -897,6 +900,11 @@ func (r *EvalRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if r.TrialStore == nil || r.ResultStore == nil || r.EventStore == nil {
 		return fmt.Errorf("EvalRun controller requires trial, result and execution event stores")
+	}
+	// Settle promotion records an earlier process left open before any
+	// promote or rollback runs; it needs leadership, as the API server does.
+	if err := mgr.Add(manager.RunnableFunc(r.recoverAgentPromotionsUntilDone)); err != nil {
+		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1alpha1.EvalRun{}).

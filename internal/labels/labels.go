@@ -72,6 +72,10 @@ const (
 	LabelAuthProfile   = "orka.ai/auth-profile"
 
 	// Annotations
+	// AnnotationPromotionRecord names the promotion log record whose promote
+	// or rollback last wrote the Agent's spec. The controller sets it in the
+	// same update, so a restart can tell whether an open record committed.
+	AnnotationPromotionRecord               = "orka.ai/promotion-record"
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"

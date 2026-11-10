@@ -225,6 +225,8 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/agents` | `core.orka.ai` | `agents` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none |
 | `GET` | `/api/v1/agents/:name/system-prompt` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | Named `get` on core `configmaps` for the Agent's `systemPrompt.configMapRef` |
+| `GET` | `/api/v1/agents/:name/promotions` | `core.orka.ai` | `agents` | `get` | `:name` | `Q` | none; transaction-token callers are refused |
+| `POST` | `/api/v1/agents/:name/rollout` | `core.orka.ai` | `agents` | `promote` | `:name` | `Q` | Only a person in a `--eval-promoter-groups` group; `system:` users and transaction-token callers are refused. `promote` is checked against Kubernetes RBAC for every caller, direct OIDC users included |
 | `PUT` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `patch` | `:name` | `Q` | none |
 | `DELETE` | `/api/v1/agents/:name` | `core.orka.ai` | `agents` | `delete` | `:name` | `Q` | none |
 | `POST` | `/api/v1/skills` | `core.orka.ai` | `skills` | `create` | empty | `C` | none |
