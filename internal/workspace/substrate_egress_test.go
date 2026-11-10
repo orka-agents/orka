@@ -109,6 +109,20 @@ type fakeEgressControl struct {
 	nextVersion int64
 	// writeTime stamps a stored policy, as the control plane does.
 	writeTime time.Time
+	// actorCreated is the Actor's creation time; actorErr fails reading it.
+	actorCreated time.Time
+	actorErr     error
+}
+
+func (f *fakeEgressControl) GetActor(_ context.Context, in *ateapipb.GetActorRequest, _ ...grpc.CallOption) (*ateapipb.Actor, error) {
+	if f.actorErr != nil {
+		return nil, f.actorErr
+	}
+	actor := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: in.GetActor().GetName()}}
+	if !f.actorCreated.IsZero() {
+		actor.Metadata.CreateTime = timestamppb.New(f.actorCreated)
+	}
+	return actor, nil
 }
 
 func (f *fakeEgressControl) stampWrite() {
@@ -184,11 +198,12 @@ func TestEnsureSubstrateActorEgressPolicyCreatesAndVerifies(t *testing.T) {
 }
 
 // The egress gateway enforces a policy some time after it is stored, so the
-// caller needs to know when the stored rules were written and whether they
-// replaced others.
+// caller needs to know when the stored rules were written, whether they
+// replaced others, and how long the Actor has existed.
 func TestApplySubstrateActorEgressPolicyReportsTheStoredPolicy(t *testing.T) {
+	actorCreated := time.Unix(1_799_999_000, 0).UTC()
 	created, replaced := time.Unix(1_800_000_000, 0).UTC(), time.Unix(1_800_000_600, 0).UTC()
-	control := &fakeEgressControl{writeTime: created}
+	control := &fakeEgressControl{writeTime: created, actorCreated: actorCreated}
 	rules := []SubstrateEgressRule{{Scheme: "https", Host: "api.github.com"}}
 	steps := []struct {
 		name  string
@@ -196,9 +211,9 @@ func TestApplySubstrateActorEgressPolicyReportsTheStoredPolicy(t *testing.T) {
 		at    time.Time
 		want  SubstrateEgressPolicyState
 	}{
-		{"created", rules, created, SubstrateEgressPolicyState{Version: 1, UpdateTime: created}},
-		{"unchanged", rules, replaced, SubstrateEgressPolicyState{Version: 1, UpdateTime: created}},
-		{"replaced", nil, replaced, SubstrateEgressPolicyState{Version: 2, UpdateTime: replaced}},
+		{"created", rules, created, SubstrateEgressPolicyState{Version: 1, UpdateTime: created, ActorCreateTime: actorCreated}},
+		{"unchanged", rules, replaced, SubstrateEgressPolicyState{Version: 1, UpdateTime: created, ActorCreateTime: actorCreated}},
+		{"replaced", nil, replaced, SubstrateEgressPolicyState{Version: 2, UpdateTime: replaced, ActorCreateTime: actorCreated}},
 	}
 	for _, step := range steps {
 		control.writeTime = step.at
@@ -207,10 +222,44 @@ func TestApplySubstrateActorEgressPolicyReportsTheStoredPolicy(t *testing.T) {
 			t.Fatalf("%s: state = %+v, %v, want %+v", step.name, got, err, step.want)
 		}
 	}
-	// A failed apply reports no state a caller could mistake for a stored policy.
-	control.getErr = status.Error(codes.Unavailable, "down")
+	// Without the Actor's age the caller cannot tell whether its name may have
+	// a cached policy, so the apply fails rather than report half a state.
+	control.actorErr = status.Error(codes.Unavailable, "down")
+	if got, err := applySubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", nil); err == nil || got != (SubstrateEgressPolicyState{}) {
+		t.Fatalf("state = %+v, %v, want an error and no state", got, err)
+	}
+	control.actorErr, control.getErr = nil, status.Error(codes.Unavailable, "down")
 	if got, err := applySubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", rules); err == nil || got != (SubstrateEgressPolicyState{}) {
 		t.Fatalf("state = %+v, %v, want an error and no state", got, err)
+	}
+}
+
+func TestSubstrateEgressPolicyStateEnforcedAfter(t *testing.T) {
+	const window = 14 * time.Second
+	long := time.Unix(1_800_000_000, 0).UTC()
+	recent := long.Add(time.Hour)
+	for name, tc := range map[string]struct {
+		state SubstrateEgressPolicyState
+		want  time.Time
+	}{
+		// The gateway may remember the rules this policy replaced.
+		"replaced policy": {SubstrateEgressPolicyState{Version: 2, UpdateTime: recent, ActorCreateTime: long}, recent.Add(window)},
+		// A new Actor's name may have belonged to a deleted one, whose policy
+		// the gateway may remember.
+		"new actor": {SubstrateEgressPolicyState{Version: 1, UpdateTime: recent, ActorCreateTime: recent}, recent.Add(window)},
+		// An Actor created ahead of its first policy has no such history left.
+		"first policy of an old actor": {SubstrateEgressPolicyState{Version: 1, UpdateTime: recent, ActorCreateTime: long}, long.Add(window)},
+		"replaced before the actor was recreated": {
+			SubstrateEgressPolicyState{Version: 3, UpdateTime: long, ActorCreateTime: recent}, recent.Add(window),
+		},
+		"unknown": {SubstrateEgressPolicyState{}, time.Time{}},
+	} {
+		if got := tc.state.EnforcedAfter(window); !got.Equal(tc.want) {
+			t.Errorf("%s: EnforcedAfter = %s, want %s", name, got, tc.want)
+		}
+	}
+	if got := (SubstrateEgressPolicyState{Version: 2, UpdateTime: recent, ActorCreateTime: long}).EnforcedAfter(0); !got.IsZero() {
+		t.Errorf("EnforcedAfter(0) = %s, want no wait for a gateway that does not cache", got)
 	}
 }
 

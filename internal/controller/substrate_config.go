@@ -70,11 +70,13 @@ type SubstrateConfig struct {
 	// EnableTelemetry mirrors --enable-telemetry: Substrate control and router
 	// clients then propagate Task trace context and record client spans.
 	EnableTelemetry bool
-	// EgressPolicyPropagation is how long after an Actor's egress policy is
-	// replaced the egress gateway may still apply the previous rules. A Tool
-	// is not ready, and its Actor is not resumed, until it has passed. Set it
-	// to the gateway's --egress-policy-cache-ttl plus 4s; zero does not wait,
-	// which is correct only for a gateway whose cache is disabled.
+	// EgressPolicyPropagation is how long the egress gateway may apply rules
+	// other than an Actor's stored policy: after the policy is replaced, and
+	// after the Actor is created under a name a deleted Actor may have had.
+	// Until it has passed the Tool is not ready and its Actor does not run; a
+	// running Actor is stopped. Set it to the gateway's
+	// --egress-policy-cache-ttl plus 4s; zero does not wait, which is correct
+	// only for a gateway whose cache is disabled.
 	EgressPolicyPropagation time.Duration
 }
 
