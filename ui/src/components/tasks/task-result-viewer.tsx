@@ -8,6 +8,7 @@ import { GitBranch } from 'lucide-react'
 import { DiffViewer } from './diff-viewer'
 import { TaskFilesChanged } from './task-files-changed'
 import { isNotFoundError } from '@/lib/api-client'
+import { isTaskTerminal } from '@/lib/task-phase'
 
 interface StructuredResult {
   summary?: string
@@ -103,7 +104,7 @@ interface TaskResultViewerProps {
 }
 
 export function TaskResultViewer({ taskId, taskPhase, taskUid }: TaskResultViewerProps) {
-  const terminal = ['Succeeded', 'Failed', 'Cancelled'].includes(taskPhase ?? '')
+  const terminal = isTaskTerminal(taskPhase)
   const { data, isLoading, isFetched, isFetching, error, refetch } = useTaskResult(taskId, terminal, taskUid)
 
   const resultText = data?.result
