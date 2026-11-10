@@ -65,8 +65,9 @@ kubectl annotate executionworkspaceclass sandbox-debug -n team-a \
 A ValidatingAdmissionPolicy only lets callers holding the dedicated
 `operator-access` verb on the class set, change, or remove this annotation.
 `cluster-admin` has that verb through its wildcard. No built-in Orka role
-grants it. Class editors and Task authors, who only need `use` on a class,
-cannot enable operator access. To grant the verb to a platform team:
+grants it, including the class admin role that the raw installer ships. Class
+editors and Task authors, who only need `use` on a class, cannot enable
+operator access. To grant the verb to a platform team:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1

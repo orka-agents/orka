@@ -1994,7 +1994,15 @@ rules:
   resources:
   - executionworkspaceclasses
   verbs:
-  - '*'
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - use
+  - watch
 - apiGroups:
   - workspace.orka.ai
   resources:

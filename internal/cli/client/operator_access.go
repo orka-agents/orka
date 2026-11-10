@@ -117,8 +117,17 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 	if err := write(operatoraccess.Frame(operatoraccess.ChannelControl, request)); err != nil {
 		return operatoraccess.Status{}, fmt.Errorf("send exec request: %w", err)
 	}
+	// Input that cannot be read is not the end of the input. Telling the
+	// remote command it was would let it finish on truncated input and report
+	// success, so a failed read ends the exec instead.
+	stdinFailure := make(chan error, 1)
 	if options.Stdin && streams.Stdin != nil {
-		go pumpOperatorStdin(streams.Stdin, options.TTY, write)
+		go func() {
+			if err := pumpOperatorStdin(streams.Stdin, options.TTY, write); err != nil {
+				stdinFailure <- err
+				cancel()
+			}
+		}()
 	}
 	if streams.Controls != nil {
 		go pumpOperatorControls(streamCtx, streams.Controls, write)
@@ -128,6 +137,11 @@ func (c *Client) OperatorExec(ctx context.Context, taskName string, options oper
 		if err != nil {
 			if ctx.Err() != nil {
 				return operatoraccess.Status{}, ctx.Err()
+			}
+			select {
+			case stdinErr := <-stdinFailure:
+				return operatoraccess.Status{}, fmt.Errorf("read command stdin: %w", stdinErr)
+			default:
 			}
 			var closeErr websocket.CloseError
 			if errors.As(err, &closeErr) && closeErr.Reason != "" {
@@ -169,18 +183,24 @@ func writeOperatorOutput(w io.Writer, data []byte) error {
 	return err
 }
 
-func pumpOperatorStdin(stdin io.Reader, tty bool, write func([]byte) error) {
+// pumpOperatorStdin forwards stdin until it ends. Only a real end of input is
+// announced to the remote command; any other read error is returned.
+func pumpOperatorStdin(stdin io.Reader, tty bool, write func([]byte) error) error {
 	buffer := make([]byte, 16<<10)
 	for {
 		n, readErr := stdin.Read(buffer)
 		if n > 0 && write(operatoraccess.Frame(operatoraccess.ChannelStdin, buffer[:n])) != nil {
-			return
+			return nil
 		}
-		if readErr != nil {
+		switch {
+		case readErr == nil:
+		case errors.Is(readErr, io.EOF):
 			if !tty {
 				_ = write(operatoraccess.ControlFrame(operatoraccess.Control{Type: operatoraccess.ControlEOF}))
 			}
-			return
+			return nil
+		default:
+			return readErr
 		}
 	}
 }
