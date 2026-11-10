@@ -93,6 +93,7 @@ func (r *EvalRunReconciler) prepareExperiment(ctx context.Context, run *corev1al
 			MaxCandidatesPerBaseline:    gate.MaxCandidatesPerBaseline,
 			MaxExperimentsPerHeldOutSet: gate.MaxExperimentsPerHeldOutSet,
 			MinTargetImprovementPoints:  gate.MinTargetImprovementPoints,
+			MaxGuardrailDropPoints:      gate.MaxGuardrailDropPoints,
 			Significance:                evals.FormatDecimal(gate.Significance),
 		},
 	}, nil
@@ -307,6 +308,7 @@ func (r *EvalRunReconciler) experimentInput(ctx context.Context, candidate, base
 			MaxCandidatesPerBaseline:    gate.MaxCandidatesPerBaseline,
 			MaxExperimentsPerHeldOutSet: gate.MaxExperimentsPerHeldOutSet,
 			MinTargetImprovementPoints:  gate.MinTargetImprovementPoints,
+			MaxGuardrailDropPoints:      gate.MaxGuardrailDropPoints,
 			Significance:                significance,
 		},
 		Grader: string(candidate.Spec.Experiment.Target.Grader),
