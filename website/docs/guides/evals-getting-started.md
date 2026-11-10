@@ -172,10 +172,15 @@ spec:
   maxConcurrentTrials: 6
   graders: [verdict, localization, contract, honesty]
   experiment:
-    hypothesis: The careful prompt on a larger model catches more defects.
+    hypothesis: The careful prompt on a larger model reviews more accurately.
     baselineRunRef: {name: review-baseline}
-    target: {grader: verdict, tag: defect}
+    target: {grader: verdict}
 ```
+
+Pick the target with care. `verdict` over every case rewards a reviewer that catches
+defects *and* passes clean changes. A target on the `defect` tag alone rewards one that
+blocks everything: a reviewer that flags every pull request scores perfectly there. The
+other graders still guard against regressions, but only the target has to improve.
 
 ```bash
 orka eval run -f candidate.yaml --wait
