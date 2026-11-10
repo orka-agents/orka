@@ -302,6 +302,17 @@ keeps data, and the next successful reconcile resumes it. A template that
 snapshots `VOLUMES` and mounts no durable directory cannot be suspended by
 Substrate, so its Actor is deleted and created again later.
 
+A stored policy is not enforced at once. The Substrate egress gateway caches each
+Actor's policy for `--egress-policy-cache-ttl` (10s by default) and does not
+invalidate the entry when the policy changes. After the controller replaces an
+Actor's policy, the Tool reports `EgressPolicyReady=False` with reason
+`EgressPolicyPropagating`, stays unavailable, and a suspended Actor is not
+resumed, for `--substrate-egress-policy-propagation` (14s by default: the cache
+TTL plus the 4s a policy fetch may take). Set the flag to your gateway's TTL
+plus 4s, or to `0` if its cache is disabled. An Actor that is already running
+keeps running during that time and can still reach hosts the old rules allowed.
+A new Tool's first policy replaces nothing and is not delayed.
+
 ### Grant restricted AI workers the Tool credential {#mcp-tool-credential-grant}
 
 Workers used to read a Substrate MCP Tool's `http.authSecretRef` themselves, from

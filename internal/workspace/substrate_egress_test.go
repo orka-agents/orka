@@ -5,12 +5,14 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestValidateSubstrateEgressRulesRejectsUnsafeHosts(t *testing.T) {
@@ -105,6 +107,14 @@ type fakeEgressControl struct {
 	lastUpdate  *ateapipb.UpdateActorEgressPolicyRequest
 	actorRefs   []*ateapipb.ObjectRef
 	nextVersion int64
+	// writeTime stamps a stored policy, as the control plane does.
+	writeTime time.Time
+}
+
+func (f *fakeEgressControl) stampWrite() {
+	if !f.writeTime.IsZero() {
+		f.policy.Metadata.UpdateTime = timestamppb.New(f.writeTime)
+	}
 }
 
 func (f *fakeEgressControl) GetActorEgressPolicy(_ context.Context, in *ateapipb.GetActorEgressPolicyRequest, _ ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
@@ -135,6 +145,7 @@ func (f *fakeEgressControl) CreateActorEgressPolicy(_ context.Context, in *ateap
 	f.nextVersion++
 	f.policy = proto.CloneOf(in.GetEgressPolicy())
 	f.policy.Metadata.Uid, f.policy.Metadata.Version = "uid-1", f.nextVersion
+	f.stampWrite()
 	return proto.CloneOf(f.policy), nil
 }
 
@@ -150,6 +161,7 @@ func (f *fakeEgressControl) UpdateActorEgressPolicy(_ context.Context, in *ateap
 	f.nextVersion++
 	f.policy = proto.CloneOf(in.GetEgressPolicy())
 	f.policy.Metadata.Version = f.nextVersion
+	f.stampWrite()
 	return proto.CloneOf(f.policy), nil
 }
 
@@ -168,6 +180,37 @@ func TestEnsureSubstrateActorEgressPolicyCreatesAndVerifies(t *testing.T) {
 	// Idempotent: a matching policy is not rewritten.
 	if err := ensureSubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", rules); err != nil || control.creates != 1 || control.updates != 0 {
 		t.Fatalf("second ensure err=%v creates=%d updates=%d", err, control.creates, control.updates)
+	}
+}
+
+// The egress gateway enforces a policy some time after it is stored, so the
+// caller needs to know when the stored rules were written and whether they
+// replaced others.
+func TestApplySubstrateActorEgressPolicyReportsTheStoredPolicy(t *testing.T) {
+	created, replaced := time.Unix(1_800_000_000, 0).UTC(), time.Unix(1_800_000_600, 0).UTC()
+	control := &fakeEgressControl{writeTime: created}
+	rules := []SubstrateEgressRule{{Scheme: "https", Host: "api.github.com"}}
+	steps := []struct {
+		name  string
+		rules []SubstrateEgressRule
+		at    time.Time
+		want  SubstrateEgressPolicyState
+	}{
+		{"created", rules, created, SubstrateEgressPolicyState{Version: 1, UpdateTime: created}},
+		{"unchanged", rules, replaced, SubstrateEgressPolicyState{Version: 1, UpdateTime: created}},
+		{"replaced", nil, replaced, SubstrateEgressPolicyState{Version: 2, UpdateTime: replaced}},
+	}
+	for _, step := range steps {
+		control.writeTime = step.at
+		got, err := applySubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", step.rules)
+		if err != nil || got != step.want {
+			t.Fatalf("%s: state = %+v, %v, want %+v", step.name, got, err, step.want)
+		}
+	}
+	// A failed apply reports no state a caller could mistake for a stored policy.
+	control.getErr = status.Error(codes.Unavailable, "down")
+	if got, err := applySubstrateActorEgressPolicy(context.Background(), control, "mcp-1.tools", rules); err == nil || got != (SubstrateEgressPolicyState{}) {
+		t.Fatalf("state = %+v, %v, want an error and no state", got, err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	ateapipb "github.com/orka-agents/orka/internal/substratepb"
 	"google.golang.org/grpc"
@@ -91,41 +92,73 @@ func CompileSubstrateActorEgressPolicy(atespace string, rules []SubstrateEgressR
 // and verifies it. Any error means the policy may not match; callers must not
 // resume the Actor.
 func (c *SubstrateNativeClient) EnsureActorEgressPolicy(ctx context.Context, actorID string, rules []SubstrateEgressRule) error {
+	_, err := c.ApplyActorEgressPolicy(ctx, actorID, rules)
+	return err
+}
+
+// SubstrateEgressPolicyState describes an Actor's stored egress policy.
+//
+// Storing a policy does not make it effective at once. The Substrate egress
+// gateway caches each Actor's policy by Actor name (--egress-policy-cache-ttl,
+// 10s by default, plus a fetch of up to 4s that may have read the previous
+// rules) and nothing invalidates an entry. Until that time has passed since
+// UpdateTime, the gateway may still decide by the rules this write replaced.
+type SubstrateEgressPolicyState struct {
+	// Version is 1 for a policy that was created and never replaced.
+	Version int64
+	// UpdateTime is when the control plane stored the current rules.
+	UpdateTime time.Time
+}
+
+// ApplyActorEgressPolicy is EnsureActorEgressPolicy that also reports the
+// stored policy's state, so the caller can wait for it to take effect.
+func (c *SubstrateNativeClient) ApplyActorEgressPolicy(ctx context.Context, actorID string, rules []SubstrateEgressRule) (SubstrateEgressPolicyState, error) {
 	if c == nil || c.Control == nil {
-		return NewError("apply egress policy", ErrorKindInvalidArgument, "Substrate native client is not configured", false, nil)
+		return SubstrateEgressPolicyState{}, NewError("apply egress policy", ErrorKindInvalidArgument, "Substrate native client is not configured", false, nil)
 	}
-	return ensureSubstrateActorEgressPolicy(ctx, c.Control, actorID, rules)
+	return applySubstrateActorEgressPolicy(ctx, c.Control, actorID, rules)
 }
 
 func ensureSubstrateActorEgressPolicy(ctx context.Context, control substrateEgressControl, actorID string, rules []SubstrateEgressRule) error {
+	_, err := applySubstrateActorEgressPolicy(ctx, control, actorID, rules)
+	return err
+}
+
+func applySubstrateActorEgressPolicy(ctx context.Context, control substrateEgressControl, actorID string, rules []SubstrateEgressRule) (SubstrateEgressPolicyState, error) {
+	fail := func(err error) (SubstrateEgressPolicyState, error) { return SubstrateEgressPolicyState{}, err }
 	if !strings.Contains(strings.TrimSpace(actorID), ".") {
-		return NewError("apply egress policy", ErrorKindInvalidArgument, "egress policy requires a qualified Actor ID (name.atespace)", false, nil)
+		return fail(NewError("apply egress policy", ErrorKindInvalidArgument, "egress policy requires a qualified Actor ID (name.atespace)", false, nil))
 	}
 	ref, err := substrateObjectRef(actorID, "")
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	desired, err := CompileSubstrateActorEgressPolicy(ref.GetAtespace(), rules)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	for range substrateEgressApplyAttempts {
 		if err := ctx.Err(); err != nil {
-			return substrateControlError("apply egress policy", err)
+			return fail(substrateControlError("apply egress policy", err))
 		}
 		existing, getErr := control.GetActorEgressPolicy(ctx, &ateapipb.GetActorEgressPolicyRequest{Actor: proto.CloneOf(ref), Name: substrateEgressPolicyName})
 		switch {
 		case status.Code(getErr) == codes.NotFound:
 			_, err = control.CreateActorEgressPolicy(ctx, &ateapipb.CreateActorEgressPolicyRequest{Actor: proto.CloneOf(ref), EgressPolicy: proto.CloneOf(desired)})
 		case getErr != nil:
-			return substrateControlError("get egress policy", getErr)
+			return fail(substrateControlError("get egress policy", getErr))
 		case substrateEgressRulesEqual(existing.GetRules(), desired.GetRules()):
 			// Verified by a fresh read after any write.
-			return nil
+			metadata := existing.GetMetadata()
+			state := SubstrateEgressPolicyState{Version: metadata.GetVersion()}
+			if updated := metadata.GetUpdateTime(); updated != nil {
+				state.UpdateTime = updated.AsTime()
+			}
+			return state, nil
 		default:
 			metadata := existing.GetMetadata()
 			if metadata.GetUid() == "" || metadata.GetVersion() == 0 {
-				return NewError("apply egress policy", ErrorKindFailedPrecondition, "existing egress policy has no UID/version precondition", false, nil)
+				return fail(NewError("apply egress policy", ErrorKindFailedPrecondition, "existing egress policy has no UID/version precondition", false, nil))
 			}
 			update := proto.CloneOf(desired)
 			update.Metadata = proto.CloneOf(metadata)
@@ -136,10 +169,10 @@ func ensureSubstrateActorEgressPolicy(ctx context.Context, control substrateEgre
 			// Re-read: verify our write or reload after a concurrent one.
 			continue
 		default:
-			return substrateControlError("write egress policy", err)
+			return fail(substrateControlError("write egress policy", err))
 		}
 	}
-	return NewError("apply egress policy", ErrorKindFailedPrecondition, "actor egress policy did not converge after concurrent updates", true, nil)
+	return fail(NewError("apply egress policy", ErrorKindFailedPrecondition, "actor egress policy did not converge after concurrent updates", true, nil))
 }
 
 func canonicalSubstrateEgressRules(rules []SubstrateEgressRule) ([]SubstrateEgressRule, error) {
