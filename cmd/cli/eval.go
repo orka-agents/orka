@@ -473,6 +473,14 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 	if current.UID != run.UID {
 		return fmt.Errorf("evalrun/%s was deleted and recreated before its trial records were read", run.Name)
 	}
+	// Deleting a run removes its trial records before its finalizer, so a
+	// run on its way out can list fewer records than it completed.
+	if !current.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("evalrun/%s is being deleted, so its trial records may be incomplete", run.Name)
+	}
+	if current.Status.Phase == corev1alpha1.EvalRunPhaseSucceeded && int32(len(trials)) < current.Status.Counts.Completed {
+		return fmt.Errorf("evalrun/%s completed %d trials but %d trial records were read", run.Name, current.Status.Counts.Completed, len(trials))
+	}
 	// The steps below change, empty and write into events/, so it must be a
 	// real directory: through a symlink they would act on its target.
 	eventsDir := filepath.Join(dir, "events")
@@ -520,15 +528,9 @@ func writeEvalRunOutput(ctx context.Context, c *client.Client, run *corev1alpha1
 		if errs := validation.IsDNS1123Subdomain(trial.TaskName); len(errs) > 0 {
 			return fmt.Errorf("trial %d of case %q names an invalid Task", trial.Trial, trial.CaseID)
 		}
-		events, err := allTaskEvents(ctx, c, run.Namespace, trial.TaskName)
-		switch {
-		case err == nil:
-		case strings.Contains(err.Error(), "HTTP 404"):
-			// The trial Task is gone already; the record still names it.
-			events = fmt.Appendf(nil, "{\"taskName\": %q, \"missing\": \"the Task no longer exists\"}\n", trial.TaskName)
-		default:
-			// Any other failure leaves the export incomplete, so it fails.
-			return fmt.Errorf("read events of failed trial Task %s: %w", trial.TaskName, err)
+		events, err := evalTrialEvents(ctx, c, run.Namespace, trial)
+		if err != nil {
+			return err
 		}
 		if err := writePrivateFile(filepath.Join(eventsDir, trial.TaskName+".json"), events); err != nil {
 			return err
@@ -562,6 +564,48 @@ const (
 	evalEventPageSize = 500
 	evalEventMaxPages = 1000
 )
+
+// evalTrialEvents reads a failed trial's events. A Task name can be reused,
+// so when the record names the trial Task's UID, the Task must still be that
+// one before and after the pages are read; otherwise the transcript is
+// marked missing rather than taken from the replacement.
+func evalTrialEvents(ctx context.Context, c *client.Client, namespace string, trial store.EvalTrialRecord) ([]byte, error) {
+	missing := func(why string) []byte {
+		return fmt.Appendf(nil, "{\"taskName\": %q, \"missing\": %q}\n", trial.TaskName, why)
+	}
+	const gone, replaced = "the Task no longer exists", "the Task was replaced by another with the same name"
+	sameTask := func() (bool, error) {
+		if trial.TaskUID == "" {
+			return true, nil
+		}
+		task, err := c.GetTask(ctx, trial.TaskName, client.GetOptions{Namespace: namespace})
+		if err != nil {
+			return false, err
+		}
+		metadata, _ := (*task)["metadata"].(map[string]any)
+		uid, _ := metadata["uid"].(string)
+		return uid == trial.TaskUID, nil
+	}
+	same, err := sameTask()
+	if err == nil && same {
+		var events []byte
+		if events, err = allTaskEvents(ctx, c, namespace, trial.TaskName); err == nil {
+			if same, err = sameTask(); err == nil && same {
+				return events, nil
+			}
+		}
+	}
+	switch {
+	case err == nil:
+		return missing(replaced), nil
+	case strings.Contains(err.Error(), "HTTP 404"):
+		// The trial Task is gone already; the record still names it.
+		return missing(gone), nil
+	default:
+		// Any other failure leaves the export incomplete, so it fails.
+		return nil, fmt.Errorf("read events of failed trial Task %s: %w", trial.TaskName, err)
+	}
+}
 
 // allTaskEvents reads every page of a Task's events, following after= until
 // the stream's latest sequence, and returns them as one document.
