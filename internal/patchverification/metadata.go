@@ -2,8 +2,9 @@ package patchverification
 
 import (
 	"fmt"
-	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"strings"
+
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
 type DeclaredChange = verificationv1.DeclaredChange

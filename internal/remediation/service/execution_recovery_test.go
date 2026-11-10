@@ -90,6 +90,8 @@ func TestExecutionReceiptRecoveryAfterCoordinatorRestart(t *testing.T) {
 			stop = f.start()
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
 				require.NoError(c, EnsureNoActiveRuns(t.Context(), f.client, "private"))
+				require.True(c, apierrors.IsNotFound(f.client.Get(t.Context(),
+					client.ObjectKey{Namespace: "private", Name: runSlotName}, &corev1.ConfigMap{})))
 			}, 10*time.Second, time.Millisecond)
 			stop()
 

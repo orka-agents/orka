@@ -635,26 +635,8 @@ func (s *Coordinator) stop(ctx context.Context, id, reason string) {
 		done, err := s.cancelAgent(ctx, r, op)
 		settled = settled && done && err == nil
 	}
-	for key, op := range r.state.Executions {
-		if !op.Attempted || op.Rejected || op.Settled || !op.Record.empty() {
-			continue
-		}
-		if op.Receipt == nil {
-			if err := s.recoverExecution(ctx, r, key, op); err != nil {
-				settled = false
-				continue
-			}
-			if op.Settled {
-				continue
-			}
-		}
-		if err := s.requireCurrentRun(ctx, r); err != nil {
-			return
-		}
-		if err := s.config.Backend.Cancel(ctx, *op.Receipt); err != nil {
-			settled = false
-		}
-	}
+	// Backend cleanup must still run while agent cleanup is pending.
+	settled = s.settleExecutions(ctx, r) && settled
 	if !settled || ctx.Err() != nil {
 		return
 	}
@@ -697,6 +679,31 @@ func (s *Coordinator) stop(ctx context.Context, id, reason string) {
 	if err == nil {
 		_ = s.releaseRunSlot(ctx, current)
 	}
+}
+
+func (s *Coordinator) settleExecutions(ctx context.Context, r *run) bool {
+	settled := true
+	for key, op := range r.state.Executions {
+		if !op.Attempted || op.Rejected || op.Settled || !op.Record.empty() {
+			continue
+		}
+		if op.Receipt == nil {
+			if err := s.recoverExecution(ctx, r, key, op); err != nil {
+				settled = false
+				continue
+			}
+			if op.Settled {
+				continue
+			}
+		}
+		if err := s.requireCurrentRun(ctx, r); err != nil {
+			return false
+		}
+		if err := s.config.Backend.Cancel(ctx, *op.Receipt); err != nil {
+			settled = false
+		}
+	}
+	return settled
 }
 
 func boundedSelectedFiles(inventory []source.Entry, selected []string) ([]string, bool, bool) {

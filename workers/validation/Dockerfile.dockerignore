@@ -3,6 +3,16 @@
 !go.mod
 !go.sum
 
+!pkg/
+pkg/**
+!pkg/storage/
+pkg/storage/**
+!pkg/storage/v1/
+pkg/storage/v1/**
+!pkg/storage/v1/verification/
+pkg/storage/v1/verification/**
+!pkg/storage/v1/verification/*.go
+
 !internal/
 internal/**
 !internal/patchverification/

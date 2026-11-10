@@ -8,6 +8,7 @@ ENV TMPDIR=/build/work GOTOOLCHAIN=local
 RUN mkdir -p /build/work /artifacts
 COPY go.mod go.sum ./
 COPY internal/patchverification/ ./internal/patchverification/
+COPY pkg/storage/v1/verification/ ./pkg/storage/v1/verification/
 COPY workers/validation/ ./workers/validation/
 RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,target=/root/.cache/go-build,sharing=locked \

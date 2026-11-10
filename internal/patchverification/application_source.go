@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"io"
 	"io/fs"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
 // Application preparation retains the existing provenance/Manifest protocol;

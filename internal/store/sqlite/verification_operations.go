@@ -12,6 +12,12 @@ type verificationOperationResult[T any] struct {
 	Code  string
 }
 
+const (
+	verificationBindingCode   = "binding"
+	verificationConflictCode  = "conflict"
+	verificationIntegrityCode = "integrity"
+)
+
 func verificationErrorCode(err error) (string, bool) {
 	switch err {
 	case nil:
@@ -19,13 +25,13 @@ func verificationErrorCode(err error) (string, bool) {
 	case pv.ErrRunNotFound:
 		return "not-found", true
 	case pv.ErrBinding:
-		return "binding", true
+		return verificationBindingCode, true
 	case pv.ErrConflict:
-		return "conflict", true
+		return verificationConflictCode, true
 	case pv.ErrClosed:
 		return "closed", true
 	case pv.ErrIntegrity:
-		return "integrity", true
+		return verificationIntegrityCode, true
 	case pv.ErrLimit:
 		return "limit", true
 	case pv.ErrEvidence:
@@ -41,13 +47,13 @@ func verificationOutcomeError(code string) error {
 		return nil
 	case "not-found":
 		return pv.ErrRunNotFound
-	case "binding":
+	case verificationBindingCode:
 		return pv.ErrBinding
-	case "conflict":
+	case verificationConflictCode:
 		return pv.ErrConflict
 	case "closed":
 		return pv.ErrClosed
-	case "integrity":
+	case verificationIntegrityCode:
 		return pv.ErrIntegrity
 	case "limit":
 		return pv.ErrLimit

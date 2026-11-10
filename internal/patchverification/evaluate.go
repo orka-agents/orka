@@ -9,8 +9,9 @@ import (
 	"regexp"
 	"strings"
 
-	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 	"unicode/utf8"
+
+	verificationv1 "github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
 type Conclusion = verificationv1.Conclusion

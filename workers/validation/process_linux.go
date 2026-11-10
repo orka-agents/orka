@@ -447,7 +447,9 @@ func (manager *processManager) ownedProcesses() ([]processIdentity, error) {
 	return manager.ownedProcessInventory(inventory, os.Getpid())
 }
 
-func (manager *processManager) ownedProcessInventory(inventory map[int]processIdentity, supervisor int) ([]processIdentity, error) {
+func (manager *processManager) ownedProcessInventory(
+	inventory map[int]processIdentity, supervisor int,
+) ([]processIdentity, error) {
 	uids := make(map[int]bool)
 	for _, process := range manager.processes {
 		uids[process.uid] = true
