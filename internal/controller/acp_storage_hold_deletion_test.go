@@ -43,6 +43,34 @@ func heldDeletingTask(t *testing.T, fixture *recoveryFixture) (*corev1alpha1.Tas
 	return task, receipt, hold
 }
 
+// requireDeletingTaskCleanupProceeds checks that recovery handed the released
+// deleting Task to the current epoch, whose terminal recovery owns its pending
+// runtime cleanup, and that this recovery completes the cleanup the Task
+// finalizer waits on.
+func requireDeletingTaskCleanupProceeds(t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task) {
+	t.Helper()
+	released := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), released); err != nil {
+		t.Fatal(err)
+	}
+	if released.Status.Execution == nil || released.Status.Execution.ControllerEpoch != fixture.fence.Epoch {
+		t.Fatalf("released deleting Task execution = %#v, want controller epoch %d", released.Status.Execution, fixture.fence.Epoch)
+	}
+	if taskScopedRuntimeSessionCleanupComplete(released) {
+		t.Fatal("the released deleting Task has no runtime cleanup left to prove")
+	}
+	if err := fixture.dispatcher.recoverStaleTask(fixture.ctx, released, fixture.fence); err != nil {
+		t.Fatalf("current-epoch terminal recovery: %v", err)
+	}
+	cleaned := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), cleaned); err != nil {
+		t.Fatal(err)
+	}
+	if !taskScopedRuntimeSessionCleanupComplete(cleaned) {
+		t.Fatalf("released deleting Task runtime cleanup is still pending: %#v", cleaned.Status.Execution)
+	}
+}
+
 // Acknowledging the hold of a Task already marked for deletion still records
 // its outcome as unknown, so the finalizer's terminal attempt is reached.
 func TestACPDispatcherReleasesAcknowledgedHoldOfADeletingTask(t *testing.T) {
@@ -66,6 +94,7 @@ func TestACPDispatcherReleasesAcknowledgedHoldOfADeletingTask(t *testing.T) {
 		t.Fatalf("acknowledged deleting Task execution = %#v, want OutcomeUnknown", updated.Status.Execution)
 	}
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryAcknowledgedReason)
+	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }
 
 // A receipt restored after the held Task was marked for deletion releases the
@@ -87,4 +116,5 @@ func TestACPDispatcherReleasesRestoredHoldOfADeletingTask(t *testing.T) {
 		t.Fatalf("restored result = %q, %v", result, err)
 	}
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionFalse, corev1alpha1.StorageRecoveryRecordFoundReason)
+	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }

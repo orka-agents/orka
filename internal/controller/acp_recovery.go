@@ -681,7 +681,7 @@ func (d *ACPDispatcher) readRecoverableTask(
 
 // deletingTaskRecoverable reports whether stale recovery may re-fence a
 // deleting Task. Deleting prompts are never replayed, and recovery must not
-// drop runtime cleanup authority the Task finalizer still waits on. Two cases
+// drop runtime cleanup authority the Task finalizer still waits on. Three cases
 // qualify:
 //   - The attempt and the Task's own execution status are still before prompt
 //     submission, and the attempt holds no RuntimeSession binding. Recovery
@@ -730,6 +730,18 @@ func (d *ACPDispatcher) deletingTaskRecoverable(ctx context.Context, task *corev
 	}
 	return task.Spec.SessionRef == nil && store.IsTerminalPromptExecutionState(attempt.ExecutionState) &&
 		store.IsTerminalPromptDeliveryState(attempt.DeliveryState), nil
+}
+
+// handOffSettledDeletingTask moves a deleting Task whose attempt recovery just
+// settled to the current epoch. Stale recovery passes over a deleting Task
+// once its attempt is terminal, and the current epoch's terminal recovery owns
+// its pending runtime cleanup, which the terminal projection's frozen runtime
+// identity still authorizes, as after a restored receipt.
+func (d *ACPDispatcher) handOffSettledDeletingTask(ctx context.Context, task *corev1alpha1.Task, fence store.ControllerEpochFence) error {
+	if task.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	return d.patchRecoveredTerminalEpoch(ctx, task, fence.Epoch)
 }
 
 // acpTaskExecutionBeforeSubmission reports whether a Task's own execution
@@ -849,7 +861,10 @@ func (d *ACPDispatcher) recoverStaleTask(ctx context.Context, task *corev1alpha1
 		if err := d.finalizeRecoveredSessionUnknown(ctx, task, fence, attempt.ID, reason); err != nil {
 			return err
 		}
-		return d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, reason, message)
+		if err := d.failTask(ctx, task, corev1alpha1.TaskExecutionStateOutcomeUnknown, corev1alpha1.TaskExecutionOutcomeOutcomeUnknown, reason, message); err != nil {
+			return err
+		}
+		return d.handOffSettledDeletingTask(ctx, task, fence)
 	case store.PromptExecutionSucceeded:
 		if err := d.recoverSucceededTaskProjection(ctx, task, attempt, fence); err != nil {
 			return err
@@ -1146,9 +1161,12 @@ func (d *ACPDispatcher) recoverJournaledPromptTerminal(
 		if err != nil {
 			return true, err
 		}
-		return true, d.finishNonSuccessWithCancellationReason(
+		if err := d.finishNonSuccessWithCancellationReason(
 			ctx, task, attempt.ID, fence, session, harnessv2.Event{Type: evidence.TerminalEvent}, evidence.CancellationReason,
-		)
+		); err != nil {
+			return true, err
+		}
+		return true, d.handOffSettledDeletingTask(ctx, task, fence)
 	}
 	if journaled {
 		// A journaled completion does not replace the settling receipt.
