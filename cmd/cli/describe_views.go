@@ -60,13 +60,19 @@ func shortImage(image string) string {
 
 // taskWaitingOn says what a running Task is waiting on a person for, or
 // nothing. A Task held on an approval reports Running; its
-// WaitingForApproval condition is the only sign someone has to act.
+// WaitingForApproval condition is the only sign someone has to act. The
+// command it suggests names the Task's namespace, so it finds this Task
+// whatever namespace the CLI defaults to.
 func taskWaitingOn(task map[string]any) string {
 	conditions, _ := nestedMap(task, "status")["conditions"].([]any)
 	for _, item := range conditions {
 		condition, _ := item.(map[string]any)
 		if firstString(condition, "type") == "WaitingForApproval" && firstString(condition, "status") == "True" {
-			return fmt.Sprintf("approval; see 'orka task approvals %s'", nestedString(task, "metadata", "name"))
+			command := "orka task approvals " + nestedString(task, "metadata", "name")
+			if namespace := nestedString(task, "metadata", "namespace"); namespace != "" {
+				command += " -n " + namespace
+			}
+			return fmt.Sprintf("approval; see '%s'", command)
 		}
 	}
 	return ""

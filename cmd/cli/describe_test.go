@@ -179,6 +179,12 @@ func TestTaskDescribeShowsAPendingApproval(t *testing.T) {
 	if got, want := taskWaitingOn(task("True")), "approval; see 'orka task approvals az-write'"; got != want {
 		t.Fatalf("taskWaitingOn = %q, want %q", got, want)
 	}
+	// The suggested command finds the Task in its own namespace.
+	namespaced := task("True")
+	namespaced["metadata"].(map[string]any)["namespace"] = "team-a"
+	if got, want := taskWaitingOn(namespaced), "approval; see 'orka task approvals az-write -n team-a'"; got != want {
+		t.Fatalf("taskWaitingOn = %q, want %q", got, want)
+	}
 	shown := false
 	for _, row := range taskDescribeRows(task("True")) {
 		shown = shown || (row.Label == labelWaitingOn && strings.Contains(row.Value, "orka task approvals az-write"))
