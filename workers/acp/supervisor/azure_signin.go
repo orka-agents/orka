@@ -168,7 +168,7 @@ func (g *azureGateway) signInAtPromptStart() {
 	go func() {
 		ctx, cancel := context.WithTimeout(g.ctx, azureSignInTimeout)
 		defer cancel()
-		_, _ = g.signIn(ctx, true)
+		_, _ = g.signIn(ctx, true, false)
 	}()
 }
 
@@ -177,7 +177,9 @@ func (g *azureGateway) signInAtPromptStart() {
 // profile names. With unlessSignedIn, it does nothing once an attempt has
 // succeeded, so a prompt-start sign-in that started late never overwrites a
 // profile the agent has since changed, for example with az account set.
-func (g *azureGateway) signIn(ctx context.Context, unlessSignedIn bool) (int, error) {
+// holdsSlot says the caller already holds a runtime-wide request slot, which
+// then also covers an attempt it starts.
+func (g *azureGateway) signIn(ctx context.Context, unlessSignedIn, holdsSlot bool) (int, error) {
 	g.signInMu.Lock()
 	if unlessSignedIn && g.signedIn {
 		g.signInMu.Unlock()
@@ -188,7 +190,7 @@ func (g *azureGateway) signIn(ctx context.Context, unlessSignedIn bool) (int, er
 		attempt = &azureSignIn{done: make(chan struct{})}
 		g.signInAttempt = attempt
 		g.signInMu.Unlock()
-		attempt.subscriptions, attempt.err = g.discoverAndWriteProfile(ctx)
+		attempt.subscriptions, attempt.err = g.discoverAndWriteProfile(ctx, holdsSlot)
 		g.signInMu.Lock()
 		g.signInAttempt = nil
 		if attempt.err == nil {
@@ -207,8 +209,8 @@ func (g *azureGateway) signIn(ctx context.Context, unlessSignedIn bool) (int, er
 	}
 }
 
-func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error) {
-	if g.session.proxy != nil {
+func (g *azureGateway) discoverAndWriteProfile(ctx context.Context, holdsSlot bool) (int, error) {
+	if g.session.proxy != nil && !holdsSlot {
 		if !tryAcquireMCPSlot(g.session.proxy.slots) {
 			return 0, errMCPSessionAtCapacity
 		}
@@ -407,7 +409,18 @@ func underPlaceholderAccount(path string) bool {
 // cannot. The command itself is never sent: the zero tenant is no
 // subscription.
 func (g *azureGateway) answerUnderPlaceholderAccount(w http.ResponseWriter, r *http.Request) {
-	subscriptions, err := g.signIn(r.Context(), false)
+	// Every waiting command holds a runtime-wide slot, like any request, so
+	// a slow sign-in cannot pile up handlers; the slot of the one that
+	// starts the sign-in also covers it.
+	if g.session.proxy != nil {
+		if !tryAcquireMCPSlot(g.session.proxy.slots) {
+			w.Header().Set("Retry-After", "1")
+			writeAzureError(w, http.StatusTooManyRequests, "OrkaGatewayBusy", "This runtime already has its most requests in flight; retry shortly.")
+			return
+		}
+		defer releaseMCPSlot(g.session.proxy.slots)
+	}
+	subscriptions, err := g.signIn(r.Context(), false, true)
 	if toolErr, ok := errors.AsType[*azureSignInToolError](err); ok {
 		writeAzureToolError(w, false, toolErr.result)
 		return

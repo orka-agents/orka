@@ -251,13 +251,13 @@ func TestAzureGatewayDoesNotSignInAtPromptStartWhenReadsNeedApproval(t *testing.
 // nothing, so it cannot overwrite a profile the agent changed since.
 func TestAzureGatewayLatePromptStartSignInKeepsTheProfile(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
-	if _, err := fixture.gateway.signIn(t.Context(), true); err != nil {
+	if _, err := fixture.gateway.signIn(t.Context(), true, false); err != nil {
 		t.Fatal(err)
 	}
 	if calls := fixture.brokerCalls(); len(calls) != 0 {
 		t.Fatalf("a late prompt-start sign-in made %d broker calls", len(calls))
 	}
-	if _, err := fixture.gateway.signIn(t.Context(), false); err != nil || len(fixture.brokerCalls()) != 1 {
+	if _, err := fixture.gateway.signIn(t.Context(), false, false); err != nil || len(fixture.brokerCalls()) != 1 {
 		t.Fatalf("a sign-in for a command under the placeholder must run: %v", err)
 	}
 }
@@ -347,4 +347,33 @@ func TestAzureSignInStopsWhenItsPromptEnds(t *testing.T) {
 	if profile := readAzureProfile(t, fixture); len(profile.Subscriptions) != 1 || profile.Subscriptions[0].ID != azureZeroTenant {
 		t.Fatalf("profile = %+v", profile.Subscriptions)
 	}
+}
+
+// A command under the placeholder holds a runtime-wide slot like any request:
+// with the runtime full it is refused before any sign-in, and its own slot
+// covers the sign-in it starts, which is released afterwards.
+func TestAzurePlaceholderRequestsShareTheRuntimeWideCallLimit(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	token := fixture.token(t)
+	slots := fixture.session.proxy.slots
+	for range cap(slots) {
+		slots <- struct{}{}
+	}
+	path := "/subscriptions/" + azureZeroTenant + "/resourcegroups"
+	response, body := fixture.do(t, http.MethodGet, path, http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusTooManyRequests || !strings.Contains(body, "OrkaGatewayBusy") || len(fixture.brokerCalls()) != 0 {
+		t.Fatalf("full runtime: status %d, %d broker calls: %s", response.StatusCode, len(fixture.brokerCalls()), body)
+	}
+	for range cap(slots) - 1 {
+		<-slots
+	}
+	// One slot is free: the command takes it and its sign-in runs under it.
+	response, body = fixture.do(t, http.MethodGet, path, http.Header{"Authorization": {"Bearer " + token}})
+	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNoSubscription") {
+		t.Fatalf("one free slot: status %d: %s", response.StatusCode, body)
+	}
+	if len(slots) != 1 {
+		t.Fatalf("slots held after the command = %d, want only the test's", len(slots))
+	}
+	<-slots
 }
