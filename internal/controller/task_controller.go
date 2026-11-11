@@ -436,7 +436,9 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			return ctrl.Result{}, err
 		}
 		if intent != nil {
-			return stopThenCascade(r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome))
+			result, err := r.completeTaskWithOutcome(ctx, task, intent.Phase, intent.OutcomePhase, intent.Message, intent.RecordOutcome)
+			r.stopFinishedTaskJob(ctx, task, err)
+			return stopThenCascade(result, err)
 		}
 	}
 	if message, ok := requestedTaskCancellation(task); ok {
@@ -2802,12 +2804,21 @@ func (r *TaskReconciler) enforceParentScheduledTaskHistory(ctx context.Context, 
 // fails.
 func (r *TaskReconciler) cancelRequestedNativeTask(ctx context.Context, task *corev1alpha1.Task, message string) (ctrl.Result, error) {
 	result, err := r.completeTask(ctx, task, corev1alpha1.TaskPhaseCancelled, message)
-	if err == nil && task.Status.Phase == corev1alpha1.TaskPhaseCancelled {
-		if _, cleanupErr := r.cleanupTerminalTaskJob(ctx, task); cleanupErr != nil {
-			logf.FromContext(ctx).Error(cleanupErr, "failed to clean up cancelled task Job")
-		}
-	}
+	r.stopFinishedTaskJob(ctx, task, err)
 	return result, err
+}
+
+// stopFinishedTaskJob deletes the Job of a Task its completion just made
+// terminal, before its cascade runs: an earlier attempt's Job delete may have
+// failed, and the cascade must not run while the Task's own container still
+// does. A failure is logged; the completed Task's own reconcile retries it.
+func (r *TaskReconciler) stopFinishedTaskJob(ctx context.Context, task *corev1alpha1.Task, completeErr error) {
+	if completeErr != nil || !task.Status.Phase.IsTerminal() {
+		return
+	}
+	if _, err := r.cleanupTerminalTaskJob(ctx, task); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to clean up the finished task's Job")
+	}
 }
 
 // handleCompletedThenCascade runs a finished Task's own completion work, its
