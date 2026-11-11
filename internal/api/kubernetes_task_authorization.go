@@ -179,8 +179,12 @@ func refuseWorkerRootTaskForIdentityAgent(ctx context.Context, reader client.Rea
 	return nil
 }
 
+// isWorkerServiceAccount reports a caller authenticated as a worker
+// ServiceAccount. Only a TokenReview caller can be one: the Agent use check
+// judges OIDC and context-token callers by issuer and subject, so their
+// display name, whatever it looks like, carries no worker's broad use grant.
 func isWorkerServiceAccount(userInfo *UserInfo) bool {
-	if userInfo == nil || parseServiceAccountNamespace(userInfo.Username) == "" {
+	if userInfo == nil || userInfo.AuthType != AuthTypeTokenReview || parseServiceAccountNamespace(userInfo.Username) == "" {
 		return false
 	}
 	name := userInfo.Username[strings.LastIndex(userInfo.Username, ":")+1:]
