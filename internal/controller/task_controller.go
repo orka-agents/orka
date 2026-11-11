@@ -792,6 +792,13 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{}, err
 	}
 
+	// A child whose Create committed after an ancestor's cancellation had
+	// already cascaded, as a delegation in another namespace whose outcome
+	// was unknown can, is reached by no cascade, so it checks for itself.
+	if requested, err := r.requestCancelForCancelledAncestor(ctx, task); err != nil || requested {
+		return ctrl.Result{RequeueAfter: time.Second}, err
+	}
+
 	if taskTransactionTokenPending(task) {
 		return r.handleTransactionTokenPending(ctx, task)
 	}
@@ -2943,6 +2950,81 @@ func (r *TaskReconciler) delegatedTaskIndex(ctx context.Context, root *corev1alp
 		index[parent] = append(index[parent], task)
 	}
 	return index, nil
+}
+
+// requestCancelForCancelledAncestor records a cancel request on a pending
+// delegated Task once a Task above it in its delegation chain was asked to
+// stop, and reports whether it did. A scheduled template is left alone, as
+// the cascade leaves it.
+func (r *TaskReconciler) requestCancelForCancelledAncestor(ctx context.Context, task *corev1alpha1.Task) (bool, error) {
+	if strings.TrimSpace(task.Spec.Schedule) != "" {
+		return false, nil
+	}
+	if _, requested := task.Annotations[labels.AnnotationCancelRequested]; requested {
+		return false, nil
+	}
+	ancestor, err := r.stoppedAncestor(ctx, task)
+	if err != nil || ancestor == "" {
+		return false, err
+	}
+	current := task.DeepCopy()
+	base := current.DeepCopy()
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	current.Annotations[labels.AnnotationCancelRequested] = "cancelled with its ancestor task " + ancestor
+	if err := r.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	return true, nil
+}
+
+// stoppedAncestor walks the Task's delegation chain, through ancestors that
+// finished normally, and names the first one that was cancelled or had its
+// cancellation requested. Only that is a cancel signal: deleting a Task, as
+// retention does, cancels nothing, and an ancestor that is gone or replaced
+// ends the walk without a verdict, as does a link no immutable UID pins. A
+// link is pinned by the controller owner reference in the same namespace,
+// or by the parent UID a brokered delegation stamps, read in the parent's
+// recorded namespace (the child's own when none is recorded).
+func (r *TaskReconciler) stoppedAncestor(ctx context.Context, task *corev1alpha1.Task) (string, error) {
+	reader := r.taskMetadataReader()
+	current := task
+	for range maxDelegationChainDepth {
+		name := labels.ParentTaskName(current.Labels, current.Annotations)
+		if name == "" {
+			return "", nil
+		}
+		namespace, pinned := current.Namespace, ""
+		if owner := metav1.GetControllerOf(current); owner != nil && owner.Kind == taskResourceKind &&
+			owner.APIVersion == corev1alpha1.GroupVersion.String() && owner.Name == name {
+			pinned = string(owner.UID)
+		} else {
+			pinned = strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskUID])
+			if recorded := strings.TrimSpace(current.Annotations[labels.AnnotationParentTaskNamespace]); recorded != "" {
+				namespace = recorded
+			}
+		}
+		if pinned == "" {
+			return "", nil
+		}
+		parent := &corev1alpha1.Task{}
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, parent); err != nil {
+			if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+				return "", nil
+			}
+			return "", err
+		}
+		if string(parent.UID) != pinned {
+			return "", nil
+		}
+		if _, requested := parent.Annotations[labels.AnnotationCancelRequested]; requested ||
+			parent.Status.Phase == corev1alpha1.TaskPhaseCancelled {
+			return parent.Name, nil
+		}
+		current = parent
+	}
+	return "", nil
 }
 
 // delegatedBy reports whether parent delegated child. In the parent's
