@@ -23,6 +23,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/connectors"
+	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/tokenexchange"
 	"github.com/orka-agents/orka/internal/transactiontoken"
 )
@@ -390,11 +391,11 @@ func ResolveReferences(ctx context.Context, reader client.Reader, policy *corev1
 		if issue, err := resolveTokenEndpoint(ctx, reader, policy.Namespace, direct.TokenEndpoint, trust.TokenEndpoints); issue != nil || err != nil {
 			return issue, err
 		}
-		if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, direct.Subject); issue != nil || err != nil {
+		if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, direct.Subject, trust); issue != nil || err != nil {
 			return issue, err
 		}
 		if direct.Actor != nil {
-			if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, *direct.Actor); issue != nil || err != nil {
+			if issue, err := resolveTokenSource(ctx, reader, policy.Namespace, *direct.Actor, trust); issue != nil || err != nil {
 				return issue, err
 			}
 		}
@@ -426,7 +427,9 @@ func resolveTokenEndpoint(ctx context.Context, reader client.Reader, namespace s
 	return resolveService(ctx, reader, namespace, *endpoint.ServiceRef, trusted)
 }
 
-func resolveTokenSource(ctx context.Context, reader client.Reader, namespace string, source corev1alpha1.OutboundTokenSource) (*Issue, error) {
+func resolveTokenSource(
+	ctx context.Context, reader client.Reader, namespace string, source corev1alpha1.OutboundTokenSource, trust TrustConfig,
+) (*Issue, error) {
 	switch source.Source {
 	case corev1alpha1.OutboundTokenSourceSecretRef:
 		return resolveSecret(ctx, reader, namespace, *source.SecretRef)
@@ -438,6 +441,15 @@ func resolveTokenSource(ctx context.Context, reader client.Reader, namespace str
 				return unresolved(ReasonReferenceNotFound, "referenced ServiceAccount was not found"), nil
 			}
 			return nil, fmt.Errorf("resolve outbound ServiceAccount reference: %w", err)
+		}
+		// A ServiceAccount source lets the AI worker request that account's
+		// token. Orka's own accounts (the controller, other workers, proxies,
+		// publisher) must never be one: the worker would gain their authority.
+		// Its own account is exempt; that token gives it nothing new.
+		platform := serviceAccount.Labels[labels.LabelPlatformIdentity] == labels.PlatformIdentityValue ||
+			trust.platformServiceAccount(namespace, serviceAccount.Name)
+		if platform && !trust.tokenRequester(namespace, serviceAccount.Name) {
+			return unresolved(ReasonReferenceDenied, "Orka platform ServiceAccounts cannot be outbound token sources"), nil
 		}
 	}
 	return nil, nil

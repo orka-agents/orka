@@ -247,7 +247,7 @@ func identityTaskOfOtherAgent(ctx context.Context, reader client.Reader, agent *
 // when that binding froze the identity.
 func unfinishedIdentityBinding(task *corev1alpha1.Task, issuer, id string) *corev1alpha1.AgentExecutionAgentRef {
 	binding := task.Status.AgentExecutionBinding
-	if isTerminalTaskPhase(task.Status.Phase) || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
+	if task.Status.Phase.IsTerminal() || binding == nil || binding.Agent == nil || binding.Agent.Identity == nil ||
 		binding.Agent.Identity.Issuer != issuer || binding.Agent.Identity.ID != id {
 		return nil
 	}

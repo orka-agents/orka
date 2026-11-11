@@ -1,4 +1,4 @@
-# ADR 0034: Agent runtime ceilings bound what Tasks may request
+# ADR 0048: Agent runtime ceilings bound what Tasks may request
 
 Date: 2026-10-16
 
