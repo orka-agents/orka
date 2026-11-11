@@ -348,10 +348,13 @@ spec:
 Point `orka` at this release in `team-a`, as in
 [Connect to the API](../getting-started.md#connect-to-the-api) and
 [Use the CLI](../getting-started.md#the-cli) but with this namespace. Forward
-the API in one terminal (the Service is named after the Helm release):
+the API in one terminal. The chart names the API Service from the release and
+any name override, so look it up by its `api` port:
 
 ```bash
-kubectl -n team-a port-forward svc/<release> 8080:8080
+SVC=$(kubectl -n team-a get svc -l app.kubernetes.io/instance=<release> \
+  -o jsonpath='{.items[?(@.spec.ports[0].name=="api")].metadata.name}')
+kubectl -n team-a port-forward "svc/$SVC" 8080:8080
 ```
 
 and in another, configure the CLI with a token for the `orka-client`
