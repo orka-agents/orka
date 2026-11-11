@@ -263,7 +263,12 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 	ownedSchedule := delegatedSchedule("nightly-owned", "parent-own")
 	borrowedSchedule := delegatedSchedule("nightly-borrowed", "parent-unbound")
 	staleSchedule := delegatedSchedule("nightly-stale", "parent-earlier-grant")
-	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentEarlierGrant, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule, staleSchedule}
+	// A native Task a worker gave a schedule and an agentRef: its creator was
+	// never checked for the Agent, so it is no scheduled Task here.
+	nativeSchedule := scheduled.DeepCopy()
+	nativeSchedule.Name = "nightly-native"
+	nativeSchedule.Spec.Type = corev1alpha1.TaskTypeAI
+	parents := []*corev1alpha1.Task{parentOwn, parentRecreated, parentOtherInstance, parentEarlierGrant, parentUnbound, scheduled, unchecked, ownedSchedule, borrowedSchedule, staleSchedule, nativeSchedule}
 	builder := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(agent, unclaimed)
 	for _, parent := range parents {
 		parent.UID = types.UID(parent.Name + "-uid")
@@ -324,6 +329,7 @@ func TestAgentExecutionIdentityFreezesAndRestrictsChildren(t *testing.T) {
 		{"run of a scheduled Task created before the grant", task("nightly-unchecked"), "re-create the scheduled Task"},
 		{"scheduled run naming another Agent", otherAgentRun, "scheduled Task names it"},
 		{"run of a schedule an unbound parent delegated", task("nightly-borrowed"), "parent's own bound Agent"},
+		{"child of a native Task given a schedule", task("nightly-native"), "parent's own bound Agent"},
 		{"orphan", orphan, "still controls it"},
 		{"replaced parent", replaced, "still controls it"},
 		{"recorded parent", misrecorded, "still controls it"},
