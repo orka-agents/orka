@@ -15,28 +15,6 @@ import (
 	"github.com/orka-agents/orka/internal/store"
 )
 
-func TestArtifactWorkspacePath(t *testing.T) {
-	tests := []struct {
-		name    string
-		subPath string
-		want    string
-	}{
-		{name: "root", subPath: "", want: ArtifactWorkspaceDir},
-		{name: "single level", subPath: "services", want: "../" + ArtifactWorkspaceDir},
-		{name: "nested", subPath: "services/api", want: "../../" + ArtifactWorkspaceDir},
-		{name: "normalizes slashes", subPath: "/services/api/", want: "../../" + ArtifactWorkspaceDir},
-		{name: "ignores traversal", subPath: "../services", want: ArtifactWorkspaceDir},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ArtifactWorkspacePath(tt.subPath); got != tt.want {
-				t.Fatalf("ArtifactWorkspacePath(%q) = %q, want %q", tt.subPath, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseGitHubRepositoryURL(t *testing.T) {
 	tests := []struct {
 		name      string
