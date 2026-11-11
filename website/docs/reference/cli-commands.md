@@ -231,7 +231,7 @@ Global Flags:
 ## `orka agent promote`
 
 ```text
-Promote the candidate an approval names onto the stable Agent. The approval must be the latest decision for its experiment, and the experiment's candidate, baseline, cases, graders and gate must still match the live configuration; the Agent must not have changed since its baseline run. The Agent then carries the candidate's system prompt inline and its model. Find the decision ID with orka eval decisions. Only a person in a promoter group with the promote permission on agents may promote. Undo it with orka agent rollback.
+Promote the candidate an approval names onto the stable Agent. The approval must be the latest decision for its experiment, and the experiment's candidate, baseline, cases, graders and gate must still match the live configuration; the Agent must not have changed since its baseline run. The Agent then carries the candidate's system prompt and model: an inline prompt is copied inline, and a prompt read from a ConfigMap stays a reference to that ConfigMap, so keep the ConfigMap as it is. Find the decision ID with orka eval decisions. Only a person in a promoter group with the promote permission on agents may promote. Undo it with orka agent rollback.
 
 Usage:
   orka agent promote <agent> --decision <id> [flags]
