@@ -762,6 +762,47 @@ func TestCancelSessionChecksEveryTaskAgainstAContextTokenFirst(t *testing.T) {
 	}
 }
 
+// A Session cancel the caller is refused for one of its Tasks stops no chat
+// turn: the Tasks are authorized before the active request is stopped.
+func TestRefusedSessionCancelLeavesTheActiveChatRunning(t *testing.T) {
+	aiTask := chatTask("default", "ai-turn", "default")
+	aiTask.Spec.Type = corev1alpha1.TaskTypeAI
+	h, app := setupTestHandlersWithObjects(aiTask)
+	authz, err := NewContextTokenAuthorizationConfig(ContextTokenAuthorizationConfigOptions{Mode: ContextTokenAuthorizationModeEnforce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.contextTokenAuthorization = authz
+	token := &ContextToken{Subject: "alice", Issuer: "https://issuer.example.test",
+		Scopes:             append(slices.Clone(authz.SessionWriteScopes), authz.TaskUpdateScopes...),
+		TransactionContext: map[string]any{"taskType": string(corev1alpha1.TaskTypeAgent)}}
+	app.Use(func(c fiber.Ctx) error {
+		c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", Subject: "alice", Issuer: token.Issuer, AuthType: AuthTypeContextToken, ContextToken: token})
+		return c.Next()
+	})
+	app.Post("/sessions/:id/cancel", h.CancelSession)
+	if err := h.sessionStore.CreateSession(context.Background(), &store.SessionRecord{Namespace: "default", Name: "conversation", SessionType: store.SessionTypeChat}); err != nil {
+		t.Fatal(err)
+	}
+	chat := &ChatHandler{}
+	h.chatTurns = chat
+	reservation, err := chat.reserveActiveChat("default", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chat.finishActiveChatReservation(reservation, nil)
+
+	if resp, body := postCancel(t, app, "/sessions/conversation/cancel", ""); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %v, want 403", resp.StatusCode, body)
+	}
+	if err := reservation.cancelContext.Err(); err != nil {
+		t.Fatalf("the active chat request was stopped by a refused cancel: %v", err)
+	}
+	if _, ok := cancelAnnotationIn(t, h, "default", "ai-turn"); ok {
+		t.Fatal("a refused cancel cancelled a Task")
+	}
+}
+
 // newCronTemplate is a scheduled Task the controller has not yet moved to
 // Scheduled: a cron template still, whatever its phase.
 func newCronTemplate(name string, phase corev1alpha1.TaskPhase) *corev1alpha1.Task {

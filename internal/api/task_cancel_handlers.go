@@ -126,11 +126,22 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 	if sessionType == store.SessionTypeGateway {
 		return fiber.NewError(fiber.StatusNotFound, "session not found")
 	}
+	chat := sessionType == store.SessionTypeChat
+	epoch, err := h.chatSessionEpoch(ctx, namespace, name, chat)
+	if err != nil {
+		return err
+	}
+	// Authorize the Tasks the Session already has before anything stops,
+	// so a caller refused one of them stops no chat turn either.
+	if _, err := h.authorizedSessionTaskList(c, namespace, name, chat, epoch); err != nil {
+		return err
+	}
 	result := sessionCancellation{Namespace: namespace, Session: name, Tasks: []taskCancellation{}}
-	if sessionType == store.SessionTypeChat && h.chatTurns != nil {
-		// Stop the chat request first so it starts no Task after the list
-		// below. It ends as a disconnected client's request does, and the
-		// Session takes no next message until its Tasks are cancelled.
+	if chat && h.chatTurns != nil {
+		// Stop the chat request before the Tasks are listed again, so it
+		// starts no Task after that list. It ends as a disconnected client's
+		// request does, and the Session takes no next message until its
+		// Tasks are cancelled.
 		stopped, release, err := h.chatTurns.stopActiveChat(ctx, namespace, name)
 		if err != nil {
 			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat turn did not stop in time; retry")
@@ -149,30 +160,13 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		}
 		result.ChatTurnStopped = stopped
 	}
-	epoch := ""
-	if reader, ok := h.sessionStore.(store.SessionCreationReader); ok && sessionType == store.SessionTypeChat {
-		// Tasks of an earlier chat under this name are told apart by the
-		// current one's creation time, so a cancel that cannot read it stops
-		// here rather than cancel them too. Stores without creation times
-		// pin no incarnation and keep the name-only match.
-		createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, name)
-		if errors.Is(err, store.ErrNotFound) {
-			return fiber.NewError(fiber.StatusNotFound, "session not found")
-		}
-		if err != nil {
-			return fiber.NewError(fiber.StatusServiceUnavailable, "the chat Session's incarnation is unavailable; retry")
-		}
-		epoch = labels.SessionEpoch(createdAt)
-	}
-	tasks, err := h.sessionTaskCandidates(ctx, namespace, name, sessionType == store.SessionTypeChat)
-	if err != nil {
-		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
-	}
-	message := cancelMessage(GetUserInfo(c), request.Reason)
-	selected, err := h.authorizedSessionTasks(c, tasks, namespace, name, sessionType == store.SessionTypeChat, epoch)
+	// The stopped turn may have created a Task after the first list; every
+	// Task is authorized again before any is cancelled.
+	selected, err := h.authorizedSessionTaskList(c, namespace, name, chat, epoch)
 	if err != nil {
 		return err
 	}
+	message := cancelMessage(GetUserInfo(c), request.Reason)
 	for _, task := range selected {
 		cancelled, err := h.recordTaskCancellation(c, task, "", message)
 		if err != nil {
@@ -188,6 +182,35 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "session has no running turn")
 	}
 	return c.JSON(result)
+}
+
+// chatSessionEpoch returns the incarnation of a chat Session, which tells its
+// Tasks apart from those of an earlier chat under the same name. A cancel
+// that cannot read it stops here rather than cancel those too. Stores
+// without creation times pin no incarnation and keep the name-only match.
+func (h *Handlers) chatSessionEpoch(ctx context.Context, namespace, name string, chat bool) (string, error) {
+	reader, ok := h.sessionStore.(store.SessionCreationReader)
+	if !ok || !chat {
+		return "", nil
+	}
+	createdAt, err := reader.GetSessionCreatedAt(ctx, namespace, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", fiber.NewError(fiber.StatusNotFound, "session not found")
+	}
+	if err != nil {
+		return "", fiber.NewError(fiber.StatusServiceUnavailable, "the chat Session's incarnation is unavailable; retry")
+	}
+	return labels.SessionEpoch(createdAt), nil
+}
+
+// authorizedSessionTaskList lists the Session's Tasks live and authorizes
+// every cancellable one, as authorizedSessionTasks does.
+func (h *Handlers) authorizedSessionTaskList(c fiber.Ctx, namespace, name string, chat bool, epoch string) ([]*corev1alpha1.Task, error) {
+	tasks, err := h.sessionTaskCandidates(c.Context(), namespace, name, chat)
+	if err != nil {
+		return nil, fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
+	}
+	return h.authorizedSessionTasks(c, tasks, namespace, name, chat, epoch)
 }
 
 // authorizedSessionTasks returns the cancellable Tasks of the Session. It
