@@ -598,7 +598,7 @@ For each call, the controller:
 | Cancel the Task (`orka task cancel`, or the dashboard) or delete it | Its delegated calls are refused at once |
 | Stop a Session's turn (`orka session cancel`) | The turn's Task is cancelled, so its delegated calls are refused. The Session takes the next message |
 | A Task above it in the delegation chain is cancelled or deleted | Delegated calls from every Task below it are refused. A parent that finished normally does not stop its children |
-| `maxDelegationAge` passes | Delegated calls are refused. It runs from the root requester's last action: creating the root Task, or sending the Session message that started the turn. Child Tasks do not reset it; a new Session turn does |
+| `maxDelegationAge` passes | Delegated calls are refused. It runs from the creation of the chain's root Task, whether the requester created it directly or with a Session message; time in the chat before that does not count. Child Tasks do not reset it; a new Session turn, which creates a new root Task, does |
 | The person disconnects or their link expires | Delegated calls are refused |
 
 ## Troubleshooting
