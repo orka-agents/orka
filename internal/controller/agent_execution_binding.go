@@ -1506,6 +1506,25 @@ func (r *TaskReconciler) ensureAgentExecutionBinding(
 		return ctrl.Result{}, nil, false
 	}
 
+	// The Task was validated against the cached Agent, ceiling included, and
+	// the binding freezes that generation. Bind only once the cache has
+	// caught up with the live Agent, so a tightened ceiling is never bound
+	// past by a stale copy. An Agent already deleted is left to the paths
+	// that handle deletion; one recreated under its name differs by UID.
+	if agent != nil {
+		live := &corev1alpha1.Agent{}
+		err := reader.Get(ctx, types.NamespacedName{Namespace: agent.Namespace, Name: agent.Name}, live)
+		if err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "uncached Agent read before execution binding")
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil, true
+		}
+		if err == nil && (live.UID != agent.UID || live.Generation != agent.Generation) {
+			log.Info("execution binding waits for the Agent cache", "agent", agent.Name,
+				"cachedGeneration", agent.Generation, "liveGeneration", live.Generation)
+			return ctrl.Result{RequeueAfter: time.Second}, nil, true
+		}
+	}
+
 	candidate, err := r.resolveAgentExecutionCandidate(ctx, task, agent)
 	if err != nil {
 		if isPermanentACPAgentConfigurationError(err) {
