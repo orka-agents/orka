@@ -165,11 +165,24 @@ func guideAgentLabels() map[string]string {
 	}
 }
 
-// isManagedGuideAgent reports whether the controller created agent. An Agent
+// isManagedGuideAgent reports whether the controller created agent: it carries
+// the guide's managed-by labels, or an owner reference to the controller
+// Deployment with ownerUID, so removing the labels doesn't release it. An Agent
 // that only shares the name is the operator's and is never changed or deleted.
-func isManagedGuideAgent(agent *corev1alpha1.Agent) bool {
-	return agent.Labels[guideComponentLabelKey] == guideComponentLabelValue &&
-		agent.Labels[managedByLabelKey] == managedByLabelValue
+func isManagedGuideAgent(agent *corev1alpha1.Agent, ownerUID types.UID) bool {
+	if agent.Labels[guideComponentLabelKey] == guideComponentLabelValue &&
+		agent.Labels[managedByLabelKey] == managedByLabelValue {
+		return true
+	}
+	if ownerUID == "" {
+		return false
+	}
+	for _, ref := range agent.OwnerReferences {
+		if ref.UID == ownerUID && ref.Kind == "Deployment" && ref.APIVersion == appsv1.SchemeGroupVersion.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // GuideAgentReconciler creates the guide Agent when the guide is enabled,
@@ -200,7 +213,18 @@ func (r *GuideAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	found := err == nil
 
 	if !r.Config.Enabled {
-		if !found || !isManagedGuideAgent(current) || !current.DeletionTimestamp.IsZero() {
+		if !found || !current.DeletionTimestamp.IsZero() {
+			return ctrl.Result{}, nil
+		}
+		managed := isManagedGuideAgent(current, "")
+		if !managed {
+			ownerUID, err := r.ownerUID(ctx)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			managed = isManagedGuideAgent(current, ownerUID)
+		}
+		if !managed {
 			return ctrl.Result{}, nil
 		}
 		uid, resourceVersion := current.UID, current.ResourceVersion
@@ -211,10 +235,6 @@ func (r *GuideAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if found && !isManagedGuideAgent(current) {
-		logger.Info("An Agent named " + GuideAgentName + " exists without the guide's managed-by labels; leaving it unchanged. Delete or rename it to let the controller create the guide.")
-		return ctrl.Result{}, nil
-	}
 	if found && !current.DeletionTimestamp.IsZero() {
 		// The delete event recreates it.
 		return ctrl.Result{}, nil
@@ -223,6 +243,14 @@ func (r *GuideAgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	owner, err := r.ownerReference(ctx)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	var ownerUID types.UID
+	if owner != nil {
+		ownerUID = owner.UID
+	}
+	if found && !isManagedGuideAgent(current, ownerUID) {
+		logger.Info("An Agent named " + GuideAgentName + " exists that the controller didn't create; leaving it unchanged. Delete or rename it to let the controller create the guide.")
+		return ctrl.Result{}, nil
 	}
 
 	desired := r.Config.DesiredAgent()
@@ -289,6 +317,23 @@ func (r *GuideAgentReconciler) ownerReference(ctx context.Context) (*metav1.Owne
 		Name:       deployment.Name,
 		UID:        deployment.UID,
 	}, nil
+}
+
+// ownerUID returns the UID of the configured controller Deployment, or "" when
+// none is configured or it no longer exists.
+func (r *GuideAgentReconciler) ownerUID(ctx context.Context) (types.UID, error) {
+	name := strings.TrimSpace(r.Config.OwnerDeployment)
+	if name == "" {
+		return "", nil
+	}
+	deployment := &appsv1.Deployment{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: r.Config.Namespace, Name: name}, deployment); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read the guide owner Deployment %s/%s: %w", r.Config.Namespace, name, err)
+	}
+	return deployment.UID, nil
 }
 
 // withGuideOwner replaces any reference to a Deployment of the same name with

@@ -126,7 +126,7 @@ func TestGuideDesiredAgentIsReadOnly(t *testing.T) {
 		!strings.Contains(spec.SystemPrompt.Inline, "/opt/orka-docs/guide/references/in-cluster.md") {
 		t.Fatalf("system prompt must point at the snapshot's skill: %#v", spec.SystemPrompt)
 	}
-	if agent.Name != GuideAgentName || agent.Namespace != guideTestNamespace || !isManagedGuideAgent(agent) {
+	if agent.Name != GuideAgentName || agent.Namespace != guideTestNamespace || !isManagedGuideAgent(agent, "") {
 		t.Fatalf("metadata = %#v, want the managed guide Agent", agent.ObjectMeta)
 	}
 }
@@ -242,7 +242,7 @@ func TestGuideAgentReconcilerCreatesOwnedAgent(t *testing.T) {
 	}
 	want := guideTestConfig().DesiredAgent()
 	if !slices.Equal(agent.Spec.Runtime.DefaultAllowedTools, want.Spec.Runtime.DefaultAllowedTools) ||
-		agent.Spec.Runtime.Toolboxes[0].Image != guideTestDocsImage || !isManagedGuideAgent(agent) {
+		agent.Spec.Runtime.Toolboxes[0].Image != guideTestDocsImage || !isManagedGuideAgent(agent, "") {
 		t.Fatalf("created Agent = %#v", agent)
 	}
 	if len(agent.OwnerReferences) != 1 {
@@ -344,6 +344,102 @@ func TestGuideAgentReconcilerDeletesManagedAgentWhenDisabled(t *testing.T) {
 	}
 	if err := reconcileGuide(t, r); err != nil {
 		t.Fatalf("a disabled guide with no Agent is a no-op: %v", err)
+	}
+}
+
+// guideAgentWithoutLabel is a controller-created guide Agent, owned by the
+// Deployment with ownerUID, with one of its identity labels removed.
+func guideAgentWithoutLabel(label, ownerUID string) *corev1alpha1.Agent {
+	agent := guideTestConfig().DesiredAgent()
+	delete(agent.Labels, label)
+	agent.OwnerReferences = []metav1.OwnerReference{
+		{APIVersion: "apps/v1", Kind: "Deployment", Name: guideTestDeployment, UID: types.UID(ownerUID)},
+	}
+	return agent
+}
+
+func TestGuideAgentReconcilerKeepsOwnedAgentWithoutLabels(t *testing.T) {
+	for _, label := range []string{guideComponentLabelKey, managedByLabelKey} {
+		t.Run("restores "+label, func(t *testing.T) {
+			drifted := guideAgentWithoutLabel(label, "deploy-uid")
+			drifted.Spec.Runtime.DefaultAllowBash = new(true)
+			r, c := guideTestReconciler(t, guideTestConfig(), guideTestDeploymentObject("deploy-uid"), drifted)
+			if err := reconcileGuide(t, r); err != nil {
+				t.Fatal(err)
+			}
+			agent, _ := getGuide(t, c)
+			if !isManagedGuideAgent(agent, "") || *agent.Spec.Runtime.DefaultAllowBash {
+				t.Fatalf("an owned guide without %s was not restored: labels %v, allowBash %v",
+					label, agent.Labels, *agent.Spec.Runtime.DefaultAllowBash)
+			}
+		})
+		t.Run("deletes when disabled without "+label, func(t *testing.T) {
+			config := guideTestConfig()
+			config.Enabled = false
+			agent := guideAgentWithoutLabel(label, "deploy-uid")
+			r, c := guideTestReconciler(t, config, guideTestDeploymentObject("deploy-uid"), agent)
+			if err := reconcileGuide(t, r); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := getGuide(t, c); ok {
+				t.Fatalf("disabling the guide must delete the owned guide Agent without %s", label)
+			}
+		})
+	}
+	// A reference to another Deployment UID doesn't make the Agent the
+	// controller's.
+	for _, enabled := range []bool{true, false} {
+		config := guideTestConfig()
+		config.Enabled = enabled
+		stale := guideAgentWithoutLabel(managedByLabelKey, "other-uid")
+		stale.Spec.Runtime.DefaultAllowBash = new(true)
+		r, c := guideTestReconciler(t, config, guideTestDeploymentObject("deploy-uid"), stale)
+		if err := reconcileGuide(t, r); err != nil {
+			t.Fatal(err)
+		}
+		agent, ok := getGuide(t, c)
+		if !ok || !*agent.Spec.Runtime.DefaultAllowBash || agent.Labels[managedByLabelKey] != "" {
+			t.Fatalf("enabled=%v: an Agent owned by another Deployment UID was changed: %#v", enabled, agent)
+		}
+	}
+}
+
+// deploymentReadFails fails every Deployment read with err.
+type deploymentReadFails struct {
+	client.Reader
+	err error
+}
+
+func (r deploymentReadFails) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*appsv1.Deployment); ok {
+		return r.err
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func TestGuideAgentReconcilerKeepsUnlabeledAgentWhenOwnerIsUnknown(t *testing.T) {
+	config := guideTestConfig()
+	config.Enabled = false
+
+	// Without the owner's UID, an Agent missing its labels can't be shown to
+	// be the controller's, so disabling the guide leaves it and retries.
+	r, c := guideTestReconciler(t, config, guideTestDeploymentObject("deploy-uid"),
+		guideAgentWithoutLabel(managedByLabelKey, "deploy-uid"))
+	r.APIReader = deploymentReadFails{Reader: r.APIReader, err: apierrors.NewServiceUnavailable("api down")}
+	if err := reconcileGuide(t, r); err == nil || !strings.Contains(err.Error(), "api down") {
+		t.Fatalf("err = %v, want the owner read failure", err)
+	}
+	if _, ok := getGuide(t, c); !ok {
+		t.Fatal("an unlabeled Agent was deleted while its owner couldn't be read")
+	}
+
+	// Once the owner Deployment is gone, garbage collection removes the Agent.
+	r, c = guideTestReconciler(t, config, guideAgentWithoutLabel(managedByLabelKey, "deploy-uid"))
+	if err := reconcileGuide(t, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := getGuide(t, c); !ok {
+		t.Fatal("an unlabeled Agent was deleted although no owner Deployment matched it")
 	}
 }
 
