@@ -31,11 +31,11 @@ const (
 )
 
 // MaxAgentPromotionRecordBytes bounds one encoded promotion record; it
-// carries two resolved system prompts. A new record must leave
+// carries two resolved system prompts, each up to the runtime's 256 KiB. A new record must leave
 // AgentPromotionTransitionReserveBytes of it free, so the state, applied
 // generation and digest, and reason that transitions add always fit.
 const (
-	MaxAgentPromotionRecordBytes         = 256 * 1024
+	MaxAgentPromotionRecordBytes         = 576 * 1024
 	AgentPromotionTransitionReserveBytes = 8 * 1024
 )
 
@@ -92,10 +92,15 @@ type AgentPromotionRecord struct {
 	AppliedGeneration int64  `json:"appliedGeneration,omitempty"`
 	AppliedDigest     string `json:"appliedDigest,omitempty"`
 
-	Actor     EvalDecisionActor `json:"actor"`
-	Reason    string            `json:"reason,omitempty"`
-	CreatedAt time.Time         `json:"createdAt"`
-	UpdatedAt time.Time         `json:"updatedAt"`
+	// Actor and Reason are who asked for the action and why; both are set
+	// when the record is created and never change.
+	Actor  EvalDecisionActor `json:"actor"`
+	Reason string            `json:"reason,omitempty"`
+	// StateReason says why the record reached its state, such as what made
+	// it fail; transitions set it.
+	StateReason string    `json:"stateReason,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // AgentPromotionTransition moves one record from one state to another.
@@ -110,6 +115,7 @@ type AgentPromotionTransition struct {
 	RequireLatestApproval bool
 	AppliedGeneration     int64
 	AppliedDigest         string
-	Reason                string
-	UpdatedAt             time.Time
+	// Reason sets the record's StateReason.
+	Reason    string
+	UpdatedAt time.Time
 }

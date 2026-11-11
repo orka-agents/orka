@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/orka-agents/orka/internal/acp"
@@ -52,6 +53,21 @@ func proposerBrokeredToolAllowed(role, toolName string) bool {
 	}
 	_, ok := proposerBrokeredTools[toolName]
 	return ok
+}
+
+// proposerReadOnlyNativeTools are the provider-native tools a read-intent
+// proposer may use: reading and searching files, nothing that runs a
+// command, writes, or reaches the network.
+var proposerReadOnlyNativeTools = []string{providerNativeToolRead, providerNativeToolGlob, providerNativeToolGrep, "ls", "list"}
+
+// proposerReadOnlyToolName reports whether a read-intent proposer may use a
+// tool: a read-only native tool or an allowed brokered tool.
+func proposerReadOnlyToolName(name string) bool {
+	if _, ok := proposerBrokeredTools[name]; ok {
+		return true
+	}
+	return slices.ContainsFunc(proposerReadOnlyNativeTools, func(tool string) bool { return strings.EqualFold(tool, name) }) &&
+		proposerAllowedToolName(name)
 }
 
 // proposerAllowedToolName reports whether a name may appear in a proposer's

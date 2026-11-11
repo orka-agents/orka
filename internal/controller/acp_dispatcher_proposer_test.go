@@ -102,7 +102,17 @@ func TestProposerConstraintViolation(t *testing.T) {
 		}, want: "execution workspace class"},
 		{name: "read proposer needs no path limits", mutate: func(task *corev1alpha1.Task) {
 			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: proposerTestRepository}
-		}},
+			task.Spec.AgentRuntime.AllowedTools = []string{"Read", "Glob", "Grep", "propose_memory"}
+		}, effective: []string{"Glob", "Grep", "Read", "propose_memory"}},
+		// A runtime keeps a read-intent allowlist as it is, so a shell or
+		// write tool would make a read-only proposer able to run and write.
+		{name: "read proposer with a shell tool", mutate: func(task *corev1alpha1.Task) {
+			task.Spec.Workspace = &corev1alpha1.WorkspaceConfig{Intent: corev1alpha1.WorkspaceIntentRead, GitRepo: proposerTestRepository}
+		}, want: "not permitted for a read-only proposer"},
+		{name: "proposer without a workspace and a write tool", mutate: func(task *corev1alpha1.Task) {
+			task.Spec.Workspace = nil
+			task.Spec.AgentRuntime.AllowedTools = []string{"read", "write"}
+		}, effective: []string{"read", "write"}, want: "not permitted for a read-only proposer"},
 		// Held-out fixtures need a read credential to clone; a proposer of
 		// either intent never gets one.
 		{name: "read proposer with a read credential", mutate: func(task *corev1alpha1.Task) {

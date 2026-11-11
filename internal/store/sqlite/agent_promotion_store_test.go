@@ -38,16 +38,26 @@ func TestAgentPromotionOneOpenPerAgent(t *testing.T) {
 	require.NoError(t, s.CreateAgentPromotion(ctx, first))
 	require.NoError(t, s.CreateAgentPromotion(ctx, first), "a repeat of the same create succeeds")
 	changed := *first
-	changed.Reason = "different"
 	changed.Target.SystemPrompt = "other"
 	require.ErrorIs(t, s.CreateAgentPromotion(ctx, &changed), store.ErrDuplicateMismatch)
+	// The requester's reason is part of the create, before and after a
+	// transition sets the state reason.
+	otherReason := *first
+	otherReason.Reason = "a different justification"
+	require.ErrorIs(t, s.CreateAgentPromotion(ctx, &otherReason), store.ErrDuplicateMismatch)
 
 	second := agentPromotionTestRecord("p2", "agent-uid")
 	require.ErrorIs(t, s.CreateAgentPromotion(ctx, second), store.ErrConflict)
 	require.NoError(t, s.CreateAgentPromotion(ctx, agentPromotionTestRecord("p3", "other-agent-uid")))
 
-	_, err := s.TransitionAgentPromotion(ctx, agentPromotionMove(first, store.AgentPromotionPending, store.AgentPromotionCanceled))
+	canceled := agentPromotionMove(first, store.AgentPromotionPending, store.AgentPromotionCanceled)
+	canceled.Reason = "superseded"
+	updated, err := s.TransitionAgentPromotion(ctx, canceled)
 	require.NoError(t, err)
+	require.Equal(t, "superseded", updated.StateReason)
+	require.Empty(t, updated.Reason)
+	require.NoError(t, s.CreateAgentPromotion(ctx, first), "a repeat of the create still succeeds after a transition")
+	require.ErrorIs(t, s.CreateAgentPromotion(ctx, &otherReason), store.ErrDuplicateMismatch)
 	require.NoError(t, s.CreateAgentPromotion(ctx, second))
 
 	records, err := s.ListAgentPromotions(ctx, "team-a", "agent-uid")

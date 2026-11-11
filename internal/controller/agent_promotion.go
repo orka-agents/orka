@@ -150,6 +150,10 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 		transition.AppliedGeneration, transition.AppliedDigest = record.AgentGeneration+1, digest
 	}
 	log.Info("Completing an Agent promotion record whose update committed before a restart")
+	if writesAgentSpec(record.Action) && agent.Annotations[labels.AnnotationPromotionRecord] != record.ID {
+		// Said in the log so an audit can tell this from a marked commit.
+		transition.Reason = "completed from the Agent's values: one generation on, it holds exactly the target; its promotion marker was missing"
+	}
 	_, err = r.ExperimentStore.TransitionAgentPromotion(ctx, transition)
 	return err
 }
@@ -177,6 +181,26 @@ func (r *EvalRunReconciler) awaitPromotionRecovery(_ context.Context) error {
 	default:
 		return refuseRollout("the controller is still settling promotions from before it restarted; ask again")
 	}
+}
+
+// beginAgentRolloutAction takes the Agent's rollout lock and settles any
+// record an earlier action left open, so every check that follows sees the
+// Agent's settled history.
+func (r *EvalRunReconciler) beginAgentRolloutAction(ctx context.Context, namespace, agentName string) (func(), error) {
+	unlock := r.promotions.lock(namespace, agentName)
+	agent := &corev1alpha1.Agent{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, agent); err != nil {
+		unlock()
+		if apierrors.IsNotFound(err) {
+			return nil, refuseRollout("Agent %q does not exist in %s", agentName, namespace)
+		}
+		return nil, err
+	}
+	if err := r.settleOpenAgentPromotions(ctx, namespace, string(agent.UID)); err != nil {
+		unlock()
+		return nil, fmt.Errorf("settle earlier rollout actions on Agent %q: %w", agentName, err)
+	}
+	return unlock, nil
 }
 
 // settleOpenAgentPromotions settles the Agent's open records under its
@@ -280,6 +304,11 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 	if r.ExperimentStore == nil {
 		return nil, refuseRollout("promotions need the eval experiment store")
 	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	approved, err := r.approvedCandidate(ctx, namespace, agentName, decisionID)
 	if err != nil {
 		return nil, err
@@ -385,6 +414,11 @@ func (r *EvalRunReconciler) CanaryAgent(ctx context.Context, namespace, agentNam
 	if percent < 1 || percent > 100 {
 		return nil, refuseRollout("percent must be 1 to 100")
 	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	approved, err := r.approvedCandidate(ctx, namespace, agentName, decisionID)
 	if err != nil {
 		return nil, err
@@ -415,6 +449,11 @@ func (r *EvalRunReconciler) AbortAgentRollout(ctx context.Context, namespace, ag
 	if r.ExperimentStore == nil {
 		return nil, refuseRollout("canaries need the eval experiment store")
 	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	stable := &corev1alpha1.Agent{}
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, stable); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -578,6 +617,11 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 	if r.ExperimentStore == nil {
 		return nil, refuseRollout("rollbacks need the eval experiment store")
 	}
+	unlock, err := r.beginAgentRolloutAction(ctx, namespace, agentName)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	stable := &corev1alpha1.Agent{}
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: agentName}, stable); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -634,12 +678,10 @@ type rolloutWrite func(context.Context, *store.AgentPromotionRecord) (int64, str
 // with the record's marker, then complete it with what the write produced.
 func (r *EvalRunReconciler) applyAgentRolloutAction(ctx context.Context, stable *corev1alpha1.Agent, record *store.AgentPromotionRecord,
 	requireApproval bool, write rolloutWrite) (*store.AgentPromotionRecord, error) {
-	unlock := r.promotions.lock(stable.Namespace, stable.Name)
-	defer unlock()
-	if err := r.settleOpenAgentPromotions(ctx, stable.Namespace, string(stable.UID)); err != nil {
-		return nil, fmt.Errorf("settle earlier rollout actions on Agent %q: %w", stable.Name, err)
-	}
 	if err := r.ExperimentStore.CreateAgentPromotion(ctx, record); err != nil {
+		if errors.Is(err, store.ErrValidation) {
+			return nil, refuseRollout("the rollout record was refused: %v", err)
+		}
 		if errors.Is(err, store.ErrConflict) {
 			return nil, refuseRollout("another rollout action on Agent %q is in progress", stable.Name)
 		}
