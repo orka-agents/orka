@@ -28,21 +28,23 @@ type (
 	EvalExperimentListOptions   = storagev1.EvalExperimentListOptions
 	EvalExperimentPage          = storagev1.EvalExperimentPage
 
-	AgentPromotionValues     = storagev1.AgentPromotionValues
-	AgentPromotionRecord     = storagev1.AgentPromotionRecord
-	AgentPromotionTransition = storagev1.AgentPromotionTransition
+	AgentPromotionValues       = storagev1.AgentPromotionValues
+	AgentPromotionConfigMapRef = storagev1.AgentPromotionConfigMapRef
+	AgentPromotionRecord       = storagev1.AgentPromotionRecord
+	AgentPromotionTransition   = storagev1.AgentPromotionTransition
 )
 
 const (
-	AgentPromotionSchemaVersion  = storagev1.AgentPromotionSchemaVersion
-	AgentPromotionPromote        = storagev1.AgentPromotionPromote
-	AgentPromotionRollback       = storagev1.AgentPromotionRollback
-	AgentPromotionPending        = storagev1.AgentPromotionPending
-	AgentPromotionApplying       = storagev1.AgentPromotionApplying
-	AgentPromotionComplete       = storagev1.AgentPromotionComplete
-	AgentPromotionFailed         = storagev1.AgentPromotionFailed
-	AgentPromotionCanceled       = storagev1.AgentPromotionCanceled
-	MaxAgentPromotionRecordBytes = storagev1.MaxAgentPromotionRecordBytes
+	AgentPromotionSchemaVersion          = storagev1.AgentPromotionSchemaVersion
+	AgentPromotionPromote                = storagev1.AgentPromotionPromote
+	AgentPromotionRollback               = storagev1.AgentPromotionRollback
+	AgentPromotionPending                = storagev1.AgentPromotionPending
+	AgentPromotionApplying               = storagev1.AgentPromotionApplying
+	AgentPromotionComplete               = storagev1.AgentPromotionComplete
+	AgentPromotionFailed                 = storagev1.AgentPromotionFailed
+	AgentPromotionCanceled               = storagev1.AgentPromotionCanceled
+	MaxAgentPromotionRecordBytes         = storagev1.MaxAgentPromotionRecordBytes
+	AgentPromotionTransitionReserveBytes = storagev1.AgentPromotionTransitionReserveBytes
 )
 
 const (

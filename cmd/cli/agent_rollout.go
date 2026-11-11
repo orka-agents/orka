@@ -91,8 +91,10 @@ func postAgentRollout(cmd *cobra.Command, agent string, request agentRolloutBody
 	if err != nil {
 		return err
 	}
+	// Structured output is the API's response as it came: its prompt views
+	// carry digests and sizes a decoded record would drop.
 	if format != outputTable {
-		return printStructuredTo(cmd.OutOrStdout(), format, record)
+		return printStructuredTo(cmd.OutOrStdout(), format, value)
 	}
 	switch record.Action {
 	case store.AgentPromotionPromote:
@@ -136,7 +138,11 @@ func printItemsPage[T any](cmd *cobra.Command, path, what string, table func(io.
 		return err
 	}
 	if format != outputTable {
-		return printStructuredTo(cmd.OutOrStdout(), format, page)
+		var response any
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return fmt.Errorf("decode %s: %w", what, err)
+		}
+		return printStructuredTo(cmd.OutOrStdout(), format, response)
 	}
 	table(cmd.OutOrStdout(), page.Items)
 	return nil

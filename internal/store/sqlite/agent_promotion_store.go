@@ -86,6 +86,10 @@ func (s *Store) CreateAgentPromotion(ctx context.Context, record *store.AgentPro
 	if err != nil {
 		return err
 	}
+	if len(encoded) > store.MaxAgentPromotionRecordBytes-store.AgentPromotionTransitionReserveBytes {
+		return store.ValidationErrorf("agent promotion record is %d bytes; a new record may be at most %d",
+			len(encoded), store.MaxAgentPromotionRecordBytes-store.AgentPromotionTransitionReserveBytes)
+	}
 	return writeOperationErr(ctx, s, "CreateAgentPromotion", func(ctx context.Context) error {
 		return s.inWriteTransaction(ctx, func(ctx context.Context, _ *sql.Tx) error {
 			executor := s.taskDataExecutor(ctx)

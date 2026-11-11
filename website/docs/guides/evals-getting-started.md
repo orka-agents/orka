@@ -320,8 +320,9 @@ orka agent promote reviewer --decision <decision-id>
 orka agent promotions reviewer             # what was promoted, by whom, and when
 ```
 
-Promotion writes the candidate's system prompt (inline) and model onto the reviewer
-the experiment's baseline ran, and nothing else. It's refused if:
+Promotion writes the candidate's system prompt and model onto the reviewer the
+experiment's baseline ran, and nothing else. A prompt kept in a ConfigMap stays a
+ConfigMap reference. It's refused if:
 
 - the approval isn't the latest decision for its experiment;
 - the approval has gone stale;
@@ -341,7 +342,8 @@ To undo it:
 orka agent rollback reviewer --reason "More false positives in production."
 ```
 
-Rollback writes back the prompt and model the promotion replaced. If anyone edited
+Rollback writes back the prompt and model the promotion replaced, including a
+ConfigMap reference. If anyone edited
 the reviewer after the promotion, rollback is refused rather than overwriting that
 edit.
 

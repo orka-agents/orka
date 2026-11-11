@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,9 @@ func TestAgentPromotionValidates(t *testing.T) {
 		"no actor":      func(r *store.AgentPromotionRecord) { r.Actor.Username = "" },
 		"too large": func(r *store.AgentPromotionRecord) {
 			r.Target.SystemPrompt = string(make([]byte, store.MaxAgentPromotionRecordBytes))
+		},
+		"no room to transition": func(r *store.AgentPromotionRecord) {
+			r.Target.SystemPrompt = strings.Repeat("x", store.MaxAgentPromotionRecordBytes-store.AgentPromotionTransitionReserveBytes)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

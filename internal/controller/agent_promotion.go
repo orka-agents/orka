@@ -12,11 +12,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -35,6 +37,18 @@ import (
 type promotionGate struct {
 	once  sync.Once
 	ready chan struct{}
+	// locks serialize rollout actions per Agent in this process. The API
+	// server runs only on the leader, so no other process acts at the same
+	// time, and an open record no lock holder owns is one an earlier
+	// action left behind.
+	locks sync.Map
+}
+
+func (g *promotionGate) lock(namespace, agent string) func() {
+	value, _ := g.locks.LoadOrStore(namespace+"/"+agent, &sync.Mutex{})
+	mutex := value.(*sync.Mutex)
+	mutex.Lock()
+	return mutex.Unlock
 }
 
 func (g *promotionGate) channel() chan struct{} {
@@ -94,6 +108,13 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 		return err
 	}
 	committed := err == nil && agent.UID == types.UID(record.AgentUID) && agent.Annotations[labels.AnnotationPromotionRecord] == record.ID
+	if !committed && err == nil && agent.UID == types.UID(record.AgentUID) && agent.Generation == record.AgentGeneration+1 {
+		// The marker is an annotation an Agent editor could change. An Agent
+		// one generation on that holds exactly the target values took this
+		// update too.
+		current, valuesErr := r.agentPromotionValues(ctx, agent)
+		committed = valuesErr == nil && reflect.DeepEqual(current, record.Target)
+	}
 	log := logf.FromContext(ctx).WithValues("agent", record.Agent, "namespace", record.Namespace, "record", record.ID)
 	if !committed {
 		log.Info("Failing an Agent promotion record the controller restarted before applying")
@@ -125,13 +146,31 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 	return err
 }
 
-func (r *EvalRunReconciler) awaitPromotionRecovery(ctx context.Context) error {
+func (r *EvalRunReconciler) awaitPromotionRecovery(_ context.Context) error {
 	select {
 	case <-r.promotions.channel():
 		return nil
-	case <-ctx.Done():
+	default:
 		return refuseRollout("the controller is still settling promotions from before it restarted; ask again")
 	}
+}
+
+// settleOpenAgentPromotions settles the Agent's open records under its
+// lock: an action that failed ambiguously leaves its record applying, and
+// this settles it on the next action rather than at the next restart.
+func (r *EvalRunReconciler) settleOpenAgentPromotions(ctx context.Context, namespace, agentUID string) error {
+	records, err := r.ExperimentStore.ListAgentPromotions(ctx, namespace, agentUID)
+	if err != nil {
+		return err
+	}
+	for i := range records {
+		if records[i].State == store.AgentPromotionPending || records[i].State == store.AgentPromotionApplying {
+			if err := r.recoverAgentPromotion(ctx, &records[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // agentPromotionDigest digests an Agent's promotable values.
@@ -141,11 +180,35 @@ func agentPromotionDigest(values store.AgentPromotionValues) (string, error) {
 
 // agentPromotionValues resolves an Agent's promotable values.
 func (r *EvalRunReconciler) agentPromotionValues(ctx context.Context, agent *corev1alpha1.Agent) (store.AgentPromotionValues, error) {
-	prompt, err := resolveACPSystemPrompt(ctx, r.uncachedReader(), agent)
+	values, _, err := r.resolvedPromotionValues(ctx, agent)
+	return values, err
+}
+
+// resolvedPromotionValues resolves an Agent's promotable values once, with
+// the digest of its prompt composed with its soul, as an EvalRun snapshot
+// records it.
+func (r *EvalRunReconciler) resolvedPromotionValues(ctx context.Context, agent *corev1alpha1.Agent) (store.AgentPromotionValues, string, error) {
+	reader := r.uncachedReader()
+	prompt, err := resolveACPSystemPrompt(ctx, reader, agent)
 	if err != nil {
-		return store.AgentPromotionValues{}, fmt.Errorf("resolve Agent %q's system prompt: %w", agent.Name, err)
+		return store.AgentPromotionValues{}, "", fmt.Errorf("resolve Agent %q's system prompt: %w", agent.Name, err)
 	}
-	return store.AgentPromotionValues{SystemPrompt: prompt, Model: evalAgentModelName(agent)}, nil
+	soul, err := agentcontext.ResolveSoul(ctx, reader, agent)
+	if err != nil {
+		return store.AgentPromotionValues{}, "", fmt.Errorf("resolve Agent %q's soul: %w", agent.Name, err)
+	}
+	sum := sha256.Sum256([]byte(agentcontext.Compose(prompt, soul)))
+	values := store.AgentPromotionValues{SystemPrompt: prompt, Model: evalAgentModelName(agent)}
+	if source := agent.Spec.SystemPrompt; source != nil && source.ConfigMapRef != nil {
+		values.SystemPromptConfigMap = &store.AgentPromotionConfigMapRef{Name: source.ConfigMapRef.Name, Key: source.ConfigMapRef.Key}
+	}
+	return values, evals.DigestPrefix + hex.EncodeToString(sum[:]), nil
+}
+
+// sameBehavior reports whether two sets of values give the Agent the same
+// prompt text and model, wherever the text comes from.
+func sameBehavior(a, b store.AgentPromotionValues) bool {
+	return a.SystemPrompt == b.SystemPrompt && a.Model == b.Model
 }
 
 // withPromotableValues returns spec with its system prompt and model name
@@ -164,11 +227,17 @@ func withPromotableValues(spec corev1alpha1.AgentSpec, prompt *corev1alpha1.Prom
 	return out
 }
 
-// applyPromotableValues writes values onto an Agent spec: the prompt inline,
-// so the Agent no longer depends on a ConfigMap no arm was tested against.
+// applyPromotableValues writes values onto an Agent spec. A prompt that came
+// from a ConfigMap keeps its reference, so its text is not copied where
+// every Agent reader could see it; any other prompt is written inline.
 func applyPromotableValues(spec corev1alpha1.AgentSpec, values store.AgentPromotionValues) corev1alpha1.AgentSpec {
 	var prompt *corev1alpha1.PromptSource
-	if values.SystemPrompt != "" {
+	switch {
+	case values.SystemPromptConfigMap != nil:
+		prompt = &corev1alpha1.PromptSource{ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{
+			Name: values.SystemPromptConfigMap.Name, Key: values.SystemPromptConfigMap.Key,
+		}}
+	case values.SystemPrompt != "":
 		prompt = &corev1alpha1.PromptSource{Inline: values.SystemPrompt}
 	}
 	return withPromotableValues(spec, prompt, values.Model)
@@ -202,19 +271,26 @@ func (r *EvalRunReconciler) PromoteAgent(ctx context.Context, namespace, agentNa
 	if err != nil {
 		return nil, err
 	}
-	previous, err := r.agentPromotionValues(ctx, stable)
+	previous, previousDigest, err := r.resolvedPromotionValues(ctx, stable)
 	if err != nil {
 		return nil, err
+	}
+	// The rollback target is what the baseline ran: a ConfigMap edit since
+	// then changes the prompt without moving the Agent's generation.
+	if previousDigest != outcome.Baseline.SystemPromptDigest {
+		return nil, refuseRollout("Agent %q's system prompt is not the one its baseline ran; run the experiment again", stable.Name)
 	}
 	target, err := r.promotionTargetValues(ctx, candidate, outcome)
 	if err != nil {
 		return nil, err
 	}
-	if previous == target {
+	if sameBehavior(previous, target) {
 		return nil, refuseRollout("candidate Agent %q has the same system prompt and model as %q; there is nothing to promote",
 			candidate.Name, stable.Name)
 	}
-	if !equality.Semantic.DeepEqual(withPromotableValues(candidate.Spec, nil, ""), withPromotableValues(stable.Spec, nil, "")) {
+	// reflect, not Semantic: an empty list and an omitted one differ, as a
+	// tool list does to the runtime.
+	if !reflect.DeepEqual(withPromotableValues(candidate.Spec, nil, ""), withPromotableValues(stable.Spec, nil, "")) {
 		return nil, refuseRollout("candidate Agent %q differs from %q in more than its system prompt and model; only those are promoted",
 			candidate.Name, stable.Name)
 	}
@@ -307,21 +383,15 @@ func (r *EvalRunReconciler) promotionAgents(ctx context.Context, run *corev1alph
 // ConfigMap-backed prompt can change without the Agent's generation moving.
 func (r *EvalRunReconciler) promotionTargetValues(ctx context.Context, candidate *corev1alpha1.Agent,
 	outcome *store.EvalExperimentOutcome) (store.AgentPromotionValues, error) {
-	reader := r.uncachedReader()
-	prompt, err := resolveACPSystemPrompt(ctx, reader, candidate)
+	values, digest, err := r.resolvedPromotionValues(ctx, candidate)
 	if err != nil {
-		return store.AgentPromotionValues{}, fmt.Errorf("resolve Agent %q's system prompt: %w", candidate.Name, err)
+		return store.AgentPromotionValues{}, err
 	}
-	soul, err := agentcontext.ResolveSoul(ctx, reader, candidate)
-	if err != nil {
-		return store.AgentPromotionValues{}, fmt.Errorf("resolve Agent %q's soul: %w", candidate.Name, err)
-	}
-	sum := sha256.Sum256([]byte(agentcontext.Compose(prompt, soul)))
-	if evals.DigestPrefix+hex.EncodeToString(sum[:]) != outcome.Candidate.SystemPromptDigest {
+	if digest != outcome.Candidate.SystemPromptDigest {
 		return store.AgentPromotionValues{}, refuseRollout(
 			"candidate Agent %q's system prompt is not the one its experiment ran; run the experiment again", candidate.Name)
 	}
-	return store.AgentPromotionValues{SystemPrompt: prompt, Model: evalAgentModelName(candidate)}, nil
+	return values, nil
 }
 
 // RollbackAgent writes back the values the Agent's latest promotion
@@ -385,6 +455,11 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 // complete it with what the update produced.
 func (r *EvalRunReconciler) applyAgentPromotion(ctx context.Context, stable *corev1alpha1.Agent, record *store.AgentPromotionRecord,
 	requireApproval bool) (*store.AgentPromotionRecord, error) {
+	unlock := r.promotions.lock(stable.Namespace, stable.Name)
+	defer unlock()
+	if err := r.settleOpenAgentPromotions(ctx, stable.Namespace, string(stable.UID)); err != nil {
+		return nil, fmt.Errorf("settle earlier rollout actions on Agent %q: %w", stable.Name, err)
+	}
 	if err := r.ExperimentStore.CreateAgentPromotion(ctx, record); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			return nil, refuseRollout("another rollout action on Agent %q is in progress", stable.Name)
@@ -411,6 +486,12 @@ func (r *EvalRunReconciler) applyAgentPromotion(ctx context.Context, stable *cor
 	}
 	record = applying
 
+	if ref := record.Target.SystemPromptConfigMap; ref != nil {
+		if err := r.checkPromptConfigMap(ctx, record.Namespace, ref, record.Target.SystemPrompt); err != nil {
+			fail(err.Error())
+			return nil, err
+		}
+	}
 	updated := stable.DeepCopy()
 	updated.Spec = applyPromotableValues(stable.Spec, record.Target)
 	if updated.Annotations == nil {
@@ -455,4 +536,21 @@ func (r *EvalRunReconciler) ListAgentPromotions(ctx context.Context, namespace, 
 		return nil, err
 	}
 	return r.ExperimentStore.ListAgentPromotions(ctx, namespace, string(agent.UID))
+}
+
+// checkPromptConfigMap refuses writing a ConfigMap reference whose
+// ConfigMap no longer holds the prompt the action checked.
+func (r *EvalRunReconciler) checkPromptConfigMap(ctx context.Context, namespace string, ref *store.AgentPromotionConfigMapRef,
+	want string) error {
+	configMap := &corev1.ConfigMap{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return refuseRollout("ConfigMap %q holding the system prompt is gone; restore it or roll back by hand", ref.Name)
+		}
+		return err
+	}
+	if value, ok := configMap.Data[ref.Key]; !ok || value != want {
+		return refuseRollout("ConfigMap %q key %q no longer holds the system prompt this action checked; roll back by hand", ref.Name, ref.Key)
+	}
+	return nil
 }

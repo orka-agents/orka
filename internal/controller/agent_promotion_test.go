@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -213,15 +214,6 @@ func TestPromoteRefusals(t *testing.T) {
 		env.decide("d1", store.EvalDecisionApproved)
 		refusedRollout(t, promote(env, "reviewer", "d1"), "more than its system prompt and model")
 	})
-	t.Run("another action in progress", func(t *testing.T) {
-		env := newPromotionEnv(t, nil)
-		env.decide("d1", store.EvalDecisionApproved)
-		open := promotionTestRecord(env, "open")
-		if err := env.store.CreateAgentPromotion(ctx, open); err != nil {
-			t.Fatal(err)
-		}
-		refusedRollout(t, promote(env, "reviewer", "d1"), "in progress")
-	})
 	t.Run("before recovery", func(t *testing.T) {
 		env := newPromotionEnv(t, nil)
 		env.reconciler.promotions = promotionGate{}
@@ -316,4 +308,113 @@ func TestPromotionPinsTheCandidateToItsExperiment(t *testing.T) {
 	decision.Binding = &binding
 	_, _, err = env.reconciler.promotionAgents(ctx, env.getRun("candidate"), &decision, "reviewer")
 	refusedRollout(t, err, "changed after its experiment")
+}
+
+// A reviewer whose prompt lives in a ConfigMap gets the reference back on
+// rollback, never the ConfigMap's text, and a ConfigMap edited since the
+// promotion refuses the rollback.
+func TestRollbackKeepsAConfigMapPrompt(t *testing.T) {
+	baseline, candidate := experimentRuns(3, 3)
+	env := newExperimentEnv(t, baseline, candidate, evalTestGate)
+	ctx := context.Background()
+	if err := env.client.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer-prompt", Namespace: evalTestNamespace},
+		Data:       map[string]string{"prompt.md": "Private review instructions."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stable := env.getAgent("reviewer")
+	stable.Spec.SystemPrompt = &corev1alpha1.PromptSource{ConfigMapRef: &corev1alpha1.ConfigMapKeySelector{Name: "reviewer-prompt", Key: "prompt.md"}}
+	if err := env.client.Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+	agent := env.getAgent("candidate-agent")
+	agent.Labels = map[string]string{labels.LabelCandidateOf: "reviewer"}
+	agent.OwnerReferences = []metav1.OwnerReference{{APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Agent", Name: "reviewer", UID: "agent-uid"}}
+	agent.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: promotionTestPrompt}
+	if err := env.client.Update(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	env.runToEnd("baseline", repositoryMonitorReviewVerdictPassed)
+	env.runToEnd("candidate", "needs_changes")
+	env.reconcileRun("candidate")
+	if err := env.reconciler.RecoverAgentPromotions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	env.decide("d1", store.EvalDecisionApproved)
+	promotion, err := env.reconciler.PromoteAgent(ctx, evalTestNamespace, "reviewer", "d1", promotionTestActor)
+	if err != nil {
+		t.Fatalf("PromoteAgent() error = %v", err)
+	}
+	if ref := promotion.Previous.SystemPromptConfigMap; ref == nil || ref.Name != "reviewer-prompt" {
+		t.Fatalf("previous = %+v", promotion.Previous)
+	}
+	if _, err := env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, ""); err != nil {
+		t.Fatalf("RollbackAgent() error = %v", err)
+	}
+	prompt := env.getAgent("reviewer").Spec.SystemPrompt
+	if prompt == nil || prompt.Inline != "" || prompt.ConfigMapRef == nil || prompt.ConfigMapRef.Name != "reviewer-prompt" {
+		t.Fatalf("rolled back prompt = %+v", prompt)
+	}
+}
+
+func TestRollbackRefusesAnEditedPromptConfigMap(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	if err := env.client.Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "reviewer-prompt", Namespace: evalTestNamespace},
+		Data:       map[string]string{"prompt.md": "Edited since."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := env.reconciler.checkPromptConfigMap(ctx, evalTestNamespace,
+		&store.AgentPromotionConfigMapRef{Name: "reviewer-prompt", Key: "prompt.md"}, "Private review instructions.")
+	refusedRollout(t, err, "no longer holds")
+	err = env.reconciler.checkPromptConfigMap(ctx, evalTestNamespace, &store.AgentPromotionConfigMapRef{Name: "gone", Key: "prompt.md"}, "x")
+	refusedRollout(t, err, "is gone")
+}
+
+// An action left applying by an ambiguous failure is settled by the next
+// action on the Agent, without a restart.
+func TestPromoteSettlesAnEarlierOpenRecord(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	stuck := promotionTestRecord(env, "stuck")
+	if err := env.store.CreateAgentPromotion(ctx, stuck); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.store.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{Namespace: evalTestNamespace, ID: "stuck",
+		From: store.AgentPromotionPending, To: store.AgentPromotionApplying, UpdatedAt: env.now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.reconciler.PromoteAgent(ctx, evalTestNamespace, "reviewer", "d1", promotionTestActor); err != nil {
+		t.Fatalf("PromoteAgent() error = %v", err)
+	}
+	log, err := env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
+	if err != nil || len(log) != 2 || log[0].State != store.AgentPromotionFailed || log[1].State != store.AgentPromotionComplete {
+		t.Fatalf("log = %+v, %v", log, err)
+	}
+}
+
+// An Agent one generation on with exactly the target values committed the
+// update, even when an editor removed the marker.
+func TestRecoveryUsesValuesWhenTheMarkerIsGone(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	stable := env.getAgent("reviewer")
+	record := promotionTestRecord(env, "applied")
+	record.AgentGeneration = stable.Generation - 1
+	record.Target = store.AgentPromotionValues{Model: "claude-haiku"}
+	if err := env.store.CreateAgentPromotion(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	env.reconciler.promotions = promotionGate{}
+	if err := env.reconciler.RecoverAgentPromotions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	log, err := env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
+	if err != nil || len(log) != 1 || log[0].State != store.AgentPromotionComplete {
+		t.Fatalf("log = %+v, %v", log, err)
+	}
 }
