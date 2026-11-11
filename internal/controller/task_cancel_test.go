@@ -1133,3 +1133,102 @@ func TestRequestedCancellationMessagesAreBounded(t *testing.T) {
 		t.Fatalf("agent cancel message = %d bytes, %t; want at most %d", len(message), ok, acpPromptFailureMessageLimit)
 	}
 }
+
+// TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor covers a child
+// whose Create committed after a cancelled ancestor's cascade had already
+// run: a child in another namespace wakes no parent, and its direct parent
+// may have finished normally. Pending, it walks its UID-pinned chain,
+// through the finished parent and into the parent's recorded namespace, and
+// requests its own cancellation. Only a cancel is a signal: a chain no UID
+// proves, a live chain, an ancestor deleted as retention deletes finished
+// runs, a namesake in the child's own namespace, and a scheduled template
+// are left alone.
+func TestLateDelegatedChildCancelsItselfUnderAStoppedAncestor(t *testing.T) {
+	controller := true
+	root := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "default", UID: "root-uid",
+			Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"}},
+		Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	live := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{Name: "live", Namespace: "default", UID: "live-uid"},
+		Status:     corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseRunning},
+	}
+	finishedUnder := func(name, parent, parentUID string) *corev1alpha1.Task {
+		return &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid"),
+				Labels: map[string]string{labels.LabelParentTask: parent},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: corev1alpha1.GroupVersion.String(), Kind: "Task", Name: parent, UID: types.UID(parentUID), Controller: &controller,
+				}}},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhaseSucceeded},
+		}
+	}
+	// lateChild is a Pending child in another namespace, pinned to its
+	// parent by UID and, when given, the parent's namespace.
+	lateChild := func(name, parent, parentUID, parentNamespace string) *corev1alpha1.Task {
+		task := &corev1alpha1.Task{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "other",
+				Labels:      map[string]string{labels.LabelParentTask: parent},
+				Annotations: map[string]string{}},
+			Spec:   corev1alpha1.TaskSpec{Type: corev1alpha1.TaskTypeAgent},
+			Status: corev1alpha1.TaskStatus{Phase: corev1alpha1.TaskPhasePending},
+		}
+		if parentUID != "" {
+			task.Annotations[labels.AnnotationParentTaskUID] = parentUID
+		}
+		if parentNamespace != "" {
+			task.Annotations[labels.AnnotationParentTaskNamespace] = parentNamespace
+		}
+		return task
+	}
+	template := lateChild("template", "mid", "mid-uid", "default")
+	template.Spec.Schedule = "*/5 * * * *"
+	children := map[string]struct {
+		task *corev1alpha1.Task
+		want bool
+	}{
+		"under a finished parent of a cancelled root":   {lateChild("late", "mid", "mid-uid", "default"), true},
+		"under a gone parent":                           {lateChild("orphan", "gone", "gone-uid", "default"), false},
+		"under a replaced parent":                       {lateChild("replaced", "mid", "earlier-mid-uid", "default"), false},
+		"under a finished parent whose own was deleted": {lateChild("retained", "kept", "kept-uid", "default"), false},
+		"named after a namesake in its own namespace":   {lateChild("namesake", "neighbor", "elsewhere-uid", ""), false},
+		"under a live chain":                            {lateChild("healthy", "live", "live-uid", "default"), false},
+		"without a UID pin":                             {lateChild("unpinned", "mid", "", "default"), false},
+		"without the parent's namespace":                {lateChild("unplaced", "mid", "mid-uid", ""), false},
+		"a scheduled template":                          {template, false},
+	}
+	// kept finished under a run that retention has since deleted; neighbor
+	// is an unrelated Task in the child's namespace.
+	neighbor := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "neighbor", Namespace: "other", UID: "neighbor-uid"}}
+	objects := make([]client.Object, 0, 5+len(children))
+	objects = append(objects, root, live, finishedUnder("mid", "root", "root-uid"), finishedUnder("kept", "deleted-run", "deleted-run-uid"), neighbor)
+	for _, child := range children {
+		objects = append(objects, child.task)
+	}
+	c := fake.NewClientBuilder().WithScheme(newTestScheme()).WithObjects(objects...).Build()
+	r := &TaskReconciler{Client: c, APIReader: c}
+	for name, child := range children {
+		task := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(child.task), task); err != nil {
+			t.Fatal(err)
+		}
+		requested, err := r.requestCancelForCancelledAncestor(context.Background(), task)
+		if err != nil || requested != child.want {
+			t.Fatalf("%s: requested = %t, err = %v, want %t", name, requested, err, child.want)
+		}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(child.task), task); err != nil {
+			t.Fatal(err)
+		}
+		if _, recorded := task.Annotations[labels.AnnotationCancelRequested]; recorded != child.want {
+			t.Fatalf("%s: cancel request recorded = %t, want %t", name, recorded, child.want)
+		}
+	}
+	got := &corev1alpha1.Task{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "other", Name: "late"}, got); err != nil {
+		t.Fatal(err)
+	}
+	if message := got.Annotations[labels.AnnotationCancelRequested]; message != "cancelled with its ancestor task root" {
+		t.Fatalf("late child's cancel message = %q, want it to name the cancelled root", message)
+	}
+}

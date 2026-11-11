@@ -78,6 +78,7 @@ var (
 	controllerManagedTaskAnnotationKeys = []string{
 		labels.AnnotationCancelRequested,
 		labels.AnnotationParentTaskUID,
+		labels.AnnotationParentTaskNamespace,
 		labels.AnnotationRequestedBySource,
 		labels.AnnotationRequestedByStamp,
 	}
