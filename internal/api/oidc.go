@@ -127,10 +127,8 @@ func parseOIDCTokenCandidate(token string, cfg OIDCConfig) (*parsedJWT, error) {
 }
 
 func authorizeOIDCClaims(claims oidcClaims, cfg OIDCConfig) error {
-	if len(cfg.AllowedSubjects) == 0 {
-		return fmt.Errorf("%w: OIDC subject authorization is not configured", errOIDCAuthorization)
-	}
-
+	// An empty list allows no one, yet a verified caller is still told its
+	// subject, which is how an installation learns the first subjects to add.
 	for _, allowed := range cfg.AllowedSubjects {
 		allowed = strings.TrimSpace(allowed)
 		if allowed == "" {
