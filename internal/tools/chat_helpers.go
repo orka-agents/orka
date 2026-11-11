@@ -26,12 +26,16 @@ import (
 // for the turn to stop.
 const chatTaskCreateTimeout = 5 * time.Second
 
-// createChatTask creates a Task for a chat turn on a context the turn's own
-// cancellation does not end. A Session cancel stops the turn and then lists
-// its Tasks; were the Create abandoned mid-flight, the API server could
-// commit the Task after that list, and the Task would run uncancelled. The
-// turn instead waits for the Create's outcome, so the list sees it.
+// createChatTask creates a Task for a chat turn. A turn already stopped
+// starts no Create. One the turn's stop interrupts runs on to its outcome:
+// a Session cancel stops the turn and then lists its Tasks, and were the
+// Create abandoned mid-flight, the API server could commit the Task after
+// that list, where it would run uncancelled. The turn instead waits for the
+// Create's outcome, so the list sees it.
 func createChatTask(ctx context.Context, c client.Client, task *corev1alpha1.Task) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	createCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatTaskCreateTimeout)
 	defer cancel()
 	return c.Create(createCtx, task)
