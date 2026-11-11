@@ -174,7 +174,7 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return err
 	}
 	for _, task := range selected {
-		cancelled, err := h.requestTaskCancellation(c, task, "", message)
+		cancelled, err := h.recordTaskCancellation(c, task, "", message)
 		if err != nil {
 			var fiberErr *fiber.Error
 			if errors.Is(err, errCancelTaskGone) || (errors.As(err, &fiberErr) && fiberErr.Code == fiber.StatusConflict) {
@@ -191,8 +191,8 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 }
 
 // authorizedSessionTasks returns the cancellable Tasks of the Session. It
-// authorizes every one before the caller cancels any, so a denial leaves none
-// of them cancelled.
+// authorizes every one, including the per-Task credential checks, before the
+// caller cancels any, so a denial leaves none of them cancelled.
 func (h *Handlers) authorizedSessionTasks(
 	c fiber.Ctx,
 	tasks []corev1alpha1.Task,
@@ -212,6 +212,9 @@ func (h *Handlers) authorizedSessionTasks(
 				apiVerbUpdate, corev1alpha1.GroupVersion.Group, "tasks/cancel", task.Name); err != nil {
 				return nil, err
 			}
+		}
+		if err := h.authorizeTaskCancellation(c, task); err != nil {
+			return nil, err
 		}
 		selected = append(selected, task)
 	}
@@ -274,12 +277,24 @@ func taskInSession(task *corev1alpha1.Task, namespace, name string, chat bool, e
 // requestTaskCancellation records a cancel request on task. A second request
 // changes nothing; a finished Task other than a Cancelled one is a conflict.
 func (h *Handlers) requestTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task, expectedUID, message string) (taskCancellation, error) {
+	if err := h.authorizeTaskCancellation(c, task); err != nil {
+		return taskCancellation{}, err
+	}
+	return h.recordTaskCancellation(c, task, expectedUID, message)
+}
+
+// authorizeTaskCancellation applies the per-Task checks that depend on the
+// caller's credential rather than the route.
+func (h *Handlers) authorizeTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task) error {
 	if err := h.authorizeContextTokenLoadedTask(c, "cancelTask", task); err != nil {
-		return taskCancellation{}, err
+		return err
 	}
-	if err := h.taskAccess().authorizeGatewayTaskOperate(c, "cancelTask", task); err != nil {
-		return taskCancellation{}, err
-	}
+	return h.taskAccess().authorizeGatewayTaskOperate(c, "cancelTask", task)
+}
+
+// recordTaskCancellation records a cancel request on a Task the caller is
+// already authorized to cancel.
+func (h *Handlers) recordTaskCancellation(c fiber.Ctx, task *corev1alpha1.Task, expectedUID, message string) (taskCancellation, error) {
 	// The confirmed UID is compared only once the caller may act on this
 	// Task, so a refusal says nothing about the Task's identity.
 	if expectedUID != "" && string(task.UID) != expectedUID {

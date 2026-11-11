@@ -560,15 +560,29 @@ export function createDemoTask(input: DemoTaskInput): string {
 
 /**
  * Cancels a pending or running task now, the way a controller-side
- * cancellation (such as a repository monitor Stop command) does. Finished and
- * scheduled tasks are left alone.
+ * cancellation (such as a repository monitor Stop command) does, together
+ * with its unfinished delegated descendants. Finished and scheduled tasks
+ * are left alone.
  */
 export function cancelDemoTask(name: string, reason: string) {
   const rec = tasks.get(name)
+  if (rec && cancelDemoRecord(rec, reason)) cancelDemoDescendants(name, reason)
+}
+
+/** Cancels every unfinished, nonscheduled descendant, through finished ones too. */
+function cancelDemoDescendants(name: string, reason: string) {
+  for (const child of children(name)) {
+    if (child.schedule) continue
+    cancelDemoRecord(child, reason)
+    cancelDemoDescendants(child.name, reason)
+  }
+}
+
+/** Cancels one unfinished, nonscheduled task; reports whether it did. */
+function cancelDemoRecord(rec: TaskRecord, reason: string): boolean {
   const now = Date.now()
-  if (!rec) return
   advance(rec, now)
-  if (rec.finished || rec.schedule) return
+  if (rec.finished || rec.schedule) return false
   for (const approval of rec.approvals) {
     if (approval.status !== 'pending') continue
     Object.assign(approval, { status: 'cancelled', decisionTime: iso(now), decisionReason: reason })
@@ -580,8 +594,7 @@ export function cancelDemoTask(name: string, reason: string) {
   rec.end = now
   rec.outcome = { phase: 'Cancelled', message: reason }
   finishTask(rec)
-  // The controller cancels a Task's unfinished delegated children with it.
-  for (const child of children(name)) cancelDemoTask(child.name, reason)
+  return true
 }
 
 // ---- views ------------------------------------------------------------------------
