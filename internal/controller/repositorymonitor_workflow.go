@@ -24,12 +24,15 @@ import (
 )
 
 const (
-	repositoryMonitorWorkActionStatusQueued    = "queued"
-	repositoryMonitorWorkActionStatusRunning   = "running"
-	repositoryMonitorWorkActionStatusSucceeded = "succeeded"
-	repositoryMonitorWorkActionStatusFailed    = "failed"
-	repositoryMonitorWorkActionStatusBlocked   = "blocked"
-	repositoryMonitorWorkActionStatusCancelled = "cancelled"
+	repositoryMonitorWorkActionStatusQueued    = store.RepositoryMonitorWorkActionStatusQueued
+	repositoryMonitorWorkActionStatusRunning   = store.RepositoryMonitorWorkActionStatusRunning
+	repositoryMonitorWorkActionStatusSucceeded = store.RepositoryMonitorWorkActionStatusSucceeded
+	repositoryMonitorWorkActionStatusFailed    = store.RepositoryMonitorWorkActionStatusFailed
+	repositoryMonitorWorkActionStatusBlocked   = store.RepositoryMonitorWorkActionStatusBlocked
+	repositoryMonitorWorkActionStatusCancelled = store.RepositoryMonitorWorkActionStatusCancelled
+	// Command intake writes completed only for an action it coalesced into an
+	// identical active action; the controller never writes it.
+	repositoryMonitorWorkActionStatusCompleted = store.RepositoryMonitorWorkActionStatusCompleted
 )
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, run *store.MonitorRun, command *store.CommandEvent, targetKind string, targetNumber int64, targetSHA, snapshotDigest, actionKind, status, phase, taskName, reason string) error {
@@ -62,6 +65,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	}
 	blockedReason, actionError := repositoryMonitorWorkActionReasonFields(status, reason)
 	if existing, err := r.Store.GetWorkAction(ctx, monitor.Namespace, id); err == nil {
+		if existing.Status == repositoryMonitorWorkActionStatusCompleted {
+			// A coalesced action is final; its outcome is the action it joined.
+			return nil
+		}
 		if status == repositoryMonitorWorkActionStatusQueued {
 			// Queue recovery only fills missing actions; it must not rewind state.
 			return nil
@@ -96,8 +103,7 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 			return err
 		}
 		for _, candidate := range active {
-			switch candidate.Status {
-			case repositoryMonitorWorkActionStatusQueued, "leased", repositoryMonitorWorkActionStatusRunning, store.RepositoryMonitorWorkActionStatusRetryPending:
+			if store.IsRepositoryMonitorWorkActionActive(candidate.Status) {
 				return nil
 			}
 		}
@@ -136,7 +142,10 @@ func (r *RepositoryMonitorReconciler) recordRepositoryMonitorWorkActionState(ctx
 	return nil
 }
 
-func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
+// repositoryMonitorWorkActionHalted reports whether a command's work must not
+// run or advance: its action was cancelled, or command intake coalesced it
+// into an identical active action (completed), even after its run was queued.
+func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionHalted(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, commandID, actionKind string) (bool, error) {
 	if r.Store == nil || monitor == nil || strings.TrimSpace(commandID) == "" {
 		return false, nil
 	}
@@ -154,7 +163,7 @@ func (r *RepositoryMonitorReconciler) repositoryMonitorWorkActionCancelled(ctx c
 		}
 		return false, err
 	}
-	return action.Status == repositoryMonitorWorkActionStatusCancelled, nil
+	return action.Status == repositoryMonitorWorkActionStatusCancelled || action.Status == repositoryMonitorWorkActionStatusCompleted, nil
 }
 
 func (r *RepositoryMonitorReconciler) recordRepositoryMonitorGitHubMutation(ctx context.Context, monitor *corev1alpha1.RepositoryMonitor, record *store.GitHubMutationRecord) error {
@@ -310,7 +319,7 @@ func (r *RepositoryMonitorReconciler) cancelRepositoryMonitorTargetTasks(ctx con
 				}
 				return err
 			}
-			if repositoryMonitorReviewTaskTerminal(current.Status.Phase) {
+			if current.Status.Phase.IsTerminal() {
 				return nil
 			}
 			if err := r.cancelRepositoryMonitorTask(ctx, &current, reason); apierrors.IsNotFound(err) {
