@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -154,5 +158,94 @@ func TestLateChildCancelSurvivesTheCallersCancellation(t *testing.T) {
 	}
 	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; !requested {
 		t.Fatal("the late child of a cancelled parent was not cancelled")
+	}
+}
+
+// TestChildOfAnUnknownCreateIsCancelled covers a Create the caller's
+// cancellation cut short after the API server committed the child: its name
+// was never learned, and the parent's cascade had already listed, so the
+// child is found by the parent that delegated it and cancelled. Siblings of
+// another delegation effect and other parents' children are left alone.
+func TestChildOfAnUnknownCreateIsCancelled(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	saved := unknownCreateBackoff
+	unknownCreateBackoff.Duration = time.Millisecond
+	t.Cleanup(func() { unknownCreateBackoff = saved })
+	parent := &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+		Name: "parent", Namespace: "default", UID: "parent-uid",
+		Annotations: map[string]string{labels.AnnotationCancelRequested: "cancelled by alice"},
+	}}
+	child := func(name, parentUID, effect string) *corev1alpha1.Task {
+		return &corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "other", UID: types.UID(name + "-uid"),
+			Labels: map[string]string{labels.LabelParentTask: "parent"},
+			Annotations: map[string]string{
+				labels.AnnotationParentTaskUID:      parentUID,
+				labels.AnnotationDelegationEffectID: effect,
+			},
+		}}
+	}
+	committed := child("parent-child-x7k2p", "parent-uid", "effect-1")
+	sibling := child("parent-child-a1b2c", "parent-uid", "effect-0")
+	stranger := child("parent-child-zz9zz", "earlier-parent-uid", "effect-1")
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, committed, sibling, stranger).Build()
+
+	// The Create's own object never learned the generated name.
+	attempted := committed.DeepCopy()
+	attempted.Name, attempted.UID = "", ""
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cancelChildrenAfterUnknownCreate(ctx, c, c, parent, attempted); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		task *corev1alpha1.Task
+		want bool
+	}{{committed, true}, {sibling, false}, {stranger, false}} {
+		got := &corev1alpha1.Task{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(tc.task), got); err != nil {
+			t.Fatal(err)
+		}
+		if _, requested := got.Annotations[labels.AnnotationCancelRequested]; requested != tc.want {
+			t.Fatalf("%s cancel requested = %t, want %t", tc.task.Name, requested, tc.want)
+		}
+	}
+
+	// A live parent's own cascade lists the child, so nothing is cancelled.
+	live := parent.DeepCopy()
+	live.Annotations = nil
+	other := child("parent-child-live1", "parent-uid", "effect-2")
+	c = fake.NewClientBuilder().WithScheme(scheme).WithObjects(live, other).Build()
+	if err := cancelChildrenAfterUnknownCreate(context.Background(), c, c, live, other); err != nil {
+		t.Fatal(err)
+	}
+	got := &corev1alpha1.Task{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(other), got); err != nil {
+		t.Fatal(err)
+	}
+	if _, requested := got.Annotations[labels.AnnotationCancelRequested]; requested {
+		t.Fatal("the child of a live parent was cancelled")
+	}
+}
+
+func TestChildCreateOutcomeUnknown(t *testing.T) {
+	gr := schema.GroupResource{Group: "core.orka.ai", Resource: "tasks"}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"caller cancelled", context.Canceled, true},
+		{"connection reset", errors.New("connection reset by peer"), true},
+		{"server timeout", apierrors.NewServerTimeout(gr, "create", 1), true},
+		{"invalid", apierrors.NewInvalid(schema.GroupKind{Group: "core.orka.ai", Kind: "Task"}, "x", nil), false},
+		{"forbidden", apierrors.NewForbidden(gr, "x", errors.New("no")), false},
+	} {
+		if got := childCreateOutcomeUnknown(tc.err); got != tc.want {
+			t.Errorf("%s: unknown = %t, want %t", tc.name, got, tc.want)
+		}
 	}
 }
