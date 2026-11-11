@@ -345,8 +345,25 @@ spec:
       name: graph-as-agent
 ```
 
-Run a Task on the Agent that calls `graph-users`. With the API reachable and
-`orka` configured as in [Connect to the API](../getting-started.md#connect-to-the-api):
+Point `orka` at this release in `team-a`, as in
+[Connect to the API](../getting-started.md#connect-to-the-api) and
+[Use the CLI](../getting-started.md#the-cli) but with this namespace. Forward
+the API in one terminal (the Service is named after the Helm release):
+
+```bash
+kubectl -n team-a port-forward svc/<release> 8080:8080
+```
+
+and in another, configure the CLI with a token for the `orka-client`
+ServiceAccount that step 4 lets run Tasks on the Agent:
+
+```bash
+orka config set-server http://localhost:8080
+orka config set-namespace team-a
+kubectl -n team-a create token orka-client | orka config set-token --file -
+```
+
+Run a Task on the Agent that calls `graph-users`:
 
 ```bash
 orka task create "Call graph-users and tell me the display name it returns." \
