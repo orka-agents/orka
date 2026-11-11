@@ -169,18 +169,11 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusInternalServerError, fmt.Sprintf("failed to list tasks: %v", err))
 	}
 	message := cancelMessage(GetUserInfo(c), request.Reason)
-	for i := range tasks {
-		task := &tasks[i]
-		if !cancellableTask(task) || !taskInSession(task, namespace, name, sessionType == store.SessionTypeChat, epoch) {
-			continue
-		}
-		if task.Namespace != namespace {
-			// The route authorized the Session's namespace only.
-			if err := authorizeKubernetesResourceAction(ctx, h.clientset, GetUserInfo(c), task.Namespace,
-				apiVerbUpdate, corev1alpha1.GroupVersion.Group, "tasks/cancel", task.Name); err != nil {
-				return err
-			}
-		}
+	selected, err := h.authorizedSessionTasks(c, tasks, namespace, name, sessionType == store.SessionTypeChat, epoch)
+	if err != nil {
+		return err
+	}
+	for _, task := range selected {
 		cancelled, err := h.requestTaskCancellation(c, task, "", message)
 		if err != nil {
 			var fiberErr *fiber.Error
@@ -195,6 +188,34 @@ func (h *Handlers) CancelSession(c fiber.Ctx) error {
 		return fiber.NewError(fiber.StatusConflict, "session has no running turn")
 	}
 	return c.JSON(result)
+}
+
+// authorizedSessionTasks returns the cancellable Tasks of the Session. It
+// authorizes every one before the caller cancels any, so a denial leaves none
+// of them cancelled.
+func (h *Handlers) authorizedSessionTasks(
+	c fiber.Ctx,
+	tasks []corev1alpha1.Task,
+	namespace, name string,
+	chat bool,
+	epoch string,
+) ([]*corev1alpha1.Task, error) {
+	selected := make([]*corev1alpha1.Task, 0, len(tasks))
+	for i := range tasks {
+		task := &tasks[i]
+		if !cancellableTask(task) || !taskInSession(task, namespace, name, chat, epoch) {
+			continue
+		}
+		if task.Namespace != namespace {
+			// The route authorized the Session's namespace only.
+			if err := authorizeKubernetesResourceAction(c.Context(), h.clientset, GetUserInfo(c), task.Namespace,
+				apiVerbUpdate, corev1alpha1.GroupVersion.Group, "tasks/cancel", task.Name); err != nil {
+				return nil, err
+			}
+		}
+		selected = append(selected, task)
+	}
+	return selected, nil
 }
 
 // sessionTaskCandidates lists, live, the Tasks that may belong to a Session:

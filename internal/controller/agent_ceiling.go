@@ -62,6 +62,9 @@ func validateAgentRuntimeCeilingWithRegisteredPolicy(
 	// Registered external runtimes fix the Bash gate in their profile, so only
 	// the tool allowlist applies to them.
 	if ceiling.AllowBash != nil && !*ceiling.AllowBash && bash && !runtimeRef {
+		if runtime.Type == corev1alpha1.AgentRuntimeCodex {
+			return fmt.Errorf("agent %q ceiling forbids Bash, but the codex runtime runs shell commands in every session, including read-only ones; use another runtime or allow Bash in the ceiling", agent.Name)
+		}
 		return fmt.Errorf("agent %q ceiling forbids Bash, but the task resolves to a policy that allows it; set allowBash: false or omit Bash from the allowed tools", agent.Name)
 	}
 	if ceiling.AllowedTools == nil || (task == nil && runtime.DefaultAllowedTools == nil) {
@@ -164,15 +167,20 @@ func resolvedCeilingRuntimeTools(task *corev1alpha1.Task, agent *corev1alpha1.Ag
 		tools := acp.OpenCodeEffectiveAllowedTools(allowed, disallowed, allowBash)
 		return tools, allowBash && slices.ContainsFunc(tools, isCeilingBashTool)
 	}
+	// Every Codex session that dispatches can run shell commands: the
+	// unrestricted policy grants the shell, and the only narrower policy Codex
+	// accepts (read intent with Glob, Grep, and Read) still runs read commands
+	// through it. allowBash: false cannot remove that.
+	codexShell := agent.Spec.Runtime.Type == corev1alpha1.AgentRuntimeCodex
 	if allowed == nil {
-		return nil, allowBash
+		return nil, allowBash || codexShell
 	}
 	// Judge exactly what dispatch grants: descriptors keep every allowed name
 	// that MCPToolPolicy.Allows accepts, and its deny list matches names
 	// exactly, so a differently cased deny entry does not narrow the request.
 	policy := harnessv2.MCPToolPolicy{AllowedToolNames: allowed, DisallowedToolNames: disallowed, AllowBash: allowBash}
 	tools := sortedUnique(slices.DeleteFunc(slices.Clone(allowed), func(tool string) bool { return !policy.Allows(tool) }))
-	return tools, slices.ContainsFunc(tools, isCeilingBashTool)
+	return tools, codexShell || slices.ContainsFunc(tools, isCeilingBashTool)
 }
 
 // ceilingAllowsTool reports whether a requested tool is within the ceiling.
