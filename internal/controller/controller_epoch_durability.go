@@ -120,6 +120,10 @@ func (t *storageTakeover) run(ctx context.Context) error {
 			log.Info("Released the acknowledged storage recovery hold and recorded what each dataset holds now", "hold", hold.ID)
 			continue
 		}
+		// Each fence opens only once its dataset passes the takeover step,
+		// also after a hold that left the record without this manager
+		// releasing it, as an edit of the status does.
+		t.manager.closeFences()
 		t.manager.clearHold()
 		hold, err := t.openAndMaintain(ctx, record)
 		if err != nil || hold == nil {

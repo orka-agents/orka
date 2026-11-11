@@ -792,6 +792,96 @@ func TestStorageHoldClosesFencesBeforeItIsRecorded(t *testing.T) {
 	requireHeld(t, manager, storagev1.StateContract)
 }
 
+// describeGatedDataset makes Describe wait while a gate is set, as a dataset
+// that stops answering does.
+type describeGatedDataset struct {
+	*recordingEpochDataset
+	gate atomic.Pointer[chan struct{}]
+}
+
+func (d *describeGatedDataset) Describe(ctx context.Context) (storagev1.ProviderInfo, error) {
+	if gate := d.gate.Load(); gate != nil {
+		select {
+		case <-*gate:
+		case <-ctx.Done():
+			return storagev1.ProviderInfo{}, ctx.Err()
+		}
+	}
+	return d.recordingEpochDataset.Describe(ctx)
+}
+
+// A hold that leaves the record without this manager releasing it, as an
+// edit of the status does, reopens no fence it closed: each opens again only
+// once its dataset passes the takeover step, which here holds again for the
+// writes the dataset lost.
+func TestHoldRemovedFromTheRecordDoesNotReopenFencesBeforeTheCheck(t *testing.T) {
+	authorityDB, err := sqlite.NewDB(filepath.Join(t.TempDir(), "authority.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authorityDB.Close() })
+	records := newMemoryStorageRecords()
+	authority := installationEpochStore{
+		ControllerEpochStore: sqlite.NewStore(authorityDB, "authority"), memoryStorageRecords: records,
+		installationID: "installation-a",
+	}
+	dataset := &describeGatedDataset{recordingEpochDataset: newRecordingEpochDataset("dataset-a")}
+	manager := fastEpochManager(authority, "controller-a").WithStorage(storagev1.StateContract, dataset)
+	startEpochManager(t, manager)
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "a recorded watermark", func() bool { return recordedWatermarkOf(t, records, storagev1.StateContract) >= 2 })
+	// The dataset loses acknowledged writes while its fence is open.
+	dataset.mu.Lock()
+	dataset.watermark = 0
+	dataset.mu.Unlock()
+	recordedHold := func() *store.StorageRecoveryHold {
+		record, err := records.GetStorageRecord(context.Background(), store.DefaultControllerEpochName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record.Hold
+	}
+	eventually(t, "a recorded hold", func() bool { return recordedHold() != nil })
+	first := recordedHold()
+	if first.Reason != store.StorageRecoveryWatermarkRegressed {
+		t.Fatalf("hold = %#v, want the lost watermark held", first)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+
+	gate := make(chan struct{})
+	dataset.gate.Store(&gate)
+	records.mu.Lock()
+	records.record.Hold = nil
+	records.mu.Unlock()
+	eventually(t, "the manager to drop the hold that left the record", func() bool {
+		var held *store.StorageHoldError
+		return !errors.As(manager.StorageHold(), &held)
+	})
+	if _, _, err := writeFenceWithin(manager, storagev1.StateContract, 20*time.Millisecond); err == nil {
+		t.Fatal("the state write fence reopened before the dataset that lost writes was checked again")
+	}
+	if err := manager.StorageHold(); !errors.Is(err, store.ErrNotReady) {
+		t.Fatalf("StorageHold before the dataset is checked again = %v, want ErrNotReady", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := manager.CurrentFence(ctx); err == nil {
+		t.Fatal("CurrentFence opened before the dataset that lost writes was checked again")
+	}
+
+	close(gate)
+	eventually(t, "the takeover step to hold the dataset again", func() bool {
+		hold := recordedHold()
+		return hold != nil && hold.ID != first.ID
+	})
+	if hold := recordedHold(); hold.Reason != store.StorageRecoveryWatermarkRegressed {
+		t.Fatalf("hold = %#v, want the lost watermark held again", hold)
+	}
+	requireHeld(t, manager, storagev1.StateContract)
+}
+
 // After an operator acknowledges a hold raised because a contract moved to
 // another dataset, the contract's fence names the new dataset.
 func TestReleasedDatasetChangeMovesTheFence(t *testing.T) {
