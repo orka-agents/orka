@@ -42,11 +42,12 @@ checked at that tag.
 - In the release: `git grep -n '<term>' <tag> -- <path>`, or, when the tag isn't local,
   `gh api 'repos/orka-agents/orka/contents/<path>?ref=<tag>' -H 'Accept: application/vnd.github.raw'`.
   For a PR, take its merge commit
-  (`gh pr view <N> -R orka-agents/orka --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`)
-  and run `git merge-base --is-ancestor <commit> <tag>` (exit 0: included; 1: not
-  included; 128: not in the checkout), or without them locally
+  (`gh pr view <N> -R orka-agents/orka --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "-")"'`);
+  a PR that isn't `MERGED` shipped nothing itself. Then run
+  `git merge-base --is-ancestor <commit> <tag>` (exit 0: included; 1: not included; 128:
+  not in the checkout), or without them locally
   `gh api repos/orka-agents/orka/compare/<tag>...<commit> --jq .status` (`behind` or
-  `identical` means included).
+  `identical` means included; `ahead` or `diverged` means not).
 - Patch releases carry backports, some without the PR number. Before saying a merged PR
   missed a release, run `git log --oneline --cherry-mark --right-only -1 <tag>...<commit>`
   (`=` means the tag has an equivalent patch) and search only the tag's own commits:
@@ -55,6 +56,8 @@ checked at that tag.
   `gh api repos/orka-agents/orka/compare/<commit>...<tag> --jq '.commits[].commit.message|split("\n")[0]'`.
   Search the tag, not the `release-X.Y` branch.
 - The docs aren't versioned, so a documented feature can still be unreleased.
+- A check that errors or can't run proves nothing: call the status unverified, never
+  "not in vX.Y.Z".
 
 Cite the version you read: `main@<sha>` or `<tag>` (upstream main's commit:
 `gh api repos/orka-agents/orka/commits/main --jq .sha`). If the checkout differs from it,
