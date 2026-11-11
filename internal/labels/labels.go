@@ -81,6 +81,10 @@ const (
 	AnnotationOriginalPrompt                = "orka.ai/original-prompt"
 	AnnotationParentTaskName                = "orka.ai/parent-task-name"
 	AnnotationParentTaskUID                 = "orka.ai/parent-task-uid"
+	// AnnotationParentTaskNamespace records the namespace of the Task a
+	// brokered child was delegated from, beside its UID, so a child in
+	// another namespace can still find the Task it was delegated from.
+	AnnotationParentTaskNamespace = "orka.ai/parent-task-namespace"
 	// AnnotationCancelRequested records a verified parent's cancel_task
 	// request; its value is the Task's terminal message. Only controller
 	// identities may set it, and the Task controller completes the
