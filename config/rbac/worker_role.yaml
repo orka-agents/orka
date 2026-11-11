@@ -2,18 +2,30 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: ai-worker
   namespace: system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: vendor-worker
   namespace: system
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/name: orka
+    orka.ai/platform-identity: "true"
+    app.kubernetes.io/managed-by: kustomize
   name: container-worker
   namespace: system
 ---
