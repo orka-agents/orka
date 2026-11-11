@@ -223,6 +223,11 @@ controller:
   dashboard:
     enabled: false
 
+  # ConfigMap in the release namespace whose protectedSet.yaml declares what
+  # self-improvement proposer Tasks may never change. Empty, missing or
+  # invalid refuses every proposer Task. It can be the same ConfigMap as
+  # evals.gateConfigMap.
+  protectedSetConfigMap: ""
   # Capability evals (EvalRun) and experiments that compare a candidate Agent
   # with the current one. Off by default.
   evals:
@@ -236,6 +241,13 @@ controller:
     # decide verb on evalruns (the eval-promoter ClusterRole). Empty refuses
     # every decision.
     promoterGroups: []
+    # Agent, in the release namespace, that runs proposer Tasks: read-only
+    # Tasks that learn from a training run's failed trials and propose a
+    # candidate reviewer change. Empty turns proposals off.
+    proposerAgent: ""
+    # Model names a proposed candidate may switch the reviewer to. Empty
+    # allows prompt changes only.
+    proposerModels: []
   # Long-lived, single-user agent hosts (AgentHostTemplate and AgentHost) on
   # Orka-owned Pods. Off by default.
   agentHosts:

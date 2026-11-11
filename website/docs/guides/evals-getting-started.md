@@ -219,6 +219,61 @@ trials per case, or more cases, buy that power.
 If the runs can't be compared fairly, for example because their cases or trial plans
 differ, the verdict is `Incomparable`.
 
+### Or let Orka propose the candidate
+
+Instead of writing the candidate yourself, a proposer can learn one from the cases the
+current reviewer gets wrong. It reads only training cases, and its candidate is then
+judged on held-out ones it never saw.
+
+1. List a training case set in the protected set, next to the held-out one, and load it:
+
+   ```yaml
+   caseSets:
+     - {namespace: orka-system, name: pr-review-train, split: train}
+     - {namespace: orka-system, name: pr-review-heldout, split: heldOut, baselineMonitors: [fixtures]}
+   ```
+
+2. Create the proposer Agent, and turn proposals on:
+
+   ```yaml title="proposer.yaml"
+   apiVersion: core.orka.ai/v1alpha1
+   kind: Agent
+   metadata: {name: proposer, namespace: orka-system}
+   spec:
+     model: {name: "openai/gpt-4.1", contextWindow: 65536, maxTokens: 8192}
+     runtime:
+       contractVersion: orka.harness.v2
+       type: opencode
+       defaultAllowBash: false
+       defaultAllowedTools: [read]
+   ```
+
+   ```bash
+   helm upgrade orka ./manifest_staging/charts/orka -n orka-system --reuse-values \
+     --set-string controller.protectedSetConfigMap=orka-protected-set \
+     --set-string controller.evals.proposerAgent=proposer \
+     --set 'controller.evals.proposerModels={openai/gpt-4.1}'
+   ```
+
+   Leave `proposerModels` empty to allow prompt changes only.
+
+3. Run the current reviewer on the training cases, then ask for a proposal:
+
+   ```bash
+   orka eval run -f training.yaml --wait     # a plain run on pr-review-train
+   orka eval propose review-training
+   orka eval proposals review-training
+   ```
+
+The proposer is a read-only Task with no workspace, no Kubernetes or Orka API token, and
+no tools beyond reading. It gets the reviewer's current prompt and model, the failed
+training trials with their pull requests, expected verdicts and grader reasons, and the
+hypotheses already tried. It answers with one hypothesis and a new system prompt or
+model. Orka checks the answer strictly, then creates the candidate Agent,
+`reviewer-c-<digest>`, and a baseline and a candidate run on the held-out set.
+`orka eval proposals` shows them; follow the candidate run as in step 5. Each training
+run allows `maxCandidatesPerBaseline` proposals.
+
 ## 6. Read the result
 
 ```bash

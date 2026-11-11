@@ -139,7 +139,7 @@ type TaskTransaction struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.execution.workspace.reusePolicy != 'session' || has(self.sessionRef)",message="session workspace reuse requires spec.sessionRef"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.expectedRemoteSHA)",message="container Tasks do not support workspace.expectedRemoteSHA"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.createPR) || !self.workspace.createPR)",message="container Tasks do not support workspace.createPR"
-// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
+// +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || (!has(self.workspace.maxChangedFiles) && (!has(self.workspace.allowedPaths) || self.workspace.allowedPaths.size() == 0) && (!has(self.workspace.denyRepositoryControlPaths) || !self.workspace.denyRepositoryControlPaths) && (!has(self.workspace.deniedPaths) || self.workspace.deniedPaths.size() == 0) && (!has(self.workspace.rejectBinaryFiles) || !self.workspace.rejectBinaryFiles) && (!has(self.workspace.rejectSecretLikeContent) || !self.workspace.rejectSecretLikeContent))",message="container Tasks do not support clean-room workspace publication policies"
 // +kubebuilder:validation:XValidation:rule="self.type != 'container' || !has(self.workspace) || !has(self.workspace.pushBranch) || self.workspace.pushBranch.size() == 0 || !has(self.image) || self.image.size() == 0",message="custom-image container Tasks do not support workspace.pushBranch publication"
 // +kubebuilder:validation:XValidation:rule="!has(self.execution) || !has(self.execution.workspace) || self.type == 'agent'",message="execution.workspace is only supported for agent Tasks"
 type TaskSpec struct {
@@ -1081,6 +1081,17 @@ type WorkspaceConfig struct {
 	// It is not supported for container Tasks.
 	// +optional
 	DenyRepositoryControlPaths bool `json:"denyRepositoryControlPaths,omitempty"`
+
+	// DeniedPaths rejects publishable workspace changes to these repository
+	// path globs or directory prefixes ending in /**, using the AllowedPaths
+	// syntax, before publication even when AllowedPaths matches. Both the
+	// runtime and the publisher check it. It requires write workspace intent
+	// and is not supported for container Tasks.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MaxLength=1024
+	// +listType=set
+	// +optional
+	DeniedPaths []string `json:"deniedPaths,omitempty"`
 
 	// RejectBinaryFiles rejects changed file content that is not valid text. It is
 	// not supported for container Tasks.

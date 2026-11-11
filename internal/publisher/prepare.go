@@ -57,6 +57,9 @@ func (p *Publisher) Prepare(ctx context.Context, request PrepareRequest) (Prepar
 	if err != nil {
 		return PreparedPublication{}, err
 	}
+	if err := delta.rejectDeniedPaths(request.DeniedPaths); err != nil {
+		return PreparedPublication{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return PreparedPublication{}, err
 	}
@@ -222,12 +225,27 @@ func validatePrepareRequest(request PrepareRequest) error {
 			return invalid("workspace relative root", "must be a canonical relative path")
 		}
 	}
+	if err := validateDeniedPaths(request.DeniedPaths); err != nil {
+		return err
+	}
 	if request.CommitMessage == "" || len(request.CommitMessage) > 4096 || !utf8.ValidString(request.CommitMessage) ||
 		strings.ContainsRune(request.CommitMessage, 0) || strings.Contains(request.CommitMessage, "\r") || !strings.HasSuffix(request.CommitMessage, "\n") {
 		return invalid("commit message", "must be non-empty UTF-8, at most 4096 bytes, contain no NUL/CR, and end with newline")
 	}
 	if request.CommitTimestamp.Location() != time.UTC || request.CommitTimestamp.Nanosecond() != 0 || request.CommitTimestamp.IsZero() {
 		return invalid("commit timestamp", "must be a non-zero whole-second UTC timestamp")
+	}
+	return nil
+}
+
+func validateDeniedPaths(patterns []string) error {
+	if len(patterns) > maxDeniedPathPatterns {
+		return invalid("denied paths", "must contain at most %d patterns", maxDeniedPathPatterns)
+	}
+	for _, pattern := range patterns {
+		if !workspacedelta.ValidDeniedPathPattern(pattern) {
+			return invalid("denied paths", "contains an invalid pattern")
+		}
 	}
 	return nil
 }
@@ -246,6 +264,7 @@ func prepareRequestDigest(request PrepareRequest) (string, error) {
 		RemoteBefore          RemoteRef  `json:"remoteBefore"`
 		DeltaArtifactDigest   string     `json:"deltaArtifactDigest"`
 		RelativeRoot          string     `json:"relativeRoot,omitempty"`
+		DeniedPaths           []string   `json:"deniedPaths,omitempty"`
 		CommitAuthorName      string     `json:"commitAuthorName"`
 		CommitAuthorEmail     string     `json:"commitAuthorEmail"`
 		CommitMessage         string     `json:"commitMessage"`
@@ -255,7 +274,8 @@ func prepareRequestDigest(request PrepareRequest) (string, error) {
 		PublicationGeneration: request.PublicationGeneration, Source: request.Source, SourceRef: request.SourceRef,
 		Target: request.Target, TargetRef: request.TargetRef, BranchClaimGeneration: request.BranchClaimGeneration,
 		BaselineOID: request.BaselineOID, RemoteBefore: request.RemoteBefore,
-		DeltaArtifactDigest: request.DeltaArtifactDigest, RelativeRoot: request.RelativeRoot, CommitAuthorName: CommitAuthorName,
+		DeltaArtifactDigest: request.DeltaArtifactDigest, RelativeRoot: request.RelativeRoot, DeniedPaths: request.DeniedPaths,
+		CommitAuthorName:  CommitAuthorName,
 		CommitAuthorEmail: CommitAuthorEmail, CommitMessage: request.CommitMessage, CommitTimestamp: request.CommitTimestamp,
 	})
 }

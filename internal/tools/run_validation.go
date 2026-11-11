@@ -237,6 +237,7 @@ func buildRepositoryValidationTask(parent *corev1alpha1.Task, monitor *corev1alp
 	workspace.MaxChangedFiles = nil
 	workspace.AllowedPaths = nil
 	workspace.DenyRepositoryControlPaths = false
+	workspace.DeniedPaths = nil
 	workspace.RejectBinaryFiles = false
 	workspace.RejectSecretLikeContent = false
 

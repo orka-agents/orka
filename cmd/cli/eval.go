@@ -45,6 +45,8 @@ func newEvalCmd() *cobra.Command {
 	cmd.AddCommand(newEvalDecisionsCmd())
 	cmd.AddCommand(newEvalDecideCmd(store.EvalDecisionApproved))
 	cmd.AddCommand(newEvalDecideCmd(store.EvalDecisionRejected))
+	cmd.AddCommand(newEvalProposeCmd())
+	cmd.AddCommand(newEvalProposalsCmd())
 	return cmd
 }
 

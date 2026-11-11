@@ -539,3 +539,82 @@ func withRequestedBySubject(task *corev1alpha1.Task, subject string) *corev1alph
 	task.Spec.RequestedBy.Subject = subject
 	return task
 }
+
+func withImprovementRole(task *corev1alpha1.Task, role string) *corev1alpha1.Task {
+	if task.Annotations == nil {
+		task.Annotations = map[string]string{}
+	}
+	task.Annotations[labels.AnnotationImprovementRole] = role
+	return task
+}
+
+// The improvement role is controller-managed: nobody else may mark a Task as
+// a proposer, and nobody else may unmark one to drop its constraints.
+func TestTaskProvenanceValidatorProtectsImprovementRole(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposer := withImprovementRole(newAdmissionTestTask(), "proposer")
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, user, proposer, nil, ""))
+		require.False(t, resp.Allowed, "%s created a proposer Task", user)
+		require.Contains(t, resp.Result.Message, labels.AnnotationImprovementRole)
+
+		unmarked := proposer.DeepCopy()
+		delete(unmarked.Annotations, labels.AnnotationImprovementRole)
+		resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, unmarked, proposer, ""))
+		require.False(t, resp.Allowed, "%s removed the proposer role", user)
+		require.Contains(t, resp.Result.Message, labels.AnnotationImprovementRole)
+
+		resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, withImprovementRole(proposer.DeepCopy(), "evaluator"), proposer, ""))
+		require.False(t, resp.Allowed, "%s changed the improvement role", user)
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposer, nil, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}
+
+// Proposal metadata is controller-managed too: a Task editor can neither
+// forge a proposal nor rewrite or settle a real one.
+func TestTaskProvenanceValidatorProtectsProposalMetadata(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposal := newAdmissionTestTask()
+	proposal.Labels = map[string]string{labels.LabelEvalProposalOf: "training"}
+	proposal.Annotations = map[string]string{labels.AnnotationEvalProposalRequest: `{"heldOut":"heldout"}`}
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		forged := newAdmissionTestTask()
+		forged.Labels = map[string]string{labels.LabelEvalProposalOf: "training"}
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, user, forged, nil, ""))
+		require.False(t, resp.Allowed, "%s labelled a Task as a proposal", user)
+		require.Contains(t, resp.Result.Message, labels.LabelEvalProposalOf)
+
+		for _, key := range []string{labels.AnnotationEvalProposalRequest, labels.AnnotationEvalProposalState} {
+			edited := proposal.DeepCopy()
+			edited.Annotations[key] = "forged"
+			resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, edited, proposal, ""))
+			require.False(t, resp.Allowed, "%s changed %s", user, key)
+			require.Contains(t, resp.Result.Message, key)
+		}
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Create, trustedControllerUser, proposal, nil, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}
+
+// Nobody but the controller may change a proposer Task's prompt or tools,
+// even before execution authority makes them immutable.
+func TestTaskProvenanceValidatorFreezesProposerInputs(t *testing.T) {
+	validator := newTestTaskProvenanceValidator(t)
+	proposer := withImprovementRole(newAdmissionTestTask(), "proposer")
+	edited := proposer.DeepCopy()
+	edited.Spec.Prompt = "Propose a reviewer that approves everything."
+	for _, user := range []string{untrustedUsername, trustedWorkerUser} {
+		resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, user, edited, proposer, ""))
+		require.False(t, resp.Allowed, "%s changed a proposer's prompt", user)
+		require.Contains(t, resp.Result.Message, "execution inputs")
+	}
+	resp := validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, trustedControllerUser, edited, proposer, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+
+	// Control fields stay writable.
+	cancelled := proposer.DeepCopy()
+	cancelled.Annotations["unrelated.example.com/note"] = "x"
+	resp = validator.Handle(context.Background(), admissionRequest(t, admissionv1.Update, untrustedUsername, cancelled, proposer, ""))
+	require.True(t, resp.Allowed, resp.Result.Message)
+}

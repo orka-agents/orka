@@ -1,5 +1,6 @@
 # Grants approving and rejecting EvalRun experiments through
-# POST /api/v1/evals/runs/:name/decisions. It is not aggregated into "edit" or
+# POST /api/v1/evals/runs/:name/decisions, and asking for proposals through
+# POST /api/v1/evals/runs/:name/proposals. It is not aggregated into "edit" or
 # "admin": bind it only to people. The API also refuses ServiceAccounts,
 # transaction-token callers and anyone outside --eval-promoter-groups.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -16,6 +17,7 @@ rules:
   - evalruns
   verbs:
   - decide
+  - propose
   - get
   - list
   - watch

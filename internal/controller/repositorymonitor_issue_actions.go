@@ -28,10 +28,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/security"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/workerenv"
+	"github.com/orka-agents/orka/internal/workspacedelta"
 	"github.com/orka-agents/orka/workers/common"
 )
 
@@ -52,6 +54,7 @@ const (
 	repositoryMonitorCommandIntentImplement      = "implement"
 	repositoryMonitorIssueUnknownValue           = "unknown"
 	repositoryMonitorPatchPathDenied             = "patch_path_denied"
+	repositoryMonitorPatchPathNotAllowed         = "patch_path_not_allowed"
 	repositoryMonitorPatchPathInvalid            = "patch_path_invalid"
 	repositoryMonitorPatchManifestMismatch       = "patch_path_manifest_mismatch"
 	repositoryMonitorPatchSensitiveContentReason = "patch_secret_scan_failed"
@@ -482,8 +485,7 @@ func (r *RepositoryMonitorReconciler) createRepositoryMonitorIssueActionTask(ctx
 		workspace.PushBranch = repositoryMonitorIssueImplementationBranch(monitor, item, command)
 		maxChangedFiles := int32(repositoryMonitorImplementationMaxChangedFiles(monitor)) //nolint:gosec // CRD field is int32-bounded.
 		workspace.MaxChangedFiles = &maxChangedFiles
-		workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
-		workspace.DenyRepositoryControlPaths = true
+		repositoryMonitorApplyPatchPathLimits(monitor, workspace)
 		workspace.RejectBinaryFiles = true
 		workspace.RejectSecretLikeContent = true
 		annotations[labels.AnnotationAgentRuntimeAuthOnly] = scheduledRunLabelValue
@@ -1521,6 +1523,47 @@ func repositoryMonitorImplementationMaxChangedFiles(monitor *corev1alpha1.Reposi
 	return 12
 }
 
+// repositoryMonitorApplyPatchPathLimits bounds which repository paths a
+// monitor write Task may publish. Implementation and repair Tasks share one
+// policy: spec.issueWorkflow.implementation.allowedPaths, when set, and
+// repository control paths are always denied. The runtime enforces both before
+// any publication.
+func repositoryMonitorApplyPatchPathLimits(monitor *corev1alpha1.RepositoryMonitor, workspace *corev1alpha1.WorkspaceConfig) {
+	if monitor == nil || workspace == nil {
+		return
+	}
+	workspace.AllowedPaths = append([]string(nil), monitor.Spec.IssueWorkflow.Implementation.AllowedPaths...)
+	workspace.DenyRepositoryControlPaths = true
+}
+
+// repositoryMonitorWorkspacePathRejectionReason reports the patch path reason
+// for a write Task whose runtime rejected its workspace delta under the path
+// limits, so nothing was published. It returns "" for any other outcome.
+func repositoryMonitorWorkspacePathRejectionReason(task *corev1alpha1.Task) string {
+	if task == nil || task.Status.Delivery == nil || task.Status.Delivery.Reason != acpWorkspaceValidationFailedReason {
+		return ""
+	}
+	switch message := task.Status.Delivery.Message; {
+	case strings.Contains(message, harnessv2.WorkspaceDeltaRepositoryControlPathMessage),
+		strings.Contains(message, harnessv2.WorkspaceDeltaDeniedPathMessage):
+		return repositoryMonitorPatchPathDenied
+	case strings.Contains(message, harnessv2.WorkspaceDeltaDisallowedPathMessage):
+		return repositoryMonitorPatchPathNotAllowed
+	default:
+		return ""
+	}
+}
+
+// repositoryMonitorTaskPathDenied reports whether a patch path matches the
+// Task's spec.workspace.deniedPaths. The controller re-checks the result's
+// paths so a runtime that skipped the check still cannot land a denied path.
+func repositoryMonitorTaskPathDenied(task *corev1alpha1.Task, path string) bool {
+	if task == nil || task.Spec.Workspace == nil {
+		return false
+	}
+	return workspacedelta.PathDenied(task.Spec.Workspace.DeniedPaths, path)
+}
+
 func repositoryMonitorImplementationPathAllowed(monitor *corev1alpha1.RepositoryMonitor, path string) bool {
 	if monitor == nil || len(monitor.Spec.IssueWorkflow.Implementation.AllowedPaths) == 0 {
 		return true
@@ -2164,8 +2207,11 @@ func (r *RepositoryMonitorReconciler) validateAndSaveIssuePatchArtifacts(ctx con
 		if strings.HasPrefix(lower, ".github/workflows/") || strings.HasPrefix(lower, "config/rbac/") || (strings.HasPrefix(lower, "charts/") && strings.Contains(lower, "secret")) {
 			return repositoryMonitorPatchPathDenied, nil
 		}
+		if repositoryMonitorTaskPathDenied(task, path) {
+			return repositoryMonitorPatchPathDenied, nil
+		}
 		if !repositoryMonitorImplementationPathAllowed(monitor, path) {
-			return "patch_path_not_allowed", nil
+			return repositoryMonitorPatchPathNotAllowed, nil
 		}
 	}
 	addedContent := repositoryMonitorPatchAddedContent(sr.Diff)

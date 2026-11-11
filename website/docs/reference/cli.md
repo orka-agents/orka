@@ -534,6 +534,15 @@ orka eval approve pr-review-cand --reason "fewer missed defects, no regressions"
 orka eval reject pr-review-cand --reason "the gain is on one case only"
 ```
 
+`propose` asks a proposer to learn a candidate from a training run's failed
+trials; `proposals` lists what each proposal became:
+
+```bash
+orka eval propose review-training                      # from a plain run on a training case set
+orka eval propose review-training --held-out pr-review-heldout --target verdict:defect
+orka eval proposals review-training                    # hypothesis, candidate Agent, experiment runs
+```
+
 `approve` and `reject` append a decision; the latest one is in force. Only a
 person in a group named by the controller's `--eval-promoter-groups`, with the
 `decide` verb on `evalruns` (the `orka-eval-promoter` ClusterRole), may decide,

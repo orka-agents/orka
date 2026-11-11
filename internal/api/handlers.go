@@ -121,6 +121,7 @@ type Handlers struct {
 	evalTrialStore            store.EvalTrialStore
 	evalExperimentStore       store.EvalExperimentStore
 	evalDecisionVerifier      EvalDecisionVerifier
+	evalProposer              EvalProposer
 	evalPromoterGroups        []string
 	executionEventStore       store.ExecutionEventStore
 	gatewayEventStore         store.GatewayEventStore
@@ -156,6 +157,7 @@ type HandlersConfig struct {
 	EvalTrialStore            store.EvalTrialStore
 	EvalExperimentStore       store.EvalExperimentStore
 	EvalDecisionVerifier      EvalDecisionVerifier
+	EvalProposer              EvalProposer
 	// EvalPromoterGroups are the groups whose members may decide
 	// experiments. Empty refuses every decision.
 	EvalPromoterGroups   []string
@@ -194,6 +196,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		evalTrialStore:            cfg.EvalTrialStore,
 		evalExperimentStore:       cfg.EvalExperimentStore,
 		evalDecisionVerifier:      cfg.EvalDecisionVerifier,
+		evalProposer:              cfg.EvalProposer,
 		evalPromoterGroups:        append([]string(nil), cfg.EvalPromoterGroups...),
 		executionEventStore:       cfg.ExecutionEventStore,
 		gatewayEventStore:         cfg.GatewayEventStore,

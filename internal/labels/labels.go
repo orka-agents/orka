@@ -60,10 +60,28 @@ const (
 	LabelEvalRun           = "orka.ai/eval-run"
 	LabelEvalCase          = "orka.ai/eval-case"
 	LabelEvalTrial         = "orka.ai/eval-trial"
-	LabelTransactionID     = "orka.ai/transaction-id"
-	LabelAuthProfile       = "orka.ai/auth-profile"
+	// LabelEvalProposalOf marks a proposer Task with the training EvalRun it
+	// learns from; LabelEvalProposal marks the candidate Agent and the paired
+	// EvalRuns a proposal created with the proposer Task's name.
+	LabelEvalProposalOf = "orka.ai/eval-proposal-of"
+	LabelEvalProposal   = "orka.ai/eval-proposal"
+	// LabelCandidateOf marks a candidate Agent with the stable Agent it would
+	// replace; the candidate is also owner-referenced to that Agent.
+	LabelCandidateOf   = "orka.ai/candidate-of"
+	LabelTransactionID = "orka.ai/transaction-id"
+	LabelAuthProfile   = "orka.ai/auth-profile"
 
 	// Annotations
+	// Eval proposal annotations on a proposer Task: the request as JSON, and
+	// what became of it once the proposer finished. Admission reserves them
+	// to the controller, with LabelEvalProposalOf.
+	AnnotationEvalProposalRequest           = "orka.ai/eval-proposal-request"
+	AnnotationEvalProposalState             = "orka.ai/eval-proposal-state"
+	AnnotationEvalProposalReason            = "orka.ai/eval-proposal-reason"
+	AnnotationEvalProposalHypothesis        = "orka.ai/eval-proposal-hypothesis"
+	AnnotationEvalProposalCandidateAgent    = "orka.ai/eval-proposal-candidate-agent"
+	AnnotationEvalProposalBaselineRun       = "orka.ai/eval-proposal-baseline-run"
+	AnnotationEvalProposalCandidateRun      = "orka.ai/eval-proposal-candidate-run"
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"
@@ -96,7 +114,12 @@ const (
 	// Only controller identities may write it, and admission is not
 	// retroactive, so the source annotation alone proves nothing: a Task
 	// planted while admission was disabled carries no valid stamp.
-	AnnotationRequestedByStamp              = "orka.ai/requested-by-stamp"
+	AnnotationRequestedByStamp = "orka.ai/requested-by-stamp"
+	// AnnotationImprovementRole marks a Task the controller created for the
+	// self-improvement loop. Only controller identities may set or change it;
+	// ImprovementRoleProposer constrains the Task's tools, paths and
+	// namespace at dispatch and its brokered calls at the broker.
+	AnnotationImprovementRole               = "orka.ai/improvement-role"
 	AnnotationDelegationEffectID            = "orka.ai/delegation-effect-id"
 	AnnotationForkSourceTask                = "orka.ai/fork-source-task"
 	AnnotationForkSourceSeq                 = "orka.ai/fork-source-seq"
@@ -129,6 +152,10 @@ const (
 	AnnotationTraceState                    = "orka.ai/tracestate"
 	AnnotationTraceBaggage                  = "orka.ai/baggage"
 )
+
+// ImprovementRoleProposer is the AnnotationImprovementRole value for a
+// proposer Task.
+const ImprovementRoleProposer = "proposer"
 
 const AnnotationRepositoryValidationCommandDigest = "orka.ai/repository-validation-command-digest"
 
