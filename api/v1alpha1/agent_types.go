@@ -428,6 +428,11 @@ type AgentRolloutStatus struct {
 	// +optional
 	CandidateRun *EvalObjectIdentity `json:"candidateRun,omitempty"`
 
+	// StartedAt is when this canary first routed: a Session created before it
+	// stays on the stable Agent. Changing the share keeps it.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+
 	// RecordID is the promotion log record of the last canary or abort.
 	// +kubebuilder:validation:MaxLength=128
 	// +optional

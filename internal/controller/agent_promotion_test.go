@@ -659,3 +659,35 @@ func TestRecoveryFencesAnOutstandingUpdate(t *testing.T) {
 		t.Fatalf("log = %+v, %v", log, err)
 	}
 }
+
+// A canary of one approval is never silently replaced by another, and a
+// canary whose promotion's cleanup did not run ends at the next action.
+func TestCanaryOfAnotherDecisionAndLeftoverCleanup(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	canary, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 10, promotionTestActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := env.getAgent("reviewer").Status.Rollout.StartedAt
+	if started == nil {
+		t.Fatal("canary has no start time")
+	}
+	stable := env.getAgent("reviewer")
+	stable.Status.Rollout.DecisionID = "d-other"
+	if err := env.client.Status().Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+	_, err = env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 20, promotionTestActor)
+	refusedRollout(t, err, "abort it before starting another")
+
+	// A promotion of d-other completed, but its canary cleanup did not run.
+	promotion := promotionTestRecord(env, "promoted")
+	promotion.DecisionID = "d-other"
+	completedPromotionRecord(t, env, promotion, stable.Generation)
+	_, _ = env.reconciler.AbortAgentRollout(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	if rollout := env.getAgent("reviewer").Status.Rollout; rollout == nil || rollout.Candidate != nil || rollout.RecordID != canary.ID {
+		t.Fatalf("rollout = %+v", rollout)
+	}
+}

@@ -1696,6 +1696,12 @@ spec:
                       canary or abort.
                     maxLength: 128
                     type: string
+                  startedAt:
+                    description: |-
+                      StartedAt is when this canary first routed: a Session created before it
+                      stays on the stable Agent. Changing the share keeps it.
+                    format: date-time
+                    type: string
                 type: object
             required:
             - activeTasks

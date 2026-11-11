@@ -133,6 +133,27 @@ func TestRouteAgentRollout(t *testing.T) {
 			t.Fatal("an aborted canary was marked invalid")
 		}
 	})
+	t.Run("a canary marked invalid stays off until a promoter acts", func(t *testing.T) {
+		agent, task := rolloutTestAgent(100), rolloutTestTask("invalid", nil)
+		agent.Status.Conditions = []metav1.Condition{{Type: AgentConditionRolloutInvalid, Status: metav1.ConditionTrue,
+			Reason: "CanaryCheckFailed", LastTransitionTime: metav1.Now()}}
+		verifier := &fakeRolloutVerifier{}
+		r := newRolloutTestReconciler(t, verifier, agent, task)
+		if routed, err := r.routeAgentRollout(ctx, task, agent); err != nil || routed.Name != "reviewer" || verifier.calls != 0 {
+			t.Fatalf("routed = %v, %v (verifier calls %d)", routed, err, verifier.calls)
+		}
+	})
+	t.Run("a retry keeps the arm the Task already took", func(t *testing.T) {
+		agent := rolloutTestAgent(1)
+		task := rolloutTestTask("retry", func(task *corev1alpha1.Task) {
+			task.Spec.SessionRef = &corev1alpha1.SessionReference{Name: "chat", Create: true}
+			task.Annotations = map[string]string{labels.AnnotationRolloutArm: rolloutArmCandidate, labels.AnnotationRolloutCandidate: "reviewer-c-1"}
+		})
+		r := newRolloutTestReconciler(t, &fakeRolloutVerifier{}, agent, task)
+		if routed, err := r.routeAgentRollout(ctx, task, agent); err != nil || routed.Name != "reviewer-c-1" {
+			t.Fatalf("routed = %v, %v", routed, err)
+		}
+	})
 	t.Run("without a verifier every Task runs on the stable Agent", func(t *testing.T) {
 		agent, task := rolloutTestAgent(100), rolloutTestTask("unverified", nil)
 		r := newRolloutTestReconciler(t, nil, agent, task)

@@ -218,6 +218,10 @@ func (r *EvalRunReconciler) beginAgentRolloutAction(ctx context.Context, namespa
 		unlock()
 		return nil, fmt.Errorf("settle earlier rollout actions on Agent %q: %w", agentName, err)
 	}
+	if err := r.clearPromotedCanary(ctx, agent); err != nil {
+		unlock()
+		return nil, err
+	}
 	return unlock, nil
 }
 
@@ -450,6 +454,15 @@ func (r *EvalRunReconciler) CanaryAgent(ctx context.Context, namespace, agentNam
 	if err != nil {
 		return nil, err
 	}
+	startedAt := metav1.NewTime(r.now())
+	if running := approved.stable.Status.Rollout; running != nil && running.Candidate != nil {
+		if running.DecisionID != decisionID {
+			return nil, refuseRollout("Agent %q has a canary of decision %q; abort it before starting another", agentName, running.DecisionID)
+		}
+		if running.StartedAt != nil {
+			startedAt = *running.StartedAt
+		}
+	}
 	record := approved.record(store.AgentPromotionCanary, actor, r.now())
 	record.Percent = percent
 	return r.applyAgentRolloutAction(ctx, approved.stable, record, true,
@@ -460,6 +473,7 @@ func (r *EvalRunReconciler) CanaryAgent(ctx context.Context, namespace, agentNam
 				},
 				Percent: percent, DecisionID: record.DecisionID,
 				CandidateRun: &corev1alpha1.EvalObjectIdentity{Name: record.CandidateRun, UID: types.UID(record.CandidateRunUID)},
+				StartedAt:    &startedAt,
 				RecordID:     record.ID,
 			})
 		})
@@ -856,4 +870,28 @@ func (r *EvalRunReconciler) checkPromptConfigMap(ctx context.Context, namespace 
 		return refuseRollout("ConfigMap %q key %q no longer holds the system prompt this action checked; roll back by hand", name, key)
 	}
 	return nil
+}
+
+// clearPromotedCanary finishes a promotion whose canary cleanup did not run:
+// when the latest spec write is a promotion of the canary's own decision,
+// the canary ends now.
+func (r *EvalRunReconciler) clearPromotedCanary(ctx context.Context, agent *corev1alpha1.Agent) error {
+	rollout := agent.Status.Rollout
+	if rollout == nil || rollout.Candidate == nil {
+		return nil
+	}
+	records, err := r.ExperimentStore.ListAgentPromotions(ctx, agent.Namespace, string(agent.UID))
+	if err != nil {
+		return err
+	}
+	var lastWrite *store.AgentPromotionRecord
+	for i := range records {
+		if records[i].State == store.AgentPromotionComplete && writesAgentSpec(records[i].Action) {
+			lastWrite = &records[i]
+		}
+	}
+	if lastWrite == nil || lastWrite.Action != store.AgentPromotionPromote || lastWrite.DecisionID != rollout.DecisionID {
+		return nil
+	}
+	return r.clearAgentRollout(ctx, agent, "")
 }

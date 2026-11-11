@@ -107,6 +107,12 @@ func (r *TaskReconciler) routeAgentRollout(ctx context.Context, task *corev1alph
 	if owner := metav1.GetControllerOf(task); owner != nil && owner.Kind == "EvalRun" {
 		return agent, nil
 	}
+	// A canary that failed a check stays off until a promoter aborts it or
+	// starts a new one, even if the check would pass again.
+	if condition := meta.FindStatusCondition(agent.Status.Conditions, AgentConditionRolloutInvalid); condition != nil &&
+		condition.Status == metav1.ConditionTrue {
+		return agent, r.recordRolloutArm(ctx, task, rolloutArmStable, agent.Name)
+	}
 	arm, err := r.rolloutArm(ctx, task, agent, rollout)
 	if err != nil {
 		return nil, err
@@ -144,12 +150,24 @@ func (r *TaskReconciler) verifyRollout(ctx context.Context, agent *corev1alpha1.
 // rolloutArm decides a Task's arm before verification.
 func (r *TaskReconciler) rolloutArm(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent,
 	rollout *corev1alpha1.AgentRolloutStatus) (string, error) {
+	// A retry keeps the arm this Task already took: binding may have created
+	// its Session before failing, which must not move it to the other arm.
+	switch task.Annotations[labels.AnnotationRolloutArm] {
+	case rolloutArmCandidate:
+		if task.Annotations[labels.AnnotationRolloutCandidate] == rollout.Candidate.Name {
+			return rolloutArmCandidate, nil
+		}
+		return rolloutArmStable, nil
+	case rolloutArmStable:
+		return rolloutArmStable, nil
+	}
 	if task.Spec.SessionRef == nil {
 		return bucketArm("task/"+string(task.UID), rollout.Percent), nil
 	}
 	session := task.Spec.SessionRef.Name
+	// Uncached, so an earlier Task's arm the cache has not seen yet is found.
 	var tasks corev1alpha1.TaskList
-	if err := r.List(ctx, &tasks, client.InNamespace(task.Namespace),
+	if err := uncachedReader(r.APIReader, r.Client).List(ctx, &tasks, client.InNamespace(task.Namespace),
 		client.MatchingLabels{labels.LabelRolloutSession: rolloutSessionLabel(task.Namespace, session)}); err != nil {
 		return "", err
 	}
@@ -169,8 +187,13 @@ func (r *TaskReconciler) rolloutArm(ctx context.Context, task *corev1alpha1.Task
 	if r.SessionManager == nil {
 		return rolloutArmStable, nil
 	}
-	if _, err := r.SessionManager.GetSession(ctx, task.Namespace, session); err == nil {
-		return rolloutArmStable, nil
+	// A Session created before the canary started is an existing
+	// conversation and stays where it is. Gateway admission creates a
+	// Session before its first Task, so existence alone is not enough.
+	if record, err := r.SessionManager.GetSession(ctx, task.Namespace, session); err == nil {
+		if rollout.StartedAt == nil || record.CreatedAt.Before(rollout.StartedAt.Time) {
+			return rolloutArmStable, nil
+		}
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return "", err
 	}
