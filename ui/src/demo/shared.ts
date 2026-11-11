@@ -69,44 +69,5 @@ export function digest(seed: string, length = 40): string {
   return out.slice(0, length)
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-/**
- * A streaming response that writes each chunk after its delay. Used for SSE
- * (execution events, chat) and slow log streams; the stream closes after the
- * last chunk unless `holdOpen` is set, in which case it stays open until the
- * client aborts.
- */
-export function streamResponse(
-  chunks: Array<{ data: string; delayMs?: number }>,
-  { contentType = 'text/event-stream', holdOpen = false, signal }: { contentType?: string; holdOpen?: boolean; signal?: AbortSignal } = {},
-) {
-  const encoder = new TextEncoder()
-  const body = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        for (const chunk of chunks) {
-          if (chunk.delayMs) await sleep(chunk.delayMs)
-          if (signal?.aborted) return
-          controller.enqueue(encoder.encode(chunk.data))
-        }
-        if (holdOpen) {
-          // Heartbeats keep an idle stream alive the way the controller does.
-          while (!signal?.aborted) {
-            await sleep(15_000)
-            if (signal?.aborted) break
-            controller.enqueue(encoder.encode(': heartbeat\n\n'))
-          }
-          return
-        }
-        controller.close()
-      } catch {
-        // The reader went away; nothing to clean up.
-      }
-    },
-  })
-  return new HttpResponse(body, { headers: { 'Content-Type': contentType, 'Cache-Control': 'no-cache' } })
-}
-
 /** One SSE block. */
 export const sseFrame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`

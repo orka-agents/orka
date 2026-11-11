@@ -121,7 +121,7 @@ func TestPreparePullRequestReviewContextWritesIgnoredDiffFiles(t *testing.T) {
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+	if err := PreparePullRequestReviewContext(cloneDir, &WorkspaceConfig{PRBaseBranch: "main"}); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestPreparePullRequestReviewContextFetchesBaseFromTrustedRepo(t *testing.T)
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+	if err := PreparePullRequestReviewContext(cloneDir, &WorkspaceConfig{
 		PRBaseBranch: "main",
 		PRBaseRepo:   "file://" + baseBareDir,
 	}); err != nil {
@@ -249,7 +249,7 @@ func TestPreparePullRequestReviewContextDeepensBaseSHAForStalePR(t *testing.T) {
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+forkBareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+	if err := PreparePullRequestReviewContext(cloneDir, &WorkspaceConfig{
 		PRBaseBranch: "main",
 		PRBaseRepo:   "file://" + baseBareDir,
 		PRBaseSHA:    baseSHA,
@@ -299,7 +299,7 @@ func TestPreparePullRequestReviewContextFallsBackToBaseBranchWhenBaseSHAFetchFai
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{
+	if err := PreparePullRequestReviewContext(cloneDir, &WorkspaceConfig{
 		PRBaseBranch: "main",
 		PRBaseSHA:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}); err != nil {
@@ -355,7 +355,7 @@ func TestPreparePullRequestReviewContextTruncatesLargeDiff(t *testing.T) {
 	runGitWS(t, t.TempDir(),
 		"clone", "--branch", workspaceTestFeatureBranch, "--single-branch", "file://"+bareDir, cloneDir,
 	)
-	if err := PreparePullRequestReviewContext(cloneDir, &AgentConfig{PRBaseBranch: "main"}); err != nil {
+	if err := PreparePullRequestReviewContext(cloneDir, &WorkspaceConfig{PRBaseBranch: "main"}); err != nil {
 		t.Fatalf("PreparePullRequestReviewContext() error = %v", err)
 	}
 
