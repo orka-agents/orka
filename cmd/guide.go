@@ -34,14 +34,20 @@ func guideAgentConfig(
 		ContractVersion: mode.ContractVersion(),
 		OwnerDeployment: strings.TrimSpace(ownerDeployment),
 	}
+	ownerOutsideWatchNamespace := config.OwnerDeployment != "" && config.Namespace != strings.TrimSpace(podNamespace)
 	if !enabled {
+		// The owner only identifies a guide Agent created before; one outside
+		// the watch namespace can't own it.
+		if ownerOutsideWatchNamespace {
+			config.OwnerDeployment = ""
+		}
 		return config, nil
 	}
 	if maxTurns < 1 || maxTurns > 1000 {
 		return controller.GuideAgentConfig{}, fmt.Errorf("--guide-max-turns must be between 1 and 1000, got %d", maxTurns)
 	}
 	config.MaxTurns = int32(maxTurns)
-	if config.OwnerDeployment != "" && config.Namespace != strings.TrimSpace(podNamespace) {
+	if ownerOutsideWatchNamespace {
 		return controller.GuideAgentConfig{}, fmt.Errorf(
 			"--guide-owner-deployment needs the controller to run in the watch namespace %q, but it runs in %q; omit it there",
 			config.Namespace, podNamespace)

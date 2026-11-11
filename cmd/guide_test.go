@@ -30,6 +30,14 @@ func TestGuideAgentConfigFromFlags(t *testing.T) {
 	if _, err := guideAgentConfig(false, "", "", 0, "", owner, "tenant", ns, v2); err != nil {
 		t.Fatalf("a disabled guide ignores its other flags: %v", err)
 	}
+	// Disabled, the owner still identifies a guide Agent created before, but
+	// only a Deployment in the watch namespace can own it.
+	if config, _ := guideAgentConfig(false, "", "", 0, "", owner, ns, ns, v2); config.OwnerDeployment != owner {
+		t.Fatalf("a disabled guide must keep its owner Deployment: %#v", config)
+	}
+	if config, _ := guideAgentConfig(false, "", "", 0, "", owner, "tenant", ns, v2); config.OwnerDeployment != "" {
+		t.Fatalf("a disabled guide must drop an owner outside the watch namespace: %#v", config)
+	}
 
 	for _, turns := range []int{0, 1001, 1<<32 + 30} {
 		if _, err := guideAgentConfig(true, "claude", "m", turns, "i", "", ns, ns, v2); err == nil ||

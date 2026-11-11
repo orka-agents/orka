@@ -178,8 +178,9 @@ spec:
             - {{ printf "--guide-model=%s" (trim (toString .Values.guide.model)) | quote }}
             - --guide-max-turns={{ atoi (toString (dig "maxTurns" 30 .Values.guide)) }}
             - {{ printf "--guide-docs-image=%s" (include "orka.guideDocsImage" .) | quote }}
-            - {{ printf "--guide-owner-deployment=%s" (include "orka.controllerName" .) | quote }}
             {{- end }}
+            {{- /* Rendered with the guide off too, so disabling it still recognizes the Agent the controller created. */}}
+            - {{ printf "--guide-owner-deployment=%s" (include "orka.controllerName" .) | quote }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}
             - --gateway-pending-per-session={{ .Values.controller.gateway.pendingPerSession }}

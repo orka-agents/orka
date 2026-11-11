@@ -20,14 +20,22 @@ func guideChartArgs(extra ...string) []string {
 
 func TestStaticChartRendersGuideFlags(t *testing.T) {
 
+	// With the guide off, only the owner Deployment is passed, so the
+	// controller can still recognize and delete a guide Agent it created.
+	onlyOwner := func(t *testing.T, output string) {
+		t.Helper()
+		withoutOwner := strings.ReplaceAll(output, `- "--guide-owner-deployment=test-orka-controller"`+"\n", "")
+		if withoutOwner == output || strings.Contains(withoutOwner, "--guide-") {
+			t.Fatalf("a render with the guide off must pass only --guide-owner-deployment:\n%s", output)
+		}
+	}
+
 	t.Run("off by default", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, "--show-only", "templates/deployment.yaml")
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, output)
 		}
-		if strings.Contains(output, "--guide-") {
-			t.Fatalf("default render unexpectedly enabled the guide:\n%s", output)
-		}
+		onlyOwner(t, output)
 	})
 
 	t.Run("enabled", func(t *testing.T) {
@@ -95,9 +103,7 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("helm template: %v\n%s", err, output)
 		}
-		if strings.Contains(output, "--guide-") {
-			t.Fatalf("missing guide values enabled the guide:\n%s", output)
-		}
+		onlyOwner(t, output)
 	})
 
 	set := func(key, value string) []string { return []string{"--set", key + "=" + value} }

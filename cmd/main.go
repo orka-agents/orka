@@ -599,7 +599,7 @@ func main() {
 	flag.StringVar(&guideDocsImage, "guide-docs-image", os.Getenv("ORKA_GUIDE_DOCS_IMAGE"),
 		"Digest-pinned docs snapshot image mounted into the guide Agent as a toolbox. Required with --guide-enabled; needs --acp-toolboxes-enabled and an allowed registry.")
 	flag.StringVar(&guideOwnerDeployment, "guide-owner-deployment", os.Getenv("ORKA_GUIDE_OWNER_DEPLOYMENT"),
-		"Controller Deployment in the watch namespace that owns the guide Agent, so deleting the installation deletes it. The Agent is created only once this Deployment exists.")
+		"Controller Deployment in the watch namespace that owns the guide Agent, so deleting the installation deletes it. The Agent is created only once this Deployment exists. With the guide disabled, it identifies a guide Agent the controller created, so it's deleted even without its labels.")
 	flag.BoolVar(&acpWorkspaceDispatchEnabled, "acp-workspace-dispatch-enabled", acpWorkspaceDispatchEnabled,
 		"Admit registered external workspace provider ACP RuntimeSession dispatch; when false, Task.spec.execution.workspace agent Tasks fail closed.")
 	flag.BoolVar(&substrateMCPToolsEnabled, "substrate-mcp-tools-enabled", substrateMCPToolsEnabled,
