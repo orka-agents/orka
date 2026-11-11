@@ -477,8 +477,10 @@ deployment delivers the guarantees above.
 
 ### Configuring Entra Agent ID
 
-A summary of the setup. The full, tested steps, with troubleshooting, are in
-the guide [Agent identities with Microsoft Entra](../../website/docs/guides/agent-identities.md).
+An illustrative summary of the setup; the manifests below are not complete
+(the Agent, for example, omits its runtime). The full, tested steps, with
+troubleshooting, are in the guide
+[Agent identities with Microsoft Entra](../../website/docs/guides/agent-identities.md).
 
 1. **In Entra**, an administrator creates one agent identity blueprint per Orka
    installation. Its federated identity credential trusts the controller
