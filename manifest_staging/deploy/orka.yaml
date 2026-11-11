@@ -861,6 +861,57 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: orka
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+  name: orka-evalrun-admin-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - '*'
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+  name: orka-evalrun-editor-role
+rules:
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core.orka.ai
+  resources:
+  - evalruns/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: orka
   name: orka-gateway-admin-role
 rules:
 - apiGroups:

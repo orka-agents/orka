@@ -53,6 +53,9 @@ resources:
 - task_admin_role.yaml
 - task_editor_role.yaml
 - task_viewer_role.yaml
+# EvalRun management aggregates into the built-in edit and admin roles, not view.
+- evalrun_editor_role.yaml
+- evalrun_admin_role.yaml
 # External API permissions, including virtual resources stored outside CRDs.
 - api_viewer_role.yaml
 - api_editor_role.yaml

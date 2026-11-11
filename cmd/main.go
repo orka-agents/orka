@@ -375,6 +375,7 @@ func main() {
 	var agentHostNamespace string
 	var agentHostAgentImage string
 	var agentHostControllerPodLabels string
+	var evalsEnabled bool
 	var tlsOpts []func(*tls.Config)
 
 	acpWorkspaceDispatchEnabled = strings.EqualFold(os.Getenv("ORKA_ACP_WORKSPACE_DISPATCH_ENABLED"), "true")
@@ -803,6 +804,8 @@ func main() {
 	flag.StringVar(&agentHostControllerPodLabels, "agent-host-controller-pod-labels",
 		envutil.String("ORKA_AGENT_HOST_CONTROLLER_POD_LABELS", "orka.ai/network-role=controller"),
 		"Comma-separated key=value labels of the controller Pods that may read agent-host status.")
+	flag.BoolVar(&evalsEnabled, "enable-evals", envBool("ORKA_ENABLE_EVALS"),
+		"Enable EvalRun capability evals. Reserved: this release serves the EvalRun API but does not reconcile it.")
 	flag.Parse()
 	nativeSessionMaxBytes, nativeSessionMaxBytesErr = effectiveNativeSessionMaxBytes(flag.CommandLine, nativeSessionMaxBytes, nativeSessionMaxBytesErr)
 	if nativeSessionMaxBytesErr != nil {
@@ -847,6 +850,9 @@ func main() {
 		// The logger is not set up yet, so setupLog would drop this.
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if evalsEnabled {
+		setupLog.Info("--enable-evals is set, but this release does not reconcile EvalRuns yet")
 	}
 
 	if !enableLeaderElection {
