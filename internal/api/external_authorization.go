@@ -96,6 +96,11 @@ var externalAPIPolicies = map[string]apiRoutePolicy{
 	"GET /api/v1/tasks/:id/artifacts":           coreAPIPolicy("get", "tasks", "id"),
 	"GET /api/v1/tasks/:id/artifacts/:filename": coreAPIPolicy("get", "tasks", "id"),
 
+	"POST /api/v1/remediations":            coreAPIPolicy("create", "remediations", "").inNamespace(apiQueryNamespace),
+	"GET /api/v1/remediations/:id":         coreAPIPolicy("get", "remediations", "id").inNamespace(apiQueryNamespace),
+	"POST /api/v1/remediations/:id/cancel": coreAPIPolicy("update", "remediations/cancel", "id").inNamespace(apiQueryNamespace),
+	"GET /api/v1/remediations/:id/patch":   coreAPIPolicy("get", "remediations/patch", "id").inNamespace(apiQueryNamespace),
+
 	"GET /api/v1/sessions":            coreAPIPolicy("list", "sessions", ""),
 	"GET /api/v1/sessions/:id":        coreAPIPolicy("get", "sessions", "id"),
 	"GET /api/v1/sessions/:id/native": coreAPIPolicy("get", "sessions", "id"),
@@ -309,6 +314,11 @@ func (h *Handlers) checkExternalRoute(c fiber.Ctx, route string) error {
 	// Do not reinterpret them as Kubernetes TokenReview identities.
 	if policy.identityOnly || ui.AuthType != AuthTypeTokenReview {
 		return nil
+	}
+	if isRemediationPath(c.Path()) {
+		if _, err := remediationExplicitNamespace(c); err != nil {
+			return err
+		}
 	}
 	namespaces, err := h.externalRequestNamespaces(c, policy)
 	if err != nil {

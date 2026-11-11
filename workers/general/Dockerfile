@@ -12,7 +12,10 @@ COPY . .
 
 # Build the worker
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/general
+    CGO_ENABLED=0 GOOS=linux go build -o worker ./workers/general \
+    && cc -std=c11 -O2 -Wall -Wextra -Werror -static \
+      -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wl,-z,relro,-z,now \
+      -o validation-git-launcher workers/general/gitlauncher/launcher.c
 
 # Runtime stage
 FROM alpine:3.24
@@ -28,6 +31,7 @@ RUN apk add --no-cache ca-certificates git \
 WORKDIR /
 
 COPY --from=builder /workspace/worker /worker
+COPY --from=builder --chmod=0555 /workspace/validation-git-launcher /usr/local/libexec/orka-validation-git
 
 USER 1000:1000
 ENV HOME=/home/worker

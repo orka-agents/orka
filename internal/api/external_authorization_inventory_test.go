@@ -58,6 +58,10 @@ GET /api/v1/tasks/:id/plan | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/children | get core.orka.ai:tasks protected; list core.orka.ai:tasks
 GET /api/v1/tasks/:id/artifacts | get core.orka.ai:tasks protected
 GET /api/v1/tasks/:id/artifacts/:filename | get core.orka.ai:tasks protected
+POST /api/v1/remediations | create core.orka.ai:remediations
+GET /api/v1/remediations/:id | get core.orka.ai:remediations protected
+POST /api/v1/remediations/:id/cancel | update core.orka.ai:remediations/cancel protected
+GET /api/v1/remediations/:id/patch | get core.orka.ai:remediations/patch protected
 GET /api/v1/sessions | list core.orka.ai:sessions
 GET /api/v1/sessions/:id | get core.orka.ai:sessions protected
 GET /api/v1/sessions/:id/native | get core.orka.ai:sessions protected

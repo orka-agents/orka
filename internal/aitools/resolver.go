@@ -16,6 +16,7 @@ import (
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/workerenv"
 )
 
 const (
@@ -137,8 +138,7 @@ func IsImplicitTool(task *corev1alpha1.Task, agent *corev1alpha1.Agent, name str
 			}
 		}
 	}
-	return task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI &&
-		containsTool(memoryToolNames, name)
+	return injectsMemoryTools(task) && containsTool(memoryToolNames, name)
 }
 
 func containsTool(tools []string, name string) bool {
@@ -159,7 +159,7 @@ func memoryToolsImplicitlyEnabled(task *corev1alpha1.Task, agent *corev1alpha1.A
 // release's compatibility policy. The next release will require explicit
 // selection or coordination without the disable-injection annotation.
 func DeprecatedMemoryToolNames(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
-	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI || !usesAIWorkerToolRegistry(task, agent) ||
+	if !injectsMemoryTools(task) || !usesAIWorkerToolRegistry(task, agent) ||
 		memoryToolsImplicitlyEnabled(task, agent) {
 		return nil
 	}
@@ -199,6 +199,18 @@ func usesAIWorkerToolRegistry(task *corev1alpha1.Task, agent *corev1alpha1.Agent
 	return task == nil || task.Spec.Type == "" || task.Spec.Type == corev1alpha1.TaskTypeAI
 }
 
+func injectsMemoryTools(task *corev1alpha1.Task) bool {
+	if task == nil || task.Spec.Type != corev1alpha1.TaskTypeAI {
+		return false
+	}
+	for _, variable := range slices.Backward(task.Spec.Env) {
+		if variable.Name == workerenv.MemoryToolsAutoEnable {
+			return variable.ValueFrom != nil || !strings.EqualFold(strings.TrimSpace(variable.Value), "false")
+		}
+	}
+	return true
+}
+
 func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Agent) bool {
 	if task == nil || task.Annotations[labels.AnnotationDisableCoordinationToolInject] == trueStr {
 		return false
@@ -222,7 +234,8 @@ func injectsChildMessagingTools(task *corev1alpha1.Task, agent *corev1alpha1.Age
 // Resolve returns the ordered, de-duplicated configured and implicit tool set
 // exposed for task. Container tasks do not expose AI tools. Agent tasks retain
 // configured/brokered tools and built-in agent children get messaging tools.
-// Native AI Tasks retain their legacy memory tools for the warning release.
+// Native AI Tasks retain their legacy memory tools for the warning release,
+// unless automatic injection is explicitly disabled.
 // DeprecatedMemoryToolNames identifies calls that will require opt-in next release.
 // Consumers loading Tool CRs must also enforce ValidateRemoteMCPSelection;
 // this name-only resolver cannot distinguish remote backends from legacy Tools.
@@ -274,7 +287,7 @@ func Resolve(task *corev1alpha1.Task, agent *corev1alpha1.Agent) []string {
 		appendTools(childMessagingToolNames)
 	}
 
-	if task != nil && task.Spec.Type == corev1alpha1.TaskTypeAI && usesAIWorkerToolRegistry(task, agent) {
+	if injectsMemoryTools(task) && usesAIWorkerToolRegistry(task, agent) {
 		appendTools(memoryToolNames)
 	}
 

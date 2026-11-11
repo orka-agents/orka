@@ -51,6 +51,10 @@
 // that cannot serve the contract revision a call needs, or the dataset's
 // schema, returns [ErrIncompatible]; neither commits anything.
 //
+// [VerificationStore] additionally has domain outcomes that can durably
+// invalidate evidence. Those outcomes are recorded and replayed with their
+// operation receipts rather than treated as storage-level refusals.
+//
 // # Validation and health
 //
 // Before Orka uses a provider, and again while it runs, it validates the
@@ -127,7 +131,8 @@ const (
 	// [DatasetBindingStore] and [ProviderInfo.Binding]. Revision 4 requires a
 	// valid [WriteEnvelope] on every write and [ErrValidation] when missing.
 	// Revision 5 adds [RepositoryMonitorStore.MarkWorkActionRetryPending].
-	ContractRevision = 5
+	// Revision 6 adds the private, fenced [VerificationStore] family.
+	ContractRevision = 6
 	// StateContract names the application state part of the contract.
 	StateContract = "state.v1"
 	// ArtifactsContract names the public artifact part of the contract.
@@ -153,6 +158,7 @@ type StateProvider interface {
 
 	ResultStore
 	PromptResultReceiptStore
+	VerificationStore
 	PlanStore
 	MessageStore
 

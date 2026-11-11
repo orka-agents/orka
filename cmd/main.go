@@ -76,6 +76,7 @@ import (
 	_ "github.com/orka-agents/orka/internal/metrics"
 	"github.com/orka-agents/orka/internal/outboundaccess"
 	publisherservice "github.com/orka-agents/orka/internal/publisher/service"
+	remediationcontract "github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/storageconfig"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
@@ -271,6 +272,13 @@ func main() {
 	var chatMaxSessionSize int
 	var chatMaxPrematureEndRetries int
 	var gatewayEnabled bool
+	var remediationEnabled bool
+	var remediationAgentName string
+	var remediationBackendName string
+	var remediationApplication remediationApplicationOptions
+	var validationHelperImage, validationToolImage, validationToolImageID string
+	var validationPreparationImageID, validationHelperImageID string
+	var validationPlatform, validationNodeSelector, validationNetworkCanary string
 	var connectorsEnabled bool
 	var dashboardEnabled bool
 	var connectorCallbackBaseURL string
@@ -482,6 +490,18 @@ func main() {
 			"no-tool-use response as the final turn. The model must emit the GOAL_STATE sentinel on its true "+
 			"final turn — see coordinatorSystemPrompt.")
 	flag.BoolVar(&gatewayEnabled, "gateway-enabled", true, "Enable generic gateway reconciliation and ingress.")
+	flag.BoolVar(&remediationEnabled, "remediation-enabled", false, "Enable standalone report reproduction, one candidate fix, and independent validation.")
+	flag.StringVar(&remediationAgentName, "remediation-agent", "", "Operator-approved native Agent used for separate remediation role Tasks.")
+	flag.StringVar(&remediationBackendName, "remediation-backend", "source-harness", "Explicit remediation evidence backend: source-harness or application-runtime.")
+	bindRemediationApplicationFlags(flag.CommandLine, &remediationApplication)
+	flag.StringVar(&validationHelperImage, "validation-helper-image", "", "Digest-pinned validation helper image.")
+	flag.StringVar(&validationPreparationImageID, "validation-preparation-image-id", "", "Expected CRI image ID for the configured general worker used for preparation.")
+	flag.StringVar(&validationHelperImageID, "validation-helper-image-id", "", "Expected CRI image ID for the validation helper.")
+	flag.StringVar(&validationToolImage, "validation-tool-image", "", "Digest-pinned validation tool image.")
+	flag.StringVar(&validationToolImageID, "validation-tool-image-id", "", "Expected runtime image ID for the validation tool image.")
+	flag.StringVar(&validationPlatform, "validation-platform", "linux/amd64", "Validation worker platform (linux/amd64 or linux/arm64).")
+	flag.StringVar(&validationNodeSelector, "validation-node-selector", defaultRemediationNodeSelector, "Operator-qualified validation worker node selector key=value.")
+	flag.StringVar(&validationNetworkCanary, "validation-network-canary", "", "Trusted local-services canary IP:port.")
 	flag.BoolVar(&connectorsEnabled, "connectors-enabled", envBool("ORKA_CONNECTORS_ENABLED"),
 		"Enable per-user connector reconciliation (ConnectorProvider and Connection).")
 	flag.BoolVar(&dashboardEnabled, "dashboard-enabled", envBool("ORKA_DASHBOARD_ENABLED"),
@@ -1651,6 +1671,26 @@ func main() {
 	)
 	jobBuilder.OutboundAccessTrustedGatewayServices = outboundAccessTrustedGatewayServices
 	jobBuilder.OutboundAccessTrustedTokenEndpointServices = outboundAccessTrustedTokenEndpointServices
+	var validationTaskReconciler controller.ValidationTaskReconciler
+	var remediationTaskReconciler controller.RemediationTaskReconciler
+	var remediationAPIService remediationcontract.Service
+	remediationService, remediationBackend, err := setupRemediation(processCtx, mgr, kubeClient, appStorage, jobBuilder, remediationOptions{
+		StorageFences: controllerEpochManager,
+		Enabled:       remediationEnabled, Namespace: watchNamespace, AgentName: remediationAgentName, AIWorkerImage: aiWorkerImage,
+		Backend: remediationBackendName, Application: remediationApplication,
+		GeneralWorkerImage: generalWorkerImage, GeneralWorkerImageID: validationPreparationImageID,
+		HelperImage: validationHelperImage, HelperImageID: validationHelperImageID, ToolImage: validationToolImage,
+		ToolImageID: validationToolImageID, Platform: validationPlatform,
+		NodeSelector: validationNodeSelector, NetworkCanary: validationNetworkCanary,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to configure report remediation")
+		os.Exit(1)
+	}
+	if remediationService != nil {
+		remediationTaskReconciler, remediationAPIService = remediationService, remediationService
+		validationTaskReconciler = remediationBackend
+	}
 	// Auto-discover controller URL from in-cluster service if not explicitly set
 	if jobBuilder.ControllerURL == "" {
 		ns := os.Getenv(workerenv.PodNamespace)
@@ -1733,6 +1773,8 @@ func main() {
 		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		JobBuilder:                   jobBuilder,
+		ValidationTaskReconciler:     validationTaskReconciler,
+		RemediationTaskReconciler:    remediationTaskReconciler,
 		GatewayService:               gatewayService,
 		SessionManager:               sessionManager,
 		WebhookNotifier:              webhookNotifier,
@@ -2186,6 +2228,7 @@ func main() {
 		GatewayEventStore:         appStorage,
 		GatewayDeliveryStore:      appStorage,
 		GatewayService:            gatewayService,
+		RemediationService:        remediationAPIService,
 		HealthChecker:             appStorage,
 		Clientset:                 kubeClient,
 		APIReader:                 mgr.GetAPIReader(),

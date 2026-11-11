@@ -52,6 +52,9 @@ func generalWorkerExitCode(err error) int {
 }
 
 func run() (err error) {
+	if len(os.Args) > 1 && os.Args[1] == "--validation-git" {
+		return runBoundedValidationGit(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--run-validation-network-sandbox" {
 		return runValidationNetworkSandbox(os.Args[2:])
 	}
@@ -59,6 +62,9 @@ func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
+	if len(os.Args) > 1 && os.Args[1] == "--prepare-validation-source" {
+		return runValidationSourcePreparation(ctx, os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--prepare-workspace-only" {
 		return prepareWorkspace(ctx)
 	}

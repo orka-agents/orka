@@ -7,6 +7,7 @@ import (
 	"time"
 
 	storagev1 "github.com/orka-agents/orka/pkg/storage/v1"
+	"github.com/orka-agents/orka/pkg/storage/v1/verification"
 )
 
 func (p envelopedState) AcquireChatTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 time.Time) (bool, error) {
@@ -106,6 +107,18 @@ func (p envelopedState) ArchiveMemoryProposal(ctx context.Context, a1 string, a2
 	})
 }
 
+func (p envelopedState) AttachCancelledKubernetesValidationRun(ctx context.Context, a1 string, a2 string, a3 verification.Binding) error {
+	return p.ops.run(ctx, writeCall{method: "AttachCancelledKubernetesValidationRun", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.AttachCancelledKubernetesValidationRun(ctx, a1, a2, a3)
+	})
+}
+
+func (p envelopedState) BindKubernetesValidationTasks(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 verification.Binding) error {
+	return p.ops.run(ctx, writeCall{method: "BindKubernetesValidationTasks", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+		return p.StateProvider.BindKubernetesValidationTasks(ctx, a1, a2, a3, a4, a5)
+	})
+}
+
 func (p envelopedState) BindPatchProposalPublicationEvidence(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	return p.ops.run(ctx, writeCall{method: "BindPatchProposalPublicationEvidence", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.BindPatchProposalPublicationEvidence(ctx, a1)
@@ -116,6 +129,16 @@ func (p envelopedState) BindSessionCleanupIdentity(ctx context.Context, a1 strin
 	return p.ops.run(ctx, writeCall{method: "BindSessionCleanupIdentity", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
 		return p.StateProvider.BindSessionCleanupIdentity(ctx, a1, a2, a3)
 	})
+}
+
+func (p envelopedState) CancelPatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	err := p.ops.run(ctx, writeCall{method: "CancelPatchVerificationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.CancelPatchVerificationRun(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) CancelWorkActions(ctx context.Context, a1 string, a2 string, a3 string, a4 int64, a5 string, a6 string) (int, error) {
@@ -201,6 +224,12 @@ func (p envelopedState) CommitSealedSessionTurnFinalization(ctx context.Context,
 func (p envelopedState) CommitSessionTurn(ctx context.Context, a1 *storagev1.SessionRecord, a2 string, a3 int, a4 []storagev1.SessionMessage, a5 int, a6 int) error {
 	return p.ops.run(ctx, writeCall{method: "CommitSessionTurn", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
 		return p.StateProvider.CommitSessionTurn(ctx, a1, a2, a3, a4, a5, a6)
+	})
+}
+
+func (p envelopedState) CompleteKubernetesValidationSubmission(ctx context.Context, a1 string, a2 string, a3 string) error {
+	return p.ops.run(ctx, writeCall{method: "CompleteKubernetesValidationSubmission", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.CompleteKubernetesValidationSubmission(ctx, a1, a2, a3)
 	})
 }
 
@@ -293,6 +322,18 @@ func (p envelopedState) CreateImplementationJob(ctx context.Context, a1 *storage
 	})
 }
 
+func (p envelopedState) CreateKubernetesValidationDispatch(ctx context.Context, a1 verification.KubernetesDispatch) error {
+	return p.ops.run(ctx, writeCall{method: "CreateKubernetesValidationDispatch", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateKubernetesValidationDispatch(ctx, a1)
+	})
+}
+
+func (p envelopedState) CreateKubernetesValidationSubmission(ctx context.Context, a1 verification.KubernetesSubmission) error {
+	return p.ops.run(ctx, writeCall{method: "CreateKubernetesValidationSubmission", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		return p.StateProvider.CreateKubernetesValidationSubmission(ctx, a1)
+	})
+}
+
 func (p envelopedState) CreateMemory(ctx context.Context, a1 *storagev1.Memory) error {
 	return p.ops.run(ctx, writeCall{method: "CreateMemory", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CreateMemory(ctx, a1)
@@ -320,6 +361,12 @@ func (p envelopedState) CreateMonitorRun(ctx context.Context, a1 *storagev1.Moni
 func (p envelopedState) CreatePatchProposal(ctx context.Context, a1 *storagev1.PatchProposal) error {
 	return p.ops.run(ctx, writeCall{method: "CreatePatchProposal", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.CreatePatchProposal(ctx, a1)
+	})
+}
+
+func (p envelopedState) CreatePatchVerificationRun(ctx context.Context, a1 verification.Manifest, a2 verification.Binding, a3 map[string][]byte) error {
+	return p.ops.run(ctx, writeCall{method: "CreatePatchVerificationRun", contract: storagev1.StateContract, args: []any{a1, a2, a3}}, func(ctx context.Context) error {
+		return p.StateProvider.CreatePatchVerificationRun(ctx, a1, a2, a3)
 	})
 }
 
@@ -527,6 +574,16 @@ func (p envelopedState) ExpireGatewayEventWithDelivery(ctx context.Context, a1 s
 	return r0, r1, err
 }
 
+func (p envelopedState) FinalizePatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	err := p.ops.run(ctx, writeCall{method: "FinalizePatchVerificationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.FinalizePatchVerificationRun(ctx, a1)
+		return err
+	})
+	return r0, err
+}
+
 func (p envelopedState) FreezeGatewayEventTaskRuntimeAllowedTools(ctx context.Context, a1 string, a2 string, a3 string, a4 []string, a5 time.Time) (*storagev1.GatewayEvent, error) {
 	var r0 *storagev1.GatewayEvent
 	err := p.ops.run(ctx, writeCall{method: "FreezeGatewayEventTaskRuntimeAllowedTools", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
@@ -542,6 +599,26 @@ func (p envelopedState) GetMessages(ctx context.Context, a1 string, a2 string, a
 	err := p.ops.run(ctx, writeCall{method: "GetMessages", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
 		var err error
 		r0, err = p.StateProvider.GetMessages(ctx, a1, a2, a3, a4)
+		return err
+	})
+	return r0, err
+}
+
+func (p envelopedState) GetPatchVerificationBlob(ctx context.Context, a1 string, a2 string) ([]byte, error) {
+	var r0 []byte
+	err := p.ops.run(ctx, writeCall{method: "GetPatchVerificationBlob", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.GetPatchVerificationBlob(ctx, a1, a2)
+		return err
+	})
+	return r0, err
+}
+
+func (p envelopedState) GetPatchVerificationRun(ctx context.Context, a1 string) (*verification.Record, error) {
+	var r0 *verification.Record
+	err := p.ops.run(ctx, writeCall{method: "GetPatchVerificationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.GetPatchVerificationRun(ctx, a1)
 		return err
 	})
 	return r0, err
@@ -603,6 +680,30 @@ func (p envelopedState) MarkGatewayEventTaskCreated(ctx context.Context, a1 stri
 	})
 }
 
+func (p envelopedState) MarkKubernetesValidationDispatchCreated(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	return p.ops.run(ctx, writeCall{method: "MarkKubernetesValidationDispatchCreated", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
+		return p.StateProvider.MarkKubernetesValidationDispatchCreated(ctx, a1, a2, a3, a4)
+	})
+}
+
+func (p envelopedState) MarkKubernetesValidationDispatchFailed(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	return p.ops.run(ctx, writeCall{method: "MarkKubernetesValidationDispatchFailed", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
+		return p.StateProvider.MarkKubernetesValidationDispatchFailed(ctx, a1, a2, a3, a4)
+	})
+}
+
+func (p envelopedState) MarkKubernetesValidationDispatchObserved(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string, a6 string) error {
+	return p.ops.run(ctx, writeCall{method: "MarkKubernetesValidationDispatchObserved", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5, a6}}, func(ctx context.Context) error {
+		return p.StateProvider.MarkKubernetesValidationDispatchObserved(ctx, a1, a2, a3, a4, a5, a6)
+	})
+}
+
+func (p envelopedState) MarkKubernetesValidationDispatchRecorded(ctx context.Context, a1 string, a2 string, a3 string, a4 string, a5 string) error {
+	return p.ops.run(ctx, writeCall{method: "MarkKubernetesValidationDispatchRecorded", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4, a5}}, func(ctx context.Context) error {
+		return p.StateProvider.MarkKubernetesValidationDispatchRecorded(ctx, a1, a2, a3, a4, a5)
+	})
+}
+
 func (p envelopedState) MarkWorkActionRetryPending(ctx context.Context, a1 storagev1.MarkWorkActionRetryPendingRequest) (bool, error) {
 	var r0 bool
 	err := p.ops.run(ctx, writeCall{method: "MarkWorkActionRetryPending", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
@@ -660,6 +761,18 @@ func (p envelopedState) PutSealedConnectorCredential(ctx context.Context, a1 sto
 	return r0, err
 }
 
+func (p envelopedState) RecordKubernetesValidationTaskUID(ctx context.Context, a1 string, a2 string, a3 string, a4 string) error {
+	return p.ops.run(ctx, writeCall{method: "RecordKubernetesValidationTaskUID", contract: storagev1.StateContract, args: []any{a1, a2, a3, a4}}, func(ctx context.Context) error {
+		return p.StateProvider.RecordKubernetesValidationTaskUID(ctx, a1, a2, a3, a4)
+	})
+}
+
+func (p envelopedState) RecordPatchVerificationEvidence(ctx context.Context, a1 verification.Binding, a2 verification.ExecutionEvidence) error {
+	return p.ops.run(ctx, writeCall{method: "RecordPatchVerificationEvidence", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.RecordPatchVerificationEvidence(ctx, a1, a2)
+	})
+}
+
 func (p envelopedState) RecordUsage(ctx context.Context, a1 storagev1.UsageObservation) error {
 	return p.ops.run(ctx, writeCall{method: "RecordUsage", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.RecordUsage(ctx, a1)
@@ -670,6 +783,16 @@ func (p envelopedState) RecordUsagePullRequest(ctx context.Context, a1 storagev1
 	return p.ops.run(ctx, writeCall{method: "RecordUsagePullRequest", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
 		return p.StateProvider.RecordUsagePullRequest(ctx, a1)
 	})
+}
+
+func (p envelopedState) RecoverInterruptedPatchVerificationRun(ctx context.Context, a1 verification.Binding) (*verification.Record, error) {
+	var r0 *verification.Record
+	err := p.ops.run(ctx, writeCall{method: "RecoverInterruptedPatchVerificationRun", contract: storagev1.StateContract, args: []any{a1}}, func(ctx context.Context) error {
+		var err error
+		r0, err = p.StateProvider.RecoverInterruptedPatchVerificationRun(ctx, a1)
+		return err
+	})
+	return r0, err
 }
 
 func (p envelopedState) RegisterTaskDataFence(ctx context.Context, a1 string, a2 string) (storagev1.TaskDataFence, bool, error) {
@@ -737,6 +860,12 @@ func (p envelopedState) ReplaceSealedConnectorCredential(ctx context.Context, a1
 		return err
 	})
 	return r0, err
+}
+
+func (p envelopedState) RequestKubernetesValidationCancellation(ctx context.Context, a1 string, a2 string) error {
+	return p.ops.run(ctx, writeCall{method: "RequestKubernetesValidationCancellation", contract: storagev1.StateContract, args: []any{a1, a2}}, func(ctx context.Context) error {
+		return p.StateProvider.RequestKubernetesValidationCancellation(ctx, a1, a2)
+	})
 }
 
 func (p envelopedState) RequestScanRunCancellation(ctx context.Context, a1 *storagev1.ScanRun, a2 string) error {

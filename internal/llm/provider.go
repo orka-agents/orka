@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -222,6 +223,12 @@ type ProviderConfig struct {
 	ProviderType        string // e.g. "openai", "azure-openai"
 	AzureAPIVersion     string // Azure OpenAI API version (e.g. "2024-02-15-preview")
 	AzureDeploymentName string // Azure request model override; logical model selection is unchanged
+	// HTTPClient is an optional request-scoped transport policy. Nil retains
+	// shared connection reuse. SDK retries must also pass through this client.
+	HTTPClient *http.Client
+	// DisableRetries disables SDK retries only; the caller owns any outer retry
+	// or fallback wrappers. Its zero value preserves existing behavior.
+	DisableRetries bool
 }
 
 // ProviderFactory is a function that creates a provider

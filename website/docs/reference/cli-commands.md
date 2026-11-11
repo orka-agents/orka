@@ -38,6 +38,7 @@ Available Commands:
   models        List compatible model IDs
   monitor       Manage repository monitors
   provider      Manage providers
+  remediate     Reproduce a supplied report, make one fix, and independently verify it
   run           Chat with the Orka AI assistant
   runtime-pool  Manage controller-owned ACP runtime pools
   secret        Inspect secret metadata
@@ -3174,6 +3175,127 @@ Global Flags:
   -n, --namespace string        Kubernetes namespace (default "default")
   -s, --server string           Orka server URL (default "http://localhost:8080")
   -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka remediate`
+
+```text
+Submit one report to the operator-configured Orka remediation service. The service uses separate agent stages; failed candidates are not automatically retried or published. The default backend provides source-harness evidence. Application-runtime evidence requires explicit operator qualification.
+
+Usage:
+  orka remediate [flags]
+  orka remediate [command]
+
+Available Commands:
+  cancel      Request cancellation of the exact remote run
+  download    Save a candidate patch to a new private file
+  start       Submit a JSON report with explicit repository and ref
+  status      Read the exact remote run's status
+
+Flags:
+  -h, --help                help for remediate
+      --token-file string   private Kubernetes bearer-token file (otherwise use saved login)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+
+Use "orka remediate [command] --help" for more information about a command.
+```
+
+## `orka remediate cancel`
+
+```text
+Request cancellation of the exact remote run
+
+Usage:
+  orka remediate cancel RUN_ID [flags]
+
+Flags:
+  -h, --help   help for cancel
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --token-file string       private Kubernetes bearer-token file (otherwise use saved login)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka remediate download`
+
+```text
+Save a candidate patch to a new private file
+
+Usage:
+  orka remediate download RUN_ID [flags]
+
+Flags:
+  -h, --help            help for download
+      --output string   new patch file, created owner-only; existing files, symlinks, and '..' components are refused
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --token-file string       private Kubernetes bearer-token file (otherwise use saved login)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka remediate start`
+
+```text
+Submit a JSON report with explicit repository and ref
+
+Usage:
+  orka remediate start [flags]
+
+Flags:
+  -h, --help                             help for start
+      --input string                     report JSON: title, problem or description, repository, and ref (required)
+      --mode string                      generate or validate (report only) (default "generate")
+      --request-id string                stable request ID; reuse only with the identical request
+      --required-evidence-scope string   source-harness (default) or application-runtime (strict; requires an operator-qualified application backend)
+      --timeout duration                 command deadline; expiry does not cancel the remote run (default 45m0s)
+      --wait                             wait and print the normal parent Task result; progress goes to stderr, without resubmitting
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --token-file string       private Kubernetes bearer-token file (otherwise use saved login)
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka remediate status`
+
+```text
+Read the exact remote run's status
+
+Usage:
+  orka remediate status RUN_ID [flags]
+
+Flags:
+  -h, --help   help for status
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --token-file string       private Kubernetes bearer-token file (otherwise use saved login)
       --txn-token string        Transaction token to send via Txn-Token header
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```

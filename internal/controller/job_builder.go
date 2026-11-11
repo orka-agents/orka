@@ -41,6 +41,7 @@ import (
 	"github.com/orka-agents/orka/internal/executionmode"
 	"github.com/orka-agents/orka/internal/labels"
 	"github.com/orka-agents/orka/internal/metrics"
+	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/taskmeta"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/workerenv"
@@ -121,6 +122,7 @@ const (
 // JobBuilder builds Kubernetes Jobs for Tasks
 type JobBuilder struct {
 	client.Client
+	ValidationJobBuilder                       func(context.Context, *corev1alpha1.Task) (*batchv1.Job, error)
 	AIWorkerImage                              string
 	GeneralWorkerImage                         string
 	InitImage                                  string
@@ -490,8 +492,29 @@ func (b *JobBuilder) Build(ctx context.Context, task *corev1alpha1.Task, agent *
 	return b.BuildWithOptions(ctx, task, agent, provider, JobBuildOptions{})
 }
 
+func (b *JobBuilder) buildStandaloneValidationJob(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, bool, error) {
+	if task != nil {
+		for name := range task.Annotations {
+			if strings.HasPrefix(name, "patchverification.orka.ai/") {
+				if b.ValidationJobBuilder == nil {
+					return nil, true, fmt.Errorf("standalone validation execution is disabled")
+				}
+				if opts.RepositoryMonitorValidation || agent != nil || provider != nil {
+					return nil, true, fmt.Errorf("standalone validation cannot use monitor or agent execution")
+				}
+				job, err := b.ValidationJobBuilder(ctx, task)
+				return job, true, err
+			}
+		}
+	}
+	return nil, false, nil
+}
+
 // BuildWithOptions creates a Job for the given Task using additional resolved options.
 func (b *JobBuilder) BuildWithOptions(ctx context.Context, task *corev1alpha1.Task, agent *corev1alpha1.Agent, provider *corev1alpha1.Provider, opts JobBuildOptions) (*batchv1.Job, error) {
+	if job, handled, err := b.buildStandaloneValidationJob(ctx, task, agent, provider, opts); handled {
+		return job, err
+	}
 	if err := validateContainerPublicationWorkspace(task); err != nil {
 		return nil, err
 	}
@@ -1311,8 +1334,12 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 
 	// Child identity enables the coordination registry even when implicit tool
 	// injection is disabled, so explicitly selected coordination tools resolve to
-	// the platform implementations rather than Tool CRs.
-	if aitools.RegistersCoordinationTools(task, agent) && !coordinationConfigured {
+	// the platform implementations rather than Tool CRs. Budgeted native roles
+	// must not acquire coordination merely by having a parent Task.
+	budgetedNative := slices.ContainsFunc(envVars, func(variable corev1.EnvVar) bool {
+		return variable.Name == contract.BoundedModelRequestsEnv && variable.ValueFrom == nil && variable.Value == "1"
+	})
+	if aitools.RegistersCoordinationTools(task, agent) && !coordinationConfigured && !budgetedNative {
 		envVars = append(envVars, corev1.EnvVar{Name: workerenv.CoordinationEnabled, Value: scheduledRunLabelValue})
 	}
 

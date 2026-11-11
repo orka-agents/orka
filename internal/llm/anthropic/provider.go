@@ -52,6 +52,12 @@ func NewProvider(config llm.ProviderConfig) (*Provider, error) {
 		option.WithMiddleware(llm.UsageHTTPMiddleware),
 		option.WithHTTPClient(llm.SharedHTTPClient()),
 	}
+	if config.HTTPClient != nil {
+		opts = append(opts, option.WithHTTPClient(config.HTTPClient))
+	}
+	if config.DisableRetries {
+		opts = append(opts, option.WithMaxRetries(0))
+	}
 
 	if config.BaseURL != "" {
 		// The Anthropic SDK appends "v1/messages" to the base URL, so strip

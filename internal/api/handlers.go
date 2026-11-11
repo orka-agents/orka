@@ -35,6 +35,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/store"
 	storekube "github.com/orka-agents/orka/internal/store/kube"
 	"github.com/orka-agents/orka/internal/tools"
@@ -122,6 +123,7 @@ type Handlers struct {
 	gatewayEventStore         store.GatewayEventStore
 	gatewayDeliveryStore      store.GatewayDeliveryStore
 	gatewayService            *gatewayruntime.Service
+	remediationService        contract.Service
 	gatewayIngressLimiter     *gatewayIngressLimiter
 	eventStreamPollInterval   time.Duration
 	eventStreamHeartbeatEvery time.Duration
@@ -153,6 +155,7 @@ type HandlersConfig struct {
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
+	RemediationService        contract.Service
 	Connectors                ConnectorConfig
 }
 
@@ -185,6 +188,7 @@ func NewHandlers(cfg HandlersConfig) *Handlers {
 		gatewayEventStore:         cfg.GatewayEventStore,
 		gatewayDeliveryStore:      cfg.GatewayDeliveryStore,
 		gatewayService:            cfg.GatewayService,
+		remediationService:        cfg.RemediationService,
 		gatewayIngressLimiter:     newGatewayIngressLimiter(),
 		eventStreamPollInterval:   defaultEventStreamPollInterval,
 		eventStreamHeartbeatEvery: defaultEventStreamHeartbeatEvery,
@@ -947,6 +951,7 @@ func parseTaskLogTailLines(raw string) (int64, error) {
 
 // GetTaskResult gets the result of a task
 func (h *Handlers) GetTaskResult(c fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "private, no-store")
 	id := c.Params("id")
 	namespace, err := h.resolveNamespace(c, c.Query(toolNamespaceArg, ""))
 	if err != nil {

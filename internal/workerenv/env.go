@@ -169,6 +169,7 @@ const (
 
 	// Memory/controller context env vars used by AI worker memory integration.
 	MemoryContextEnabled    = "ORKA_MEMORY_CONTEXT_ENABLED"
+	MemoryToolsAutoEnable   = "ORKA_MEMORY_TOOLS_AUTO_ENABLE"
 	MemoryContextLimit      = "ORKA_MEMORY_CONTEXT_LIMIT"
 	MemoryContextMaxChars   = "ORKA_MEMORY_CONTEXT_MAX_CHARS"
 	ServiceAccountToken     = "ORKA_SA_TOKEN"

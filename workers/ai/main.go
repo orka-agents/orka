@@ -46,6 +46,7 @@ import (
 	"github.com/orka-agents/orka/internal/llm"
 	_ "github.com/orka-agents/orka/internal/llm/anthropic"
 	_ "github.com/orka-agents/orka/internal/llm/openai"
+	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/tools"
 	"github.com/orka-agents/orka/internal/tracing"
@@ -111,6 +112,22 @@ func run(transcriptPath string) (err error) {
 
 	// Get configuration from environment
 	workerEnv := workerenv.ParseAIWorkerEnv(os.Getenv)
+	bounded, err := boundedModelRequests(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if bounded {
+		if err := validateBoundedModelEnvironment(os.Getenv, workerEnv); err != nil {
+			return err
+		}
+		deadline, err := time.Parse(time.RFC3339Nano, os.Getenv(contract.ModelBudgetDeadlineEnv))
+		if err != nil {
+			return errModelCallBudget
+		}
+		boundedCtx, stop := context.WithDeadline(ctx, deadline)
+		defer stop()
+		ctx = boundedCtx
+	}
 	taskName := workerEnv.TaskName
 	taskNamespace := workerEnv.TaskNamespace
 	eventRecorder := common.NewHTTPEventRecorderFromEnv()
@@ -183,19 +200,29 @@ func run(transcriptPath string) (err error) {
 	}
 
 	// Create LLM provider
-	llmProvider, err := llm.NewProvider(provider, llm.ProviderConfig{
+	providerConfig := llm.ProviderConfig{
 		APIKey:              apiKey,
 		BaseURL:             baseURL,
 		ProviderType:        provider,
 		AzureAPIVersion:     azureAPIVersion,
 		AzureDeploymentName: workerEnv.AzureDeploymentName,
-	})
+	}
+	if bounded {
+		claim, err := modelCallPermitFromEnvironment(os.Getenv)
+		if err != nil {
+			return err
+		}
+		providerConfig.HTTPClient, providerConfig.DisableRetries = boundedModelClient(claim), true
+	}
+	llmProvider, err := llm.NewProvider(provider, providerConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create LLM provider: %w", err)
 	}
 
 	// Wrap with retry logic for transient errors
-	llmProvider = llm.NewRetryProvider(llmProvider)
+	if !bounded {
+		llmProvider = llm.NewRetryProvider(llmProvider)
+	}
 
 	// Set up fallback providers if configured
 	if len(workerEnv.Fallbacks) > 0 {
@@ -275,6 +302,9 @@ func run(transcriptPath string) (err error) {
 
 	// Load skills from mounted volume and prepend to system prompt
 	if skillContent := loadSkillsFromVolume(); skillContent != "" {
+		if bounded {
+			return errors.New("budgeted model roles cannot load ambient skills")
+		}
 		systemPrompt = skillContent + "\n\n" + systemPrompt
 	}
 
@@ -1316,7 +1346,18 @@ func executeAgentLoopWithEvents(
 	// The identity remains fixed across transport retries of that tool execution.
 	replyExecutionID := rand.Text()
 	coordinationEnv := workerenv.ParseCoordinationEnv(os.Getenv)
+	bounded, err := boundedModelRequests(os.Getenv)
+	if err != nil {
+		return "", err
+	}
+	if bounded && (len(llmTools) != 0 || len(customTools) != 0 ||
+		coordinationEnv.Enabled || coordinationEnv.AutonomousMode) {
+		return "", errors.New("budgeted model roles cannot execute tools or coordination")
+	}
 	maxIterations := agentLoopMaxIterations(coordinationEnv)
+	if bounded {
+		maxIterations = 1
+	}
 	allowedToolCalls := advertisedToolNames(llmTools)
 	deprecatedMemoryTools := workerenv.SplitCSV(os.Getenv(workerenv.AIDeprecatedMemoryTools))
 	if !coordinationEnv.AutonomousMode && approvalToolingRequested(coordinationEnv, allowedToolCalls) {
@@ -1346,6 +1387,10 @@ func executeAgentLoopWithEvents(
 			TemperatureSet: settings.temperatureSet,
 			Tools:          requestTools,
 		}
+		if bounded {
+			storeResponse := false
+			req.Store = &storeResponse
+		}
 		common.RecordEventWithTimeout(eventRecorder, events.ExecutionEventTypeModelRequestStarted, modelLoopEventTimeout,
 			common.WithEventSummary("model request started"),
 			common.WithEventContent(eventContent(map[string]any{
@@ -1358,7 +1403,7 @@ func executeAgentLoopWithEvents(
 		)
 
 		resp, err := provider.Complete(stepCtx, req)
-		if err != nil && llm.IsContextTooLongErr(err) {
+		if err != nil && !bounded && llm.IsContextTooLongErr(err) {
 			tokenEstimate := 0
 			for _, m := range messages {
 				tokenEstimate += len(m.Content) / 4
@@ -1419,6 +1464,9 @@ func executeAgentLoopWithEvents(
 		)
 
 		decision, result, completionErr := evaluateCompletionResponse(resp, finalAnswerRetry, blankFinalRetried)
+		if bounded && completionErr == nil && decision != completionDecisionReturn {
+			completionErr = errors.New("budgeted model roles require one complete final response without tools or retries")
+		}
 		if completionErr != nil {
 			stepSpan.RecordError(completionErr)
 			stepSpan.SetStatus(codes.Error, aiWorkerErrorType(completionErr))

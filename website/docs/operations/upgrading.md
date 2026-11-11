@@ -140,12 +140,14 @@ Orka creates its SQLite database on first startup. Restarts reuse that database
 and keep its records. Keep the data volume and encryption key together.
 
 The controller compares the complete schema, including every table and index
-definition, before upgrading. These immutable main-branch revisions identify
-supported source layouts; they are **unreleased baselines**, not release-version
-compatibility promises. Other commits with the exact same layout are equivalent.
-Object counts alone do not establish compatibility.
+definition, before upgrading. It validates recognized optional validation stores
+separately from the core layout; no objects are ignored. These immutable
+main-branch revisions identify supported core layouts; they are **unreleased
+baselines**, not release-version compatibility promises. Other commits with the
+exact same layout are equivalent. Object counts alone do not establish
+compatibility.
 
-| Source layout | Representative revision | Transition |
+| Source core layout | Representative revision | Transition |
 | --- | --- | --- |
 | 149 objects | [`0e567418`](https://github.com/orka-agents/orka/commit/0e567418ae20b4a11b5684eb42da47c1cdf1c92e) | Add the GitHub mutation index, then empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
 | 150 objects | [`1f18614c`](https://github.com/orka-agents/orka/commit/1f18614ca9dd2339a9c8caac8e3320e7daf61c2e), #731 | Add empty connector and native-session tables and their indexes, then remove the empty harness v1 tables and add dataset metadata. |
@@ -196,6 +198,27 @@ of the entire database, restoration of older history, or establish an independen
 installation binding. Preserve the volume, Kubernetes state and key together;
 this metadata is not a backup/restore protocol.
 
+### Optional report-validation stores
+
+The core object counts above exclude optional report-validation tables and
+indexes. Startup accepts only their exact known definitions: the standalone
+`patch_verification_write_lock` left by interrupted initialization, the complete
+patch-verification store with its lock, or that store plus the complete Kubernetes
+validation tables and indexes. The lock may still be empty if initialization
+stopped before its first insert. Missing members, incompatible definitions, and
+unknown objects are rejected, including unknown objects with validation prefixes.
+
+Core upgrades preserve the existing optional schema and records without creating,
+repairing, or removing optional tables. The optional definitions are captured
+before backup and must remain unchanged at the locked recheck and after every
+migration step. Optional-schema drift aborts the upgrade; changes made by the
+migration transaction roll back.
+
+Database compatibility does not authorize a new execution environment for active
+runs. Before changing remediation images or other frozen authority, settle or
+cancel active runs and wait for cleanup under the original configuration; see
+[Report remediation](../guides/report-remediation.md#operator-configuration).
+
 ### Unsupported intermediate connector layout
 
 The **161-object layout from #700**, introduced at
@@ -224,12 +247,13 @@ If backup creation or verification fails, startup stops without changing schema.
 Only an incomplete backup created by that attempt is removed.
 
 All additive steps run in one `BEGIN IMMEDIATE` transaction under the controller
-lock. Each resulting layout is checked exactly, and integrity and foreign-key
-checks must pass before commit. A process interrupted before commit leaves the
-old schema; retry takes a new backup and repeats the migration. A committed
-current layout only validates on reopen. Completed backups remain available even
-if a later migration step fails; they are not overwritten or automatically
-pruned, so allow disk space for them and manage retention explicitly.
+lock. Each resulting core layout and the unchanged optional schema are checked
+exactly, and integrity and foreign-key checks must pass before commit. A process
+interrupted before commit leaves the old schema and optional records; retry takes
+a new backup and repeats the migration. A committed current layout only validates
+on reopen. Completed backups remain available even if a later migration step
+fails; they are not overwritten or automatically pruned, so allow disk space for
+them and manage retention explicitly.
 
 Backups contain the same sensitive records as the live database. Keep them
 protected with the original encryption key, include them in your backup policy,

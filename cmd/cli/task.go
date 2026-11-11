@@ -429,22 +429,28 @@ func newTaskResultCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			format, err := outputFormat(cmd)
-			if err != nil {
-				return err
-			}
-			if format == outputTable {
-				fmt.Fprint(cmd.OutOrStdout(), result.Result) //nolint:errcheck
-				if !strings.HasSuffix(result.Result, "\n") {
-					fmt.Fprintln(cmd.OutOrStdout()) //nolint:errcheck
-				}
-				return nil
-			}
-			return printStructured(cmd, result)
+			return printTaskResult(cmd, result)
 		},
 	}
 	addOutputFlag(cmd, outputTable)
 	return cmd
+}
+
+func printTaskResult(cmd *cobra.Command, result *client.TaskResultResponse) error {
+	format, err := outputFormat(cmd)
+	if err != nil {
+		return err
+	}
+	if format != outputTable {
+		return printStructured(cmd, result)
+	}
+	if _, err := fmt.Fprint(cmd.OutOrStdout(), result.Result); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(result.Result, "\n") {
+		_, err = fmt.Fprintln(cmd.OutOrStdout())
+	}
+	return err
 }
 
 func newTaskPlanCmd() *cobra.Command {

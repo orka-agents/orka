@@ -95,7 +95,7 @@ func TestDatasetMetadataInsertionFailureRollsBackUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	steps := schemaMigrations()[3:]
 	steps[len(steps)-1].sql += `; CREATE TEMP TRIGGER fail_dataset BEFORE INSERT ON store_dataset BEGIN SELECT RAISE(ABORT,'injected dataset insert failure'); END;`
-	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema166, steps), "injected dataset insert failure")
+	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema166, nil, steps), "injected dataset insert failure")
 	require.NoError(t, conn.Close())
 	require.Equal(t, beforeSchema, storedSchemaSQL(t, db))
 	require.Equal(t, before, applicationRows(t, db))

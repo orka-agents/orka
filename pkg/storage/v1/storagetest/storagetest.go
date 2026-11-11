@@ -46,6 +46,7 @@ type stateFamily struct {
 
 var stateFamilies = []stateFamily{
 	{"results", runResults},
+	{"verification", runVerification},
 	{"plans", runPlans},
 	{"messages", runMessages},
 	{"sessions", runSessions},

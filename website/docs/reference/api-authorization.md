@@ -11,7 +11,7 @@ UID, groups, and extra attributes. The permission must cover the final namespace
 resource, verb, and name. Missing clients, review errors, denied decisions, and
 ambiguous results return `403` before the requested operation runs.
 
-The table covers all 133 authenticated external route registrations, including 50
+The table covers all 149 authenticated external route registrations, including 61
 non-GET registrations under `/api/v1` and the OpenAI and Anthropic compatibility
 routes. `GET /api/v1/auth/validate` and `GET /api/v1/auth/whoami` only validate or
 report the authenticated identity. They do not access tenant resources and require
@@ -22,6 +22,11 @@ tokens retain their `off`, `audit`, and `enforce` scope and `tctx` policies. Nei
 identity is converted into a TokenReview identity for these checks. Existing
 route-specific restrictions still apply. See [Security](../concepts/security.md)
 and [Transaction Token integration](../concepts/transaction-tokens.md).
+
+The opt-in `/api/v1/remediations` routes accept only Kubernetes TokenReview
+identities. Their namespace-scoped run and patch permissions are distinct from
+ordinary Task read permissions. They do not grant model, source, or publication
+capabilities beyond the operator-configured remediation boundary.
 
 Health probes, static UI files, Gateway adapter ingress, GitHub webhooks, and
 internal worker/ACP routes are outside this inventory. Their existing probe,
@@ -173,6 +178,10 @@ otherwise. In the additional-checks column:
 | `GET` | `/api/v1/tasks/:id/children` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | `list` on `core.orka.ai/tasks`, empty name; Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
 | `GET` | `/api/v1/tasks/:id/artifacts/:filename` | `core.orka.ai` | `tasks` | `get` | `:id` | `Q` | Gateway read |
+| `POST` | `/api/v1/remediations` | `core.orka.ai` | `remediations` | `create` | empty | `Q` | TokenReview only; feature enabled |
+| `GET` | `/api/v1/remediations/:id` | `core.orka.ai` | `remediations` | `get` | `:id` | `Q` | TokenReview only |
+| `POST` | `/api/v1/remediations/:id/cancel` | `core.orka.ai` | `remediations/cancel` | `update` | `:id` | `Q` | TokenReview only |
+| `GET` | `/api/v1/remediations/:id/patch` | `core.orka.ai` | `remediations/patch` | `get` | `:id` | `Q` | TokenReview only; candidate status remains explicit |
 | `GET` | `/api/v1/sessions` | `core.orka.ai` | `sessions` | `list` | empty | `Q` | none |
 | `GET` | `/api/v1/sessions/:id` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |
 | `GET` | `/api/v1/sessions/:id/events` | `core.orka.ai` | `sessions` | `get` | `:id` | `Q` | none |

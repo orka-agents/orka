@@ -18,6 +18,9 @@ AGENTKIT_RUNTIME_IMAGE ?=
 # Digest-pinned AgentKit source image identity used as the adapter authority.
 AGENTKIT_ADAPTER_DIGEST ?=
 WORKSPACE_PUBLISHER_IMG ?= ghcr.io/orka-agents/orka/workspace-publisher:latest
+VALIDATION_HELPER_IMG ?= ghcr.io/orka-agents/orka/validation-helper:latest
+APPLICATION_WORKER_IMG ?= ghcr.io/orka-agents/orka/application-worker:latest
+VALIDATION_TEST_TOOL_IMAGE ?= docker.io/library/golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c
 # Providers backing the generated docker-build-acp-<provider>-runtime and
 # docker-push-acp-<provider>-runtime targets.
 ACP_RUNTIME_PROVIDERS = codex claude copilot opencode
@@ -178,6 +181,12 @@ repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+
+.PHONY: test-remediation-worker
+test-remediation-worker: ## Run the native Git launcher and validation supervisor/guard in bounded offline containers.
+	@test -n "$(VALIDATION_TEST_TOOL_IMAGE)" || { echo "VALIDATION_TEST_TOOL_IMAGE is required" >&2; exit 1; }
+	CGO_ENABLED=0 ORKA_VALIDATION_LIVE_TOOL_IMAGE="$(VALIDATION_TEST_TOOL_IMAGE)" \
+		go test ./workers/general ./workers/validation -run '^TestProduction(HTTPGuardContainer|ValidationGitLauncherContainer)$$' -count=1 -v
 
 # The default e2e setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 KIND_CLUSTER ?= orka-test-e2e
@@ -353,6 +362,14 @@ docker-build-ai-worker: ## Build docker image for the AI worker.
 .PHONY: docker-build-general-worker
 docker-build-general-worker: ## Build docker image for the general worker.
 	$(CONTAINER_TOOL) build -t ${GENERAL_WORKER_IMG} -f workers/general/Dockerfile .
+
+.PHONY: docker-build-validation-helper
+docker-build-validation-helper: ## Build the opt-in report-validation observer and guard image.
+	$(CONTAINER_TOOL) build -t ${VALIDATION_HELPER_IMG} -f workers/validation/Dockerfile .
+
+.PHONY: docker-build-application-worker
+docker-build-application-worker: ## Build the opt-in application-runtime builder and independent observer.
+	$(CONTAINER_TOOL) build -t ${APPLICATION_WORKER_IMG} -f workers/application/Dockerfile .
 
 # Recipes for the docker-build-acp-<provider>-runtime targets are generated
 # from ACP_RUNTIME_PROVIDERS below; these dependency-less rules carry their

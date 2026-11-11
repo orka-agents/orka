@@ -32,6 +32,7 @@ import (
 	gatewayruntime "github.com/orka-agents/orka/internal/gateway"
 	"github.com/orka-agents/orka/internal/gateway/protocol"
 	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
+	"github.com/orka-agents/orka/internal/remediation/contract"
 	"github.com/orka-agents/orka/internal/store"
 	"github.com/orka-agents/orka/internal/taskwebhook"
 )
@@ -93,6 +94,7 @@ type ServerConfig struct {
 	GatewayEventStore         store.GatewayEventStore
 	GatewayDeliveryStore      store.GatewayDeliveryStore
 	GatewayService            *gatewayruntime.Service
+	RemediationService        contract.Service
 	HealthChecker             store.HealthChecker
 	Clientset                 kubernetes.Interface
 	APIReader                 client.Reader
@@ -183,6 +185,7 @@ func NewServer(c client.Client, sessionManager *controller.SessionManager, confi
 		GatewayEventStore:         config.GatewayEventStore,
 		GatewayDeliveryStore:      config.GatewayDeliveryStore,
 		GatewayService:            config.GatewayService,
+		RemediationService:        config.RemediationService,
 		Connectors:                config.Connectors,
 	})
 	resolver := NewProviderResolver(c, config.Chat)
@@ -217,6 +220,9 @@ func requestBodyConfigWithNativeSessionLimit(header *fasthttp.RequestHeader, nat
 	}
 	if isGatewayIngressPath(path) {
 		return fasthttp.RequestConfig{MaxRequestBodySize: protocol.MaxHTTPBodyBytes}
+	}
+	if isRemediationPath(path) {
+		return fasthttp.RequestConfig{MaxRequestBodySize: maxRemediationRequestBytes, ReadTimeout: 30 * time.Second}
 	}
 	// Use Fiber's fasthttp path semantics for the streaming exemption, including
 	// fragment handling. net/url would retain a literal '#' in the path and
@@ -322,6 +328,8 @@ func allowedCORSHeaders(contextTokens ContextTokenConfig) []string {
 
 // setupRoutes configures the API routes
 func (s *Server) setupRoutes() {
+	s.app.Use("/api/v1/remediations", remediationPrivateResponse)
+
 	// The ACP artifact transport must be installed before other routes so large
 	// capability-bound uploads remain streamed while ordinary API bodies retain
 	// the historical bounded request limit.
@@ -369,6 +377,11 @@ func (s *Server) setupRoutes() {
 	api.Get("/tasks/:id/children", s.handlers.GetTaskChildren)
 	api.Get("/tasks/:id/artifacts", s.handlers.ListTaskArtifacts)
 	api.Get("/tasks/:id/artifacts/:filename", s.handlers.DownloadTaskArtifact)
+
+	api.Post("/remediations", s.handlers.CreateRemediation)
+	api.Get("/remediations/:id", s.handlers.GetRemediation)
+	api.Post("/remediations/:id/cancel", s.handlers.CancelRemediation)
+	api.Get("/remediations/:id/patch", s.handlers.GetRemediationPatch)
 
 	// Session endpoints
 	api.Get("/sessions", s.handlers.ListSessions)
@@ -580,6 +593,7 @@ func (s *Server) setupRoutes() {
 		internal.Post("/tasks/:namespace/:taskName/children/:child/cancel", s.internalHandlers.CancelChildTask)
 		internal.Get("/tasks/:namespace/:taskName/gateway-messages/budget", s.internalHandlers.GetGatewayMessageBudget)
 		internal.Post("/tasks/:namespace/:taskName/execution-workspace/status", s.internalHandlers.UpdateExecutionWorkspaceStatus)
+		internal.Post("/tasks/:namespace/:taskName/remediation-model-call", s.handlers.ClaimRemediationModelCall)
 		internal.Get("/sessions/:namespace/search", s.internalHandlers.SearchTranscript)
 		internal.Get("/sessions/:namespace/:name/transcript", s.internalHandlers.GetSessionTranscript)
 		internal.Post("/plans/:namespace/:taskName", s.internalHandlers.SubmitPlan)

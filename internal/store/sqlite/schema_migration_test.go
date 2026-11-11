@@ -179,7 +179,7 @@ func TestNewestHistoricalMigrationReproducesCurrentSchema(t *testing.T) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, migrationsFrom(t, schema166)))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema166, nil, migrationsFrom(t, schema166)))
 	schema, err := readSchema(conn)
 	require.NoError(t, err)
 	require.NoError(t, validateSchema(schema, currentSchemaStatements()))
@@ -196,7 +196,7 @@ func TestSQLiteMigrationRefusesChangedSourceAfterBackup(t *testing.T) {
 	require.NoError(t, err)
 	before, err := readSchema(conn)
 	require.NoError(t, err)
-	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema149, schemaMigrations()), "schema changed after backup")
+	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema149, nil, schemaMigrations()), "schema changed after backup")
 	after, err := readSchema(conn)
 	require.NoError(t, err)
 	require.Equal(t, before, after)
@@ -257,11 +257,15 @@ func interruptMigration(t *testing.T, db *sql.DB, path, mode string) {
 	conn, err := db.Conn(t.Context())
 	require.NoError(t, err)
 	defer func() { _ = conn.Close() }()
+	schema, err := readSchema(conn)
+	require.NoError(t, err)
+	core, optional, err := splitOptionalValidationSchema(schema)
+	require.NoError(t, err)
 	_, err = backupSchemaDatabase(t.Context(), conn, path)
 	require.NoError(t, err)
 	steps := schemaMigrations()
 	steps[1].sql += `; SELECT no_such_migration_function()`
-	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema149, steps), "no_such_migration_function")
+	require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schemaFingerprint(core), optional, steps), "no_such_migration_function")
 }
 
 func TestSQLiteMigrationCrashProcess(t *testing.T) {
@@ -279,11 +283,15 @@ func TestSQLiteMigrationCrashProcess(t *testing.T) {
 	defer func() { _ = lock.Close() }()
 	conn, err := rawMigrationDB(t, path).Conn(t.Context())
 	require.NoError(t, err)
+	schema, err := readSchema(conn)
+	require.NoError(t, err)
+	core, optional, err := splitOptionalValidationSchema(schema)
+	require.NoError(t, err)
 	_, err = backupSchemaDatabase(t.Context(), conn, path)
 	require.NoError(t, err)
 	steps := schemaMigrations()
 	steps[len(steps)-1].sql += `; SELECT w275_crash()`
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema149, steps))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schemaFingerprint(core), optional, steps))
 	t.Fatal("migration did not reach crash point")
 }
 
@@ -478,7 +486,7 @@ func TestSchemaVersion1UpgradeFailureRollsBack(t *testing.T) {
 	require.NoError(t, err)
 	steps := versionUpgrades()
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 1, schema168, steps))
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 1, schema168, nil, steps))
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
 	require.NoError(t, err)
@@ -516,7 +524,7 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
 	steps := migrationsFrom(t, schema168)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, steps))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema168, nil, steps))
 	require.NoError(t, conn.Close())
 
 	for _, state := range version1StoreStates {
@@ -529,7 +537,7 @@ func TestSchemaVersion1StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, steps),
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema168, nil, steps),
 				"unsupported SQLite schema version 1 before upgrade")
 			require.NoError(t, conn.Close())
 
@@ -723,7 +731,7 @@ func TestSchemaVersion2UpgradeFailureRollsBack(t *testing.T) {
 	require.GreaterOrEqual(t, first, 0)
 	// The final step fails, so every step from version 2 rolls back together.
 	steps[len(steps)-1].sql += `; SELECT no_such_function()`
-	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, steps[first:]))
+	require.Error(t, runVersionUpgrades(t.Context(), conn, 2, schema169, nil, steps[first:]))
 	require.NoError(t, conn.Close())
 	after, err := readDataset(db)
 	require.NoError(t, err)
@@ -759,7 +767,7 @@ func TestSchemaVersion2StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 	require.Equal(t, schema169, schemaFingerprint(schema))
 	conn, err := fixture.Conn(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema169, migrationsFrom(t, schema169)))
+	require.NoError(t, runSchemaMigrations(t.Context(), conn, schema169, nil, migrationsFrom(t, schema169)))
 	require.NoError(t, conn.Close())
 
 	for _, state := range version2StoreStates {
@@ -770,7 +778,7 @@ func TestSchemaVersion2StoreDiffersFromRebuiltLayoutFixture(t *testing.T) {
 			beforeRows := applicationRows(t, db)
 			conn, err := db.Conn(t.Context())
 			require.NoError(t, err)
-			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema169, migrationsFrom(t, schema169)),
+			require.ErrorContains(t, runSchemaMigrations(t.Context(), conn, schema169, nil, migrationsFrom(t, schema169)),
 				"unsupported SQLite schema version 2 before upgrade")
 			require.NoError(t, conn.Close())
 			after, err := readDataset(db)
