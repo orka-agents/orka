@@ -799,9 +799,9 @@ func (r *TaskReconciler) handlePending(ctx context.Context, task *corev1alpha1.T
 		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
-	// Non-agent workers retain the legacy Session lock lifecycle. Agent Tasks
-	// claim protocol lineage and a fenced SessionTurn in their dispatcher only
-	// after the immutable execution binding has selected v1 or v2.
+	// Non-agent workers use the Session lock lifecycle. Agent Tasks claim
+	// protocol lineage and a fenced SessionTurn in their ACP dispatcher only
+	// after the immutable execution binding is recorded.
 	if task.Spec.SessionRef != nil && task.Spec.Type != corev1alpha1.TaskTypeAgent {
 		if result, err, locked := r.acquireSessionLock(ctx, task); locked {
 			return result, err
@@ -4132,11 +4132,6 @@ func trustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName 
 	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
 }
 
-func legacyTrustedServiceReadBindingName(taskNamespace, serviceNamespace, serviceName string) string {
-	sum := sha256.Sum256([]byte(taskNamespace + "\x00" + serviceNamespace + "\x00" + serviceName))
-	return "orka-outbound-service-" + hex.EncodeToString(sum[:])[:16]
-}
-
 func trustedServiceReadBindingLabels(taskNamespace string) map[string]string {
 	return map[string]string{
 		orkaManagedByLabelKey:                     managedByLabelValue,
@@ -4318,41 +4313,6 @@ func (r *TaskReconciler) deleteTrustedServiceReadBindingsForNamespaceLocked(
 			return fmt.Errorf("deleting trusted Service Role %s/%s for inactive namespace %q: %w", role.Namespace, role.Name, taskNamespace, err)
 		}
 	}
-	return r.deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(ctx, taskNamespace)
-}
-
-func (r *TaskReconciler) deleteLegacyTrustedServiceReadBindingsForNamespaceLocked(
-	ctx context.Context,
-	taskNamespace string,
-) error {
-	refs := append(r.OutboundAccessTrust.Gateways.References(), r.OutboundAccessTrust.TokenEndpoints.References()...)
-	seen := map[types.NamespacedName]struct{}{}
-	for _, ref := range refs {
-		if ref.Namespace == "" || ref.Namespace == taskNamespace {
-			continue
-		}
-		key := types.NamespacedName{
-			Namespace: ref.Namespace,
-			Name:      legacyTrustedServiceReadBindingName(taskNamespace, ref.Namespace, ref.Name),
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		binding := &rbacv1.RoleBinding{}
-		if err := r.trustedServiceReadReader().Get(ctx, key, binding); apierrors.IsNotFound(err) {
-			continue
-		} else if err != nil {
-			return fmt.Errorf("getting legacy trusted Service RoleBinding %s/%s: %w", key.Namespace, key.Name, err)
-		}
-		ownerNamespace, ok := legacyTrustedServiceReadRoleBindingTaskNamespace(binding)
-		if !ok || ownerNamespace != taskNamespace {
-			continue
-		}
-		if err := r.deleteTrustedServiceReadGrant(ctx, binding, taskNamespace); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -4447,10 +4407,7 @@ func trustedServiceReadRoleOwned(role *rbacv1.Role, taskNamespace string, servic
 		strings.HasPrefix(role.Name, "orka-outbound-service-") {
 		return true
 	}
-	if len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0]) {
-		return true
-	}
-	return legacyTrustedServiceReadRole(role, taskNamespace)
+	return len(serviceAccountNames) > 0 && trustedServiceReadRoleMatches(role, taskNamespace, serviceAccountNames[0])
 }
 
 func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAccountName string) bool {
@@ -4458,13 +4415,6 @@ func trustedServiceReadRoleMatches(role *rbacv1.Role, taskNamespace, serviceAcco
 		return false
 	}
 	return role.Name == trustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0], serviceAccountName)
-}
-
-func legacyTrustedServiceReadRole(role *rbacv1.Role, taskNamespace string) bool {
-	if !trustedServiceReadRoleRuleValid(role) {
-		return false
-	}
-	return role.Name == legacyTrustedServiceReadBindingName(taskNamespace, role.Namespace, role.Rules[0].ResourceNames[0])
 }
 
 func trustedServiceReadRoleRuleValid(role *rbacv1.Role) bool {

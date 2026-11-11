@@ -56,6 +56,47 @@ func TestConsumeMessagesReplayReadsTheReceiptIDs(t *testing.T) {
 	require.Equal(t, "two", unread[0].Content)
 }
 
+// A consuming replay reads its messages again only from the reader's own
+// inbox, so a row stored under a deleted message's ID for another Task is
+// never returned to the reader and stays unread for its recipient.
+func TestConsumeMessagesReplayRereadsOnlyItsInbox(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	datasetID := advanceTestEpoch(t, s, testWriteFence)
+	for _, from := range []string{"writer", "deleted-writer"} {
+		require.NoError(t, s.SendMessage(ctx, &store.Message{
+			Namespace: "tenant", FromTask: from, ToTask: "reader", ParentTask: "parent", Content: from,
+		}))
+	}
+	request := store.ConsumeMessagesRequest{Namespace: "tenant", TaskName: "reader", ParentTask: "parent"}
+	envelopeCtx, _ := testEnvelope(t, ctx, datasetID, "ConsumeMessages", time.Now().UTC(), request)
+	first, err := s.ConsumeMessages(envelopeCtx, request)
+	require.NoError(t, err)
+	require.Equal(t, []string{"writer", "deleted-writer"}, messageContentsOf(first))
+	require.NoError(t, s.DeleteTaskMessages(ctx, "tenant", "deleted-writer"))
+	// SQLite never reuses an ID; store a row under the deleted one directly to
+	// stand in for a backend that would.
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO messages (id, namespace, from_task, to_task, parent_task, content) VALUES (?, ?, ?, ?, ?, ?)`,
+		first[1].ID, "tenant", "x", "victim", "other", "for the victim")
+	require.NoError(t, err)
+
+	replay, err := s.ConsumeMessages(envelopeCtx, request)
+	require.NoError(t, err)
+	require.Equal(t, first[:1], replay, "the replay returns only what is left of the reader's batch")
+	victim, err := s.ListUnreadMessages(ctx, "tenant", "victim", "other", 0)
+	require.NoError(t, err)
+	require.Equal(t, []string{"for the victim"}, messageContentsOf(victim))
+}
+
+func messageContentsOf(messages []store.Message) []string {
+	contents := make([]string, len(messages))
+	for i, message := range messages {
+		contents[i] = message.Content
+	}
+	return contents
+}
+
 // The SendMessage receipt keeps the assigned identity, not the content, so
 // the content leaves the store with the message when cleanup deletes it, and
 // a replay still writes the identity back.
@@ -147,6 +188,37 @@ func TestTransientLockExpiryIsJudgedAtTheRequestTime(t *testing.T) {
 	require.Equal(t, 1, session.InputTokens)
 	require.Equal(t, 1, session.MessageCount)
 	require.Equal(t, "owner-b", session.ActiveTask)
+}
+
+// ReleaseLockWithTokenUsage counts the owner's tokens only while its
+// transient lock is live at the request time, and releases the lock either
+// way.
+func TestReleaseLockWithTokenUsageJudgesTheLockAtTheRequestTime(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	expiry := leaseClockBase.Add(time.Minute)
+	for _, tc := range []struct {
+		session       string
+		now           time.Time
+		input, output int
+	}{
+		{session: "in-time", now: expiry.Add(-time.Nanosecond), input: 3, output: 4},
+		{session: "late", now: expiry},
+	} {
+		require.NoError(t, s.CreateSession(ctx, &store.SessionRecord{
+			Namespace: "tenant", Name: tc.session, SessionType: "task",
+			CreatedAt: leaseClockBase, UpdatedAt: leaseClockBase,
+		}))
+		require.NoError(t, s.AcquireLockUntil(ctx, "tenant", tc.session, "owner-a", "uid-a", leaseClockBase, expiry))
+		owner := store.SessionOwnerWrite{Namespace: "tenant", Name: tc.session, OwnerName: "owner-a", OwnerUID: "uid-a", Now: tc.now}
+		require.NoError(t, s.ReleaseLockWithTokenUsage(ctx, owner, 3, 4))
+
+		session, err := s.GetSession(ctx, "tenant", tc.session)
+		require.NoError(t, err)
+		require.Equal(t, tc.input, session.InputTokens, tc.session)
+		require.Equal(t, tc.output, session.OutputTokens, tc.session)
+		require.Empty(t, session.ActiveTask, "%s: the lock is released", tc.session)
+	}
 }
 
 // Session cleanup judges a chat turn reservation at the plan's preparation

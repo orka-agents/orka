@@ -188,6 +188,26 @@ func runMessages(t *testing.T, newProvider StateFactory) {
 		require.NoError(t, err)
 		require.Equal(t, []string{"to y"}, messageContents(toY), "other parents keep their messages")
 	})
+
+	t.Run("message IDs increase and are never reused", func(t *testing.T) {
+		provider := newProvider(t)
+		ctx := t.Context()
+		send := func(from, parent string) int64 {
+			t.Helper()
+			message := &storagev1.Message{Namespace: "tenant-a", FromTask: from, ToTask: "worker-b", ParentTask: parent, Content: from}
+			require.NoError(t, provider.SendMessage(ctx, message))
+			return message.ID
+		}
+		first := send("worker-a", "parent")
+		newest := send("worker-c", "parent")
+		require.Greater(t, newest, first, "IDs increase in the order messages are stored")
+		require.NoError(t, provider.DeleteTaskMessages(ctx, "tenant-a", "worker-c"))
+		afterTaskCleanup := send("worker-d", "other-parent")
+		require.Greater(t, afterTaskCleanup, newest, "the newest message's ID is not reused after its sender's cleanup")
+		require.NoError(t, provider.DeleteParentMessages(ctx, "tenant-a", "other-parent"))
+		afterParentCleanup := send("worker-e", "parent")
+		require.Greater(t, afterParentCleanup, afterTaskCleanup, "the newest message's ID is not reused after its parent's cleanup")
+	})
 }
 
 func runSessions(t *testing.T, newProvider StateFactory) {

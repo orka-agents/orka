@@ -175,10 +175,6 @@ repository-monitor-fake-e2e: ensure-ui-embed ## Run fake-GitHub RepositoryMonito
 repository-monitor-validate: ensure-ui-embed ## Run full local RepositoryMonitor fake-E2E/docs/example validation
 	bash scripts/repository-monitor-validate.sh
 
-.PHONY: repository-monitor-completion-audit
-repository-monitor-completion-audit: ensure-ui-embed ## Run local RepositoryMonitor validation and report remaining live validation
-	bash scripts/repository-monitor-completion-audit.sh
-
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
