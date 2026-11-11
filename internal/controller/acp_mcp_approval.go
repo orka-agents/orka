@@ -817,13 +817,8 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 	callCtx, stopPrompt := b.watchPromptAuthority(callCtx, call.Request, false)
 	defer stopPrompt()
 	result, executeErr := prepared(withACPMCPAuthenticatedTask(callCtx, credentials.Task))
-	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
-		// Nothing reached the remote system, so the failure is final whatever
-		// happened to the prompt's authority meanwhile. A receipt that cannot
-		// be recorded leaves the outcome unknown below, as the record shows.
-		if failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect); err == nil {
-			return failure, false, nil
-		}
+	if failure, ok := b.failCallWithoutEffect(ctx, call, credentials, effect, result, executeErr); ok {
+		return failure, false, nil
 	}
 	if executeErr == nil {
 		executeErr = callCtx.Err()
@@ -865,10 +860,44 @@ func (b *ACPMCPBroker) executeApprovedCall(ctx context.Context, call *acpMCPAppr
 // failApprovedCall settles an approved call that failed without effect as a
 // definite failure whose safe summary both the reviewer and the model see.
 func (b *ACPMCPBroker) failApprovedCall(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, cause *tools.NoEffectError) (json.RawMessage, error) {
+	return b.failApprovedCallWithCode(ctx, call, credentials, effect, acpApprovalCodeNoEffect, cause)
+}
+
+// failCallWithoutEffect settles an approved call that provably reached no
+// remote system as failed, and reports whether it did. Nothing was sent, so
+// the failure is final whatever happened to the prompt's authority
+// meanwhile. That is a no-effect error, or the refusal of a requester's link
+// found missing or unusable, which keeps its code and the fix it names for
+// the agent. A receipt that cannot be recorded leaves the outcome to the
+// caller, which treats it as unknown, as the record shows.
+func (b *ACPMCPBroker) failCallWithoutEffect(
+	ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect,
+	result json.RawMessage, executeErr error,
+) (json.RawMessage, bool) {
+	if noEffect, ok := errors.AsType[*tools.NoEffectError](executeErr); ok {
+		failure, err := b.failApprovedCall(ctx, call, credentials, effect, noEffect)
+		return failure, err == nil
+	}
+	if executeErr != nil {
+		return nil, false
+	}
+	reason, ok := acpMCPConnectionRequiredResult(result)
+	if !ok {
+		return nil, false
+	}
+	failure, err := b.failApprovedCallWithCode(ctx, call, credentials, effect, harnessv2.MCPToolErrorCodeConnectionRequired,
+		&tools.NoEffectError{Summary: reason, Err: errors.New(reason)})
+	return failure, err == nil
+}
+
+// failApprovedCallWithCode settles an approved call that had no effect as
+// failed, under code: the generic no-effect code, or a refusal's own, such
+// as connection_required, whose guidance the agent relays.
+func (b *ACPMCPBroker) failApprovedCallWithCode(ctx context.Context, call *acpMCPApprovalCall, credentials ACPMCPBrokerCredentials, effect *store.ExternalEffect, code string, cause *tools.NoEffectError) (json.RawMessage, error) {
 	settleCtx, stop := acpApprovalDetachedContext(ctx, acpApprovalSettleTimeout)
 	defer stop()
 	summary := acpApprovalFailureSummary(cause.Summary)
-	failure := acpApprovalResult(call.ID, acpApprovalCodeNoEffect, summary)
+	failure := acpApprovalResult(call.ID, code, summary)
 	if err := settleExternalEffectStore(settleCtx, b.Effects, credentials.ControllerFence, effect.Identity, store.ExternalEffectFailed, failure); err != nil {
 		return nil, err
 	}
@@ -924,6 +953,21 @@ func acpApprovalError(id, code string) json.RawMessage {
 		acpApprovalCodeUnknown:   "The tool may have run. Do not repeat it automatically.",
 	}
 	return acpApprovalResult(id, code, messages[code])
+}
+
+// acpMCPConnectionRequiredResult reports whether a tool result is the
+// refusal of a missing or unusable linked account, and its reason.
+func acpMCPConnectionRequiredResult(result json.RawMessage) (string, bool) {
+	var refusal struct {
+		IsError bool   `json:"isError"`
+		Code    string `json:"code"`
+		Error   string `json:"error"`
+	}
+	if json.Unmarshal(result, &refusal) != nil || !refusal.IsError ||
+		refusal.Code != harnessv2.MCPToolErrorCodeConnectionRequired || strings.TrimSpace(refusal.Error) == "" {
+		return "", false
+	}
+	return refusal.Error, true
 }
 
 func acpApprovalResult(id, code, message string) json.RawMessage {

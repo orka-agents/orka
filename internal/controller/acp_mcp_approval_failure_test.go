@@ -226,3 +226,43 @@ func TestAcpApprovalFailureSummaryRedactsBeforeBounding(t *testing.T) {
 		t.Fatal("an empty summary has no fallback")
 	}
 }
+
+// TestMCPApprovalExpiredLinkFailsWithoutEffect covers an approved connector
+// call whose requester link expired before it ran: credential resolution
+// refuses it before any request leaves, so it settles failed, not succeeded
+// or unknown, even when the prompt is cancelled at the same moment, and the
+// agent still gets connection_required and the fix it names.
+func TestMCPApprovalExpiredLinkFailsWithoutEffect(t *testing.T) {
+	f := newMCPApprovalFixture(t)
+	const reason = "Azure is not linked for the person who asked. They need to run `orka connect azure -n team-a`, then run this Task again"
+	f.broker.Executor = ACPMCPToolExecutorFunc(func(context.Context, harnessv2.MCPBrokerCallRequest, harnessv2.MCPToolDescriptor) (json.RawMessage, error) {
+		f.count.Add(1)
+		// The prompt is cancelled while the credential is resolved.
+		f.authorized.Store(false)
+		return json.Marshal(struct {
+			IsError bool   `json:"isError"`
+			Code    string `json:"code"`
+			Error   string `json:"error"`
+		}{true, harnessv2.MCPToolErrorCodeConnectionRequired, reason})
+	})
+	done := f.start(f.request)
+	pending := f.pending()
+	f.decide(pending.ID, events.ExecutionEventTypeApprovalApproved)
+	result := awaitMCPApprovalResult(t, done)
+
+	want := acpApprovalResult(pending.ID, harnessv2.MCPToolErrorCodeConnectionRequired, reason)
+	if !result.IsError || string(result.Result) != string(want) || f.count.Load() != 1 {
+		t.Fatalf("approved expired-link result=%s executions=%d", result.Result, f.count.Load())
+	}
+	if effect := f.approvalEffect(); effect.State != store.ExternalEffectFailed {
+		t.Fatalf("effect state = %s, want %s", effect.State, store.ExternalEffectFailed)
+	}
+	if approval := f.approval(); approval.ExecutionOutcome != acpApprovalOutcomeFailed || approval.ExecutionReason != reason {
+		t.Fatalf("approval = %#v, want a failed execution naming the fix", approval)
+	}
+	// Recovery reads the receipt back as the same failure.
+	outcome, recovered, _ := mcpApprovalRecoveredOutcome(f.approvalEffect(), pending.ID)
+	if outcome != acpApprovalOutcomeFailed || recovered != reason {
+		t.Fatalf("recovered outcome = %q, %q", outcome, recovered)
+	}
+}
