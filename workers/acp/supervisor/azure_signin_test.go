@@ -320,3 +320,31 @@ func TestAzureGatewayProfileWritesDoNotFollowLinks(t *testing.T) {
 		t.Fatalf("the link's target holds %v, %v", entries, err)
 	}
 }
+
+// A sign-in runs under one prompt: when its prompt ends between subscription
+// pages and another starts, the next page is not read and no profile mixing
+// the two prompts' answers is written.
+func TestAzureSignInStopsWhenItsPromptEnds(t *testing.T) {
+	fixture := newAzureGatewayFixture(t)
+	var listed atomic.Int32
+	pages := subscriptionsResponder(t, &listed)
+	fixture.mu.Lock()
+	fixture.respond = func(request harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		// The prompt changes while the first page is in flight.
+		fixture.session.mu.Lock()
+		fixture.session.authorization.PromptID = "prompt-later"
+		fixture.session.mu.Unlock()
+		return pages(request)
+	}
+	fixture.mu.Unlock()
+	response, body := fixture.do(t, http.MethodGet, "/subscriptions/"+azureZeroTenant+"/resourcegroups", http.Header{"Authorization": {"Bearer " + fixture.token(t)}})
+	if response.StatusCode != http.StatusForbidden || !strings.Contains(body, "OrkaNotAuthorized") {
+		t.Fatalf("status = %d: %s", response.StatusCode, body)
+	}
+	if calls := fixture.brokerCalls(); len(calls) != 1 {
+		t.Fatalf("broker calls = %d, want only the first page", len(calls))
+	}
+	if profile := readAzureProfile(t, fixture); len(profile.Subscriptions) != 1 || profile.Subscriptions[0].ID != azureZeroTenant {
+		t.Fatalf("profile = %+v", profile.Subscriptions)
+	}
+}

@@ -235,6 +235,14 @@ func (s *mcpProxySession) markRunning(promptID harnessv2.PromptID, now time.Time
 	return nil
 }
 
+// promptRunning reports whether prompt is the session's running prompt.
+func (s *mcpProxySession) promptRunning(prompt harnessv2.PromptID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return prompt != "" && !s.closed && s.authorization != nil && s.authorization.PromptID == prompt &&
+		s.state == harnessv2.RuntimeSessionStatePromptRunning
+}
+
 // approvalRequired reports whether the running prompt's policy requires
 // approval for a tool.
 func (s *mcpProxySession) approvalRequired(toolName string) bool {

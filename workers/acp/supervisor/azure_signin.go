@@ -121,6 +121,11 @@ type azureSubscriptionPage struct {
 	NextLink string `json:"nextLink"`
 }
 
+// errAzureSignInPromptEnded stops a sign-in whose prompt ended before it
+// finished. It is a refusal of prompt authority, so a command waiting on it
+// is told az works only while a prompt runs.
+var errAzureSignInPromptEnded = fmt.Errorf("%w: the prompt the sign-in started under ended", errMCPCallNotAuthorized)
+
 // azureSignInToolError is a sign-in read the broker answered with a tool
 // error, such as a missing linked account.
 type azureSignInToolError struct{ result json.RawMessage }
@@ -209,10 +214,24 @@ func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error)
 		}
 		defer releaseMCPSlot(g.session.proxy.slots)
 	}
+	// The whole sign-in runs under the prompt its first read ran under:
+	// every page, and the profile written from them, comes from one
+	// prompt's authority, and a sign-in that outlives it starts over.
+	var prompt harnessv2.PromptID
+	admit := func(current harnessv2.PromptID) error {
+		if prompt == "" {
+			prompt = current
+			return nil
+		}
+		if current != prompt {
+			return errAzureSignInPromptEnded
+		}
+		return nil
+	}
 	var accounts []azureProfileAccount
 	request := harnessv2.MCPForwardRequest{Method: http.MethodGet, Path: "/subscriptions", Query: "api-version=" + azureSubscriptionsAPIVersion}
 	for page := 0; page < maxAzureSubscriptionPages && len(accounts) < maxAzureSubscriptions; page++ {
-		found, next, err := g.readSubscriptionPage(ctx, request)
+		found, next, err := g.readSubscriptionPage(ctx, request, admit)
 		if err != nil {
 			return 0, err
 		}
@@ -237,6 +256,9 @@ func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error)
 		accounts[chosen].IsDefault = true
 		profile.Subscriptions = accounts
 	}
+	if !g.session.promptRunning(prompt) {
+		return 0, errAzureSignInPromptEnded
+	}
 	if err := g.writeProfile(profile, true); err != nil {
 		return 0, err
 	}
@@ -245,7 +267,9 @@ func (g *azureGateway) discoverAndWriteProfile(ctx context.Context) (int, error)
 
 // readSubscriptionPage reads one page of the identity's subscriptions
 // through the broker, and returns the request for the next page, if any.
-func (g *azureGateway) readSubscriptionPage(ctx context.Context, request harnessv2.MCPForwardRequest) ([]azureProfileAccount, *harnessv2.MCPForwardRequest, error) {
+func (g *azureGateway) readSubscriptionPage(
+	ctx context.Context, request harnessv2.MCPForwardRequest, admit func(harnessv2.PromptID) error,
+) ([]azureProfileAccount, *harnessv2.MCPForwardRequest, error) {
 	if err := request.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -257,7 +281,7 @@ func (g *azureGateway) readSubscriptionPage(ctx context.Context, request harness
 	if _, err := rand.Read(raw); err != nil {
 		return nil, nil, err
 	}
-	response, err := g.session.callBrokeredTool(ctx, azureSignInCallPrefix+hex.EncodeToString(raw), g.toolName, arguments, true, nil)
+	response, err := g.session.callBrokeredTool(ctx, azureSignInCallPrefix+hex.EncodeToString(raw), g.toolName, arguments, true, admit)
 	if err != nil {
 		return nil, nil, err
 	}
