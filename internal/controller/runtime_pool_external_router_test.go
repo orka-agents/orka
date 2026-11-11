@@ -263,7 +263,8 @@ func TestExternalRuntimePoolRefusesShortServiceNamesForSubstrateV1Native(t *test
 		t.Fatal("a workload request was published with a short Service name in its egress allowlist")
 	}
 	pool := runtimePoolTestGetPool(t, f.r, f.pool)
-	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "set --acp-provider-proxy-base-url to the fully qualified name") {
+	if pool.Status.Lifecycle != corev1alpha1.RuntimePoolLifecycleDegraded || !strings.Contains(pool.Status.Message, "set --acp-provider-proxy-base-url to the fully qualified name") ||
+		strings.Contains(pool.Status.Message, "--acp-workspace-allow-provider-token-in-sandbox") {
 		t.Fatalf("pool status = %s %q, want Degraded naming the flag to fix", pool.Status.Lifecycle, pool.Status.Message)
 	}
 }

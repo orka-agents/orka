@@ -682,6 +682,12 @@ func (r *RuntimePoolReconciler) ensureExternalProcessIngress(ctx context.Context
 // admission fails closed unless the operator explicitly allowed delivering
 // the token into the sandbox through the sealed bootstrap.
 func (r *RuntimePoolReconciler) externalRuntimeEgressWithProviderToken(cfg runtimePoolConfig, registration *workspacev1alpha1.ExecutionWorkspaceProvider, provider *corev1.Secret) (*workspacev1alpha1.RuntimeEgressPolicy, bool, error) {
+	// An origin that cannot be admitted at all is a configuration error, not
+	// a reason to consider delivering the token into the sandbox: report it
+	// on its own.
+	if _, err := r.externalRuntimeEgress(cfg, nil); err != nil {
+		return nil, false, err
+	}
 	reason := "the workspace provider does not advertise " + string(workspacev1alpha1.WorkspaceFeatureEgressCredentialInjection)
 	if externalProviderSupportsEgressCredentialInjection(registration) {
 		if provider == nil || provider.Namespace == "" || provider.Name == "" {
