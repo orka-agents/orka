@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -550,5 +551,47 @@ func TestEscapeDataMarkers(t *testing.T) {
 		if got := escapeDataMarkers(in); got != want {
 			t.Fatalf("escapeDataMarkers(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A monitor edited while the proposer ran refuses the answer, and a
+// candidate never inherits the reviewer's TTL.
+func TestEvalProposalRefusesAMonitorEditedWhileItRan(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	task, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "monitor"}, monitor); err != nil {
+		t.Fatal(err)
+	}
+	monitor.Generation++
+	if err := env.client.Update(ctx, monitor); err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || !strings.Contains(proposals[0].Reason, "RepositoryMonitor \"monitor\" changed while") {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+}
+
+func TestEvalProposalCandidateHasNoTTL(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	reviewer := &corev1alpha1.Agent{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "reviewer"}, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	stable := reviewer.DeepCopy()
+	stable.Spec.TTLAfterLastTask = &metav1.Duration{Duration: time.Minute}
+	agent, refusal, err := env.reconciler.ensureEvalCandidateAgent(ctx, stable,
+		&corev1alpha1.Task{ObjectMeta: metav1.ObjectMeta{Name: "proposal"}},
+		&evals.Candidate{Hypothesis: "h", AgentPatch: evals.AgentPatch{SystemPrompt: "Be careful."}})
+	if err != nil || refusal != "" || agent.Spec.TTLAfterLastTask != nil {
+		t.Fatalf("candidate = %+v, %q, %v", agent, refusal, err)
 	}
 }

@@ -120,6 +120,24 @@ func (r *EvalRunReconciler) recoverAgentPromotion(ctx context.Context, record *s
 		committed = valuesErr == nil && reflect.DeepEqual(current, record.Target)
 	}
 	log := logf.FromContext(ctx).WithValues("agent", record.Agent, "namespace", record.Namespace, "record", record.ID)
+	if !committed && err == nil && agent.UID == types.UID(record.AgentUID) && record.State == store.AgentPromotionApplying &&
+		agent.ResourceVersion == record.AgentResourceVersion {
+		// An update that failed ambiguously is preconditioned on this same
+		// resourceVersion and may still commit. Moving the Agent on first
+		// makes it fail; if it commits first, this write conflicts and the
+		// record is settled again from what it wrote.
+		fenced := agent.DeepCopy()
+		if fenced.Annotations == nil {
+			fenced.Annotations = map[string]string{}
+		}
+		fenced.Annotations[labels.AnnotationPromotionFence] = record.ID
+		if err := r.Update(ctx, fenced); err != nil {
+			if apierrors.IsConflict(err) {
+				return r.recoverAgentPromotion(ctx, record)
+			}
+			return err
+		}
+	}
 	if !committed {
 		log.Info("Failing an Agent promotion record the controller restarted before applying")
 		_, err := r.ExperimentStore.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{
@@ -275,6 +293,15 @@ func withPromotableValues(spec corev1alpha1.AgentSpec, prompt *corev1alpha1.Prom
 	return out
 }
 
+// comparableAgentSpec is a spec without its promotable values or its
+// lifetime: a candidate never inherits the stable Agent's TTL, and promotion
+// writes only the promotable values, so the stable Agent keeps its own.
+func comparableAgentSpec(spec corev1alpha1.AgentSpec) corev1alpha1.AgentSpec {
+	out := withPromotableValues(spec, nil, "")
+	out.TTLAfterLastTask = nil
+	return out
+}
+
 // applyPromotableValues writes values onto an Agent spec. A prompt that came
 // from a ConfigMap keeps its reference, so its text is not copied where
 // every Agent reader could see it; any other prompt is written inline.
@@ -392,7 +419,7 @@ func (r *EvalRunReconciler) approvedCandidate(ctx context.Context, namespace, ag
 	}
 	// reflect, not Semantic: an empty list and an omitted one differ, as a
 	// tool list does to the runtime.
-	if !reflect.DeepEqual(withPromotableValues(candidate.Spec, nil, ""), withPromotableValues(stable.Spec, nil, "")) {
+	if !reflect.DeepEqual(comparableAgentSpec(candidate.Spec), comparableAgentSpec(stable.Spec)) {
 		return nil, refuseRollout("candidate Agent %q differs from %q in more than its system prompt and model; only those are rolled out",
 			candidate.Name, stable.Name)
 	}
@@ -576,6 +603,9 @@ func (r *EvalRunReconciler) promotionAgents(ctx context.Context, run *corev1alph
 	}
 	candidate := &corev1alpha1.Agent{}
 	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: binding.CandidateAgent.Name}, candidate); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil, refuseRollout("candidate Agent %q is gone; run the experiment again", binding.CandidateAgent.Name)
+		}
 		return nil, nil, err
 	}
 	// The approval was checked against an earlier read; this read is what
@@ -636,15 +666,29 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 	if rollout := stable.Status.Rollout; rollout != nil && rollout.Candidate != nil {
 		return nil, refuseRollout("Agent %q has a canary running; abort it before rolling back", agentName)
 	}
-	var last *store.AgentPromotionRecord
+	// Promotions stack: each rollback reverts the newest promotion still in
+	// effect, and the Agent must hold exactly what the last spec write left.
+	var active []*store.AgentPromotionRecord
+	var lastWrite *store.AgentPromotionRecord
 	for i := range records {
-		if records[i].State == store.AgentPromotionComplete && writesAgentSpec(records[i].Action) {
-			last = &records[i]
+		record := &records[i]
+		if record.State != store.AgentPromotionComplete {
+			continue
+		}
+		switch record.Action {
+		case store.AgentPromotionPromote:
+			active, lastWrite = append(active, record), record
+		case store.AgentPromotionRollback:
+			if n := len(active); n > 0 && active[n-1].ID == record.PromotionID {
+				active = active[:n-1]
+			}
+			lastWrite = record
 		}
 	}
-	if last == nil || last.Action != store.AgentPromotionPromote {
+	if len(active) == 0 {
 		return nil, refuseRollout("Agent %q has no promotion to roll back", agentName)
 	}
+	last := active[len(active)-1]
 	current, err := r.agentPromotionValues(ctx, stable)
 	if err != nil {
 		return nil, err
@@ -653,7 +697,7 @@ func (r *EvalRunReconciler) RollbackAgent(ctx context.Context, namespace, agentN
 	if err != nil {
 		return nil, err
 	}
-	if stable.Generation != last.AppliedGeneration || digest != last.AppliedDigest {
+	if stable.Generation != lastWrite.AppliedGeneration || digest != lastWrite.AppliedDigest {
 		return nil, refuseRollout("Agent %q changed after promotion %s; roll it back by hand rather than overwrite that edit",
 			agentName, last.ID)
 	}
@@ -799,15 +843,17 @@ func (r *EvalRunReconciler) AgentRollout(ctx context.Context, namespace, agentNa
 // ConfigMap no longer holds the prompt the action checked.
 func (r *EvalRunReconciler) checkPromptConfigMap(ctx context.Context, namespace string, ref *store.AgentPromotionConfigMapRef,
 	want string) error {
+	// Resolve the selector as the runtime does, which trims both parts.
+	name, key := strings.TrimSpace(ref.Name), strings.TrimSpace(ref.Key)
 	configMap := &corev1.ConfigMap{}
-	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, configMap); err != nil {
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, configMap); err != nil {
 		if apierrors.IsNotFound(err) {
-			return refuseRollout("ConfigMap %q holding the system prompt is gone; restore it or roll back by hand", ref.Name)
+			return refuseRollout("ConfigMap %q holding the system prompt is gone; restore it or roll back by hand", name)
 		}
 		return err
 	}
-	if value, ok := configMap.Data[ref.Key]; !ok || value != want {
-		return refuseRollout("ConfigMap %q key %q no longer holds the system prompt this action checked; roll back by hand", ref.Name, ref.Key)
+	if value, ok := configMap.Data[key]; !ok || value != want {
+		return refuseRollout("ConfigMap %q key %q no longer holds the system prompt this action checked; roll back by hand", name, key)
 	}
 	return nil
 }

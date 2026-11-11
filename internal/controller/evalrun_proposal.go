@@ -66,6 +66,10 @@ type evalProposalRecord struct {
 	// the paired runs are created only while the cases are unchanged, so the
 	// training-held-out separation checked then still holds.
 	HeldOutDigest string `json:"heldOutDigest,omitempty"`
+	// MonitorUID and MonitorGeneration are the monitor the training run
+	// snapshotted; the paired runs are created only while it is unchanged.
+	MonitorUID        types.UID `json:"monitorUID,omitempty"`
+	MonitorGeneration int64     `json:"monitorGeneration,omitempty"`
 }
 
 func refuseEvalProposal(format string, args ...any) error {
@@ -167,6 +171,7 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 		Monitor:     monitorName,
 		StableAgent: corev1alpha1.EvalObjectIdentity{Name: stable.Name, UID: stable.UID, Generation: stable.Generation},
 		HeldOut:     heldOut, HeldOutKey: heldOutKey, HeldOutDigest: heldOutDigest,
+		MonitorUID: run.Status.Snapshot.MonitorUID, MonitorGeneration: run.Status.Snapshot.MonitorGeneration,
 		Target: target, RequestedBy: request.RequestedBy,
 		CurrentModel: input.CurrentModel, PromptDigest: promptDigest,
 	}
@@ -682,6 +687,16 @@ func (r *EvalRunReconciler) createEvalProposalCandidate(ctx context.Context, run
 	if heldOutDigest != record.HeldOutDigest {
 		return evalProposalCandidate{}, fmt.Sprintf("held-out case set %s changed while the proposer ran", record.HeldOut), nil
 	}
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: record.Monitor}, monitor); err != nil {
+		if apierrors.IsNotFound(err) {
+			return evalProposalCandidate{}, fmt.Sprintf("RepositoryMonitor %q is gone", record.Monitor), nil
+		}
+		return evalProposalCandidate{}, "", err
+	}
+	if monitor.UID != record.MonitorUID || monitor.Generation != record.MonitorGeneration {
+		return evalProposalCandidate{}, fmt.Sprintf("RepositoryMonitor %q changed while the proposer ran", record.Monitor), nil
+	}
 	currentPrompt, err := resolveACPSystemPrompt(ctx, r.uncachedReader(), stable)
 	if err != nil {
 		return evalProposalCandidate{}, "", fmt.Errorf("resolve the reviewer's system prompt: %w", err)
@@ -711,6 +726,9 @@ func (r *EvalRunReconciler) createEvalProposalCandidate(ctx context.Context, run
 func (r *EvalRunReconciler) ensureEvalCandidateAgent(ctx context.Context, stable *corev1alpha1.Agent, task *corev1alpha1.Task,
 	candidate *evals.Candidate) (*corev1alpha1.Agent, string, error) {
 	spec := stable.Spec.DeepCopy()
+	// Agent cleanup counts only Tasks that name an Agent, not the EvalRuns
+	// that test it, so an inherited TTL could expire the candidate mid-run.
+	spec.TTLAfterLastTask = nil
 	if candidate.AgentPatch.SystemPrompt != "" {
 		spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: candidate.AgentPatch.SystemPrompt}
 	}

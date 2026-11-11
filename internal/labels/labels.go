@@ -84,6 +84,9 @@ const (
 	// or rollback last wrote the Agent's spec. The controller sets it in the
 	// same update, so a restart can tell whether an open record committed.
 	AnnotationPromotionRecord = "orka.ai/promotion-record"
+	// AnnotationPromotionFence names an open promotion record whose
+	// ambiguous update the controller fenced off by moving the Agent on.
+	AnnotationPromotionFence = "orka.ai/promotion-fence"
 	// Eval proposal annotations on a proposer Task: the request as JSON, and
 	// what became of it once the proposer finished. Admission reserves them
 	// to the controller, with LabelEvalProposalOf.

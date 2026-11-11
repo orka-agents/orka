@@ -581,3 +581,81 @@ func TestRollbackSettlesACommittedPromotionFirst(t *testing.T) {
 		t.Fatalf("rolled back prompt = %+v", prompt)
 	}
 }
+
+// completedPromotionRecord stores a completed promote or rollback.
+func completedPromotionRecord(t *testing.T, env *experimentEnv, record *store.AgentPromotionRecord, generation int64) {
+	t.Helper()
+	ctx := context.Background()
+	if err := env.store.CreateAgentPromotion(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := agentPromotionDigest(record.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, move := range [][2]string{{store.AgentPromotionPending, store.AgentPromotionApplying}, {store.AgentPromotionApplying, store.AgentPromotionComplete}} {
+		if _, err := env.store.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{Namespace: evalTestNamespace, ID: record.ID,
+			From: move[0], To: move[1], AppliedGeneration: generation, AppliedDigest: digest, UpdatedAt: env.now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Rollbacks unwind stacked promotions newest first: after A to B and B to
+// C, one rollback restores B and the next restores A.
+func TestRollbackUnwindsStackedPromotions(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	a := store.AgentPromotionValues{Model: "claude-haiku"}
+	b := store.AgentPromotionValues{SystemPrompt: "B", Model: "claude-haiku"}
+	c := store.AgentPromotionValues{SystemPrompt: "C", Model: "claude-haiku"}
+	stable := env.getAgent("reviewer")
+	first := promotionTestRecord(env, "p1")
+	first.Previous, first.Target = a, b
+	completedPromotionRecord(t, env, first, stable.Generation)
+	second := promotionTestRecord(env, "p2")
+	second.Previous, second.Target = b, c
+	completedPromotionRecord(t, env, second, stable.Generation)
+	stable.Spec = applyPromotableValues(stable.Spec, c)
+	if err := env.client.Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+
+	rollback, err := env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	if err != nil || rollback.PromotionID != "p2" || env.getAgent("reviewer").Spec.SystemPrompt.Inline != "B" {
+		t.Fatalf("first rollback = %+v, %v", rollback, err)
+	}
+	rollback, err = env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	if err != nil || rollback.PromotionID != "p1" || env.getAgent("reviewer").Spec.SystemPrompt != nil {
+		t.Fatalf("second rollback = %+v, %v", rollback, err)
+	}
+	_, err = env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	refusedRollout(t, err, "no promotion to roll back")
+}
+
+// An applying record whose ambiguous update may still commit is fenced:
+// the Agent moves on, so that update can only fail, and the record fails.
+func TestRecoveryFencesAnOutstandingUpdate(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	record := promotionTestRecord(env, "outstanding")
+	if err := env.store.CreateAgentPromotion(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.store.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{Namespace: evalTestNamespace, ID: "outstanding",
+		From: store.AgentPromotionPending, To: store.AgentPromotionApplying, UpdatedAt: env.now}); err != nil {
+		t.Fatal(err)
+	}
+	env.reconciler.promotions = promotionGate{}
+	if err := env.reconciler.RecoverAgentPromotions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stable := env.getAgent("reviewer")
+	if stable.Annotations[labels.AnnotationPromotionFence] != "outstanding" || stable.ResourceVersion == record.AgentResourceVersion {
+		t.Fatalf("Agent was not fenced: %+v", stable.ObjectMeta)
+	}
+	log, err := env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
+	if err != nil || len(log) != 1 || log[0].State != store.AgentPromotionFailed {
+		t.Fatalf("log = %+v, %v", log, err)
+	}
+}
