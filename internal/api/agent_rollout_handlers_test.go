@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/store"
 )
@@ -41,6 +43,26 @@ func (f *fakeAgentPromoter) RollbackAgent(_ context.Context, namespace, agent st
 	}
 	f.calls = append(f.calls, "rollback "+namespace+"/"+agent+" by "+actor.Username+": "+reason)
 	return &store.AgentPromotionRecord{ID: "r1", Agent: agent, Action: store.AgentPromotionRollback, State: store.AgentPromotionComplete}, nil
+}
+
+func (f *fakeAgentPromoter) CanaryAgent(_ context.Context, namespace, agent, decisionID string, percent int32,
+	actor store.EvalDecisionActor) (*store.AgentPromotionRecord, error) {
+	if f.refuse != "" {
+		return nil, &evals.RolloutRefusal{Reason: f.refuse}
+	}
+	f.calls = append(f.calls, fmt.Sprintf("canary %s/%s %s %d%% by %s", namespace, agent, decisionID, percent, actor.Username))
+	return &store.AgentPromotionRecord{ID: "c1", Agent: agent, Action: store.AgentPromotionCanary, Percent: percent}, nil
+}
+
+func (f *fakeAgentPromoter) AbortAgentRollout(_ context.Context, namespace, agent string, actor store.EvalDecisionActor,
+	reason string) (*store.AgentPromotionRecord, error) {
+	f.calls = append(f.calls, "abort "+namespace+"/"+agent+" by "+actor.Username+": "+reason)
+	return &store.AgentPromotionRecord{ID: "a1", Agent: agent, Action: store.AgentPromotionAbort}, nil
+}
+
+func (f *fakeAgentPromoter) AgentRollout(context.Context, string, string) (*corev1alpha1.AgentRolloutStatus, string, error) {
+	return &corev1alpha1.AgentRolloutStatus{Candidate: &corev1alpha1.EvalObjectIdentity{Name: "reviewer-c-1"}, Percent: 10,
+		DecisionID: "d1", RecordID: "c1"}, "the approval is stale", nil
 }
 
 func (f *fakeAgentPromoter) ListAgentPromotions(_ context.Context, _, agent string) ([]store.AgentPromotionRecord, error) {
@@ -103,7 +125,13 @@ func TestRolloutAgent(t *testing.T) {
 		"service account":   {user: "system:serviceaccount:demo:bot", groups: "promoters", body: promote, wantStatus: http.StatusForbidden, wantBody: "not a ServiceAccount"},
 		"outside the group": {user: "alice", groups: "developers", body: promote, wantStatus: http.StatusForbidden, wantBody: "promoter group"},
 		"no promote grant":  {user: "carol", groups: "promoters", body: promote, wantStatus: http.StatusForbidden, wantBody: "promote verb"},
-		"unknown action":    {user: "alice", groups: "promoters", body: `{"action":"canary"}`, wantStatus: http.StatusBadRequest, wantBody: "promote or rollback"},
+		"unknown action":    {user: "alice", groups: "promoters", body: `{"action":"widen"}`, wantStatus: http.StatusBadRequest, wantBody: "promote, rollback, canary or abort"},
+		"canary without a percent": {user: "alice", groups: "promoters", body: `{"action":"canary","decisionID":"d1"}`,
+			wantStatus: http.StatusBadRequest, wantBody: "percent from 1 to 100"},
+		"canary": {user: "alice", groups: "promoters", body: `{"action":"canary","decisionID":"d1","percent":10}`, wantStatus: http.StatusCreated,
+			wantBody: `"id":"c1"`, wantCall: "canary demo/reviewer d1 10% by alice"},
+		"abort": {user: "alice", groups: "promoters", body: `{"action":"abort","reason":"noisy"}`, wantStatus: http.StatusCreated,
+			wantBody: `"id":"a1"`, wantCall: "abort demo/reviewer by alice: noisy"},
 		"promote without a decision": {user: "alice", groups: "promoters", body: `{"action":"promote"}`,
 			wantStatus: http.StatusBadRequest, wantBody: "decisionID is required"},
 		"rollback with a decision": {user: "alice", groups: "promoters", body: `{"action":"rollback","decisionID":"d1"}`,
@@ -147,6 +175,8 @@ func TestGetAgentPromotions(t *testing.T) {
 	require.Equal(t, "m1", page.Items[0].Previous.Model)
 	require.Equal(t, len("secret from a ConfigMap"), page.Items[0].Previous.SystemPromptBytes)
 	require.Contains(t, page.Items[0].Previous.SystemPromptDigest, "sha256:")
+	require.Contains(t, string(raw), `"rollout":{"candidate":{"name":"reviewer-c-1"},"percent":10`)
+	require.Contains(t, string(raw), `"rolloutInvalid":"the approval is stale"`)
 
 	missing, err := app.Test(httptest.NewRequest(http.MethodGet, "/agents/nope/promotions?namespace=demo", nil))
 	require.NoError(t, err)

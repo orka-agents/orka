@@ -317,3 +317,114 @@ func TestPromotionPinsTheCandidateToItsExperiment(t *testing.T) {
 	_, _, err = env.reconciler.promotionAgents(ctx, env.getRun("candidate"), &decision, "reviewer")
 	refusedRollout(t, err, "changed after its experiment")
 }
+
+// A canary starts and widens on an approval, routing checks it, a
+// promotion of the same approval ends it, and an abort ends one early.
+func TestCanaryAnAgent(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+
+	_, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 0, promotionTestActor)
+	refusedRollout(t, err, "percent must be 1 to 100")
+	record, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 10, promotionTestActor)
+	if err != nil || record.State != store.AgentPromotionComplete || record.Percent != 10 {
+		t.Fatalf("CanaryAgent() = %+v, %v", record, err)
+	}
+	rollout := env.getAgent("reviewer").Status.Rollout
+	if rollout == nil || rollout.Candidate == nil || rollout.Candidate.Name != "candidate-agent" || rollout.Percent != 10 ||
+		rollout.DecisionID != "d1" || rollout.RecordID != record.ID || env.getAgent("reviewer").Spec.SystemPrompt != nil {
+		t.Fatalf("rollout = %+v", rollout)
+	}
+	widened, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 50, promotionTestActor)
+	if err != nil || env.getAgent("reviewer").Status.Rollout.Percent != 50 {
+		t.Fatalf("widen = %+v, %v", widened, err)
+	}
+	candidate, err := env.reconciler.VerifyAgentRollout(ctx, env.getAgent("reviewer"))
+	if err != nil || candidate.Name != "candidate-agent" {
+		t.Fatalf("VerifyAgentRollout() = %v, %v", candidate, err)
+	}
+	_, err = env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	refusedRollout(t, err, "abort it before rolling back")
+
+	// Promoting another approval while this canary runs is refused.
+	stable := env.getAgent("reviewer")
+	stable.Status.Rollout.DecisionID = "d-other"
+	if err := env.client.Status().Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+	_, err = env.reconciler.PromoteAgent(ctx, evalTestNamespace, "reviewer", "d1", promotionTestActor)
+	refusedRollout(t, err, "has a canary of decision \"d-other\"")
+	stable = env.getAgent("reviewer")
+	stable.Status.Rollout.DecisionID = "d1"
+	if err := env.client.Status().Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+
+	promoted, err := env.reconciler.PromoteAgent(ctx, evalTestNamespace, "reviewer", "d1", promotionTestActor)
+	if err != nil {
+		t.Fatalf("PromoteAgent() error = %v", err)
+	}
+	if after := env.getAgent("reviewer").Status.Rollout; after == nil || after.Candidate != nil || after.RecordID != widened.ID {
+		t.Fatalf("rollout after promotion = %+v (promotion %s)", after, promoted.ID)
+	}
+	_, err = env.reconciler.AbortAgentRollout(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	refusedRollout(t, err, "no canary to abort")
+}
+
+func TestAbortACanary(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	canary, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 20, promotionTestActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abort, err := env.reconciler.AbortAgentRollout(ctx, evalTestNamespace, "reviewer", promotionTestActor, "noisy reviews")
+	if err != nil || abort.PromotionID != canary.ID || abort.Reason != "noisy reviews" {
+		t.Fatalf("AbortAgentRollout() = %+v, %v", abort, err)
+	}
+	if rollout := env.getAgent("reviewer").Status.Rollout; rollout == nil || rollout.Candidate != nil || rollout.RecordID != abort.ID {
+		t.Fatalf("rollout after abort = %+v", rollout)
+	}
+	_, err = env.reconciler.VerifyAgentRollout(ctx, env.getAgent("reviewer"))
+	refusedRollout(t, err, "has no canary")
+}
+
+// A later rejection stops a running canary at the next routing check.
+func TestVerifyAgentRolloutAfterARejection(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	if _, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 30, promotionTestActor); err != nil {
+		t.Fatal(err)
+	}
+	env.decide("d2", store.EvalDecisionRejected)
+	_, err := env.reconciler.VerifyAgentRollout(ctx, env.getAgent("reviewer"))
+	refusedRollout(t, err, "not the approval in force")
+}
+
+// Recovery settles an open canary from status.rollout, not the annotation.
+func TestRecoverACanary(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	record := promotionTestRecord(env, "canary-1")
+	record.Action, record.Percent = store.AgentPromotionCanary, 10
+	if err := env.store.CreateAgentPromotion(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	stable := env.getAgent("reviewer")
+	stable.Status.Rollout = &corev1alpha1.AgentRolloutStatus{RecordID: "canary-1",
+		Candidate: &corev1alpha1.EvalObjectIdentity{Name: "candidate-agent"}, Percent: 10}
+	if err := env.client.Status().Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+	env.reconciler.promotions = promotionGate{}
+	if err := env.reconciler.RecoverAgentPromotions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	log, err := env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
+	if err != nil || len(log) != 1 || log[0].State != store.AgentPromotionComplete || log[0].AppliedGeneration != stable.Generation {
+		t.Fatalf("log = %+v, %v", log, err)
+	}
+}

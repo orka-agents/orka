@@ -75,6 +75,8 @@ Usage:
   orka agent [command]
 
 Available Commands:
+  abort       End the Agent's canary; new Tasks run on the stable Agent
+  canary      Run a share of the Agent's new Sessions and Tasks on an approved candidate
   create      Create an agent from a manifest
   delete      Delete an agent
   get         Get agent details
@@ -96,6 +98,51 @@ Global Flags:
       --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 
 Use "orka agent [command] --help" for more information about a command.
+```
+
+## `orka agent abort`
+
+```text
+Abort the running canary. New Tasks run on the stable Agent; a Session that started on the candidate can't continue and needs a new Session. Tasks already running finish where they started.
+
+Usage:
+  orka agent abort <agent> [--reason <text>] [flags]
+
+Flags:
+  -h, --help            help for abort
+  -o, --output string   Output format: table, json, yaml (default "table")
+      --reason string   Why, in a sentence or two
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka agent canary`
+
+```text
+Start a canary, or change its share. The approval is checked as for a promotion. Each new Session, or Task without a Session, is routed to the candidate when a hash of its name falls below the percent, after the approval is checked again; a Session keeps its arm. EvalRun trials are never routed. If a check fails, Tasks run on the stable Agent and the Agent is marked RolloutInvalid until the canary is aborted or restarted. Finish with orka agent promote, or stop with orka agent abort.
+
+Usage:
+  orka agent canary <agent> --decision <id> --percent <1-100> [flags]
+
+Flags:
+      --decision string   ID of the approval to canary (required)
+  -h, --help              help for canary
+  -o, --output string     Output format: table, json, yaml (default "table")
+      --percent int32     Share of new Sessions and Tasks to route to the candidate, 1 to 100 (required)
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
 ```
 
 ## `orka agent create`

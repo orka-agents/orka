@@ -551,12 +551,14 @@ monitor, cases, graders and gate. `decisions` reports an approval as stale once
 any of them changes. A decision changes no Agent; promote it to roll it out:
 
 ```bash
+orka agent canary reviewer --decision <decision-id> --percent 10  # route 10% of new Sessions and Tasks to the candidate
+orka agent abort reviewer --reason "noisy"             # end the canary
 orka agent promote reviewer --decision <decision-id>   # write the approved candidate's prompt and model onto the reviewer
 orka agent rollback reviewer --reason "regressed"      # write back what the latest promotion replaced
 orka agent promotions reviewer                         # every promotion and rollback, oldest first
 ```
 
-Both need the `promote` verb on `agents`, which the same ClusterRole grants.
+All four need the `promote` verb on `agents`, which the same ClusterRole grants.
 `promote` rechecks the approval and refuses a stale one, and `rollback` refuses
 when the reviewer was edited after the promotion. See
 [Evaluate a reviewer change](../guides/evals-getting-started.md).

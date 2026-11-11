@@ -12,6 +12,11 @@ const (
 	AgentPromotionPromote = "promote"
 	// AgentPromotionRollback writes back the values a promotion replaced.
 	AgentPromotionRollback = "rollback"
+	// AgentPromotionCanary starts or changes a canary: a share of new Tasks
+	// runs on the approved candidate instead of the stable Agent.
+	AgentPromotionCanary = "canary"
+	// AgentPromotionAbort ends a canary; new Tasks run on the stable Agent.
+	AgentPromotionAbort = "abort"
 )
 
 // Agent promotion record states. A record starts pending, moves to applying
@@ -53,8 +58,11 @@ type AgentPromotionRecord struct {
 	CandidateRun    string             `json:"candidateRun,omitempty"`
 	CandidateRunUID string             `json:"candidateRunUID,omitempty"`
 	CandidateAgent  *EvalAgentIdentity `json:"candidateAgent,omitempty"`
-	// PromotionID is the promotion a rollback reverts.
+	// PromotionID is the promotion a rollback reverts, or the canary record
+	// an abort ends.
 	PromotionID string `json:"promotionID,omitempty"`
+	// Percent is a canary's share of new Sessions and standalone Tasks.
+	Percent int32 `json:"percent,omitempty"`
 
 	// Previous are the Agent's values before the action and Target the
 	// values it writes.

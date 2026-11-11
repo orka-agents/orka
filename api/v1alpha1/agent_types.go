@@ -398,6 +398,40 @@ type AgentStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Rollout is the canary the controller routes new Tasks through, set
+	// only by the controller through POST /api/v1/agents/:name/rollout.
+	// After an abort only RecordID remains.
+	// +optional
+	Rollout *AgentRolloutStatus `json:"rollout,omitempty"`
+}
+
+// AgentRolloutStatus is an Agent's canary: the approved candidate a share of
+// new Tasks run on instead of the Agent.
+type AgentRolloutStatus struct {
+	// Candidate is the candidate Agent the canary routes to.
+	// +optional
+	Candidate *EvalObjectIdentity `json:"candidate,omitempty"`
+
+	// Percent of new Sessions and standalone Tasks that run on the candidate.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	Percent int32 `json:"percent,omitempty"`
+
+	// DecisionID is the approval the canary carries out.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	DecisionID string `json:"decisionID,omitempty"`
+
+	// CandidateRun is the experiment's candidate EvalRun.
+	// +optional
+	CandidateRun *EvalObjectIdentity `json:"candidateRun,omitempty"`
+
+	// RecordID is the promotion log record of the last canary or abort.
+	// +kubebuilder:validation:MaxLength=128
+	// +optional
+	RecordID string `json:"recordID,omitempty"`
 }
 
 // +kubebuilder:object:root=true

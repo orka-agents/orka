@@ -37,6 +37,8 @@ const (
 	AgentPromotionSchemaVersion  = storagev1.AgentPromotionSchemaVersion
 	AgentPromotionPromote        = storagev1.AgentPromotionPromote
 	AgentPromotionRollback       = storagev1.AgentPromotionRollback
+	AgentPromotionCanary         = storagev1.AgentPromotionCanary
+	AgentPromotionAbort          = storagev1.AgentPromotionAbort
 	AgentPromotionPending        = storagev1.AgentPromotionPending
 	AgentPromotionApplying       = storagev1.AgentPromotionApplying
 	AgentPromotionComplete       = storagev1.AgentPromotionComplete

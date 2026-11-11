@@ -85,12 +85,15 @@ var (
 		labels.AnnotationEvalProposalCandidateAgent,
 		labels.AnnotationEvalProposalBaselineRun,
 		labels.AnnotationEvalProposalCandidateRun,
+		labels.AnnotationRolloutArm,
+		labels.AnnotationRolloutCandidate,
 	}
 
 	// controllerManagedTaskLabelKeys are labels only the controller sets:
 	// a proposer Task's training run.
 	controllerManagedTaskLabelKeys = []string{
 		labels.LabelEvalProposalOf,
+		labels.LabelRolloutSession,
 	}
 )
 
