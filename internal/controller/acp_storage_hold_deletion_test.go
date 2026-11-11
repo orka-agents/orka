@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
+	harnessv2 "github.com/orka-agents/orka/internal/harness/v2"
 	"github.com/orka-agents/orka/internal/store"
 )
 
@@ -203,4 +204,54 @@ func TestACPDispatcherFinishesRestoredDeletingTaskAfterAFailedPass(t *testing.T)
 	failing := &failingDeliveryStore{DurableControlStore: fixture.dispatcher.Store, failures: 1}
 	recoverAfterAFailedPass(t, fixture, task, failing, errInjectedDeliveryTransition)
 	requireAttemptState(t, fixture, store.PromptExecutionSucceeded)
+}
+
+// errInjectedOutcomeUnknown fails the transition that records an attempt's
+// outcome as unknown.
+var errInjectedOutcomeUnknown = errors.New("injected outcome-unknown transition failure")
+
+// An acknowledged deleting Task whose pass journaled its terminal event but
+// failed before the attempt recorded the unknown outcome is finished from the
+// journal by the next pass, which also hands the Task to the current epoch.
+func TestACPDispatcherHandsOffADeletingTaskFromAJournaledRecoveryTerminal(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, _, hold := heldDeletingTask(t, fixture)
+	acknowledgeTaskStorageHold(t, fixture, task, hold.id())
+	controls := fixture.dispatcher.Store
+	fixture.dispatcher.Store = &failingTerminalAttemptTransitionStore{
+		DurableControlStore: controls, transitionState: store.PromptExecutionOutcomeUnknown, transitionErr: errInjectedOutcomeUnknown,
+	}
+
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); !errors.Is(err, errInjectedOutcomeUnknown) {
+		t.Fatalf("recovery error = %v, want the injected failure", err)
+	}
+	requireAttemptState(t, fixture, store.PromptExecutionSettling)
+	if evidence := journaledPromptTerminal(t, fixture, task); evidence == nil || evidence.TerminalEvent == harnessv2.EventCompleted {
+		t.Fatalf("the failed pass journaled %#v, want a terminal event other than completion", evidence)
+	}
+	latest := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.Execution == nil || latest.Status.Execution.ControllerEpoch == fixture.fence.Epoch {
+		t.Fatalf("deleting Task execution after the failed pass = %#v, want an earlier controller epoch", latest.Status.Execution)
+	}
+
+	fixture.dispatcher.Store = controls
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); err != nil {
+		t.Fatalf("recovery after the failed pass: %v", err)
+	}
+	attempt := requireAttemptState(t, fixture, store.PromptExecutionOutcomeUnknown)
+	if !store.IsTerminalPromptDeliveryState(attempt.DeliveryState) {
+		t.Fatalf("attempt delivery after the journaled pass = %s, want terminal", attempt.DeliveryState)
+	}
+	updated := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Execution == nil || updated.Status.Execution.State != corev1alpha1.TaskExecutionStateOutcomeUnknown {
+		t.Fatalf("deleting Task execution after the journaled pass = %#v, want OutcomeUnknown", updated.Status.Execution)
+	}
+	requireDeletingTaskCleanupProceeds(t, fixture, task)
 }

@@ -71,18 +71,12 @@ func requireValidationSettledAsConflict(t *testing.T, fixture *recoveryFixture, 
 	}
 }
 
-// A pass that fails before the validation is settled leaves the journal open,
-// so the next pass settles the validation before recording the outcome.
-func TestACPDispatcherSettlesWorkspaceValidationBeforeClosingThePromptJournal(t *testing.T) {
-	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
-	defer fixture.close(t)
-	task := acknowledgedValidationHold(t, fixture)
-	controls := fixture.dispatcher.Store
-	fixture.dispatcher.Store = &failingDeliveryStore{DurableControlStore: controls, failures: 1}
-
-	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); !errors.Is(err, errInjectedDeliveryTransition) {
-		t.Fatalf("recovery error = %v, want the injected failure", err)
-	}
+// journaledPromptTerminal returns the terminal event the Task's prompt journal
+// records, or nil while the journal is open.
+func journaledPromptTerminal(
+	t *testing.T, fixture *recoveryFixture, task *corev1alpha1.Task,
+) *v2eventjournal.PromptTerminalEvidence {
+	t.Helper()
 	latest := &corev1alpha1.Task{}
 	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), latest); err != nil {
 		t.Fatal(err)
@@ -97,7 +91,22 @@ func TestACPDispatcherSettlesWorkspaceValidationBeforeClosingThePromptJournal(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence != nil {
+	return evidence
+}
+
+// A pass that fails before the validation is settled leaves the journal open,
+// so the next pass settles the validation before recording the outcome.
+func TestACPDispatcherSettlesWorkspaceValidationBeforeClosingThePromptJournal(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task := acknowledgedValidationHold(t, fixture)
+	controls := fixture.dispatcher.Store
+	fixture.dispatcher.Store = &failingDeliveryStore{DurableControlStore: controls, failures: 1}
+
+	if err := fixture.dispatcher.recoverStaleAttempts(fixture.ctx); !errors.Is(err, errInjectedDeliveryTransition) {
+		t.Fatalf("recovery error = %v, want the injected failure", err)
+	}
+	if evidence := journaledPromptTerminal(t, fixture, task); evidence != nil {
 		t.Fatalf("the failed pass journaled a %s terminal before settling the validation", evidence.TerminalEvent)
 	}
 

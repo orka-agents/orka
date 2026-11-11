@@ -114,6 +114,50 @@ func TestACPDispatcherHoldsWorkspaceValidationWithAConflictingReceipt(t *testing
 	requireTaskStorageCondition(t, fixture, task, metav1.ConditionTrue, corev1alpha1.StorageRecoveryConflictingRecordReason)
 }
 
+// Once the attempt records a later operation, a receipt is checked against
+// the settling operation it names. That operation must come from an earlier
+// attempt version: a receipt naming the attempt's current or a later version,
+// or no valid version, conflicts even when its digest matches its own data.
+func TestACPDispatcherHoldsWorkspaceValidationWithAReceiptNamingNoEarlierVersion(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version func(attempt *store.PromptAttempt) int64
+	}{
+		{name: "the attempt's current version", version: func(attempt *store.PromptAttempt) int64 { return attempt.Version }},
+		{name: "a later version", version: func(attempt *store.PromptAttempt) int64 { return attempt.Version + 1 }},
+		{name: "version zero", version: func(*store.PromptAttempt) int64 { return 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+			task := settlingTaskInWorkspaceValidation(t, fixture)
+			receipt, err := fixture.controlStore.GetPromptResultReceipt(fixture.ctx, fixture.attemptID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempt := requireAttemptState(t, fixture, store.PromptExecutionSettling)
+			if err := fixture.controlStore.DeleteResult(fixture.ctx, task.Namespace, task.Name); err != nil {
+				t.Fatal(err)
+			}
+			version := test.version(attempt)
+			forged := *receipt
+			forged.Data = []byte("a result stored under another attempt version")
+			forged.OperationID = acpSettlingOperationID(version)
+			forged.OperationDigest, err = acpSettlingTransitionDigest(fixture.attemptID, version, forged.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.controlStore.SavePromptResultReceipt(fixture.ctx, forged); err != nil {
+				t.Fatal(err)
+			}
+
+			requireTaskHeld(t, fixture, task, taskStorageRecordHold{
+				reason: corev1alpha1.StorageRecoveryConflictingRecordReason, record: promptResultReceiptRecord, key: fixture.attemptID,
+			})
+		})
+	}
+}
+
 // A restore that changed the Task's UID, with the prompt's completion
 // journaled and its receipt lost, holds the restored Task too; acknowledging
 // the hold records the outcome as unknown.

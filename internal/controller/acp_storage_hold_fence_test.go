@@ -8,6 +8,7 @@ import (
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/store"
@@ -112,6 +113,52 @@ func TestTaskStorageHoldIsNotWrittenAfterALaterEpochRecoveredTheTask(t *testing.
 	}
 
 	requireHoldRefused(t, fixture, task, observed, hold)
+}
+
+// A Task deleted and created again under the same name is another Task: the
+// hold its predecessor's attempt earned is not written to it, even when it
+// records the same execution and the attempt is unchanged.
+func TestTaskStorageHoldIsNotWrittenToAReplacedTask(t *testing.T) {
+	fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+	defer fixture.close(t)
+	task, observed, hold := heldTaskObservation(t, fixture, fixture.fence)
+	replaced := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), replaced); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.kubeClient.Delete(fixture.ctx, replaced); err != nil {
+		t.Fatal(err)
+	}
+	status := *replaced.Status.DeepCopy()
+	replacement := &corev1alpha1.Task{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: task.Namespace, Name: task.Name, UID: types.UID("55555555-5555-5555-5555-555555555555"),
+			Labels: replaced.Labels, Annotations: replaced.Annotations,
+		},
+		Spec: *replaced.Spec.DeepCopy(),
+	}
+	if err := fixture.kubeClient.Create(fixture.ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacement.Status = status
+	if err := fixture.kubeClient.Status().Update(fixture.ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if replacement.UID == task.UID {
+		t.Fatalf("replacement Task UID = %s, want a new incarnation", replacement.UID)
+	}
+
+	requireHoldRefused(t, fixture, task, observed, hold)
+	updated := &corev1alpha1.Task{}
+	if err := fixture.kubeClient.Get(fixture.ctx, clientObjectKey(task), updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.UID != replacement.UID {
+		t.Fatalf("Task UID after the refused hold = %s, want the replacement %s", updated.UID, replacement.UID)
+	}
+	if condition := apiMeta.FindStatusCondition(updated.Status.Conditions, corev1alpha1.ConditionStorageRecoveryRequired); condition != nil {
+		t.Fatalf("replacement Task carries a storage condition: %#v", condition)
+	}
 }
 
 // taskStorageHoldInterlockStore stands in for a control store with the

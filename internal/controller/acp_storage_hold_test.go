@@ -219,6 +219,36 @@ func TestACPDispatcherHoldsSettlingTaskWhoseResultReceiptConflicts(t *testing.T)
 	})
 }
 
+// A receipt bound to another Task conflicts even when its data, operation and
+// digest match the attempt's settling transition, whose digest does not cover
+// the Task: recovery holds the Task instead of taking that result as its own.
+func TestACPDispatcherHoldsSettlingTaskWhoseReceiptNamesAnotherTask(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		rebind func(*store.PromptResultReceipt)
+	}{
+		{name: "another Task name", rebind: func(receipt *store.PromptResultReceipt) { receipt.TaskName = "other" }},
+		{name: "another namespace", rebind: func(receipt *store.PromptResultReceipt) { receipt.Namespace = "other" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newACPRecoveryFixture(t, store.PromptExecutionRunning)
+			defer fixture.close(t)
+			task, receipt, digest := settlingTaskWithReceipt(t, fixture)
+			loseResultReceipt(t, fixture, task)
+			rebound := *receipt
+			test.rebind(&rebound)
+			if err := fixture.controlStore.SavePromptResultReceipt(fixture.ctx, rebound); err != nil {
+				t.Fatal(err)
+			}
+
+			requireTaskHeld(t, fixture, task, taskStorageRecordHold{
+				reason: corev1alpha1.StorageRecoveryConflictingRecordReason, record: promptResultReceiptRecord,
+				key: fixture.attemptID, expected: digest,
+			})
+		})
+	}
+}
+
 // A journaled completion does not stand in for a lost receipt: the result the
 // receipt protected may be gone too, or belong to something else.
 func TestACPDispatcherHoldsJournaledCompletionWhoseResultReceiptIsMissing(t *testing.T) {
