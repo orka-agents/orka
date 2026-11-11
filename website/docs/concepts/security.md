@@ -234,7 +234,9 @@ workspace classes already need it. The API checks its caller, and
 ValidatingAdmissionPolicies check direct writes to Tasks, RepositoryScans,
 RepositoryMonitors, and GatewayBindings that newly name an Agent. The Helm value
 installs those policies; without Helm, also apply `config/agent-use-policy`, or
-direct Kubernetes writes go unchecked. Orka's own components (the controller,
+direct Kubernetes writes go unchecked. Its bindings match every namespace, so on
+a cluster with more than one installation, first scope them to this
+installation's namespace as that directory's README describes. Orka's own components (the controller,
 API, gateways, monitors, and workers) hold `use` broadly. Callers are checked
 only when a request newly names an Agent: a RepositoryMonitor run starts with
 no Agent `use` check, and Agent references an object already names, including
