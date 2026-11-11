@@ -52,6 +52,18 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("turns with leading zeros render as decimal", func(t *testing.T) {
+		for value, want := range map[string]string{"030": "30", "08": "8"} {
+			output, err := helmTemplateStaticChart(t, guideChartArgs("--set-string", "guide.maxTurns="+value)...)
+			if err != nil {
+				t.Fatalf("helm template: %v\n%s", err, output)
+			}
+			if !strings.Contains(output, "- --guide-max-turns="+want+"\n") {
+				t.Fatalf("guide.maxTurns=%s must render --guide-max-turns=%s:\n%s", value, want, output)
+			}
+		}
+	})
+
 	t.Run("registry with a port", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, guideChartArgs(
 			"--set", "controller.acpRuntime.toolboxes.allowedRegistries[2]=localhost:5000",
