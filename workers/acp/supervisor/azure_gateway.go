@@ -165,6 +165,11 @@ type azureGateway struct {
 	signInMu      sync.Mutex
 	signInAttempt *azureSignIn
 	signedIn      bool
+	// autoSignInTried records that a prompt start has already tried to sign
+	// az in. It is tried once, whatever its outcome: after a failure the
+	// agent may sign in itself and choose a subscription, which a later
+	// automatic discovery must not overwrite.
+	autoSignInTried bool
 	// throttled counts, per write call ID, the throttled answers Azure gave
 	// it. Azure did not process a throttled request, so the client's retry
 	// is a new attempt under a new call ID rather than a replay.

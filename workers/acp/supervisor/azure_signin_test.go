@@ -185,6 +185,44 @@ func TestAzureGatewaySignsInAgainForACommandUnderThePlaceholder(t *testing.T) {
 	}
 }
 
+// A prompt-start sign-in that failed is not tried again at the next prompt:
+// the agent may have signed in itself and chosen a subscription meanwhile,
+// which a second discovery would overwrite.
+func TestAzureGatewayTriesThePromptStartSignInOnce(t *testing.T) {
+	refused := func(harnessv2.MCPBrokerCallRequest) json.RawMessage {
+		raw, _ := json.Marshal(harnessv2.MCPForwardResponse{Status: http.StatusForbidden, Headers: map[string]string{"Content-Type": "application/json"},
+			Body: `{"error":{"code":"AuthorizationFailed","message":"no access"}}`})
+		return raw
+	}
+	fixture := newAzureGatewayFixtureSigningIn(t, false, refused)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		fixture.gateway.signInMu.Lock()
+		attempt := fixture.gateway.signInAttempt
+		fixture.gateway.signInMu.Unlock()
+		if attempt == nil && len(fixture.brokerCalls()) > 0 {
+			break
+		}
+		if attempt != nil {
+			<-attempt.done
+			continue
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the prompt start did not try to sign az in")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := len(fixture.brokerCalls())
+	fixture.gateway.signInAtPromptStart()
+	time.Sleep(200 * time.Millisecond)
+	fixture.gateway.signInMu.Lock()
+	attempt := fixture.gateway.signInAttempt
+	fixture.gateway.signInMu.Unlock()
+	if attempt != nil || len(fixture.brokerCalls()) != before {
+		t.Fatalf("a later prompt start tried to sign in again: calls %d -> %d", before, len(fixture.brokerCalls()))
+	}
+}
+
 func TestAzureGatewayPassesASignInRefusalThrough(t *testing.T) {
 	fixture := newAzureGatewayFixture(t)
 	fixture.mu.Lock()

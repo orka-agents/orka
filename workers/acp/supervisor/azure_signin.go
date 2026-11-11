@@ -151,18 +151,22 @@ type azureSignIn struct {
 	err           error
 }
 
-// signInAtPromptStart signs az in once per session, in the background, when
-// a prompt starts running. A Tool whose reads need approval is left to the
-// first az command instead, so starting a session never asks anyone to
-// approve a read the agent did not make.
+// signInAtPromptStart tries, once per session and in the background, to sign
+// az in when the first prompt starts running. It is not tried again after a
+// failure: the first az command under the placeholder account signs in on
+// demand, and an agent that signed in itself and chose a subscription keeps
+// that choice. A Tool whose reads need approval is left to the first az
+// command instead, so starting a session never asks anyone to approve a read
+// the agent did not make.
 func (g *azureGateway) signInAtPromptStart() {
 	if g.session.approvalRequired(g.toolName) {
 		return
 	}
 	g.signInMu.Lock()
-	signedIn := g.signedIn
+	skip := g.signedIn || g.autoSignInTried
+	g.autoSignInTried = true
 	g.signInMu.Unlock()
-	if signedIn {
+	if skip {
 		return
 	}
 	go func() {
