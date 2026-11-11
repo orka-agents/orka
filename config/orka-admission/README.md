@@ -17,8 +17,11 @@ Before applying this base:
    example matches the canonical direct-Kustomize controller in `orka-system`, plus Helm releases
    `orka-v1` in `orka-v1-system` and `orka-v2` in `orka-v2-system`. If any
    release namespace, release name, or ServiceAccount name differs,
-   patch `--controller-usernames`, `--task-provenance-trusted-users`, and
-   `--task-provenance-trusted-service-accounts`. Patch the exact same
+   patch `--controller-usernames`, `--task-provenance-trusted-users`,
+   `--task-provenance-trusted-service-accounts`, and
+   `--worker-service-accounts`. List every worker ServiceAccount in
+   `--worker-service-accounts`, even one the trusted list leaves out, so the
+   identity-bound Agent rule still applies to it. Patch the exact same
    controller usernames in every `route-unless-controller-cleanup-safe`
    condition in `../orka-admission-webhooks/validating_webhook.yaml`.
 
