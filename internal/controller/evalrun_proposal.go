@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,13 +31,13 @@ const (
 
 	// annotationEvalProposal holds the proposal request as JSON; the others
 	// record what became of it once the proposer Task finished.
-	annotationEvalProposal               = "orka.ai/eval-proposal-request"
-	annotationEvalProposalState          = "orka.ai/eval-proposal-state"
-	annotationEvalProposalReason         = "orka.ai/eval-proposal-reason"
-	annotationEvalProposalHypothesis     = "orka.ai/eval-proposal-hypothesis"
-	annotationEvalProposalCandidateAgent = "orka.ai/eval-proposal-candidate-agent"
-	annotationEvalProposalBaselineRun    = "orka.ai/eval-proposal-baseline-run"
-	annotationEvalProposalCandidateRun   = "orka.ai/eval-proposal-candidate-run"
+	annotationEvalProposal               = labels.AnnotationEvalProposalRequest
+	annotationEvalProposalState          = labels.AnnotationEvalProposalState
+	annotationEvalProposalReason         = labels.AnnotationEvalProposalReason
+	annotationEvalProposalHypothesis     = labels.AnnotationEvalProposalHypothesis
+	annotationEvalProposalCandidateAgent = labels.AnnotationEvalProposalCandidateAgent
+	annotationEvalProposalBaselineRun    = labels.AnnotationEvalProposalBaselineRun
+	annotationEvalProposalCandidateRun   = labels.AnnotationEvalProposalCandidateRun
 	annotationCandidateHypothesis        = "orka.ai/candidate-hypothesis"
 
 	evalProposalStateCreated = "Created"
@@ -46,6 +47,7 @@ const (
 	evalProposalMaxFailedTrials = 24
 	evalProposalMaxPatchBytes   = 3000
 	evalProposalMaxPromptBytes  = 96 * 1024
+	evalProposalMaxEarlier      = 20
 )
 
 // evalProposalRecord is what the proposer Task carries about its request.
@@ -75,6 +77,7 @@ type evalProposalInput struct {
 	Failed        []store.EvalTrialRecord
 	TotalTrials   int
 	Earlier       []string
+	CaseList      []evals.Case
 }
 
 // StartEvalProposal creates a read-only proposer Task that learns from the
@@ -105,20 +108,9 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 	if err != nil {
 		return nil, err
 	}
-	monitor := &corev1alpha1.RepositoryMonitor{}
-	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: monitorName}, monitor); err != nil {
-		return nil, fmt.Errorf("read RepositoryMonitor %q: %w", monitorName, err)
-	}
-	if monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "" {
-		return nil, refuseEvalProposal("RepositoryMonitor %q has no reviewer Agent to improve", monitorName)
-	}
-	stable := &corev1alpha1.Agent{}
-	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: monitor.Spec.Agents.Reviewer.Name}, stable); err != nil {
-		return nil, fmt.Errorf("read reviewer Agent %q: %w", monitor.Spec.Agents.Reviewer.Name, err)
-	}
-	if snapshot := run.Status.Snapshot; snapshot == nil || snapshot.ReviewerAgent == nil || snapshot.ReviewerAgent.UID != stable.UID ||
-		snapshot.ReviewerAgent.Generation != stable.Generation {
-		return nil, refuseEvalProposal("reviewer Agent %q changed after evalrun/%s ran; run the training set again", stable.Name, run.Name)
+	stable, promptDigest, err := r.evalProposalReviewer(ctx, run, monitorName)
+	if err != nil {
+		return nil, err
 	}
 	proposer, tools, err := r.evalProposerAgent(ctx, run.Namespace)
 	if err != nil {
@@ -139,6 +131,17 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 	if len(input.Failed) == 0 {
 		return nil, refuseEvalProposal("evalrun/%s has no failed trials to learn from", run.Name)
 	}
+	if len(input.CurrentPrompt) > evals.MaxCandidateSystemPromptBytes {
+		return nil, refuseEvalProposal("reviewer Agent %q's system prompt is %d bytes, more than a candidate may be (%d)",
+			stable.Name, len(input.CurrentPrompt), evals.MaxCandidateSystemPromptBytes)
+	}
+	if err := r.checkTrainingCasesDisjoint(ctx, sets, input.CaseList); err != nil {
+		return nil, err
+	}
+	heldOutKey, err := r.evalProposalHeldOutKey(ctx, run, heldOut)
+	if err != nil {
+		return nil, err
+	}
 	prompt := buildEvalProposerPrompt(input)
 	target := corev1alpha1.EvalExperimentTarget{Grader: corev1alpha1.EvalGraderVerdict}
 	if request.Target != nil {
@@ -147,14 +150,13 @@ func (r *EvalRunReconciler) StartEvalProposal(ctx context.Context, run *corev1al
 	if !slices.Contains(run.Spec.Graders, target.Grader) {
 		return nil, refuseEvalProposal("evalrun/%s does not grade %q, the experiment target", run.Name, target.Grader)
 	}
-	promptSum := sha256.Sum256([]byte(input.CurrentPrompt))
 	record := evalProposalRecord{
 		TrainingRun: corev1alpha1.EvalObjectIdentity{Name: run.Name, UID: run.UID, Generation: run.Generation},
 		Monitor:     monitorName,
 		StableAgent: corev1alpha1.EvalObjectIdentity{Name: stable.Name, UID: stable.UID, Generation: stable.Generation},
-		HeldOut:     heldOut, HeldOutKey: run.Spec.Cases.ConfigMapRef.Key,
+		HeldOut:     heldOut, HeldOutKey: heldOutKey,
 		Target: target, RequestedBy: request.RequestedBy,
-		CurrentModel: input.CurrentModel, PromptDigest: evals.DigestPrefix + hex.EncodeToString(promptSum[:]),
+		CurrentModel: input.CurrentModel, PromptDigest: promptDigest,
 	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -281,6 +283,15 @@ func (r *EvalRunReconciler) evalProposalInput(ctx context.Context, run *corev1al
 	if err != nil {
 		return evalProposalInput{}, err
 	}
+	// The failures were graded against these cases; an edited ConfigMap
+	// could pair them with different pull requests under the same IDs.
+	caseSetDigest, err := evals.CaseSetDigest(cases)
+	if err != nil {
+		return evalProposalInput{}, err
+	}
+	if run.Status.Snapshot == nil || caseSetDigest != run.Status.Snapshot.CaseSetDigest {
+		return evalProposalInput{}, refuseEvalProposal("the cases of evalrun/%s changed after it ran; run the training set again", run.Name)
+	}
 	currentPrompt, err := resolveACPSystemPrompt(ctx, r.uncachedReader(), stable)
 	if err != nil {
 		return evalProposalInput{}, fmt.Errorf("resolve the reviewer's system prompt: %w", err)
@@ -288,6 +299,7 @@ func (r *EvalRunReconciler) evalProposalInput(ctx context.Context, run *corev1al
 	input := evalProposalInput{
 		TrainingRun: run.Name, CurrentPrompt: currentPrompt, CurrentModel: evalAgentModelName(stable),
 		Models: append([]string(nil), r.ProposerModels...), Cases: make(map[string]evals.Case, len(cases)), TotalTrials: len(records),
+		CaseList: cases,
 	}
 	for _, c := range cases {
 		input.Cases[c.ID] = c
@@ -316,6 +328,9 @@ func (r *EvalRunReconciler) evalProposalInput(ctx context.Context, run *corev1al
 		}
 	}
 	sort.Strings(input.Earlier)
+	if len(input.Earlier) > evalProposalMaxEarlier {
+		input.Earlier = input.Earlier[len(input.Earlier)-evalProposalMaxEarlier:]
+	}
 	return input, nil
 }
 
@@ -339,64 +354,81 @@ func buildEvalProposerPrompt(input evalProposalInput) string {
 	b.WriteString("## Current reviewer\n\n")
 	fmt.Fprintf(&b, "Model: %s\n\nSystem prompt:\nBEGIN DATA\n%s\nEND DATA\n\n", valueOrNone(input.CurrentModel), input.CurrentPrompt)
 	fmt.Fprintf(&b, "## Failed training trials (%d of %d trials in evalrun/%s)\n\n", len(input.Failed), input.TotalTrials, input.TrainingRun)
+	// The trailing sections are rendered first so the failed trials get
+	// whatever budget they leave.
+	var tail strings.Builder
+	if len(input.Earlier) > 0 {
+		tail.WriteString("## Hypotheses already tried for this reviewer\n\nPropose something different.\n\nBEGIN DATA\n")
+		for _, hypothesis := range input.Earlier {
+			fmt.Fprintf(&tail, "- %s\n", truncatedData(singleLine(hypothesis), 4*evals.MaxCandidateHypothesisRunes))
+		}
+		tail.WriteString("END DATA\n\n")
+	}
+	writeEvalProposerAnswerFormat(&tail, input.Models)
+	budget := evalProposalMaxPromptBytes - tail.Len()
 	shown := map[string]bool{}
 	for i, record := range input.Failed {
 		if i == evalProposalMaxFailedTrials {
 			fmt.Fprintf(&b, "(%d more failed trials not shown)\n\n", len(input.Failed)-i)
 			break
 		}
-		c, ok := input.Cases[record.CaseID]
-		fmt.Fprintf(&b, "### Case %s, trial %d\n\n", record.CaseID, record.Trial)
-		if ok {
-			fmt.Fprintf(&b, "Expected verdict: %s\n", c.Reference.Verdict)
-			for _, location := range c.Reference.Locations {
-				fmt.Fprintf(&b, "Defect at %s:%d-%d\n", location.File, location.StartLine, location.EndLine)
-			}
-		}
-		fmt.Fprintf(&b, "Reviewer verdict: %s\n", valueOrNone(record.ReviewerVerdict))
-		for _, grade := range record.Grades {
-			if grade.Status == string(evals.GradeFail) {
-				fmt.Fprintf(&b, "Grader %s failed: %s\n", grade.Grader, singleLine(grade.Reason))
-			}
-		}
-		// Each case's pull request is shown once, however many trials failed.
-		if ok && !shown[c.ID] && c.Input.RepositoryMonitorReview != nil {
-			shown[c.ID] = true
-			input := c.Input.RepositoryMonitorReview
-			fmt.Fprintf(&b, "\nBEGIN DATA\nTitle: %s\n", singleLine(input.Title))
-			if body := strings.TrimSpace(input.Body); body != "" {
-				fmt.Fprintf(&b, "Description:\n%s\n", truncatedData(body, evalProposalMaxPatchBytes))
-			}
-			for _, file := range input.Files {
-				fmt.Fprintf(&b, "--- %s (%s)\n%s\n", file.Filename, file.Status, truncatedData(file.Patch, evalProposalMaxPatchBytes))
-			}
-			b.WriteString("END DATA\n")
-		}
-		b.WriteString("\n")
-		if b.Len() > evalProposalMaxPromptBytes {
-			b.WriteString("(the remaining failed trials are not shown)\n\n")
+		section := renderEvalProposerTrial(record, input.Cases, shown)
+		if b.Len()+len(section) > budget {
+			fmt.Fprintf(&b, "(%d more failed trials not shown)\n\n", len(input.Failed)-i)
 			break
 		}
+		b.WriteString(section)
 	}
-	if len(input.Earlier) > 0 {
-		b.WriteString("## Hypotheses already tried for this reviewer\n\nPropose something different.\n\nBEGIN DATA\n")
-		for _, hypothesis := range input.Earlier {
-			fmt.Fprintf(&b, "- %s\n", singleLine(hypothesis))
+	b.WriteString(tail.String())
+	return b.String()
+}
+
+// renderEvalProposerTrial renders one failed trial; each case's pull request
+// is shown once, however many of its trials failed.
+func renderEvalProposerTrial(record store.EvalTrialRecord, cases map[string]evals.Case, shown map[string]bool) string {
+	var b strings.Builder
+	c, ok := cases[record.CaseID]
+	fmt.Fprintf(&b, "### Case %s, trial %d\n\n", record.CaseID, record.Trial)
+	if ok {
+		fmt.Fprintf(&b, "Expected verdict: %s\n", c.Reference.Verdict)
+		for _, location := range c.Reference.Locations {
+			fmt.Fprintf(&b, "Defect at %s:%d-%d\n", location.File, location.StartLine, location.EndLine)
 		}
-		b.WriteString("END DATA\n\n")
 	}
+	fmt.Fprintf(&b, "Reviewer verdict: %s\n", valueOrNone(record.ReviewerVerdict))
+	for _, grade := range record.Grades {
+		if grade.Status == string(evals.GradeFail) {
+			fmt.Fprintf(&b, "Grader %s failed: %s\n", grade.Grader, singleLine(grade.Reason))
+		}
+	}
+	if ok && !shown[c.ID] && c.Input.RepositoryMonitorReview != nil {
+		shown[c.ID] = true
+		input := c.Input.RepositoryMonitorReview
+		fmt.Fprintf(&b, "\nBEGIN DATA\nTitle: %s\n", singleLine(input.Title))
+		if body := strings.TrimSpace(input.Body); body != "" {
+			fmt.Fprintf(&b, "Description:\n%s\n", truncatedData(body, evalProposalMaxPatchBytes))
+		}
+		for _, file := range input.Files {
+			fmt.Fprintf(&b, "--- %s (%s)\n%s\n", file.Filename, file.Status, truncatedData(file.Patch, evalProposalMaxPatchBytes))
+		}
+		b.WriteString("END DATA\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func writeEvalProposerAnswerFormat(b *strings.Builder, models []string) {
 	b.WriteString("## Your answer\n\nReply with exactly one JSON object and nothing else:\n\n")
-	fmt.Fprintf(&b, "{\"schemaVersion\":%q,\"hypothesis\":\"<one sentence: what the reviewer gets wrong and what the change fixes>\","+
+	fmt.Fprintf(b, "{\"schemaVersion\":%q,\"hypothesis\":\"<one sentence: what the reviewer gets wrong and what the change fixes>\","+
 		"\"agentPatch\":{\"systemPrompt\":\"<the full new system prompt, not a diff>\",\"model\":\"<optional>\"}}\n\n", evals.CandidateSchemaVersion)
-	fmt.Fprintf(&b, "- systemPrompt is the complete replacement prompt, at most %d bytes. Omit it to keep the current prompt.\n",
+	fmt.Fprintf(b, "- systemPrompt is the complete replacement prompt, at most %d bytes. Omit it to keep the current prompt.\n",
 		evals.MaxCandidateSystemPromptBytes)
-	if len(input.Models) == 0 {
+	if len(models) == 0 {
 		b.WriteString("- Do not set model: only prompt changes are allowed.\n")
 	} else {
-		fmt.Fprintf(&b, "- model, if set, must be one of: %s. Omit it to keep the current model.\n", strings.Join(input.Models, ", "))
+		fmt.Fprintf(b, "- model, if set, must be one of: %s. Omit it to keep the current model.\n", strings.Join(models, ", "))
 	}
 	b.WriteString("- Change nothing else. The reviewer's output format is fixed by its task, so do not restate it.\n")
-	return b.String()
 }
 
 func valueOrNone(value string) string {
@@ -419,6 +451,42 @@ func truncatedData(value string, maxBytes int) string {
 }
 
 // listEvalProposalTasks returns the proposer Tasks this run owns.
+// evalProposalReviewer reads the monitor's reviewer Agent and checks it is
+// the one the training run ran: same UID and generation, and the same
+// resolved system prompt, whose digest it returns.
+func (r *EvalRunReconciler) evalProposalReviewer(ctx context.Context, run *corev1alpha1.EvalRun,
+	monitorName string) (*corev1alpha1.Agent, string, error) {
+	monitor := &corev1alpha1.RepositoryMonitor{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: monitorName}, monitor); err != nil {
+		return nil, "", fmt.Errorf("read RepositoryMonitor %q: %w", monitorName, err)
+	}
+	if monitor.Spec.Agents.Reviewer == nil || strings.TrimSpace(monitor.Spec.Agents.Reviewer.Name) == "" {
+		return nil, "", refuseEvalProposal("RepositoryMonitor %q has no reviewer Agent to improve", monitorName)
+	}
+	stable := &corev1alpha1.Agent{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: monitor.Spec.Agents.Reviewer.Name}, stable); err != nil {
+		return nil, "", fmt.Errorf("read reviewer Agent %q: %w", monitor.Spec.Agents.Reviewer.Name, err)
+	}
+	if snapshot := run.Status.Snapshot; snapshot == nil || snapshot.ReviewerAgent == nil || snapshot.ReviewerAgent.UID != stable.UID ||
+		snapshot.ReviewerAgent.Generation != stable.Generation {
+		return nil, "", refuseEvalProposal("reviewer Agent %q changed after evalrun/%s ran; run the training set again", stable.Name, run.Name)
+	}
+	// A ConfigMap-backed prompt can change without the Agent's generation
+	// moving; failures from the old prompt must not teach the new one.
+	promptDigest, err := r.evalReviewerSystemPromptDigest(ctx, stable)
+	if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+		return nil, "", refuseEvalProposal("%s", configErr.message)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if promptDigest != run.Status.Snapshot.ReviewerSystemPromptDigest {
+		return nil, "", refuseEvalProposal("reviewer Agent %q's system prompt changed after evalrun/%s ran; run the training set again",
+			stable.Name, run.Name)
+	}
+	return stable, promptDigest, nil
+}
+
 // evalProposalTaskName names a run's proposal slot. The names are fixed, so
 // the API server's create is what spends a slot: two requests that race for
 // the last one cannot both win, on one replica or several.
@@ -450,7 +518,10 @@ func (r *EvalRunReconciler) listEvalProposalTasks(ctx context.Context, run *core
 	}
 	var tasks []corev1alpha1.Task
 	for _, task := range list.Items {
-		if owner := metav1.GetControllerOf(&task); owner != nil && owner.UID == run.UID {
+		// The improvement role is reserved to the controller at admission,
+		// so a Task an editor labelled by hand is never taken for a proposal.
+		if owner := metav1.GetControllerOf(&task); owner != nil && owner.UID == run.UID &&
+			task.Annotations[labels.AnnotationImprovementRole] == labels.ImprovementRoleProposer {
 			tasks = append(tasks, task)
 		}
 	}
@@ -561,6 +632,16 @@ func (r *EvalRunReconciler) createEvalProposalCandidate(ctx context.Context, run
 	}
 	if stable.UID != record.StableAgent.UID || stable.Generation != record.StableAgent.Generation {
 		return evalProposalCandidate{}, fmt.Sprintf("reviewer Agent %q changed while the proposer ran", stable.Name), nil
+	}
+	promptDigest, err := r.evalReviewerSystemPromptDigest(ctx, stable)
+	if configErr, ok := errors.AsType[*evalRunConfigError](err); ok {
+		return evalProposalCandidate{}, configErr.message, nil
+	}
+	if err != nil {
+		return evalProposalCandidate{}, "", err
+	}
+	if promptDigest != record.PromptDigest {
+		return evalProposalCandidate{}, fmt.Sprintf("reviewer Agent %q's system prompt changed while the proposer ran", stable.Name), nil
 	}
 	currentPrompt, err := resolveACPSystemPrompt(ctx, r.uncachedReader(), stable)
 	if err != nil {
@@ -690,4 +771,63 @@ func ownedByAgent(agent, owner *corev1alpha1.Agent) bool {
 	return slices.ContainsFunc(agent.OwnerReferences, func(ref metav1.OwnerReference) bool {
 		return ref.Kind == agentKind && ref.UID == owner.UID
 	})
+}
+
+// checkTrainingCasesDisjoint refuses training cases that review the same
+// pull request evidence as any held-out set the protected set lists: the
+// proposer would see held-out patches and verdicts. A held-out set that
+// cannot be read fails the check.
+func (r *EvalRunReconciler) checkTrainingCasesDisjoint(ctx context.Context, sets map[string]evals.CaseSet, cases []evals.Case) error {
+	keys, err := evals.HeldOutCaseKeys(cases)
+	if err != nil {
+		return refuseEvalProposal("the training cases cannot be checked against the held-out sets: %v", err)
+	}
+	training := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		training[key] = true
+	}
+	names := make([]string, 0, len(sets))
+	for name, set := range sets {
+		if set.Split == evals.SplitHeldOut {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		namespace, configMap, _ := strings.Cut(name, "/")
+		heldOutKeys, err := r.heldOutCaseKeys(ctx, namespace, configMap)
+		if err != nil {
+			return refuseEvalProposal("held-out case set %s cannot be read to check the training cases against it: %v", name, err)
+		}
+		for _, key := range heldOutKeys {
+			if training[key] {
+				return refuseEvalProposal("the training cases review a pull request that held-out case set %s also holds; "+
+					"a proposer would see held-out evidence", name)
+			}
+		}
+	}
+	return nil
+}
+
+// evalProposalHeldOutKey picks the held-out ConfigMap key the paired runs
+// read: the training run's key when the held-out ConfigMap has it, else its
+// only key.
+func (r *EvalRunReconciler) evalProposalHeldOutKey(ctx context.Context, run *corev1alpha1.EvalRun, heldOut string) (string, error) {
+	configMap := &corev1.ConfigMap{}
+	if err := r.uncachedReader().Get(ctx, types.NamespacedName{Namespace: run.Namespace, Name: heldOut}, configMap); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", refuseEvalProposal("held-out case ConfigMap %q does not exist", heldOut)
+		}
+		return "", err
+	}
+	if _, ok := configMap.Data[run.Spec.Cases.ConfigMapRef.Key]; ok {
+		return run.Spec.Cases.ConfigMapRef.Key, nil
+	}
+	if len(configMap.Data) == 1 {
+		for key := range configMap.Data {
+			return key, nil
+		}
+	}
+	return "", refuseEvalProposal("held-out case ConfigMap %q has no key %q and more than one other; "+
+		"store its cases under the training run's key", heldOut, run.Spec.Cases.ConfigMapRef.Key)
 }

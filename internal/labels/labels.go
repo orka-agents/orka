@@ -75,7 +75,17 @@ const (
 	// AnnotationPromotionRecord names the promotion log record whose promote
 	// or rollback last wrote the Agent's spec. The controller sets it in the
 	// same update, so a restart can tell whether an open record committed.
-	AnnotationPromotionRecord               = "orka.ai/promotion-record"
+	AnnotationPromotionRecord = "orka.ai/promotion-record"
+	// Eval proposal annotations on a proposer Task: the request as JSON, and
+	// what became of it once the proposer finished. Admission reserves them
+	// to the controller, with LabelEvalProposalOf.
+	AnnotationEvalProposalRequest           = "orka.ai/eval-proposal-request"
+	AnnotationEvalProposalState             = "orka.ai/eval-proposal-state"
+	AnnotationEvalProposalReason            = "orka.ai/eval-proposal-reason"
+	AnnotationEvalProposalHypothesis        = "orka.ai/eval-proposal-hypothesis"
+	AnnotationEvalProposalCandidateAgent    = "orka.ai/eval-proposal-candidate-agent"
+	AnnotationEvalProposalBaselineRun       = "orka.ai/eval-proposal-baseline-run"
+	AnnotationEvalProposalCandidateRun      = "orka.ai/eval-proposal-candidate-run"
 	AnnotationCoordinationDepth             = "orka.ai/coordination-depth"
 	AnnotationTransactionID                 = "orka.ai/transaction-id"
 	AnnotationContextTokenProfile           = "orka.ai/context-token-profile"

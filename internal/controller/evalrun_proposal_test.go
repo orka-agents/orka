@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	corev1alpha1 "github.com/orka-agents/orka/api/v1alpha1"
 	"github.com/orka-agents/orka/internal/evals"
 	"github.com/orka-agents/orka/internal/labels"
+	"github.com/orka-agents/orka/internal/store"
 )
 
 // proposalTestGate lists the experiment cases as training cases and a
@@ -281,6 +283,60 @@ func TestEvalProposalRefusals(t *testing.T) {
 		_, err := env.reconciler.StartEvalProposal(ctx, run, evals.ProposalRequest{})
 		refused(t, err, "took the same slot")
 	})
+	t.Run("training cases edited since the run", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		cases := &corev1.ConfigMap{}
+		if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "cases"}, cases); err != nil {
+			t.Fatal(err)
+		}
+		cases.Data["cases.jsonl"] = strings.ReplaceAll(cases.Data["cases.jsonl"], "Change defect", "Edited title")
+		if err := env.client.Update(ctx, cases); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+		refused(t, err, "cases of evalrun/baseline changed")
+	})
+	t.Run("reviewer prompt edited since the run", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		reviewer := &corev1alpha1.Agent{}
+		if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "reviewer"}, reviewer); err != nil {
+			t.Fatal(err)
+		}
+		// As a ConfigMap edit would, this changes the prompt but not the
+		// generation.
+		reviewer.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "Approve everything."}
+		if err := env.client.Update(ctx, reviewer); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+		refused(t, err, "system prompt changed after")
+	})
+	t.Run("training cases overlap a held-out set", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		heldOut := &corev1.ConfigMap{}
+		if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "heldout"}, heldOut); err != nil {
+			t.Fatal(err)
+		}
+		heldOut.Data["cases.jsonl"] = experimentCases()
+		if err := env.client.Update(ctx, heldOut); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+		refused(t, err, "held-out case set team-a/heldout also holds")
+	})
+	t.Run("held-out ConfigMap without a usable key", func(t *testing.T) {
+		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+		heldOut := &corev1.ConfigMap{}
+		if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "heldout"}, heldOut); err != nil {
+			t.Fatal(err)
+		}
+		heldOut.Data = map[string]string{"a.jsonl": heldOut.Data["cases.jsonl"], "b.jsonl": heldOut.Data["cases.jsonl"]}
+		if err := env.client.Update(ctx, heldOut); err != nil {
+			t.Fatal(err)
+		}
+		_, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+		refused(t, err, "has no key")
+	})
 	t.Run("reviewer changed since the run", func(t *testing.T) {
 		env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
 		reviewer := &corev1alpha1.Agent{}
@@ -335,5 +391,82 @@ func TestEvalProposalRefusesAnEditedCandidate(t *testing.T) {
 			!strings.Contains(proposal.Reason, "differs from the proposed change") || proposal.CandidateRun != "") {
 			t.Fatalf("second proposal = %+v", proposal)
 		}
+	}
+}
+
+// The paired runs read the held-out ConfigMap's own key when it differs
+// from the training run's.
+func TestEvalProposalUsesTheHeldOutKey(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	heldOut := &corev1.ConfigMap{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "heldout"}, heldOut); err != nil {
+		t.Fatal(err)
+	}
+	heldOut.Data = map[string]string{"heldout.jsonl": heldOut.Data["cases.jsonl"]}
+	if err := env.client.Update(ctx, heldOut); err != nil {
+		t.Fatal(err)
+	}
+	task, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || proposals[0].CandidateRun == "" {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+	if key := env.getRun(proposals[0].CandidateRun).Spec.Cases.ConfigMapRef.Key; key != "heldout.jsonl" {
+		t.Fatalf("candidate run reads key %q", key)
+	}
+}
+
+// A reviewer prompt edited while the proposer ran refuses the answer: it
+// was learned from the old prompt.
+func TestEvalProposalRefusesAPromptEditedWhileItRan(t *testing.T) {
+	env := newProposalEnv(t, repositoryMonitorReviewVerdictPassed)
+	ctx := context.Background()
+	task, err := env.reconciler.StartEvalProposal(ctx, env.getRun("baseline"), evals.ProposalRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := &corev1alpha1.Agent{}
+	if err := env.client.Get(ctx, types.NamespacedName{Namespace: evalTestNamespace, Name: "reviewer"}, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	reviewer.Spec.SystemPrompt = &corev1alpha1.PromptSource{Inline: "Approve everything."}
+	if err := env.client.Update(ctx, reviewer); err != nil {
+		t.Fatal(err)
+	}
+	env.finishTask(task, corev1alpha1.TaskPhaseSucceeded, []byte(proposalTestAnswer), false)
+	env.reconcileRun("baseline")
+	proposals, err := env.reconciler.ListEvalProposals(ctx, env.getRun("baseline"))
+	if err != nil || len(proposals) != 1 || proposals[0].State != evalProposalStateRefused ||
+		!strings.Contains(proposals[0].Reason, "changed while the proposer ran") {
+		t.Fatalf("proposals = %+v, %v", proposals, err)
+	}
+}
+
+// The proposer prompt stays within its byte budget however large the cases.
+func TestEvalProposerPromptStaysWithinItsBudget(t *testing.T) {
+	big := strings.Repeat("x", evalProposalMaxPatchBytes)
+	input := evalProposalInput{TrainingRun: "training", CurrentPrompt: "Review.", Cases: map[string]evals.Case{}}
+	for i := range evalProposalMaxFailedTrials {
+		id := fmt.Sprintf("case-%d", i)
+		files := make([]evals.ReviewCaseFile, evals.MaxReviewFiles)
+		for j := range files {
+			files[j] = evals.ReviewCaseFile{Filename: fmt.Sprintf("f%d.go", j), Status: "modified", Patch: big}
+		}
+		input.Cases[id] = evals.Case{ID: id, Input: evals.CaseInput{RepositoryMonitorReview: &evals.ReviewCaseInput{Title: id, Files: files}}}
+		input.Failed = append(input.Failed, store.EvalTrialRecord{CaseID: id, Trial: 1})
+	}
+	for range 30 {
+		input.Earlier = append(input.Earlier, strings.Repeat("h", 2000))
+	}
+	prompt := buildEvalProposerPrompt(input)
+	if len(prompt) > evalProposalMaxPromptBytes || !strings.Contains(prompt, "more failed trials not shown") ||
+		!strings.Contains(prompt, "## Your answer") {
+		t.Fatalf("prompt is %d bytes (budget %d)", len(prompt), evalProposalMaxPromptBytes)
 	}
 }
