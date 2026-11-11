@@ -445,7 +445,10 @@ func taskAutomationMarker(task *corev1alpha1.Task) string {
 // the child, not one recreated under its name. A scheduled run is not
 // delegation: it runs its scheduled Task's own Agent, which that Task's
 // creator was checked for. Its scheduled Task never binds, so the scheduled
-// Task itself must have been created after the claim was granted.
+// Task itself must have been created after the claim was granted. Only an
+// agent Task counts as scheduled here: its agentRef is immutable, while a
+// worker could add a schedule and an agentRef to its own native Task, which
+// its creator was never checked for, so any other parent must be bound.
 func requireParentOwnsIdentityAgent(
 	ctx context.Context,
 	reader client.Reader,
@@ -469,7 +472,7 @@ func requireParentOwnsIdentityAgent(
 		return permanentACPAgentConfiguration(fmt.Errorf(
 			"a child Task may use identity-bound Agent %q only while its parent Task %q still controls it", agent.Name, parentName))
 	}
-	if parent.Spec.Schedule != "" {
+	if parent.Spec.Schedule != "" && parent.Spec.Type == corev1alpha1.TaskTypeAgent {
 		if parent.Spec.AgentRef == nil || task.Spec.AgentRef == nil || *parent.Spec.AgentRef != *task.Spec.AgentRef {
 			return permanentACPAgentConfiguration(fmt.Errorf(
 				"a scheduled run may use identity-bound Agent %q only when its scheduled Task names it", agent.Name))
