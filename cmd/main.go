@@ -591,7 +591,7 @@ func main() {
 	flag.BoolVar(&guideEnabled, "guide-enabled", strings.EqualFold(os.Getenv("ORKA_GUIDE_ENABLED"), "true"),
 		"Create and maintain the orka-guide Agent in the watch namespace, a read-only agent that answers questions from the installed version's docs. Off by default; disabling it deletes the Agent the controller created.")
 	flag.StringVar(&guideRuntime, "guide-runtime", envutil.String("ORKA_GUIDE_RUNTIME", string(corev1alpha1.AgentRuntimeClaude)),
-		"Built-in runtime of the guide Agent: claude, codex or copilot. Its runtime image must be configured.")
+		"Built-in runtime of the guide Agent: claude or copilot. Its runtime image must be configured.")
 	flag.StringVar(&guideModel, "guide-model", os.Getenv("ORKA_GUIDE_MODEL"),
 		"Model ID the guide Agent requests through the provider proxy. Required with --guide-enabled.")
 	flag.IntVar(&guideMaxTurns, "guide-max-turns", envutil.MustInt("ORKA_GUIDE_MAX_TURNS", int(controller.DefaultGuideMaxTurns)),

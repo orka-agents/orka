@@ -520,7 +520,7 @@ providerProxy:
 # an allowedRegistries entry covering guide.docs.image.repository.
 guide:
   enabled: false
-  # Built-in runtime: claude, codex or copilot.
+  # Built-in runtime: claude or copilot, the runtimes that enforce the guide's read-only tools.
   runtime: claude
   # Model ID the runtime requests through the provider proxy. Required when enabled.
   model: ""

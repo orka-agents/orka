@@ -32,7 +32,7 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 
 	t.Run("enabled", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, guideChartArgs(
-			"--set", "guide.runtime=codex",
+			"--set", "guide.runtime=copilot",
 			"--set", "guide.maxTurns=12",
 		)...)
 		if err != nil {
@@ -40,7 +40,7 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		}
 		for _, want := range []string{
 			"- --guide-enabled=true",
-			`- "--guide-runtime=codex"`,
+			`- "--guide-runtime=copilot"`,
 			`- "--guide-model=claude-test"`,
 			"- --guide-max-turns=12",
 			`- "--guide-docs-image=ghcr.io/orka-agents/orka/guide-docs@sha256:` + strings.Repeat("a", 64) + `"`,
@@ -106,6 +106,7 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		want  string
 	}{
 		{"opencode", set("guide.runtime", "opencode"), `guide.runtime "opencode" is not supported`},
+		{"codex", set("guide.runtime", "codex"), `guide.runtime "codex" is not supported`},
 		{"runtime image unset", str("controller.acpRuntime.claudeImage", ""), "needs controller.acpRuntime.claudeImage"},
 		{"no model", str("guide.model", " "), "guide.model is required"},
 		{"zero turns", set("guide.maxTurns", "0"), badTurns},

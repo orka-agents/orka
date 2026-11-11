@@ -73,7 +73,7 @@ controller:
         - <registry>
 guide:
   enabled: true
-  runtime: claude          # claude, codex or copilot
+  runtime: claude          # claude or copilot
   model: <model-id>        # a model your provider proxy serves
   maxTurns: 30             # turn limit for one answer, 1-1000
   docs:
@@ -82,9 +82,13 @@ guide:
       digest: sha256:<digest>
 ```
 
-OpenCode isn't supported, because its read-only sessions disable Grep. When a
-value is missing or doesn't fit, the chart fails the render and names it. The
-controller checks its `--guide-*` flags again when it starts and exits on an
+The guide runs on Claude or Copilot, the built-in runtimes that enforce its Read,
+Glob and Grep tool set. Codex isn't supported, because its read-only sessions
+still run read-only shell commands, and OpenCode isn't, because its read-only
+sessions disable Grep.
+
+When a value is missing or doesn't fit, the chart fails the render and names it.
+The controller checks its `--guide-*` flags again when it starts and exits on an
 invalid one. The flags are listed in [Configuration](../reference/configuration.md).
 
 On every Orka upgrade, rebuild the snapshot from the new tag and update

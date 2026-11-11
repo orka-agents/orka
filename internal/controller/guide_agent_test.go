@@ -200,6 +200,9 @@ func TestGuideAgentConfigValidate(t *testing.T) {
 		{"opencode", func(c *GuideAgentConfig, _ *ACPToolboxPolicy, _ *ACPRuntimeImages) {
 			c.Runtime = corev1alpha1.AgentRuntimeOpencode
 		}, "--guide-runtime"},
+		{"codex", func(c *GuideAgentConfig, _ *ACPToolboxPolicy, _ *ACPRuntimeImages) {
+			c.Runtime = corev1alpha1.AgentRuntimeCodex
+		}, "--guide-runtime"},
 		{"unknown runtime", func(c *GuideAgentConfig, _ *ACPToolboxPolicy, _ *ACPRuntimeImages) { c.Runtime = "gemini" }, "--guide-runtime"},
 		{"no model", func(c *GuideAgentConfig, _ *ACPToolboxPolicy, _ *ACPRuntimeImages) { c.Model = " " }, "--guide-model"},
 		{"zero turns", func(c *GuideAgentConfig, _ *ACPToolboxPolicy, _ *ACPRuntimeImages) { c.MaxTurns = 0 }, "--guide-max-turns"},

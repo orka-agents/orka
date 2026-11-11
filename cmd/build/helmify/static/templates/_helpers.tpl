@@ -926,8 +926,8 @@ every check; these fail the render first with the value to change.
 {{- if include "orka.guideEnabled" . -}}
 {{- $guide := .Values.guide -}}
 {{- $runtime := toString (dig "runtime" "claude" $guide) -}}
-{{- if not (has $runtime (list "claude" "codex" "copilot")) -}}
-{{- fail (printf "guide.runtime %q is not supported; use claude, codex or copilot" $runtime) -}}
+{{- if not (has $runtime (list "claude" "copilot")) -}}
+{{- fail (printf "guide.runtime %q is not supported; use claude or copilot" $runtime) -}}
 {{- end -}}
 {{- if not (get .Values.controller.acpRuntime (printf "%sImage" $runtime)) -}}
 {{- fail (printf "guide.runtime=%s needs controller.acpRuntime.%sImage" $runtime $runtime) -}}

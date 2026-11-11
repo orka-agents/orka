@@ -57,11 +57,12 @@ You are read-only: you change nothing, and you give people the commands to run.`
 // or runs commands.
 var guideAllowedTools = []string{"Glob", "Grep", "Read"}
 
-// GuideRuntimeTypes lists the built-in runtimes the guide supports. OpenCode
-// is left out because its read-only sessions disable Grep.
+// GuideRuntimeTypes lists the built-in runtimes the guide supports: those that
+// enforce its Read, Glob and Grep tool set natively. Codex is left out because
+// its read-only sessions still run read-only shell commands, and OpenCode
+// because its read-only sessions disable Grep.
 var GuideRuntimeTypes = []corev1alpha1.AgentRuntimeType{
 	corev1alpha1.AgentRuntimeClaude,
-	corev1alpha1.AgentRuntimeCodex,
 	corev1alpha1.AgentRuntimeCopilot,
 }
 
@@ -101,7 +102,7 @@ func (c GuideAgentConfig) Validate(policy ACPToolboxPolicy, images ACPRuntimeIma
 		return fmt.Errorf("the guide needs a namespace")
 	}
 	if !slices.Contains(GuideRuntimeTypes, c.Runtime) {
-		return fmt.Errorf("--guide-runtime %q is not supported; use claude, codex or copilot", c.Runtime)
+		return fmt.Errorf("--guide-runtime %q is not supported; use claude or copilot", c.Runtime)
 	}
 	if image, err := configuredACPRuntimeImage(string(c.Runtime), images); err != nil || image == "" {
 		return fmt.Errorf("--guide-runtime %s needs its runtime image (--acp-%s-runtime-image)", c.Runtime, c.Runtime)
