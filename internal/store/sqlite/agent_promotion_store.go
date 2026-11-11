@@ -102,7 +102,7 @@ func (s *Store) CreateAgentPromotion(ctx context.Context, record *store.AgentPro
 				// transitions change differ.
 				var stored store.AgentPromotionRecord
 				if json.Unmarshal([]byte(existing), &stored) == nil {
-					stored.State, stored.UpdatedAt, stored.Reason = normalized.State, normalized.UpdatedAt, normalized.Reason
+					stored.State, stored.UpdatedAt, stored.StateReason = normalized.State, normalized.UpdatedAt, normalized.StateReason
 					stored.AppliedGeneration, stored.AppliedDigest = normalized.AppliedGeneration, normalized.AppliedDigest
 					if again, err := json.Marshal(&stored); err == nil && bytes.Equal(again, encoded) {
 						return nil
@@ -183,7 +183,7 @@ func (s *Store) TransitionAgentPromotion(ctx context.Context, transition store.A
 				record.AppliedDigest = transition.AppliedDigest
 			}
 			if transition.Reason != "" {
-				record.Reason = transition.Reason
+				record.StateReason = transition.Reason
 			}
 			next, err := encodeAgentPromotion(&record)
 			if err != nil {

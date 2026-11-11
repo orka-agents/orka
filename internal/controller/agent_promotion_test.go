@@ -275,7 +275,7 @@ func TestRecoverAgentPromotions(t *testing.T) {
 		t.Fatal(err)
 	}
 	log, err = env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
-	if err != nil || len(log) != 2 || log[1].State != store.AgentPromotionFailed || !strings.Contains(log[1].Reason, "restarted") {
+	if err != nil || len(log) != 2 || log[1].State != store.AgentPromotionFailed || !strings.Contains(log[1].StateReason, "restarted") {
 		t.Fatalf("log = %+v, %v", log, err)
 	}
 	if after := env.getAgent("reviewer"); after.ResourceVersion != before.ResourceVersion {
@@ -416,5 +416,38 @@ func TestRecoveryUsesValuesWhenTheMarkerIsGone(t *testing.T) {
 	log, err := env.reconciler.ListAgentPromotions(ctx, evalTestNamespace, "reviewer")
 	if err != nil || len(log) != 1 || log[0].State != store.AgentPromotionComplete {
 		t.Fatalf("log = %+v, %v", log, err)
+	}
+}
+
+// A promotion whose Agent update committed but whose completion write
+// failed is settled by the next action, so it can be rolled back without a
+// restart.
+func TestRollbackSettlesACommittedPromotionFirst(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	stable := env.getAgent("reviewer")
+	record := promotionTestRecord(env, "committed")
+	record.Previous = store.AgentPromotionValues{Model: "claude-haiku"}
+	record.Target = store.AgentPromotionValues{SystemPrompt: promotionTestPrompt, Model: "claude-sonnet"}
+	if err := env.store.CreateAgentPromotion(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.store.TransitionAgentPromotion(ctx, store.AgentPromotionTransition{Namespace: evalTestNamespace, ID: "committed",
+		From: store.AgentPromotionPending, To: store.AgentPromotionApplying, UpdatedAt: env.now}); err != nil {
+		t.Fatal(err)
+	}
+	// The update reached the Agent; the completion write did not.
+	stable.Spec = applyPromotableValues(stable.Spec, record.Target)
+	stable.Annotations = map[string]string{labels.AnnotationPromotionRecord: "committed"}
+	stable.Generation = record.AgentGeneration + 1
+	if err := env.client.Update(ctx, stable); err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := env.reconciler.RollbackAgent(ctx, evalTestNamespace, "reviewer", promotionTestActor, "")
+	if err != nil || rollback.PromotionID != "committed" {
+		t.Fatalf("RollbackAgent() = %+v, %v", rollback, err)
+	}
+	if prompt := env.getAgent("reviewer").Spec.SystemPrompt; prompt != nil {
+		t.Fatalf("rolled back prompt = %+v", prompt)
 	}
 }

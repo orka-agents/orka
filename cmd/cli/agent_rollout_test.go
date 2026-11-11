@@ -86,3 +86,29 @@ func TestAgentPromotionsStructuredOutputKeepsPromptViews(t *testing.T) {
 		t.Fatalf("promotions -o json = %v\n%s", err, out)
 	}
 }
+
+// Rollout requests carry the selected namespace, like every CLI request.
+func TestAgentRolloutUsesTheSelectedNamespace(t *testing.T) {
+	var namespaces []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		namespaces = append(namespaces, r.URL.Query().Get("namespace"))
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"r1","agent":"reviewer","action":"rollback"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer srv.Close()
+	for _, args := range [][]string{
+		{"agent", "rollback", "reviewer"}, {"agent", "promotions", "reviewer"},
+	} {
+		if _, err := runEvalCommand(t, append(args, "-n", "team-x", "--server", srv.URL, "--token", "tok")...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(namespaces) != 2 || namespaces[0] != "team-x" || namespaces[1] != "team-x" {
+		t.Fatalf("namespaces = %v", namespaces)
+	}
+}
