@@ -6,7 +6,7 @@ Date: 2026-11-05
 
 Proposed. Read requests from the Azure CLI are implemented, and writes are
 being added (see "Writes" below). Builds on ADR
-0039 (agent identities) and ADR 0033 (per-user connectors); extends ADR 0034's
+0039 (agent identities) and ADR 0033 (per-user connectors); extends ADR 0048's
 ceilings to the new Tool kind without changing them.
 
 ## Context
