@@ -39,7 +39,9 @@ const (
 )
 
 // AgentRolloutVerifier checks, before a Task is routed to a canary's
-// candidate, that the canary still carries out an approval in force.
+// candidate, that the canary still carries out an approval in force. A nil
+// candidate with no error means the canary was aborted or replaced since
+// the Agent was read: the Task runs on the stable Agent.
 type AgentRolloutVerifier interface {
 	VerifyAgentRollout(ctx context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.Agent, error)
 }
@@ -60,6 +62,13 @@ func (r *EvalRunReconciler) VerifyAgentRollout(ctx context.Context, agent *corev
 	approved, err := r.approvedCandidate(ctx, agent.Namespace, agent.Name, rollout.DecisionID)
 	if err != nil {
 		return nil, err
+	}
+	// The routing decision used an Agent read that may predate an abort or a
+	// new canary. Only the live rollout, read uncached by the check above,
+	// may send a Task to a candidate.
+	if live := approved.stable.Status.Rollout; live == nil || live.Candidate == nil || live.RecordID != rollout.RecordID ||
+		live.DecisionID != rollout.DecisionID || live.Candidate.UID != rollout.Candidate.UID {
+		return nil, nil
 	}
 	if approved.candidate.UID != rollout.Candidate.UID || approved.candidate.Generation != rollout.Candidate.Generation {
 		return nil, refuseRollout("candidate Agent %q is not the one the canary started with", approved.candidate.Name)
@@ -110,6 +119,8 @@ func (r *TaskReconciler) routeAgentRollout(ctx context.Context, task *corev1alph
 			arm = rolloutArmStable
 		} else if err != nil {
 			return nil, err
+		} else if candidate == nil {
+			arm = rolloutArmStable
 		} else {
 			routed = candidate
 		}

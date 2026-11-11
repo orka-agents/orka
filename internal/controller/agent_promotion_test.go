@@ -529,3 +529,22 @@ func TestRecoveryUsesValuesWhenTheMarkerIsGone(t *testing.T) {
 		t.Fatalf("log = %+v, %v", log, err)
 	}
 }
+
+// A routing decision made from an Agent read before an abort never reaches
+// the candidate: verification reads the live rollout.
+func TestVerifyAgentRolloutReadsTheLiveRollout(t *testing.T) {
+	env := newPromotionEnv(t, nil)
+	ctx := context.Background()
+	env.decide("d1", store.EvalDecisionApproved)
+	if _, err := env.reconciler.CanaryAgent(ctx, evalTestNamespace, "reviewer", "d1", 30, promotionTestActor); err != nil {
+		t.Fatal(err)
+	}
+	beforeAbort := env.getAgent("reviewer")
+	if _, err := env.reconciler.AbortAgentRollout(ctx, evalTestNamespace, "reviewer", promotionTestActor, ""); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := env.reconciler.VerifyAgentRollout(ctx, beforeAbort)
+	if err != nil || candidate != nil {
+		t.Fatalf("VerifyAgentRollout() after an abort = %v, %v", candidate, err)
+	}
+}

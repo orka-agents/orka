@@ -22,14 +22,18 @@ import (
 )
 
 type fakeRolloutVerifier struct {
-	refuse string
-	calls  int
+	refuse  string
+	aborted bool
+	calls   int
 }
 
 func (f *fakeRolloutVerifier) VerifyAgentRollout(_ context.Context, agent *corev1alpha1.Agent) (*corev1alpha1.Agent, error) {
 	f.calls++
 	if f.refuse != "" {
 		return nil, &evals.RolloutRefusal{Reason: f.refuse}
+	}
+	if f.aborted {
+		return nil, nil
 	}
 	return &corev1alpha1.Agent{ObjectMeta: metav1.ObjectMeta{Name: agent.Status.Rollout.Candidate.Name, Namespace: agent.Namespace}}, nil
 }
@@ -114,6 +118,19 @@ func TestRouteAgentRollout(t *testing.T) {
 		condition := meta.FindStatusCondition(stored.Status.Conditions, AgentConditionRolloutInvalid)
 		if condition == nil || condition.Status != metav1.ConditionTrue || condition.Message != "the approval of evalrun/candidate is stale" {
 			t.Fatalf("conditions = %+v", stored.Status.Conditions)
+		}
+	})
+	t.Run("a canary aborted since the Agent was read routes nothing", func(t *testing.T) {
+		agent, task := rolloutTestAgent(100), rolloutTestTask("aborted", nil)
+		r := newRolloutTestReconciler(t, &fakeRolloutVerifier{aborted: true}, agent, task)
+		routed, err := r.routeAgentRollout(ctx, task, agent)
+		if err != nil || routed.Name != "reviewer" {
+			t.Fatalf("routed = %v, %v", routed, err)
+		}
+		stored := &corev1alpha1.Agent{}
+		_ = r.Get(ctx, client.ObjectKeyFromObject(agent), stored)
+		if meta.FindStatusCondition(stored.Status.Conditions, AgentConditionRolloutInvalid) != nil {
+			t.Fatal("an aborted canary was marked invalid")
 		}
 	})
 	t.Run("without a verifier every Task runs on the stable Agent", func(t *testing.T) {
