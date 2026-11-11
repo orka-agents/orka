@@ -186,6 +186,9 @@ describe('demo task API', () => {
     })
     expect(taskSchema.parse(await json(`/tasks/${finished}`)).status?.message).toBe('Cancelled: stopped earlier')
     expect(taskSchema.parse(await json(`/tasks/${grandchild}`)).status?.phase).toBe('Cancelled')
+
+    // A stale confirmation is refused even once the Task is already cancelled.
+    expect((await call(`/tasks/${parent}/cancel`, post({ uid: 'replaced-uid' }))).status).toBe(409)
   })
 
   it('forks a finished container task with its own container and keeps its outcome', async () => {
