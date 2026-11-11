@@ -511,6 +511,27 @@ providerProxy:
       memory: 128Mi
       ephemeral-storage: 128Mi
 
+# In-cluster Orka guide: an `orka-guide` Agent the controller creates in the
+# watch namespace that answers questions about Orka from a docs snapshot of the
+# installed version (`orka ask "<question>"`). It reads only: Read, Glob and Grep,
+# no shell, workspace or credentials. Needs providerProxy.enabled, the runtime's
+# controller.acpRuntime.<runtime>Image, and controller.acpRuntime.toolboxes with
+# an allowedRegistries entry covering guide.docs.image.repository.
+guide:
+  enabled: false
+  # Built-in runtime: claude, codex or copilot.
+  runtime: claude
+  # Model ID the runtime requests through the provider proxy. Required when enabled.
+  model: ""
+  # Turn limit for one answer (1-1000).
+  maxTurns: 30
+  docs:
+    image:
+      # Docs snapshot built by `make docker-build-guide-docs` from the commit the
+      # controller runs. Pin it by digest; tags are not accepted.
+      repository: ghcr.io/orka-agents/orka/guide-docs
+      digest: ""
+
 # Worker configuration
 workers:
   ai:

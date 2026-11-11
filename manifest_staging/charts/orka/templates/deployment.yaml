@@ -9,6 +9,7 @@
 {{- include "orka.validateSubstrateCredentials" . }}
 {{- include "orka.validateAgentHosts" . }}
 {{- include "orka.validateTaskWebhooks" . }}
+{{- include "orka.validateGuide" . }}
 {{- $substrateCredentials := .Values.controller.substrate.apiCredentials | default dict -}}
 {{- $startupProbe := .Values.controller.startupProbe | default dict -}}
 {{- if not .Values.publisher.enabled }}
@@ -170,6 +171,14 @@ spec:
             {{- end }}
             - --acp-toolbox-mount-method={{ .mountMethod | default "copy" }}
             {{- end }}
+            {{- end }}
+            {{- if include "orka.guideEnabled" . }}
+            - --guide-enabled=true
+            - {{ printf "--guide-runtime=%s" (toString (dig "runtime" "claude" .Values.guide)) | quote }}
+            - {{ printf "--guide-model=%s" (trim (toString .Values.guide.model)) | quote }}
+            - --guide-max-turns={{ toString (dig "maxTurns" 30 .Values.guide) }}
+            - {{ printf "--guide-docs-image=%s" (include "orka.guideDocsImage" .) | quote }}
+            - {{ printf "--guide-owner-deployment=%s" (include "orka.controllerName" .) | quote }}
             {{- end }}
             - --zap-log-level={{ .Values.controller.logLevel }}
             - --gateway-enabled={{ $gatewayRuntimeEnabled }}

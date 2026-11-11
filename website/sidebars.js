@@ -58,6 +58,7 @@ const sidebars = {
           items: [
             'guides/chat',
             'guides/ui',
+            'guides/orka-guide',
             'reference/openai-compat',
             'reference/anthropic-compat',
             'operations/shared-compatibility-api',

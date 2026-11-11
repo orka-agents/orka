@@ -24,6 +24,7 @@ Usage:
 Available Commands:
   agent         Manage agents
   agent-runtime Manage external orka.harness.v2 AgentRuntime registrations
+  ask           Ask the Orka guide a question about Orka
   audit         Inspect audit and transaction traces
   auth          Inspect authentication
   completion    Generate the autocompletion script for the specified shell
@@ -324,6 +325,39 @@ Usage:
 Flags:
   -f, --file string   Path to YAML/JSON manifest (use - for stdin)
   -h, --help          help for update
+
+Global Flags:
+      --kubeconfig string       Path to kubeconfig file
+  -n, --namespace string        Kubernetes namespace (default "default")
+  -s, --server string           Orka server URL (default "http://localhost:8080")
+  -t, --token string            Bearer token for authentication
+      --txn-token string        Transaction token to send via Txn-Token header
+      --txn-token-file string   Path to file containing a Transaction token (use - for stdin)
+```
+
+## `orka ask`
+
+```text
+Ask the installation's Orka guide a question. The guide answers from the
+docs of the installed Orka version and changes nothing: when something needs
+changing, it gives you the commands to run.
+
+  orka ask -n orka-system "how do I mount a toolbox into an Agent?"
+  echo "which runtimes can mount toolboxes?" | orka ask -n orka-system -
+
+The guide is the orka-guide Agent, which the controller creates when the Helm
+chart sets guide.enabled=true. Each question runs as an agent Task in the
+namespace, so asking needs permission to create Tasks there.
+
+Usage:
+  orka ask <question> [flags]
+
+Flags:
+      --agent string       Agent that answers (default "orka-guide")
+  -h, --help               help for ask
+      --no-wait            Create the Task, print its name and return without waiting
+  -o, --output string      Output format: table, json, yaml (default "table")
+      --timeout duration   How long to wait for the answer (default 5m0s)
 
 Global Flags:
       --kubeconfig string       Path to kubeconfig file
