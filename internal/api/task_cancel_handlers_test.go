@@ -683,10 +683,15 @@ func TestCancelSessionStaysInTheWatchNamespace(t *testing.T) {
 }
 
 // A chat Task in another namespace is cancelled only with tasks/cancel in
-// that namespace; the route authorized the Session's namespace alone.
+// that namespace; the route authorized the Session's namespace alone. A
+// denial cancels none of the Session's Tasks, including those in its own
+// namespace.
 func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 	for _, allow := range []bool{false, true} {
-		h, app := setupTestHandlersWithObjects(chatTask("elsewhere", "created-elsewhere", "default"))
+		h, app := setupTestHandlersWithObjects(
+			chatTask("default", "same-namespace", "default"),
+			chatTask("elsewhere", "created-elsewhere", "default"),
+		)
 		app.Use(func(c fiber.Ctx) error {
 			c.Locals(UserInfoContextKey, &UserInfo{Username: "alice", AuthType: AuthTypeTokenReview})
 			return c.Next()
@@ -705,8 +710,10 @@ func TestCancelSessionAuthorizesChatTasksInOtherNamespaces(t *testing.T) {
 		if resp.StatusCode != want {
 			t.Fatalf("allow=%v: status = %d, body = %v, want %d", allow, resp.StatusCode, body, want)
 		}
-		if _, ok := cancelAnnotationIn(t, h, "elsewhere", "created-elsewhere"); ok != allow {
-			t.Fatalf("allow=%v: cancelled = %v", allow, ok)
+		for _, task := range [][2]string{{"default", "same-namespace"}, {"elsewhere", "created-elsewhere"}} {
+			if _, ok := cancelAnnotationIn(t, h, task[0], task[1]); ok != allow {
+				t.Fatalf("allow=%v: %s/%s cancelled = %v", allow, task[0], task[1], ok)
+			}
 		}
 		found := false
 		for _, attributes := range *seen {
