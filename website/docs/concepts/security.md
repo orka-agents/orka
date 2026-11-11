@@ -292,10 +292,19 @@ the label lists them:
 
 The release namespace's profile covers only Pods admitted there. A privileged
 or `hostPath` Pod from any other namespace that lands on the controller's node
-can read the credential too. So either every namespace whose Pods can run on
-that node enforces at least `baseline` as well, or the controller runs on nodes
-only trusted workloads use: taint them and set the chart's `nodeSelector` and
-`tolerations`, which apply to the controller Deployment.
+can read the credential too, and a taint does not keep one off: its author can
+add the toleration, or set `spec.nodeName` and skip the scheduler. So either
+every namespace whose Pods can run on that node enforces at least `baseline`
+as well, or admission control stops every Pod but the controller from
+tolerating the controller nodes' taint or binding to them by name. Only then do
+the chart's `nodeSelector` and `tolerations`, which apply to the controller
+Deployment, give it nodes of its own.
+
+The controller ServiceAccount's own policy governs only new Pods. Before you
+turn identities on, also delete any Pod already running as that ServiceAccount
+that the controller Deployment did not create, since it keeps the identity:
+`kubectl get pods -n <namespace> -o jsonpath='{range .items[?(@.spec.serviceAccountName=="<controller ServiceAccount>")]}{.metadata.name}{"\n"}{end}'`
+lists them.
 
 ## Secret management
 
