@@ -54,6 +54,61 @@ func (s *digestCheckingStore) AppendExecutionEvent(ctx context.Context, event *s
 	return s.Store.AppendExecutionEvent(ctx, event)
 }
 
+func (s *digestCheckingStore) ReviewMemoryProposal(ctx context.Context, review store.MemoryProposalReview) error {
+	s.check(ctx, "ReviewMemoryProposal", review)
+	return s.Store.ReviewMemoryProposal(ctx, review)
+}
+
+func (s *digestCheckingStore) SaveThreatModelIfVersion(ctx context.Context, model *store.ThreatModel, expectedVersion int64) error {
+	s.check(ctx, "SaveThreatModelIfVersion", model, expectedVersion)
+	return s.Store.SaveThreatModelIfVersion(ctx, model, expectedVersion)
+}
+
+func (s *digestCheckingStore) ExpireGatewayEvent(ctx context.Context, namespace, id, owner, reason string, now time.Time) error {
+	s.check(ctx, "ExpireGatewayEvent", namespace, id, owner, reason, now)
+	return s.Store.ExpireGatewayEvent(ctx, namespace, id, owner, reason, now)
+}
+
+func (s *digestCheckingStore) ExpireGatewayEventWithDelivery(
+	ctx context.Context, projection store.GatewayExpiryProjection,
+) (*store.GatewayDelivery, bool, error) {
+	s.check(ctx, "ExpireGatewayEventWithDelivery", projection)
+	return s.Store.ExpireGatewayEventWithDelivery(ctx, projection)
+}
+
+func (s *digestCheckingStore) MarkExpiredGatewayEventDeadLettered(ctx context.Context, namespace, id, reason string, now time.Time) error {
+	s.check(ctx, "MarkExpiredGatewayEventDeadLettered", namespace, id, reason, now)
+	return s.Store.MarkExpiredGatewayEventDeadLettered(ctx, namespace, id, reason, now)
+}
+
+func (s *digestCheckingStore) ProjectGatewayTerminal(
+	ctx context.Context, projection store.GatewayTerminalProjection,
+) (*store.GatewayDelivery, bool, error) {
+	s.check(ctx, "ProjectGatewayTerminal", projection)
+	return s.Store.ProjectGatewayTerminal(ctx, projection)
+}
+
+func (s *digestCheckingStore) MarkGatewayDeliveryDelivered(
+	ctx context.Context, namespace, id, owner, providerMessageID string, now time.Time,
+) error {
+	s.check(ctx, "MarkGatewayDeliveryDelivered", namespace, id, owner, providerMessageID, now)
+	return s.Store.MarkGatewayDeliveryDelivered(ctx, namespace, id, owner, providerMessageID, now)
+}
+
+func (s *digestCheckingStore) ScheduleGatewayDeliveryRetry(
+	ctx context.Context, namespace, id, owner, reason string, nextAttemptAt time.Time,
+) error {
+	s.check(ctx, "ScheduleGatewayDeliveryRetry", namespace, id, owner, reason, nextAttemptAt)
+	return s.Store.ScheduleGatewayDeliveryRetry(ctx, namespace, id, owner, reason, nextAttemptAt)
+}
+
+func (s *digestCheckingStore) MarkGatewayDeliveryTerminal(
+	ctx context.Context, namespace, id, owner string, state store.GatewayDeliveryState, reason string, now time.Time,
+) error {
+	s.check(ctx, "MarkGatewayDeliveryTerminal", namespace, id, owner, state, reason, now)
+	return s.Store.MarkGatewayDeliveryTerminal(ctx, namespace, id, owner, state, reason, now)
+}
+
 // secretText is redacted by Orka's credential redaction.
 const secretText = "dial failed: password=correct-horse-battery-staple rejected"
 
@@ -122,6 +177,83 @@ func TestCallerEnvelopeRefusesARequestTheClientWouldProtect(t *testing.T) {
 					t.Fatalf("the caller's threat model changed: %q", model.Content)
 				}
 			}, err
+		}},
+		"proposal content with a credential": {"CreateMemoryProposal", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			proposal := &store.MemoryProposal{
+				ID: "proposal", Namespace: "tenant", Content: secretText, CreatedAt: callerStamp, UpdatedAt: callerStamp,
+			}
+			err := f.client.CreateMemoryProposal(callerEnvelope(t, t.Context(), f, "CreateMemoryProposal", proposal), proposal)
+			return func(t *testing.T) {
+				if proposal.Content != secretText {
+					t.Fatalf("the caller's proposal changed: %q", proposal.Content)
+				}
+			}, err
+		}},
+		"proposal review note with a credential": {"ReviewMemoryProposal", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			review := store.MemoryProposalReview{Namespace: "tenant", ID: "proposal", Status: "approved", ReviewNote: secretText}
+			return nil, f.client.ReviewMemoryProposal(callerEnvelope(t, t.Context(), f, "ReviewMemoryProposal", review), review)
+		}},
+		"conditional threat model with a credential": {"SaveThreatModelIfVersion", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			model := &store.ThreatModel{Namespace: "tenant", Content: secretText}
+			err := f.client.SaveThreatModelIfVersion(callerEnvelope(t, t.Context(), f, "SaveThreatModelIfVersion", model, int64(1)), model, 1)
+			return func(t *testing.T) {
+				if model.Content != secretText {
+					t.Fatalf("the caller's threat model changed: %q", model.Content)
+				}
+			}, err
+		}},
+		"expiry reason with a credential": {"ExpireGatewayEvent", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			ctx := callerEnvelope(t, t.Context(), f, "ExpireGatewayEvent", "tenant", "event", "owner", secretText, callerStamp)
+			return nil, f.client.ExpireGatewayEvent(ctx, "tenant", "event", "owner", secretText, callerStamp)
+		}},
+		"expiry projection reason over its limit": {"ExpireGatewayEventWithDelivery", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			projection := store.GatewayExpiryProjection{EventID: "event", Owner: "owner", Reason: long, CompletedAt: callerStamp}
+			_, _, err := f.client.ExpireGatewayEventWithDelivery(
+				callerEnvelope(t, t.Context(), f, "ExpireGatewayEventWithDelivery", projection), projection)
+			return nil, err
+		}},
+		"expiry projection delivery error with a credential": {"ExpireGatewayEventWithDelivery", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			projection := store.GatewayExpiryProjection{
+				EventID: "event", Owner: "owner", Reason: "expired", CompletedAt: callerStamp,
+				Delivery: store.GatewayDelivery{Namespace: "tenant", ID: "delivery", LastError: secretText},
+			}
+			_, _, err := f.client.ExpireGatewayEventWithDelivery(
+				callerEnvelope(t, t.Context(), f, "ExpireGatewayEventWithDelivery", projection), projection)
+			return nil, err
+		}},
+		"dead-letter reason with a credential": {"MarkExpiredGatewayEventDeadLettered", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			ctx := callerEnvelope(t, t.Context(), f, "MarkExpiredGatewayEventDeadLettered", "tenant", "event", secretText, callerStamp)
+			return nil, f.client.MarkExpiredGatewayEventDeadLettered(ctx, "tenant", "event", secretText, callerStamp)
+		}},
+		"terminal projection delivery error with a credential": {"ProjectGatewayTerminal", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			projection := store.GatewayTerminalProjection{
+				EventID: "event", CompletedAt: callerStamp,
+				Delivery: store.GatewayDelivery{Namespace: "tenant", ID: "delivery", LastError: secretText},
+			}
+			_, _, err := f.client.ProjectGatewayTerminal(callerEnvelope(t, t.Context(), f, "ProjectGatewayTerminal", projection), projection)
+			return nil, err
+		}},
+		"terminal message metadata with a credential": {"ProjectGatewayTerminal", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			projection := store.GatewayTerminalProjection{
+				EventID: "event", CompletedAt: callerStamp,
+				Message: store.SessionMessage{ID: "message", Role: "assistant", Metadata: map[string]string{"error": secretText}},
+			}
+			_, _, err := f.client.ProjectGatewayTerminal(callerEnvelope(t, t.Context(), f, "ProjectGatewayTerminal", projection), projection)
+			return nil, err
+		}},
+		"provider message ID over its limit": {"MarkGatewayDeliveryDelivered", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			id := strings.Repeat("i", gatewayIdentityBytes+1)
+			ctx := callerEnvelope(t, t.Context(), f, "MarkGatewayDeliveryDelivered", "tenant", "delivery", "owner", id, callerStamp)
+			return nil, f.client.MarkGatewayDeliveryDelivered(ctx, "tenant", "delivery", "owner", id, callerStamp)
+		}},
+		"delivery retry reason with a credential": {"ScheduleGatewayDeliveryRetry", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			ctx := callerEnvelope(t, t.Context(), f, "ScheduleGatewayDeliveryRetry", "tenant", "delivery", "owner", secretText, callerStamp)
+			return nil, f.client.ScheduleGatewayDeliveryRetry(ctx, "tenant", "delivery", "owner", secretText, callerStamp)
+		}},
+		"delivery terminal reason with a credential": {"MarkGatewayDeliveryTerminal", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
+			state := store.GatewayDeliveryFailed
+			ctx := callerEnvelope(t, t.Context(), f, "MarkGatewayDeliveryTerminal", "tenant", "delivery", "owner", state, secretText, callerStamp)
+			return nil, f.client.MarkGatewayDeliveryTerminal(ctx, "tenant", "delivery", "owner", state, secretText, callerStamp)
 		}},
 		"usage model name over its limit": {"RecordUsage", func(t *testing.T, f *lossyFixture) (func(*testing.T), error) {
 			observation := store.UsageObservation{Provider: "provider", Model: strings.Repeat("m", maxUsageNameChars+1)}

@@ -929,7 +929,6 @@ func (b *JobBuilder) buildEnvVarsWithOptions(ctx context.Context, task *corev1al
 	}
 	envVars = setControllerEnvValue(envVars, workerenv.ConnectionBindings, frozenBindings)
 	if taskRequestsReadOnlyAgent(task) {
-		envVars = setControllerEnv(envVars, workerenv.AgentReadOnly, scheduledRunLabelValue)
 		envVars = setControllerEnv(envVars, workerenv.ResultStdout, scheduledRunLabelValue)
 	}
 
@@ -1349,20 +1348,6 @@ func (b *JobBuilder) addAIEnvVars(ctx context.Context, //nolint:gocyclo
 		}
 	}
 
-	// AllowBash: task override > agent default > true
-	allowBash := true
-	if agent != nil && agent.Spec.Runtime != nil && agent.Spec.Runtime.DefaultAllowBash != nil {
-		allowBash = *agent.Spec.Runtime.DefaultAllowBash
-	}
-	if task.Spec.AgentRuntime != nil && task.Spec.AgentRuntime.AllowBash != nil {
-		allowBash = *task.Spec.AgentRuntime.AllowBash
-	}
-	if allowBash {
-		envVars = append(envVars, corev1.EnvVar{
-			Name: workerenv.AllowBash, Value: scheduledRunLabelValue,
-		})
-	}
-
 	return envVars, nil
 }
 
@@ -1724,31 +1709,6 @@ func scopedAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) (keys, credentialKe
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support copilot because %s can mutate GitHub", workerenv.GitHubToken)
 	default:
 		return nil, nil, fmt.Errorf("scoped agent runtime credentials do not support runtime %q", readOnlyAgentRuntimeType(agent))
-	}
-}
-
-func readOnlyAgentRuntimeSecretKeys(agent *corev1alpha1.Agent) ([]string, error) {
-	switch readOnlyAgentRuntimeType(agent) {
-	case corev1alpha1.AgentRuntimeCodex:
-		return []string{workerenv.OpenAIAPIKey, workerenv.CodexAPIKey, workerenv.OpenAIBaseURL}, nil
-	case corev1alpha1.AgentRuntimeClaude:
-		return []string{
-			workerenv.AnthropicAPIKey,
-			workerenv.AnthropicBaseURL,
-			"CLAUDE_CODE_USE_FOUNDRY",
-			"ANTHROPIC_FOUNDRY_API_KEY",
-			workerenv.AnthropicFoundryBaseURL,
-			"ANTHROPIC_FOUNDRY_RESOURCE",
-			"ANTHROPIC_DEFAULT_SONNET_MODEL",
-			"ANTHROPIC_DEFAULT_HAIKU_MODEL",
-			"ANTHROPIC_DEFAULT_OPUS_MODEL",
-		}, nil
-	case corev1alpha1.AgentRuntimeCopilot:
-		return nil, fmt.Errorf("read-only agent tasks do not support copilot runtime credentials because GITHUB_TOKEN can mutate GitHub")
-	case corev1alpha1.AgentRuntimeOpencode:
-		return nil, nil
-	default:
-		return nil, nil
 	}
 }
 

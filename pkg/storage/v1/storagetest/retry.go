@@ -170,6 +170,30 @@ func runLostResponses(t *testing.T, newProvider StateFactory) {
 		require.Equal(t, first[:1], replay)
 	})
 
+	t.Run("a replayed consuming read never returns a message stored after its batch", func(t *testing.T) {
+		provider, dataset := prepare(t)
+		ctx := t.Context()
+		sendInboxMessage(t, provider, "kept")
+		require.NoError(t, provider.SendMessage(ctx, &storagev1.Message{
+			Namespace: "tenant", FromTask: "deleted-writer", ToTask: "reader", ParentTask: "parent", Content: "deleted",
+		}))
+		consumeCtx := storagev1.WithWriteEnvelope(ctx, envelope(t, dataset, "ConsumeMessages", inboxRequest(0)))
+		first, err := provider.ConsumeMessages(consumeCtx, inboxRequest(0))
+		require.NoError(t, err)
+		require.Equal(t, []string{"kept", "deleted"}, messageContents(first))
+		require.NoError(t, provider.DeleteTaskMessages(ctx, "tenant", "deleted-writer"))
+		later := &storagev1.Message{Namespace: "tenant", FromTask: "x", ToTask: "victim", ParentTask: "other", Content: "for the victim"}
+		require.NoError(t, provider.SendMessage(ctx, later))
+		require.Greater(t, later.ID, first[1].ID, "a deleted message's ID is never given to a later message")
+
+		replay, err := provider.ConsumeMessages(consumeCtx, inboxRequest(0))
+		require.NoError(t, err)
+		require.Equal(t, first[:1], replay, "the replay returns only what is left of its own batch")
+		victim, err := provider.ListUnreadMessages(ctx, "tenant", "victim", "other", 0)
+		require.NoError(t, err)
+		require.Equal(t, []string{"for the victim"}, messageContents(victim), "the later message stays unread for its recipient")
+	})
+
 	t.Run("consuming reads are bounded", func(t *testing.T) {
 		provider, _ := prepare(t)
 		ctx := t.Context()

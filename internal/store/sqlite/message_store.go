@@ -131,7 +131,7 @@ func (s *Store) ConsumeMessages(ctx context.Context, request store.ConsumeMessag
 				return ids, nil
 			}
 			var err error
-			messages, err = selectMessagesByID(ctx, s.taskDataExecutor(ctx), request.Namespace, ids)
+			messages, err = selectMessagesByID(ctx, s.taskDataExecutor(ctx), request, ids)
 			return ids, err
 		},
 	)
@@ -209,18 +209,27 @@ func selectUnreadMessages(
 	return scanMessages(rows, namespace)
 }
 
-// selectMessagesByID reads the messages a consuming read returned, in ID
-// order. A message deleted since is left out. They are returned as that read
-// returned them, without their read flag.
-func selectMessagesByID(ctx context.Context, executor taskDataExecutor, namespace string, ids []int64) ([]store.Message, error) {
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, namespace)
+// selectMessagesByID reads the messages a consuming read of request's inbox
+// returned, in ID order. A message deleted since is left out. They are
+// returned as that read returned them, without their read flag. The inbox
+// predicate keeps the replay to the reader's own inbox even if a later message
+// were given a deleted message's ID.
+func selectMessagesByID(
+	ctx context.Context, executor taskDataExecutor, request store.ConsumeMessagesRequest, ids []int64,
+) ([]store.Message, error) {
+	args := make([]any, 0, len(ids)+4)
+	args = append(args, request.Namespace, request.TaskName, request.ParentTask, request.TaskName)
 	for _, id := range ids {
 		args = append(args, id)
 	}
 	rows, err := executor.QueryContext(ctx,
 		`SELECT id, from_task, to_task, parent_task, content, created_at
-		 FROM messages WHERE namespace = ? AND id IN (`+messageIDPlaceholders(len(ids))+`)
+		 FROM messages
+		 WHERE namespace = ?
+		   AND from_task != ?
+		   AND parent_task = ?
+		   AND (to_task = ? OR to_task = '*')
+		   AND id IN (`+messageIDPlaceholders(len(ids))+`)
 		 ORDER BY id ASC`,
 		args...,
 	)
@@ -228,7 +237,7 @@ func selectMessagesByID(ctx context.Context, executor taskDataExecutor, namespac
 		return nil, err
 	}
 	defer rows.Close() //nolint:errcheck
-	return scanMessages(rows, namespace)
+	return scanMessages(rows, request.Namespace)
 }
 
 func scanMessages(rows *sql.Rows, namespace string) ([]store.Message, error) {
