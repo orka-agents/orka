@@ -285,6 +285,10 @@ included, whichever ServiceAccount it runs as. Before you turn on agent
 identities, enforce at least the `baseline` Pod Security profile on the release
 namespace (`pod-security.kubernetes.io/enforce: baseline`), or an equivalent
 admission control; the chart does not label a namespace it does not create.
+Admission checks only new Pods and evicts none, so also delete any running Pod
+that breaks the profile before you turn identities on. A server-side dry run of
+the label lists them:
+`kubectl label --dry-run=server --overwrite ns <namespace> pod-security.kubernetes.io/enforce=baseline`.
 
 ## Secret management
 
