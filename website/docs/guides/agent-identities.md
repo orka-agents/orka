@@ -68,12 +68,17 @@ delegated Tools can only read.
     ([admin consent roles](https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/grant-admin-consent#prerequisites)).
 - Orka installed with Helm in the namespace `team-a`, with built-in RuntimePools.
   A release reconciles only its own namespace, so everything below lives there.
-- The `baseline` Pod Security profile enforced on that namespace
-  (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`), so no
-  privileged or `hostPath` Pod can read the controller's blueprint credential
-  from its node. Admission checks only new Pods, so first run the label with
-  `--dry-run=server`; it lists running Pods that break the profile. Delete
-  them before you label the namespace.
+- No privileged or `hostPath` Pod able to run on the controller's node, since
+  one could read the controller's blueprint credential from it:
+  - enforce the `baseline` Pod Security profile on that namespace
+    (`kubectl label ns team-a pod-security.kubernetes.io/enforce=baseline`).
+    Admission checks only new Pods, so first run the label with
+    `--dry-run=server`; it lists running Pods that break the profile. Delete
+    them before you label the namespace;
+  - and enforce it on every other namespace whose Pods can be scheduled onto
+    that node, or run the controller on dedicated nodes with the chart's
+    `nodeSelector` and `tolerations`
+    ([Security](../concepts/security.md#agent-identities)).
 - For Delegated mode, also:
   - Orka's API reachable over HTTPS by the people who will link accounts;
   - Entra sign-in configured for Orka (step 8);
