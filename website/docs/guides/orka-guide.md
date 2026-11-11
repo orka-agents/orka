@@ -6,9 +6,9 @@ description: "Ask a read-only, in-cluster guide questions about Orka, answered f
 # In-cluster guide
 
 The Orka guide is an optional Agent that answers questions about Orka from the
-docs of the version you installed. You ask it with `orka ask`. It reads a docs
-snapshot and nothing else. It has no shell, workspace, credentials or cluster
-access, so when something needs changing, it gives you the commands to run.
+docs of the version you installed. You ask it with `orka ask`. Its Agent can
+read a docs snapshot and nothing else: no shell, workspace, credentials or
+cluster access. When something needs changing, it gives you the commands to run.
 
 ## How it works
 
@@ -26,8 +26,12 @@ access, so when something needs changing, it gives you the commands to run.
 
   The Agent's system prompt only points to the skill, so the instructions and
   the sources always come from the same version.
-- **Read-only tools.** The guide has Read, Glob and Grep, and Bash is off. A
-  question Task has no workspace, so its runtime session is read-only too.
+- **Read-only tools.** The Agent's defaults are Read, Glob and Grep, with Bash
+  off. `orka ask` keeps them, and its Tasks have no workspace, so their runtime
+  sessions are read-only. These are defaults, as on any Agent: a Task created
+  directly with its own `agentRuntime` tools, Bash or a workspace can widen them.
+  Treat `create` on Tasks in the guide's namespace as the permission that
+  matters.
 
 Build the snapshot from the commit the controller runs, and the guide describes
 the version that is installed.
@@ -43,13 +47,18 @@ The guide needs:
   image.
 
 Release builds don't publish the snapshot image yet. Build and push it from the
-tag you install:
+tag you install, in a clone of the Orka repository:
 
 ```bash
-git checkout <release-tag>
 make docker-build-guide-docs docker-push-guide-docs \
+  GUIDE_DOCS_REF=<release-tag> \
   GUIDE_DOCS_IMG=<registry>/orka-guide-docs:<release-tag>
 ```
+
+The target builds from the committed files of `GUIDE_DOCS_REF` (`HEAD` by
+default), never from uncommitted or untracked ones, and writes the tag, commit
+and commit date into the snapshot's `VERSION`. Use a release that includes the
+guide.
 
 Then set the chart values, pinning the image by digest:
 
@@ -77,6 +86,10 @@ OpenCode isn't supported, because its read-only sessions disable Grep. When a
 value is missing or doesn't fit, the chart fails the render and names it. The
 controller checks its `--guide-*` flags again when it starts and exits on an
 invalid one. The flags are listed in [Configuration](../reference/configuration.md).
+
+On every Orka upgrade, rebuild the snapshot from the new tag and update
+`guide.docs.image.digest`. Nothing ties the snapshot to the controller's version,
+and the guide answers for the snapshot's version.
 
 After the upgrade, check that the Agent exists and is ready:
 

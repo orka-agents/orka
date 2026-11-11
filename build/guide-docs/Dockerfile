@@ -2,9 +2,11 @@
 
 # Docs snapshot for the in-cluster Orka guide, mounted read-only into the guide
 # Agent as a toolbox at /opt/orka-docs. Data only: Orka never runs anything from
-# a toolbox image, so it starts from scratch. Build it from the commit the
-# controller is built from with `make docker-build-guide-docs`, which stamps
-# VERSION from Git. Build context: the repository root.
+# a toolbox image, so it starts from scratch. Build it with
+# `make docker-build-guide-docs GUIDE_DOCS_REF=<release tag>`, which sends a git
+# archive of the snapshot's paths as the build context and stamps VERSION from
+# that ref. A plain directory context would copy untracked files and keep
+# private file modes that the toolbox copier can't read.
 FROM scratch
 
 ARG ORKA_VERSION=dev

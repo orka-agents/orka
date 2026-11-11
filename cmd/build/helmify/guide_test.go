@@ -50,6 +50,19 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("registry with a port", func(t *testing.T) {
+		output, err := helmTemplateStaticChart(t, guideChartArgs(
+			"--set", "controller.acpRuntime.toolboxes.allowedRegistries[2]=localhost:5000",
+			"--set-string", "guide.docs.image.repository=localhost:5000/orka/guide-docs",
+		)...)
+		if err != nil {
+			t.Fatalf("helm template: %v\n%s", err, output)
+		}
+		if !strings.Contains(output, `"--guide-docs-image=localhost:5000/orka/guide-docs@sha256:`) {
+			t.Fatalf("render is missing the local registry image:\n%s", output)
+		}
+	})
+
 	t.Run("reuse-values from a release without guide values", func(t *testing.T) {
 		output, err := helmTemplateStaticChart(t, "--set", "guide=null", "--show-only", "templates/deployment.yaml")
 		if err != nil {
@@ -78,6 +91,10 @@ func TestStaticChartRendersGuideFlags(t *testing.T) {
 		{"toolboxes off", []string{"--set", "controller.acpRuntime.toolboxes.enabled=false"}, "needs controller.acpRuntime.toolboxes.enabled=true"},
 		{"registry not allowed", []string{"--set-string", "guide.docs.image.repository=ghcr.io/someone/guide-docs"}, "is not covered by controller.acpRuntime.toolboxes.allowedRegistries"},
 		{"partial segment", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents-mirror/guide-docs"}, "is not covered by"},
+		{"no registry host", []string{"--set-string", "guide.docs.image.repository=myregistry/guide-docs"}, "must be <registry host>/<lowercase path>"},
+		{"host only", []string{"--set-string", "guide.docs.image.repository=ghcr.io"}, "must be <registry host>/<lowercase path>"},
+		{"uppercase path", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents/Guide-Docs"}, "must be <registry host>/<lowercase path>"},
+		{"tag in repository", []string{"--set-string", "guide.docs.image.repository=ghcr.io/orka-agents/guide-docs:v1"}, "must be <registry host>/<lowercase path>"},
 	} {
 		t.Run("rejects "+tt.name, func(t *testing.T) {
 			output, err := helmTemplateStaticChart(t, guideChartArgs(tt.extra...)...)

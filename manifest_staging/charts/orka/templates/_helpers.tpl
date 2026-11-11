@@ -947,6 +947,13 @@ every check; these fail the render first with the value to change.
 {{- if not $repository -}}
 {{- fail "guide.docs.image.repository is required when guide.enabled=true" -}}
 {{- end -}}
+{{- /* The controller accepts only canonical, fully qualified toolbox references and exits at startup on anything else. */ -}}
+{{- $repositoryHost := first (splitList "/" $repository) -}}
+{{- $repositoryPath := join "/" (rest (splitList "/" $repository)) -}}
+{{- $qualifiedHost := and (regexMatch `^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*(:[0-9]+)?$` $repositoryHost) (or (eq $repositoryHost "localhost") (contains "." $repositoryHost) (contains ":" $repositoryHost)) -}}
+{{- if or (not $qualifiedHost) (not (regexMatch `^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*$` $repositoryPath)) -}}
+{{- fail (printf "guide.docs.image.repository %q must be <registry host>/<lowercase path> with no tag, where the host is localhost or contains a dot or port, such as ghcr.io or registry:5000" $repository) -}}
+{{- end -}}
 {{- if not (regexMatch `^sha256:[0-9a-f]{64}$` $digest) -}}
 {{- fail "guide.docs.image.digest must be a sha256 digest: the guide mounts its docs snapshot by digest" -}}
 {{- end -}}

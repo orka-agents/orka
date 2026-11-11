@@ -23,8 +23,13 @@ import (
 
 const defaultGuideAgent = "orka-guide"
 
-// askPollInterval is how often orka ask checks the Task. Tests shorten it.
-var askPollInterval = 2 * time.Second
+// askPollInterval is how often orka ask checks the Task, and askNotFoundGrace
+// how long a new Task may still read as not found: the API serves Task reads
+// from its informer cache, which can lag the create. Tests shorten both.
+var (
+	askPollInterval  = 2 * time.Second
+	askNotFoundGrace = 30 * time.Second
+)
 
 // askAnswer is the structured output of orka ask.
 type askAnswer struct {
@@ -182,16 +187,23 @@ func createAskTask(ctx context.Context, c *client.Client, agent, question string
 func waitForAskTask(ctx context.Context, c *client.Client, name string) (client.TaskDetail, error) {
 	ticker := time.NewTicker(askPollInterval)
 	defer ticker.Stop()
+	notFoundUntil := time.Now().Add(askNotFoundGrace)
+	seen := false
 	for {
 		detail, err := c.GetTask(ctx, name, client.GetOptions{Namespace: c.Namespace})
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if err != nil {
+		switch {
+		case err != nil && !seen && strings.Contains(err.Error(), "HTTP 404") && time.Now().Before(notFoundUntil):
+			// Not visible to the API yet.
+		case err != nil:
 			return nil, fmt.Errorf("read task %s: %w", name, err)
-		}
-		if taskPhaseIsTerminal(client.StringField(*detail, "status", "phase")) {
-			return *detail, nil
+		default:
+			seen = true
+			if taskPhaseIsTerminal(client.StringField(*detail, "status", "phase")) {
+				return *detail, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -203,12 +215,8 @@ func waitForAskTask(ctx context.Context, c *client.Client, name string) (client.
 
 func askTaskFailure(name, namespace string, detail client.TaskDetail) error {
 	phase := client.StringField(detail, "status", "phase")
-	reason := strings.TrimSpace(strings.Join([]string{
-		client.StringField(detail, "status", "execution", "reason"),
-		client.StringField(detail, "status", "execution", "message"),
-	}, " "))
 	message := fmt.Sprintf("task %s finished with phase %s", name, phase)
-	if reason != "" {
+	if reason := taskFailureReason(nestedMap(detail, "status"), detail); reason != "" && reason != phase {
 		message += ": " + reason
 	}
 	return errors.New(message + fmt.Sprintf(". See orka task get %s -n %s and orka task logs %s -n %s", name, namespace, name, namespace))

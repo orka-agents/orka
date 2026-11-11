@@ -22,6 +22,8 @@ type askServer struct {
 	agentStatus int
 	phases      []string
 	execution   map[string]any
+	message     string
+	missing     int // Task reads that answer 404 before the Task is visible
 	created     map[string]any
 	resultReads int
 }
@@ -46,6 +48,10 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/result"):
 			s.resultReads++
 			_ = json.NewEncoder(w).Encode(map[string]any{"result": "**Answer:** Yes.\n"})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/") && s.missing > 0:
+			s.missing--
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"task not found"}`))
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/tasks/"):
 			phase := s.phases[0]
 			if len(s.phases) > 1 {
@@ -54,6 +60,9 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 			status := map[string]any{"phase": phase}
 			if s.execution != nil {
 				status["execution"] = s.execution
+			}
+			if s.message != "" {
+				status["message"] = s.message
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "ask"}, "status": status})
 		default:
@@ -68,9 +77,9 @@ func newAskServer(t *testing.T, agentStatus int, phases ...string) *askServer {
 func runAsk(t *testing.T, srv *askServer, stdin string, args ...string) (string, string, error) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	previous := askPollInterval
-	askPollInterval = 10 * time.Millisecond
-	t.Cleanup(func() { askPollInterval = previous })
+	previousInterval, previousGrace := askPollInterval, askNotFoundGrace
+	askPollInterval, askNotFoundGrace = 10*time.Millisecond, time.Second
+	t.Cleanup(func() { askPollInterval, askNotFoundGrace = previousInterval, previousGrace })
 
 	root := newRootCmd()
 	var stdout, stderr bytes.Buffer
@@ -159,12 +168,42 @@ func TestAskReportsFailedTask(t *testing.T) {
 	srv := newAskServer(t, http.StatusOK, "Failed")
 	srv.execution = map[string]any{"reason": "ToolboxUnavailable", "message": "toolboxes are disabled"}
 	_, _, err := runAsk(t, srv, "", "q")
-	if err == nil || !strings.Contains(err.Error(), "phase Failed: ToolboxUnavailable toolboxes are disabled") ||
+	if err == nil || !strings.Contains(err.Error(), "phase Failed: ToolboxUnavailable: toolboxes are disabled") ||
 		!strings.Contains(err.Error(), "orka task logs ask-") {
 		t.Fatalf("err = %v", err)
 	}
 	if srv.resultReads != 0 {
 		t.Fatal("a failed Task has no answer to read")
+	}
+}
+
+func TestAskReportsFailureMessageOutsideExecution(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Failed")
+	srv.message = `Agent "orka-guide" not found`
+	_, _, err := runAsk(t, srv, "", "q")
+	if err == nil || !strings.Contains(err.Error(), `phase Failed: Agent "orka-guide" not found`) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestAskWaitsForNewTaskToBecomeVisible(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Running", "Succeeded")
+	srv.missing = 2
+	stdout, _, err := runAsk(t, srv, "", "q")
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if stdout != "**Answer:** Yes.\n" {
+		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+func TestAskStopsWhenTaskNeverAppears(t *testing.T) {
+	srv := newAskServer(t, http.StatusOK, "Succeeded")
+	srv.missing = 1 << 20
+	_, _, err := runAsk(t, srv, "", "q")
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "still running") {
+		t.Fatalf("err = %v, want the not-found error once the grace period ends", err)
 	}
 }
 
