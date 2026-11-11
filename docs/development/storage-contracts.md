@@ -912,9 +912,11 @@ into the installation record once that exists.
 record before it advances the dataset or opens the contract's fence (see
 "Controller ownership" above). From then on, about once a minute, it
 describes each dataset that has passed, without waiting for datasets that
-are still unreachable. When the
+are still unreachable, and compares its incarnation with the last one
+checked, starting with the one described before the takeover advanced it. When the
 dataset's incarnation changed, the manager closes the fences of the
-contracts it serves until it has been checked again; once it is ready, the
+contracts it serves until it has been checked again, and a passed check
+reopens only those whose acknowledgement is recorded; once it is ready, the
 manager checks that the dataset still holds this controller's epoch and at
 least its acknowledged watermark, and holds the installation for an `async-replicated`
 dataset whatever it holds. It then advances the watermark with a fenced

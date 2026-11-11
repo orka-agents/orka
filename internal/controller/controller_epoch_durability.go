@@ -69,9 +69,17 @@ type storageTakeover struct {
 
 // trackedDataset is one dataset the takeover advanced.
 type trackedDataset struct {
-	dataset     EpochDataset
-	contracts   []string
+	dataset   EpochDataset
+	contracts []string
+	// opened holds the contracts whose acknowledgement is recorded. A passed
+	// switch check reopens only their fences.
+	opened map[string]bool
+	// incarnation is the last one checked: first the one the takeover's
+	// advance described, then each one a switch check passed.
 	incarnation string
+	// checking is set while a restart or switch the loop saw has not passed
+	// its check, so a contract acknowledged meanwhile waits for that check.
+	checking bool
 	// acknowledged is the highest write watermark recorded as acknowledged.
 	acknowledged int64
 }
@@ -240,8 +248,8 @@ func (t *storageTakeover) openAndMaintain(ctx context.Context, record store.Stor
 }
 
 // open runs the takeover step of every contract and opens each contract's
-// fence once its own dataset passed. It returns the first hold a contract
-// raises.
+// fence once its own dataset passed and its acknowledgement is recorded. It
+// returns the first hold a contract raises.
 func (t *storageTakeover) open(ctx context.Context, record store.StorageRecord) (*store.StorageRecoveryHold, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -272,16 +280,42 @@ func (t *storageTakeover) open(ctx context.Context, record store.StorageRecord) 
 	return nil, nil
 }
 
-// openContract records a contract's acknowledgement and opens its fence.
+// openContract records a contract's acknowledgement and opens its fence,
+// unless a switch check of its dataset is running, which opens it once it
+// passes.
 func (t *storageTakeover) openContract(ctx context.Context, contract string, ack store.StorageAcknowledgement) error {
 	if _, err := retryEpochStorageStep(ctx, "record the "+contract+" acknowledgement", func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, t.records.RecordStorageAcknowledgement(ctx, t.fence, ack)
 	}); err != nil {
 		return err
 	}
-	t.manager.openContractFence(contract, ack.DatasetID, t.acquired)
-	logf.FromContext(ctx).Info("Opened the storage write fence", "contract", contract, "dataset", ack.DatasetID, "epoch", t.acquired.Epoch)
+	log := logf.FromContext(ctx).WithValues("contract", contract, "dataset", ack.DatasetID, "epoch", t.acquired.Epoch)
+	if !t.acknowledged(contract, ack.DatasetID) {
+		log.Info("Recorded the storage acknowledgement; the write fence opens once the restarted or switched dataset passes its check")
+		return nil
+	}
+	log.Info("Opened the storage write fence")
 	return nil
+}
+
+// acknowledged marks contract's acknowledgement on datasetID as recorded and
+// opens its fence, unless the watermark loop is checking a restart or switch
+// of the dataset, whose check then opens it. It reports whether the fence
+// opened.
+func (t *storageTakeover) acknowledged(contract, datasetID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if tracked := t.datasets[datasetID]; tracked != nil {
+		if tracked.opened == nil {
+			tracked.opened = map[string]bool{}
+		}
+		tracked.opened[contract] = true
+		if tracked.checking {
+			return false
+		}
+	}
+	t.manager.openContractFence(contract, datasetID, t.acquired)
+	return true
 }
 
 // release records what each dataset holds now as acknowledged and clears the
@@ -429,7 +463,12 @@ func (t *storageTakeover) check(
 	if acknowledged {
 		outcome.ack.Watermark, outcome.ack.WatermarkAcknowledgedAt = previous.Watermark, previous.WatermarkAcknowledgedAt
 	}
-	t.track(contract, info, dataset, outcome.ack.Watermark)
+	// The loop watches the dataset from the incarnation the advance
+	// described, which every contract the dataset serves shares, so a switch
+	// after it is checked even if this contract described the dataset later.
+	described := info
+	described.Incarnation = advanced.incarnation
+	t.track(contract, described, dataset, outcome.ack.Watermark)
 	return outcome
 }
 
@@ -449,7 +488,7 @@ func (t *storageTakeover) advance(
 	ctx context.Context, info storagev1.ProviderInfo, dataset EpochDataset, record store.StorageRecord,
 ) (datasetAdvanceResult, error) {
 	datasetID := info.DatasetID
-	var result datasetAdvanceResult
+	result := datasetAdvanceResult{incarnation: info.Incarnation}
 	before, watermark, err := t.held(ctx, datasetID, dataset)
 	if err != nil {
 		return result, err
@@ -520,7 +559,8 @@ func highestAcknowledged(record store.StorageRecord, datasetID string) (epochCon
 	return epochContract, epoch, watermarkContract, watermark
 }
 
-// track records a dataset the takeover advanced, for the watermark loop.
+// track records a dataset the takeover advanced, for the watermark loop, and
+// a contract it serves whose acknowledgement is still to be recorded.
 func (t *storageTakeover) track(contract string, info storagev1.ProviderInfo, dataset EpochDataset, acknowledged int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -587,7 +627,39 @@ func (t *storageTakeover) snapshot(datasetID string) (trackedDataset, bool) {
 	}
 	copy := *tracked
 	copy.contracts = slices.Clone(tracked.contracts)
+	copy.opened = nil
 	return copy, true
+}
+
+// startCheck marks datasetID as being checked after a restart or switch and
+// returns every contract it serves, whose fences the caller closes. A
+// contract acknowledged from now on waits for the check.
+func (t *storageTakeover) startCheck(datasetID string) []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	tracked, ok := t.datasets[datasetID]
+	if !ok {
+		return nil
+	}
+	tracked.checking = true
+	return slices.Clone(tracked.contracts)
+}
+
+// passCheck records that datasetID passed its check at incarnation and
+// reopens the fences of the contracts whose acknowledgement is recorded.
+func (t *storageTakeover) passCheck(datasetID, incarnation string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	tracked, ok := t.datasets[datasetID]
+	if !ok {
+		return
+	}
+	tracked.incarnation, tracked.checking = incarnation, false
+	for _, contract := range tracked.contracts {
+		if tracked.opened[contract] {
+			t.manager.openContractFence(contract, datasetID, t.acquired)
+		}
+	}
 }
 
 // update changes the tracked dataset datasetID under the lock.
@@ -620,10 +692,13 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 			Message: fmt.Sprintf("%s is now served by dataset %s instead of dataset %s", contract, info.DatasetID, datasetID),
 		}
 	}
-	if info.Incarnation != tracked.incarnation {
+	// A check that has not finished runs again even when the dataset reports
+	// the incarnation checked last, as after a switchover that was seen and
+	// then rolled back.
+	if info.Incarnation != tracked.incarnation || tracked.checking {
 		// Nothing is written to a dataset whose database restarted or
 		// switched until it has been checked again.
-		t.manager.closeContractFences(tracked.contracts)
+		t.manager.closeContractFences(t.startCheck(datasetID))
 		if info.State != storagev1.DatasetReady {
 			log.Info("A storage dataset restarted or switched and is not ready yet; checking again later", "state", info.State)
 			return nil
@@ -637,10 +712,7 @@ func (t *storageTakeover) tickDataset(ctx context.Context, datasetID string) *st
 		}
 		log.Info("A storage dataset restarted or switched and still holds every write it acknowledged",
 			"incarnation", info.Incarnation, "durability", info.Durability)
-		t.update(datasetID, func(tracked *trackedDataset) { tracked.incarnation = info.Incarnation })
-		for _, contract := range tracked.contracts {
-			t.manager.openContractFence(contract, datasetID, t.acquired)
-		}
+		t.passCheck(datasetID, info.Incarnation)
 	}
 	watermark, err := tracked.dataset.AdvanceWriteWatermark(callCtx)
 	if err != nil {
